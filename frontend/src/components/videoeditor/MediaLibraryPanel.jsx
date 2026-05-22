@@ -126,7 +126,7 @@ const MediaLibraryPanel = ({
   };
 
   return (
-    <Paper elevation={2} sx={{ width: 280, display: "flex", flexDirection: "column", minHeight: 0 }}>
+    <Paper elevation={0} sx={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", minHeight: 0, bgcolor: "transparent", backgroundImage: "none" }}>
       <Tabs
         value={tabIndex}
         onChange={(_, v) => setTabIndex(v)}

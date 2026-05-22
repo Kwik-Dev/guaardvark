@@ -21,6 +21,7 @@ DASHBOARD_STATE_FILE = os.path.join(STORAGE_DIR, "dashboard_state.json")
 FOLDER_STATE_FILE = os.path.join(STORAGE_DIR, "folder_state.json")
 CODE_EDITOR_STATE_FILE = os.path.join(STORAGE_DIR, "code_editor_state.json")
 CODE_EDITOR_SESSION_FILE = os.path.join(STORAGE_DIR, "code_editor_session.json")
+VIDEO_EDITOR_STATE_FILE = os.path.join(STORAGE_DIR, "video_editor_state.json")
 DOCUMENTS_WINDOWS_STATE_FILE = os.path.join(STORAGE_DIR, "documents_windows_v2_state.json")
 IMAGES_WINDOWS_STATE_FILE = os.path.join(STORAGE_DIR, "images_windows_state.json")
 STICKY_NOTES_STATE_FILE = os.path.join(STORAGE_DIR, "sticky_notes_state.json")
@@ -643,6 +644,40 @@ def save_code_editor_session():
             ),
             500,
         )
+
+
+@state_bp.route("/video-editor", methods=["GET"])
+def get_video_editor_state():
+    """Persisted Video Editor card layout (mirrors /code-editor). Stores the
+    react-grid-layout array plus per-card colors and minimized flags."""
+    logger = current_app.logger if current_app else logging.getLogger(__name__)
+    try:
+        if os.path.exists(VIDEO_EDITOR_STATE_FILE):
+            with open(VIDEO_EDITOR_STATE_FILE, "r", encoding="utf-8") as f:
+                return jsonify(json.load(f)), 200
+        return jsonify({"error": "Video editor state not found"}), 404
+    except json.JSONDecodeError as e:
+        logger.error(f"API Error (GET /video-editor): invalid JSON: {e}", exc_info=True)
+        return jsonify({"error": "Invalid JSON in video editor state file", "details": str(e)}), 500
+    except Exception as e:
+        logger.error(f"API Error (GET /video-editor): {e}", exc_info=True)
+        return jsonify({"error": "Failed to read video editor state file.", "details": str(e)}), 500
+
+
+@state_bp.route("/video-editor", methods=["POST"])
+def save_video_editor_state():
+    logger = current_app.logger if current_app else logging.getLogger(__name__)
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    try:
+        state_data = request.get_json()
+        os.makedirs(LAYOUT_DIR, exist_ok=True)
+        with open(VIDEO_EDITOR_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state_data, f, indent=2, ensure_ascii=False)
+        return jsonify({"success": True, "message": "Video editor state saved successfully"}), 200
+    except Exception as e:
+        logger.error(f"API Error (POST /video-editor): {e}", exc_info=True)
+        return jsonify({"error": "Failed to save video editor state file.", "details": str(e)}), 500
 
 
 @state_bp.route("/sticky-notes", methods=["GET"])

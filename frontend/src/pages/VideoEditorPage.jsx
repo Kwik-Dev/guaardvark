@@ -6,7 +6,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
-  Paper,
   Typography,
   Stack,
   Button,
@@ -44,6 +43,33 @@ import { useTimelineHistory } from "../components/videoeditor/useTimelineHistory
 import { listVideoDocuments, listAudioDocuments, listImageDocuments } from "../api/videoOverlayService";
 import { listStyleRecipes, renderArrangement, openInShotcut, rescanClip, getClipHash } from "../api/videoEditorService";
 import { getJobsGate } from "../api/jobsService";
+import ReactGridLayout, { WidthProvider } from "react-grid-layout";
+import "react-grid-layout/css/styles.css";
+import "react-resizable/css/styles.css";
+import DashboardCardWrapper from "../components/dashboard/DashboardCardWrapper";
+import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
+
+const GridLayout = WidthProvider(ReactGridLayout);
+
+// Default card placement on a ~175-col grid (10px units). Three across the top
+// (library / preview / properties) and three across the bottom (bin / controls /
+// arrangement) — the familiar NLE layout, but every card is draggable/resizable.
+const DEFAULT_VE_LAYOUT = [
+  { i: "media",       x: 0,   y: 0,  w: 34,  h: 42, minW: 16, minH: 12 },
+  { i: "preview",     x: 34,  y: 0,  w: 107, h: 42, minW: 30, minH: 12 },
+  { i: "properties",  x: 141, y: 0,  w: 34,  h: 42, minW: 16, minH: 12 },
+  { i: "bin",         x: 0,   y: 42, w: 48,  h: 30, minW: 22, minH: 10 },
+  { i: "controls",    x: 48,  y: 42, w: 48,  h: 30, minW: 22, minH: 10 },
+  { i: "arrangement", x: 96,  y: 42, w: 79,  h: 30, minW: 22, minH: 10 },
+];
+const VE_CARD_TITLES = {
+  media: "Media Library",
+  preview: "Preview",
+  properties: "Properties",
+  bin: "Bin",
+  controls: "Song & Controls",
+  arrangement: "Arrangement",
+};
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -91,6 +117,74 @@ const VideoEditorPage = () => {
   // Quick Render: when true, the next planJob.result triggers a Render
   // automatically. Cleared on completion or error.
   const [quickRenderPending, setQuickRenderPending] = useState(false);
+
+  // --- Card grid layout (resizable/draggable windows, same system as the Code
+  // Editor & Documents pages). Persisted to /api/state/video-editor. ---
+  const { gridSettings } = useLayout();
+  const { COLS_COUNT, ROW_HEIGHT_PX, CARD_MARGIN_PX, CONTAINER_PADDING_PX } = gridSettings;
+  const gridWidth = useDashboardWidth();
+  const [layout, setLayout] = useState(DEFAULT_VE_LAYOUT);
+  const [cardColors, setCardColors] = useState({});
+  const [minimizedCards, setMinimizedCards] = useState({});
+  const layoutLoadedRef = useRef(false);
+  const MIN_ROW = Math.max(1, Math.round(48 / ROW_HEIGHT_PX));
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/state/video-editor")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((saved) => {
+        if (cancelled) return;
+        if (saved && Array.isArray(saved.layout) && saved.layout.length) {
+          // Keep any default card the saved layout predates (forward-compat).
+          const savedIds = new Set(saved.layout.map((l) => l.i));
+          setLayout([...saved.layout, ...DEFAULT_VE_LAYOUT.filter((d) => !savedIds.has(d.i))]);
+        }
+        if (saved?.cardColors) setCardColors(saved.cardColors);
+        if (saved?.minimizedCards) setMinimizedCards(saved.minimizedCards);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) layoutLoadedRef.current = true; });
+    return () => { cancelled = true; };
+  }, []);
+
+  const saveLayoutState = useCallback((nextLayout, nextColors, nextMin) => {
+    if (!layoutLoadedRef.current) return;  // don't clobber saved state on first paint
+    fetch("/api/state/video-editor", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        layout: nextLayout,
+        cardColors: nextColors,
+        minimizedCards: nextMin,
+        lastSaved: new Date().toISOString(),
+      }),
+    }).catch((e) => console.warn("video-editor layout save failed:", e));
+  }, []);
+
+  const onLayoutChange = useCallback((next) => {
+    if (!layoutLoadedRef.current) return;
+    // A minimized card reports its collapsed height — preserve its stored
+    // (expanded) height so un-minimizing restores the real size.
+    const prevById = Object.fromEntries(layout.map((l) => [l.i, l]));
+    const merged = next.map((l) =>
+      minimizedCards[l.i] && prevById[l.i] ? { ...l, h: prevById[l.i].h } : l,
+    );
+    setLayout(merged);
+    saveLayoutState(merged, cardColors, minimizedCards);
+  }, [layout, minimizedCards, cardColors, saveLayoutState]);
+
+  const handleCardColorChange = useCallback((cardId, color) => {
+    const next = { ...cardColors, [cardId]: color };
+    setCardColors(next);
+    saveLayoutState(layout, next, minimizedCards);
+  }, [cardColors, layout, minimizedCards, saveLayoutState]);
+
+  const handleToggleMinimize = useCallback((cardId) => {
+    const next = { ...minimizedCards, [cardId]: !minimizedCards[cardId] };
+    setMinimizedCards(next);
+    saveLayoutState(layout, cardColors, next);
+  }, [minimizedCards, layout, cardColors, saveLayoutState]);
 
   // Phase 8 — poll the JobOperationGate so the Render button knows whether
   // another exclusive job (training, etc.) is mid-flight. Refreshes every
@@ -478,28 +572,26 @@ const VideoEditorPage = () => {
     e.dataTransfer.effectAllowed = "copy";
   };
 
-  return (
-    <PageLayout title="Video Editor" subtitle="Compose videos with overlays, audio, and text">
-      <Box sx={{ display: "flex", flexDirection: "column", height: "calc(100vh - 96px)", p: 2, gap: 2 }}>
-        {/* Top half: preview + media library + properties */}
-        <Box sx={{ display: "flex", gap: 2, flex: 1, minHeight: 0 }}>
-          {/* Media library — left. Owns its own tab/view-mode/drill state.
-              Item click + drag handlers come from the page so the timeline
-              drop-targets stay wired the way they always were. */}
+  // Each card's body. The card chrome (title bar, drag handle, minimize, color)
+  // comes from DashboardCardWrapper — these just fill the card.
+  const renderCardBody = (cardId) => {
+    switch (cardId) {
+      case "media":
+        return (
           <MediaLibraryPanel
             videos={mediaLibrary}
             audios={audioLibrary}
             images={imageLibrary}
             loading={loadingMedia}
-            onItemClick={(item, kind) => {
-              if (kind === "video") handleAddMedia(item);
-            }}
+            onItemClick={(item, kind) => { if (kind === "video") handleAddMedia(item); }}
             onItemDragStart={handleDragStartMedia}
           />
+        );
 
-          {/* Preview window — center */}
-          <Paper elevation={4} sx={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-            <Box sx={{ position: "relative", flex: 1, bgcolor: "#000", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+      case "preview":
+        return (
+          <Box sx={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+            <Box sx={{ position: "relative", flex: 1, minHeight: 0, bgcolor: "#000", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", borderRadius: 1 }}>
               {previewVideoUrl ? (
                 <video
                   ref={videoElRef}
@@ -533,8 +625,8 @@ const VideoEditorPage = () => {
             </Box>
 
             {/* Toolbar under the preview — Plan / Render / Open in Shotcut */}
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ p: 1, borderTop: 1, borderColor: "divider" }}>
-              <IconButton onClick={() => setPreviewPlaying(!previewPlaying)} size="small">
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ pt: 1, mt: 1, borderTop: 1, borderColor: "divider" }}>
+              <IconButton onClick={() => setPreviewPlaying(!previewPlaying)} size="small" className="non-draggable">
                 {previewPlaying ? <PauseIcon /> : <PlayIcon />}
               </IconButton>
               <Box sx={{ flexGrow: 1 }} />
@@ -556,8 +648,9 @@ const VideoEditorPage = () => {
               <Tooltip title={planJob.result ? "Render the arrangement to .mlt + .mp4" : "Hit Plan first"}>
                 <span>
                   <Button
+                    size="small"
                     variant="contained"
-                    startIcon={rendering ? <CircularProgress size={20} color="inherit" /> : <RenderIcon />}
+                    startIcon={rendering ? <CircularProgress size={18} color="inherit" /> : <RenderIcon />}
                     onClick={handleRender}
                     disabled={!planJob.result || rendering || quickRenderPending}
                   >
@@ -568,11 +661,12 @@ const VideoEditorPage = () => {
               <Tooltip title="Plan + Render in one click. The Batch Video Generator pattern — set it and forget it.">
                 <span>
                   <Button
+                    size="small"
                     variant="contained"
                     color="secondary"
                     startIcon={
                       (planJob.planning || rendering) && quickRenderPending
-                        ? <CircularProgress size={20} color="inherit" />
+                        ? <CircularProgress size={18} color="inherit" />
                         : <QuickRenderIcon />
                     }
                     onClick={handleQuickRender}
@@ -587,19 +681,19 @@ const VideoEditorPage = () => {
               {renderResult?.mlt_path && (
                 <Tooltip title="Open the rendered project in Shotcut for refinement">
                   <Button size="small" variant="text" startIcon={<ShotcutIcon />} onClick={handleOpenInShotcut}>
-                    Open in Shotcut
+                    Shotcut
                   </Button>
                 </Tooltip>
               )}
             </Stack>
-          </Paper>
+          </Box>
+        );
 
-          {/* Properties panel — right. Shows Director's Notes for a selected
-              bin clip, or text-overlay properties for a selected text element. */}
-          <Paper elevation={2} sx={{ width: 280, p: 0, overflow: "auto" }}>
+      case "properties":
+        return (
+          <Box sx={{ height: "100%", overflow: "auto" }}>
             {!selectedItem && (
-              <Box sx={{ p: 2 }}>
-                <Typography variant="subtitle2" fontWeight="bold" mb={1}>Properties</Typography>
+              <Box sx={{ p: 1 }}>
                 <Typography variant="caption" color="text.secondary">
                   Select a bin clip or text overlay.
                 </Typography>
@@ -618,7 +712,7 @@ const VideoEditorPage = () => {
               />
             )}
             {selectedText && (
-              <Stack spacing={2} sx={{ p: 2 }}>
+              <Stack spacing={2} sx={{ p: 1 }} className="non-draggable">
                 <Typography variant="subtitle2" fontWeight="bold">Text properties</Typography>
                 <TextField
                   size="small"
@@ -679,33 +773,25 @@ const VideoEditorPage = () => {
                 </Button>
               </Stack>
             )}
-          </Paper>
-        </Box>
-
-        {/* Project Bin + Song + Plan controls — bottom.
-            flex: "0 0 320px" locks the bottom row at 320px regardless of bin
-            content. Previously this used `minHeight: 220` with no cap, so
-            adding clips grew the Paper unbounded, squeezed the top preview
-            row (which has `flex: 1, minHeight: 0`), and eventually pushed
-            the Plan/Render toolbar below the viewport. BinPanel already has
-            its own `overflow: auto` so clip lists scroll inside the fixed
-            320px instead of growing the page. */}
-        <Paper elevation={2} sx={{ p: 2, flex: "0 0 320px", minHeight: 0, display: "flex", gap: 2 }}>
-          {/* Left: Bin */}
-          <Box sx={{ width: 320, minWidth: 280, display: "flex", flexDirection: "column", borderRight: 1, borderColor: "divider", pr: 2, minHeight: 0 }}>
-            <BinPanel
-              binClips={timeline.bin}
-              selectedClipId={selectedItem?.type === "bin" ? selectedItem.id : null}
-              onSelect={(id) => setSelectedItem({ type: "bin", id })}
-              onAdd={handleBinAdd}
-              onAddMany={handleBinAddMany}
-              onRemove={handleBinRemove}
-              warningsByClipId={warningsByClipId}
-            />
           </Box>
+        );
 
-          {/* Middle: Song + Controls */}
-          <Box sx={{ width: 320, minWidth: 260, display: "flex", flexDirection: "column", gap: 1.5 }}>
+      case "bin":
+        return (
+          <BinPanel
+            binClips={timeline.bin}
+            selectedClipId={selectedItem?.type === "bin" ? selectedItem.id : null}
+            onSelect={(id) => setSelectedItem({ type: "bin", id })}
+            onAdd={handleBinAdd}
+            onAddMany={handleBinAddMany}
+            onRemove={handleBinRemove}
+            warningsByClipId={warningsByClipId}
+          />
+        );
+
+      case "controls":
+        return (
+          <Stack spacing={1.5} sx={{ height: "100%", overflow: "auto", p: 0.5 }} className="non-draggable">
             <Box>
               <Typography variant="caption" color="text.secondary">Master soundtrack</Typography>
               <SongSlot song={timeline.song} onSet={handleSongSet} onClear={handleSongClear} />
@@ -729,14 +815,18 @@ const VideoEditorPage = () => {
             </Box>
             {error && <Alert severity="error" sx={{ py: 0 }}>{error}</Alert>}
             {planJob.error && <Alert severity="error" sx={{ py: 0 }}>{planJob.error}</Alert>}
-          </Box>
+          </Stack>
+        );
 
-          {/* Right: Arrangement preview */}
-          <Box sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-            <Stack direction="row" alignItems="center" spacing={1} mb={1}>
-              <Typography variant="subtitle2" fontWeight="bold">Arrangement</Typography>
-              {planJob.planning && <CircularProgress size={14} />}
-            </Stack>
+      case "arrangement":
+        return (
+          <Box sx={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+            {planJob.planning && (
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+                <CircularProgress size={14} />
+                <Typography variant="caption" color="text.secondary">Planning…</Typography>
+              </Stack>
+            )}
             <Box sx={{ flex: 1, overflow: "auto" }}>
               <ArrangementPreview arrangement={planJob.result?.arrangement} />
               {planJob.result?.warnings?.length > 0 && (
@@ -748,7 +838,60 @@ const VideoEditorPage = () => {
               )}
             </Box>
           </Box>
-        </Paper>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <PageLayout title="Video Editor" subtitle="Compose videos with overlays, audio, and text">
+      {/* Window/card system — drag by the title bar, resize from any edge,
+          double-click a header to minimize. Layout persists per-machine via
+          /api/state/video-editor. Same pattern as the Documents & Code Editor pages. */}
+      <Box sx={{ height: "calc(100vh - 96px)", overflow: "auto", p: 0.5 }}>
+        <GridLayout
+          className="layout"
+          layout={layout}
+          cols={COLS_COUNT}
+          rowHeight={ROW_HEIGHT_PX}
+          width={gridWidth}
+          containerPadding={[CONTAINER_PADDING_PX / 10, CONTAINER_PADDING_PX / 10]}
+          margin={[CARD_MARGIN_PX / 20, CARD_MARGIN_PX / 20]}
+          isDraggable
+          isResizable
+          compactType={null}
+          preventCollision={false}
+          useCSSTransforms={false}
+          allowOverlap={true}
+          draggableHandle=".card-header-buttons"
+          draggableCancel="button, input, textarea, select, option, .non-draggable"
+          onLayoutChange={onLayoutChange}
+          resizeHandles={["s", "w", "e", "n", "sw", "nw", "se", "ne"]}
+        >
+          {layout.map((item) => {
+            const cardId = item.i;
+            const isMin = !!minimizedCards[cardId];
+            const dataGrid = isMin
+              ? { ...item, h: MIN_ROW, minH: MIN_ROW, maxH: MIN_ROW, isResizable: false }
+              : { ...item, isResizable: true };
+            return (
+              <div key={cardId} data-grid={dataGrid}>
+                <DashboardCardWrapper
+                  id={cardId}
+                  title={VE_CARD_TITLES[cardId] || cardId}
+                  cardColor={cardColors[cardId]}
+                  onCardColorChange={(c) => handleCardColorChange(cardId, c)}
+                  isMinimized={isMin}
+                  onToggleMinimize={() => handleToggleMinimize(cardId)}
+                >
+                  {renderCardBody(cardId)}
+                </DashboardCardWrapper>
+              </div>
+            );
+          })}
+        </GridLayout>
       </Box>
     </PageLayout>
   );
