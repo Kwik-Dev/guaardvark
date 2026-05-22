@@ -251,10 +251,14 @@ def test_run_storyboard_artist_advances_to_awaiting_approval(app, production):
     db.session.add(shot)
     db.session.commit()
 
-    run_storyboard_artist(production.id, image_generator=None)
+    # image_generator=None → run_storyboard_artist builds a default
+    # ComfyUIImageGenerator. Patch it so the unit test doesn't need ComfyUI.
+    with patch("backend.services.comfyui_image_generator.ComfyUIImageGenerator") as MockGen:
+        MockGen.return_value.generate_image.side_effect = lambda **kw: kw["output_path"]
+        run_storyboard_artist(production.id, image_generator=None)
 
     db.session.refresh(shot)
-    assert shot.storyboard_image_path == f"/tmp/storyboards/{production.id}/shot_1.png"
+    assert shot.storyboard_image_path.endswith(f"/storyboards/{production.id}/shot_1.png")
 
     db.session.refresh(production)
     assert production.current_stage == "awaiting_approval"
@@ -305,7 +309,7 @@ def test_run_editor_renders_and_advances_to_complete(app, production):
         from backend.services.swarm.agents.editor import RenderResult
         mock_editor_instance.render.return_value = RenderResult(
             final_mp4_path="/tmp/final.mp4",
-            video_project_id=None,
+            mlt_path=None,
             clip_paths=["/tmp/shot_1.mp4"],
             voiceover_paths=[],
             music_path=None

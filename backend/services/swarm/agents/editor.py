@@ -51,11 +51,13 @@ class FFmpegRunner(Protocol) :
 
 
 class VideoEditorClient(Protocol):
-    def create_project_with_timeline(
-        self, *, name: str, video_clips: list[str],
-        voiceovers: list[str | None], music_track: str | None,
-    ) -> int:
-        """Returns the new VideoProject id. Stub-friendly until the editor ships."""
+    def compose_arrangement(
+        self, *, clips: list[dict], audio_path: str | None,
+        song_duration_seconds: float | None = None,
+        render_mp4: bool = False,
+    ) -> dict | None:
+        """Compose the rendered shots into an editable Shotcut/MLT timeline.
+        Returns the plugin response ({mlt_path, ...}) or None if unavailable."""
         ...
 
 
@@ -75,7 +77,7 @@ class ShotInput:
 @dataclass
 class RenderResult:
     final_mp4_path: str
-    video_project_id: int | None  # None if Video Editor stubbed out
+    mlt_path: str | None  # editable Shotcut/MLT timeline; None if plugin down
     clip_paths: list[str]
     voiceover_paths: list[str | None]
     music_path: str | None
@@ -90,7 +92,7 @@ class Editor:
         self,
         *,
         i2v: I2VGenerator,
-        audio_foundry: AudioFoundry,
+        audio_foundry: AudioFoundry | None,
         ffmpeg: FFmpegRunner,
         video_editor: VideoEditorClient | None = None,
         lipsync: LipsyncGenerator | None = None,
@@ -169,27 +171,28 @@ class Editor:
                 voiceover_paths.append(vo_path)
                 self._emit_progress(production_id, shot.shot_number, clip_path)
 
-        # Phase 1.3: Per-scene music
-        scenes_map: dict[int, list[ShotInput]] = {}
-        for s in shots:
-            if s.scene_number is not None:
-                scenes_map.setdefault(s.scene_number, []).append(s)
-        
-        music_tracks: list[str] = []
-        if scenes_map:
-            sorted_scene_ids = sorted(scenes_map.keys())
-            for sid in sorted_scene_ids:
-                scene_shots = scenes_map[sid]
-                mood = scene_shots[0].scene_mood or music_mood
-                duration = sum(s.duration_seconds for s in scene_shots)
-                scene_music_path = self._render_music(mood, duration, audio_dir, suffix=f"_scene_{sid}")
-                music_tracks.append(scene_music_path)
-            
-            # Use the first track or implement concat logic if needed
-            music_path = music_tracks[0] if music_tracks else None
-        else:
-            total_duration = sum(s.duration_seconds for s in shots) or 1.0
-            music_path = self._render_music(music_mood, total_duration, audio_dir)
+        # Phase 1.3: Per-scene music. Skipped entirely when AudioFoundry is
+        # unavailable — the production still renders, just video-only.
+        music_path: str | None = None
+        if self.audio_foundry is not None:
+            scenes_map: dict[int, list[ShotInput]] = {}
+            for s in shots:
+                if s.scene_number is not None:
+                    scenes_map.setdefault(s.scene_number, []).append(s)
+
+            if scenes_map:
+                for sid in sorted(scenes_map.keys()):
+                    scene_shots = scenes_map[sid]
+                    mood = scene_shots[0].scene_mood or music_mood
+                    duration = sum(s.duration_seconds for s in scene_shots)
+                    track = self._render_music(mood, duration, audio_dir, suffix=f"_scene_{sid}")
+                    # v1: the first scene's track scores the production; stitching
+                    # per-scene tracks across the timeline is a v1.x refinement.
+                    if track and music_path is None:
+                        music_path = track
+            else:
+                total_duration = sum(s.duration_seconds for s in shots) or 1.0
+                music_path = self._render_music(music_mood, total_duration, audio_dir)
 
         final_mp4 = str(output_path / "final.mp4")
         self.ffmpeg.concat_with_audio(
@@ -199,22 +202,55 @@ class Editor:
             output_path=final_mp4,
         )
 
-        video_project_id = None
+        # Compose an editable Shotcut/MLT timeline from the rendered clips so the
+        # production can be reopened and tweaked in the Video Editor. Purely
+        # additive: final_mp4 above is the deliverable, this is the project file.
+        mlt_path: str | None = None
         if self.video_editor is not None:
-            video_project_id = self.video_editor.create_project_with_timeline(
-                name=production_name,
-                video_clips=clip_paths,
-                voiceovers=voiceover_paths,
-                music_track=music_path,
+            arrangement_clips, total = self._build_arrangement(clip_paths, shots)
+            resp = self.video_editor.compose_arrangement(
+                clips=arrangement_clips,
+                audio_path=music_path,
+                song_duration_seconds=total,
+                render_mp4=False,
             )
+            if resp:
+                mlt_path = resp.get("mlt_path")
 
         return RenderResult(
             final_mp4_path=final_mp4,
-            video_project_id=video_project_id,
+            mlt_path=mlt_path,
             clip_paths=clip_paths,
             voiceover_paths=voiceover_paths,
             music_path=music_path,
         )
+
+    def _build_arrangement(
+        self, clip_paths: list[str], shots: list[ShotInput],
+    ) -> tuple[list[dict], float]:
+        """Lay the rendered clips end-to-end into ArrangedClip dicts the
+        video_editor plugin's compose-arrangement endpoint understands. Uses the
+        clip's actual probed duration when ffmpeg can measure it (SVD clamps
+        frame counts, so the requested duration may not match), else the shot's
+        intended duration."""
+        probe = getattr(self.ffmpeg, "probe_duration", None)
+        clips: list[dict] = []
+        acc = 0.0
+        for path, shot in zip(clip_paths, shots):
+            dur = (probe(path) if probe else 0.0) or shot.duration_seconds
+            clips.append({
+                "clip_id": f"shot_{shot.shot_number}",
+                "source_path": path,
+                "section_label": f"shot {shot.shot_number}",
+                "timeline_start": round(acc, 3),
+                "timeline_end": round(acc + dur, 3),
+                "source_in": 0.0,
+                "source_out": round(dur, 3),
+                "filter_preset": "none",
+                "transition_to_next": "hard-cut",
+            })
+            acc += dur
+        return clips, round(acc, 3)
 
     # --- internals ----------------------------------------------------------
 
@@ -229,18 +265,28 @@ class Editor:
         )
 
     def _render_voiceover(self, shot: ShotInput, audio_dir: Path, voice: str) -> str | None:
-        if not shot.dialogue_text:
+        if not shot.dialogue_text or self.audio_foundry is None:
             return None
         vo_path = str(audio_dir / f"shot_{shot.shot_number}_vo.wav")
-        return self.audio_foundry.tts(
-            text=shot.dialogue_text, voice=voice, output_path=vo_path,
-        )
+        try:
+            return self.audio_foundry.tts(
+                text=shot.dialogue_text, voice=voice, output_path=vo_path,
+            )
+        except Exception as e:  # noqa: BLE001 — VO is best-effort, don't sink the render
+            logger.warning("TTS failed for shot %s, continuing without VO: %s", shot.shot_number, e)
+            return None
 
-    def _render_music(self, mood: str, duration_seconds: float, audio_dir: Path, suffix: str = "") -> str:
+    def _render_music(self, mood: str, duration_seconds: float, audio_dir: Path, suffix: str = "") -> str | None:
+        if self.audio_foundry is None:
+            return None
         music_path = str(audio_dir / f"score{suffix}.wav")
-        return self.audio_foundry.generate_music(
-            mood=mood, duration_seconds=duration_seconds, output_path=music_path,
-        )
+        try:
+            return self.audio_foundry.generate_music(
+                mood=mood, duration_seconds=duration_seconds, output_path=music_path,
+            )
+        except Exception as e:  # noqa: BLE001 — score is best-effort
+            logger.warning("Music generation failed, continuing without score: %s", e)
+            return None
 
     def _emit_progress(self, production_id: int, shot_number: int, clip_path: str):
         """Emit WebSocket event for shot completion."""

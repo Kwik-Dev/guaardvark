@@ -10,7 +10,7 @@ from pathlib import Path
 from backend.models import db, Production, Folder, Document
 
 
-VALID_CATEGORIES = {"storyboard", "clips", "audio", "final"}
+VALID_CATEGORIES = {"storyboard", "clips", "audio", "final", "timeline"}
 
 
 def _ensure_folder(name: str, parent_id: int | None, path: str) -> Folder:

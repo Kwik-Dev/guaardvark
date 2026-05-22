@@ -1,4 +1,5 @@
 import json
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from celery import Celery
@@ -209,8 +210,8 @@ def run_casting_director(prod_id: int, llm=None):
         # Fetch available voices from Audio Foundry
         available_voices = []
         try:
-            from backend.config import FLASK_PORT
-            resp = requests.get(f"http://localhost:{FLASK_PORT}/api/audio-foundry/voices", timeout=5)
+            flask_port = os.environ.get("FLASK_PORT", "5002")
+            resp = requests.get(f"http://localhost:{flask_port}/api/audio-foundry/voices", timeout=5)
             if resp.status_code == 200:
                 available_voices = resp.json().get("voices", [])
         except Exception as e:
@@ -350,24 +351,34 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             from backend.services.comfyui_video_generator import SvdI2VGenerator
             i2v = SvdI2VGenerator()
 
+        # Real service clients with graceful degradation: ffmpeg always present
+        # (system binary), audio only when the plugin is up, timeline compose
+        # only when the video_editor plugin is up. A missing plugin downgrades
+        # the output (video-only / no editable .mlt) rather than failing.
+        from backend.services.swarm.clients import (
+            AudioFoundryClient, FfmpegRunner, VideoEditorComposeClient,
+        )
+        if ffmpeg is None:
+            ffmpeg = FfmpegRunner()
+        if audio_foundry is None:
+            _af = AudioFoundryClient()
+            audio_foundry = _af if _af.available() else None
+
         shots = ProductionShot.query.filter_by(production_id=prod_id, approved=True).all()
         if not shots:
             ctx.fail("No approved shots")
 
-        # Initialize backend clients
-        from backend.config import FLASK_PORT
-        backend_url = f"http://localhost:{FLASK_PORT}/api"
-        
-        from backend.services.video_editor_client import VideoEditorClient as VEClient
-        ve_client = VEClient(backend_url)
+        flask_port = os.environ.get("FLASK_PORT", "5002")
+        backend_url = f"http://localhost:{flask_port}/api"
+        ve_client = VideoEditorComposeClient(backend_url)
 
         editor = Editor(
-            i2v=i2v, 
-            audio_foundry=audio_foundry, 
+            i2v=i2v,
+            audio_foundry=audio_foundry,
             ffmpeg=ffmpeg,
-            video_editor=ve_client
+            video_editor=ve_client,
         )
-        
+
         from backend.services.swarm.agents.editor import ShotInput
         shot_inputs = []
         for s in shots:
@@ -398,22 +409,57 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             
         import tempfile
         output_dir = tempfile.mkdtemp(prefix=f"prod_{prod_id}_")
-        
-        res = editor.render(
-            production_id=prod_id,
-            production_name=ctx.production.name,
-            shots=shot_inputs,
-            output_dir=output_dir
-        )
-        
-        for i, shot in enumerate(shots):
-            if i < len(res.clip_paths):
-                shot.video_clip_path = res.clip_paths[i]
-                
+
+        # Ride the unified job rail: a VIDEO_RENDER progress process so the
+        # production render shows up in /api/jobs/active and the gate snapshot,
+        # exactly like a standalone editor render.
+        from backend.utils.unified_progress_system import get_unified_progress, ProcessType
+        from backend.services.job_operation_gate import get_gate
+        from backend.services.job_types import JobKind
         from backend.services.production_documents import register_production_output
-        register_production_output(production=ctx.production, file_path=res.final_mp4_path, category="final")
-        
-        db.session.commit()
+
+        progress = get_unified_progress()
+        gate = get_gate()
+        render_id = f"prod_{prod_id}"
+        job_id = progress.create_process(
+            ProcessType.VIDEO_RENDER,
+            f"Rendering production {prod_id}: {ctx.production.name}",
+            additional_data={"production_id": prod_id},
+        )
+        gate.register_running(JobKind.VIDEO_RENDER, render_id)
+        try:
+            progress.update_process(job_id, 5, f"Rendering {len(shot_inputs)} shots")
+            res = editor.render(
+                production_id=prod_id,
+                production_name=ctx.production.name,
+                shots=shot_inputs,
+                output_dir=output_dir,
+            )
+
+            for i, shot in enumerate(shots):
+                if i < len(res.clip_paths):
+                    shot.video_clip_path = res.clip_paths[i]
+
+            final_doc = register_production_output(
+                production=ctx.production, file_path=res.final_mp4_path, category="final",
+            )
+            # The editable Shotcut/MLT timeline, when the video_editor plugin
+            # composed one (None when the plugin is down — final.mp4 still ships).
+            if res.mlt_path:
+                register_production_output(
+                    production=ctx.production, file_path=res.mlt_path, category="timeline",
+                )
+
+            db.session.commit()
+            progress.complete_process(
+                job_id, "Production render complete",
+                additional_data={"document_id": final_doc.id, "mlt_path": res.mlt_path},
+            )
+        except Exception as e:
+            progress.error_process(job_id, f"Production render failed: {e}")
+            raise
+        finally:
+            gate.unregister_running(JobKind.VIDEO_RENDER, render_id)
 
 
 def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, image_generator=None):

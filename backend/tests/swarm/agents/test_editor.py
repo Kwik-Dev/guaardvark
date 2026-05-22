@@ -23,6 +23,7 @@ def _make_editor(tmp_path):
     audio.generate_music.side_effect = lambda **kw: kw["output_path"]
     ffmpeg = MagicMock()
     ffmpeg.concat_with_audio.side_effect = lambda **kw: kw["output_path"]
+    ffmpeg.probe_duration.side_effect = lambda p: 3.0
     return i2v, audio, ffmpeg
 
 
@@ -98,10 +99,10 @@ def test_render_calls_ffmpeg_concat_at_end(tmp_path):
     assert result.final_mp4_path == str(Path(tmp_path) / "final.mp4")
 
 
-def test_render_populates_video_editor_when_provided(tmp_path):
+def test_render_composes_timeline_when_video_editor_provided(tmp_path):
     i2v, audio, ffmpeg = _make_editor(tmp_path)
     video_editor = MagicMock()
-    video_editor.create_project_with_timeline.return_value = 99
+    video_editor.compose_arrangement.return_value = {"mlt_path": "/tmp/proj.mlt"}
 
     editor = Editor(
         i2v=i2v, audio_foundry=audio, ffmpeg=ffmpeg,
@@ -109,23 +110,39 @@ def test_render_populates_video_editor_when_provided(tmp_path):
     )
     result = editor.render(
         production_id=1, production_name="My Project",
-        shots=[_make_shot(1)], output_dir=str(tmp_path),
+        shots=[_make_shot(1), _make_shot(2)], output_dir=str(tmp_path),
     )
 
-    video_editor.create_project_with_timeline.assert_called_once()
-    kwargs = video_editor.create_project_with_timeline.call_args.kwargs
-    assert kwargs["name"] == "My Project"
-    assert result.video_project_id == 99
+    video_editor.compose_arrangement.assert_called_once()
+    kwargs = video_editor.compose_arrangement.call_args.kwargs
+    # Two shots laid end-to-end into the arrangement
+    assert len(kwargs["clips"]) == 2
+    assert kwargs["clips"][0]["clip_id"] == "shot_1"
+    assert kwargs["render_mp4"] is False
+    assert result.mlt_path == "/tmp/proj.mlt"
 
 
-def test_render_skips_video_editor_when_not_provided(tmp_path):
+def test_render_skips_timeline_when_video_editor_not_provided(tmp_path):
     i2v, audio, ffmpeg = _make_editor(tmp_path)
     editor = Editor(i2v=i2v, audio_foundry=audio, ffmpeg=ffmpeg)
     result = editor.render(
         production_id=1, production_name="X",
         shots=[_make_shot(1)], output_dir=str(tmp_path),
     )
-    assert result.video_project_id is None
+    assert result.mlt_path is None
+
+
+def test_render_video_only_when_audio_foundry_none(tmp_path):
+    """AudioFoundry plugin down → no VO, no music, but the render still completes."""
+    i2v, _audio, ffmpeg = _make_editor(tmp_path)
+    editor = Editor(i2v=i2v, audio_foundry=None, ffmpeg=ffmpeg)
+    result = editor.render(
+        production_id=1, production_name="X",
+        shots=[_make_shot(1, dialogue="hi")], output_dir=str(tmp_path),
+    )
+    assert result.music_path is None
+    assert result.voiceover_paths == [None]
+    ffmpeg.concat_with_audio.assert_called_once()
 
 
 def test_render_creates_output_directories(tmp_path):
