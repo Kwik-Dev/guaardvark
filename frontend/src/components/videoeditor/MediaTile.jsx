@@ -11,23 +11,7 @@
 // drop-targets keep working unchanged.
 import React from "react";
 import { Box, Paper, Typography } from "@mui/material";
-import {
-  MovieFilter as VideoIcon,
-  GraphicEq as AudioIcon,
-  Image as ImageIcon,
-} from "@mui/icons-material";
-
-const ICONS = {
-  video: VideoIcon,
-  audio: AudioIcon,
-  image: ImageIcon,
-};
-
-const ICON_COLORS = {
-  video: "primary.main",
-  audio: "#9c27b0",
-  image: "info.main",
-};
+import { ICONS, ICON_COLORS } from "./MediaThumb";
 
 const formatDuration = (sec) => {
   if (sec == null || !isFinite(sec)) return null;
@@ -63,7 +47,7 @@ const _attachDrag = (item, kind, onDragStart) => ({
 });
 
 const MediaTile = ({ item, kind, variant = "grid", onClick, onDragStart, selected = false }) => {
-  const Icon = ICONS[kind] || VideoIcon;
+  const Icon = ICONS[kind] || ICONS.video;
   const iconColor = ICON_COLORS[kind] || "primary.main";
   const thumb = item?.thumbnail_url || null;
   const drag = _attachDrag(item, kind, onDragStart);

@@ -51,16 +51,23 @@ import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 
 const GridLayout = WidthProvider(ReactGridLayout);
 
+// Bumped whenever DEFAULT_VE_LAYOUT changes shape — a saved layout from an older
+// version is discarded so everyone picks up the improved tiling once (otherwise
+// a stale, messy hand-dragged layout shadows the default forever).
+const LAYOUT_VERSION = 2;
+
 // Default card placement on a ~175-col grid (10px units). Three across the top
 // (library / preview / properties) and three across the bottom (bin / controls /
 // arrangement) — the familiar NLE layout, but every card is draggable/resizable.
+// Each row's widths sum to COLS_COUNT (175) so there's no right-edge gap, and the
+// two row heights fill the ~calc(100vh-96px) canvas.
 const DEFAULT_VE_LAYOUT = [
-  { i: "media",       x: 0,   y: 0,  w: 34,  h: 42, minW: 16, minH: 12 },
-  { i: "preview",     x: 34,  y: 0,  w: 107, h: 42, minW: 30, minH: 12 },
-  { i: "properties",  x: 141, y: 0,  w: 34,  h: 42, minW: 16, minH: 12 },
-  { i: "bin",         x: 0,   y: 42, w: 48,  h: 30, minW: 22, minH: 10 },
-  { i: "controls",    x: 48,  y: 42, w: 48,  h: 30, minW: 22, minH: 10 },
-  { i: "arrangement", x: 96,  y: 42, w: 79,  h: 30, minW: 22, minH: 10 },
+  { i: "media",       x: 0,   y: 0,  w: 32,  h: 46, minW: 16, minH: 14 },
+  { i: "preview",     x: 32,  y: 0,  w: 111, h: 46, minW: 30, minH: 14 },
+  { i: "properties",  x: 143, y: 0,  w: 32,  h: 46, minW: 16, minH: 14 },
+  { i: "bin",         x: 0,   y: 46, w: 44,  h: 46, minW: 22, minH: 12 },
+  { i: "controls",    x: 44,  y: 46, w: 52,  h: 46, minW: 22, minH: 12 },
+  { i: "arrangement", x: 96,  y: 46, w: 79,  h: 46, minW: 22, minH: 12 },
 ];
 const VE_CARD_TITLES = {
   media: "Media Library",
@@ -142,11 +149,15 @@ const VideoEditorPage = () => {
       .then((r) => (r.ok ? r.json() : null))
       .then((saved) => {
         if (cancelled) return;
-        if (saved && Array.isArray(saved.layout) && saved.layout.length) {
-          // Keep any default card the saved layout predates (forward-compat).
-          const savedIds = new Set(saved.layout.map((l) => l.i));
-          setLayout([...saved.layout, ...DEFAULT_VE_LAYOUT.filter((d) => !savedIds.has(d.i))]);
+        if (saved && saved.version === LAYOUT_VERSION && Array.isArray(saved.layout) && saved.layout.length) {
+          // Same version: restore it, but drop any card id no longer in the
+          // default set and add any new default card the save predates.
+          const defaultIds = new Set(DEFAULT_VE_LAYOUT.map((d) => d.i));
+          const kept = saved.layout.filter((l) => defaultIds.has(l.i));
+          const keptIds = new Set(kept.map((l) => l.i));
+          setLayout([...kept, ...DEFAULT_VE_LAYOUT.filter((d) => !keptIds.has(d.i))]);
         }
+        // Older/absent version → keep DEFAULT_VE_LAYOUT (discard stale layout).
         if (saved?.cardColors) setCardColors(saved.cardColors);
         if (saved?.minimizedCards) setMinimizedCards(saved.minimizedCards);
       })
@@ -163,6 +174,7 @@ const VideoEditorPage = () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          version: LAYOUT_VERSION,
           layout: nextLayout,
           cardColors: nextColors,
           minimizedCards: nextMin,

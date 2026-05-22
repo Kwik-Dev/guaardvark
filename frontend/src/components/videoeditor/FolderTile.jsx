@@ -5,7 +5,7 @@
 // a single-row folder + count in list mode. Click → drill into the
 // folder. NOT draggable on purpose: dragging a folder onto a track is
 // ambiguous and multi-clip-per-track is v2 work.
-import React from "react";
+import React, { useState } from "react";
 import { Box, Paper, Typography, Chip } from "@mui/material";
 import {
   Folder as FolderIcon,
@@ -19,10 +19,14 @@ const _renderableThumbs = (preview_thumbs = []) =>
   preview_thumbs.filter(Boolean).slice(0, 3);
 
 const FolderTile = ({ group, variant = "grid", onOpen }) => {
+  const [failed, setFailed] = useState({});
   if (!group?.folder) return null;
   const { folder, items, preview_thumbs = [] } = group;
   const count = items?.length ?? 0;
   const thumbs = _renderableThumbs(preview_thumbs);
+  // If every preview thumb 404s (common for batch videos with no cached thumb),
+  // show the folder icon rather than an empty dark box.
+  const allThumbsFailed = thumbs.length > 0 && thumbs.every((_, i) => failed[i]);
 
   if (variant === "list") {
     return (
@@ -116,7 +120,7 @@ const FolderTile = ({ group, variant = "grid", onOpen }) => {
           "& .MuiChip-label": { px: 0.5 },
         }}
       />
-      {thumbs.length > 0 ? (
+      {thumbs.length > 0 && !allThumbsFailed ? (
         <Box sx={{ position: "relative", width: 60, height: 60 }}>
           {thumbs.map((url, idx) => (
             <Box
@@ -124,10 +128,8 @@ const FolderTile = ({ group, variant = "grid", onOpen }) => {
               component="img"
               src={url}
               loading="lazy"
-              onError={(e) => {
-                // Hide a single broken thumb without nuking the others
-                e.target.style.opacity = "0";
-              }}
+              onError={() => setFailed((f) => ({ ...f, [idx]: true }))}
+              style={failed[idx] ? { opacity: 0 } : undefined}
               sx={{
                 position: "absolute",
                 top: idx * 4,
