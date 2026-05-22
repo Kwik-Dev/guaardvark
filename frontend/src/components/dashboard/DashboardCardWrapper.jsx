@@ -229,7 +229,10 @@ const DashboardCardWrapper = React.forwardRef(
             minHeight: isMinimized ? "unset" : "200px",
             p: 0.5, // Reduced base padding from 1 to 0.5
             overflow: "hidden", // Hide overflow
-            cursor: isDraggable !== false ? "grab" : "default",
+            // Body uses a normal cursor — only the header (.card-header-buttons,
+            // the draggableHandle on every card page) drags, so the whole-card
+            // "grab" cursor was misleading. Header keeps its own grab cursor.
+            cursor: "default",
             userSelect: "none",
             borderRadius: "5px 5px 5px 5px",
             transition: theme.transitions.create(['height', 'min-height'], {
