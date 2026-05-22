@@ -32,6 +32,7 @@ def _serialize(s: Subject) -> dict:
         "description": s.description,
         "ref_image_paths": s.ref_image_paths or [],
         "trigger_word": s.trigger_word,
+        "voice_id": s.voice_id,
         "lora_path": s.lora_path,
         "lora_version": s.lora_version,
         "training_status": s.training_status,
@@ -58,9 +59,32 @@ def create_subject():
         description=body.get("description") or "",
         ref_image_paths=body.get("ref_image_paths") or [],
         trigger_word=(body.get("trigger_word") or "").strip() or None,
+        voice_id=(body.get("voice_id") or "").strip() or None,
     )
     db.session.add(s); db.session.commit()
     return jsonify(_serialize(s)), 201
+
+
+@bp.patch("/subjects/<int:subject_id>")
+def update_subject(subject_id):
+    """Update editable Subject fields. The cast UI uses this to assign a
+    character's voice (voice_id) and LoRA trigger word after creation — without
+    it, voice_id could only ever be set by the Casting Director's auto-pick."""
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+    body = request.get_json(silent=True) or {}
+    if "name" in body and body["name"]:
+        s.name = body["name"]
+    if "description" in body:
+        s.description = body["description"] or ""
+    # Empty string clears the field (sets NULL); absent key leaves it untouched.
+    if "voice_id" in body:
+        s.voice_id = (body["voice_id"] or "").strip() or None
+    if "trigger_word" in body:
+        s.trigger_word = (body["trigger_word"] or "").strip() or None
+    db.session.commit()
+    return jsonify(_serialize(s))
 
 
 @bp.get("/subjects/<int:subject_id>/preview")

@@ -328,6 +328,42 @@ def test_run_editor_renders_and_advances_to_complete(app, production):
     assert doc.path == "/tmp/final.mp4"
 
 
+def test_run_editor_resolves_voice_and_lora_from_cast(app, production):
+    """Seam C: the speaking Subject's voice_id and LoRA both come from the
+    shot's cast (shot_subjects), and voice_subject_id is stamped."""
+    production.current_stage = "rendering"
+    subj = Subject(
+        kind="character", name="Serenity", voice_id="af_bella",
+        lora_path="/loras/serenity.safetensors",
+    )
+    db.session.add(subj)
+    db.session.commit()
+    shot = ProductionShot(
+        production_id=production.id, scene_number=1, shot_number=1,
+        description="Close up", storyboard_image_path="/tmp/i.png",
+        character_name="Serenity", dialogue_text="Hello there", approved=True,
+    )
+    db.session.add(shot)
+    db.session.commit()
+    db.session.add(ProductionShotSubject(shot_id=shot.id, subject_id=subj.id))
+    db.session.commit()
+
+    mock_i2v, mock_audio, mock_ffmpeg = MagicMock(), MagicMock(), MagicMock()
+    with patch("backend.tasks.production_swarm_tasks.Editor") as MockEditor:
+        from backend.services.swarm.agents.editor import RenderResult
+        MockEditor.return_value.render.return_value = RenderResult(
+            final_mp4_path="/tmp/final.mp4", mlt_path=None,
+            clip_paths=["/tmp/shot_1.mp4"], voiceover_paths=[None], music_path=None,
+        )
+        run_editor(production.id, i2v=mock_i2v, audio_foundry=mock_audio, ffmpeg=mock_ffmpeg)
+        shots_arg = MockEditor.return_value.render.call_args.kwargs["shots"]
+
+    assert shots_arg[0].voice_id == "af_bella"
+    assert shots_arg[0].lora_paths == ["/loras/serenity.safetensors"]
+    db.session.refresh(shot)
+    assert shot.voice_subject_id == subj.id
+
+
 def test_run_editor_refuses_empty_shots(app, production):
     production.current_stage = "rendering"
     db.session.commit()

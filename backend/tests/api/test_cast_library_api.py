@@ -85,6 +85,59 @@ def test_delete_unknown_subject_404(client):
     assert resp.status_code == 404
 
 
+# --- voice_id (Seam C) ----------------------------------------------------
+
+def test_create_subject_accepts_and_serializes_voice_id(client):
+    resp = client.post("/api/cast-library/subjects", json={
+        "kind": "character", "name": "Serenity", "voice_id": "af_bella",
+    })
+    assert resp.status_code == 201
+    assert resp.get_json()["voice_id"] == "af_bella"
+
+
+def test_voice_id_defaults_to_null(client):
+    resp = client.post("/api/cast-library/subjects", json={
+        "kind": "character", "name": "NoVoice",
+    })
+    assert resp.get_json()["voice_id"] is None
+
+
+def test_patch_updates_voice_id(client):
+    subj = client.post("/api/cast-library/subjects", json={
+        "kind": "character", "name": "Dean",
+    }).get_json()
+    patch = client.patch(f"/api/cast-library/subjects/{subj['id']}", json={
+        "voice_id": "am_adam", "trigger_word": "dean_xyz",
+    })
+    assert patch.status_code == 200
+    data = patch.get_json()
+    assert data["voice_id"] == "am_adam"
+    assert data["trigger_word"] == "dean_xyz"
+
+
+def test_patch_empty_string_clears_voice_id(client):
+    subj = client.post("/api/cast-library/subjects", json={
+        "kind": "character", "name": "Dean", "voice_id": "af_heart",
+    }).get_json()
+    patch = client.patch(f"/api/cast-library/subjects/{subj['id']}", json={"voice_id": ""})
+    assert patch.get_json()["voice_id"] is None
+
+
+def test_patch_absent_key_leaves_voice_id_untouched(client):
+    subj = client.post("/api/cast-library/subjects", json={
+        "kind": "character", "name": "Dean", "voice_id": "af_heart",
+    }).get_json()
+    patch = client.patch(f"/api/cast-library/subjects/{subj['id']}", json={"description": "updated"})
+    data = patch.get_json()
+    assert data["voice_id"] == "af_heart"
+    assert data["description"] == "updated"
+
+
+def test_patch_unknown_subject_404(client):
+    resp = client.patch("/api/cast-library/subjects/9999", json={"voice_id": "x"})
+    assert resp.status_code == 404
+
+
 # --- upload-refs ---------------------------------------------------------
 
 def _png_bytes() -> bytes:

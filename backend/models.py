@@ -2659,6 +2659,10 @@ class ProductionShotSubject(db.Model):
         "ProductionShot",
         backref=db.backref("shot_subjects", cascade="all, delete-orphan"),
     )
+    # The cast member itself. Without this, `pss.subject` (used to collect a
+    # shot's LoRA paths and resolve its speaking voice) blows up — a latent bug
+    # that never surfaced only because no real render ever populated a cast.
+    subject = db.relationship("Subject")
 
 
 class SwarmMessage(db.Model):

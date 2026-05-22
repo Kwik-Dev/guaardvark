@@ -382,18 +382,28 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
         from backend.services.swarm.agents.editor import ShotInput
         shot_inputs = []
         for s in shots:
-            # Map character_name to voice_id if available
-            voice_id = None
-            if s.character_name:
-                subj = Subject.query.filter_by(name=s.character_name, kind="character").first()
-                if subj:
-                    voice_id = subj.voice_id
+            # Resolve the shot's cast once: LoRAs stack from every cast Subject,
+            # and the speaking Subject (whose voice_id drives the VO) is drawn
+            # from that SAME cast — one casting decision yields both a consistent
+            # face and a consistent voice.
+            cast = [pss.subject for pss in s.shot_subjects]
+            lora_paths = [c.lora_path for c in cast if c.lora_path]
 
-            # Collect LoRA paths for this shot
-            lora_paths = []
-            for pss in s.shot_subjects:
-                if pss.subject.lora_path:
-                    lora_paths.append(pss.subject.lora_path)
+            char_cast = [c for c in cast if c.kind == "character"]
+            speaker = None
+            if s.character_name:
+                speaker = next((c for c in char_cast if c.name == s.character_name), None)
+            if speaker is None:
+                speaker = char_cast[0] if char_cast else None
+            if speaker is None and s.character_name:
+                # Back-compat: shot wasn't explicitly cast — fall back to a
+                # library-wide lookup by the screenwriter's character name.
+                speaker = Subject.query.filter_by(name=s.character_name, kind="character").first()
+            voice_id = speaker.voice_id if speaker else None
+            if speaker is not None and s.voice_subject_id != speaker.id:
+                # Stamp who speaks this shot (the previously-dead FK) so the
+                # choice is traceable and reusable downstream.
+                s.voice_subject_id = speaker.id
 
             shot_inputs.append(ShotInput(
                 shot_number=s.shot_number,
