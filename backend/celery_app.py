@@ -347,6 +347,12 @@ def create_celery_app():
     except ImportError as e:
         logger.warning(f"Could not import cluster heartbeat sweeper: {e}")
 
+    try:
+        from backend.tasks.plugin_tasks import reconcile_plugin_deps  # noqa: F401
+        logger.info("Plugin dependency reconciler task imported successfully")
+    except ImportError as e:
+        logger.warning(f"Could not import plugin dependency task: {e}")
+
     logger.info("Celery app configured with enhanced performance settings and Beat schedule")
     return celery_app
 

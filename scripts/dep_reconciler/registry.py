@@ -24,7 +24,12 @@ def classify_plugin_venv_mode(plugin_dir: Path) -> Literal["isolated", "shared"]
 
 
 def enabled_plugin_ids(plugin_state_path: Path) -> list[str]:
-    """Read data/plugin_state.json. Missing/corrupt → empty list."""
+    """Read data/plugin_state.json. Missing/corrupt → empty list.
+
+    Handles the v1 PluginStateStore schema — a top-level ``user_enabled`` map of
+    ``{plugin_id: bool}`` — and falls back to the legacy per-plugin-nested shape
+    (``{plugin_id: {"user_enabled": bool}}``) so older state files still parse.
+    """
     if not plugin_state_path.is_file():
         return []
     try:
@@ -33,6 +38,11 @@ def enabled_plugin_ids(plugin_state_path: Path) -> list[str]:
         return []
     if not isinstance(data, dict):
         return []
+    # v1 schema: {"version": 1, "user_enabled": {"ollama": true, ...}, ...}
+    ue = data.get("user_enabled")
+    if isinstance(ue, dict):
+        return [pid for pid, on in ue.items() if on is True]
+    # Legacy schema: {"ollama": {"user_enabled": true}, ...}
     return [pid for pid, cfg in data.items()
             if isinstance(cfg, dict) and cfg.get("user_enabled") is True]
 

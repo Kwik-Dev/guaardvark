@@ -746,25 +746,24 @@ class PluginManager:
             logger.error(f"Failed to persist user_enabled for {plugin_id}: {e}")
             return {'success': False, 'error': 'Failed to enable plugin'}
 
-        # Ensure deps are installed before the plugin can come up. Without
+        # Ensure deps get installed before the plugin can come up. Without
         # this, a user toggling in the UI without restarting the backend
         # skips the start.sh-driven reconciler invocation entirely and the
-        # daemon falls over on missing imports.
-        ok, err = _run_dep_reconciler_for_plugin(plugin_id)
-        if not ok:
-            # Revert so the UI accurately reflects state.
+        # daemon falls over on missing imports. We dispatch this to Celery
+        # rather than running it inline: a pip install (potentially minutes for
+        # a torch plugin) must never block the Flask request or mutate the live
+        # venv mid-response. Any failure surfaces when the plugin is started.
+        if os.environ.get("GUAARDVARK_SKIP_DEP_RECONCILER") != "1":
             try:
-                self.state_store.set_user_enabled(plugin_id, False)
-            except Exception as revert_err:
-                logger.error(
-                    f"Failed to revert user_enabled for {plugin_id} after "
-                    f"reconciler failure: {revert_err}"
+                from backend.tasks.plugin_tasks import reconcile_plugin_deps
+                reconcile_plugin_deps.delay(plugin_id)
+            except Exception as e:
+                # Broker down / Celery unavailable — don't fail the enable.
+                # start.sh reconciles deps on the next boot regardless.
+                logger.warning(
+                    f"Could not dispatch dep reconciler for {plugin_id} "
+                    f"(deps will reconcile on next start.sh): {e}"
                 )
-            logger.error(f"dep_reconciler refused enable of {plugin_id}: {err}")
-            return {
-                'success': False,
-                'error': f'Failed to install dependencies for {plugin_id}: {err}',
-            }
 
         # Keep the in-memory metadata in sync so any code reading
         # metadata.config.enabled (until those paths are migrated to

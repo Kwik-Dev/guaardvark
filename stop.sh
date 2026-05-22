@@ -261,7 +261,9 @@ if [ -n "$flask_pids" ]; then
 fi
 
 # Pattern catches both worker AND beat processes from this checkout.
-celery_pids=$(pgrep -f "celery.*\(worker\|beat\)" 2>/dev/null)
+# ERE alternation — `\(worker\|beat\)` was BRE syntax that pgrep -f (ERE)
+# matched literally, so it killed nothing and leaked beat/training workers.
+celery_pids=$(pgrep -f "celery.*(worker|beat)" 2>/dev/null)
 if [ -n "$celery_pids" ]; then
     env_celery_pids=()
     for pid in $celery_pids; do
