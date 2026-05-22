@@ -8,6 +8,21 @@ import axios from "axios";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
+// Route each dropped file to the right library folder (and tag its kind) by
+// extension, so the Bin can accept video, audio, and image in one drop.
+const EXT_KIND = {
+  video: ["mp4", "mov", "webm", "mkv", "avi", "m4v"],
+  audio: ["mp3", "wav", "flac", "m4a", "aac", "ogg"],
+  image: ["jpg", "jpeg", "png", "webp", "gif", "bmp"],
+};
+const FOLDER_FOR_KIND = { video: "Videos", audio: "Audio", image: "Images" };
+
+export function kindForFile(name = "", fallback = "video") {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  for (const [k, exts] of Object.entries(EXT_KIND)) if (exts.includes(ext)) return k;
+  return fallback;
+}
+
 export function useExternalDrop({ folderName = "Videos", onUploaded }) {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -26,9 +41,10 @@ export function useExternalDrop({ folderName = "Videos", onUploaded }) {
 
     try {
       for (const [idx, file] of files.entries()) {
+        const kind = kindForFile(file.name);
         const form = new FormData();
         form.append("file", file);
-        form.append("folder_name", folderName);
+        form.append("folder_name", FOLDER_FOR_KIND[kind] || folderName);
         const res = await axios.post(`${API_BASE}/files/upload`, form, {
           headers: { "Content-Type": "multipart/form-data" },
           onUploadProgress: (e) => {
@@ -39,7 +55,7 @@ export function useExternalDrop({ folderName = "Videos", onUploaded }) {
           },
         });
         const doc = res.data?.data || res.data?.document || res.data;
-        if (doc?.id) uploaded.push(doc);
+        if (doc?.id) uploaded.push({ ...doc, kind });
       }
       if (onUploaded) onUploaded(uploaded);
     } catch (e) {

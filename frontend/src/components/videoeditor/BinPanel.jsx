@@ -19,12 +19,12 @@ const BinPanel = ({
 }) => {
   // OS file drop: upload → Document → bin tile.
   const { onDrop, onDragOver, uploading, progress, error } = useExternalDrop({
-    folderName: "Videos",
     onUploaded: (docs) => {
       const newClips = docs.map((d) => ({
         clipId: `doc${d.id}`,
         documentId: d.id,
         filename: d.filename || d.name || "(unnamed)",
+        kind: d.kind || "video",
         keptRanges: null,
         durationSeconds: null,
       }));
@@ -42,12 +42,12 @@ const BinPanel = ({
         return;
       }
       const data = JSON.parse(raw);
-      if (data.kind !== "video") return; // bin is video-only for now
       event.preventDefault();
       onAdd({
         clipId: `doc${data.id}`,
         documentId: data.id,
         filename: data.filename,
+        kind: data.kind || "video",
         keptRanges: null,
         durationSeconds: null,
       });

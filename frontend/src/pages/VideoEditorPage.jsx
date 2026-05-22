@@ -10,8 +10,6 @@ import {
   Stack,
   Button,
   IconButton,
-  TextField,
-  Slider,
   Chip,
   Divider,
   CircularProgress,
@@ -22,7 +20,6 @@ import {
   PlayArrow as PlayIcon,
   Pause as PauseIcon,
   AutoFixHigh as RenderIcon,
-  Delete as DeleteIcon,
   TextFields as TextIcon,
   MovieFilter as VideoIcon,
   GraphicEq as AudioIcon,
@@ -34,12 +31,11 @@ import PageLayout from "../components/layout/PageLayout";
 import MediaLibraryPanel from "../components/videoeditor/MediaLibraryPanel";
 import OverlayLayer from "../components/videoeditor/OverlayLayer";
 import BinPanel from "../components/videoeditor/BinPanel";
-import SongSlot from "../components/videoeditor/SongSlot";
-import ScanModeSelector from "../components/videoeditor/ScanModeSelector";
 import ArrangementPreview from "../components/videoeditor/ArrangementPreview";
-import DirectorsNotesPanel from "../components/videoeditor/DirectorsNotesPanel";
+import OptionsPanel from "../components/videoeditor/OptionsPanel";
 import { usePlanJob } from "../components/videoeditor/usePlanJob";
 import { useTimelineHistory } from "../components/videoeditor/useTimelineHistory";
+import { normalizeTimeline } from "../components/videoeditor/normalizeTimeline";
 import { listVideoDocuments, listAudioDocuments, listImageDocuments } from "../api/videoOverlayService";
 import { listStyleRecipes, renderArrangement, openInShotcut, rescanClip, getClipHash } from "../api/videoEditorService";
 import { getJobsGate } from "../api/jobsService";
@@ -54,7 +50,7 @@ const GridLayout = WidthProvider(ReactGridLayout);
 // Bumped whenever DEFAULT_VE_LAYOUT changes shape — a saved layout from an older
 // version is discarded so everyone picks up the improved tiling once (otherwise
 // a stale, messy hand-dragged layout shadows the default forever).
-const LAYOUT_VERSION = 2;
+const LAYOUT_VERSION = 3;
 
 // Default card placement on a ~175-col grid (10px units). Three across the top
 // (library / preview / properties) and three across the bottom (bin / controls /
@@ -64,17 +60,15 @@ const LAYOUT_VERSION = 2;
 const DEFAULT_VE_LAYOUT = [
   { i: "media",       x: 0,   y: 0,  w: 32,  h: 46, minW: 16, minH: 14 },
   { i: "preview",     x: 32,  y: 0,  w: 111, h: 46, minW: 30, minH: 14 },
-  { i: "properties",  x: 143, y: 0,  w: 32,  h: 46, minW: 16, minH: 14 },
-  { i: "bin",         x: 0,   y: 46, w: 44,  h: 46, minW: 22, minH: 12 },
-  { i: "controls",    x: 44,  y: 46, w: 52,  h: 46, minW: 22, minH: 12 },
-  { i: "arrangement", x: 96,  y: 46, w: 79,  h: 46, minW: 22, minH: 12 },
+  { i: "options",     x: 143, y: 0,  w: 32,  h: 46, minW: 16, minH: 14 },
+  { i: "bin",         x: 0,   y: 46, w: 70,  h: 46, minW: 26, minH: 12 },
+  { i: "arrangement", x: 70,  y: 46, w: 105, h: 46, minW: 26, minH: 12 },
 ];
 const VE_CARD_TITLES = {
   media: "Media Library",
   preview: "Preview",
-  properties: "Properties",
+  options: "Options",
   bin: "Bin",
-  controls: "Song & Controls",
   arrangement: "Arrangement",
 };
 
@@ -91,8 +85,10 @@ const TRACK_COLORS = {
 // the master soundtrack. Text overlays are kept for A2+ — currently they
 // don't flow through the Plan pipeline.
 const _emptyTimeline = () => ({
-  bin: [],                // BinClip[]: { clipId, documentId, filename, keptRanges, durationSeconds }
-  song: null,             // { documentId, filename, volume }
+  // BinClip[]: { clipId, documentId, filename, kind, keptRanges, durationSeconds,
+  //              isMasterSong?, volume? }. The master soundtrack is the one audio
+  //              clip flagged isMasterSong — there is no separate song slot.
+  bin: [],
   textElements: [],
 });
 
@@ -197,7 +193,7 @@ const VideoEditorPage = () => {
       .then((r) => (r.ok ? r.json() : null))
       .then((s) => {
         if (cancelled || !s) return;
-        if (s.timeline) commitTimeline(() => ({ ..._emptyTimeline(), ...s.timeline }));
+        if (s.timeline) commitTimeline(() => normalizeTimeline(s.timeline));
         if (s.scanMode) setScanMode(s.scanMode);
         if (s.styleRecipeName) setStyleRecipeName(s.styleRecipeName);
         if (s.clipOverrides) setClipOverrides(s.clipOverrides);
@@ -293,9 +289,9 @@ const VideoEditorPage = () => {
     return () => { cancelled = true; };
   }, []);
 
-  // Click a video in the library → add it to the project Bin.
+  // Click a media item in the library → add it to the project Bin (any kind).
   // (Drag also works; this handles the click affordance.)
-  const handleAddMedia = (mediaItem) => {
+  const handleAddMedia = (mediaItem, kind = "video") => {
     commitTimeline((prev) => {
       // Don't double-add — silently skip if already in bin.
       if (prev.bin.some((c) => c.documentId === mediaItem.id)) return prev;
@@ -307,6 +303,7 @@ const VideoEditorPage = () => {
             clipId: `doc${mediaItem.id}`,
             documentId: mediaItem.id,
             filename: mediaItem.filename,
+            kind,
             keptRanges: null,
             durationSeconds: null,
           },
@@ -335,12 +332,24 @@ const VideoEditorPage = () => {
     commitTimeline((prev) => ({ ...prev, bin: prev.bin.filter((c) => c.clipId !== clipId) }));
   }, [commitTimeline]);
 
-  const handleSongSet = useCallback((song) => {
-    commitTimeline((prev) => ({ ...prev, song }));
+  // Master soundtrack = the one audio bin clip flagged isMasterSong. Toggling
+  // one on clears the others (single-flag invariant); Plan reads the flagged clip.
+  const handleSetMasterSong = useCallback((clipId, on) => {
+    commitTimeline((prev) => ({
+      ...prev,
+      bin: prev.bin.map((c) =>
+        c.clipId === clipId
+          ? { ...c, isMasterSong: on }
+          : on ? { ...c, isMasterSong: false } : c,
+      ),
+    }));
   }, [commitTimeline]);
 
-  const handleSongClear = useCallback(() => {
-    commitTimeline((prev) => ({ ...prev, song: null }));
+  const handleSetClipVolume = useCallback((clipId, volume) => {
+    commitTimeline((prev) => ({
+      ...prev,
+      bin: prev.bin.map((c) => (c.clipId === clipId ? { ...c, volume } : c)),
+    }));
   }, [commitTimeline]);
 
   // Click on the preview to add a text element at that point. Phase 3 of
@@ -502,24 +511,26 @@ const VideoEditorPage = () => {
     }));
   }, [planJob.result]);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  const canPlan = timeline.bin.length > 0 && !!timeline.song && !planJob.planning;
+  // Master soundtrack = the flagged audio bin clip. Plan arranges the VIDEO
+  // clips against it; audio/image clips aren't part of the auto-edit material.
+  const masterSong = timeline.bin.find((c) => c.kind === "audio" && c.isMasterSong) || null;
+  const canPlan = timeline.bin.some((c) => c.kind === "video") && !!masterSong && !planJob.planning;
 
   const handlePlan = useCallback(() => {
     if (!canPlan) return;
     setError(null);
     setRenderResult(null);
     planJob.start({
-      bin_clips: timeline.bin.map((c) => ({
-        clip_id: c.clipId,
-        document_id: c.documentId,
-      })),
-      song_document_id: timeline.song.documentId,
+      bin_clips: timeline.bin
+        .filter((c) => c.kind === "video")
+        .map((c) => ({ clip_id: c.clipId, document_id: c.documentId })),
+      song_document_id: masterSong.documentId,
       scan_mode: scanMode,
       style_recipe_name: styleRecipeName,
       seed: Math.floor(Math.random() * 1_000_000),
       clip_overrides: clipOverrides,
     });
-  }, [canPlan, planJob, timeline.bin, timeline.song, scanMode, styleRecipeName, clipOverrides]);
+  }, [canPlan, planJob, timeline.bin, masterSong, scanMode, styleRecipeName, clipOverrides]);
 
   const handleQuickRender = useCallback(() => {
     if (!canPlan) return;
@@ -594,8 +605,8 @@ const VideoEditorPage = () => {
     try {
       const res = await renderArrangement({
         arrangement: arr,
-        song_document_id: timeline.song?.documentId,
-        audio_volume: timeline.song?.volume ?? 1.0,
+        song_document_id: masterSong?.documentId,
+        audio_volume: masterSong?.volume ?? 1.0,
         song_duration_seconds: planJob.result?.song?.duration_seconds,
         render_mp4: true,
       });
@@ -606,7 +617,7 @@ const VideoEditorPage = () => {
     } finally {
       setRendering(false);
     }
-  }, [planJob.result, timeline.song]);
+  }, [planJob.result, masterSong]);
 
   // Quick Render: when planJob lands with a result and we're pending, chain into Render.
   useEffect(() => {
@@ -630,7 +641,7 @@ const VideoEditorPage = () => {
   }, [renderResult]);
 
   // HTML5 drag-and-drop. dataTransfer carries the media-library row id +
-  // kind so BinPanel / SongSlot know whether to accept the drop.
+  // kind so BinPanel knows what kind of media is being dropped.
   const handleDragStartMedia = (e, mediaItem, kind) => {
     e.dataTransfer.setData("application/json", JSON.stringify({ id: mediaItem.id, kind, filename: mediaItem.filename }));
     e.dataTransfer.effectAllowed = "copy";
@@ -647,7 +658,7 @@ const VideoEditorPage = () => {
             audios={audioLibrary}
             images={imageLibrary}
             loading={loadingMedia}
-            onItemClick={(item, kind) => { if (kind === "video") handleAddMedia(item); }}
+            onItemClick={(item, kind) => handleAddMedia(item, kind)}
             onItemDragStart={handleDragStartMedia}
           />
         );
@@ -764,92 +775,35 @@ const VideoEditorPage = () => {
           </Box>
         );
 
-      case "properties":
+      case "options": {
+        const selectedClip = selectedItem?.type === "bin"
+          ? timeline.bin.find((c) => c.clipId === selectedItem.id) || null
+          : null;
         return (
-          <Box sx={{ height: "100%", overflow: "auto" }}>
-            {!selectedItem && (
-              <Box sx={{ p: 1 }}>
-                <Typography variant="caption" color="text.secondary">
-                  Select a bin clip or text overlay.
-                </Typography>
-              </Box>
-            )}
-            {selectedItem?.type === "bin" && (
-              <DirectorsNotesPanel
-                clipAnalysis={selectedClipAnalysis}
-                onOverride={handleClipOverride}
-                onReanalyze={handleReanalyze}
-                rescanning={rescanInFlight === selectedItem.id}
-                clipHash={(() => {
-                  const clip = timeline.bin.find((c) => c.clipId === selectedItem.id);
-                  return clip?.documentId ? clipHashByDocId[clip.documentId] : null;
-                })()}
-              />
-            )}
-            {selectedText && (
-              <Stack spacing={2} sx={{ p: 1 }} className="non-draggable">
-                <Typography variant="subtitle2" fontWeight="bold">Text properties</Typography>
-                <TextField
-                  size="small"
-                  fullWidth
-                  label="Text"
-                  value={selectedText.text}
-                  onChange={(e) => handleUpdateText(selectedText.id, { text: e.target.value })}
-                />
-                <Box>
-                  <Typography variant="caption">Font size: {selectedText.fontSize}</Typography>
-                  <Slider
-                    value={selectedText.fontSize}
-                    min={12}
-                    max={144}
-                    onChange={(_e, v) => handleUpdateText(selectedText.id, { fontSize: v })}
-                  />
-                </Box>
-                <TextField
-                  size="small"
-                  fullWidth
-                  label="Color"
-                  value={selectedText.fontColor}
-                  onChange={(e) => handleUpdateText(selectedText.id, { fontColor: e.target.value })}
-                />
-                <Box>
-                  <Typography variant="caption">Rotation: {selectedText.rotation}°</Typography>
-                  <Slider
-                    value={selectedText.rotation}
-                    min={-180}
-                    max={180}
-                    onChange={(_e, v) => handleUpdateText(selectedText.id, { rotation: v })}
-                  />
-                </Box>
-                <Stack direction="row" spacing={1}>
-                  <TextField
-                    size="small"
-                    label="X (px)"
-                    type="number"
-                    value={selectedText.x}
-                    onChange={(e) => handleUpdateText(selectedText.id, { x: Number(e.target.value) || 0 })}
-                  />
-                  <TextField
-                    size="small"
-                    label="Y (px)"
-                    type="number"
-                    value={selectedText.y}
-                    onChange={(e) => handleUpdateText(selectedText.id, { y: Number(e.target.value) || 0 })}
-                  />
-                </Stack>
-                <Button
-                  variant="outlined"
-                  color="error"
-                  size="small"
-                  startIcon={<DeleteIcon />}
-                  onClick={() => handleDeleteText(selectedText.id)}
-                >
-                  Delete element
-                </Button>
-              </Stack>
-            )}
-          </Box>
+          <OptionsPanel
+            selectedItem={selectedItem}
+            selectedClip={selectedClip}
+            selectedClipAnalysis={selectedClipAnalysis}
+            selectedText={selectedText}
+            scanMode={scanMode}
+            setScanMode={setScanMode}
+            styleRecipeName={styleRecipeName}
+            setStyleRecipeName={setStyleRecipeName}
+            recipes={recipes}
+            planning={planJob.planning}
+            onClipOverride={handleClipOverride}
+            onReanalyze={handleReanalyze}
+            rescanning={rescanInFlight === selectedItem?.id}
+            clipHash={selectedClip?.documentId ? clipHashByDocId[selectedClip.documentId] : null}
+            onSetMasterSong={handleSetMasterSong}
+            onSetVolume={handleSetClipVolume}
+            onUpdateText={handleUpdateText}
+            onDeleteText={handleDeleteText}
+            error={error}
+            planError={planJob.error}
+          />
         );
+      }
 
       case "bin":
         return (
@@ -862,35 +816,6 @@ const VideoEditorPage = () => {
             onRemove={handleBinRemove}
             warningsByClipId={warningsByClipId}
           />
-        );
-
-      case "controls":
-        return (
-          <Stack spacing={1.5} sx={{ height: "100%", overflow: "auto", p: 0.5 }} className="non-draggable">
-            <Box>
-              <Typography variant="caption" color="text.secondary">Master soundtrack</Typography>
-              <SongSlot song={timeline.song} onSet={handleSongSet} onClear={handleSongClear} />
-            </Box>
-            <ScanModeSelector value={scanMode} onChange={setScanMode} disabled={planJob.planning} />
-            <Box>
-              <Typography variant="caption" color="text.secondary">Style recipe</Typography>
-              <Stack direction="row" spacing={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
-                {(recipes.length === 0 ? [{ name: "Default" }] : recipes).map((r) => (
-                  <Chip
-                    key={r.name}
-                    label={r.name}
-                    size="small"
-                    color={styleRecipeName === r.name ? "primary" : "default"}
-                    onClick={() => setStyleRecipeName(r.name)}
-                    variant={styleRecipeName === r.name ? "filled" : "outlined"}
-                    sx={{ mb: 0.5 }}
-                  />
-                ))}
-              </Stack>
-            </Box>
-            {error && <Alert severity="error" sx={{ py: 0 }}>{error}</Alert>}
-            {planJob.error && <Alert severity="error" sx={{ py: 0 }}>{planJob.error}</Alert>}
-          </Stack>
         );
 
       case "arrangement":
