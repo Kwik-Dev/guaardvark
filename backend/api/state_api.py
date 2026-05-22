@@ -22,6 +22,7 @@ FOLDER_STATE_FILE = os.path.join(STORAGE_DIR, "folder_state.json")
 CODE_EDITOR_STATE_FILE = os.path.join(STORAGE_DIR, "code_editor_state.json")
 CODE_EDITOR_SESSION_FILE = os.path.join(STORAGE_DIR, "code_editor_session.json")
 VIDEO_EDITOR_STATE_FILE = os.path.join(STORAGE_DIR, "video_editor_state.json")
+VIDEO_EDITOR_SESSION_FILE = os.path.join(STORAGE_DIR, "video_editor_session.json")
 DOCUMENTS_WINDOWS_STATE_FILE = os.path.join(STORAGE_DIR, "documents_windows_v2_state.json")
 IMAGES_WINDOWS_STATE_FILE = os.path.join(STORAGE_DIR, "images_windows_state.json")
 STICKY_NOTES_STATE_FILE = os.path.join(STORAGE_DIR, "sticky_notes_state.json")
@@ -678,6 +679,40 @@ def save_video_editor_state():
     except Exception as e:
         logger.error(f"API Error (POST /video-editor): {e}", exc_info=True)
         return jsonify({"error": "Failed to save video editor state file.", "details": str(e)}), 500
+
+
+@state_bp.route("/video-editor/session", methods=["GET"])
+def get_video_editor_session():
+    """The Video Editor's working content — bin clips, song, text overlays, scan
+    mode, style recipe, clip overrides — so a reload restores work in progress."""
+    logger = current_app.logger if current_app else logging.getLogger(__name__)
+    try:
+        if os.path.exists(VIDEO_EDITOR_SESSION_FILE):
+            with open(VIDEO_EDITOR_SESSION_FILE, "r", encoding="utf-8") as f:
+                return jsonify(json.load(f)), 200
+        return jsonify({"error": "Video editor session not found"}), 404
+    except json.JSONDecodeError as e:
+        logger.error(f"API Error (GET /video-editor/session): invalid JSON: {e}", exc_info=True)
+        return jsonify({"error": "Invalid JSON in video editor session file", "details": str(e)}), 500
+    except Exception as e:
+        logger.error(f"API Error (GET /video-editor/session): {e}", exc_info=True)
+        return jsonify({"error": "Failed to read video editor session file.", "details": str(e)}), 500
+
+
+@state_bp.route("/video-editor/session", methods=["POST"])
+def save_video_editor_session():
+    logger = current_app.logger if current_app else logging.getLogger(__name__)
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    try:
+        session_data = request.get_json()
+        os.makedirs(LAYOUT_DIR, exist_ok=True)
+        with open(VIDEO_EDITOR_SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(session_data, f, indent=2, ensure_ascii=False)
+        return jsonify({"success": True, "message": "Video editor session saved successfully"}), 200
+    except Exception as e:
+        logger.error(f"API Error (POST /video-editor/session): {e}", exc_info=True)
+        return jsonify({"error": "Failed to save video editor session file.", "details": str(e)}), 500
 
 
 @state_bp.route("/sticky-notes", methods=["GET"])

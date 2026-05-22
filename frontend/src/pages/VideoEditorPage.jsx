@@ -129,6 +129,13 @@ const VideoEditorPage = () => {
   const layoutLoadedRef = useRef(false);
   const MIN_ROW = Math.max(1, Math.round(48 / ROW_HEIGHT_PX));
 
+  // SaveState indicator (same UX as CodeEditor/Dashboard/Documents): a "Saving…/
+  // Saved" chip backed by both the layout save and the session (content) save.
+  const [isSaving, setIsSaving] = useState(false);
+  const [lastSaveTime, setLastSaveTime] = useState(null);
+  const sessionLoadedRef = useRef(false);
+  const lastSavedSessionRef = useRef(null);
+
   useEffect(() => {
     let cancelled = false;
     fetch("/api/state/video-editor")
@@ -148,19 +155,64 @@ const VideoEditorPage = () => {
     return () => { cancelled = true; };
   }, []);
 
-  const saveLayoutState = useCallback((nextLayout, nextColors, nextMin) => {
+  const saveLayoutState = useCallback(async (nextLayout, nextColors, nextMin) => {
     if (!layoutLoadedRef.current) return;  // don't clobber saved state on first paint
-    fetch("/api/state/video-editor", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        layout: nextLayout,
-        cardColors: nextColors,
-        minimizedCards: nextMin,
-        lastSaved: new Date().toISOString(),
-      }),
-    }).catch((e) => console.warn("video-editor layout save failed:", e));
+    setIsSaving(true);
+    try {
+      await fetch("/api/state/video-editor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          layout: nextLayout,
+          cardColors: nextColors,
+          minimizedCards: nextMin,
+          lastSaved: new Date().toISOString(),
+        }),
+      });
+      setLastSaveTime(new Date());
+    } catch (e) {
+      console.warn("video-editor layout save failed:", e);
+    } finally {
+      setIsSaving(false);
+    }
   }, []);
+
+  // Restore the working session (bin / song / overlays / scan mode / recipe /
+  // overrides) on mount, then auto-save it (debounced) whenever it changes.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/state/video-editor/session")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (cancelled || !s) return;
+        if (s.timeline) commitTimeline(() => ({ ..._emptyTimeline(), ...s.timeline }));
+        if (s.scanMode) setScanMode(s.scanMode);
+        if (s.styleRecipeName) setStyleRecipeName(s.styleRecipeName);
+        if (s.clipOverrides) setClipOverrides(s.clipOverrides);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) sessionLoadedRef.current = true; });
+    return () => { cancelled = true; };
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!sessionLoadedRef.current) return;
+    const payload = { timeline, scanMode, styleRecipeName, clipOverrides };
+    const serialized = JSON.stringify(payload);
+    if (lastSavedSessionRef.current === serialized) return;  // nothing changed
+    const t = setTimeout(() => {
+      setIsSaving(true);
+      fetch("/api/state/video-editor/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, lastSaved: new Date().toISOString() }),
+      })
+        .then((r) => { if (r.ok) { lastSavedSessionRef.current = serialized; setLastSaveTime(new Date()); } })
+        .catch((e) => console.warn("video-editor session save failed:", e))
+        .finally(() => setIsSaving(false));
+    }, 800);
+    return () => clearTimeout(t);
+  }, [timeline, scanMode, styleRecipeName, clipOverrides]);
 
   const onLayoutChange = useCallback((next) => {
     if (!layoutLoadedRef.current) return;
@@ -629,6 +681,17 @@ const VideoEditorPage = () => {
               <IconButton onClick={() => setPreviewPlaying(!previewPlaying)} size="small" className="non-draggable">
                 {previewPlaying ? <PauseIcon /> : <PlayIcon />}
               </IconButton>
+              {(isSaving || lastSaveTime) && (
+                <Tooltip title={isSaving ? "Saving…" : `Last saved: ${lastSaveTime?.toLocaleTimeString?.() || ""}`}>
+                  <Chip
+                    label={isSaving ? "Saving…" : "Saved"}
+                    size="small"
+                    color={isSaving ? "primary" : "success"}
+                    className="non-draggable"
+                    sx={{ fontSize: "0.6rem", height: 18, "& .MuiChip-label": { px: 0.75, py: 0 } }}
+                  />
+                </Tooltip>
+              )}
               <Box sx={{ flexGrow: 1 }} />
               <Tooltip title="Run the auto-edit + Art Director pipeline. Cheap to re-run (vision is cached).">
                 <span>
