@@ -3,7 +3,7 @@ import logging
 import os
 from pathlib import Path
 
-from flask import Blueprint, current_app, request, jsonify
+from flask import Blueprint, current_app, request, jsonify, send_file
 from werkzeug.utils import secure_filename
 
 from backend.models import db, Subject
@@ -31,6 +31,7 @@ def _serialize(s: Subject) -> dict:
         "id": s.id, "kind": s.kind, "name": s.name,
         "description": s.description,
         "ref_image_paths": s.ref_image_paths or [],
+        "trigger_word": s.trigger_word,
         "lora_path": s.lora_path,
         "lora_version": s.lora_version,
         "training_status": s.training_status,
@@ -56,9 +57,26 @@ def create_subject():
         kind=kind, name=name,
         description=body.get("description") or "",
         ref_image_paths=body.get("ref_image_paths") or [],
+        trigger_word=(body.get("trigger_word") or "").strip() or None,
     )
     db.session.add(s); db.session.commit()
     return jsonify(_serialize(s)), 201
+
+
+@bp.get("/subjects/<int:subject_id>/preview")
+def subject_preview(subject_id):
+    """Serve a thumbnail for a Subject — its first existing reference image.
+    Used by the character picker UI. Falls back to 404 if no image is on disk."""
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+    for p in (s.ref_image_paths or []):
+        try:
+            if p and os.path.isfile(p):
+                return send_file(p, max_age=3600)
+        except (OSError, ValueError):
+            continue
+    return jsonify({"error": "no_preview"}), 404
 
 
 @bp.delete("/subjects/<int:subject_id>")

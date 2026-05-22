@@ -961,6 +961,33 @@ try:
                 except Exception:
                     pass
 
+            # Film Crew columns added after the base schema was stamped. These
+            # ride migrations f63d6ff26f29 + a1b2c3d4e5f6, but since we stamp
+            # (not replay) migrations, existing/interconnector DBs never get the
+            # ALTERs — they drift and 500. Reconcile idempotently here.
+            for _tbl, _col, _ddl in (
+                ("subjects", "voice_id", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS voice_id VARCHAR(128)"),
+                ("subjects", "trigger_word", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS trigger_word VARCHAR(64)"),
+                ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
+                ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
+            ):
+                try:
+                    from sqlalchemy import text as _sa_text
+                    existing = db.session.execute(_sa_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = :t AND column_name = :c"
+                    ), {"t": _tbl, "c": _col}).fetchone()
+                    if existing is None:
+                        app.logger.warning(f"Adding missing {_tbl}.{_col} column (legacy DB)")
+                        db.session.execute(_sa_text(_ddl))
+                        db.session.commit()
+                except Exception as col_err:
+                    app.logger.warning(f"Failed to ensure {_tbl}.{_col} column: {col_err}")
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+
             # Create default OS-style folders (Images/, Videos/, Code/) so
             # generated outputs land somewhere DocumentsPage can see them
             try:

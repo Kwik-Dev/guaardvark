@@ -1,5 +1,6 @@
 import json
 from contextlib import contextmanager
+from pathlib import Path
 from celery import Celery
 from flask import current_app
 
@@ -293,26 +294,61 @@ def run_cinematographer(prod_id: int, llm=None):
         db.session.commit()
 
 
+def _shot_loras_and_prompt(shot) -> tuple[list[str], str]:
+    """Collect a shot's character LoRA paths and build the generation prompt
+    with each Subject's trigger word prepended — the LoRA only locks identity
+    when the token it was trained on is actually present at inference."""
+    lora_paths: list[str] = []
+    triggers: list[str] = []
+    for pss in shot.shot_subjects:
+        subj = pss.subject
+        if subj.lora_path:
+            lora_paths.append(subj.lora_path)
+            triggers.append((subj.trigger_word or subj.name or "").strip())
+    triggers = [t for t in triggers if t]
+    prompt = shot.description
+    if triggers:
+        prompt = f"{', '.join(triggers)}, {prompt}"
+    return lora_paths, prompt
+
+
+def _storyboard_path(prod_id: int, shot_number: int) -> str:
+    from backend.config import STORAGE_DIR
+    out_dir = Path(STORAGE_DIR) / "outputs" / "storyboards" / str(prod_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return str(out_dir / f"shot_{shot_number}.png")
+
+
 def run_storyboard_artist(prod_id: int, image_generator=None):
     with _agent_run(prod_id, agent_name="storyboard_artist", expected_stage="storyboard_gen", next_agent=None) as ctx:
         if ctx is None:
             return
 
+        if image_generator is None:
+            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+            image_generator = ComfyUIImageGenerator()
+
         shots = ProductionShot.query.filter_by(production_id=prod_id).all()
-        
+
         for i, shot in enumerate(shots):
-            if image_generator:
-                path = image_generator.generate_image(prompt=shot.description)
-                shot.storyboard_image_path = path
-            else:
-                shot.storyboard_image_path = f"/tmp/storyboards/{prod_id}/shot_{i+1}.png"
-                
+            lora_paths, prompt = _shot_loras_and_prompt(shot)
+            output_path = _storyboard_path(prod_id, shot.shot_number or (i + 1))
+            shot.storyboard_image_path = image_generator.generate_image(
+                prompt=prompt, loras=lora_paths, output_path=output_path,
+            )
+
         db.session.commit()
 
 def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
     with _agent_run(prod_id, agent_name="editor", expected_stage="rendering", next_agent=None) as ctx:
         if ctx is None:
             return
+
+        if i2v is None:
+            # SVD animates the LoRA-consistent storyboard frame — identity rides
+            # in the image, so no video-side LoRA is needed.
+            from backend.services.comfyui_video_generator import SvdI2VGenerator
+            i2v = SvdI2VGenerator()
 
         shots = ProductionShot.query.filter_by(production_id=prod_id, approved=True).all()
         if not shots:
@@ -387,11 +423,17 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
         logging.warning("Regen storyboard shot called when not awaiting approval")
         return
 
-    if image_generator:
-        prompt = prompt_override if prompt_override else shot.description
-        path = image_generator.generate_image(prompt=prompt)
-        shot.storyboard_image_path = path
-        db.session.commit()
+    if image_generator is None:
+        from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+        image_generator = ComfyUIImageGenerator()
+
+    lora_paths, base_prompt = _shot_loras_and_prompt(shot)
+    prompt = prompt_override if prompt_override else base_prompt
+    output_path = _storyboard_path(shot.production_id, shot.shot_number or shot.id)
+    shot.storyboard_image_path = image_generator.generate_image(
+        prompt=prompt, loras=lora_paths, output_path=output_path,
+    )
+    db.session.commit()
 
 def run_regen_shot_plan(shot_id: int, feedback: str, llm=None):
     if llm is None:

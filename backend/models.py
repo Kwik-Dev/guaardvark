@@ -2568,6 +2568,10 @@ class Subject(db.Model):
     description = db.Column(db.Text, nullable=True)
     ref_image_paths = db.Column(db.JSON, nullable=False, default=list)
     voice_id = db.Column(db.String(128), nullable=True)  # TTS voice ID
+    # Rare token the LoRA is trained on AND must appear at inference (e.g.
+    # "sage_harlow"). This is what locks identity — the display name is for
+    # humans, the trigger is for the model. Falls back to name if unset.
+    trigger_word = db.Column(db.String(64), nullable=True)
     lora_path = db.Column(db.String(512), nullable=True)
     lora_version = db.Column(db.Integer, nullable=False, default=0)
     training_status = db.Column(db.String(32), nullable=False, default="untrained", index=True)

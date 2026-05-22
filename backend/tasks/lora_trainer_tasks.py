@@ -43,6 +43,7 @@ def _train_impl(subject_id: int) -> dict:
         return _TRAINER.train_subject_lora(
             subject_id=s.id,
             subject_name=s.name,
+            trigger_word=s.trigger_word,
             ref_image_paths=s.ref_image_paths or [],
             output_dir=_output_dir(),
         )

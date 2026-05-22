@@ -103,9 +103,14 @@ class RealLoraTrainer:
         except json.JSONDecodeError as e:
             raise RuntimeError(f"LoRA trainer daemon returned non-JSON: {response_line!r} ({e})") from e
 
-    def train_subject_lora(self, *, subject_id: int, subject_name: str, ref_image_paths: list[str], output_dir: str, **_) -> dict:
+    def train_subject_lora(self, *, subject_id: int, subject_name: str, ref_image_paths: list[str], output_dir: str, trigger_word: str | None = None, **_) -> dict:
         if not ref_image_paths:
             return {"status": "failed", "error": "no reference images provided"}
+
+        # The token the LoRA actually learns. Prefer the explicit rare trigger
+        # (e.g. "sage_harlow"); fall back to the display name. Whatever we train
+        # on here MUST be what generation prompts with — see ComfyUIImageGenerator.
+        token = (trigger_word or "").strip() or subject_name
 
         with self._lock:
             try:
@@ -113,7 +118,11 @@ class RealLoraTrainer:
             except Exception as e:
                 return {"status": "failed", "error": str(e)}
             
-            target_dir = Path(output_dir)
+            # Absolute path is mandatory: the daemon subprocess runs with
+            # cwd=plugin root, so a relative output_dir (e.g. "data/training/
+            # loras") would resolve under plugins/lora_trainer/ and the save
+            # would land nowhere / fail. Resolve against the backend cwd here.
+            target_dir = Path(output_dir).resolve()
             target_dir.mkdir(parents=True, exist_ok=True)
             safe_name = "".join(c if c.isalnum() else "_" for c in subject_name) or "subject"
             
@@ -144,7 +153,7 @@ class RealLoraTrainer:
                     "learning_rate": 1.0e-4,
                     "resolution": 1024,
                     "seed": 42,
-                    "instance_prompt": f"a photo of {subject_name}"
+                    "instance_prompt": f"a photo of {token}"
                 }
             }, timeout_s=self._TRAIN_TIMEOUT_S)
 
@@ -155,6 +164,8 @@ class RealLoraTrainer:
             sidecar.write_text(json.dumps({
                 "subject_id": subject_id,
                 "subject_name": subject_name,
+                "trigger_word": token,
+                "instance_prompt": f"a photo of {token}",
                 "ref_count": len(ref_image_paths),
                 "mock": False,
                 "steps": steps,

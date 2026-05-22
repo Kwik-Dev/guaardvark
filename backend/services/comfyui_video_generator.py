@@ -45,6 +45,10 @@ class VideoGenerationRequest:
     interpolation_multiplier: int = 2  # 1 = no interpolation, 2 = double fps, 4 = quad fps
     prompt_style: str = "cinematic"   # Enhancement style: cinematic, realistic, artistic, anime, none
     enhance_prompt: bool = True       # Whether to run prompt through the enhancer
+    freeu: bool = False
+    face_restore: bool = False
+    lora_name: Optional[str] = None
+    lora_strength: float = 1.0
 
 
 @dataclass
@@ -617,9 +621,10 @@ class ComfyUIVideoGenerator:
         # Default negative prompt for anatomy quality
         if not negative_prompt:
             negative_prompt = (
-                "blurry, low quality, extra fingers, extra limbs, deformed hands, "
-                "deformed face, disfigured, static, overexposed, worst quality, "
-                "NSFW, nude"
+                "blurry, low quality, worst quality, deformed, disfigured, poor anatomy, "
+                "bad proportions, extra limbs, missing limbs, mutated hands, fused fingers, "
+                "extra fingers, deformed face, asymmetrical eyes, weird body, static, "
+                "overexposed, "
             )
 
         midpoint = num_inference_steps // 2
@@ -813,9 +818,10 @@ class ComfyUIVideoGenerator:
 
         if not negative_prompt:
             negative_prompt = (
-                "blurry, low quality, extra fingers, extra limbs, deformed hands, "
-                "deformed face, disfigured, static, overexposed, worst quality, "
-                "NSFW, nude"
+                "blurry, low quality, worst quality, deformed, disfigured, poor anatomy, "
+                "bad proportions, extra limbs, missing limbs, mutated hands, fused fingers, "
+                "extra fingers, deformed face, asymmetrical eyes, weird body, static, "
+                "overexposed"
             )
 
         midpoint = num_inference_steps // 2
@@ -916,10 +922,10 @@ class ComfyUIVideoGenerator:
     def _build_vae_decode_node(self, samples_node: str, vae_node: str, width: int, height: int) -> dict:
         """Pick the right VAE decode strategy based on resolution.
 
-        Standard VAEDecode works fine up to 720p. Above that, tiled decoding
-        saves your VRAM from a very bad day.
+        Standard VAEDecode works fine for tiny tests. Above that, tiled decoding
+        saves your VRAM from a very bad day. Lowered threshold to 720 for video.
         """
-        use_tiled = width >= 1280 or height >= 1280
+        use_tiled = width >= 720 or height >= 720
         if use_tiled:
             return {
                 "class_type": "VAEDecodeTiled",
@@ -1038,6 +1044,84 @@ class ComfyUIVideoGenerator:
             f"node {source_node_id} -> Upscale({upscale_id}) -> VHS_VideoCombine({video_combine_node_id})"
         )
 
+        return workflow
+
+    def _add_freeu_node(self, workflow: dict, model_node_id: str, is_cogvideo: bool = False) -> str:
+        """Insert FreeU_V2 node to improve generation quality.
+        Returns the ID of the new FreeU node.
+        """
+        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
+        freeu_id = str(max(existing_ids) + 1)
+        
+        # FreeU V2 defaults (tuned for video models generally)
+        b1, b2, s1, s2 = 1.01, 1.02, 0.99, 0.95
+        if is_cogvideo:
+            b1, b2, s1, s2 = 1.1, 1.2, 0.9, 0.2
+
+        workflow[freeu_id] = {
+            "class_type": "FreeU_V2",
+            "inputs": {
+                "model": [model_node_id, 0],
+                "b1": b1,
+                "b2": b2,
+                "s1": s1,
+                "s2": s2,
+            }
+        }
+        logger.info(f"Added FreeU_V2 node ({freeu_id}) after model node {model_node_id}")
+        return freeu_id
+
+    def _add_lora_loader(self, workflow: dict, model_node_id: str, clip_node_id: str, lora_name: str, strength: float = 1.0) -> tuple[str, str]:
+        """Insert a LoraLoader node.
+        Returns the new (model_node_id, clip_node_id) to use in downstream nodes.
+        """
+        if not lora_name:
+            return model_node_id, clip_node_id
+            
+        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
+        lora_id = str(max(existing_ids) + 1)
+        
+        workflow[lora_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "model": [model_node_id, 0],
+                "clip": [clip_node_id, 0],
+                "lora_name": lora_name,
+                "strength_model": strength,
+                "strength_clip": strength,
+            }
+        }
+        logger.info(f"Added LoraLoader node ({lora_id}) for {lora_name} (strength: {strength})")
+        return lora_id, lora_id
+
+    def _add_face_detailer_node(self, workflow: dict, source_node_id: str, video_combine_node_id: str) -> dict:
+        """Insert FaceRestoreWithModel node for human realism before VHS_VideoCombine.
+        """
+        existing_ids = [int(k) for k in workflow.keys() if k.isdigit()]
+        restore_loader_id = str(max(existing_ids) + 1)
+        restore_node_id = str(max(existing_ids) + 2)
+        
+        workflow[restore_loader_id] = {
+            "class_type": "FaceRestoreModelLoader",
+            "inputs": {
+                "model_name": "codeformer.pth"
+            }
+        }
+        
+        workflow[restore_node_id] = {
+            "class_type": "FaceRestoreWithModel",
+            "inputs": {
+                "facerestore_model": [restore_loader_id, 0],
+                "image": [source_node_id, 0],
+                "facedetection": "retinaface_resnet50",
+                "codeformer_fidelity": 0.5
+            }
+        }
+        
+        # Rewire VHS_VideoCombine to take frames from FaceRestore
+        workflow[video_combine_node_id]["inputs"]["images"] = [restore_node_id, 0]
+        
+        logger.info(f"Added FaceRestoreWithModel ({restore_node_id}) after node {source_node_id}")
         return workflow
 
     def interrupt(self) -> bool:
@@ -1416,6 +1500,50 @@ class ComfyUIVideoGenerator:
                     if source_ref:
                         self._add_upscale_node(workflow, source_ref, vhs_node_id)
 
+            # Apply FaceRestore if requested
+            if request.face_restore:
+                vhs_node_id = next(
+                    (nid for nid, node in workflow.items() if node.get("class_type") == "VHS_VideoCombine"),
+                    None
+                )
+                if vhs_node_id:
+                    source_ref = workflow[vhs_node_id]["inputs"].get("images", [None])[0]
+                    if source_ref:
+                        self._add_face_detailer_node(workflow, source_ref, vhs_node_id)
+
+            # Apply FreeU if requested
+            if request.freeu:
+                model_node_id = None
+                for nid, node in workflow.items():
+                    if node.get("class_type") == "DownloadAndLoadCogVideoModel":
+                        model_node_id = nid
+                        break
+                if model_node_id:
+                    freeu_id = self._add_freeu_node(workflow, model_node_id, is_cogvideo=True)
+                    for nid, node in workflow.items():
+                        if node.get("class_type") == "CogVideoSampler":
+                            if node["inputs"].get("model", [None])[0] == model_node_id:
+                                node["inputs"]["model"] = [freeu_id, 0]
+
+            # Apply Lora if requested
+            if request.lora_name:
+                model_node_id = None
+                clip_node_id = None
+                for nid, node in workflow.items():
+                    if node.get("class_type") == "DownloadAndLoadCogVideoModel":
+                        model_node_id = nid
+                    elif node.get("class_type") == "CLIPLoader":
+                        clip_node_id = nid
+                if model_node_id and clip_node_id:
+                    new_model, new_clip = self._add_lora_loader(workflow, model_node_id, clip_node_id, request.lora_name, request.lora_strength)
+                    for nid, node in workflow.items():
+                        if node.get("class_type") == "CogVideoSampler":
+                            if node["inputs"].get("model", [None])[0] == model_node_id:
+                                node["inputs"]["model"] = [new_model, 0]
+                        elif "TextEncode" in node.get("class_type", ""):
+                            if node["inputs"].get("clip", [None])[0] == clip_node_id:
+                                node["inputs"]["clip"] = [new_clip, 0]
+
             logger.info("Sending workflow to ComfyUI...")
             prompt_id = self._queue_prompt(workflow)
 
@@ -1502,3 +1630,37 @@ def get_video_generator() -> ComfyUIVideoGenerator:
     if _video_generator_instance is None:
         _video_generator_instance = ComfyUIVideoGenerator()
     return _video_generator_instance
+
+
+class SvdI2VGenerator:
+    """Adapts the SVD image-to-video path to the Editor's I2VGenerator protocol.
+
+    Character identity rides in via the seed image — the storyboard frame is
+    already LoRA-consistent — so SVD (which animates a single image and takes no
+    text prompt or LoRA) is the right tool. `prompt`/`loras` are accepted to
+    satisfy the protocol but intentionally ignored: the frame carries identity.
+    """
+
+    def __init__(self, fps: int = 7):
+        self.fps = fps
+
+    def i2v_from_image(
+        self, *, image_path: str, prompt: str, loras: list[str],
+        duration_seconds: float, output_path: str,
+    ) -> str:
+        # SVD-XT tops out at 25 frames; clamp the requested duration to that.
+        frames = max(14, min(25, int(round(duration_seconds * self.fps)) or 25))
+        gen = get_video_generator()
+        req = VideoGenerationRequest(
+            model="svd",
+            duration_frames=frames,
+            fps=self.fps,
+            enhance_prompt=False,
+            metadata={"image_path": image_path},
+        )
+        result = gen.generate_video(req)
+        if not result.success or not result.video_path:
+            raise RuntimeError(f"SVD I2V failed: {result.error or 'no video produced'}")
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(result.video_path, output_path)
+        return output_path
