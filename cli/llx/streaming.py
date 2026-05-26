@@ -10,11 +10,13 @@ from engineio import payload as _engineio_payload
 _engineio_payload.Payload.max_decode_packets = 10000
 
 import socketio
+import json
 import threading
 import time
 from typing import Callable
 
 from llx.config import get_server_url
+from llx.working_memory import approval_target_mismatch, extract_approval_targets
 
 
 class LlxStreamer:
@@ -164,7 +166,10 @@ class LlxStreamer:
                         self.send_approval_response(self._session_id, False)
                         self.abort(self._session_id)
                     raise
-                except Exception:
+                except Exception as e:
+                    import sys
+                    sys.stderr.write(f"\nApproval handler failed; rejecting tool call: {e}\n")
+                    sys.stderr.flush()
                     approved = False
             if self._session_id:
                 self.send_approval_response(self._session_id, approved)
@@ -360,12 +365,18 @@ class ChatRenderer:
         # response. Clear them so the final answer comes through clean.
         self._tokens.clear()
         name = data.get("name") or data.get("tool", "unknown")
-        args = data.get("arguments") or data.get("args", "")
+        args = data.get("params")
+        if args is None:
+            args = data.get("arguments")
+        if args is None:
+            args = data.get("args", "")
+        if isinstance(args, (dict, list)):
+            args = json.dumps(args, sort_keys=True)
         line = f"[dim]{_ICON_TOOL} Calling: {name}({args})[/dim]"
         self._tool_lines.append(line)
         self._refresh()
 
-    def prompt_for_approval(self, data: dict) -> bool:
+    def prompt_for_approval(self, data: dict, expected_target: str | None = None) -> bool:
         """Ask the user whether to allow the listed tools.
 
         MUST be called from the main thread (not a socketio callback).
@@ -399,6 +410,25 @@ class ChatRenderer:
         self._console.print()
         self._console.print("[bold yellow]\u26a0 Approval Required[/bold yellow]")
         self._console.print(f"  Tool(s): [bold]{tools_str}[/bold]")
+        actual_targets = extract_approval_targets(data)
+        if expected_target:
+            self._console.print(f"  Expected target: [bold]{expected_target}[/bold]")
+        if actual_targets:
+            self._console.print(f"  Actual target(s): [bold]{', '.join(actual_targets)}[/bold]")
+
+        mismatch, _targets = approval_target_mismatch(data, expected_target)
+        if mismatch:
+            self._console.print("[red]\u2717 Rejected: edit target does not match the active file.[/red]\n")
+            if live_was_active:
+                try:
+                    self._live.start()
+                except Exception:
+                    pass
+            if spinner_was_running:
+                self._thinking = True
+                self._spinner_stop.clear()
+                self._start_spinner()
+            return False
 
         aborted = False
         approved = False

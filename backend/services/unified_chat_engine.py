@@ -780,6 +780,20 @@ class UnifiedChatEngine:
         finally:
             clear_abort_flag(session_id)
 
+    def _format_interface_context(self, options: Dict[str, Any]) -> str:
+        """Return caller-supplied context for injection into the active turn."""
+        if not isinstance(options, dict):
+            return ""
+        context = options.get("context")
+        if not isinstance(context, str):
+            return ""
+        context = context.strip()
+        if not context:
+            return ""
+        if len(context) > 6000:
+            context = context[:5997] + "..."
+        return f"Interface-provided context:\n{context}"
+
     def _run_chat(self, session_id: str, message: str, options: Dict[str, Any],
                   emit_fn: Callable, request_id: str, steps: List) -> Dict[str, Any]:
         """Internal chat execution with app context assumed."""
@@ -865,9 +879,12 @@ class UnifiedChatEngine:
             role = "user" if msg["role"] == "user" else "assistant"
             ollama_messages.append({"role": role, "content": msg["content"]})
 
-        # Dynamic context as user message (RAG + web results)
+        # Dynamic context as user message (CLI/runtime context + RAG + web results)
         user_content = message
         context_parts = []
+        interface_context = self._format_interface_context(options)
+        if interface_context:
+            context_parts.append(interface_context)
         if rag_context:
             context_parts.append(f"Relevant context from knowledge base:\n{rag_context}")
         # Vision pipeline context (if active). Ask the plugin manager first so
@@ -1121,10 +1138,16 @@ class UnifiedChatEngine:
             # If any tool in this iteration requires approval, pause and wait.
             _pre = _preapproved_tool_names(session_id)
             approval_jobs = []
+            approval_details = []
             for tc, tool_name, params in tool_jobs:
                 tool = self.registry.get_tool(tool_name)
                 if tool and tool.requires_approval and tool_name not in _pre:
                     approval_jobs.append(tool_name)
+                    approval_details.append({
+                        "tool": tool_name,
+                        "params": params,
+                        "reasoning": tc.reasoning,
+                    })
 
             if approval_jobs and not is_aborted(session_id):
                 logger.info(f"Session {session_id} waiting for approval of: {approval_jobs}")
@@ -1142,6 +1165,7 @@ class UnifiedChatEngine:
                     }
                 emit_fn("chat:tool_approval_request", {
                     "tools": approval_jobs,
+                    "tool_details": approval_details,
                     "iteration": iteration,
                     "available_scopes": ["once", "session", "task"],
                 })
@@ -1238,12 +1262,13 @@ class UnifiedChatEngine:
                 """Thread-safe result emission."""
                 _, t_name, t_params = tool_jobs[job_i]
                 out = _output_str(res)
+                output_limit = 4000 if t_name == "edit_code" else 2000
                 with _emit_lock:
                     emit_fn("chat:tool_result", {
                         "tool": t_name,
                         "result": {
                             "success": res.success,
-                            "output": out[:2000] if res.success else None,
+                            "output": out[:output_limit] if res.success else None,
                             "error": res.error if not res.success else None,
                         },
                         "duration_ms": dur_ms,
@@ -1398,12 +1423,13 @@ class UnifiedChatEngine:
                     if out:
                         tool_output_snippets.append(out[:300])
 
+                preview_limit = 1200 if tool_name == "edit_code" else 200
                 step_info["tool_calls"].append({
                     "tool_name": tool_name,
                     "params": params,
                     "success": result.success,
                     "duration_ms": duration_ms,
-                    "output_preview": out[:200] if result.success else result.error,
+                    "output_preview": out[:preview_limit] if result.success else result.error,
                 })
 
                 formatted = format_tool_result_for_llm(tool_name, result, format='xml')
@@ -2037,8 +2063,8 @@ class UnifiedChatEngine:
     @staticmethod
     def _should_skip_rag(message: str) -> bool:
         """Return True if the message is action-oriented and unlikely to benefit from RAG."""
-        msg_lower = message.lower()
-        return any(kw in msg_lower for kw in UnifiedChatEngine._ACTION_KEYWORDS)
+        msg_lower = message.lower().strip()
+        return any(msg_lower == kw or msg_lower.startswith(kw + " ") for kw in UnifiedChatEngine._ACTION_KEYWORDS)
 
     def _get_routed_tools(self, message: str) -> List[str]:
         """Use the AgentRouter to boost relevant tools based on message intent.
