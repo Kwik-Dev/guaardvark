@@ -1,9 +1,9 @@
 # torch + torchvision come from the cu130 index in setup_venv.sh — not pinned
 # here because PyPI doesn't host the cu130 builds. Don't list them in this file.
-diffusers==0.34.0
+diffusers==0.38.0
 peft==0.16.0
 accelerate==1.10.0
-transformers==4.50.0
+transformers==5.0.0rc3
 safetensors==0.5.3
 Pillow==12.2.0
 huggingface_hub==0.27.0

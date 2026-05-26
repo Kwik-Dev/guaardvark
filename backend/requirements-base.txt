@@ -3,20 +3,20 @@
 # IMPORTANT: Keep in sync with requirements.txt — start.sh prefers this file
 
 # Core Flask/Backend Dependencies
-Flask==3.0.0
+Flask==3.1.3
 Flask-Executor==1.0.0
 Flask-Migrate==4.0.7
 Flask-SQLAlchemy==3.1.1
 Flask-SocketIO==5.3.6
-flask-cors==4.0.2
+flask-cors==6.0.0
 alembic==1.13.1
 anthropic>=0.40.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 
 # Background Tasks & Caching
 celery==5.4.0
 redis==5.0.4
-eventlet==0.35.1
+eventlet==0.40.3
 
 # Data Processing & Analysis
 numpy<2.0,>=1.26.4  # Pin to <2.0 for PyTorch compatibility
@@ -27,8 +27,8 @@ psutil==5.9.8
 # Web Scraping & File Processing
 beautifulsoup4==4.12.3
 lxml==6.1.1
-pypdf==5.1.0
-requests==2.32.4
+pypdf==6.10.2
+requests==2.33.0
 duckduckgo-search==8.1.1
 
 # Database & Utilities
@@ -43,7 +43,7 @@ llama-index-embeddings-ollama>=0.8.0
 llama-index-readers-file>=0.5.0  # Updated for llama-index-core 0.14.x
 
 # Image Generation Dependencies (without torch)
-diffusers>=0.37.0
+diffusers>=0.38.0
 transformers>=4.50.3,<5.0  # ComfyUI needs >=4.50.3, diffusers incompatible with 5.x
 accelerate==1.2.1
 safetensors>=0.4.0
@@ -82,7 +82,7 @@ piper-tts==1.3.0
 onnxruntime==1.22.1
 
 # Testing Dependencies
-pytest==8.4.1
+pytest==9.0.3
 pytest-timeout==2.3.1
 pytest-playwright==0.7.0
 playwright==1.52.0
