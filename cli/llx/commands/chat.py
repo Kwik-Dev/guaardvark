@@ -288,10 +288,15 @@ def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | N
                     # before doing the next render tick.
                     pending = streamer.pop_pending_approval()
                     if pending is not None:
+                        from llx.working_memory import extract_approval_targets
+
                         live.stop()
                         tools_str = ", ".join(pending.get("tools", [])) or "(unknown tools)"
+                        targets = extract_approval_targets(pending)
                         console.print(f"\n[bold yellow]\u26a0 Approval Required[/bold yellow]")
                         console.print(f"  Tool(s): [bold]{tools_str}[/bold]")
+                        if targets:
+                            console.print(f"  Actual target(s): [bold]{', '.join(targets)}[/bold]")
                         try:
                             approved = typer.confirm("Allow execution?", default=False)
                         except (KeyboardInterrupt, EOFError, typer.Abort):

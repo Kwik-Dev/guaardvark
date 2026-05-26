@@ -30,6 +30,16 @@ from llx.theme import (
     get_banner,
     make_console,
 )
+from llx.working_memory import (
+    apply_attachments,
+    apply_user_intent,
+    build_cli_context,
+    empty_working_memory,
+    expected_edit_target,
+    normalize_working_memory,
+    record_recommendation_summary,
+    should_demote_rag,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -96,13 +106,18 @@ def _dynamic_completions(command: str, sub_text: str):
 # ── Chat handler ──────────────────────────────────────────────
 
 
-def _handle_chat(state: dict, ctx: ContextSnapshot, message: str):
+def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: str | None = None, attachments: list[dict] | None = None):
     """Send a chat message with streaming or synchronous response."""
     console = make_console()
     server = state["server"]
     session_id = state["session_id"]
     agent_mode = state.get("agent_mode", False)
     lite_mode = state.get("lite_mode", False)
+    raw_message = raw_message or message
+    attachments = attachments or []
+    memory = normalize_working_memory(state.get("working_memory"))
+    state["working_memory"] = memory
+    use_rag = not should_demote_rag(raw_message, memory, attachments)
 
     # Freshen context in background
     ctx.refresh_async()
@@ -118,6 +133,7 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str):
 
     if lite_mode:
         # Lite mode: synchronous chat (no Socket.IO)
+        assistant_text = ""
         try:
             client = get_client(server)
             response = client.post("/api/chat/unified", json={
@@ -125,11 +141,14 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str):
                 "message": message,
                 "options": {
                     "use_rag": False,
+                    "context": build_cli_context(ctx.format_context_block(), memory),
                     "agent_screen_active": screen_active,
+                    "cli_working_memory": memory,
                 },
             })
             result = response.get("data", response)
             content = result.get("response", str(result))
+            assistant_text = content
             from rich.markdown import Markdown
             console.print()
             console.print(Markdown(content))
@@ -138,7 +157,7 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str):
             console.print(f"[llx.error]Chat error: {e}[/llx.error]")
     else:
         # Full mode: streaming via Socket.IO
-        context_block = ctx.format_context_block()
+        context_block = build_cli_context(ctx.format_context_block(), memory)
         renderer = ChatRenderer()
         streamer = LlxStreamer(server)
 
@@ -158,9 +177,10 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str):
                 "session_id": session_id,
                 "message": message,
                 "options": {
-                    "use_rag": True,
+                    "use_rag": use_rag,
                     "context": context_block,
                     "agent_screen_active": screen_active,
+                    "cli_working_memory": memory,
                 },
             })
         except (LlxConnectionError, LlxError, Exception) as e:
@@ -172,7 +192,10 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str):
         completed = False
         try:
             completed = streamer.wait_for_completion(
-                approval_handler=renderer.prompt_for_approval,
+                approval_handler=lambda data: renderer.prompt_for_approval(
+                    data,
+                    expected_target=expected_edit_target(memory),
+                ),
                 timeout=300,
             )
         except KeyboardInterrupt:
@@ -188,10 +211,12 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str):
                 "[llx.error]No response after 5 minutes — server may be stalled "
                 "(check backend log / Ollama). Returning to prompt.[/llx.error]"
             )
+        assistant_text = "".join(renderer._tokens)
 
+    record_recommendation_summary(memory, raw_message, assistant_text)
     # Track session
     state["message_count"] = state.get("message_count", 0) + 1
-    save_session(session_id, message[:80], state["message_count"])
+    save_session(session_id, raw_message[:80], state["message_count"], working_memory=memory)
 
 
 # ── Main entry point ──────────────────────────────────────────
@@ -222,6 +247,7 @@ def launch_repl():
         "message_count": 0,
         "agent_mode": False,
         "lite_mode": _lite_mode,
+        "working_memory": empty_working_memory(),
     }
 
     # Create context snapshot and start background population
@@ -328,6 +354,7 @@ def launch_repl():
             if pending:
                 state["session_id"] = pending["id"]
                 state["message_count"] = pending.get("message_count", 0)
+                state["working_memory"] = normalize_working_memory(pending.get("working_memory"))
                 state.pop("pending_resume", None)
                 console.print(
                     f"[llx.success]Resumed session {pending['id'][:8]}...[/llx.success]"
@@ -347,6 +374,11 @@ def launch_repl():
                 break
         else:
             # Chat message
-            from llx.utils import parse_file_mentions
-            line = parse_file_mentions(line)
-            _handle_chat(state, ctx, line)
+            from llx.utils import parse_file_mentions_with_metadata
+            raw_line = line
+            line, attachments = parse_file_mentions_with_metadata(line)
+            memory = normalize_working_memory(state.get("working_memory"))
+            apply_attachments(memory, attachments)
+            apply_user_intent(memory, raw_line)
+            state["working_memory"] = memory
+            _handle_chat(state, ctx, line, raw_message=raw_line, attachments=attachments)

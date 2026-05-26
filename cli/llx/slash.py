@@ -234,10 +234,13 @@ class SlashRouter:
 
     def _cmd_new(self, args: list[str]):
         """Start a new chat session."""
+        from llx.working_memory import empty_working_memory
+
         new_id = str(uuid.uuid4())
         self._state["session_id"] = new_id
         self._state["message_count"] = 0
         self._state["context"] = None
+        self._state["working_memory"] = empty_working_memory()
         self._console.print(f"[llx.success]New session started.[/llx.success]")
         self._console.print(f"[llx.dim]Session: {new_id[:8]}...[/llx.dim]")
 
@@ -268,9 +271,12 @@ class SlashRouter:
                 return
 
             session = sessions[idx]
+            from llx.working_memory import normalize_working_memory
+
             self._state["session_id"] = session["id"]
             self._state["message_count"] = session.get("message_count", 0)
             self._state["context"] = None
+            self._state["working_memory"] = normalize_working_memory(session.get("working_memory"))
             self._console.print(f"[llx.success]Resumed session {session['id'][:8]}...[/llx.success]")
             preview = session.get("preview", "")
             if preview:

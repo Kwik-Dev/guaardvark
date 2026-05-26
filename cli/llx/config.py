@@ -123,7 +123,7 @@ def load_sessions() -> list[dict]:
     return []
 
 
-def save_session(session_id: str, preview: str, message_count: int = 1):
+def save_session(session_id: str, preview: str, message_count: int = 1, working_memory: dict | None = None):
     """Save a chat session to history."""
     ensure_config_dir()
     sessions = load_sessions()
@@ -132,13 +132,19 @@ def save_session(session_id: str, preview: str, message_count: int = 1):
     if existing:
         prev_count = existing.get("message_count", 0)
         message_count = max(message_count, prev_count)
-    sessions = [s for s in sessions if s["id"] != session_id]
-    sessions.insert(0, {
+    entry = {
         "id": session_id,
         "preview": preview[:80],
         "timestamp": time.time(),
         "message_count": message_count,
-    })
+    }
+    if working_memory is not None:
+        entry["working_memory"] = working_memory
+    elif existing and existing.get("working_memory"):
+        entry["working_memory"] = existing["working_memory"]
+
+    sessions = [s for s in sessions if s["id"] != session_id]
+    sessions.insert(0, entry)
     config = load_config()
     max_history = config.get("chat_session_history", 50)
     sessions = sessions[:max_history]
