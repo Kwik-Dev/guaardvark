@@ -84,6 +84,14 @@ def resolve_guaardvark_root() -> Path | None:
     if env and Path(env).is_dir():
         return Path(env)
 
+    # 1. Resolve relative to this file dynamically (since cli/ is inside the repo root)
+    try:
+        relative_root = Path(__file__).resolve().parent.parent.parent
+        if (relative_root / "start.sh").exists():
+            return relative_root
+    except Exception:
+        pass
+
     cfg = load_launch_config()
     root = cfg.get("guaardvark_root")
     if root and Path(root).is_dir():

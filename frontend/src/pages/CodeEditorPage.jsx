@@ -121,8 +121,10 @@ const CodeEditorPage = () => {
       // Fetch content if not provided
       if (content === null || content === undefined) {
         try {
-          const { getDocumentContent } = await import("../api/documentService");
-          const result = await getDocumentContent(incoming.id);
+          const { getDocumentContent, getRepoFileContent } = await import("../api/documentService");
+          const result = incoming.source === 'live_repo'
+            ? await getRepoFileContent(incoming.relativePath || incoming.filePath || "")
+            : await getDocumentContent(incoming.id);
           content = typeof result === "string" ? result : result.content || result.data || "";
         } catch {
           content = "";
@@ -131,12 +133,13 @@ const CodeEditorPage = () => {
       const { getLanguageFromFilename } = await import("../utils/languageDetector");
       const newTab = {
         id: `doc-${incoming.id}-${Date.now()}`,
-        filePath: incoming.filename,
+        filePath: incoming.filePath || incoming.filename,
         content: content,
         language: getLanguageFromFilename(incoming.filename),
         isModified: false,
-        source: 'document',
-        documentId: incoming.id,
+        source: incoming.source || 'document',
+        documentId: incoming.source === 'live_repo' ? null : incoming.id,
+        readOnly: incoming.source === 'live_repo',
       };
       setOpenTabs(prev => {
         const updated = [...prev, newTab];

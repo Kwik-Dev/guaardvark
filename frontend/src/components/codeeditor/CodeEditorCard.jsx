@@ -510,6 +510,7 @@ ${currentTab.content}
 
     const handleContentChange = useCallback((value) => {
       if (!currentTab || activeTabIndex < 0 || activeTabIndex >= openTabs.length) return;
+      if (currentTab.readOnly || currentTab.source === 'live_repo') return;
 
       setOpenTabs(prev => {
         if (activeTabIndex >= 0 && activeTabIndex < prev.length) {
@@ -532,6 +533,9 @@ ${currentTab.content}
       if (!currentTab) return;
 
       try {
+        if (currentTab.readOnly || currentTab.source === 'live_repo') {
+          throw new Error('Live repository files are read-only here. Use self-code proposed edits for changes.');
+        }
         const processId = startProcess("save-file", "Saving file...", "file_generation");
 
         // Validate file content
@@ -907,10 +911,11 @@ ${currentTab.content}
                 height="100%"
                 language={currentTab.language}
                 value={currentTab.content}
-                onChange={handleContentChange}
+                onChange={currentTab.readOnly || currentTab.source === 'live_repo' ? undefined : handleContentChange}
                 onMount={handleEditorDidMount}
                 theme="vs-dark"
                 options={{
+                  readOnly: currentTab.readOnly || currentTab.source === 'live_repo',
                   fontSize: 14,
                   wordWrap: "on",
                   minimap: { enabled: true },

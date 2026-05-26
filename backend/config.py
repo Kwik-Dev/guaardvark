@@ -160,6 +160,7 @@ PROTECTED_FILES = [
     "backend/services/claude_advisor_service.py",
     "backend/services/self_improvement_service.py",
     "backend/services/tool_execution_guard.py",
+    "backend/services/guarded_code_service.py",
     "backend/tools/agent_tools/code_manipulation_tools.py",
     "backend/app.py",
     "backend/config.py",

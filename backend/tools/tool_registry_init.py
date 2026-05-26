@@ -111,6 +111,14 @@ def register_code_tools() -> List[str]:
         _tool_categories["analyze_code"] = category
         logger.info("Registered: CodeAnalysisTool")
 
+        from backend.tools.agent_tools.code_manipulation_tools import CODE_MANIPULATION_TOOLS
+
+        for tool in CODE_MANIPULATION_TOOLS:
+            register_tool(tool)
+            registered.append(tool.name)
+            _tool_categories[tool.name] = category
+            logger.info(f"Registered: {tool.__class__.__name__}")
+
     except ImportError as e:
         logger.error(f"Failed to import code tools: {e}")
     except Exception as e:

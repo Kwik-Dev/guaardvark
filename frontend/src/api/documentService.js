@@ -170,6 +170,35 @@ export const getDocumentContent = async (documentId) => {
   }
 };
 
+export const getRepoFileContent = async (relativePath) => {
+  if (!relativePath && relativePath !== "")
+    return { error: "Invalid repository file path." };
+  try {
+    const params = new URLSearchParams({ path: relativePath });
+    const response = await fetch(`${BASE_URL}/self-code/file?${params.toString()}`);
+    const data = await handleResponse(response);
+    if (typeof data === "object" && data !== null && data.error)
+      throw new Error(data.error);
+    const payload = data?.data || data;
+    return { content: payload?.content || "", metadata: payload };
+  } catch (err) {
+    console.error(
+      `documentService: Error fetching repo file ${relativePath}:`,
+      err.message,
+    );
+    return { error: err.message || "Failed to fetch repository file." };
+  }
+};
+
+export const reviewRepoScope = async ({ path = "", prompt = "" } = {}) => {
+  const response = await fetch(`${BASE_URL}/self-code/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, prompt }),
+  });
+  return handleResponse(response);
+};
+
 export const uploadFile = async (
   file,
   projectId = null,

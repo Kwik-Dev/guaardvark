@@ -378,10 +378,10 @@ def upload_client_logo(client_id):
 
     file.save(save_path)
 
-    # Store just the filename (not the full path) since we know it's in logos/
-    client_obj.logo_path = filename
+    # Store the path relative to UPLOAD_FOLDER since the frontend and tests expect it to start with "logos/"
+    client_obj.logo_path = f"logos/{filename}"
     db.session.commit()
-    logger.info(f"Saved logo for client {client_id}: {filename}")
+    logger.info(f"Saved logo for client {client_id}: {client_obj.logo_path}")
     return jsonify({"logo_path": client_obj.logo_path}), 200
 
 

@@ -7,6 +7,14 @@ import logging
 from pathlib import Path
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
+from backend.services.guarded_code_service import (
+    GuardedCodeError,
+    apply_exact_replacement,
+    default_repo_root,
+    is_codebase_locked,
+    protected_file_reason,
+    resolve_repo_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +42,24 @@ def is_safe_path(base_path, file_path):
     try:
         base_path = Path(base_path).resolve()
         file_path = Path(file_path).resolve()
-        return base_path in file_path.parents or base_path == file_path.parent
+        file_path.relative_to(base_path)
+        return True
     except (OSError, ValueError):
         return False
 
 def get_project_root():
     """Get the project root directory"""
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '..')
+    return str(default_repo_root())
+
+def _guard_mutation_path(path):
+    """Shared guard for manual CodeEditorPage filesystem writes."""
+    if is_codebase_locked():
+        raise GuardedCodeError("Codebase is locked. Unlock it before saving code.", "CODEBASE_LOCKED", 423)
+    resolved, relative_path = resolve_repo_path(path)
+    reason = protected_file_reason(relative_path)
+    if reason:
+        raise GuardedCodeError(reason, "PROTECTED_FILE", 403)
+    return resolved, relative_path
 
 @file_ops_bp.route("/read", methods=["POST"])
 def read_file():
@@ -50,11 +69,10 @@ def read_file():
         if not data or 'filePath' not in data:
             return jsonify({"error": "filePath is required"}), 400
 
-        file_path = data['filePath']
-        
-        # Security check
-        if not is_safe_path(get_project_root(), file_path):
-            return jsonify({"error": "Access denied: Invalid file path"}), 403
+        try:
+            file_path, _relative_path = resolve_repo_path(data['filePath'])
+        except GuardedCodeError as e:
+            return jsonify({"error": str(e), "code": e.code}), e.status_code
 
         if not os.path.exists(file_path):
             return jsonify({"error": "File not found"}), 404
@@ -133,10 +151,6 @@ def write_file():
 
         file_path = data['filePath']
         content = data['content']
-        
-        # Security check
-        if not is_safe_path(get_project_root(), file_path):
-            return jsonify({"error": "Access denied: Invalid file path"}), 403
 
         if not is_allowed_file(file_path):
             return jsonify({"error": "File type not allowed"}), 403
@@ -145,16 +159,18 @@ def write_file():
         if len(content) > MAX_FILE_SIZE:
             return jsonify({"error": "Content too large"}), 413
 
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-        # Write file content
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        try:
+            resolved_path, _relative_path = _guard_mutation_path(file_path)
+            if not resolved_path.exists():
+                return jsonify({"error": "File not found"}), 404
+            old_content = resolved_path.read_text(encoding='utf-8')
+            apply_exact_replacement(str(resolved_path), old_content, content)
+        except GuardedCodeError as e:
+            return jsonify({"error": str(e), "code": e.code}), e.status_code
 
         return jsonify({
             "success": True,
-            "filePath": file_path,
+            "filePath": str(resolved_path),
             "size": len(content),
             "message": "File saved successfully"
         })
@@ -173,27 +189,28 @@ def create_file():
 
         file_path = data['filePath']
         content = data.get('content', '')
-        
-        # Security check
-        if not is_safe_path(get_project_root(), file_path):
-            return jsonify({"error": "Access denied: Invalid file path"}), 403
 
         if not is_allowed_file(file_path):
             return jsonify({"error": "File type not allowed"}), 403
 
-        if os.path.exists(file_path):
+        try:
+            resolved_path, _relative_path = _guard_mutation_path(file_path)
+        except GuardedCodeError as e:
+            return jsonify({"error": str(e), "code": e.code}), e.status_code
+
+        if resolved_path.exists():
             return jsonify({"error": "File already exists"}), 409
 
         # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
 
         # Create file
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(resolved_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
         return jsonify({
             "success": True,
-            "filePath": file_path,
+            "filePath": str(resolved_path),
             "message": "File created successfully"
         })
 
@@ -210,16 +227,16 @@ def delete_file():
             return jsonify({"error": "filePath is required"}), 400
 
         file_path = data['filePath']
-        
-        # Security check
-        if not is_safe_path(get_project_root(), file_path):
-            return jsonify({"error": "Access denied: Invalid file path"}), 403
+        try:
+            resolved_path, _relative_path = _guard_mutation_path(file_path)
+        except GuardedCodeError as e:
+            return jsonify({"error": str(e), "code": e.code}), e.status_code
 
-        if not os.path.exists(file_path):
+        if not os.path.exists(resolved_path):
             return jsonify({"error": "File not found"}), 404
 
         # Delete file
-        os.remove(file_path)
+        os.remove(resolved_path)
 
         return jsonify({
             "success": True,
@@ -238,11 +255,10 @@ def list_directory():
         if not data or 'dirPath' not in data:
             return jsonify({"error": "dirPath is required"}), 400
 
-        dir_path = data['dirPath']
-        
-        # Security check
-        if not is_safe_path(get_project_root(), dir_path):
-            return jsonify({"error": "Access denied: Invalid directory path"}), 403
+        try:
+            dir_path, _relative_path = resolve_repo_path(data['dirPath'])
+        except GuardedCodeError as e:
+            return jsonify({"error": str(e), "code": e.code}), e.status_code
 
         if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
             return jsonify({"error": "Directory not found"}), 404
@@ -289,16 +305,16 @@ def create_directory():
             return jsonify({"error": "dirPath is required"}), 400
 
         dir_path = data['dirPath']
-        
-        # Security check
-        if not is_safe_path(get_project_root(), dir_path):
-            return jsonify({"error": "Access denied: Invalid directory path"}), 403
+        try:
+            resolved_path, _relative_path = _guard_mutation_path(dir_path)
+        except GuardedCodeError as e:
+            return jsonify({"error": str(e), "code": e.code}), e.status_code
 
-        if os.path.exists(dir_path):
+        if os.path.exists(resolved_path):
             return jsonify({"error": "Directory already exists"}), 409
 
         # Create directory
-        os.makedirs(dir_path, exist_ok=True)
+        os.makedirs(resolved_path, exist_ok=True)
 
         return jsonify({
             "success": True,
@@ -319,26 +335,25 @@ def rename_file():
 
         old_path = data['oldPath']
         new_path = data['newPath']
-        
-        # Security check
-        if not is_safe_path(get_project_root(), old_path):
-            return jsonify({"error": "Access denied: Invalid old path"}), 403
-        if not is_safe_path(get_project_root(), new_path):
-            return jsonify({"error": "Access denied: Invalid new path"}), 403
+        try:
+            resolved_old, _old_rel = _guard_mutation_path(old_path)
+            resolved_new, _new_rel = _guard_mutation_path(new_path)
+        except GuardedCodeError as e:
+            return jsonify({"error": str(e), "code": e.code}), e.status_code
 
-        if not os.path.exists(old_path):
+        if not os.path.exists(resolved_old):
             return jsonify({"error": "File or directory not found"}), 404
 
-        if os.path.exists(new_path):
+        if os.path.exists(resolved_new):
             return jsonify({"error": "Target already exists"}), 409
 
         # Rename file or directory
-        os.rename(old_path, new_path)
+        os.rename(resolved_old, resolved_new)
 
         return jsonify({
             "success": True,
-            "oldPath": old_path,
-            "newPath": new_path,
+            "oldPath": str(resolved_old),
+            "newPath": str(resolved_new),
             "message": "File renamed successfully"
         })
 

@@ -25,7 +25,7 @@ import {
   Visibility as ViewIcon,
 } from "@mui/icons-material";
 import Editor from "@monaco-editor/react";
-import { getDocumentContent, updateDocument } from "../../api/documentService";
+import { getDocumentContent, getRepoFileContent, updateDocument } from "../../api/documentService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
 
 const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
@@ -40,6 +40,7 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
 
   const filename = file?.filename || file?.name || "untitled";
   const language = getLanguageFromFilename(filename);
+  const isLiveRepoFile = file?.source_type === "live_repo";
   const isModified = content !== originalContent;
 
   useEffect(() => {
@@ -50,7 +51,10 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
     setOriginalContent(null);
     setEditing(false);
 
-    getDocumentContent(file.id).then((result) => {
+    const loader = isLiveRepoFile
+      ? getRepoFileContent(file.relative_path || "")
+      : getDocumentContent(file.id);
+    loader.then((result) => {
       if (result.error) {
         setError(result.error);
       } else {
@@ -60,7 +64,7 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
       }
       setLoading(false);
     });
-  }, [open, file?.id]);
+  }, [open, file?.id, file?.relative_path, isLiveRepoFile]);
 
   const handleCopy = async () => {
     if (!content) return;
@@ -78,6 +82,10 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
 
   const handleSave = async () => {
     if (!file?.id || !isModified) return;
+    if (isLiveRepoFile) {
+      setError("Live repository files are read-only here. Use a staged self-code edit instead.");
+      return;
+    }
     setSaving(true);
     try {
       await updateDocument(file.id, { content });
@@ -89,6 +97,10 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
   };
 
   const handleToggleEdit = () => {
+    if (isLiveRepoFile) {
+      setError("Live repository files are review-first and cannot be edited directly in this modal.");
+      return;
+    }
     setEditing(!editing);
   };
 
@@ -131,13 +143,16 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
             {filename}
           </Typography>
           <Chip label={language} size="small" variant="outlined" sx={{ fontSize: "0.7rem" }} />
+          {isLiveRepoFile && (
+            <Chip label="Live repo · read-only" size="small" color="primary" variant="outlined" sx={{ fontSize: "0.65rem", height: 20 }} />
+          )}
           {isModified && (
             <Chip label="Modified" size="small" color="warning" sx={{ fontSize: "0.65rem", height: 20 }} />
           )}
         </Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
           <Tooltip title={editing ? "View mode" : "Edit mode"}>
-            <IconButton size="small" onClick={handleToggleEdit} disabled={loading || !!error}>
+            <IconButton size="small" onClick={handleToggleEdit} disabled={loading || !!error || isLiveRepoFile}>
               {editing ? <ViewIcon fontSize="small" /> : <EditIcon fontSize="small" />}
             </IconButton>
           </Tooltip>

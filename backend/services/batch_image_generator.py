@@ -48,6 +48,11 @@ class BatchPrompt:
     seed: Optional[int] = None
     model: str = "sd-1.5"
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Character casting: when loras is non-empty the image routes through the
+    # LoRA-aware SDXL ComfyUI generator (the only path that actually applies a
+    # trained character), and trigger_word is prepended to the prompt.
+    loras: List[str] = field(default_factory=list)
+    trigger_word: str = ""
     content_preset: Optional[str] = None
     auto_enhance: bool = True
     enhance_anatomy: bool = True
@@ -245,6 +250,47 @@ class BatchImageGenerator:
         except Exception:
             pass
 
+    def _generate_with_character_lora(self, prompt: BatchPrompt) -> Optional[ImageGenerationResult]:
+        """Generate one image with a cast character's SDXL LoRA via ComfyUI.
+
+        Returns an ImageGenerationResult on success (image_path is a temp file
+        the caller relocates), or None to fall back to the normal generator if
+        ComfyUI/ the LoRA path is unavailable."""
+        try:
+            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+        except Exception as e:
+            logger.warning(f"Character LoRA path unavailable, falling back: {e}")
+            return None
+
+        final_prompt = prompt.prompt
+        trig = (prompt.trigger_word or "").strip()
+        if trig and trig.lower() not in final_prompt.lower():
+            final_prompt = f"{trig}, {final_prompt}"
+
+        # SDXL LoRAs want ~1024; the page default is 512 (SD1.5-era). Bump small
+        # requests so the character renders at the resolution it was trained on.
+        width = prompt.width if prompt.width and prompt.width >= 768 else 1024
+        height = prompt.height if prompt.height and prompt.height >= 768 else 1024
+
+        import tempfile, os as _os, time as _time
+        out_path = _os.path.join(tempfile.gettempdir(), f"char_{prompt.id}_{int(_time.time()*1000)}.png")
+        try:
+            gen = ComfyUIImageGenerator()
+            path = gen.generate_image(
+                prompt=final_prompt, loras=list(prompt.loras),
+                output_path=out_path, width=width, height=height,
+                negative_prompt=prompt.negative_prompt or None,
+                seed=prompt.seed if prompt.seed is not None else 42,
+            )
+            return ImageGenerationResult(
+                success=True, image_path=path, prompt_used=final_prompt,
+                model_used="sdxl+lora", image_size=(width, height),
+                seed_used=prompt.seed,
+            )
+        except Exception as e:
+            logger.error(f"Character LoRA generation failed: {e}")
+            return ImageGenerationResult(success=False, error=str(e), prompt_used=final_prompt)
+
     def _generate_single_image(self, batch_id: str, prompt: BatchPrompt, output_dir: Path,
                              batch_status: BatchGenerationStatus) -> BatchImageResult:
         start_time = time.time()
@@ -252,27 +298,37 @@ class BatchImageGenerator:
         try:
             restore_faces = getattr(batch_status, 'restore_faces', False)
             face_restoration_weight = getattr(batch_status, 'face_restoration_weight', 0.5)
-            
-            gen_request = ImageGenerationRequest(
-                prompt=prompt.prompt,
-                negative_prompt=prompt.negative_prompt,
-                width=prompt.width,
-                height=prompt.height,
-                num_inference_steps=prompt.steps,
-                guidance_scale=prompt.guidance,
-                style=prompt.style,
-                seed=prompt.seed,
-                model=prompt.model,
-                content_preset=prompt.content_preset,
-                auto_enhance=prompt.auto_enhance,
-                enhance_anatomy=prompt.enhance_anatomy,
-                enhance_faces=prompt.enhance_faces,
-                enhance_hands=prompt.enhance_hands,
-                restore_faces=restore_faces,
-                face_restoration_weight=face_restoration_weight
-            )
 
-            result = self.image_generator.generate_image(gen_request)
+            # Character casting: a selected character carries a trained SDXL LoRA.
+            # OfflineImageGenerator can't apply LoRAs, so route through the
+            # verified ComfyUI SDXL+LoRA path instead. Trigger word is prepended
+            # so the token the LoRA learned is present at inference.
+            if getattr(prompt, "loras", None):
+                result = self._generate_with_character_lora(prompt)
+            else:
+                result = None
+
+            if result is None:
+                gen_request = ImageGenerationRequest(
+                    prompt=prompt.prompt,
+                    negative_prompt=prompt.negative_prompt,
+                    width=prompt.width,
+                    height=prompt.height,
+                    num_inference_steps=prompt.steps,
+                    guidance_scale=prompt.guidance,
+                    style=prompt.style,
+                    seed=prompt.seed,
+                    model=prompt.model,
+                    content_preset=prompt.content_preset,
+                    auto_enhance=prompt.auto_enhance,
+                    enhance_anatomy=prompt.enhance_anatomy,
+                    enhance_faces=prompt.enhance_faces,
+                    enhance_hands=prompt.enhance_hands,
+                    restore_faces=restore_faces,
+                    face_restoration_weight=face_restoration_weight
+                )
+
+                result = self.image_generator.generate_image(gen_request)
 
             if result.success and result.image_path:
                 image_ext = Path(result.image_path).suffix or ".png"
@@ -1089,7 +1145,7 @@ class BatchImageGenerator:
 
         prompt_params = ['model', 'style', 'width', 'height', 'steps', 'guidance',
                         'content_preset', 'auto_enhance', 'enhance_anatomy',
-                        'enhance_faces', 'enhance_hands']
+                        'enhance_faces', 'enhance_hands', 'loras', 'trigger_word']
         
         batch_params = ['max_workers', 'preserve_order', 'generate_thumbnails', 
                        'save_metadata', 'user_id', 'project_id', 'content_preset',
@@ -1106,7 +1162,7 @@ class BatchImageGenerator:
     def create_batch_from_prompts(self, prompt_list: List[str], **kwargs) -> BatchImageRequest:
         prompt_params = ['model', 'style', 'width', 'height', 'steps', 'guidance',
                         'content_preset', 'auto_enhance', 'enhance_anatomy',
-                        'enhance_faces', 'enhance_hands']
+                        'enhance_faces', 'enhance_hands', 'loras', 'trigger_word']
         
         batch_params = ['max_workers', 'preserve_order', 'generate_thumbnails', 
                        'save_metadata', 'user_id', 'project_id', 'content_preset',

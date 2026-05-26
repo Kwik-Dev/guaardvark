@@ -56,6 +56,8 @@ import {
   NavigateBefore as PrevIcon,
   NavigateNext as NextIcon,
 } from "@mui/icons-material";
+import { io } from "socket.io-client";
+import { SOCKET_URL } from "../api/apiClient";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -447,6 +449,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     generate_frames_only: false,
     frames_per_batch: 1,
     combine_frames: false,
+    freeu: false,
+    face_restore: false,
+    lora_name: "",
+    lora_strength: 1.0,
   });
 
   // CogVideoX-specific power features
@@ -660,6 +666,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       // For Low VRAM mode, use frames_per_batch=1 to minimize memory usage
       frames_per_batch: lowVramMode && (isCogVideoXModel(model) || isWanModel(model)) ? 1 : advancedParams.frames_per_batch,
       combine_frames: advancedParams.combine_frames,
+      freeu: advancedParams.freeu,
+      face_restore: advancedParams.face_restore,
+      lora_name: advancedParams.lora_name,
+      lora_strength: advancedParams.lora_strength,
       // Post-processing: interpolation and upscaling from quality tier
       interpolation_multiplier: tier.interpolation,
       upscale: tier.upscale,
@@ -679,6 +689,30 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       .filter(Boolean);
   }, [promptsText]);
 
+  // WebSocket setup for real-time progress
+  const socketRef = useRef(null);
+
+  useEffect(() => {
+    socketRef.current = io(SOCKET_URL);
+
+    socketRef.current.on("video_batch:update", (data) => {
+      setBatchStatus(data);
+      if (
+        data.status === "completed" ||
+        data.status === "error" ||
+        data.status === "cancelled"
+      ) {
+        fetchBatches();
+      }
+    });
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
+
   const stopPolling = () => {
     if (pollingRef.current) {
       clearInterval(pollingRef.current);
@@ -687,28 +721,26 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   };
 
   const startPollingStatus = (batchId) => {
-    stopPolling();
-    pollingRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`${API_BASE}/batch-video/status/${batchId}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success) {
-            setBatchStatus(data.data);
-            if (
-              data.data.status === "completed" ||
-              data.data.status === "error" ||
-              data.data.status === "cancelled"
-            ) {
-              stopPolling();
-              await fetchBatches();
-            }
+    stopPolling(); // fallback clear
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("subscribe", { job_id: batchId });
+    }
+    // Initial fetch to get state while socket connects
+    fetch(`${API_BASE}/batch-video/status/${batchId}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          setBatchStatus(data.data);
+          if (
+            data.data.status === "completed" ||
+            data.data.status === "error" ||
+            data.data.status === "cancelled"
+          ) {
+            fetchBatches();
           }
         }
-      } catch (e) {
-        // ignore polling errors
-      }
-    }, 2000);
+      })
+      .catch(e => console.error(e));
   };
 
   useEffect(() => {
@@ -1736,6 +1768,74 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       <Typography variant="body2">Enhance Prompt</Typography>
                       <Typography variant="caption" color="text.secondary">
                         Add quality descriptors automatically
+                      </Typography>
+                    </Box>
+                  }
+                  sx={{ ml: 0 }}
+                />
+                <TextField
+                  size="small"
+                  label="LoRA File Name"
+                  value={advancedParams.lora_name}
+                  onChange={(e) =>
+                    setAdvancedParams({
+                      ...advancedParams,
+                      lora_name: e.target.value,
+                    })
+                  }
+                  helperText="Optional (e.g. character.safetensors)"
+                  sx={{ width: { xs: '100%', sm: '280px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
+                />
+                {advancedParams.lora_name && (
+                  <TextField
+                    size="small"
+                    label="LoRA Strength"
+                    type="number"
+                    inputProps={{ step: 0.1, min: 0.1, max: 2.0 }}
+                    value={advancedParams.lora_strength}
+                    onChange={(e) =>
+                      setAdvancedParams({
+                        ...advancedParams,
+                        lora_strength: Number(e.target.value),
+                      })
+                    }
+                    helperText="Default 1.0"
+                    sx={{ width: { xs: '100%', sm: '140px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
+                  />
+                )}
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={advancedParams.freeu}
+                      onChange={(e) => setAdvancedParams({...advancedParams, freeu: e.target.checked})}
+                      color="primary"
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Box>
+                      <Typography variant="body2">FreeU Enhance</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Improve fine details
+                      </Typography>
+                    </Box>
+                  }
+                  sx={{ ml: 0 }}
+                />
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={advancedParams.face_restore}
+                      onChange={(e) => setAdvancedParams({...advancedParams, face_restore: e.target.checked})}
+                      color="primary"
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Box>
+                      <Typography variant="body2">Fix Anatomy</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Restore faces automatically
                       </Typography>
                     </Box>
                   }

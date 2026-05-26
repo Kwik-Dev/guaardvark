@@ -196,20 +196,33 @@ def apply_fix(fix_id):
     if fix.status != "approved":
         return error_response(f"Fix must be approved before applying (current: {fix.status})", 400)
     try:
-        filepath = fix.file_path
-        if not os.path.exists(filepath):
-            return error_response(f"File not found: {filepath}", 404)
-        if fix.original_content and fix.proposed_new_content:
-            from backend.tools.llama_code_tools import edit_code
-            result = edit_code(filepath, fix.original_content, fix.proposed_new_content)
-            if result.startswith("ERROR"):
-                return error_response(f"Failed to apply: {result}", 500)
-        else:
+        if fix.original_content is None or fix.proposed_new_content is None:
             return error_response("Fix is missing original or new content", 400)
+        from backend.services.guarded_code_service import GuardedCodeError, apply_exact_replacement
+
+        apply_result = apply_exact_replacement(
+            fix.file_path,
+            fix.original_content,
+            fix.proposed_new_content,
+        )
+        fix.review_notes = (
+            (fix.review_notes or "")
+            + f"\n\nApplied via guarded_code_service. "
+              f"Verification: {apply_result.verification['output_summary']}"
+        ).strip()
         fix.status = "applied"
         fix.applied_at = datetime.now()
         db.session.commit()
-        return success_response(data=fix.to_dict(), message="Fix applied successfully")
+        return success_response(
+            data={**fix.to_dict(), "apply_result": {
+                "relative_path": apply_result.relative_path,
+                "backup_path": apply_result.backup_path,
+                "verification": apply_result.verification,
+            }},
+            message="Fix applied successfully",
+        )
+    except GuardedCodeError as e:
+        return error_response(f"Failed to apply: {e}", e.status_code, e.code)
     except Exception as e:
         logger.error(f"Failed to apply fix {fix_id}: {e}", exc_info=True)
         return error_response(str(e), 500)

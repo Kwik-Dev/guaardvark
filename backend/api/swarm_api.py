@@ -6,10 +6,13 @@ No auth needed — this is a local-only orchestration service.
 """
 
 import logging
+import subprocess
+from pathlib import Path
 
 import requests
 from flask import Blueprint, request as flask_request
 
+from backend.services.guarded_code_service import default_repo_root
 from backend.utils.response_utils import success_response, error_response
 
 logger = logging.getLogger(__name__)
@@ -73,6 +76,40 @@ def health():
 @swarm_bp.route("/launch", methods=["POST"])
 def launch():
     body = flask_request.get_json() or {}
+
+    # Securely resolve target repository path.
+    # If the request targets GUAARDVARK_ROOT (or defaults to it), we MUST treat it
+    # as a self_code swarm to prevent parameter-tampering security bypasses.
+    repo_path_str = body.get("repo_path")
+    if repo_path_str:
+        try:
+            repo_path = Path(repo_path_str).resolve()
+            is_targeting_self = (repo_path == default_repo_root())
+        except Exception as e:
+            return error_response(f"Invalid repo_path: {e}", 400)
+    else:
+        is_targeting_self = True
+        repo_path = default_repo_root()
+
+    if is_targeting_self or body.get("self_code"):
+        body["self_code"] = True
+        body["auto_merge"] = False
+        if repo_path != default_repo_root():
+            return error_response("Self-code swarms may only target the configured repository root", 403)
+        if not (repo_path / ".git").exists():
+            return error_response("Configured repository root is not a git repository", 400)
+        status = subprocess.run(
+            ["git", "-C", str(repo_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if status.stdout.strip() and not body.get("acknowledge_dirty_tree"):
+            return error_response(
+                "Repository has uncommitted changes; acknowledge_dirty_tree is required for self-code swarms",
+                409,
+                "DIRTY_TREE",
+            )
     data, status = _proxy_post("/swarm/launch", body, timeout=30)
     if status >= 400:
         return error_response(_extract_error(data, "Launch failed"), status)
@@ -108,6 +145,33 @@ def task_logs(swarm_id, task_id):
     if status >= 400:
         return error_response(_extract_error(data, "Logs unavailable"), status)
     return success_response(data=data, message="Logs retrieved")
+
+
+@swarm_bp.route("/<swarm_id>/diff/<task_id>", methods=["GET"])
+def task_diff(swarm_id, task_id):
+    data, status = _proxy_get(f"/swarm/{swarm_id}/diff/{task_id}")
+    if status >= 400:
+        return error_response(_extract_error(data, "Diff unavailable"), status)
+    return success_response(data=data, message="Diff retrieved")
+
+
+@swarm_bp.route("/<swarm_id>/bus/state", methods=["GET", "POST"])
+def bus_state(swarm_id):
+    if flask_request.method == "GET":
+        data, status = _proxy_get(f"/swarm/{swarm_id}/bus/state")
+    else:
+        data, status = _proxy_post(f"/swarm/{swarm_id}/bus/state", flask_request.get_json() or {})
+    if status >= 400:
+        return error_response(_extract_error(data, "Bus state unavailable"), status)
+    return success_response(data=data, message="Bus state updated" if flask_request.method == "POST" else "Bus state retrieved")
+
+
+@swarm_bp.route("/<swarm_id>/bus/broadcast", methods=["POST"])
+def bus_broadcast(swarm_id):
+    data, status = _proxy_post(f"/swarm/{swarm_id}/bus/broadcast", flask_request.get_json() or {})
+    if status >= 400:
+        return error_response(_extract_error(data, "Bus broadcast failed"), status)
+    return success_response(data=data, message="Bus event broadcast")
 
 
 # --- Cancel ---

@@ -462,6 +462,19 @@ class SwarmOrchestrator:
         task.branch_name = wt_info.branch_name
         task.worktree_path = wt_info.worktree_path
         task.backend_name = backend_config.name
+        try:
+            import subprocess
+            base_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=wt_info.worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout.strip()
+            task.tags["base_head"] = base_head
+        except Exception as e:
+            logger.debug(f"Could not record base HEAD for {task.id}: {e}")
 
         # spawn the agent
         config_dict = {
@@ -501,7 +514,12 @@ class SwarmOrchestrator:
                 continue
 
             if new_status == AgentStatus.FINISHED:
-                task.status = SwarmStatus.DONE
+                completion_state = self._completion_state(task)
+                if completion_state.get("has_uncommitted_diff"):
+                    task.status = SwarmStatus.NEEDS_REVIEW
+                    task.error = "Agent finished with uncommitted worktree changes"
+                else:
+                    task.status = SwarmStatus.DONE
                 task.completed_at = time.time()
 
                 # grab cost/token estimates
@@ -517,6 +535,7 @@ class SwarmOrchestrator:
                     "elapsed": task.elapsed_human,
                     "tokens": tokens,
                     "cost_usd": cost,
+                    **completion_state,
                 })
 
             elif new_status == AgentStatus.CRASHED:
@@ -566,6 +585,36 @@ class SwarmOrchestrator:
 
                 # Cleanup the crashed process record
                 self._processes.pop(task_id, None)
+
+    def _completion_state(self, task: SwarmTask) -> dict[str, object]:
+        """Summarize whether a completed task produced committed or uncommitted changes."""
+        if not task.worktree_path:
+            return {"has_commit": False, "has_uncommitted_diff": False}
+        import subprocess
+        try:
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=task.worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout.strip()
+            diff = subprocess.run(
+                ["git", "diff", "--quiet", "HEAD"],
+                cwd=task.worktree_path,
+                timeout=5,
+            )
+            base_head = task.tags.get("base_head")
+            return {
+                "base_head": base_head,
+                "head": head,
+                "has_commit": bool(base_head and head != base_head),
+                "has_uncommitted_diff": diff.returncode == 1,
+            }
+        except Exception as e:
+            logger.warning(f"Could not verify completion state for {task.id}: {e}")
+            return {"has_commit": False, "has_uncommitted_diff": False, "completion_check_error": str(e)}
 
     def _run_merge_phase(self, tasks: list[SwarmTask]) -> None:
         """Merge completed branches in dependency order."""

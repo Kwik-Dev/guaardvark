@@ -112,6 +112,28 @@ def _validate_csv_upload(file):
 
     return True, "Valid"
 
+def _apply_character_casting(data: Dict[str, Any], params: Dict[str, Any]) -> None:
+    """Resolve `subject_ids` from the request into LoRA paths + a trigger token,
+    written into params as `loras` / `trigger_word`. Only trained subjects (those
+    with a lora_path) contribute. No-op when nothing is cast."""
+    subject_ids = data.get("subject_ids") or []
+    if not subject_ids:
+        return
+    try:
+        from backend.models import Subject, db
+        loras, triggers = [], []
+        for sid in subject_ids:
+            s = db.session.get(Subject, int(sid))
+            if s and s.lora_path:
+                loras.append(s.lora_path)
+                triggers.append((s.trigger_word or s.name or "").strip())
+        if loras:
+            params["loras"] = loras
+            params["trigger_word"] = ", ".join(t for t in triggers if t)
+    except Exception as e:
+        logger.warning(f"Character casting resolution failed (ignoring): {e}")
+
+
 def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Parse and validate generation parameters.
@@ -808,6 +830,10 @@ def generate_from_prompts():
 
         # Parse generation parameters
         params, validation_info = _parse_generation_params(data)
+
+        # Character casting: resolve selected subject_ids -> trained LoRA paths
+        # + trigger word, so the chosen character actually renders.
+        _apply_character_casting(data, params)
 
         # Start batch generation
         batch_id = start_batch_from_prompts(validated_prompts, **params)

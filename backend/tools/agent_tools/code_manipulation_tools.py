@@ -19,9 +19,14 @@ from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult, re
 from backend.tools.llama_code_tools import (
     read_code,
     search_code,
-    edit_code,
     list_files,
     verify_change
+)
+from backend.services.guarded_code_service import (
+    GuardedCodeError,
+    apply_exact_replacement,
+    stage_pending_fix,
+    is_codebase_locked,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,18 +56,6 @@ def _is_protected_file(filepath: str) -> tuple[bool, str | None]:
     return False, None
 
 
-def _is_codebase_locked() -> bool:
-    """Check if codebase is locked by user or Uncle Claude directive."""
-    import os
-    lock_file = os.path.join(os.environ.get("GUAARDVARK_ROOT", "."), "data", ".codebase_lock")
-    if os.path.exists(lock_file):
-        return True
-    try:
-        from backend.models import db, SystemSetting
-        setting = db.session.query(SystemSetting).filter_by(key="codebase_locked").first()
-        return setting and setting.value.lower() == "true"
-    except Exception:
-        return False
 
 
 def _self_improvement_apply_blocked() -> bool:
@@ -144,14 +137,15 @@ class ReadCodeTool(BaseTool):
     description = (
         "Read the complete contents of a source code file. "
         "Returns file content with line count and character count. "
-        "Use this to understand existing code before making modifications."
+        "Use this to understand existing code before making modifications. "
+        "Accepts paths relative to the project root and explicit absolute paths for user-referenced external files."
     )
     parameters = {
         "filepath": ToolParameter(
             name="filepath",
             type="string",
             required=True,
-            description="Relative path from project root (e.g., 'frontend/src/pages/MyPage.jsx')"
+            description="Path relative to project root, or an explicit absolute path for an external text file"
         )
     }
 
@@ -252,18 +246,21 @@ class EditCodeTool(BaseTool):
     """Tool to edit source code files by text replacement"""
 
     name = "edit_code"
+    is_dangerous = True
+    requires_approval = True
     description = (
         "Edit a source code file by replacing exact text. Creates automatic backup. "
         "The old_text MUST be unique in the file or the edit will fail. "
         "Use read_code first to get the exact text to replace. "
-        "Use empty string for new_text to delete code."
+        "Use empty string for new_text to delete code. "
+        "Accepts paths relative to the project root and explicit absolute paths for user-referenced external files."
     )
     parameters = {
         "filepath": ToolParameter(
             name="filepath",
             type="string",
             required=True,
-            description="Relative path from project root"
+            description="Path relative to project root, or an explicit absolute path for an external text file"
         ),
         "old_text": ToolParameter(
             name="old_text",
@@ -276,6 +273,13 @@ class EditCodeTool(BaseTool):
             type="string",
             required=True,
             description="The new text to insert (can be empty string for deletion)"
+        ),
+        "dry_run": ToolParameter(
+            name="dry_run",
+            type="bool",
+            required=False,
+            default=False,
+            description="If True, verifies the edit matches and compiles without writing changes to disk (default: False)"
         )
     }
 
@@ -283,6 +287,7 @@ class EditCodeTool(BaseTool):
         filepath = kwargs.get("filepath")
         old_text = kwargs.get("old_text")
         new_text = kwargs.get("new_text", "")
+        dry_run = kwargs.get("dry_run", False)
 
         if not filepath:
             return ToolResult(
@@ -301,7 +306,7 @@ class EditCodeTool(BaseTool):
             )
 
         # Kill switch: block all edits when codebase is locked
-        if _is_codebase_locked():
+        if is_codebase_locked():
             return ToolResult(
                 success=False,
                 error="BLOCKED: Codebase is locked. A user must unlock it before autonomous edits can proceed.",
@@ -323,32 +328,18 @@ class EditCodeTool(BaseTool):
             return ToolResult(
                 success=False,
                 error=f"ERROR: {reason}",
-                metadata={"filepath": filepath}
+                metadata={"filepath": filepath, "blocked_by": "FORBIDDEN_PATH"}
             )
 
         # Extract agent context (set by AgentExecutor.set_tool_context)
         ctx = kwargs.pop("_agent_context", {})
 
-        # Self-improvement-specific apply gate. User-initiated chat edits
-        # never see this branch (no _self_improvement_context flag).
-        if ctx.get("_self_improvement_context") and _self_improvement_apply_blocked():
-            return ToolResult(
-                success=False,
-                error=(
-                    "BLOCKED: Self-improvement is in analysis-only mode. "
-                    "Set system_setting.self_improvement_apply_enabled=true "
-                    "to allow autonomous code edits."
-                ),
-                metadata={"blocked_by": "self_improvement_apply_gate"},
-            )
-
-        # Guardian review (Uncle Claude) — only during self-improvement
-        if ctx.get("_self_improvement_context"):
+        # Guardian review (Uncle Claude) — only during self-improvement (skip if dry_run)
+        if ctx.get("_self_improvement_context") and not dry_run:
             try:
                 from backend.services.claude_advisor_service import get_claude_advisor
                 advisor = get_claude_advisor()
                 if advisor.is_available():
-                    import os
                     review = advisor.review_change(
                         file_path=filepath,
                         current_content=open(filepath).read()[:3000] if os.path.exists(filepath) else "",
@@ -368,31 +359,27 @@ class EditCodeTool(BaseTool):
             except Exception as e:
                 logger.warning(f"Guardian review failed, proceeding with caution: {e}")
 
-            # Stage diff to pending_fixes instead of applying directly
+            # Stage diff to pending_fixes instead of applying directly.
             try:
-                from backend.models import db, PendingFix
-                import difflib
-                diff = ''.join(difflib.unified_diff(
-                    old_text.splitlines(keepends=True),
-                    new_text.splitlines(keepends=True),
-                    fromfile=filepath, tofile=filepath,
-                ))
-                pending = PendingFix(
-                    file_path=filepath,
-                    original_content=old_text,
-                    proposed_new_content=new_text,
-                    proposed_diff=diff,
-                    fix_description=ctx.get("_reasoning", "Autonomous fix"),
-                    status="proposed",
+                pending_id = stage_pending_fix(
+                    filepath,
+                    old_text,
+                    new_text,
+                    ctx.get("_reasoning", "Autonomous fix"),
+                    run_id=ctx.get("_run_id"),
                 )
-                db.session.add(pending)
-                db.session.commit()
                 return ToolResult(
                     success=True,
-                    output=f"Fix staged for review (pending_fix #{pending.id}). "
-                           f"File: {filepath}, diff: {len(diff)} chars. "
+                    output=f"Fix staged for review (pending_fix #{pending_id}). "
+                           f"File: {filepath}. "
                            f"The change will be applied after approval.",
-                    metadata={"staged": True, "pending_fix_id": pending.id, "filepath": filepath}
+                    metadata={"staged": True, "pending_fix_id": pending_id, "filepath": filepath}
+                )
+            except GuardedCodeError as e:
+                return ToolResult(
+                    success=False,
+                    error=f"Failed to stage fix for review: {e}",
+                    metadata={"staging_failed": True, "blocked_by": e.code}
                 )
             except Exception as e:
                 logger.error(f"Failed to stage fix: {e}", exc_info=True)
@@ -404,33 +391,49 @@ class EditCodeTool(BaseTool):
                 )
 
         try:
-            result = edit_code(filepath, old_text, new_text)
-
-            # Check if result indicates an error
-            if result.startswith("ERROR"):
-                error_msg = result
-                # Improve "exact match not found" errors with read_code suggestion
-                if "Could not find the exact text" in result or "could not find" in result.lower():
-                    error_msg = (
-                        result.rstrip()
-                        + "\n\nSUGGESTION: Use read_code(filepath) first to get the exact text including whitespace, then retry with that exact string."
-                    )
-                return ToolResult(
-                    success=False,
-                    error=error_msg,
-                    metadata={
-                        "filepath": filepath,
-                        "old_text_preview": (old_text[:100] + "..." if len(old_text or "") > 100 else (old_text or "")),
-                        "new_text_preview": (new_text[:100] + "..." if len(new_text or "") > 100 else (new_text or "")),
-                    }
-                )
-
+            edit_result = apply_exact_replacement(
+                filepath,
+                old_text,
+                new_text,
+                dry_run=dry_run,
+                allow_external=True,
+            )
+            diff = edit_result.diff
+            if len(diff) > 4000:
+                diff = diff[:4000] + "\n... diff truncated ..."
+            action = "Dry run succeeded for" if dry_run else "Successfully edited"
             return ToolResult(
                 success=True,
-                output=result,
+                output=(
+                    f"{action} '{edit_result.relative_path}'. "
+                    f"Backup: {edit_result.backup_path}. "
+                    f"Verification: {edit_result.verification['output_summary']}"
+                    f"\n\nDiff:\n{diff}"
+                ),
+                metadata={
+                    "filepath": edit_result.file_path,
+                    "relative_path": edit_result.relative_path,
+                    "backup_path": edit_result.backup_path,
+                    "diff": edit_result.diff,
+                    "verification": edit_result.verification,
+                    "operation": "dry_run" if dry_run else ("deleted" if not new_text else "replaced"),
+                }
+            )
+        except GuardedCodeError as e:
+            error_msg = str(e)
+            if e.code in {"TEXT_NOT_FOUND", "TEXT_NOT_UNIQUE"}:
+                error_msg += (
+                    "\n\nSUGGESTION: Use read_code(filepath) first to get the exact text including whitespace, "
+                    "then retry with enough surrounding context for one unique match."
+                )
+            return ToolResult(
+                success=False,
+                error=error_msg,
                 metadata={
                     "filepath": filepath,
-                    "operation": "deleted" if not new_text else "replaced"
+                    "blocked_by": e.code,
+                    "old_text_preview": (old_text[:100] + "..." if len(old_text or "") > 100 else (old_text or "")),
+                    "new_text_preview": (new_text[:100] + "..." if len(new_text or "") > 100 else (new_text or "")),
                 }
             )
         except Exception as e:
@@ -514,14 +517,15 @@ class VerifyChangeTool(BaseTool):
     description = (
         "Verify that a code change was successful by checking if text exists in file. "
         "Use after edit_code to confirm changes were applied correctly. "
-        "Set should_exist=False to verify that text was successfully removed."
+        "Set should_exist=False to verify that text was successfully removed. "
+        "Accepts paths relative to the project root and explicit absolute paths for user-referenced external files."
     )
     parameters = {
         "filepath": ToolParameter(
             name="filepath",
             type="string",
             required=True,
-            description="Relative path from project root"
+            description="Path relative to project root, or an explicit absolute path for an external text file"
         ),
         "expected_text": ToolParameter(
             name="expected_text",

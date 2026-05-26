@@ -25,10 +25,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.tools.llama_code_tools import (
     read_code,
     search_code,
-    edit_code,
     list_files,
     verify_change
 )
+from backend.services.guarded_code_service import GuardedCodeError, apply_exact_replacement
 
 logger = logging.getLogger(__name__)
 
@@ -176,10 +176,21 @@ def execute_tool_call(tool_name: str, arguments: Dict[str, Any]) -> str:
     Returns:
         Tool execution result as string
     """
+    def _guarded_edit_code(filepath: str, old_text: str, new_text: str) -> str:
+        try:
+            result = apply_exact_replacement(filepath, old_text, new_text)
+            return (
+                f"Successfully edited '{result.relative_path}'. "
+                f"Backup: {result.backup_path}. "
+                f"Verification: {result.verification['output_summary']}"
+            )
+        except GuardedCodeError as e:
+            return f"ERROR: {e}"
+
     tools_map = {
         "read_code": read_code,
         "search_code": search_code,
-        "edit_code": edit_code,
+        "edit_code": _guarded_edit_code,
         "list_files": list_files,
         "verify_change": verify_change
     }
@@ -310,7 +321,11 @@ def remove_snibbly_nips_button() -> Dict[str, Any]:
         logger.info(f"Identified region ({len(old_text)} chars): {old_text[:80]}...")
 
         logger.info("Step 3: edit_code(...) -> remove region")
-        edit_result = edit_code(filepath, old_text, "")
+        edit_result = execute_tool_call("edit_code", {
+            "filepath": filepath,
+            "old_text": old_text,
+            "new_text": "",
+        })
         steps.append({"step": 3, "action": "edit_code", "result": edit_result[:200]})
         if "ERROR" in edit_result:
             return {"success": False, "message": "Edit failed", "steps": steps, "error": edit_result}

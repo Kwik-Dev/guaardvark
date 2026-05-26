@@ -26,6 +26,7 @@ import { useSnackbar } from "../components/common/SnackbarProvider";
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
 import { triggerIndexing, indexBulk } from "../api/indexingService";
+import { reviewRepoScope } from "../api/documentService";
 import axios from 'axios';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -1451,11 +1452,33 @@ const DocumentsPage = () => {
           id: targetFile.id,
           filename: targetFile.filename || targetFile.name,
           content: content,
-          source: 'document',
+          source: targetFile.source_type === 'live_repo' ? 'live_repo' : 'document',
+          filePath: targetFile.relative_path || targetFile.path,
+          relativePath: targetFile.relative_path,
         }
       }
     });
   }, [contextMenuItem, navigate]);
+
+  const handleReviewWithAgent = useCallback(async () => {
+    const item = contextMenuItem;
+    if (!item || item.source_type !== 'live_repo') {
+      showMessage?.('Self-code review is only available for the live repo mount', 'warning');
+      setContextMenu(null);
+      return;
+    }
+    setContextMenu(null);
+    try {
+      const result = await reviewRepoScope({
+        path: item.relative_path || '',
+        prompt: 'Review this scope for concrete bugs or unsafe code. Propose only surgical fixes as pending fixes.',
+      });
+      const taskId = result?.data?.task_id || result?.task_id;
+      showMessage?.(`Self-code review dispatched${taskId ? ` (${taskId})` : ''}`, 'success');
+    } catch (err) {
+      showMessage?.(err?.message || 'Failed to dispatch self-code review', 'error');
+    }
+  }, [contextMenuItem, showMessage]);
 
   const handleProperties = useCallback(async () => {
     setContextMenu(null);
@@ -2384,13 +2407,14 @@ const DocumentsPage = () => {
         onCopy={handleCopy}
         onCut={handleCut}
         onPaste={handlePaste}
-        onDelete={handleDelete}
-        onProperties={handleProperties}
-        onRename={handleRename}
+        onDelete={contextMenuItem?.source_type === 'live_repo' ? undefined : handleDelete}
+        onProperties={contextMenuItem?.source_type === 'live_repo' ? undefined : handleProperties}
+        onRename={contextMenuItem?.source_type === 'live_repo' ? undefined : handleRename}
         onDownload={handleDownload}
         onEdit={handleEditImage}
         onColorChange={handleColorChange}
-        onIndex={handleIndex}
+        onIndex={contextMenuItem?.source_type === 'live_repo' ? undefined : handleIndex}
+        onReviewWithAgent={contextMenuItem?.source_type === 'live_repo' ? handleReviewWithAgent : undefined}
         onOpenWindow={contextMenuItem && contextMenuType === 'folder' ? () => {
           const win = windows.find(w => w.folderId === contextMenuItem.id);
           if (win) {

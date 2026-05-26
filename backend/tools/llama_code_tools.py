@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import List, Optional
 import re
 
+from backend.services.guarded_code_service import (
+    GuardedCodeError,
+    apply_exact_replacement,
+    read_repo_file,
+)
+
 logger = logging.getLogger(__name__)
 
 # Define the project root - 2 levels up from backend/tools
@@ -40,51 +46,44 @@ def read_code(filepath: str) -> str:
         content = read_code("frontend/src/pages/SettingsPage.jsx")
     """
     try:
-        full_path = PROJECT_ROOT / filepath
-
-        # Security: Ensure path is within project root
-        if not str(full_path.resolve()).startswith(str(PROJECT_ROOT)):
-            return f"ERROR: Path '{filepath}' is outside project root (security restriction)"
-
-        if not full_path.exists():
+        try:
+            file_data = read_repo_file(filepath, repo_root=PROJECT_ROOT, allow_external=True)
+        except GuardedCodeError as e:
             # Maybe the user just uploaded this to chat — those land under
             # data/uploads/, not PROJECT_ROOT, and have a Document row.
-            from backend.utils.uploaded_file_resolver import find_uploaded_file
-            uploaded = find_uploaded_file(filepath)
-            if uploaded:
-                content, on_disk = uploaded
-                if content is None and on_disk:
-                    with open(on_disk, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                if content is not None:
-                    line_count = len(content.split('\n'))
-                    char_count = len(content)
-                    logger.info(f"Read {line_count} lines from uploaded file {filepath}")
-                    return f"""✓ Successfully read uploaded file: {filepath}
+            if e.code == "FILE_NOT_FOUND":
+                from backend.utils.uploaded_file_resolver import find_uploaded_file
+                uploaded = find_uploaded_file(filepath)
+                if uploaded:
+                    content, on_disk = uploaded
+                    if content is None and on_disk:
+                        with open(on_disk, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                    if content is not None:
+                        line_count = len(content.split('\n'))
+                        char_count = len(content)
+                        logger.info(f"Read {line_count} lines from uploaded file {filepath}")
+                        return f"""✓ Successfully read uploaded file: {filepath}
 Lines: {line_count} | Characters: {char_count}
 
 ========== FILE CONTENT START ==========
 {content}
 ========== FILE CONTENT END =========="""
-            return f"ERROR: File '{filepath}' does not exist"
+            return f"ERROR reading '{filepath}': {e}"
 
-        if not full_path.is_file():
-            return f"ERROR: '{filepath}' is a directory, not a file"
-
-        with open(full_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-
+        content = file_data["content"]
         line_count = len(content.split('\n'))
         char_count = len(content)
+        display_path = file_data.get("relative_path") or filepath
 
-        result = f"""✓ Successfully read: {filepath}
+        result = f"""✓ Successfully read: {display_path}
 Lines: {line_count} | Characters: {char_count}
 
 ========== FILE CONTENT START ==========
 {content}
 ========== FILE CONTENT END =========="""
 
-        logger.info(f"Read {line_count} lines from {filepath}")
+        logger.info(f"Read {line_count} lines from {display_path}")
         return result
 
     except Exception as e:
@@ -193,91 +192,20 @@ def edit_code(filepath: str, old_text: str, new_text: str) -> str:
         )
     """
     try:
-        full_path = PROJECT_ROOT / filepath
-
-        # Security: Ensure path is within project root
-        if not str(full_path.resolve()).startswith(str(PROJECT_ROOT)):
-            return f"ERROR: Security restriction - path '{filepath}' is outside project root"
-
-        if not full_path.exists():
-            return f"ERROR: File '{filepath}' does not exist"
-
-        # Read current content
-        with open(full_path, 'r', encoding='utf-8') as f:
-            current_content = f.read()
-
-        # Check if old_text exists and is unique
-        occurrence_count = current_content.count(old_text)
-
-        if occurrence_count == 0:
-            # Provide helpful feedback
-            return f"""ERROR: Could not find the exact text in '{filepath}'.
-
-TIPS:
-1. Make sure you copied the EXACT text including all whitespace
-2. Use search_code() first to find the exact text
-3. Include enough context to make the match unique
-
-SEARCHED FOR:
-{old_text[:200]}...
-"""
-
-        if occurrence_count > 1:
-            return f"""ERROR: Found {occurrence_count} occurrences of the text in '{filepath}'.
-
-The text must be unique. Add more surrounding context to make it unique.
-
-For example, instead of just:
-  "Button"
-
-Include the full element:
-  "<Button variant=\"contained\" color=\"primary\">\\n  Snibbly Nips\\n</Button>"
-"""
-
-        # Create backup
-        backup_path = full_path.with_suffix(full_path.suffix + '.backup')
-        with open(backup_path, 'w', encoding='utf-8') as f:
-            f.write(current_content)
-
-        logger.info(f"Created backup at {backup_path}")
-
-        # Verify backup succeeded before editing
-        if not backup_path.exists():
-            return f"ERROR: Backup file was not created for '{filepath}' - edit aborted"
-        backup_size = backup_path.stat().st_size
-        if backup_size != len(current_content.encode('utf-8')):
-            return (
-                f"ERROR: Backup verification failed for '{filepath}' "
-                f"(backup size {backup_size} != original {len(current_content.encode('utf-8'))}) - edit aborted"
-            )
-
-        # Perform replacement
-        updated_content = current_content.replace(old_text, new_text)
-
-        # Write updated content
-        with open(full_path, 'w', encoding='utf-8') as f:
-            f.write(updated_content)
-
-        # Verify the change
-        with open(full_path, 'r', encoding='utf-8') as f:
-            verify_content = f.read()
-
-        # Check if edit was successful
-        if new_text and new_text not in verify_content:
-            # Restore from backup
-            with open(backup_path, 'r', encoding='utf-8') as f:
-                with open(full_path, 'w', encoding='utf-8') as out:
-                    out.write(f.read())
-            return f"ERROR: Verification failed - edit was rolled back. Backup preserved at {backup_path.name}"
-
-        # Calculate changes
+        edit_result = apply_exact_replacement(
+            filepath,
+            old_text,
+            new_text,
+            repo_root=PROJECT_ROOT,
+            allow_external=True,
+        )
         old_lines = len(old_text.split('\n'))
         new_lines = len(new_text.split('\n'))
         lines_diff = new_lines - old_lines
 
-        result = f"""✓ Successfully edited '{filepath}'
+        result = f"""✓ Successfully edited '{edit_result.relative_path}'
 
-Backup: {backup_path.name}
+Backup: {edit_result.backup_path}
 Changes: {"Removed" if lines_diff < 0 else "Added" if lines_diff > 0 else "Modified"} {abs(lines_diff)} lines
 Old text length: {len(old_text)} chars
 New text length: {len(new_text)} chars
@@ -285,8 +213,19 @@ New text length: {len(new_text)} chars
 The file has been updated. You can verify by reading it with read_code().
 """
 
-        logger.info(f"Successfully edited {filepath}: {lines_diff:+d} lines")
+        logger.info(f"Successfully edited {edit_result.relative_path}: {lines_diff:+d} lines")
         return result
+    except GuardedCodeError as e:
+        error_msg = f"ERROR editing '{filepath}': {e}"
+        if e.code in {"TEXT_NOT_FOUND", "TEXT_NOT_UNIQUE"}:
+            error_msg += (
+                "\n\nTIPS:\n"
+                "1. Use read_code() first to get the exact text including whitespace\n"
+                "2. Include enough surrounding context to make the match unique\n"
+                f"\nSEARCHED FOR:\n{old_text[:200]}..."
+            )
+        logger.error(error_msg)
+        return error_msg
 
     except Exception as e:
         error_msg = f"ERROR editing '{filepath}': {str(e)}"
@@ -380,26 +319,24 @@ def verify_change(filepath: str, expected_text: str, should_exist: bool = True) 
         result = verify_change("frontend/src/pages/SettingsPage.jsx", "Snibbly Nips", should_exist=False)
     """
     try:
-        full_path = PROJECT_ROOT / filepath
-
-        if not full_path.exists():
-            return f"ERROR: File '{filepath}' does not exist"
-
-        with open(full_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        file_data = read_repo_file(filepath, repo_root=PROJECT_ROOT, allow_external=True)
+        content = file_data["content"]
+        display_path = file_data.get("relative_path") or filepath
 
         text_found = expected_text in content
 
         if should_exist:
             if text_found:
-                return f"✓ VERIFIED: Text '{expected_text[:50]}...' exists in '{filepath}'"
+                return f"✓ VERIFIED: Text '{expected_text[:50]}...' exists in '{display_path}'"
             else:
-                return f"✗ VERIFICATION FAILED: Expected text not found in '{filepath}'"
+                return f"✗ VERIFICATION FAILED: Expected text not found in '{display_path}'"
         else:
             if not text_found:
-                return f"✓ VERIFIED: Text '{expected_text[:50]}...' successfully removed from '{filepath}'"
+                return f"✓ VERIFIED: Text '{expected_text[:50]}...' successfully removed from '{display_path}'"
             else:
-                return f"✗ VERIFICATION FAILED: Text still exists in '{filepath}' (should have been removed)"
+                return f"✗ VERIFICATION FAILED: Text still exists in '{display_path}' (should have been removed)"
+    except GuardedCodeError as e:
+        return f"ERROR during verification: {e}"
 
     except Exception as e:
         return f"ERROR during verification: {str(e)}"

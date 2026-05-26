@@ -872,12 +872,6 @@ Negative Prompt: {negative_prompt}""",
                         generator=generator
                     )
 
-                # Some diffusers versions silently replace images with black
-                # when internal NSFW detection triggers, even with safety_checker=None.
-                # Check and override this behavior.
-                if hasattr(output, 'nsfw_content_detected') and output.nsfw_content_detected:
-                    if any(output.nsfw_content_detected):
-                        logger.warning("Diffusers NSFW flag detected but safety_checker is disabled — ignoring flag")
 
                 image = output.images[0]
                 if image is None:

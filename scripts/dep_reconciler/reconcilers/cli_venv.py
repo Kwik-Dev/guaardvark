@@ -35,6 +35,14 @@ class CliVenv(Reconciler):
             h.update(b"\n")
         return f"sha256:{h.hexdigest()}"
 
+    def extra_state(self) -> dict[str, object]:
+        """Check if the guaardvark binary is actually present in the current venv's bin directory."""
+        venv_bin = Path(sys.executable).parent
+        guaardvark_bin = venv_bin / "guaardvark"
+        return {
+            "installed": guaardvark_bin.is_file(),
+        }
+
     def install(self, log_path: Path) -> int:
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"\n=== {self.id} install @ {os.getpid()} ===\n")

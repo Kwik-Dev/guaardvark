@@ -24,6 +24,8 @@ export const launchSwarm = async ({
   maxAgents,
   autoMerge,
   dryRun = false,
+  selfCode = false,
+  acknowledgeDirtyTree = false,
 }) => {
   const response = await fetch(`${BASE_URL}/launch`, {
     method: "POST",
@@ -35,6 +37,8 @@ export const launchSwarm = async ({
       max_agents: maxAgents,
       auto_merge: autoMerge,
       dry_run: dryRun,
+      self_code: selfCode,
+      acknowledge_dirty_tree: acknowledgeDirtyTree,
     }),
   });
   return handleResponse(response);

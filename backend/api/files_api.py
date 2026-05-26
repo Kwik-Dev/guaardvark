@@ -18,6 +18,7 @@ from werkzeug.utils import secure_filename
 from sqlalchemy import func as sa_func
 
 from backend.models import Folder, Document as DBDocument, Client, Project, Website, db
+from backend.services.guarded_code_service import GuardedCodeError, browse_repo_path, default_repo_root
 from backend.utils.db_utils import ensure_db_session_cleanup
 from backend.utils.response_utils import success_response, error_response
 
@@ -170,6 +171,57 @@ _DOC_SORT_COLS = {
     "size": DBDocument.size,
 }
 
+LIVE_REPO_PREFIX = "/__repo__"
+
+
+def _live_repo_mount_folder() -> dict:
+    root = default_repo_root()
+    return {
+        "id": "repo:.",
+        "name": "Guaardvark Code",
+        "path": LIVE_REPO_PREFIX,
+        "parent_id": None,
+        "source_type": "live_repo",
+        "relative_path": "",
+        "is_repository": True,
+        "description": "Live read-only mount of the configured Guaardvark repository.",
+        "repo_metadata": {
+            "source_type": "live_repo",
+            "repo_root": str(root),
+            "mount_mode": "read_first_review_apply",
+        },
+        "subfolder_count": 0,
+        "document_count": 0,
+        "indexed_document_count": 0,
+        "created_at": None,
+        "updated_at": None,
+    }
+
+
+def _browse_live_repo_folder(folder_path: str) -> dict:
+    relative = folder_path[len(LIVE_REPO_PREFIX):].lstrip("/")
+    listing = browse_repo_path(relative)
+    breadcrumbs = [{"name": "Root", "path": "/"}, {"name": "Guaardvark Code", "path": LIVE_REPO_PREFIX}]
+    parts = [p for p in relative.split("/") if p]
+    accum = LIVE_REPO_PREFIX
+    for part in parts:
+        accum = f"{accum}/{part}"
+        breadcrumbs.append({"name": part, "path": accum})
+
+    listing.update({
+        "parent_id": None,
+        "breadcrumbs": breadcrumbs,
+        "offset": 0,
+        "limit": 0,
+        "current_folder": {
+            **_live_repo_mount_folder(),
+            "name": parts[-1] if parts else "Guaardvark Code",
+            "path": folder_path,
+            "relative_path": relative,
+        },
+    })
+    return listing
+
 
 @files_bp.route("/browse", methods=["GET"])
 @ensure_db_session_cleanup
@@ -192,6 +244,12 @@ def browse_folder():
         # Safety check
         if not ensure_path_is_safe(folder_path):
             return error_response("Invalid path", 400, "INVALID_PATH")
+
+        if folder_path == LIVE_REPO_PREFIX or folder_path.startswith(f"{LIVE_REPO_PREFIX}/"):
+            try:
+                return success_response(_browse_live_repo_folder(folder_path))
+            except GuardedCodeError as e:
+                return error_response(str(e), e.status_code, e.code)
 
         # Resolve folder queries
         if not folder_path or folder_path == "/":
@@ -271,6 +329,10 @@ def browse_folder():
         else:
             folder_dicts = [f.to_dict() for f in folders]
             doc_dicts = [d.to_dict() for d in documents]
+
+        if not folder_path or folder_path == "/":
+            folder_dicts = [_live_repo_mount_folder(), *folder_dicts]
+            total_folders += 1
 
         result = {
             "path": resp_path,

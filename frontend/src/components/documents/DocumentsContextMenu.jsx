@@ -24,6 +24,7 @@ const DocumentsContextMenu = ({
   onIndex,
   onOpenWindow,
   onOpenInCodeEditor,
+  onReviewWithAgent,
   hasClipboard = false,
   _hasSelection = false,
   contextType = 'desktop', // 'desktop', 'folder', 'file'
@@ -102,6 +103,7 @@ const DocumentsContextMenu = ({
         sx={menuStyles}
       >
         {onOpenWindow && <MenuItem onClick={onOpenWindow}>Open in Window</MenuItem>}
+        {onReviewWithAgent && <MenuItem onClick={onReviewWithAgent}>Review with Agent</MenuItem>}
         {onOpenWindow && <Divider />}
         {onCut && <MenuItem onClick={onCut}>Cut</MenuItem>}
         {onCopy && <MenuItem onClick={onCopy}>Copy</MenuItem>}
@@ -179,6 +181,7 @@ const DocumentsContextMenu = ({
         {isCode && onEdit && <MenuItem onClick={onEdit}>Edit</MenuItem>}
         {isPdf && onEdit && <MenuItem onClick={onEdit}>View</MenuItem>}
         {isCode && onOpenInCodeEditor && <MenuItem onClick={onOpenInCodeEditor}>Open in Code Editor</MenuItem>}
+        {onReviewWithAgent && <MenuItem onClick={onReviewWithAgent}>Review with Agent</MenuItem>}
         {onRename && <MenuItem onClick={onRename}>Rename</MenuItem>}
         {onProperties && <MenuItem onClick={onProperties}>Properties</MenuItem>}
         {onIndex && (

@@ -78,6 +78,11 @@ pids/
 
 # Environment
 .env
+/env
+
+# Local IDE/agent session state
+.antigravitycli/
+/SELF_CODE_AGENTS_EVIDENCE.md
 
 # Local-only planning/design docs (never pushed)
 plans/
@@ -134,6 +139,7 @@ coverage.xml
 plugins/comfyui/ComfyUI/
 plugins/*/venv/
 backend/tools/voice/piper-models/*.onnx
+backend/tools/voice/piper-models/*.onnx.json
 
 # ONNX/WASM runtime files (downloaded at build time)
 frontend/public/ort-*
@@ -183,7 +189,25 @@ plugins/upscaling/test_gfpgan.py
 # Keep-local by decision: outreach targeting config + agent dev/strategy notes
 data/agent/social_outreach_targets.json
 data/agent/findings_response_2026-05-19.md
+data/agent/LEARNING_PRINCIPLES.local.md
+data/agent/PITCH.md
+data/agent/findings_*.md
+cursor_servo_diagnosis.md
+docs/android-litert-exploration.md
+docs/cluster-hardening-notes.md
 
 # Scratch YouTube manual run-scripts (ad-hoc run() scripts, not pytest)
 backend/tests/test_youtube_chat*.py
 backend/tests/test_youtube_final.py
+
+# Local migration backups and runtime editor/session state
+backend/FUCKED.migrations/
+data/video_editor_session.json
+data/video_editor_state.json
+data/training/loras/
+
+# Local-only tooling/config and seeded demo/outreach content
+pyrightconfig.json
+pytest.ini
+scripts/seed_demo_data.py
+scripts/seed_social_outreach_tasks.py

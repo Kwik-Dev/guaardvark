@@ -692,6 +692,19 @@ def manage_document(doc_id):
                     )
                     document.tags = json.dumps([])
 
+            if "content" in data:
+                content = data["content"]
+                if not isinstance(content, str):
+                    return jsonify({"error": "content must be a string"}), 400
+                document.content = content
+                document.is_code_file = _is_code_file(document.filename)
+                document.size = len(content.encode("utf-8"))
+                if document.path and current_app.config.get("UPLOAD_FOLDER"):
+                    full_path = os.path.join(current_app.config["UPLOAD_FOLDER"], document.path)
+                    if os.path.exists(full_path):
+                        with open(full_path, "w", encoding="utf-8") as f:
+                            f.write(content)
+
             document.updated_at = datetime.datetime.now(datetime.UTC)
             db.session.commit()
             logger.info(f"Document {doc_id} updated successfully. Data: {data}")

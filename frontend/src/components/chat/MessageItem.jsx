@@ -473,7 +473,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
                   <ToolCallCard
                     key={`${stepIdx}-${tcIdx}`}
                     toolName={tc.tool_name}
-                    params={tc.params}
+                    params={tc.params || tc.arguments || tc.args || {}}
                     result={tc.success != null ? {
                       success: tc.success,
                       output: tc.output_preview,

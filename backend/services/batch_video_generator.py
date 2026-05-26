@@ -89,6 +89,10 @@ class BatchVideoRequest:
     prompt_style: str = "cinematic"
     enhance_prompt: bool = True
     negative_prompt: str = ""
+    freeu: bool = False
+    face_restore: bool = False
+    lora_name: Optional[str] = None
+    lora_strength: float = 1.0
     metadata: Dict = field(default_factory=dict)
 
 
@@ -225,6 +229,14 @@ class BatchVideoGenerator:
                 serializable["end_time"] = batch_status.end_time.isoformat()
             with open(metadata_file, "w") as f:
                 json.dump(serializable, f, indent=2)
+
+            try:
+                from backend.socketio_instance import socketio
+                # The event name matches frontend expectations and uses the batch_id as the room
+                socketio.emit("video_batch:update", serializable, room=batch_status.batch_id)
+            except Exception as e:
+                logger.debug(f"Failed to emit WebSocket update for batch {batch_status.batch_id}: {e}")
+
         except Exception as e:  # pragma: no cover - best effort
             logger.warning(f"Failed to save batch metadata: {e}")
 
@@ -289,6 +301,10 @@ class BatchVideoGenerator:
                         interpolation_multiplier=batch_request.interpolation_multiplier,
                         prompt_style=batch_request.prompt_style,
                         enhance_prompt=batch_request.enhance_prompt,
+                        freeu=batch_request.freeu,
+                        face_restore=batch_request.face_restore,
+                        lora_name=batch_request.lora_name,
+                        lora_strength=batch_request.lora_strength,
                     )
 
                     result: VideoGenerationResult = self.video_generator.generate_video(gen_request)
@@ -435,6 +451,10 @@ class BatchVideoGenerator:
             prompt_style=params.get("prompt_style", "cinematic"),
             enhance_prompt=bool(params.get("enhance_prompt", True)),
             negative_prompt=params.get("negative_prompt", "") or "",
+            freeu=bool(params.get("freeu", False)),
+            face_restore=bool(params.get("face_restore", False)),
+            lora_name=params.get("lora_name"),
+            lora_strength=float(params.get("lora_strength", 1.0)),
             metadata=params.get("metadata", {}),
         )
 

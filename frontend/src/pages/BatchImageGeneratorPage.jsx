@@ -49,6 +49,7 @@ import {
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import PageLayout from '../components/layout/PageLayout';
+import CharacterPicker from '../components/filmcrew/CharacterPicker';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -101,6 +102,15 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [enhanceHands, _setEnhanceHands] = useState(true);
   const [_contentDetection, setContentDetection] = useState(null);
   const [_analyzingPrompt, setAnalyzingPrompt] = useState(false);
+  // Character casting: selected subject ids whose LoRA + trigger get applied.
+  const [castSubjectIds, setCastSubjectIds] = useState([]);
+
+  // Pre-cast a character when arriving from the Cast Library "Generate" button
+  // (/images?character=<id>).
+  useEffect(() => {
+    const cid = searchParams.get('character');
+    if (cid) setCastSubjectIds([parseInt(cid, 10)]);
+  }, [searchParams]);
 
   // Generation parameters
   const [params, setParams] = useState({
@@ -686,6 +696,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           body: JSON.stringify({
             prompts: promptsToGenerate,
             ...params,
+            // Cast characters: backend resolves these to LoRA paths + trigger.
+            subject_ids: castSubjectIds,
             // Quality enhancement parameters
             content_preset: selectedPreset === 'auto' ? null : selectedPreset,
             auto_enhance: autoEnhance,
@@ -1011,6 +1023,20 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
               {/* Bulk Input */}
               {inputMode === 'bulk' && (
                 <Box>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>
+                    Cast (optional)
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                    Pick a trained character to render consistently — its LoRA and trigger word are applied automatically.
+                  </Typography>
+                  <Box sx={{ mb: 2 }}>
+                    <CharacterPicker
+                      value={castSubjectIds}
+                      onChange={setCastSubjectIds}
+                      onlyTrained
+                    />
+                  </Box>
+
                   <Typography variant="subtitle2" sx={{ mb: 2, fontWeight: 500 }}>
                     Image Topics/Prompts
                   </Typography>

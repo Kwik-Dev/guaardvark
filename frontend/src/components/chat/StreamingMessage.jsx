@@ -104,7 +104,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
         ...prev,
         {
           tool: data.tool,
-          params: data.params,
+          params: data.params || data.arguments || data.args || {},
           result: null,
           durationMs: null,
           isPending: true,

@@ -1,2 +1,0 @@
-FROM qwen2-vl:2b-instruct
-ADAPTER ./lora

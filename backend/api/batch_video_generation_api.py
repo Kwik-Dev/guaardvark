@@ -119,6 +119,10 @@ def generate_text_to_video_batch():
             "prompt_style": data.get("prompt_style", "cinematic"),
             "enhance_prompt": str(data.get("enhance_prompt", "true")).lower() != "false",
             "negative_prompt": data.get("negative_prompt", "") or "",
+            "freeu": str(data.get("freeu", "false")).lower() == "true",
+            "face_restore": str(data.get("face_restore", "false")).lower() == "true",
+            "lora_name": data.get("lora_name"),
+            "lora_strength": float(data.get("lora_strength", 1.0)),
             "metadata": {
                 **(data.get("metadata") or {}),
                 "upscale": str(data.get("upscale", "false")).lower() == "true",
@@ -170,6 +174,10 @@ def generate_image_to_video_batch():
             "prompt_style": data.get("prompt_style", "cinematic"),
             "enhance_prompt": str(data.get("enhance_prompt", "true")).lower() != "false",
             "negative_prompt": data.get("negative_prompt", "") or "",
+            "freeu": str(data.get("freeu", "false")).lower() == "true",
+            "face_restore": str(data.get("face_restore", "false")).lower() == "true",
+            "lora_name": data.get("lora_name"),
+            "lora_strength": float(data.get("lora_strength", 1.0)),
             "metadata": {
                 **(data.get("metadata") or {}),
                 "upscale": str(data.get("upscale", "false")).lower() == "true",

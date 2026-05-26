@@ -475,6 +475,13 @@ async function handleChatMode(args, { addMessage, chatState }) {
   }
 
   try {
+    // Kill any lingering agent loops
+    await fetch(`/api/chat/unified/${encodeURIComponent(sessionId)}/abort`, {
+      method: "POST"
+    }).catch(err => {
+      console.warn("Failed to send abort signal:", err);
+    });
+
     await _patchSessionMode(sessionId, "chat");
     useAppStore.getState().setSessionMode(sessionId, "chat");
     addMessage({
