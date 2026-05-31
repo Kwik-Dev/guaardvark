@@ -294,7 +294,7 @@ class AgentExecutor:
             max_iterations: Maximum iterations before stopping
         """
         self.tool_registry = tool_registry
-        self.llm = llm
+        self.llm = llm if llm is not None else self._load_default_llm()
         self.max_iterations = max_iterations
         self.facts_registry = FactsRegistry()
         self.original_query = ""  # Store original query for synthesis
@@ -310,6 +310,19 @@ class AgentExecutor:
             self.coordinator = None
 
         logger.info(f"Agent executor initialized with {len(tool_registry)} tools")
+
+    @staticmethod
+    def _load_default_llm():
+        """Load the default chat LLM for callers that pass llm=None."""
+        try:
+            from backend.utils.llm_service import get_default_llm
+            llm = get_default_llm()
+            if llm is None:
+                logger.error("Default LLM loader returned None")
+            return llm
+        except Exception as e:
+            logger.error(f"Failed to initialize default LLM for AgentExecutor: {e}", exc_info=True)
+            return None
 
     def set_tool_context(self, **kwargs):
         """Set extra kwargs that get forwarded to every tool execute() call."""
@@ -334,6 +347,20 @@ class AgentExecutor:
             steps = []
             self.original_query = user_query  # Store for synthesis step
             self._tool_history = []  # Track tools called across iterations
+
+            if self.llm is None or not hasattr(self.llm, "chat"):
+                error = (
+                    "Agent executor cannot run: no chat-capable LLM instance is configured. "
+                    "Check Ollama/LlamaIndex startup and active model configuration."
+                )
+                logger.error(error)
+                return AgentResult(
+                    final_answer="",
+                    steps=[],
+                    iterations=0,
+                    success=False,
+                    error=error,
+                )
 
             # Clear facts registry for new execution
             self.facts_registry.clear()

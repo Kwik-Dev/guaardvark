@@ -107,12 +107,11 @@ def create_celery_app():
                 'schedule': 86400.0,  # 24 hours
                 'options': {'queue': 'default'},
             },
-            # Cluster heartbeat sweeper (master-only; see CLUSTER_ROLE env)
-            'cluster-heartbeat-sweep': {
-                'task': 'cluster.sweep_node_heartbeats',
-                'schedule': float(os.environ.get("CLUSTER_SWEEP_INTERVAL_S", 5)),
-                'options': {'queue': 'default'},
-            },
+            # Cluster heartbeat sweeper is scheduled conditionally below — only
+            # when CLUSTER_ROLE == "master". On non-master nodes the task just
+            # early-returns {'skipped': 'not_master'}, so scheduling it every few
+            # seconds only spams the log. See the conditional block after task
+            # registration.
             # Social outreach loops — beat-driven so they run unattended.
             # Cadence here is the upper bound; kill_switch.cadence_allows_post
             # enforces the actual 30-min-per-platform / 8-per-day caps.
@@ -382,7 +381,18 @@ def create_celery_app():
 
     try:
         from backend.tasks import cluster_heartbeat_sweeper  # noqa: F401 - registers task
-        logger.info("Cluster heartbeat sweeper task registered")
+        # Only schedule the periodic sweep when this node is an actual cluster
+        # master. Otherwise the task fires every few seconds and early-returns
+        # {'skipped': 'not_master'}, which does nothing but flood the log.
+        if os.environ.get("CLUSTER_ROLE") == "master":
+            celery_app.conf.beat_schedule['cluster-heartbeat-sweep'] = {
+                'task': 'cluster.sweep_node_heartbeats',
+                'schedule': float(os.environ.get("CLUSTER_SWEEP_INTERVAL_S", 5)),
+                'options': {'queue': 'default'},
+            }
+            logger.info("Cluster heartbeat sweeper task registered and scheduled (master node)")
+        else:
+            logger.info("Cluster heartbeat sweeper task registered (not scheduled — node is not cluster master)")
     except ImportError as e:
         logger.warning(f"Could not import cluster heartbeat sweeper: {e}")
 

@@ -9,6 +9,7 @@
 // - Root path scoped to /Images/
 
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   Box,
   Typography,
@@ -92,8 +93,19 @@ const ImagesPage = () => {
   const { _activeModel, _isLoadingModel, _modelError } = useStatus();
   const theme = useTheme();
 
-  // Tabs
-  const [activeTab, setActiveTab] = useState(0);
+  // Tabs — the /batch-images route is the "Image Gen" sidebar entry; it shares
+  // this page with the Media Library (/images) but must open on the Image Gen
+  // tab (index 1), not the library. Drive the initial tab from the route.
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState(
+    location.pathname.startsWith('/batch-images') ? 1 : 0
+  );
+
+  // Keep the tab in sync if the route changes while the page stays mounted
+  // (e.g. clicking Media then Image Gen without a full remount).
+  useEffect(() => {
+    setActiveTab(location.pathname.startsWith('/batch-images') ? 1 : 0);
+  }, [location.pathname]);
 
   // Data
   const [rootFolders, setRootFolders] = useState([]);

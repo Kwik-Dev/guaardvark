@@ -13,6 +13,7 @@ These tools enable Claude Code-like behavior:
 
 import logging
 import os
+from pathlib import Path
 from typing import Dict, Any
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult, register_tool
@@ -22,6 +23,9 @@ from backend.tools.llama_code_tools import (
     list_files,
     verify_change
 )
+from backend.models import db, Folder
+import json
+import ast
 from backend.services.guarded_code_service import (
     GuardedCodeError,
     apply_exact_replacement,
@@ -588,6 +592,223 @@ class VerifyChangeTool(BaseTool):
             )
 
 
+class GetRepositoryMapTool(BaseTool):
+    """Tool to get the PageRank-based repository map of a Code Repository folder."""
+
+    name = "get_repository_map"
+    description = (
+        "Retrieve the PageRank-based architectural repository map for a given folder ID. "
+        "This map shows the most important functions and classes in the codebase and their relationships. "
+        "Use this tool to get a high-level understanding of a Code Repository."
+    )
+    parameters = {
+        "folder_id": ToolParameter(
+            name="folder_id",
+            type="int",
+            required=True,
+            description="The integer ID of the Code Repository folder."
+        )
+    }
+
+    def execute(self, **kwargs) -> ToolResult:
+        folder_id = kwargs.get("folder_id")
+        if not folder_id:
+            return ToolResult(success=False, error="Missing required parameter: folder_id")
+
+        try:
+            folder = db.session.get(Folder, folder_id)
+            if not folder:
+                return ToolResult(success=False, error=f"Folder {folder_id} not found.")
+
+            if not folder.is_repository:
+                return ToolResult(success=False, error=f"Folder {folder_id} is not marked as a Code Repository.")
+
+            if not folder.repo_metadata:
+                return ToolResult(success=False, error=f"Folder {folder_id} has no repository metadata generated yet.")
+
+            metadata = json.loads(folder.repo_metadata)
+            repo_map = metadata.get("repository_map")
+            
+            if not repo_map:
+                return ToolResult(success=False, error="No repository map found in the metadata. It may still be generating.")
+
+            return ToolResult(
+                success=True,
+                output=repo_map,
+                metadata={"folder_id": folder_id}
+            )
+        except Exception as e:
+            logger.error(f"GetRepositoryMapTool failed: {e}", exc_info=True)
+            return ToolResult(success=False, error=f"Failed to get repository map: {str(e)}")
+
+
+class GetDependencyGraphTool(BaseTool):
+    """Tool to get the import dependency graph of a Code Repository folder."""
+
+    name = "get_dependency_graph"
+    description = (
+        "Retrieve the file-level import dependency graph for a given folder ID. "
+        "This returns a JSON string mapping files to the files they import. "
+        "Use this tool to trace dependencies and understand how files interact."
+    )
+    parameters = {
+        "folder_id": ToolParameter(
+            name="folder_id",
+            type="int",
+            required=True,
+            description="The integer ID of the Code Repository folder."
+        )
+    }
+
+    def execute(self, **kwargs) -> ToolResult:
+        folder_id = kwargs.get("folder_id")
+        if not folder_id:
+            return ToolResult(success=False, error="Missing required parameter: folder_id")
+
+        try:
+            folder = db.session.get(Folder, folder_id)
+            if not folder:
+                return ToolResult(success=False, error=f"Folder {folder_id} not found.")
+
+            if not folder.is_repository:
+                return ToolResult(success=False, error=f"Folder {folder_id} is not marked as a Code Repository.")
+
+            if not folder.repo_metadata:
+                return ToolResult(success=False, error=f"Folder {folder_id} has no repository metadata generated yet.")
+
+            metadata = json.loads(folder.repo_metadata)
+            dep_graph = metadata.get("dependency_graph")
+            
+            if not dep_graph:
+                return ToolResult(success=False, error="No dependency graph found in the metadata.")
+
+            return ToolResult(
+                success=True,
+                output=json.dumps(dep_graph, indent=2),
+                metadata={"folder_id": folder_id, "node_count": len(dep_graph)}
+            )
+        except Exception as e:
+            logger.error(f"GetDependencyGraphTool failed: {e}", exc_info=True)
+            return ToolResult(success=False, error=f"Failed to get dependency graph: {str(e)}")
+
+
+class ReadASTNodeTool(BaseTool):
+    """Tool to precisely extract a class or function from a Python file using AST."""
+
+    name = "read_ast_node"
+    description = (
+        "Read the exact source code of a specific class or function from a Python file in a Code Repository folder. "
+        "This is more precise and token-efficient than reading the entire file. "
+        "Only supports Python (.py) files currently and requires a repository-relative filepath."
+    )
+    parameters = {
+        "folder_id": ToolParameter(
+            name="folder_id",
+            type="int",
+            required=True,
+            description="The integer ID of the Code Repository folder."
+        ),
+        "filepath": ToolParameter(
+            name="filepath",
+            type="string",
+            required=True,
+            description="Path to the Python file, relative to the Code Repository folder."
+        ),
+        "node_name": ToolParameter(
+            name="node_name",
+            type="string",
+            required=True,
+            description="The name of the class or function to extract (e.g., 'MyClass' or 'my_function')."
+        )
+    }
+
+    def execute(self, **kwargs) -> ToolResult:
+        folder_id = kwargs.get("folder_id")
+        filepath = kwargs.get("filepath")
+        node_name = kwargs.get("node_name")
+
+        if not folder_id or not filepath or not node_name:
+            return ToolResult(success=False, error="Missing required parameter: folder_id, filepath, or node_name")
+
+        if not filepath.endswith(".py"):
+            return ToolResult(success=False, error="read_ast_node currently only supports Python (.py) files.")
+
+        try:
+            if Path(filepath).is_absolute():
+                return ToolResult(success=False, error="filepath must be relative to the Code Repository folder.")
+
+            folder = db.session.get(Folder, folder_id)
+            if not folder:
+                return ToolResult(success=False, error=f"Folder {folder_id} not found.")
+
+            if not folder.is_repository:
+                return ToolResult(success=False, error=f"Folder {folder_id} is not marked as a Code Repository.")
+
+            from backend.api.files_api import get_physical_path
+
+            repo_root = get_physical_path(folder.path).resolve()
+            full_path = (repo_root / filepath).resolve()
+            try:
+                full_path.relative_to(repo_root)
+            except ValueError:
+                return ToolResult(success=False, error="filepath resolves outside the Code Repository folder.")
+
+            if not full_path.exists():
+                return ToolResult(success=False, error=f"File not found: {filepath}")
+
+            source = full_path.read_text(encoding="utf-8")
+
+            try:
+                tree = ast.parse(source)
+            except SyntaxError as e:
+                return ToolResult(success=False, error=f"Syntax error in file, cannot parse AST: {e}")
+
+            matches = []
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if node.name == node_name:
+                        lines = source.splitlines()
+                        start_line = node.lineno - 1
+                        end_line = node.end_lineno
+                        if node.decorator_list:
+                            start_line = node.decorator_list[0].lineno - 1
+
+                        matches.append({
+                            "type": type(node).__name__,
+                            "start_line": start_line + 1,
+                            "end_line": end_line,
+                            "source": "\n".join(lines[start_line:end_line]),
+                        })
+
+            if matches:
+                if len(matches) == 1:
+                    output = matches[0]["source"]
+                else:
+                    output = "\n\n".join(
+                        f"# Match {idx}: {match['type']} lines {match['start_line']}-{match['end_line']}\n{match['source']}"
+                        for idx, match in enumerate(matches, start=1)
+                    )
+                return ToolResult(
+                    success=True,
+                    output=output,
+                    metadata={
+                        "folder_id": folder_id,
+                        "filepath": filepath,
+                        "node_name": node_name,
+                        "match_count": len(matches),
+                        "matches": [
+                            {k: v for k, v in match.items() if k != "source"}
+                            for match in matches
+                        ],
+                    }
+                )
+            return ToolResult(success=False, error=f"Node '{node_name}' not found in {filepath}.")
+            
+        except Exception as e:
+            logger.error(f"ReadASTNodeTool failed: {e}", exc_info=True)
+            return ToolResult(success=False, error=f"Failed to read AST node: {str(e)}")
+
+
 # Tool instances for registration
 CODE_MANIPULATION_TOOLS = [
     ReadCodeTool(),
@@ -595,6 +816,9 @@ CODE_MANIPULATION_TOOLS = [
     EditCodeTool(),
     ListCodeFilesTool(),
     VerifyChangeTool(),
+    GetRepositoryMapTool(),
+    GetDependencyGraphTool(),
+    ReadASTNodeTool(),
 ]
 
 

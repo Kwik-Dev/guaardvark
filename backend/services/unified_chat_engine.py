@@ -1761,7 +1761,17 @@ class UnifiedChatEngine:
                 )
                 messages = self._prune_messages_to_fit(messages, ctx_window)
 
-            opts = {"num_ctx": ctx_window, "num_predict": max_tokens, "temperature": 0.4, "top_p": 0.8, "top_k": 30, "num_keep": -1}
+            # Sampling knobs come from services.sampling_profiles (single source
+            # of truth) so runtime chat matches what get_default_llm builds and
+            # what modelfile_generator bakes. num_ctx/num_predict/num_keep are
+            # runtime concerns layered on top of the pure sampling profile.
+            from backend.services import sampling_profiles
+            opts = sampling_profiles.profile_options(
+                sampling_profiles.DEFAULT_PROFILE,
+                num_ctx=ctx_window,
+                num_predict=max_tokens,
+                extra={"num_keep": -1},
+            )
 
             # For thinking models: strip literal XML tags from messages to
             # prevent the model from reproducing them in its thinking stream,

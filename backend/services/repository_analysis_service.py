@@ -1,10 +1,14 @@
 """Repository analysis service — generates architectural summaries and metadata for code repos."""
 
+import ast
 import json
 import logging
 import os
+import posixpath
+import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from pathlib import PurePosixPath
+from typing import Dict, List, Optional, Tuple
 
 from backend.models import Folder, Document, db
 from backend.services.indexing_service import add_text_to_index
@@ -154,13 +158,153 @@ class RepositoryAnalysisService:
         return metadata
 
     @staticmethod
+    def _repo_relative_path(folder: Folder, doc_path: str) -> str:
+        """Return a document path relative to the repository root folder."""
+        folder_path = (folder.path or "").strip("/")
+        normalized = (doc_path or "").strip("/")
+        if folder_path and normalized == folder_path:
+            return ""
+        if folder_path and normalized.startswith(f"{folder_path}/"):
+            return normalized[len(folder_path) + 1:]
+        return normalized
+
+    @staticmethod
+    def _build_module_lookup(folder: Folder, documents: list) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """Build path/module lookup tables whose values are stored document paths."""
+        from backend.utils.code_chunker import CODE_LANGUAGE_MAP
+
+        path_lookup: Dict[str, str] = {}
+        module_lookup: Dict[str, str] = {}
+
+        for doc in documents:
+            rel_path = RepositoryAnalysisService._repo_relative_path(folder, doc.path)
+            if not rel_path:
+                continue
+
+            rel_posix = posixpath.normpath(rel_path.replace("\\", "/").lstrip("/"))
+            path_lookup[rel_posix] = doc.path
+
+            ext = os.path.splitext(doc.filename)[1].lower()
+            if ext not in CODE_LANGUAGE_MAP:
+                continue
+
+            stem = rel_posix[: -len(ext)] if ext else rel_posix
+            module_lookup[stem.replace("/", ".")] = doc.path
+            module_lookup[stem] = doc.path
+
+            if PurePosixPath(rel_posix).name in {"__init__.py", "index.js", "index.jsx", "index.ts", "index.tsx"}:
+                package_path = str(PurePosixPath(stem).parent)
+                if package_path and package_path != ".":
+                    module_lookup[package_path.replace("/", ".")] = doc.path
+                    module_lookup[package_path] = doc.path
+
+        return path_lookup, module_lookup
+
+    @staticmethod
+    def _extract_python_imports(content: str) -> List[Tuple[int, str]]:
+        """Return Python import targets as (relative_level, module_name)."""
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return []
+
+        imports: List[Tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend((0, alias.name) for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                for alias in node.names:
+                    if alias.name == "*":
+                        imports.append((node.level, base))
+                    elif base:
+                        imports.append((node.level, f"{base}.{alias.name}"))
+                        imports.append((node.level, base))
+                    else:
+                        imports.append((node.level, alias.name))
+        return imports
+
+    @staticmethod
+    def _resolve_python_import(
+        rel_path: str,
+        level: int,
+        module: str,
+        module_lookup: Dict[str, str],
+    ) -> Optional[str]:
+        """Resolve a Python import target to a stored document path when it is in-repo."""
+        if level:
+            rel_no_ext = os.path.splitext(rel_path)[0]
+            parts = [part for part in rel_no_ext.split("/") if part]
+            package_parts = parts if parts[-1:] == ["__init__"] else parts[:-1]
+            if package_parts[-1:] == ["__init__"]:
+                package_parts = package_parts[:-1]
+            keep_count = max(0, len(package_parts) - (level - 1))
+            target_parts = package_parts[:keep_count]
+            if module:
+                target_parts.extend(module.split("."))
+            target = ".".join(part for part in target_parts if part)
+        else:
+            target = module
+
+        if not target:
+            return None
+
+        pieces = target.split(".")
+        for end in range(len(pieces), 0, -1):
+            candidate = ".".join(pieces[:end])
+            if candidate in module_lookup:
+                return module_lookup[candidate]
+        return None
+
+    @staticmethod
+    def _extract_js_imports(content: str) -> List[str]:
+        """Return JS/TS module specifiers from import/export/require statements."""
+        patterns = (
+            r"(?:import|export)\s+(?:[^'\"\n]+?\s+from\s+)?['\"]([^'\"]+)['\"]",
+            r"require\(\s*['\"]([^'\"]+)['\"]\s*\)",
+        )
+        imports: List[str] = []
+        for pattern in patterns:
+            imports.extend(match.group(1) for match in re.finditer(pattern, content))
+        return imports
+
+    @staticmethod
+    def _resolve_js_import(
+        rel_path: str,
+        specifier: str,
+        path_lookup: Dict[str, str],
+        module_lookup: Dict[str, str],
+    ) -> Optional[str]:
+        """Resolve a JS/TS module specifier to a stored document path when it is in-repo."""
+        candidates: List[str] = []
+        js_exts = (".js", ".jsx", ".ts", ".tsx")
+
+        if specifier.startswith("."):
+            parent = PurePosixPath(rel_path).parent
+            base = posixpath.normpath(str(parent.joinpath(specifier)).replace("\\", "/"))
+        else:
+            base = specifier.strip("/")
+            if base.replace("/", ".") in module_lookup:
+                return module_lookup[base.replace("/", ".")]
+
+        base = posixpath.normpath(str(PurePosixPath(base)))
+        candidates.append(base)
+        candidates.extend(f"{base}{ext}" for ext in js_exts)
+        candidates.extend(f"{base}/index{ext}" for ext in js_exts)
+
+        for candidate in candidates:
+            normalized = posixpath.normpath(str(PurePosixPath(candidate)))
+            if normalized in path_lookup:
+                return path_lookup[normalized]
+        return None
+
+    @staticmethod
     def build_dependency_graph(folder_id: int) -> Dict[str, List[str]]:
         """Build import-based dependency graph for a repository.
 
         Returns an adjacency list: {file_path: [imported_file_paths]}.
         Only includes edges where the imported file exists in the repo.
         """
-        from backend.utils.code_symbol_extractor import extract_symbols
         from backend.utils.code_chunker import CODE_LANGUAGE_MAP
 
         folder = db.session.get(Folder, folder_id)
@@ -168,15 +312,7 @@ class RepositoryAnalysisService:
             return {}
 
         all_files = RepositoryAnalysisService._get_all_files_recursive(folder)
-
-        # Build a lookup from filename/partial-path to full path
-        path_lookup = {}
-        for doc in all_files:
-            path_lookup[doc.filename] = doc.path
-            parts = doc.path.split("/")
-            for i in range(len(parts)):
-                partial = "/".join(parts[i:])
-                path_lookup[partial] = doc.path
+        path_lookup, module_lookup = RepositoryAnalysisService._build_module_lookup(folder, all_files)
 
         graph = {}
 
@@ -186,26 +322,26 @@ class RepositoryAnalysisService:
             if not language or not doc.content:
                 continue
 
-            symbols = extract_symbols(doc.content, language)
-            imports = [s["name"] for s in symbols if s["type"] == "import"]
-
+            rel_path = RepositoryAnalysisService._repo_relative_path(folder, doc.path)
             resolved = []
-            for imp in imports:
-                candidates = [
-                    imp, imp.replace(".", "/"),
-                    imp + ext, imp.replace(".", "/") + ext,
-                    imp + ".py", imp + ".js", imp + ".ts",
-                    imp + "/index.js", imp + "/index.ts",
-                ]
-                candidates += [c.lstrip("./") for c in candidates]
 
-                for candidate in candidates:
-                    if candidate in path_lookup:
-                        resolved.append(path_lookup[candidate])
-                        break
+            if language == "python":
+                for level, module in RepositoryAnalysisService._extract_python_imports(doc.content):
+                    target = RepositoryAnalysisService._resolve_python_import(
+                        rel_path, level, module, module_lookup
+                    )
+                    if target:
+                        resolved.append(target)
+            elif language in {"javascript", "typescript"}:
+                for specifier in RepositoryAnalysisService._extract_js_imports(doc.content):
+                    target = RepositoryAnalysisService._resolve_js_import(
+                        rel_path, specifier, path_lookup, module_lookup
+                    )
+                    if target:
+                        resolved.append(target)
 
             if resolved:
-                graph[doc.path] = resolved
+                graph[doc.path] = sorted(set(resolved))
 
         # Store in folder metadata
         try:

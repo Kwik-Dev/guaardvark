@@ -380,6 +380,23 @@ from backend.config import (ACTIVE_MODEL_FILE, DEFAULT_EMBEDDING_MODEL,
                             DEFAULT_LLM, OLLAMA_BASE_URL)
 
 
+def _default_chat_sampling():
+    """Return (temperature, sampling_kwargs) for the default chat profile.
+
+    Single source of truth: services.sampling_profiles. Every default Ollama
+    instance we build here stays in lockstep with what unified_chat_engine
+    passes as runtime options and what modelfile_generator bakes — change a
+    sampling knob once in sampling_profiles and all of them move together.
+    The returned sampling_kwargs carry min_p / top_p / top_k / repeat_penalty;
+    temperature is split out because the LlamaIndex Ollama ctor takes it
+    separately.
+    """
+    from backend.services import sampling_profiles
+    profile = sampling_profiles.get_profile(sampling_profiles.DEFAULT_PROFILE)
+    temperature = profile.pop("temperature", 0.5)
+    return temperature, profile
+
+
 def get_default_llm() -> Ollama:
     """Instantiate and return the default Ollama LLM, preferring the saved active model."""
     from backend.config import LLM_REQUEST_TIMEOUT
@@ -401,14 +418,15 @@ def get_default_llm() -> Ollama:
         logger.warning("Failed to compute adaptive num_ctx, using 8192: %s", e)
         num_ctx = 8192
 
+    temperature, sampling_kwargs = _default_chat_sampling()
     return Ollama(
         model=model_name,
         base_url=OLLAMA_BASE_URL,
         request_timeout=timeout_value,
-        temperature=0.4,
+        temperature=temperature,
         context_window=num_ctx,
         keep_alive="24h",
-        additional_kwargs={"num_ctx": num_ctx, "top_p": 0.8, "top_k": 30}
+        additional_kwargs={"num_ctx": num_ctx, **sampling_kwargs},
     )
 
 
@@ -480,14 +498,15 @@ def get_llm_for_startup() -> Ollama:
 
     start = time.time()
     timeout_value = min(LLM_REQUEST_TIMEOUT, 180.0)  # Cap at 3 minutes for startup
+    temperature, sampling_kwargs = _default_chat_sampling()
     llm = Ollama(
         model=model_name,
         base_url=OLLAMA_BASE_URL,
         request_timeout=timeout_value,
-        temperature=0.4,
+        temperature=temperature,
         context_window=num_ctx,
         keep_alive="24h",
-        additional_kwargs={"num_ctx": num_ctx, "top_p": 0.8, "top_k": 30}
+        additional_kwargs={"num_ctx": num_ctx, **sampling_kwargs},
     )
     logger.info("Loaded LLM '%s' with num_ctx=%d in %.2fs", model_name, num_ctx, time.time() - start)
     return llm
@@ -626,14 +645,15 @@ def load_active_llm() -> Ollama:
                         num_ctx = compute_optimal_num_ctx(saved_model)
                     except Exception:
                         num_ctx = 8192
+                    temperature, sampling_kwargs = _default_chat_sampling()
                     llm = Ollama(
                         model=saved_model,
                         base_url=OLLAMA_BASE_URL,
                         request_timeout=timeout_value,
-                        temperature=0.4,
+                        temperature=temperature,
                         context_window=num_ctx,
                         keep_alive="24h",
-                        additional_kwargs={"num_ctx": num_ctx, "top_p": 0.8, "top_k": 30}
+                        additional_kwargs={"num_ctx": num_ctx, **sampling_kwargs},
                     )
                     llm.complete("Test.")
                     return llm

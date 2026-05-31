@@ -766,7 +766,7 @@ class Folder(db.Model):
 
     def to_dict_light(self):
         """Lightweight serialization - no relationship loads, counts injected externally"""
-        return {
+        data = {
             "id": self.id,
             "name": self.name,
             "path": self.path,
@@ -783,6 +783,16 @@ class Folder(db.Model):
             "document_count": 0,
             "indexed_document_count": 0,
         }
+        if self.is_repository:
+            metadata = {}
+            if self.repo_metadata:
+                try:
+                    metadata = json.loads(self.repo_metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+            data["description"] = self.description
+            data["repo_metadata"] = metadata
+        return data
 
     def __repr__(self):
         return f"<Folder {self.name} ({self.path})>"

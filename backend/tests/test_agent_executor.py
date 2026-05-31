@@ -88,6 +88,40 @@ def _make_code_tool_registry(project_root):
     return registry, original_root
 
 
+class TestAgentExecutorLLMInitialization:
+    """Unit tests for AgentExecutor LLM fallback behavior (no live LLM required)."""
+
+    def test_none_llm_uses_default_loader(self, monkeypatch):
+        from backend.services.agent_executor import AgentExecutor
+        from backend.services.agent_tools import ToolRegistry
+        from backend.utils import llm_service
+
+        class FakeLLM:
+            def chat(self, *_args, **_kwargs):
+                raise AssertionError("chat should not be called during initialization")
+
+        fake_llm = FakeLLM()
+        monkeypatch.setattr(llm_service, "get_default_llm", lambda: fake_llm)
+
+        executor = AgentExecutor(ToolRegistry(), None, max_iterations=1)
+
+        assert executor.llm is fake_llm
+
+    def test_execute_fails_cleanly_when_default_llm_unavailable(self, monkeypatch):
+        from backend.services.agent_executor import AgentExecutor
+        from backend.services.agent_tools import ToolRegistry
+        from backend.utils import llm_service
+
+        monkeypatch.setattr(llm_service, "get_default_llm", lambda: None)
+
+        executor = AgentExecutor(ToolRegistry(), None, max_iterations=1)
+        result = executor.execute("do something")
+
+        assert result.success is False
+        assert result.iterations == 0
+        assert "no chat-capable LLM" in result.error
+
+
 @requires_llm
 class TestAgentExecutor:
     """Tests for AgentExecutor — backend/services/agent_executor.py:262"""

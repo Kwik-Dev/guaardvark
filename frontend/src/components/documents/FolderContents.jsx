@@ -25,6 +25,7 @@ import { TableVirtuoso, VirtuosoGrid } from 'react-virtuoso';
 import { useSnackbar } from '../common/SnackbarProvider';
 import { API_BASE, getFileIcon, getFileIconSmall, FolderIndexIndicator, formatBytes, formatDate, getItemKey, isMediaFile } from './fileUtils.jsx';
 import MediaView from './MediaView';
+import CodeRepoDashboard from './CodeRepoDashboard';
 
 // Stable grid components (must be defined outside render to avoid Virtuoso remounts)
 const GridItemWrapper = React.forwardRef(({ children, ...props }, ref) => (
@@ -548,6 +549,7 @@ const FolderContents = ({
           }
         }}
       >
+        <CodeRepoDashboard folder={folder} />
         <Typography variant="body2" color="text.secondary">
           This folder is empty
         </Typography>
@@ -601,6 +603,8 @@ const FolderContents = ({
             }}
           />
         )}
+
+        <CodeRepoDashboard folder={folder} />
 
         <TableVirtuoso
           style={{ height: '100%', width: '100%', cursor: 'default' }}
@@ -777,6 +781,10 @@ const FolderContents = ({
           }}
         />
       )}
+
+      <Box sx={{ width: '100%', mb: folder.is_repository ? 2 : 0 }}>
+        <CodeRepoDashboard folder={folder} />
+      </Box>
 
       <VirtuosoGrid
         style={{ height: '100%', width: '100%' }}

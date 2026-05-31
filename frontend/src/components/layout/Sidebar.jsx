@@ -51,6 +51,8 @@ import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
 import MovieFilterIcon from "@mui/icons-material/MovieFilter";
 import LocalMoviesIcon from "@mui/icons-material/LocalMovies";
 import BubbleChartIcon from "@mui/icons-material/BubbleChart";
+import PhotoLibraryIcon from "@mui/icons-material/PhotoLibrary";
+import VideoCameraBackIcon from "@mui/icons-material/VideoCameraBack";
 
 import SystemMetricsModal from "../modals/SystemMetricsModal";
 import AgentScreenViewer from "../agent/AgentScreenViewer";
@@ -66,7 +68,7 @@ const navGroups = [
       { text: "Chat", icon: <ChatBubbleOutlineIcon />, path: "/chat" },
       { text: "Code Editor", icon: <CodeIcon />, path: "/code-editor" },
       { text: "Files", icon: <ArticleIcon />, path: "/documents" },
-      { text: "Media", icon: <ImageIcon />, path: "/images" },
+      { text: "Media", icon: <PhotoLibraryIcon />, path: "/images" },
       { text: "Notes", icon: <StickyNote2Icon />, path: "/notes" },
     ],
   },
@@ -81,7 +83,7 @@ const navGroups = [
     items: [
       { text: "Film Crew", icon: <LocalMoviesIcon />, path: "/film-crew" },
       { text: "Video Editor", icon: <MovieFilterIcon />, path: "/video-editor" },
-      { text: "Video Gen", icon: <ImageIcon />, path: "/video" },
+      { text: "Video Gen", icon: <VideoCameraBackIcon />, path: "/video" },
       { text: "Image Gen", icon: <ImageIcon />, path: "/batch-images" },
       { text: "Audio Studio", icon: <GraphicEqIcon />, path: "/audio" },
       { text: "Video Text", icon: <TextFieldsIcon />, path: "/video-text-overlay" },
@@ -267,9 +269,17 @@ const Sidebar = () => {
                 )}
                 <List disablePadding>
                   {group.items.map((item) => {
+                    // Match on whole path segments, not raw string prefix.
+                    // A bare startsWith() makes "/video" (Video Gen) light up
+                    // when the route is "/video-editor" or "/video-text-overlay",
+                    // because both literally start with "/video". Requiring an
+                    // exact match or a "/" boundary keeps nested routes
+                    // (e.g. /clients/123 -> Clients) highlighting correctly
+                    // while killing the sibling-collision.
                     const isActive = item.path === "/"
                       ? location.pathname === "/"
-                      : location.pathname.startsWith(item.path);
+                      : location.pathname === item.path ||
+                        location.pathname.startsWith(item.path + "/");
 
                     const button = (
                       <ListItemButton

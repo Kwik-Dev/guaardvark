@@ -433,11 +433,29 @@ def create_ollama_modelfile(model_dir: str, model_name: str):
 
     gguf_file = gguf_files[0]
 
+    # Sampling knobs come from services.sampling_profiles (single source of
+    # truth) so a fine-tuned model imported here matches what the app passes at
+    # runtime. This script runs in a standalone training venv where the backend
+    # package may not be importable, so fall back to the balanced-profile values
+    # (kept in sync with services/sampling_profiles.py::BALANCED) if the import
+    # fails. For hardware-aware Modelfiles, prefer services.modelfile_generator.
+    try:
+        from backend.services import sampling_profiles
+        param_block = sampling_profiles.profile_modelfile_params(
+            sampling_profiles.DEFAULT_PROFILE
+        )
+    except Exception:
+        param_block = (
+            "PARAMETER temperature 0.5\n"
+            "PARAMETER min_p 0.05\n"
+            "PARAMETER top_p 0.95\n"
+            "PARAMETER top_k 40\n"
+            "PARAMETER repeat_penalty 1.1"
+        )
+
     modelfile_content = f"""FROM {gguf_file}
 
-PARAMETER temperature 0.4
-PARAMETER top_p 0.8
-PARAMETER top_k 30
+{param_block}
 
 SYSTEM \"\"\"You are a helpful, accurate, and concise assistant. You are honest about what you know and don't know. When you have search results, synthesize them into direct answers - never paste raw data.\"\"\"
 """

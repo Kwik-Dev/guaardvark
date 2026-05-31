@@ -5,10 +5,6 @@ Wraps existing code_execution_api.py capabilities as agent tools
 """
 
 import logging
-import tempfile
-import os
-from pathlib import Path
-from typing import Dict, Any
 
 from backend.services.agent_tools import BaseTool, ToolResult, ToolParameter
 
@@ -185,4 +181,15 @@ class ExecuteJavaScriptTool(BaseTool):
 # safety without the substance. Its removal was already flagged in CLAUDE.md.
 # For shell execution use the guarded /api/code-execution/shell endpoint, which
 # runs list-form commands without a shell.
+#
+# Repository-scoped command execution is intentionally deferred. A future
+# implementation must use a real sandbox or a deliberately named native runner
+# with list-form subprocess calls, containment checks, env/output limits, and
+# negative tests for traversal, symlinks, and shell metacharacters.
+#
+# NOTE: these tools are registered by backend/tools/tool_registry_init.py
+# (register_test_execution_tools), which imports ExecutePythonTool /
+# ExecuteJavaScriptTool directly. A second module-level registration helper
+# previously lived here but had no callers and risked drifting out of sync with
+# the real path, so it was removed 2026-05-31.
 
