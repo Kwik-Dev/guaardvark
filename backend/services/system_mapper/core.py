@@ -32,6 +32,7 @@ class FindingKind(str, Enum):
     UNTESTED_MODULE = "untested-module"
     DORMANT_MODULE = "dormant-module"          # no static importers
     BACKUP_ARTIFACT = "backup-artifact"        # .BACK / __BACKUP / _BACK files
+    DEAD_SYMBOL = "dead-symbol"                # function defined, statically referenced nowhere
 
 
 @dataclass
@@ -157,7 +158,7 @@ def codebase_map(
     Imports each analyzer locally so a failure in one doesn't break the others —
     self-improvement consumers want partial results when one analyzer chokes.
     """
-    from . import dependency_graph, reachability, tool_graph
+    from . import dependency_graph, reachability, tool_graph, dead_symbol
 
     root = Path(root_path).resolve()
     if not root.is_dir():
@@ -210,6 +211,19 @@ def codebase_map(
             kind=FindingKind.UNWIRED_TOOL,
             severity=Severity.INFO,
             summary=f"tool_graph analyzer failed: {e}",
+        ))
+
+    # 4. Dead-symbol (function-level static dead-code; advisory only, NEVER
+    #    auto-dispatched — see DISPATCHABLE_KINDS, deliberately excludes this kind).
+    try:
+        dead_result = dead_symbol.analyze(root, extra_excludes)
+        smap.findings.extend(dead_result["findings"])
+        smap.stats["dead_symbol"] = dead_result["stats"]
+    except Exception as e:
+        smap.findings.append(Finding(
+            kind=FindingKind.DEAD_SYMBOL,
+            severity=Severity.INFO,
+            summary=f"dead_symbol analyzer failed: {e}",
         ))
 
     return smap

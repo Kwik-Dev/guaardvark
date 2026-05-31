@@ -1060,6 +1060,40 @@ class LLMSessionSummary(db.Model):
         }
 
 
+class SymbolHit(db.Model):
+    """Runtime-liveness record: what code ACTUALLY RAN, not just what imported.
+
+    Each row is one tracked symbol (a Celery task today; routes/tools later in
+    Phase 2). `mode_flags` is a bitfield ORing together the execution modes a
+    symbol was hit under (bit 1 = celery task, future bits = http/cli/etc).
+    `static_reachability` is populated by the import-graph audit; a NULL/false
+    value means "not known reachable", TRUE means "statically reachable" — the
+    prune job never removes reachable-but-cold rows (once-a-month handlers).
+    """
+    __tablename__ = "symbol_hits"
+
+    symbol_id = db.Column(db.String(128), primary_key=True)
+    symbol_kind = db.Column(db.String(16))
+    display_name = db.Column(db.String(255))
+    module = db.Column(db.String(255), nullable=True)
+    mode_flags = db.Column(db.Integer, default=0)
+    hit_count = db.Column(db.BigInteger, default=0)
+    last_fired_at = db.Column(db.DateTime, default=lambda: datetime.now(), index=True)
+    static_reachability = db.Column(db.Boolean, nullable=True)
+
+    def to_dict(self):
+        return {
+            "symbol_id": self.symbol_id,
+            "symbol_kind": self.symbol_kind,
+            "display_name": self.display_name,
+            "module": self.module,
+            "mode_flags": self.mode_flags,
+            "hit_count": self.hit_count,
+            "last_fired_at": self.last_fired_at.isoformat() if self.last_fired_at else None,
+            "static_reachability": self.static_reachability,
+        }
+
+
 class TrainingDataset(db.Model):
     __tablename__ = "training_datasets"
     id = db.Column(db.Integer, primary_key=True)

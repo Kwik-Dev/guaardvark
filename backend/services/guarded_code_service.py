@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import difflib
 import os
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -136,6 +138,110 @@ def protected_file_reason(relative_path: str) -> str | None:
                 f"'{protected}' is protected by the kill switch architecture "
                 "and cannot be modified by autonomous processes."
             )
+    return None
+
+
+# --- Mutability Gatekeeper (read-only / archived lifecycle) ---------------
+#
+# This is a layer ON TOP of the existing guards (lock / protected / exact-match
+# / syntax / backup / rollback). Its job: refuse to mutate files the
+# system_mapper classifies as backup artifacts or archived lifecycle.
+#
+# FAIL-OPEN BY DESIGN (read this before "fixing" it):
+#   Tier 2 (the cached, map-derived lifecycle check) FAILS OPEN — if the
+#   analyzer crashes, the cache build raises, or any node lookup blows up, we
+#   ALLOW the write. This is the DELIBERATE OPPOSITE of `is_codebase_locked()`,
+#   which fails CLOSED (defaults to locked) because the lock is a hard safety
+#   brake. The lifecycle gate is an ergonomic guard, not a safety brake: an
+#   interactive edit must never be bricked because a static analyzer choked on
+#   an unrelated file. The real safety nets (lock, PROTECTED_FILES, exact-match,
+#   syntax verify, backup, rollback) all still run regardless, and Tier 1 below
+#   already HARD-BLOCKS the genuinely dangerous case (backup artifacts) with a
+#   pure string check that needs no analyzer and cannot crash.
+
+# Tier-2 lifecycle cache: repo_root(str) -> (built_at_monotonic, node_meta dict)
+_LIFECYCLE_CACHE: dict[str, tuple[float, dict]] = {}
+_LIFECYCLE_CACHE_LOCK = threading.Lock()
+_LIFECYCLE_CACHE_TTL = 300.0  # seconds
+
+
+def invalidate_lifecycle_cache() -> None:
+    """Drop the cached system-map lifecycle metadata (e.g. after large edits)."""
+    with _LIFECYCLE_CACHE_LOCK:
+        _LIFECYCLE_CACHE.clear()
+
+
+def _lifecycle_node_meta(root: Path) -> dict:
+    """Return cached node_meta for `root`, building lazily on miss/expiry.
+
+    May raise if the system-mapper import or analysis fails — callers in the
+    gatekeeper treat any raise as fail-open (allow the write)."""
+    key = str(root)
+    now = time.monotonic()
+    with _LIFECYCLE_CACHE_LOCK:
+        cached = _LIFECYCLE_CACHE.get(key)
+        if cached and (now - cached[0]) < _LIFECYCLE_CACHE_TTL:
+            return cached[1]
+
+    # Build outside the lock — codebase_map() is multi-second and we don't want
+    # to serialize unrelated edits behind it.
+    from backend.services.system_mapper import codebase_map
+
+    smap = codebase_map(root)
+    node_meta = smap.node_meta or {}
+
+    with _LIFECYCLE_CACHE_LOCK:
+        _LIFECYCLE_CACHE[key] = (time.monotonic(), node_meta)
+    return node_meta
+
+
+def readonly_lifecycle_reason(relative_path: str) -> str | None:
+    """Return a block reason if the path is a backup artifact or archived module.
+
+    TIER 1 (always-on, deterministic, no map run, no I/O): backup-artifact path
+    match (.BACK / .BACKUP / _BACK / __BACKUP / /backs/ / /_archive/). This is
+    the must-ship hard block.
+
+    TIER 2 (cached, optional, .py only): consult the system_mapper lifecycle and
+    block ONLY lifecycle == 'archived'. 'dormant' is explicitly NOT blocked —
+    dormant/unrouted modules are legitimately edited to wire them up. Tier 2
+    FAILS OPEN: any exception allows the write (see the module comment above for
+    why this is the opposite of the codebase-lock policy)."""
+    normalized = relative_path.replace("\\", "/").strip("/")
+    if not normalized:
+        return None
+
+    # TIER 1 — pure string check, microseconds, no I/O, cannot crash.
+    from backend.services.system_mapper.dependency_graph import _is_backup_artifact
+
+    if _is_backup_artifact(normalized):
+        return (
+            f"'{normalized}' is a backup/archived artifact (read-only) and "
+            "cannot be modified by self-code operations."
+        )
+
+    # TIER 2 — richer 'archived' lifecycle. Python sources only.
+    if not normalized.endswith(".py"):
+        return None
+
+    try:
+        root = default_repo_root()
+        node_meta = _lifecycle_node_meta(root)
+        for meta in node_meta.values():
+            if not isinstance(meta, dict):
+                continue
+            if meta.get("path", "").replace("\\", "/").strip("/") != normalized:
+                continue
+            if meta.get("lifecycle") == "archived":
+                return (
+                    f"'{normalized}' is classified as archived (read-only) by the "
+                    "system mapper and cannot be modified by self-code operations."
+                )
+            break
+    except Exception:
+        # FAIL OPEN — see module comment. An analyzer failure must not brick edits.
+        return None
+
     return None
 
 
@@ -388,6 +494,14 @@ def apply_exact_replacement(
         if protected_reason:
             raise GuardedCodeError(protected_reason, "PROTECTED_FILE", 403)
 
+        # Mutability Gatekeeper: refuse writes to read-only / archived files.
+        # Runs after the protected-file check (so PROTECTED_FILE wins on overlap)
+        # and before content read / dry-run / backup, so dry-runs report the
+        # rejection and the backup->write->verify->rollback sequence is untouched.
+        lifecycle_reason = readonly_lifecycle_reason(relative_path)
+        if lifecycle_reason:
+            raise GuardedCodeError(lifecycle_reason, "READONLY_LIFECYCLE", 403)
+
     current_content = _read_text_file(file_path)
     occurrence_count = current_content.count(old_text)
 
@@ -503,6 +617,13 @@ def stage_pending_fix(
     protected_reason = protected_file_reason(relative_path)
     if protected_reason:
         raise GuardedCodeError(protected_reason, "PROTECTED_FILE", 403)
+
+    # Mutability Gatekeeper: reject proposals targeting read-only / archived files
+    # at staging time, same as apply does (Tier 1 backup-artifact hard block plus
+    # Tier 2 archived-lifecycle, fail-open).
+    lifecycle_reason = readonly_lifecycle_reason(relative_path)
+    if lifecycle_reason:
+        raise GuardedCodeError(lifecycle_reason, "READONLY_LIFECYCLE", 403)
 
     current_content = file_path.read_text(encoding="utf-8")
     occurrence_count = current_content.count(old_text)

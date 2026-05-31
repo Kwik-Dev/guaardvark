@@ -220,9 +220,48 @@ def create_celery_app():
 
         def __call__(self, *args, **kwargs):
             with minimal_app.app_context():
+                # Runtime-liveness: record that this task ACTUALLY RAN. Hot
+                # path — never let an audit failure break a real task, and
+                # never do DB I/O here (the tracker buffers in-memory).
+                try:
+                    from backend.services.execution_context_tracker import (
+                        get_tracker,
+                        MODE_CELERY_TASK,
+                    )
+                    tracker = get_tracker()
+                    tracker.record_hit(
+                        f"task:{self.name}",
+                        "task",
+                        self.name,
+                        self.name.rsplit('.', 1)[0] if self.name and '.' in self.name else self.name,
+                        mode_bit=MODE_CELERY_TASK,
+                    )
+                    # Time-based flush so a steady worker doesn't grow the
+                    # buffer unbounded between the beat-driven flush ticks.
+                    tracker.maybe_flush(interval_s=60.0)
+                except Exception:  # noqa: BLE001 - never fail a task on audit
+                    pass
                 return TaskBase.__call__(self, *args, **kwargs)
 
     celery_app.Task = ContextTask
+
+    # Flush the runtime-liveness buffer when a worker child recycles
+    # (max_tasks_per_child=50) or the worker shuts down, so a recycling child
+    # doesn't drop its buffered hits. Solo/concurrency=1 means count-based
+    # flush alone isn't enough.
+    try:
+        from celery.signals import worker_process_shutdown
+
+        @worker_process_shutdown.connect
+        def _flush_runtime_hits_on_shutdown(**_kwargs):
+            try:
+                with minimal_app.app_context():
+                    from backend.services.execution_context_tracker import get_tracker
+                    get_tracker().flush()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not register runtime-audit shutdown flush: {e}")
     
     try:
         from backend.celery_tasks_isolated import ping, index_document_task, generate_bulk_csv_v2_task, bulk_import_documents_task
@@ -352,6 +391,17 @@ def create_celery_app():
         logger.info("Plugin dependency reconciler task imported successfully")
     except ImportError as e:
         logger.warning(f"Could not import plugin dependency task: {e}")
+
+    try:
+        from backend.tasks.runtime_audit_tasks import (
+            create_runtime_audit_tasks,
+            schedule_runtime_audit_tasks,
+        )
+        create_runtime_audit_tasks(celery_app)
+        schedule_runtime_audit_tasks(celery_app)
+        logger.info("Runtime-audit Celery tasks registered successfully")
+    except ImportError as e:
+        logger.warning(f"Could not import runtime-audit tasks: {e}")
 
     logger.info("Celery app configured with enhanced performance settings and Beat schedule")
     return celery_app
