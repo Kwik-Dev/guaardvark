@@ -206,6 +206,10 @@ def tick_self_share(self) -> dict:
 def tick_process_approved_drafts(self) -> dict:
     """Beat tick — process UI-approved drafts for Reddit and YouTube."""
     def _run():
+        from backend.services.social_outreach import kill_switch
+        if not kill_switch.is_enabled():
+            return {"processed": 0, "reason": "kill_switch_off"}
+
         from backend.models import SocialOutreachLog, db
         from backend.services.social_outreach.reddit_outreach import post_comment_via_servo as reddit_post_comment, record_post_via_backend
         from backend.services.social_outreach.youtube_outreach import (

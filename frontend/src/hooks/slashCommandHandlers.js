@@ -20,6 +20,7 @@ export async function executeBuiltinCommand(name, args, context) {
     "/imagemodel": handleImageModel,
     "/imagine": handleImagine,
     "/websearch": handleWebSearch,
+    "/outreach": handleOutreach,
     "/plan": handlePlan,
     "/training": handleTraining,
     "/agent": handleAgent,
@@ -254,6 +255,106 @@ async function handleWebSearch(args, { addMessage }) {
   }
   // Return unhandled so the existing ChatInput websearch handler can pick it up
   return { handled: false };
+}
+
+// ============================================================
+// /outreach [status|reddit|self_share|recon|draft]
+// ============================================================
+
+async function handleOutreach(args, { addMessage }) {
+  const raw = (args || "").trim();
+  const [verbRaw = "status", ...rest] = raw.split(/\s+/).filter(Boolean);
+  const verb = verbRaw.toLowerCase().replace("-", "_");
+
+  addMessage({
+    role: "user",
+    content: raw ? `/outreach ${raw}` : "/outreach status",
+    tempId: `outreach-user-${Date.now()}`,
+    type: "command",
+  });
+
+  if (!raw || verb === "status") {
+    try {
+      const res = await fetch("/api/social-outreach/status");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const enabled = data.enabled ? "Enabled" : "Disabled";
+      const supervised = data.supervised ? "supervised" : "unsupervised";
+      const cadence = data.cadence || {};
+      const cadenceLines = Object.entries(cadence).map(([platform, value]) => {
+        const posts = value.posts_in_24h ?? 0;
+        const cap = value.daily_cap ?? 0;
+        const last = value.last_post_seconds_ago != null
+          ? `, last ${Math.floor(value.last_post_seconds_ago / 60)}m ago`
+          : "";
+        return `- ${platform}: ${posts}/${cap} today${last}`;
+      });
+      addMessage({
+        role: "system",
+        content: `**Outreach:** ${enabled} (${supervised})\n\n${cadenceLines.join("\n") || "No cadence data."}`,
+        tempId: `outreach-status-${Date.now()}`,
+        type: "command",
+      });
+    } catch (err) {
+      addMessage({
+        role: "system",
+        content: `Outreach status failed: ${err.message}`,
+        tempId: `outreach-status-err-${Date.now()}`,
+        type: "command",
+      });
+    }
+    return { handled: true };
+  }
+
+  const platformAliases = {
+    reddit: "reddit",
+    self_share: "self_share",
+    selfshare: "self_share",
+    share: "self_share",
+    recon: "recon",
+    draft: "draft",
+  };
+  const platform = platformAliases[verb];
+  if (!platform) {
+    addMessage({
+      role: "system",
+      content: "Usage: `/outreach [status|reddit [subreddit]|self_share|recon|draft]`",
+      tempId: `outreach-usage-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+
+  const subreddit = rest[0] ? rest[0].replace(/^r\//i, "") : undefined;
+  const linkUrl = rest.find((token) => /^https?:\/\//i.test(token));
+
+  try {
+    const res = await fetch("/api/social-outreach/run-pass", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform,
+        ...(subreddit && platform !== "draft" ? { subreddit } : {}),
+        ...(linkUrl ? { link_url: linkUrl } : {}),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    addMessage({
+      role: "system",
+      content: data.message || `Outreach job queued as task #${data.task_id}.`,
+      tempId: `outreach-ok-${Date.now()}`,
+      type: "command",
+    });
+  } catch (err) {
+    addMessage({
+      role: "system",
+      content: `Outreach command failed: ${err.message}`,
+      tempId: `outreach-err-${Date.now()}`,
+      type: "command",
+    });
+  }
+  return { handled: true };
 }
 
 // ============================================================

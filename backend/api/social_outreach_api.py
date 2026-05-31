@@ -680,66 +680,28 @@ def run_pass():
     """Trigger an outreach pass on demand instead of waiting for the cron.
 
     Body: {platform: "reddit"|"self_share", subreddit?: "SideProject"}
-    Returns the Celery task id; the actual run is async on the worker.
+    Returns a Task-backed job id; the actual run is async on the worker.
     """
     body = request.get_json(silent=True) or {}
     platform = (body.get("platform") or "").strip().lower()
     subreddit = (body.get("subreddit") or "").strip() or None
-
-    if not kill_switch.is_enabled():
-        return jsonify({"error": "outreach is disabled (kill switch is off)"}), 400
+    link_url = (body.get("link_url") or body.get("share_link") or "").strip() or None
 
     try:
-        if platform == "reddit":
-            from backend.tasks.social_outreach_tasks import (
-                engage_with_subreddit,
-                tick_reddit_outreach,
-            )
-            async_result = (
-                engage_with_subreddit.delay(subreddit) if subreddit
-                else tick_reddit_outreach.delay()
-            )
-            return jsonify({
-                "task_id": async_result.id,
-                "platform": "reddit",
-                "subreddit": subreddit,
-                "message": (
-                    f"Reddit pass queued for r/{subreddit}." if subreddit
-                    else "Reddit pass queued (round-robin pick from targets.json)."
-                ),
-            })
-        if platform == "self_share":
-            from backend.tasks.social_outreach_tasks import tick_self_share
-            async_result = tick_self_share.delay()
-            return jsonify({
-                "task_id": async_result.id,
-                "platform": "self_share",
-                "message": "Self-share pass queued (link post to next round-robin sub).",
-            })
-        if platform == "recon":
-            # Recon agent — scouts for candidates only, never drafts/posts.
-            # Safe to run any time; no cadence gate, no servo.
-            from backend.tasks.social_outreach_tasks import tick_recon_reddit
-            async_result = tick_recon_reddit.delay()
-            return jsonify({
-                "task_id": async_result.id,
-                "platform": "recon",
-                "message": "Recon pass queued (scout next round-robin sub for candidates).",
-            })
-        if platform == "draft":
-            # Content agent — drafts candidates into drafts. No servo, no
-            # posting. Reads status="candidate" rows, transitions to "drafted"
-            # or "rejected" based on LLM grade.
-            from backend.tasks.social_outreach_tasks import tick_draft_candidates
-            async_result = tick_draft_candidates.delay()
-            return jsonify({
-                "task_id": async_result.id,
-                "platform": "draft",
-                "message": "Content pass queued (draft up to N candidate rows).",
-            })
-        return jsonify({
-            "error": f"unsupported platform '{platform}'. Use 'reddit', 'self_share', 'recon', or 'draft'.",
-        }), 400
+        from backend.services.social_outreach.job_service import queue_outreach_run
+
+        queued = queue_outreach_run(
+            platform,
+            subreddit=subreddit,
+            link_url=link_url,
+            batch_size=body.get("batch_size"),
+            created_by="outreach_page",
+        )
+        return jsonify(queued), 202
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error("run_pass failed: %s", e)
         return jsonify({"error": str(e)}), 500

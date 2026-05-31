@@ -380,7 +380,7 @@ class OutreachRejectDraftTool(BaseTool):
 
 
 class OutreachRunPassTool(BaseTool):
-    """Trigger an outreach Celery pass on demand."""
+    """Trigger a Task-backed outreach pass on demand."""
 
     name = "outreach_run_pass"
     description = (
@@ -388,7 +388,7 @@ class OutreachRunPassTool(BaseTool):
         "'reddit' (engage with a sub — pass subreddit to target one, omit for "
         "round-robin), 'self_share' (link post to next round-robin sub), "
         "'recon' (scout candidates only, never posts), 'draft' (LLM-draft any "
-        "candidate rows). Returns the Celery task id. Cadence + kill switch still apply."
+        "candidate rows). Returns the Task/Job Queue id. Cadence + kill switch still apply."
     )
     requires_approval = True
     parameters = {
@@ -418,40 +418,22 @@ class OutreachRunPassTool(BaseTool):
         subreddit = (kwargs.get("subreddit") or "").strip() or None
 
         try:
-            if platform == "reddit":
-                from backend.tasks.social_outreach_tasks import (
-                    engage_with_subreddit, tick_reddit_outreach,
-                )
-                async_result = (
-                    engage_with_subreddit.delay(subreddit) if subreddit
-                    else tick_reddit_outreach.delay()
-                )
-                msg = (
-                    f"Reddit pass queued for r/{subreddit}." if subreddit
-                    else "Reddit pass queued (round-robin)."
-                )
-            elif platform == "self_share":
-                from backend.tasks.social_outreach_tasks import tick_self_share
-                async_result = tick_self_share.delay()
-                msg = "Self-share pass queued."
-            elif platform == "recon":
-                from backend.tasks.social_outreach_tasks import tick_recon_reddit
-                async_result = tick_recon_reddit.delay()
-                msg = "Recon pass queued (scout only, no posting)."
-            else:  # 'draft'
-                from backend.tasks.social_outreach_tasks import tick_draft_candidates
-                async_result = tick_draft_candidates.delay()
-                msg = "Content pass queued (drafting candidate rows)."
+            from backend.services.social_outreach.job_service import queue_outreach_run
+
+            queued = queue_outreach_run(
+                platform,
+                subreddit=subreddit,
+                created_by="chat_tool",
+            )
 
             return ToolResult(
                 success=True,
-                output={
-                    "task_id": async_result.id,
+                output=queued,
+                metadata={
+                    "task_id": queued.get("task_id"),
+                    "job_id": queued.get("job_id"),
                     "platform": platform,
-                    "subreddit": subreddit,
-                    "message": msg,
                 },
-                metadata={"task_id": async_result.id, "platform": platform},
             )
         except Exception as e:
             logger.exception("outreach_run_pass failed")

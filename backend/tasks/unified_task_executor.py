@@ -493,6 +493,17 @@ def execute_unified_task(self, task_id: int):
 
         # Determine execution strategy based on task type
         task_type = task.get('type', 'content_generation')
+        if task_type and task_type.startswith('social_outreach_') and progress_system and process_id:
+            try:
+                from backend.utils.unified_progress_system import ProcessType
+                progress_system.create_process(
+                    ProcessType.OUTREACH,
+                    f"Executing Outreach task {task_id}",
+                    {"task_id": task_id, "celery_task_id": celery_task_id, "task_type": task_type},
+                    process_id=process_id,
+                )
+            except Exception as e:
+                logger.warning(f"Could not switch progress tracking to Outreach: {e}")
 
         # Try to find a specific handler for the task type
         output = None
@@ -509,21 +520,71 @@ def execute_unified_task(self, task_id: int):
         # Social outreach tasks — discover + draft + (maybe) post on a platform.
         if output is None and task_type and task_type.startswith('social_outreach_'):
             try:
-                update_progress(20, f"Running social outreach pass: {task_type}")
+                update_progress(20, f"Running Outreach pass: {task_type}")
                 wf = task.get('workflow_config') or {}
                 if task_type == 'social_outreach_reddit':
-                    from backend.services.social_outreach.reddit_outreach import RedditOutreachLoop
-                    output = RedditOutreachLoop().run_one_pass(
-                        wf.get('subreddit', ''),
-                        task_id=task_id,
-                    )
+                    subreddit = (wf.get('subreddit') or '').strip()
+                    if not subreddit:
+                        from backend.tasks.social_outreach_tasks import _load_targets, _next_target
+                        targets = _load_targets()
+                        subs = (targets.get("reddit") or {}).get("outreach_subs") or []
+                        subreddit = _next_target("reddit_outreach", subs) or ''
+                    if not subreddit:
+                        output = {"skipped": True, "reason": "no_targets"}
+                    else:
+                        update_progress(35, f"Running Reddit Outreach for r/{subreddit}")
+                        from backend.services.social_outreach.reddit_outreach import RedditOutreachLoop
+                        output = RedditOutreachLoop().run_one_pass(
+                            subreddit,
+                            task_id=task_id,
+                        )
                 elif task_type == 'social_outreach_share':
-                    from backend.services.social_outreach.self_share import SelfShareLoop
-                    output = SelfShareLoop().run_one_pass(
-                        wf.get('subreddit', ''),
-                        wf.get('link_url', ''),
-                        task_id=task_id,
+                    subreddit = (wf.get('subreddit') or '').strip()
+                    link_url = (wf.get('link_url') or '').strip()
+                    if not subreddit or not link_url:
+                        from backend.tasks.social_outreach_tasks import _load_targets, _next_target
+                        targets = _load_targets()
+                        reddit_targets = targets.get("reddit") or {}
+                        if not subreddit:
+                            subs = reddit_targets.get("share_subs") or []
+                            subreddit = _next_target("reddit_share", subs) or ''
+                        if not link_url:
+                            from backend.services.social_outreach.persona import SITE_URL
+                            link_url = reddit_targets.get("default_share_url") or SITE_URL
+                    if not subreddit:
+                        output = {"skipped": True, "reason": "no_targets"}
+                    else:
+                        update_progress(35, f"Running Outreach self-share for r/{subreddit}")
+                        from backend.services.social_outreach.self_share import SelfShareLoop
+                        output = SelfShareLoop().run_one_pass(
+                            subreddit,
+                            link_url,
+                            task_id=task_id,
+                        )
+                elif task_type == 'social_outreach_recon':
+                    subreddit = (wf.get('subreddit') or '').strip()
+                    if not subreddit:
+                        from backend.tasks.social_outreach_tasks import _load_targets, _next_target
+                        targets = _load_targets()
+                        subs = (targets.get("reddit") or {}).get("outreach_subs") or []
+                        subreddit = _next_target("reddit_recon", subs) or ''
+                    if not subreddit:
+                        output = {"skipped": True, "reason": "no_targets"}
+                    else:
+                        update_progress(35, f"Scouting Outreach candidates in r/{subreddit}")
+                        from backend.services.social_outreach.recon import RecondAgent
+                        output = RecondAgent().scout_reddit(subreddit)
+                elif task_type == 'social_outreach_draft':
+                    update_progress(35, "Drafting Outreach candidates")
+                    from backend.services.social_outreach.content_agent import (
+                        ContentAgent,
+                        DEFAULT_BATCH_SIZE,
                     )
+                    try:
+                        batch_size = int(wf.get('batch_size') or DEFAULT_BATCH_SIZE)
+                    except (TypeError, ValueError):
+                        batch_size = DEFAULT_BATCH_SIZE
+                    output = ContentAgent().draft_batch(batch_size)
                 elif task_type == 'social_outreach_discord':
                     output = {"status": "noop", "reason": "discord cog polls itself"}
                 else:
@@ -540,8 +601,13 @@ def execute_unified_task(self, task_id: int):
             handler_used = 'generic_llm'
 
         # Validate output
-        if not output or (isinstance(output, str) and output.startswith('Error:')):
-            error_msg = output if output else "No output generated"
+        if (
+            not output
+            or (isinstance(output, str) and output.startswith('Error:'))
+            or (isinstance(output, dict) and output.get("error"))
+        ):
+            error_msg = output.get("error") if isinstance(output, dict) else output
+            error_msg = error_msg if error_msg else "No output generated"
             logger.error(f"Task {task_id} produced error output: {error_msg}")
 
             # BUG FIX #4: Use Celery's built-in retry count instead of manual tracking

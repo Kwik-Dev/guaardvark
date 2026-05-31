@@ -46,6 +46,7 @@ class ProcessType(Enum):
     WORDPRESS_PUSH = "wordpress_push"
     WORDPRESS_PROCESSING = "wordpress_processing"
     VIDEO_RENDER = "video_render"
+    OUTREACH = "outreach"
     UNKNOWN = "unknown"
 
 

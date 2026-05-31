@@ -56,6 +56,33 @@ def adapt_task(row, *, started_at: datetime | None = None) -> Job:
     )
 
 
+def adapt_outreach_task(row) -> Job:
+    """Social Outreach Task row → Job."""
+    progress = float(row.progress) if row.progress is not None else None
+    status = map_status(JobKind.OUTREACH, row.status)
+
+    return Job(
+        id=f"outreach:{row.id}",
+        kind=JobKind.OUTREACH,
+        native_id=row.id,
+        status=status,
+        label=row.name or f"Outreach task #{row.id}",
+        progress=progress,
+        started_at=row.created_at,
+        finished_at=row.updated_at if status.is_terminal else None,
+        duration_s=_compute_duration(row.created_at, row.updated_at if status.is_terminal else None),
+        cancellable=status.is_active,
+        parent_id=f"task:{row.parent_task_id}" if getattr(row, "parent_task_id", None) else None,
+        error_message=getattr(row, "error_message", None),
+        metadata={
+            "type": row.type,
+            "task_id": row.id,
+            "task_job_id": getattr(row, "job_id", None),
+            "workflow_config": _safe_json(getattr(row, "workflow_config", None)),
+        },
+    )
+
+
 def adapt_training_job(row) -> Job:
     """TrainingJob → Job. Pulls progress, current_step/total_steps,
     pipeline_stage, and the live PID from the dedicated training schema."""
@@ -160,7 +187,11 @@ def adapt_unified_progress(event: dict[str, Any]) -> Job:
     """
     process_id = event.get("process_id") or event.get("job_id") or "unknown"
     process_type = event.get("process_type") or event.get("processType") or "processing"
-    status = map_status(JobKind.UNIFIED_PROGRESS, event.get("status"))
+    kind = JobKind.OUTREACH if process_type == "outreach" else JobKind.UNIFIED_PROGRESS
+    native_id = process_id
+    if kind == JobKind.OUTREACH and str(process_id).startswith("task_"):
+        native_id = str(process_id).split("_", 1)[1]
+    status = map_status(kind, event.get("status"))
     progress = event.get("progress")
     if progress is not None:
         try:
@@ -169,9 +200,9 @@ def adapt_unified_progress(event: dict[str, Any]) -> Job:
             progress = None
 
     return Job(
-        id=f"unified:{process_id}",
-        kind=JobKind.UNIFIED_PROGRESS,
-        native_id=process_id,
+        id=f"{kind.value}:{native_id}",
+        kind=kind,
+        native_id=native_id,
         status=status,
         label=event.get("message") or process_type,
         progress=progress,
@@ -180,6 +211,7 @@ def adapt_unified_progress(event: dict[str, Any]) -> Job:
         cancellable=status.is_active,
         metadata={
             "process_type": process_type,
+            "process_id": process_id,
             "additional_data": event.get("additional_data") or {},
         },
     )
@@ -254,6 +286,7 @@ def _load_unified_progress(process_id):
 # Tasks/Jobs page) picks it up automatically.
 REGISTRY: dict[JobKind, tuple[LoaderFn, AdapterFn]] = {
     JobKind.TASK: (_load_task, adapt_task),
+    JobKind.OUTREACH: (_load_task, adapt_outreach_task),
     JobKind.TRAINING: (_load_training, adapt_training_job),
     JobKind.SELF_IMPROVEMENT: (_load_self_improvement, adapt_self_improvement),
     JobKind.EXPERIMENT: (_load_experiment, adapt_experiment),

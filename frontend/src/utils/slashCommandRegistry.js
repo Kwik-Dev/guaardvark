@@ -43,6 +43,15 @@ const BUILT_IN_COMMANDS = [
     ruleId: null,
   },
   {
+    name: "/outreach",
+    description: "Show Outreach status or add an Outreach pass to the Job Queue",
+    usage: "/outreach [status|reddit [subreddit]|self_share|recon|draft]",
+    category: "outreach",
+    args: "optional",
+    handler: "builtin",
+    ruleId: null,
+  },
+  {
     name: "/plan",
     description: "Create an orchestrator plan",
     usage: "/plan <request>",

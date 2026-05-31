@@ -34,6 +34,7 @@ class JobKind(str, Enum):
     VIDEO_RENDER = "video_render"       # editor renders (lands in Phase 7 of editor plan)
     PRODUCTION = "production"           # ViMax-style production pipeline parent
     LORA_TRAIN = "lora_train"           # Per-Subject LoRA training (child of PRODUCTION)
+    OUTREACH = "outreach"               # Social outreach Task rows and progress events
     UNIFIED_PROGRESS = "unified"        # in-memory-only process
 
 
@@ -160,6 +161,7 @@ def map_status(kind: JobKind, native_status: str | None) -> JobStatus:
 
     table = {
         JobKind.TASK: _TASK_STATUS_MAP,
+        JobKind.OUTREACH: _TASK_STATUS_MAP,
         JobKind.TRAINING: _TRAINING_STATUS_MAP,
         JobKind.UNIFIED_PROGRESS: _UNIFIED_PROGRESS_STATUS_MAP,
         JobKind.VIDEO_RENDER: _UNIFIED_PROGRESS_STATUS_MAP,

@@ -30,6 +30,7 @@ from flask import Blueprint, jsonify, request
 from backend.services.job_registry import (
     REGISTRY,
     adapt_task,
+    adapt_outreach_task,
     adapt_training_job,
     adapt_self_improvement,
     adapt_experiment,
@@ -57,10 +58,24 @@ _MAX_LIMIT = 500
 def _collect_tasks(*, since: datetime | None, limit: int) -> Iterable[Job]:
     from backend.models import Task as DBTask, db
     q = db.session.query(DBTask).order_by(DBTask.updated_at.desc())
+    q = q.filter((DBTask.type.is_(None)) | (~DBTask.type.like("social_outreach_%")))
     if since:
         q = q.filter(DBTask.updated_at >= since)
     for row in q.limit(limit).all():
         yield adapt_task(row)
+
+
+def _collect_outreach(*, since: datetime | None, limit: int) -> Iterable[Job]:
+    from backend.models import Task as DBTask, db
+    q = (
+        db.session.query(DBTask)
+        .filter(DBTask.type.like("social_outreach_%"))
+        .order_by(DBTask.updated_at.desc())
+    )
+    if since:
+        q = q.filter(DBTask.updated_at >= since)
+    for row in q.limit(limit).all():
+        yield adapt_outreach_task(row)
 
 
 def _collect_training(*, since: datetime | None, limit: int) -> Iterable[Job]:
@@ -143,6 +158,7 @@ def _collect_unified_progress(*, since, limit) -> Iterable[Job]:
 # job_registry.py + add a collector here. The list endpoint picks it up.
 _COLLECTORS = {
     JobKind.TASK: _collect_tasks,
+    JobKind.OUTREACH: _collect_outreach,
     JobKind.TRAINING: _collect_training,
     JobKind.SELF_IMPROVEMENT: _collect_self_improvement,
     JobKind.EXPERIMENT: _collect_experiments,
@@ -365,6 +381,30 @@ def job_history():
             "limit": limit,
             "offset": offset,
         },
+    }), 200
+
+
+@unified_jobs_resource_bp.route("/history", methods=["DELETE"])
+def clear_job_history():
+    """Clear terminal-job history from the job_history table for specific kinds.
+
+    Query params:
+        kind     comma-separated list of JobKind values or custom strings to clear
+    """
+    from backend.services.job_history_service import clear_history
+
+    kind_raw = request.args.get("kind")
+    if not kind_raw:
+        return jsonify({"error": "kind parameter is required"}), 400
+
+    kinds = [k.strip() for k in kind_raw.split(",") if k.strip()]
+    if not kinds:
+        return jsonify({"error": "kind parameter cannot be empty"}), 400
+
+    deleted_count = clear_history(kinds)
+    return jsonify({
+        "deleted": deleted_count,
+        "kinds": kinds,
     }), 200
 
 

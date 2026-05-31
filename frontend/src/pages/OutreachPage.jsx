@@ -429,7 +429,7 @@ const OutreachPage = () => {
         throw new Error(errBody.error || `HTTP ${r.status}`);
       }
       const out = await r.json();
-      setInfo(out.message || `${passPlatform} pass queued (task ${out.task_id}).`);
+      setInfo(out.message || `${passPlatform} pass added to the Job Queue as task #${out.task_id}.`);
       // Pass takes seconds-to-minutes on the worker. Refresh once now and
       // again shortly after so the new draft lands in the visible queue
       // without making the user hit the refresh icon.
@@ -628,7 +628,7 @@ const OutreachPage = () => {
               </Tooltip>
             </Stack>
             <Stack direction="row" spacing={0.5} sx={{ mb: 1.25 }}>
-              <Tooltip title="Run the Reddit outreach pass now (next sub from targets.json) — drafts land here when it's done">
+              <Tooltip title="Add a Reddit outreach pass to the Job Queue (next sub from targets.json) — drafts land here when it's done">
                 <span style={{ flex: 1 }}>
                   <Button
                     fullWidth
@@ -643,7 +643,7 @@ const OutreachPage = () => {
                   </Button>
                 </span>
               </Tooltip>
-              <Tooltip title="Run the self-share pass — submits a link post to the next round-robin sub">
+              <Tooltip title="Add a self-share pass to the Job Queue — submits a link post to the next round-robin sub">
                 <span style={{ flex: 1 }}>
                   <Button
                     fullWidth
@@ -666,7 +666,7 @@ const OutreachPage = () => {
               <CircularProgress size={20} />
             ) : queue.length === 0 ? (
               <Typography variant="body2" color="text.secondary">
-                No drafts pending. The Reddit tick fires every 45 min, the Discord cog every 10 min. Hit refresh after that to see new entries.
+                No drafts pending. Add an Outreach pass to the Job Queue, or wait for the scheduled ticks, then refresh to see new entries.
               </Typography>
             ) : (
               <List dense disablePadding sx={{ maxHeight: 360, overflowY: "auto" }}>

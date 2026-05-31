@@ -26,17 +26,21 @@ import {
   Alert,
   TextField,
   InputAdornment,
+  Menu,
+  MenuItem,
 } from "@mui/material";
 import {
   Close as CloseIcon,
   Refresh as RefreshIcon,
   Search as SearchIcon,
+  DeleteOutline as DeleteIcon,
 } from "@mui/icons-material";
 import {
   listJobs,
   listJobHistory,
   jobsSummary,
   cancelJob,
+  clearJobHistory,
   JOB_STATUSES,
 } from "../../api/jobsService";
 import { Button } from "@mui/material";
@@ -84,6 +88,23 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
   const [error, setError] = useState(null);
   const [_summary, setSummary] = useState(null);
   const [selected, setSelected] = useState(null);
+
+  const [clearMenuAnchorEl, setClearMenuAnchorEl] = useState(null);
+  const isClearMenuOpen = Boolean(clearMenuAnchorEl);
+
+  const handleClearHistory = async (kindsToClear) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await clearJobHistory({ kinds: kindsToClear });
+      await refreshHistory();
+    } catch (e) {
+      console.error("JobsList: clear history failed:", e);
+      setError(e.response?.data?.error || e.message || "Failed to clear history");
+      setLoading(false);
+    }
+    setClearMenuAnchorEl(null);
+  };
 
   // Initial load + manual refresh button. Live updates from the socket
   // mutate `activeRows` directly; this is the snapshot fetch.
@@ -242,10 +263,38 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
 
         {/* Tabs: Active / History */}
         <Paper elevation={2} sx={{ borderRadius: 2 }}>
-          <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ borderBottom: 1, borderColor: "divider" }}>
-            <Tab label={`Active (${activeRows.length})`} />
-            <Tab label={`History (${historyRows.length})`} />
-          </Tabs>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ borderBottom: 1, borderColor: "divider", pr: 2 }}>
+            <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+              <Tab label={`Active (${activeRows.length})`} />
+              <Tab label={`History (${historyRows.length})`} />
+            </Tabs>
+            {tab === 1 && historyRows.length > 0 && (
+              <Box>
+                <Button
+                  size="small"
+                  color="error"
+                  startIcon={<DeleteIcon />}
+                  onClick={(e) => setClearMenuAnchorEl(e.currentTarget)}
+                >
+                  Clear History
+                </Button>
+                <Menu
+                  anchorEl={clearMenuAnchorEl}
+                  open={isClearMenuOpen}
+                  onClose={() => setClearMenuAnchorEl(null)}
+                >
+                  <MenuItem onClick={() => handleClearHistory(kinds)}>
+                    <Typography color="error">Clear all shown</Typography>
+                  </MenuItem>
+                  {kinds.map((k) => (
+                    <MenuItem key={k} onClick={() => handleClearHistory([k])}>
+                      Clear {k}
+                    </MenuItem>
+                  ))}
+                </Menu>
+              </Box>
+            )}
+          </Stack>
 
           {error && <Alert severity="error" sx={{ m: 2 }}>{error}</Alert>}
           {loading && <LinearProgress />}

@@ -19,6 +19,7 @@ export const JOB_KINDS = {
   DEMO: "demo",
   BATCH_CSV: "batch_csv",
   VIDEO_RENDER: "video_render",
+  OUTREACH: "outreach",
   UNIFIED_PROGRESS: "unified",
 };
 
@@ -36,6 +37,7 @@ export const JOB_KINDS_FOR_ACTIVITY_PAGE = [
   JOB_KINDS.SELF_IMPROVEMENT,
   JOB_KINDS.EXPERIMENT,
   JOB_KINDS.DEMO,
+  JOB_KINDS.OUTREACH,
   JOB_KINDS.UNIFIED_PROGRESS,
   'production',
   'lora_train',
@@ -71,6 +73,13 @@ export const listJobHistory = async ({ kind, status, limit = 100, offset = 0 } =
   if (kind) params.kind = kind;
   if (status) params.status = status;
   const res = await axios.get(`${API_BASE}/jobs/history`, { params });
+  return res.data;
+};
+
+export const clearJobHistory = async ({ kinds } = {}) => {
+  const k = _toCsv(kinds);
+  if (!k) return { deleted: 0 };
+  const res = await axios.delete(`${API_BASE}/jobs/history`, { params: { kind: k } });
   return res.data;
 };
 

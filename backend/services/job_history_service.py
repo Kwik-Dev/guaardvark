@@ -109,3 +109,30 @@ def list_history(
 
     rows = q.offset(offset).limit(limit).all()
     return [r.to_dict() for r in rows]
+
+
+def clear_history(kinds: list[str]) -> int:
+    """Clear history for the specified kinds.
+    
+    Returns the number of rows deleted.
+    """
+    if not kinds:
+        return 0
+
+    try:
+        from backend.models import JobHistory, db
+    except Exception as e:
+        logger.warning("clear_history: imports failed (%s)", e)
+        return 0
+
+    try:
+        deleted = db.session.query(JobHistory).filter(JobHistory.kind.in_(kinds)).delete(synchronize_session=False)
+        db.session.commit()
+        return deleted
+    except Exception as e:
+        logger.warning("clear_history: failed to delete for kinds %s (%s)", kinds, e)
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        return 0

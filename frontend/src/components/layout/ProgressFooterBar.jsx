@@ -27,6 +27,7 @@ const PROCESS_TYPE_LABELS = {
     wordpress_pull: 'WP Pull',
     wordpress_push: 'WP Push',
     wordpress_processing: 'WordPress',
+    outreach: 'Outreach',
     processing: 'Processing',
     unknown: 'Working',
 };
@@ -76,7 +77,7 @@ const ProgressFooterBar = () => {
             // Priority order for selecting which process to display
             const priorityOrder = [
                 'production', 'indexing', 'image_generation', 'csv_processing', 'file_generation',
-                'analysis', 'upload', 'llm_processing', 'web_scraping', 'backup',
+                'analysis', 'upload', 'llm_processing', 'web_scraping', 'outreach', 'backup',
                 'training', 'lora_train', 'task_processing', 'voice_processing', 'document_processing',
                 'wordpress_pull', 'wordpress_push', 'wordpress_processing', 'processing',
             ];
