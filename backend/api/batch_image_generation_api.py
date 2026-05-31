@@ -338,6 +338,14 @@ def download_model():
         if not generator.image_generator:
             return error_response("Image generator not initialized", 503)
 
+        # Whitelist: only models in the curated catalog may be downloaded — never an
+        # arbitrary caller-supplied HF repo path.
+        allowed_models = set(getattr(generator.image_generator, "available_models", {}) or {})
+        if model_path not in allowed_models:
+            return error_response(
+                f"Unknown model '{model_path}' — not in the allowed model set", 400
+            )
+
         estimated_size_gb = IMAGE_MODEL_SIZES.get(model_path, 2.5)
 
         with model_download_lock:

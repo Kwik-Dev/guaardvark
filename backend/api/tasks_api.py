@@ -891,8 +891,11 @@ def download_task_file(task_id):
                 400,
             )
 
-        # Construct file path
-        file_path = os.path.join(OUTPUT_DIR, task.output_filename)
+        # Construct file path — confine to OUTPUT_DIR (output_filename is user-set
+        # at task create; prevent path traversal out of the output dir).
+        file_path = os.path.realpath(os.path.join(OUTPUT_DIR, task.output_filename))
+        if not file_path.startswith(os.path.realpath(OUTPUT_DIR) + os.sep):
+            return jsonify({"error": "Invalid output filename"}), 400
 
         # Check if file exists
         if not os.path.exists(file_path):
@@ -957,8 +960,11 @@ def get_task_file_info(task_id):
                 200,
             )
 
-        # Construct file path
-        file_path = os.path.join(OUTPUT_DIR, task.output_filename)
+        # Construct file path — confine to OUTPUT_DIR (output_filename is user-set
+        # at task create; prevent path traversal out of the output dir).
+        file_path = os.path.realpath(os.path.join(OUTPUT_DIR, task.output_filename))
+        if not file_path.startswith(os.path.realpath(OUTPUT_DIR) + os.sep):
+            return jsonify({"error": "Invalid output filename"}), 400
 
         # Check if file exists and get info
         if os.path.exists(file_path):

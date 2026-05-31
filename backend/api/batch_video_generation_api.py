@@ -59,6 +59,25 @@ def _check_gpu_availability():
 batch_video_bp = Blueprint("batch_video", __name__, url_prefix="/api/batch-video")
 
 
+import re as _re
+
+
+@batch_video_bp.url_value_preprocessor
+def _reject_unsafe_batch_id(endpoint, values):
+    """Path-traversal guard for every route taking <batch_id>.
+
+    Batch ids are flat tokens (e.g. ``VideoBatch_05-30-2026_003``). The routes
+    build ``batch_dir = base_output_dir / batch_id`` from this URL segment, so a
+    value like ``../../x`` would escape the output dir (the per-file ``video_name``
+    check uses the *unresolved* batch_dir and does not catch this). Rejecting any
+    non-token batch_id here closes the hole once for all routes.
+    """
+    if values and isinstance(values.get("batch_id"), str):
+        if not _re.fullmatch(r"[A-Za-z0-9_\-]+", values["batch_id"]):
+            from flask import abort
+            abort(404)
+
+
 def _parse_list(value) -> List[str]:
     if value is None:
         return []

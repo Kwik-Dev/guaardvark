@@ -26,22 +26,30 @@ def _execute_task(app, task_id: int) -> None:
 
     with app.app_context():
         try:
-            task = db.session.get(Task, task_id)
-            if not task:
-                logger.warning("Task %s not found", task_id)
+            job_id = f"task_{task_id}"
+            # Atomically CLAIM the task before doing anything, mirroring the Celery
+            # beat's guard (status='pending' AND job_id IS NULL). Postgres row-locks
+            # the conditional UPDATE, so the thread scheduler and the beat are mutually
+            # exclusive — exactly one wins. This replaces the old non-atomic two-commit
+            # (status, then job_id) that let both schedulers run the same task.
+            now = datetime.datetime.now(datetime.timezone.utc)
+            claimed = (
+                db.session.query(Task)
+                .filter(Task.id == task_id, Task.status == "pending", Task.job_id.is_(None))
+                .update(
+                    {"status": "in-progress", "job_id": job_id, "updated_at": now},
+                    synchronize_session=False,
+                )
+            )
+            db.session.commit()
+            if claimed != 1:
+                logger.debug("Task %s not claimable (already claimed / not pending) — skipping", task_id)
                 return
 
-            # Update task status to in-progress
-            task.status = "in-progress"
-            task.updated_at = datetime.datetime.now(datetime.timezone.utc)
-            db.session.commit()
-
-            # Create progress tracking job
-            job_id = f"task_{task_id}"
-
-            # Assign job_id to task
-            task.job_id = job_id
-            db.session.commit()
+            task = db.session.get(Task, task_id)  # fresh row after the claim
+            if not task:
+                logger.warning("Task %s not found after claim", task_id)
+                return
 
             process_id = None
             try:
@@ -232,9 +240,14 @@ def _write_output(app, filename: str, content: str) -> None:
         import os
         from backend.config import OUTPUT_DIR
         
-        output_path = os.path.join(OUTPUT_DIR, filename)
+        # Confine to OUTPUT_DIR — filename derives from task.output_filename (user-set);
+        # prevent arbitrary file write via path traversal.
+        output_path = os.path.realpath(os.path.join(OUTPUT_DIR, filename))
+        if not output_path.startswith(os.path.realpath(OUTPUT_DIR) + os.sep):
+            logger.error("Refusing to write task output outside OUTPUT_DIR: %r", filename)
+            return
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
+
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(content)
             
@@ -250,7 +263,7 @@ def process_pending_tasks(app) -> None:
             now = datetime.datetime.now(datetime.timezone.utc)
             tasks = (
                 db.session.query(Task)
-                .filter(Task.status == "pending")
+                .filter(Task.status == "pending", Task.job_id.is_(None))  # mirror the beat; skip claimed tasks
                 .order_by(Task.priority, Task.due_date)
                 .all()
             )

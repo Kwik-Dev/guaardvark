@@ -289,6 +289,9 @@ def check_scheduled_tasks(self):
                 # Now submit task to Celery
                 result = execute_unified_task.apply_async(
                     args=[task_id],
+                    task_id=job_id,  # bind Celery's id to our synthetic job_id so
+                                     # stuck-task recovery's AsyncResult(job_id) is meaningful
+                                     # (was always PENDING for the unknown synthetic id → no-op)
                     queue=_get_queue_for_task_type(task.get('type'))
                 )
 

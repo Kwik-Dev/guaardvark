@@ -38,7 +38,8 @@ def daily_backup(self):
     cleaned = 0
     try:
         cutoff = datetime.now() - timedelta(days=30)
-        for backup_name in backup_service.list_backups():
+        for entry in backup_service.list_backups():
+            backup_name = entry["name"]  # list_backups() yields dicts: {name, size, type, ...}
             if not backup_name.startswith("auto_daily_"):
                 continue
             # Extract YYYYMMDD from auto_daily_YYYYMMDD_HHMMSS.zip

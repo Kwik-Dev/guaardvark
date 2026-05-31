@@ -96,7 +96,10 @@ class JobOperationGate:
             # Already held? Either by us (idempotent) or by someone else.
             if self._gpu_holder is not None:
                 hk, hid, _ = self._gpu_holder
-                if (hk, str(native_id)) == (kind, str(native_id)):
+                # Idempotent only if WE (same kind + same id) already hold it.
+                # Bug was comparing native_id to itself, so any same-kind caller was
+                # wrongly told it already held the GPU while a different id held it.
+                if (hk, hid) == (kind, str(native_id)):
                     return True, "Already holding GPU exclusively"
                 return False, f"GPU is held by {hk.value}:{hid} — wait for completion"
 

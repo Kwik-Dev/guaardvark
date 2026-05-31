@@ -133,7 +133,8 @@ def create_self_improvement_tasks(celery_app: Celery):
 def schedule_self_improvement_tasks(celery_app: Celery):
     from celery.schedules import crontab
 
-    interval_hours = int(__import__("os").environ.get("GUAARDVARK_SELF_IMPROVEMENT_INTERVAL", "6"))
+    # max(1, …): crontab(hour="*/0") raises and crashes beat startup; guard the 0 case.
+    interval_hours = max(1, int(__import__("os").environ.get("GUAARDVARK_SELF_IMPROVEMENT_INTERVAL", "6")))
 
     celery_app.conf.beat_schedule = {
         **getattr(celery_app.conf, "beat_schedule", {}),

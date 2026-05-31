@@ -1,5 +1,6 @@
 import json
 import os
+import requests
 from contextlib import contextmanager
 from pathlib import Path
 from celery import Celery

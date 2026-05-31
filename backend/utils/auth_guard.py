@@ -44,6 +44,18 @@ PROTECTED_DELETE_PREFIXES = (
     '/api/backups/',
 )
 
+# Mutation-only protection: GET/HEAD/OPTIONS stay public for the local UI, but any
+# non-GET (create/cancel/delete/run) requires auth/localhost — same model as the
+# /api/memory hardening. Stops a random LAN host from wiping jobs/tasks/schedules.
+MUTATION_PROTECTED_PREFIXES = (
+    '/api/memory',
+    '/api/tasks',
+    '/api/scheduler',
+    '/api/jobs',
+    '/api/meta',
+    '/api/progress-test',
+)
+
 
 def _is_localhost(addr):
     """Check if address is a loopback/localhost address."""
@@ -61,8 +73,10 @@ def _is_protected():
             return True
     if path.startswith('/api/files/') and request.method not in ('GET', 'HEAD', 'OPTIONS'):
         return True
-    if path.startswith('/api/memory') and request.method not in ('GET', 'HEAD', 'OPTIONS'):
-        return True
+    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        for prefix in MUTATION_PROTECTED_PREFIXES:
+            if path.startswith(prefix):
+                return True
     if request.method == 'DELETE':
         for prefix in PROTECTED_DELETE_PREFIXES:
             if path.startswith(prefix):

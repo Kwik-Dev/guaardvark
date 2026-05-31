@@ -236,7 +236,7 @@ def list_jobs():
     def _sort_key(j: Job) -> datetime:
         ts = j.finished_at or j.started_at
         if ts is None:
-            return datetime.min.replace(tzinfo=timezone.utc)
+            return datetime.min  # naive — must match the stripped real timestamps below
         # Strip tz for stable comparison — naive vs aware mix would otherwise raise.
         return ts.replace(tzinfo=None) if ts.tzinfo else ts
 

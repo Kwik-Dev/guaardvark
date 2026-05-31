@@ -399,7 +399,12 @@ def _write_output_file(filename: str, content: str) -> bool:
             output_dir = os.path.join(STORAGE_DIR, 'outputs')
 
         os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, filename)
+        # Confine to output_dir — filename comes from task.output_filename (user-set
+        # at task create); prevent arbitrary file write via path traversal.
+        output_path = os.path.realpath(os.path.join(output_dir, filename))
+        if not output_path.startswith(os.path.realpath(output_dir) + os.sep):
+            logger.error(f"Refusing to write task output outside output dir: {filename!r}")
+            return False
 
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -558,13 +563,16 @@ def execute_unified_task(self, task_id: int):
                     progress_system.error_process(process_id, error_msg)
                 return {'error': error_msg, 'task_id': task_id}
 
-        # Success - update task with result
+        # Success - update task with result.
+        # NOTE: update_progress() writes status 'in-progress' to the DB, so the
+        # final progress emit MUST happen BEFORE the terminal 'completed' write —
+        # otherwise it flips the just-completed task back to 'in-progress'.
         update_progress(90, "Finalizing task...")
         update_task_result(task_id, str(output)[:10000], task.get('output_filename'))  # Truncate large outputs
+        update_progress(100, f"Completed: {task['name']}")
         update_task_status(task_id, 'completed', progress=100)
 
         # Complete progress tracking
-        update_progress(100, f"Completed: {task['name']}")
         if progress_system and process_id:
             progress_system.complete_process(process_id, f"Task completed: {task['name']}")
 
