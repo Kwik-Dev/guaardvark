@@ -22,6 +22,69 @@ logger = logging.getLogger("swarm.backend.cline")
 DONE_MARKER = ".swarm-status"
 LOG_FILE = ".swarm-agent.log"
 
+# Candidate CLI commands, in preference order, for the offline agent backend.
+_CLI_CANDIDATES = ["openclaw", "cline", "cline-cli"]
+
+# Cache of probed CLI profiles, keyed by resolved command path/name.
+_PROBE_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def probe_cli(command: str) -> dict[str, Any]:
+    """Probe a CLI's `--help` to learn which flags it accepts.
+
+    Runs `[command, '--help']` (PROBE ONLY — never invokes a model) and scans the
+    output text for the flags we care about. Returns a profile dict:
+        {
+            "message_flag": "--message" | "--prompt" | "-p" | None,
+            "model_flag":   "--model" | None,
+            "ok":           bool,   # probe ran and produced help text
+        }
+    Result is cached per command for the process lifetime.
+    """
+    if command in _PROBE_CACHE:
+        return _PROBE_CACHE[command]
+
+    profile: dict[str, Any] = {"message_flag": None, "model_flag": None, "ok": False}
+    try:
+        res = subprocess.run(
+            [command, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        help_text = (res.stdout or "") + "\n" + (res.stderr or "")
+        if help_text.strip():
+            profile["ok"] = True
+            # Message flag preference: --message, then --prompt, then -p.
+            if "--message" in help_text:
+                profile["message_flag"] = "--message"
+            elif "--prompt" in help_text:
+                profile["message_flag"] = "--prompt"
+            elif "-p" in help_text:
+                profile["message_flag"] = "-p"
+            if "--model" in help_text:
+                profile["model_flag"] = "--model"
+    except Exception as e:
+        logger.debug(f"probe_cli({command!r}) failed: {e}")
+
+    _PROBE_CACHE[command] = profile
+    return profile
+
+
+def resolve_cli_command(config: dict[str, Any]) -> str | None:
+    """Pick the first installed CLI from the config command + known candidates."""
+    candidates: list[str] = []
+    configured = config.get("command")
+    if configured:
+        candidates.append(configured)
+    for c in _CLI_CANDIDATES:
+        if c not in candidates:
+            candidates.append(c)
+    for c in candidates:
+        if shutil.which(c):
+            return c
+    return None
+
 WRAPPER_SCRIPT = """#!/bin/bash
 cd "{worktree_path}"
 
@@ -51,17 +114,40 @@ class ClineBackend(BaseBackend):
         wt = Path(worktree_path)
         log_file = wt / LOG_FILE
 
-        command = config.get("command", "cline")
         model = config.get("model", "ollama/gemma4:e4b")
         extra_args = config.get("args", [])
 
         prompt = self._build_prompt(task)
 
+        # Resolve which CLI is actually installed, then probe its flags so we
+        # build an argv the binary understands (openclaw uses different flags
+        # from cline). Never invokes a model — probe is `<cmd> --help` only.
+        command = resolve_cli_command(config)
+        if command:
+            profile = probe_cli(command)
+        else:
+            # Nothing installed — fall back to the configured shape and let the
+            # wrapper surface the failure in the log.
+            command = config.get("command", "cline")
+            profile = {"message_flag": None, "model_flag": None, "ok": False}
+
         cline_parts = [command]
-        if model:
-            cline_parts.extend(["--model", model])
-        cline_parts.extend(extra_args)
-        cline_parts.extend(["--message", prompt])
+        if profile.get("ok"):
+            model_flag = profile.get("model_flag")
+            if model and model_flag:
+                cline_parts.extend([model_flag, model])
+            cline_parts.extend(extra_args)
+            message_flag = profile.get("message_flag") or "--message"
+            cline_parts.extend([message_flag, prompt])
+        else:
+            # Probe failed — fall back to the original command shape and log it.
+            logger.warning(
+                f"CLI probe failed for {command!r}; falling back to default 'cline' argv shape"
+            )
+            if model:
+                cline_parts.extend(["--model", model])
+            cline_parts.extend(extra_args)
+            cline_parts.extend(["--message", prompt])
 
         cline_cmd = " ".join(_shell_quote(p) for p in cline_parts)
 
@@ -159,8 +245,8 @@ class ClineBackend(BaseBackend):
         return (0, 0.0)
 
     def is_available(self) -> bool:
-        """Check if cline CLI is installed."""
-        for cmd in ["cline", "openclaw", "cline-cli"]:
+        """Check if any supported offline CLI is installed."""
+        for cmd in _CLI_CANDIDATES:
             if shutil.which(cmd):
                 return True
         return False

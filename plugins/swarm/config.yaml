@@ -2,6 +2,9 @@ defaults:
   max_concurrent_agents: 5
   worktree_base: ".swarm-worktrees"
   auto_merge: false
+  # Autonomous merge-conflict resolution. OFF by default — when on, writes to the
+  # Guaardvark repo are routed through guarded_code_service (apply_exact_replacement).
+  enable_merger_agent: false
   run_tests_before_merge: true
   test_command: "python3 -m pytest"
   flight_mode: false

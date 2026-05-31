@@ -6,6 +6,7 @@ No auth needed — this is a local-only orchestration service.
 """
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -22,12 +23,38 @@ swarm_bp = Blueprint("swarm", __name__, url_prefix="/api/swarm")
 SWARM_URL = "http://localhost:8210"
 SWARM_TIMEOUT = 10
 
+INTERNAL_TOKEN_HEADER = "X-Swarm-Internal-Token"
+
+
+def _internal_secret() -> str:
+    """Read the shared sidecar token from env or data/.swarm_internal_secret.
+
+    Must match the value the sidecar resolves at startup (see app.py
+    _load_internal_secret). Read-only here — the sidecar owns generation.
+    """
+    env_secret = os.environ.get("SWARM_INTERNAL_SECRET")
+    if env_secret:
+        return env_secret.strip()
+    try:
+        secret_file = default_repo_root() / "data" / ".swarm_internal_secret"
+        if secret_file.exists():
+            return secret_file.read_text().strip()
+    except Exception as e:
+        logger.debug(f"Could not read swarm internal secret: {e}")
+    return ""
+
+
+def _internal_headers() -> dict:
+    return {INTERNAL_TOKEN_HEADER: _internal_secret()}
+
 
 def _proxy_get(path: str, timeout: int = SWARM_TIMEOUT):
     """Proxy a GET request to the swarm service."""
     try:
         params = dict(flask_request.args)
-        resp = requests.get(f"{SWARM_URL}{path}", params=params, timeout=timeout)
+        resp = requests.get(
+            f"{SWARM_URL}{path}", params=params, timeout=timeout, headers=_internal_headers()
+        )
         return resp.json(), resp.status_code
     except requests.ConnectionError:
         return {"error": "Swarm service not running"}, 503
@@ -38,7 +65,9 @@ def _proxy_get(path: str, timeout: int = SWARM_TIMEOUT):
 def _proxy_post(path: str, json_data: dict = None, timeout: int = SWARM_TIMEOUT):
     """Proxy a POST request to the swarm service."""
     try:
-        resp = requests.post(f"{SWARM_URL}{path}", json=json_data, timeout=timeout)
+        resp = requests.post(
+            f"{SWARM_URL}{path}", json=json_data, timeout=timeout, headers=_internal_headers()
+        )
         return resp.json(), resp.status_code
     except requests.ConnectionError:
         return {"error": "Swarm service not running"}, 503

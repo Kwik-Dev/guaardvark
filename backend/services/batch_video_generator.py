@@ -241,6 +241,30 @@ class BatchVideoGenerator:
             logger.warning(f"Failed to save batch metadata: {e}")
 
     def _run_batch(self, batch_request: BatchVideoRequest, status: BatchVideoStatus) -> None:
+        # TWO GPU arbiters guard this batch:
+        #   1. JobOperationGate.gpu_exclusive (in-memory) — serializes against
+        #      production renders / training, which only know the in-memory gate.
+        #   2. GPUResourceCoordinator file-lock — the cross-process arbiter that
+        #      also stops Ollama. The two are otherwise mutually blind; claiming
+        #      the in-memory gate here makes batch video visible to (and
+        #      serialized with) the other in-memory surfaces.
+        # Lock-ordering rule: acquire the GPU-exclusive (in-memory) gate FIRST,
+        # then the file-lock. On in-memory contention -> GpuBusyError -> mark the
+        # batch errored, same as a file-lock acquire failure.
+        from backend.services.job_operation_gate import get_gate, GpuBusyError
+        from backend.services.job_types import JobKind
+        gate = get_gate()
+        try:
+            gate_cm = gate.gpu_exclusive(JobKind.VIDEO_RENDER, batch_request.batch_id)
+            gate_cm.__enter__()
+        except GpuBusyError as e:
+            status.status = "error"
+            status.error = f"Could not acquire GPU (in-memory gate busy): {e}"
+            status.end_time = datetime.now()
+            self._save_metadata(status)
+            logger.error(f"Batch {batch_request.batch_id} blocked by in-memory GPU gate: {e}")
+            return
+
         # Acquire GPU lock before starting video generation
         gpu_coordinator = get_gpu_coordinator()
         lock_result = gpu_coordinator.acquire_for_video_generation(
@@ -254,6 +278,7 @@ class BatchVideoGenerator:
             status.end_time = datetime.now()
             self._save_metadata(status)
             logger.error(f"Batch {batch_request.batch_id} failed to acquire GPU lock: {lock_result.get('error')}")
+            gate_cm.__exit__(None, None, None)  # release the in-memory gate
             return
 
         cancel_event = self.cancel_events.get(batch_request.batch_id)
@@ -373,8 +398,11 @@ class BatchVideoGenerator:
                     logger.error(f"Failed to register batch videos: {reg_err}")
 
         finally:
-            # Always release GPU lock when batch completes (success or failure)
+            # Always release GPU lock when batch completes (success or failure).
+            # Release in REVERSE acquire order: file-lock first, then the
+            # in-memory gate (acquired first, released last).
             gpu_coordinator.release_video_generation_lock(restart_ollama=True)
+            gate_cm.__exit__(None, None, None)
             logger.info(f"Batch {batch_request.batch_id} released GPU lock")
 
     def start_batch_from_prompts(

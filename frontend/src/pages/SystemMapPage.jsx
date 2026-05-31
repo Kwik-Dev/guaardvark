@@ -41,6 +41,7 @@ import { io } from "socket.io-client";
 
 import PageLayout from "../components/layout/PageLayout";
 import { SystemMapCanvas } from "../components/systemmap";
+import { pathToSection, moduleNameToPath } from "../components/systemmap/pathUtils";
 import {
   fetchSystemMap,
   fetchFindings,
@@ -101,6 +102,66 @@ function findModuleForTool(toolName, moduleNames) {
   return null;
 }
 
+// Pill-shaped toggle for an overlay (ghost endpoints / tool graph). Same chip
+// primitive as the section legend; `activeColor` is an "r, g, b" triplet so the
+// active state tints to the overlay's render color.
+function OverlayChip({ label, active, activeColor, onToggle }) {
+  return (
+    <Box
+      role="button"
+      tabIndex={0}
+      aria-pressed={active}
+      onClick={onToggle}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onToggle();
+        }
+      }}
+      sx={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 0.7,
+        px: 0.9,
+        py: 0.4,
+        borderRadius: "999px",
+        cursor: "pointer",
+        userSelect: "none",
+        border: active
+          ? `1px solid rgba(${activeColor}, 0.85)`
+          : "1px solid rgba(168, 216, 255, 0.12)",
+        bgcolor: active ? `rgba(${activeColor}, 0.18)` : "rgba(168, 216, 255, 0.04)",
+        transition: "all 160ms ease",
+        "&:hover": {
+          bgcolor: active ? `rgba(${activeColor}, 0.26)` : "rgba(168, 216, 255, 0.10)",
+          borderColor: `rgba(${activeColor}, 0.55)`,
+        },
+      }}
+    >
+      <Box
+        sx={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          bgcolor: `rgba(${activeColor}, ${active ? 1 : 0.5})`,
+          boxShadow: active ? `0 0 12px rgba(${activeColor}, 0.7)` : "none",
+        }}
+      />
+      <Typography
+        variant="caption"
+        sx={{
+          color: active ? `rgba(${activeColor}, 0.95)` : "rgba(168, 216, 255, 0.55)",
+          fontSize: "0.65rem",
+          letterSpacing: 0.5,
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </Typography>
+    </Box>
+  );
+}
+
 export default function SystemMapPage() {
   const [map, setMap] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -110,6 +171,9 @@ export default function SystemMapPage() {
   const [search, setSearch] = useState("");
   const [activity, setActivity] = useState([]);   // rolling event log
   const [highlightedPrefixes, setHighlightedPrefixes] = useState(() => new Set());
+  // Overlay toggles — both default OFF so the baseline constellation is unchanged.
+  const [showGhostEndpoints, setShowGhostEndpoints] = useState(false);
+  const [showToolGraph, setShowToolGraph] = useState(false);
 
   const toggleSectionHighlight = useCallback((prefix) => {
     setHighlightedPrefixes((prev) => {
@@ -290,6 +354,18 @@ export default function SystemMapPage() {
   const sev = useMemo(() => severityCounts(map), [map]);
   const cacheInfo = map?._cache;
 
+  // Overlay availability — used to label the toggle chips. The overlays still
+  // render nothing when these are 0 (nodes skip silently), but the count tells
+  // the user whether a toggle will do anything.
+  const ghostEndpointCount = useMemo(
+    () => (map?.findings || []).filter((f) => f.kind === "ghost-endpoint").length,
+    [map],
+  );
+  const toolCount = useMemo(
+    () => (map?.tool_graph?.registered_tools || []).length,
+    [map],
+  );
+
   const findingsByModule = useMemo(() => {
     const out = new Map();
     if (!map?.findings) return out;
@@ -304,7 +380,24 @@ export default function SystemMapPage() {
     return out;
   }, [map]);
 
-  const activeNode = hovered || (selected ? { id: selected } : null);
+  // For a selected-but-not-hovered node, the canvas never hands us a rich node
+  // object (selection is just an id), so the detail-panel chips had nothing to
+  // render. Reconstruct the same shape from map.node_meta[selected] so the
+  // section / lifecycle / importers chips show for selected nodes too.
+  const selectedMeta = useMemo(() => {
+    if (!selected) return null;
+    const meta = map?.node_meta?.[selected] || {};
+    return {
+      id: selected,
+      section: pathToSection(meta.path || moduleNameToPath(selected)),
+      lifecycle: meta.lifecycle || "active",
+      // importers may be 0 (a valid value we must preserve); only fall back to
+      // null when the backend didn't annotate this module at all.
+      importers: meta.importers != null ? meta.importers : null,
+    };
+  }, [selected, map]);
+
+  const activeNode = hovered || selectedMeta;
   const activeNodeId = activeNode?.id;
   const activeFindings = activeNodeId ? findingsByModule.get(activeNodeId) || [] : [];
 
@@ -583,6 +676,34 @@ export default function SystemMapPage() {
               clear
             </Box>
           )}
+
+          {/* Overlay toggles — distinct from the section chips. Both default OFF
+              so the baseline constellation is unchanged until the user opts in.
+              Reuses the same chip primitive as the section legend above. */}
+          {map && (
+            <>
+              <Box
+                sx={{
+                  width: "1px",
+                  alignSelf: "stretch",
+                  bgcolor: "rgba(168, 216, 255, 0.15)",
+                  mx: 0.5,
+                }}
+              />
+              <OverlayChip
+                label={`Ghost endpoints${ghostEndpointCount ? ` (${ghostEndpointCount})` : ""}`}
+                active={showGhostEndpoints}
+                activeColor="255, 170, 80"
+                onToggle={() => setShowGhostEndpoints((v) => !v)}
+              />
+              <OverlayChip
+                label={`Tool graph${toolCount ? ` (${toolCount})` : ""}`}
+                active={showToolGraph}
+                activeColor="120, 220, 180"
+                onToggle={() => setShowToolGraph((v) => !v)}
+              />
+            </>
+          )}
         </Box>
 
         {error && (
@@ -614,6 +735,8 @@ export default function SystemMapPage() {
               selectedNodeId={selected}
               searchQuery={search}
               highlightedPrefixes={highlightedPrefixes}
+              showGhostEndpoints={showGhostEndpoints}
+              showToolGraph={showToolGraph}
             />
           )}
         </Box>
@@ -688,10 +811,10 @@ export default function SystemMapPage() {
               </Stack>
 
               <Box sx={{ mt: 1.5 }}>
-                {hovered && hovered.section && (
+                {activeNode && activeNode.section && (
                   <Chip
                     size="small"
-                    label={hovered.section}
+                    label={activeNode.section}
                     sx={{
                       bgcolor: "rgba(168, 216, 255, 0.10)",
                       color: "rgba(168, 216, 255, 0.85)",
@@ -701,10 +824,10 @@ export default function SystemMapPage() {
                     }}
                   />
                 )}
-                {hovered && hovered.lifecycle && (
+                {activeNode && activeNode.lifecycle && (
                   <Chip
                     size="small"
-                    label={hovered.lifecycle}
+                    label={activeNode.lifecycle}
                     sx={{
                       bgcolor: "rgba(168, 216, 255, 0.10)",
                       color: "rgba(168, 216, 255, 0.85)",
@@ -714,10 +837,10 @@ export default function SystemMapPage() {
                     }}
                   />
                 )}
-                {hovered && hovered.importers != null && (
+                {activeNode && activeNode.importers != null && (
                   <Chip
                     size="small"
-                    label={`${hovered.importers} importer${hovered.importers === 1 ? "" : "s"}`}
+                    label={`${activeNode.importers} importer${activeNode.importers === 1 ? "" : "s"}`}
                     sx={{
                       bgcolor: "rgba(168, 216, 255, 0.06)",
                       color: "rgba(168, 216, 255, 0.7)",
@@ -793,6 +916,7 @@ export default function SystemMapPage() {
           ) : panelTab === "findings" ? (
             <FindingsView
               findings={findings}
+              openCount={sev.high + sev.medium + sev.low}
               sevFilter={sevFilter}
               onSevFilter={setSevFilter}
               onSelect={flyToFinding}
@@ -923,6 +1047,7 @@ function PanelTabs({ activeTab, onTab, badge }) {
 
 function FindingsView({
   findings,
+  openCount,
   sevFilter,
   onSevFilter,
   onSelect,
@@ -939,7 +1064,7 @@ function FindingsView({
   ];
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <PanelTabs activeTab={activeTab} onTab={onTab} badge={findings.length} />
+      <PanelTabs activeTab={activeTab} onTab={onTab} badge={openCount} />
       <Box sx={{ px: 1.5, pb: 1 }}>
         <Stack direction="row" alignItems="center" spacing={1}>
           <WarningAmberIcon sx={{ color: "rgba(255, 184, 77, 0.7)", fontSize: 16 }} />

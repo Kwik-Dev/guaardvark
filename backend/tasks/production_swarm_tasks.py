@@ -190,12 +190,20 @@ def run_casting_director(prod_id: int, llm=None):
     if llm is None:
         llm = _default_ollama_llm
 
+    # ORPHAN / ADVISORY-ONLY: this task is never dispatched. STAGE_TO_AGENT
+    # ["casting"] is None (user-gated), the screenwriter advances with
+    # next_agent=None, and nothing calls celery.send_task("production.run_casting
+    # _director"). It only writes a *recommendation* SwarmMessage and applies the
+    # cheap voice_id. The LLM's `action` (use_existing_lora / train_from_* ) is
+    # deliberately NOT applied here — applying it would auto-trigger GPU LoRA
+    # training unprompted on the shared GPU, which is forbidden. Real casting +
+    # LoRA training is USER-GATED via production_api.cast_subject / confirm_casting.
     with _agent_run(prod_id, agent_name="casting_director", expected_stage="casting", next_agent=None) as ctx:
         if ctx is None:
             return
 
         agent = CastingDirector(llm=llm)
-        
+
         # Subjects from this production's script (from screenwriter output)
         screenwriter_msg = SwarmMessage.query.filter_by(
             production_id=prod_id, agent_name="screenwriter", status="ok"
@@ -343,14 +351,23 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
 
         shots = ProductionShot.query.filter_by(production_id=prod_id).all()
 
-        for i, shot in enumerate(shots):
-            lora_paths, prompt = _shot_loras_and_prompt(shot)
-            output_path = _storyboard_path(prod_id, shot.shot_number or (i + 1))
-            shot.storyboard_image_path = image_generator.generate_image(
-                prompt=prompt, loras=lora_paths, output_path=output_path,
-            )
+        # Claim the GPU exclusively around the ComfyUI generate loop. Previously
+        # this stage ran with NO gate claim at all — storyboard image gen could
+        # collide with a video render or LoRA train on the shared 16GB card.
+        # Storyboard gen rides the VIDEO_RENDER exclusivity slot (heavy-GPU
+        # generation bucket). GpuBusyError propagates to _agent_run -> fail_stage.
+        from backend.services.job_operation_gate import get_gate
+        from backend.services.job_types import JobKind
+        gate = get_gate()
+        with gate.gpu_exclusive(JobKind.VIDEO_RENDER, f"storyboard_{prod_id}"):
+            for i, shot in enumerate(shots):
+                lora_paths, prompt = _shot_loras_and_prompt(shot)
+                output_path = _storyboard_path(prod_id, shot.shot_number or (i + 1))
+                shot.storyboard_image_path = image_generator.generate_image(
+                    prompt=prompt, loras=lora_paths, output_path=output_path,
+                )
 
-        db.session.commit()
+            db.session.commit()
 
 def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
     with _agent_run(prod_id, agent_name="editor", expected_stage="rendering", next_agent=None) as ctx:
@@ -436,7 +453,7 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
         # production render shows up in /api/jobs/active and the gate snapshot,
         # exactly like a standalone editor render.
         from backend.utils.unified_progress_system import get_unified_progress, ProcessType
-        from backend.services.job_operation_gate import get_gate
+        from backend.services.job_operation_gate import get_gate, GpuBusyError
         from backend.services.job_types import JobKind
         from backend.services.production_documents import register_production_output
 
@@ -448,40 +465,47 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             f"Rendering production {prod_id}: {ctx.production.name}",
             additional_data={"production_id": prod_id},
         )
-        gate.register_running(JobKind.VIDEO_RENDER, render_id)
+        # Claim the GPU exclusively for the render. Previously this only
+        # register_running()'d (visibility, no real exclusivity) — a second
+        # render or a training job could load the GPU concurrently and OOM the
+        # shared 16GB card. gpu_exclusive serializes on the in-memory gate; on
+        # contention GpuBusyError fails the stage cleanly (caught below ->
+        # progress.error_process; _agent_run marks the stage failed).
         try:
-            progress.update_process(job_id, 5, f"Rendering {len(shot_inputs)} shots")
-            res = editor.render(
-                production_id=prod_id,
-                production_name=ctx.production.name,
-                shots=shot_inputs,
-                output_dir=output_dir,
-            )
-
-            for i, shot in enumerate(shots):
-                if i < len(res.clip_paths):
-                    shot.video_clip_path = res.clip_paths[i]
-
-            final_doc = register_production_output(
-                production=ctx.production, file_path=res.final_mp4_path, category="final",
-            )
-            # The editable Shotcut/MLT timeline, when the video_editor plugin
-            # composed one (None when the plugin is down — final.mp4 still ships).
-            if res.mlt_path:
-                register_production_output(
-                    production=ctx.production, file_path=res.mlt_path, category="timeline",
+            with gate.gpu_exclusive(JobKind.VIDEO_RENDER, render_id):
+                progress.update_process(job_id, 5, f"Rendering {len(shot_inputs)} shots")
+                res = editor.render(
+                    production_id=prod_id,
+                    production_name=ctx.production.name,
+                    shots=shot_inputs,
+                    output_dir=output_dir,
                 )
 
-            db.session.commit()
-            progress.complete_process(
-                job_id, "Production render complete",
-                additional_data={"document_id": final_doc.id, "mlt_path": res.mlt_path},
-            )
+                for i, shot in enumerate(shots):
+                    if i < len(res.clip_paths):
+                        shot.video_clip_path = res.clip_paths[i]
+
+                final_doc = register_production_output(
+                    production=ctx.production, file_path=res.final_mp4_path, category="final",
+                )
+                # The editable Shotcut/MLT timeline, when the video_editor plugin
+                # composed one (None when the plugin is down — final.mp4 still ships).
+                if res.mlt_path:
+                    register_production_output(
+                        production=ctx.production, file_path=res.mlt_path, category="timeline",
+                    )
+
+                db.session.commit()
+                progress.complete_process(
+                    job_id, "Production render complete",
+                    additional_data={"document_id": final_doc.id, "mlt_path": res.mlt_path},
+                )
+        except GpuBusyError as e:
+            progress.error_process(job_id, f"Production render deferred — GPU busy: {e}")
+            raise
         except Exception as e:
             progress.error_process(job_id, f"Production render failed: {e}")
             raise
-        finally:
-            gate.unregister_running(JobKind.VIDEO_RENDER, render_id)
 
 
 def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, image_generator=None):
@@ -498,10 +522,17 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
     lora_paths, base_prompt = _shot_loras_and_prompt(shot)
     prompt = prompt_override if prompt_override else base_prompt
     output_path = _storyboard_path(shot.production_id, shot.shot_number or shot.id)
-    shot.storyboard_image_path = image_generator.generate_image(
-        prompt=prompt, loras=lora_paths, output_path=output_path,
-    )
-    db.session.commit()
+    # Same GPU-exclusivity wrap as run_storyboard_artist: a single-shot regen
+    # still loads the image model on the shared GPU. GpuBusyError propagates to
+    # the caller (Celery task / API) rather than colliding with a live render.
+    from backend.services.job_operation_gate import get_gate
+    from backend.services.job_types import JobKind
+    gate = get_gate()
+    with gate.gpu_exclusive(JobKind.VIDEO_RENDER, f"storyboard_{shot.production_id}"):
+        shot.storyboard_image_path = image_generator.generate_image(
+            prompt=prompt, loras=lora_paths, output_path=output_path,
+        )
+        db.session.commit()
 
 def run_regen_shot_plan(shot_id: int, feedback: str, llm=None):
     if llm is None:

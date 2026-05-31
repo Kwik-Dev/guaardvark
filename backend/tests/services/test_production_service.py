@@ -254,35 +254,37 @@ def test_gpu_stage_no_gate_just_runs():
     assert result == 42
 
 
-def test_gpu_stage_acquires_and_releases_gate():
-    class FakeGate:
-        def __init__(self):
-            self.acquired = []
-            self.released = []
-        def acquire(self, op_id):
-            self.acquired.append(op_id)
-        def release(self, op_id):
-            self.released.append(op_id)
+# gpu_stage now delegates to the REAL JobOperationGate.gpu_exclusive contract
+# (try_claim_gpu_exclusive / release_gpu_exclusive), not the fictional
+# acquire(op_id)/release(op_id) the old FakeGate asserted. These tests exercise
+# a fresh real gate instance.
 
-    gate = FakeGate()
+
+def _fresh_gate():
+    from backend.services.job_operation_gate import JobOperationGate
+    return JobOperationGate()
+
+
+def test_gpu_stage_acquires_and_releases_real_gate():
+    from backend.services.job_types import JobKind
+    gate = _fresh_gate()
     svc = ProductionService(session=None, gate=gate)
-    result = svc.gpu_stage("storyboard:42", lambda: "done")
+
+    def work():
+        # Inside the stage the gate must show the slot held.
+        snap = gate.snapshot()
+        assert snap["gpu_busy"] is True
+        assert snap["gpu_holder"]["native_id"] == "storyboard:42"
+        return "done"
+
+    result = svc.gpu_stage("storyboard:42", work, kind=JobKind.VIDEO_RENDER)
     assert result == "done"
-    assert gate.acquired == ["storyboard:42"]
-    assert gate.released == ["storyboard:42"]
+    # Released after the stage — holder cleared.
+    assert gate.snapshot()["gpu_busy"] is False
 
 
-def test_gpu_stage_releases_gate_on_exception():
-    class FakeGate:
-        def __init__(self):
-            self.acquired = []
-            self.released = []
-        def acquire(self, op_id):
-            self.acquired.append(op_id)
-        def release(self, op_id):
-            self.released.append(op_id)
-
-    gate = FakeGate()
+def test_gpu_stage_releases_real_gate_on_exception():
+    gate = _fresh_gate()
     svc = ProductionService(session=None, gate=gate)
 
     def boom():
@@ -290,5 +292,17 @@ def test_gpu_stage_releases_gate_on_exception():
 
     with pytest.raises(RuntimeError, match="CUDA OOM"):
         svc.gpu_stage("op-1", boom)
-    # Released even after exception
-    assert gate.released == ["op-1"]
+    # Released even after exception.
+    assert gate.snapshot()["gpu_busy"] is False
+
+
+def test_gpu_stage_raises_gpu_busy_when_slot_held():
+    from backend.services.job_operation_gate import GpuBusyError
+    from backend.services.job_types import JobKind
+    gate = _fresh_gate()
+    # Someone else already holds the exclusive slot.
+    acquired, _ = gate.try_claim_gpu_exclusive(JobKind.VIDEO_RENDER, "other")
+    assert acquired
+    svc = ProductionService(session=None, gate=gate)
+    with pytest.raises(GpuBusyError):
+        svc.gpu_stage("mine", lambda: "never", kind=JobKind.VIDEO_RENDER)

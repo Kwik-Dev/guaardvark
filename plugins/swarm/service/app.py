@@ -9,6 +9,8 @@ The frontend polls /swarm/status for real-time dashboard updates.
 import json
 import logging
 import os
+import secrets
+import subprocess
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +18,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from service.config import SwarmConfig, load_config, check_internet
@@ -35,6 +38,39 @@ logger = logging.getLogger("swarm.app")
 _config: Optional[SwarmConfig] = None
 _active_orchestrators: dict[str, SwarmOrchestrator] = {}  # swarm_id -> orchestrator
 _lock = threading.Lock()
+_internal_secret: Optional[str] = None
+
+
+def _load_internal_secret() -> str:
+    """Resolve the shared internal token.
+
+    Priority: env SWARM_INTERNAL_SECRET, then data/.swarm_internal_secret
+    (read if present, generated + persisted otherwise). The Flask proxy reads
+    the same file/env so the two sides stay in sync.
+    """
+    env_secret = os.environ.get("SWARM_INTERNAL_SECRET")
+    if env_secret:
+        return env_secret.strip()
+
+    root = os.environ.get("GUAARDVARK_ROOT")
+    base = Path(root) if root else Path(__file__).resolve().parents[3]
+    secret_file = base / "data" / ".swarm_internal_secret"
+    try:
+        if secret_file.exists():
+            existing = secret_file.read_text().strip()
+            if existing:
+                return existing
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        generated = secrets.token_urlsafe(32)
+        secret_file.write_text(generated)
+        try:
+            secret_file.chmod(0o600)
+        except OSError:
+            pass
+        return generated
+    except Exception as e:
+        logger.warning(f"Could not read/write internal secret file ({e}); generating ephemeral secret")
+        return secrets.token_urlsafe(32)
 
 
 # --- Pydantic request models ---
@@ -46,6 +82,8 @@ class LaunchRequest(BaseModel):
     max_agents: Optional[int] = None
     auto_merge: Optional[bool] = None
     dry_run: bool = False
+    self_code: bool = False
+    acknowledge_dirty_tree: bool = False
 
 
 class MergeRequest(BaseModel):
@@ -73,8 +111,9 @@ class SavePlanRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app):
-    global _config
+    global _config, _internal_secret
     _config = load_config()
+    _internal_secret = _load_internal_secret()
     logger.info(f"Swarm service started — {len(_config.backends)} backends configured")
     yield
     # shutdown: cancel any running swarms
@@ -91,13 +130,42 @@ async def lifespan(app):
 
 app = FastAPI(title="Swarm Orchestrator", version="0.1.0", lifespan=lifespan)
 
+# Restrict CORS to the local frontend origin. The sidecar is loopback-bound and
+# reached via the Flask proxy; the browser never talks to :8210 with credentials.
+_cors_origin = os.environ.get("SWARM_CORS_ORIGIN", "http://localhost:5173")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[_cors_origin],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+INTERNAL_TOKEN_HEADER = "X-Swarm-Internal-Token"
+
+
+@app.middleware("http")
+async def _require_internal_token(request: Request, call_next):
+    """Shared-secret gate on every route except /health.
+
+    The Flask proxy attaches X-Swarm-Internal-Token on every proxied call. A
+    direct hit on :8210 without the matching token is rejected with 403, so the
+    sidecar can no longer be driven around the Flask guard.
+    """
+    # /health stays open for liveness probes (start.sh curls it).
+    if request.url.path == "/health":
+        return await call_next(request)
+    # CORS preflight carries no custom headers — let it through; the actual
+    # request still has to present the token.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    expected = _internal_secret or _load_internal_secret()
+    provided = request.headers.get(INTERNAL_TOKEN_HEADER, "")
+    if not expected or not secrets.compare_digest(provided, expected):
+        return JSONResponse(status_code=403, content={"detail": "Forbidden: invalid internal token"})
+    return await call_next(request)
 
 
 # --- Health ---
@@ -148,22 +216,45 @@ def launch_swarm(req: LaunchRequest):
     if not plan_path.exists():
         raise HTTPException(404, f"Plan file not found: {plan_path}")
 
-    repo_path = Path(req.repo_path) if req.repo_path else _get_default_repo()
+    repo_path = Path(req.repo_path).resolve() if req.repo_path else _get_default_repo()
     if not repo_path or not (repo_path / ".git").exists():
         raise HTTPException(400, f"Not a git repository: {repo_path}")
 
-    # Pre-flight check: is the repo clean?
-    import subprocess
-    try:
-        status = subprocess.run(
-            ["git", "-C", str(repo_path), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=5
-        )
-        if status.stdout.strip():
-            logger.warning(f"Launching swarm on dirty repository: {repo_path}")
-            # we don't block launch, but we log it. In a stricter setup we might return 400.
-    except Exception as e:
-        logger.debug(f"Git status check failed: {e}")
+    # --- Launch guard parity with the Flask proxy (swarm_api.py:~94-112) ---
+    # Direct :8210 access must not bypass the self-code guard. Treat a request
+    # that targets GUAARDVARK_ROOT (or sets self_code) as a self-code swarm:
+    # force auto_merge=False and require a clean tree unless acknowledged.
+    guard_root = _guaardvark_root()
+    is_targeting_self = req.self_code or (guard_root is not None and repo_path == guard_root)
+
+    auto_merge = req.auto_merge
+    if is_targeting_self:
+        auto_merge = False  # never auto-merge into the live repo
+        try:
+            status = subprocess.run(
+                ["git", "-C", str(repo_path), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5,
+            )
+            dirty = bool(status.stdout.strip())
+        except Exception as e:
+            logger.debug(f"Git status check failed: {e}")
+            dirty = False
+        if dirty and not req.acknowledge_dirty_tree:
+            raise HTTPException(
+                409,
+                "Repository has uncommitted changes; acknowledge_dirty_tree is required for self-code swarms",
+            )
+    else:
+        # Non-self-code target: log a dirty tree but don't block.
+        try:
+            status = subprocess.run(
+                ["git", "-C", str(repo_path), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if status.stdout.strip():
+                logger.warning(f"Launching swarm on dirty repository: {repo_path}")
+        except Exception as e:
+            logger.debug(f"Git status check failed: {e}")
 
     # dry run — parse and return without launching
     if req.dry_run:
@@ -185,7 +276,7 @@ def launch_swarm(req: LaunchRequest):
             plan_path,
             flight_mode=req.flight_mode,
             max_agents=req.max_agents,
-            auto_merge=req.auto_merge,
+            auto_merge=auto_merge,
         )
     except ValueError as e:
         # plan parse failed — don't register a broken swarm
@@ -610,14 +701,25 @@ def _read_worktree_log(worktree_path: str, lines: int) -> str:
     return "\n".join(all_lines[-lines:])
 
 
+def _guaardvark_root() -> Optional[Path]:
+    """Resolve the configured Guaardvark repository root, if any."""
+    root = os.environ.get("GUAARDVARK_ROOT")
+    if root:
+        try:
+            return Path(root).expanduser().resolve()
+        except Exception:
+            return None
+    return None
+
+
 def _get_default_repo() -> Optional[Path]:
     """Get the default repo path from GUAARDVARK_ROOT or cwd."""
     root = os.environ.get("GUAARDVARK_ROOT")
     if root:
         p = Path(root)
         if (p / ".git").exists():
-            return p
+            return p.resolve()
     cwd = Path.cwd()
     if (cwd / ".git").exists():
-        return cwd
+        return cwd.resolve()
     return None

@@ -14,6 +14,10 @@ from fastapi.testclient import TestClient
 import service.app as app_module
 from service.app import app, _AGENT_LOG_FILE
 
+# E2 added an internal-token middleware; these endpoints now require the header.
+_SECRET = "test-secret-tasklogs"
+_HDRS = {"X-Swarm-Internal-Token": _SECRET}
+
 
 def _init_repo(repo):
     """git init + an initial commit so `git rev-parse HEAD` resolves."""
@@ -62,6 +66,8 @@ def fake_repo(tmp_path, monkeypatch):
 
     # point the app at this repo, and ensure no orchestrator is tracked
     monkeypatch.setenv("GUAARDVARK_ROOT", str(repo))
+    monkeypatch.setenv("SWARM_INTERNAL_SECRET", _SECRET)
+    monkeypatch.setattr(app_module, "_internal_secret", _SECRET, raising=False)
     monkeypatch.setattr(app_module, "_active_orchestrators", {}, raising=True)
 
     return repo, swarm_id, task_id, log_lines
@@ -71,7 +77,7 @@ def test_logs_fallback_tails_disk_log(fake_repo):
     repo, swarm_id, task_id, log_lines = fake_repo
     client = TestClient(app)
 
-    resp = client.get(f"/swarm/{swarm_id}/logs/{task_id}", params={"lines": 5})
+    resp = client.get(f"/swarm/{swarm_id}/logs/{task_id}", params={"lines": 5}, headers=_HDRS)
     assert resp.status_code == 200
     data = resp.json()
     assert data["success"] is True
@@ -102,10 +108,12 @@ def test_logs_fallback_no_logfile(tmp_path, monkeypatch):
     (swarm_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     monkeypatch.setenv("GUAARDVARK_ROOT", str(repo))
+    monkeypatch.setenv("SWARM_INTERNAL_SECRET", _SECRET)
+    monkeypatch.setattr(app_module, "_internal_secret", _SECRET, raising=False)
     monkeypatch.setattr(app_module, "_active_orchestrators", {}, raising=True)
 
     client = TestClient(app)
-    resp = client.get(f"/swarm/{swarm_id}/logs/{task_id}")
+    resp = client.get(f"/swarm/{swarm_id}/logs/{task_id}", headers=_HDRS)
     assert resp.status_code == 200
     assert resp.json()["logs"] == "(no log file)"
 
@@ -115,8 +123,10 @@ def test_logs_missing_worktree_404(tmp_path, monkeypatch):
     _init_repo(repo)
 
     monkeypatch.setenv("GUAARDVARK_ROOT", str(repo))
+    monkeypatch.setenv("SWARM_INTERNAL_SECRET", _SECRET)
+    monkeypatch.setattr(app_module, "_internal_secret", _SECRET, raising=False)
     monkeypatch.setattr(app_module, "_active_orchestrators", {}, raising=True)
 
     client = TestClient(app)
-    resp = client.get("/swarm/does-not-exist/logs/nope")
+    resp = client.get("/swarm/does-not-exist/logs/nope", headers=_HDRS)
     assert resp.status_code == 404

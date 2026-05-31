@@ -40,9 +40,13 @@ LOG_DIR="$PROJECT_ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/swarm.log"
 
+# Bind loopback by default — the sidecar is reached via the Flask proxy, never
+# directly. Overridable with SWARM_BIND_HOST but do not expose to the LAN.
+BIND_HOST="${SWARM_BIND_HOST:-127.0.0.1}"
+
 cd "$PLUGIN_ROOT"
 PYTHONPATH="$PLUGIN_ROOT:$PYTHONPATH" \
-python -m uvicorn service.app:app --host 0.0.0.0 --port $SERVICE_PORT --workers 1 \
+python -m uvicorn service.app:app --host "$BIND_HOST" --port $SERVICE_PORT --workers 1 \
     >> "$LOG_FILE" 2>&1 &
 
 PID_DIR="$PROJECT_ROOT/pids"

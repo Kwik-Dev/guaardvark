@@ -24,6 +24,7 @@ import {
   forceX,
   forceY,
 } from "d3-force";
+import { pathToSection, moduleNameToPath } from "./pathUtils";
 
 // ────────────────────────────────────────────────────────────────────────
 // Color palette
@@ -97,35 +98,50 @@ function radiusFor(node) {
   return Math.min(8, Math.max(2, r));
 }
 
-// Convert "backend/services/foo.py" → "backend/services" (or other section).
-function pathToSection(path) {
-  if (!path || typeof path !== "string") return "other";
-  if (!path.includes("/")) return "top-level";
-  if (path.startsWith("backend/")) {
-    const sub = path.slice("backend/".length).split("/")[0];
-    return `backend/${sub}`;
-  }
-  if (path.startsWith("frontend/src/")) {
-    const sub = path.slice("frontend/src/".length).split("/")[0];
-    return `frontend/${sub}`;
-  }
-  if (path.startsWith("frontend/")) return "frontend/other";
-  if (path.startsWith("plugins/")) return "plugins";
-  if (path.startsWith("scripts/")) return "scripts";
-  if (path.startsWith("cli/")) return "cli";
-  if (path.startsWith("training/")) return "training";
-  return "other";
-}
+// pathToSection / moduleNameToPath now live in ./pathUtils (shared with the
+// page so the detail-panel chips derive section the same way the canvas does).
 
-// Module name "backend.services.foo" → path "backend/services/foo.py".
-function moduleNameToPath(name) {
-  if (!name) return "";
-  return name.replace(/\./g, "/") + ".py";
+// Tool → module resolver. Mirrors SystemMapPage's findModuleForTool: try the
+// canonical tool name, then a class-name camelCase fallback, matching any module
+// whose dotted name ends with `.<candidate>` (the conventional backend.tools.<x>
+// layout) before falling back to a substring match. Returns a module id present
+// in `nodeIndex`, or null when nothing resolves (the caller skips silently —
+// no phantom nodes).
+function findModuleForToolNode(tool, nodeIndex) {
+  const names = Object.keys(nodeIndex);
+  const candidates = [];
+  if (tool?.name) {
+    candidates.push(tool.name);
+    if (tool.name.includes("_")) {
+      const parts = tool.name.split("_");
+      if (parts.length >= 2) candidates.push(parts.slice(1).join("_"));
+    }
+  }
+  // Class names like "WordPressContentTool" map to a snake_case module file.
+  if (tool?.class) {
+    const snake = tool.class
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .toLowerCase();
+    candidates.push(snake);
+  }
+  for (const c of candidates) {
+    if (!c) continue;
+    const exact = names.find((m) => m.endsWith(`.${c}`));
+    if (exact) return exact;
+  }
+  for (const c of candidates) {
+    if (!c) continue;
+    const sub = names.find((m) => m.toLowerCase().includes(c.toLowerCase()));
+    if (sub) return sub;
+  }
+  return null;
 }
 
 // Build the graph the simulation will run on.
 function buildGraph(systemMap) {
-  if (!systemMap) return { nodes: [], links: [], nodeIndex: {}, severityCounts: {} };
+  if (!systemMap) {
+    return { nodes: [], links: [], nodeIndex: {}, severityCounts: {}, toolEdges: [] };
+  }
 
   const dep = systemMap.dependency_graph || {};
   const moduleNames = Object.keys(dep);
@@ -141,6 +157,8 @@ function buildGraph(systemMap) {
       section: pathToSection(bm.path || moduleNameToPath(name)),
       findings: [],
       importers: bm.importers || 0,
+      isGhostEndpoint: false,  // set when this module owns a 'ghost-endpoint' finding
+      isToolNode: false,       // set when a registered tool resolves to this module
     };
   }
 
@@ -165,6 +183,14 @@ function buildGraph(systemMap) {
     if (f.kind === "dormant-module") {
       const m = pathToModuleName((f.paths || [])[0]);
       if (m && nodeMeta[m]) nodeMeta[m].lifecycle = "dormant";
+    }
+    if (f.kind === "ghost-endpoint") {
+      // Flag the backend module that owns the orphaned route. Skip silently
+      // if the finding's path doesn't resolve to a graph node.
+      for (const p of f.paths || []) {
+        const m = pathToModuleName(p);
+        if (m && nodeMeta[m]) nodeMeta[m].isGhostEndpoint = true;
+      }
     }
     for (const p of f.paths || []) {
       const m = pathToModuleName(p);
@@ -197,6 +223,8 @@ function buildGraph(systemMap) {
       importers: meta.importers,
       findings: meta.findings,
       topSeverity: topSev,
+      isGhostEndpoint: meta.isGhostEndpoint,
+      isToolNode: meta.isToolNode,  // may be set below from tool_graph
       x: Math.cos(a) * r0,
       y: Math.sin(a) * r0,
       vx: 0, vy: 0,
@@ -218,11 +246,31 @@ function buildGraph(systemMap) {
     }
   }
 
+  // ── Tool-graph decoration (built once; rendered only when the toggle is on) ──
+  // Stamp each module that a registered tool resolves to with isToolNode, and
+  // collect synthetic tool->chat-engine edges. These edges are kept separate
+  // from the real import links so they never feed the d3-force layout — they're
+  // overlay-only and skipped entirely unless both endpoints exist as nodes.
+  const toolEdges = [];
+  const CHAT_ENGINE_ID = "backend.services.unified_chat_engine";
+  const chatEngineExists = !!nodeIndex[CHAT_ENGINE_ID];
+  const registeredTools = systemMap.tool_graph?.registered_tools || [];
+  const seenToolEdge = new Set();
+  for (const tool of registeredTools) {
+    const modId = findModuleForToolNode(tool, nodeIndex);
+    if (!modId) continue;            // skip silently — no phantom nodes
+    nodeIndex[modId].isToolNode = true;
+    if (chatEngineExists && modId !== CHAT_ENGINE_ID && !seenToolEdge.has(modId)) {
+      seenToolEdge.add(modId);
+      toolEdges.push({ source: modId, target: CHAT_ENGINE_ID });
+    }
+  }
+
   const counts = { high: 0, medium: 0, low: 0, info: 0 };
   for (const f of systemMap.findings || []) {
     if (counts[f.severity] !== undefined) counts[f.severity]++;
   }
-  return { nodes, links, nodeIndex, severityCounts: counts };
+  return { nodes, links, nodeIndex, severityCounts: counts, toolEdges };
 }
 
 function pathToModuleName(path) {
@@ -245,7 +293,16 @@ function neighborsOf(nodeId, links) {
 // ────────────────────────────────────────────────────────────────────────
 
 const SystemMapCanvas = forwardRef(function SystemMapCanvas(
-  { systemMap, onNodeHover, onNodeClick, selectedNodeId, searchQuery, highlightedPrefixes },
+  {
+    systemMap,
+    onNodeHover,
+    onNodeClick,
+    selectedNodeId,
+    searchQuery,
+    highlightedPrefixes,
+    showGhostEndpoints = false,
+    showToolGraph = false,
+  },
   ref,
 ) {
   const canvasRef = useRef(null);
@@ -268,6 +325,8 @@ const SystemMapCanvas = forwardRef(function SystemMapCanvas(
     spotlightNeighbors: null,
     searchMatches: null,
     highlightedPrefixes: null, // mirror of prop, read inside the render loop
+    showGhostEndpoints: false, // mirror of prop (overlay toggle, default OFF)
+    showToolGraph: false,      // mirror of prop (overlay toggle, default OFF)
     pulseClockMs: performance.now(),
   });
 
@@ -276,6 +335,14 @@ const SystemMapCanvas = forwardRef(function SystemMapCanvas(
   useEffect(() => {
     stateRef.current.highlightedPrefixes = highlightedPrefixes;
   }, [highlightedPrefixes]);
+
+  // Same pattern for the overlay toggles — read inside the render loop.
+  useEffect(() => {
+    stateRef.current.showGhostEndpoints = showGhostEndpoints;
+  }, [showGhostEndpoints]);
+  useEffect(() => {
+    stateRef.current.showToolGraph = showToolGraph;
+  }, [showToolGraph]);
 
   // Imperative API (parent calls these via ref).
   useImperativeHandle(ref, () => ({
@@ -597,6 +664,26 @@ const SystemMapCanvas = forwardRef(function SystemMapCanvas(
         ctx.stroke();
       }
 
+      // Synthetic tool->chat-engine edges (overlay-only; default OFF). Dashed
+      // green so they read distinctly from the real import links. Endpoints are
+      // guaranteed to exist (filtered at build time), but we re-check defensively.
+      if (st.showToolGraph && st.graph.toolEdges && st.graph.toolEdges.length) {
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "rgba(120, 220, 180, 0.35)";
+        ctx.lineWidth = 1;
+        for (const te of st.graph.toolEdges) {
+          const a = st.graph.nodeIndex[te.source];
+          const b = st.graph.nodeIndex[te.target];
+          if (!a || !b) continue;
+          ctx.beginPath();
+          ctx.moveTo(a.sx, a.sy);
+          ctx.lineTo(b.sx, b.sy);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
       for (const n of st.graph.nodes) {
         if (n.pulse > 0) n.pulse -= 0.012 * dt;
         if (n.pulse < 0) n.pulse = 0;
@@ -650,6 +737,30 @@ const SystemMapCanvas = forwardRef(function SystemMapCanvas(
           ctx.beginPath();
           ctx.arc(n.sx, n.sy, auraR, 0, Math.PI * 2);
           ctx.fill();
+        }
+
+        // Ghost-endpoint overlay ring (default OFF). Distinct dashed orange
+        // ring — same primitive as the hover ring, different stroke/dash so it
+        // reads as "orphaned route lives here".
+        if (st.showGhostEndpoints && n.isGhostEndpoint) {
+          ctx.save();
+          ctx.setLineDash([3, 3]);
+          ctx.strokeStyle = "rgba(255, 170, 80, 0.9)";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(n.sx, n.sy, r + 4, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // Tool-node overlay ring (default OFF). Solid green ring marking a
+        // module a registered LLM tool resolves to.
+        if (st.showToolGraph && n.isToolNode) {
+          ctx.strokeStyle = "rgba(120, 220, 180, 0.85)";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(n.sx, n.sy, r + 2.5, 0, Math.PI * 2);
+          ctx.stroke();
         }
 
         // Hover ring

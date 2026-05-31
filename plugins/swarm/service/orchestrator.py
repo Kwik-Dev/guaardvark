@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import psutil
 import requests
 
 from .config import SwarmConfig, check_internet
@@ -46,6 +47,37 @@ logger = logging.getLogger("swarm.orchestrator")
 
 # how often we check on running agents (seconds)
 POLL_INTERVAL = 5
+
+# Freeze-guard thresholds for the shared 60GB box. Each spawned agent is a
+# `claude`/`cline` subprocess that can balloon RAM (and carry "shadow RAM"
+# before psutil reflects it). Spawning into < this much free RAM, or any swap
+# pressure, is how the box gets driven into the swap-death freeze that locked
+# the operator's PC. This is intentionally conservative and CHEAP (pure psutil,
+# no GPU/subprocess probes) so it can run on every spawn tick.
+SPAWN_MIN_RAM_AVAIL_GB = 6.0
+SPAWN_MAX_SWAP_USED_GB = 1.0
+_GB = 1024 ** 3
+
+
+def _spawn_freeze_guard_block_reason() -> str | None:
+    """Return a reason to withhold spawning a new agent subprocess, or None.
+
+    Pure psutil so it never blocks on a missing nvidia-smi or an unreachable
+    backend. Mirrors GlobalLoadGate's RAM/swap hard floors
+    (backend/services/system_load_gate.py) but local to the swarm plugin, which
+    can't assume the backend package is importable from its venv.
+    """
+    try:
+        ram_avail_gb = psutil.virtual_memory().available / _GB
+        swap_used_gb = psutil.swap_memory().used / _GB
+    except Exception:
+        # If we can't read load, don't be the thing that blocks all work.
+        return None
+    if ram_avail_gb < SPAWN_MIN_RAM_AVAIL_GB:
+        return f"RAM available {ram_avail_gb:.1f} GB < {SPAWN_MIN_RAM_AVAIL_GB:.0f} GB floor"
+    if swap_used_gb > SPAWN_MAX_SWAP_USED_GB:
+        return f"swap in use {swap_used_gb:.1f} GB > {SPAWN_MAX_SWAP_USED_GB:.0f} GB"
+    return None
 
 
 class SwarmOrchestrator:
@@ -388,6 +420,18 @@ class SwarmOrchestrator:
 
             # launch tasks to fill available slots
             for task in ready[:available_slots]:
+                # Freeze-guard: re-check RAM/swap before EACH spawn (not just
+                # once per tick) — earlier spawns this tick may have eaten the
+                # headroom. If the box is memory-pressured, throttle: stop
+                # spawning this tick and wait for the next poll rather than
+                # piling subprocesses on until the machine swaps to a freeze.
+                block_reason = _spawn_freeze_guard_block_reason()
+                if block_reason is not None:
+                    logger.warning(
+                        "Swarm freeze-guard: withholding spawn (%s) — throttling", block_reason
+                    )
+                    self._emit_event("swarm_throttled", "swarm", {"freeze_guard": block_reason})
+                    break  # try again next poll tick
                 try:
                     self._launch_task(task, online)
                 except Exception as e:

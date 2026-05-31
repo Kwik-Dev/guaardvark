@@ -14,6 +14,24 @@ from backend.tasks.production_swarm_tasks import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fresh_gpu_gate(monkeypatch):
+    """Give each test a clean JobOperationGate.
+
+    These pipeline tests share the process-wide get_gate() singleton. The GPU
+    surfaces now wrap their work in gate.gpu_exclusive(), which on release sets
+    an 8s cooldown — that leaked between back-to-back tests and made an editor/
+    storyboard render falsely report "GPU cooling down". Resetting the singleton
+    per test isolates them. (Cross-test cooldown leakage is a test artifact of
+    the module singleton, not a production concern — real renders are seconds+
+    apart and a single process holds the gate.)
+    """
+    import backend.services.job_operation_gate as jog
+    fresh = jog.JobOperationGate()
+    monkeypatch.setattr(jog, "_GATE_SINGLETON", fresh)
+    return fresh
+
+
 @pytest.fixture
 def app():
     app = Flask(__name__)

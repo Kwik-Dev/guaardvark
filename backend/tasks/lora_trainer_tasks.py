@@ -40,13 +40,27 @@ def _train_impl(subject_id: int) -> dict:
     if use_real:
         from plugins.lora_trainer.real_trainer import RealLoraTrainer, _TRAINER
         logger.info(f"lora_trainer: using REAL backend for subject {subject_id}")
-        return _TRAINER.train_subject_lora(
-            subject_id=s.id,
-            subject_name=s.name,
-            trigger_word=s.trigger_word,
-            ref_image_paths=s.ref_image_paths or [],
-            output_dir=_output_dir(),
-        )
+        # Real LoRA training is a full GPU load on the shared 16GB card — claim
+        # the GPU exclusively (LORA_TRAIN slot) so it serializes against video
+        # render / model finetune. The MOCK path below is CPU-only and is NOT
+        # gated. On contention, return a clean failed result (rather than
+        # raising) so train_subject_lora_for_subject marks the Subject 'failed'
+        # instead of leaving it stuck in 'training'.
+        from backend.services.job_operation_gate import get_gate, GpuBusyError
+        from backend.services.job_types import JobKind
+        gate = get_gate()
+        try:
+            with gate.gpu_exclusive(JobKind.LORA_TRAIN, f"subject_{s.id}"):
+                return _TRAINER.train_subject_lora(
+                    subject_id=s.id,
+                    subject_name=s.name,
+                    trigger_word=s.trigger_word,
+                    ref_image_paths=s.ref_image_paths or [],
+                    output_dir=_output_dir(),
+                )
+        except GpuBusyError as e:
+            logger.warning(f"lora_trainer: GPU busy for subject {subject_id}: {e}")
+            return {"status": "failed", "error": f"GPU busy: {e}"}
 
     from plugins.lora_trainer.mock_trainer import train_subject_lora
     logger.info(f"lora_trainer: using MOCK backend for subject {subject_id}")

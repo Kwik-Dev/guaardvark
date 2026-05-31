@@ -171,16 +171,23 @@ class ProductionService:
 
     # --- GPU gate ----------------------------------------------------------
 
-    def gpu_stage(self, op_id: str, fn, *args, **kwargs):
+    def gpu_stage(self, op_id: str, fn, *args, kind=None, **kwargs):
         """Wrap a GPU-using stage in the JobOperationGate (if configured).
 
-        The gate ensures GPU-exclusive operations (LoRA training, I2V render)
-        don't trample each other. If no gate is wired, runs `fn` directly.
+        The gate ensures GPU-exclusive operations (LoRA training, I2V render,
+        storyboard image gen) don't trample each other on the shared GPU. If no
+        gate is wired, runs ``fn`` directly.
+
+        Delegates to ``JobOperationGate.gpu_exclusive`` (the single GPU front
+        door). ``op_id`` is the native_id identifying this holder; ``kind`` is
+        the JobKind whose exclusivity slot is claimed (defaults to VIDEO_RENDER,
+        the heavy-GPU generation bucket). On contention this raises GpuBusyError
+        — the caller fails the stage cleanly rather than double-loading the GPU.
         """
         if self.gate is None:
             return fn(*args, **kwargs)
-        self.gate.acquire(op_id)
-        try:
+        from backend.services.job_types import JobKind
+        if kind is None:
+            kind = JobKind.VIDEO_RENDER
+        with self.gate.gpu_exclusive(kind, op_id):
             return fn(*args, **kwargs)
-        finally:
-            self.gate.release(op_id)

@@ -56,7 +56,10 @@ class SwarmConfig:
     max_concurrent_agents: int = 5
     worktree_base: str = ".swarm-worktrees"
     auto_merge: bool = False
-    enable_merger_agent: bool = True
+    # The merger agent writes resolved conflict content to source. Default OFF:
+    # autonomous conflict resolution must be opted into, and self-repo writes are
+    # routed through the guarded_code_service chokepoint (see merger_agent.py).
+    enable_merger_agent: bool = False
     enable_diagnostic_agent: bool = True
     run_tests_before_merge: bool = True
     test_command: str = "python3 -m pytest"
@@ -129,6 +132,8 @@ def load_config(
         max_concurrent_agents=int(env_max) if env_max else defaults.get("max_concurrent_agents", 5),
         worktree_base=defaults.get("worktree_base", ".swarm-worktrees"),
         auto_merge=defaults.get("auto_merge", False),
+        enable_merger_agent=defaults.get("enable_merger_agent", False),
+        enable_diagnostic_agent=defaults.get("enable_diagnostic_agent", True),
         run_tests_before_merge=defaults.get("run_tests_before_merge", True),
         test_command=defaults.get("test_command", "python3 -m pytest"),
         flight_mode=(env_flight == "1") if env_flight else defaults.get("flight_mode", False),

@@ -323,46 +323,57 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False):
         _emit_progress(job_id, 5, f"Loading model {base_model}...", "processing")
         
         sys.path.insert(0, str(Path(os.environ.get('GUAARDVARK_ROOT', '.')) / "backend" / "services" / "training" / "scripts"))
-        
-        if images_path:
-             _emit_progress(job_id, 8, f"Detected vision task. Using vision trainer with images from {images_path}", "processing")
-             from finetune_vision import finetune
 
-             resume_msg = " (resuming from checkpoint)" if resume else ""
-             _emit_progress(job_id, 10, f"Starting vision training loop{resume_msg}...", "processing")
-             model_dir = finetune(
-                base_model=base_model,
-                data_path=data_path,
-                image_folder=images_path,
-                output_name=output_name,
-                max_steps=max_steps,
-                learning_rate=learning_rate,
-                batch_size=batch_size,
-                lora_rank=lora_rank,
-                max_seq_length=max_seq_length,
-                offload_to_cpu=offload_to_cpu,
-                progress_callback=progress_callback,
-                resume=resume
-            )
-        else:
-             from finetune_model import finetune
+        # Claim the GPU exclusively for the actual finetune() call — model
+        # finetune is a full GPU load on the shared 16GB card. Claim at EXACTLY
+        # this level: full_training_pipeline_task calls finetune_model_task as a
+        # plain in-process function, so wrapping here covers the pipeline entry
+        # point too WITHOUT a double-claim/double-release. On contention,
+        # GpuBusyError propagates to the except-block below (marks job failed,
+        # re-raises) rather than double-loading the GPU.
+        from backend.services.job_operation_gate import get_gate
+        from backend.services.job_types import JobKind
+        _gate = get_gate()
+        with _gate.gpu_exclusive(JobKind.TRAINING, str(job_id)):
+            if images_path:
+                 _emit_progress(job_id, 8, f"Detected vision task. Using vision trainer with images from {images_path}", "processing")
+                 from finetune_vision import finetune
 
-             resume_msg = " (resuming from checkpoint)" if resume else ""
-             _emit_progress(job_id, 10, f"Starting text training loop{resume_msg}...", "processing")
-             model_dir = finetune(
-                base_model=base_model,
-                data_path=data_path,
-                output_name=output_name,
-                max_steps=max_steps,
-                learning_rate=learning_rate,
-                batch_size=batch_size,
-                lora_rank=lora_rank,
-                max_seq_length=max_seq_length,
-                offload_to_cpu=offload_to_cpu,
-                progress_callback=progress_callback,
-                resume=resume
-            )
-        
+                 resume_msg = " (resuming from checkpoint)" if resume else ""
+                 _emit_progress(job_id, 10, f"Starting vision training loop{resume_msg}...", "processing")
+                 model_dir = finetune(
+                    base_model=base_model,
+                    data_path=data_path,
+                    image_folder=images_path,
+                    output_name=output_name,
+                    max_steps=max_steps,
+                    learning_rate=learning_rate,
+                    batch_size=batch_size,
+                    lora_rank=lora_rank,
+                    max_seq_length=max_seq_length,
+                    offload_to_cpu=offload_to_cpu,
+                    progress_callback=progress_callback,
+                    resume=resume
+                )
+            else:
+                 from finetune_model import finetune
+
+                 resume_msg = " (resuming from checkpoint)" if resume else ""
+                 _emit_progress(job_id, 10, f"Starting text training loop{resume_msg}...", "processing")
+                 model_dir = finetune(
+                    base_model=base_model,
+                    data_path=data_path,
+                    output_name=output_name,
+                    max_steps=max_steps,
+                    learning_rate=learning_rate,
+                    batch_size=batch_size,
+                    lora_rank=lora_rank,
+                    max_seq_length=max_seq_length,
+                    offload_to_cpu=offload_to_cpu,
+                    progress_callback=progress_callback,
+                    resume=resume
+                )
+
         checkpoint_dir = Path(model_dir) / "checkpoints"
         checkpoint_path = None
         if checkpoint_dir.exists():

@@ -4,10 +4,18 @@ from backend.services.swarm.agents.base import BaseSwarmAgent
 
 
 class CastingAction(BaseModel):
+    # NOTE: `action` and `existing_lora_id` are ADVISORY only — the
+    # CastingDirector agent produces a *recommendation* that is persisted as a
+    # SwarmMessage for the user to review. The LLM's `action` is NEVER applied
+    # automatically: doing so would auto-trigger GPU LoRA training unprompted
+    # on the shared 16GB card, which is forbidden. The real casting + LoRA
+    # training actions are USER-GATED through production_api.cast_subject /
+    # confirm_casting. run_casting_director only applies the `voice_id` field
+    # (a cheap, non-GPU assignment); see backend/tasks/production_swarm_tasks.py.
     subject_name: str
-    action: str  # use_existing_lora | train_from_uploads | train_from_generated
-    existing_lora_id: int | None = None
-    voice_id: str | None = None
+    action: str  # use_existing_lora | train_from_uploads | train_from_generated (ADVISORY)
+    existing_lora_id: int | None = None  # ADVISORY
+    voice_id: str | None = None  # applied (non-GPU)
 
 
 class CastingPlan(BaseModel):

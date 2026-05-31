@@ -10,10 +10,30 @@ import json
 import logging
 import os
 import requests
-import subprocess
 from pathlib import Path
 
 logger = logging.getLogger("swarm.merger")
+
+
+def _guaardvark_root() -> Path | None:
+    """Resolve the configured Guaardvark repo root, if any."""
+    root = os.environ.get("GUAARDVARK_ROOT")
+    if root:
+        try:
+            return Path(root).expanduser().resolve()
+        except Exception:
+            return None
+    return None
+
+
+def _is_under_repo_root(path: Path, root: Path | None) -> bool:
+    if root is None:
+        return False
+    try:
+        path.resolve().relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 class MergerAgent:
     """
@@ -114,13 +134,41 @@ Provide the FULL resolved content of the file. Do not include any explanations, 
                 if lines[0].startswith("```"):
                     resolved_content = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
 
-            # Write the resolved content back to the file
-            full_path.write_text(resolved_content)
-            
-            # git add the resolved file
-            subprocess.run(["git", "-C", str(repo_path), "add", rel_path], check=True)
-            return True
-
         except Exception as e:
             logger.error(f"Error calling LLM for conflict resolution: {e}")
+            return False
+
+        # --- Write the resolution ---
+        # Targets inside the Guaardvark repo are funneled through the guarded-code
+        # chokepoint (apply_exact_replacement) so every code write goes through the
+        # same backup/syntax-verify/rollback path as the rest of the system. We do
+        # NOT git add here — merge_manager re-checks for conflict markers and commits.
+        root = _guaardvark_root()
+        if not _is_under_repo_root(full_path, root):
+            # Outside the repo root: refuse — the merger has no business writing there.
+            logger.error(f"MergerAgent refusing to write outside repo root: {full_path}")
+            return False
+
+        try:
+            from backend.services.guarded_code_service import (
+                apply_exact_replacement,
+                GuardedCodeError,
+            )
+        except Exception as e:
+            logger.error(f"guarded_code_service unavailable; refusing raw write for {rel_path}: {e}")
+            return False
+
+        try:
+            apply_exact_replacement(
+                str(full_path),
+                old_text=conflicting_content,
+                new_text=resolved_content,
+                repo_root=str(root),
+            )
+            return True
+        except GuardedCodeError as e:
+            logger.warning(f"Guarded write rejected for {rel_path} (NEEDS_REVIEW): {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error during guarded write for {rel_path}: {e}")
             return False

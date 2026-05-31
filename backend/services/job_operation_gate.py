@@ -26,7 +26,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 from backend.services.job_types import JobKind
 
@@ -35,11 +36,26 @@ logger = logging.getLogger(__name__)
 
 # Kinds that can't share the GPU with anything heavy. Consistent with
 # requires_exclusive_vram on AudioBackend (introduced in commit 8d779ac).
-GPU_EXCLUSIVE_KINDS: set[JobKind] = {JobKind.TRAINING, JobKind.VIDEO_RENDER}
+# LORA_TRAIN added: per-Subject LoRA training is a full GPU load on the shared
+# 16GB card and must serialize against video render and model finetune.
+# Storyboard image generation rides the VIDEO_RENDER slot (the "heavy GPU
+# generation" bucket) so it cannot run concurrently with an editor render on
+# the same card.
+GPU_EXCLUSIVE_KINDS: set[JobKind] = {
+    JobKind.TRAINING,
+    JobKind.VIDEO_RENDER,
+    JobKind.LORA_TRAIN,
+}
 
 # Cooldown after a GPU-exclusive job releases — gives CUDA a moment to
 # settle before another claim. Mirrors PLUGIN_COOLDOWN_GPU_S in spirit.
 GPU_RELEASE_COOLDOWN_S = 8.0
+
+
+class GpuBusyError(Exception):
+    """Raised by ``gpu_exclusive(..., on_busy="raise")`` when the GPU is already
+    held by another job. Carries the human-readable reason from the gate so the
+    caller can surface it (UI banner) or fail the stage cleanly."""
 
 
 class JobOperationGate:
@@ -97,8 +113,9 @@ class JobOperationGate:
             if self._gpu_holder is not None:
                 hk, hid, _ = self._gpu_holder
                 # Idempotent only if WE (same kind + same id) already hold it.
-                # Bug was comparing native_id to itself, so any same-kind caller was
-                # wrongly told it already held the GPU while a different id held it.
+                # The compared tuple must use the HELD id (hid), not native_id —
+                # comparing native_id to itself wrongly told any same-kind caller
+                # it already held the GPU while a different id held it.
                 if (hk, hid) == (kind, str(native_id)):
                     return True, "Already holding GPU exclusively"
                 return False, f"GPU is held by {hk.value}:{hid} — wait for completion"
@@ -128,6 +145,57 @@ class JobOperationGate:
             self._gpu_holder = None
             self._gpu_last_released = time.monotonic()
             self._in_progress[kind].discard(str(native_id))
+
+    # ---- contextmanager ----------------------------------------------------
+
+    @contextmanager
+    def gpu_exclusive(
+        self,
+        kind: JobKind,
+        native_id: str,
+        *,
+        on_busy: str = "raise",
+    ) -> Iterator[bool]:
+        """Claim the GPU-exclusive slot for the duration of a ``with`` block.
+
+        This is the single front door every GPU-heavy surface should use so the
+        in-memory gate actually serializes work on the shared 16GB card.
+
+        on_busy controls behaviour when the slot can't be claimed:
+          - "raise"    (default): raise GpuBusyError(reason). Caller fails the
+            stage cleanly instead of piling a second job onto the GPU.
+          - "register": fall back to register_running() for snapshot visibility
+            (DEGRADED — the job runs WITHOUT real exclusivity; use only where
+            blocking is worse than contention).
+
+        Yields True when the exclusive slot was acquired, False in the
+        degraded ("register") path. Release is idempotent and always runs in
+        ``finally`` — it clears both the holder and the in-progress flag, so a
+        bare register_running() in the degraded path is cleaned up too.
+        """
+        acquired, reason = self.try_claim_gpu_exclusive(kind, native_id)
+        if not acquired:
+            if on_busy == "register":
+                logger.warning(
+                    "gpu_exclusive(%s:%s) busy (%s) — running DEGRADED "
+                    "(register-only, no real exclusivity)",
+                    kind.value, native_id, reason,
+                )
+                self.register_running(kind, native_id)
+                try:
+                    yield False
+                finally:
+                    self.release_gpu_exclusive(kind, native_id)
+                return
+            raise GpuBusyError(reason)
+
+        try:
+            yield True
+        finally:
+            # Idempotent: clears the holder if we hold it, and always drops the
+            # in-progress flag. Safe even for non-exclusive kinds (which only
+            # registered) and double-calls.
+            self.release_gpu_exclusive(kind, native_id)
 
     # ---- snapshot ----------------------------------------------------------
 
