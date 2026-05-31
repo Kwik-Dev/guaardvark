@@ -20,9 +20,17 @@ from .models import SwarmTask, SwarmStatus, ConflictWarning
 logger = logging.getLogger("swarm.plan_parser")
 
 # patterns for detecting structured fields
-_FILES_RE = re.compile(r"^-\s*files?:\s*(.+)", re.IGNORECASE)
-_DEPS_RE = re.compile(r"^-\s*depends?_?on:\s*(.+)", re.IGNORECASE)
-_BACKEND_RE = re.compile(r"^-\s*backend:\s*(.+)", re.IGNORECASE)
+#
+# Each field accepts an optional leading "- " bullet so that both the original
+# template style (`- files:`) and the UI / AI-plan-builder style (`Files:`,
+# `Assign to:`, `Deps:`) parse identically. All matching is case-insensitive.
+#
+#   files / file               -> file_scope    (also UI label "Files:")
+#   depends_on / depends / deps -> dependencies  (also UI label "Deps:")
+#   backend / assign to        -> preferred_backend (UI label "Assign to:")
+_FILES_RE = re.compile(r"^-?\s*files?:\s*(.+)", re.IGNORECASE)
+_DEPS_RE = re.compile(r"^-?\s*(?:depends?(?:_?on)?|deps):\s*(.+)", re.IGNORECASE)
+_BACKEND_RE = re.compile(r"^-?\s*(?:backend|assign\s+to):\s*(.+)", re.IGNORECASE)
 _TAG_RE = re.compile(r"\[([\w\s-]+):\s*([^\]]+)\]")
 
 # patterns for inferring file paths from freeform text
@@ -215,12 +223,11 @@ def _parse_structured(task_id: str, title: str, body: str) -> SwarmTask:
         backend_match = _BACKEND_RE.match(line.strip())
 
         if files_match:
-            raw = files_match.group(1)
-            file_scope = [f.strip() for f in raw.split(",") if f.strip()]
+            file_scope = _split_list(files_match.group(1))
         elif deps_match:
             raw = deps_match.group(1).strip()
             if raw.lower() not in ("none", "n/a", "-"):
-                dependencies = [_slugify(d.strip()) for d in raw.split(",") if d.strip()]
+                dependencies = [_slugify(d) for d in _split_list(raw)]
         elif backend_match:
             raw = backend_match.group(1).strip().lower()
             if raw not in ("any", "auto", "none"):
@@ -316,6 +323,19 @@ def _resolve_dependencies(tasks: list[SwarmTask]) -> None:
         task.dependencies = list(dict.fromkeys(
             d for d in resolved if d != task.id
         ))
+
+
+def _split_list(raw: str) -> list[str]:
+    """Split a field value into a clean list of items.
+
+    Accepts both a bracketed list (`[a, b, c]`) and a bare comma list
+    (`a, b, c`). Surrounding brackets and whitespace are stripped, and
+    empty items are dropped.
+    """
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    return [item.strip().strip("`'\"") for item in raw.split(",") if item.strip().strip("`'\"")]
 
 
 def _slugify(text: str) -> str:

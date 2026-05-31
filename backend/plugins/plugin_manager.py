@@ -895,7 +895,26 @@ class PluginManager:
                         'plugin_id': plugin_id
                     }
             except requests.exceptions.ConnectionError:
-                return {'status': 'stopped', 'error': 'Service not running'}
+                payload = {'status': 'stopped', 'error': 'Service not running'}
+                # For the swarm plugin, the sidecar can't tell us *why* it's down
+                # when it isn't running. Run its static dependency check out of
+                # process so the UI can surface "git missing" / "no agent CLI"
+                # instead of a blank offline state. Never let this raise.
+                if plugin_id == 'swarm':
+                    try:
+                        repo_root = Path(__file__).resolve().parents[2]
+                        result = subprocess.run(
+                            [sys.executable, '-m', 'plugins.swarm.service.deps_check'],
+                            capture_output=True, text=True, timeout=10,
+                            cwd=str(repo_root),
+                        )
+                        if result.returncode == 0 and result.stdout.strip():
+                            deps = json.loads(result.stdout)
+                            payload['dependencies'] = deps.get('dependencies', [])
+                            payload['missing'] = deps.get('missing', [])
+                    except Exception as dep_err:
+                        logger.debug(f"Swarm dependency check failed: {dep_err}")
+                return payload
             except Exception as e:
                 return {'status': 'error', 'error': str(e)}
         

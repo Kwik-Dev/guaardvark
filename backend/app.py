@@ -872,9 +872,6 @@ def _initialize_app_components(app):
             resumed = ProductionService(db.session).resume_all()
             if resumed:
                 app.logger.info(f"Production pipeline resumed {resumed} in-flight production(s) from DB state")
-    except NotImplementedError:
-        # Swarm dispatch not yet wired (Phase D). Production rows past 'draft' won't auto-resume yet.
-        app.logger.debug("Production resume skipped — swarm dispatch not yet wired")
     except Exception as e:
         app.logger.warning(f"Production resume failed (non-critical): {e}")
 

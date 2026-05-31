@@ -60,13 +60,11 @@ def create():
     p = svc.create(name=name, script_text=script_text, project_id=project_id)
 
     # C1: advance to screenwriting and dispatch the agent so the pipeline
-    # actually starts. Tolerate NotImplementedError (swarm not wired yet) —
-    # state still moved forward so the next boot's resume_all picks it up.
+    # actually starts. A dispatch failure is non-fatal — state still moved
+    # forward so the next boot's resume_all picks it up.
     if svc.advance_if_predecessor(p.id, expected_predecessor="draft"):
         try:
             svc.dispatch_agent(p.id, "screenwriter")
-        except NotImplementedError:
-            log.debug("Screenwriter dispatch deferred (swarm not yet wired)")
         except Exception as e:
             log.warning(f"Screenwriter dispatch failed for production {p.id}: {e}")
         db.session.refresh(p)
@@ -236,8 +234,6 @@ def confirm_casting(prod_id):
     if advanced:
         try:
             svc.dispatch_agent(prod_id, "cinematographer")
-        except NotImplementedError:
-            log.debug("Cinematographer dispatch deferred (swarm not yet wired)")
         except Exception as e:
             log.warning(f"Cinematographer dispatch failed for production {prod_id}: {e}")
 
@@ -268,8 +264,6 @@ def approve_storyboard(prod_id):
     if svc.advance_if_predecessor(prod_id, expected_predecessor="awaiting_approval"):
         try:
             svc.dispatch_agent(prod_id, "editor")
-        except NotImplementedError:
-            log.debug("Editor dispatch deferred (swarm not yet wired)")
         except Exception as e:
             log.warning(f"Editor dispatch failed for production {prod_id}: {e}")
 

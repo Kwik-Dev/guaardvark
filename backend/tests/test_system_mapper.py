@@ -119,3 +119,73 @@ def test_describe_includes_kind_paths_evidence():
                 ["backend/tools/x.py"], {"tool": "X"})
     text = actions.describe(f.to_dict())
     assert "unwired-tool" in text and "backend/tools/x.py" in text and "X" in text
+
+
+# ---- A3: severity recalibration ------------------------------------
+
+def test_untested_module_severity_is_info(tmp_path):
+    smap = codebase_map(_fake_repo(tmp_path))
+    untested = [f for f in smap.findings if f.kind == FindingKind.UNTESTED_MODULE]
+    assert untested, "expected at least one untested-module finding"
+    assert all(f.severity == Severity.INFO for f in untested)
+
+
+def _write_route(p, prefix, path, fn):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "from flask import Blueprint\n"
+        f"bp = Blueprint('{fn}', __name__, url_prefix='{prefix}')\n"
+        f"@bp.route('{path}', methods=['GET'])\n"
+        f"def {fn}():\n    return {{}}\n"
+    )
+
+
+def test_ghost_endpoints_capped_with_rollup(tmp_path):
+    from backend.services.system_mapper import reachability
+    # 30 backend routes, no frontend callers at all.
+    fe = tmp_path / "frontend" / "src"
+    fe.mkdir(parents=True, exist_ok=True)
+    (fe / "noop.js").write_text("// no api calls here\n")
+    for i in range(30):
+        _write_route(tmp_path / "backend" / "api" / f"r{i}_api.py",
+                     "/api", f"/thing{i}", f"fn{i}")
+    result = reachability.analyze(tmp_path)
+    ghosts = [f for f in result["findings"]
+              if f.kind == FindingKind.GHOST_ENDPOINT]
+    # <= 25 LOW + 1 INFO rollup = 26 max
+    assert len(ghosts) <= 26
+    assert result["stats"]["ghost_endpoints_total"] == 30
+    assert result["stats"]["ghost_endpoints_shown"] == 25
+    rollups = [f for f in ghosts if f.severity == Severity.INFO]
+    assert len(rollups) == 1
+    assert "additional ghost endpoints suppressed" in rollups[0].summary
+
+
+def test_filter_findings_helper():
+    from backend.services.system_mapper import core
+    findings = [
+        Finding(FindingKind.URL_PATH_COLLISION, Severity.HIGH, "h", ["a"]).to_dict(),
+        Finding(FindingKind.IMPORT_CYCLE, Severity.MEDIUM, "m", ["b"]).to_dict(),
+        Finding(FindingKind.DORMANT_MODULE, Severity.LOW, "l", ["c"]).to_dict(),
+        Finding(FindingKind.UNTESTED_MODULE, Severity.INFO, "i", ["d"]).to_dict(),
+    ]
+    hi = core.filter_findings(findings, severities={"high", "medium"})
+    assert {f["severity"] for f in hi} == {"high", "medium"}
+    assert len(core.filter_findings(findings, limit=2)) == 2
+    kinds = core.filter_findings(findings, kinds={"import-cycle"})
+    assert len(kinds) == 1 and kinds[0]["kind"] == "import-cycle"
+
+
+def test_findings_api_default_excludes_low_info():
+    """The /findings endpoint defaults to high+medium when no severity param."""
+    from backend.services.system_mapper import core
+    findings = [
+        Finding(FindingKind.URL_PATH_COLLISION, Severity.HIGH, "h", ["a"]).to_dict(),
+        Finding(FindingKind.DORMANT_MODULE, Severity.LOW, "l", ["c"]).to_dict(),
+        Finding(FindingKind.UNTESTED_MODULE, Severity.INFO, "i", ["d"]).to_dict(),
+    ]
+    # Mirror the endpoint's default behavior.
+    default = core.filter_findings(findings, severities={"high", "medium"}, limit=100)
+    sevs = {f["severity"] for f in default}
+    assert "low" not in sevs and "info" not in sevs
+    assert "high" in sevs

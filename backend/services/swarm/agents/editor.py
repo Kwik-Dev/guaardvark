@@ -6,10 +6,7 @@ clients, doesn't talk to an LLM). The intent is one entry point, `render(...)`,
 that the production_service hands control to once the storyboard is approved.
 
 For v1 the cuts are intentional:
-- One char LoRA per shot (no multi-Subject stacking)
-- One global TTS voice (per-Subject voices land in v1.3)
 - One music track for the whole production (per-scene music in v1.2+)
-- Video Editor timeline population is a stub (the editor itself isn't built yet)
 """
 from __future__ import annotations
 
@@ -117,7 +114,8 @@ class Editor:
 
         Per-shot work (I2V + per-line VO) is currently sequential. Parallelization
         is a v1.x optimization gated by the JobOperationGate (handled by the
-        caller — production_service.gpu_stage wraps this method).
+        caller — run_editor in backend/tasks/production_swarm_tasks.py registers
+        the render with the gate).
         """
         # M3: refuse to render an empty production. Fails loudly so the upstream
         # caller (production_service) can fail_stage with a clear error rather

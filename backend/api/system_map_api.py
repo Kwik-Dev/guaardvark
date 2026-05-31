@@ -135,6 +135,7 @@ def findings():
     Returns findings only (not the full graph) so the panel can poll cheaply.
     """
     from backend.services.system_mapper import actions
+    from backend.services.system_mapper import core
 
     root, err = _resolve_root(request.args.get("root"))
     if err:
@@ -146,12 +147,26 @@ def findings():
     include_dismissed = request.args.get("include_dismissed") == "1"
     items = actions.ranked_findings(payload, root, include_dismissed=include_dismissed)
 
-    sev_filter = {s for s in (request.args.get("severity") or "").split(",") if s}
+    # Default to actionable severities (high+medium) when the caller doesn't
+    # specify — the low/info tier is noise for the default panel view.
+    raw_sev = request.args.get("severity")
+    if raw_sev is None:
+        sev_filter = {"high", "medium"}
+    else:
+        sev_filter = {s for s in raw_sev.split(",") if s}
     kind_filter = {k for k in (request.args.get("kind") or "").split(",") if k}
-    if sev_filter:
-        items = [f for f in items if f.get("severity") in sev_filter]
-    if kind_filter:
-        items = [f for f in items if f.get("kind") in kind_filter]
+
+    try:
+        limit = int(request.args.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+
+    items = core.filter_findings(
+        items,
+        severities=sev_filter or None,
+        kinds=kind_filter or None,
+        limit=limit,
+    )
 
     counts: dict[str, int] = {}
     for f in items:

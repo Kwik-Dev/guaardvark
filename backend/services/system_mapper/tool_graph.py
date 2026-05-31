@@ -18,11 +18,77 @@ If neither file exists, returns empty results without raising.
 from __future__ import annotations
 
 import ast
+import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from .core import Finding, FindingKind, Severity
+
+
+# Subprocess probe: import the real registry in a sanitized, offline, no-GPU
+# environment and emit the actual registered tool names as JSON on stdout.
+# This makes loop-registration (for tool in CODE_MANIPULATION_TOOLS: ...) visible,
+# which the AST pass cannot reliably see.
+_PROBE = r"""
+import os, sys, json
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["OLLAMA_HOST"] = "127.0.0.1:1"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["SYSTEM_MAPPER_PROBE"] = "1"
+sys.path.insert(0, sys.argv[1])
+try:
+    from backend.tools.tool_registry_init import get_registered_tools
+    names = list(get_registered_tools())
+    print(json.dumps({"ok": True, "tools": names}))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": repr(exc)}))
+"""
+
+
+def _probe_runtime_registry(root: Path, timeout: float = 20.0) -> tuple[set[str], dict]:
+    """Run the real tool registry in a subprocess and return its registered names.
+
+    Returns (names, info). On any failure (timeout / nonzero exit / non-JSON /
+    {"ok": False}) returns (set(), {"error": ...}) so the caller can fall back to
+    the AST extraction. Never raises.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PROBE, str(root)],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return set(), {"error": "probe timed out"}
+    except Exception as exc:  # pragma: no cover - defensive
+        return set(), {"error": f"probe spawn failed: {exc!r}"}
+
+    if proc.returncode != 0:
+        return set(), {"error": f"probe exit {proc.returncode}: {proc.stderr.strip()[-400:]}"}
+
+    stdout = (proc.stdout or "").strip()
+    # The probe may emit log lines before the JSON; take the last JSON object line.
+    payload = None
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                payload = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+    if payload is None:
+        return set(), {"error": "probe produced no JSON"}
+    if not payload.get("ok"):
+        return set(), {"error": payload.get("error", "probe reported failure")}
+    names = {n for n in payload.get("tools", []) if isinstance(n, str)}
+    return names, {"count": len(names)}
 
 
 def _extract_registered_tools(registry_init: Path) -> dict[str, dict]:
@@ -68,10 +134,107 @@ def _extract_registered_tools(registry_init: Path) -> dict[str, dict]:
             return True, None
         return False, None
 
+    # Map imported names -> source dotted module, so loop registration like
+    # `for tool in CODE_MANIPULATION_TOOLS:` can be resolved to the list's
+    # element classes (and thence their `name` attributes).
+    imported_from: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                imported_from[alias.asname or alias.name] = node.module
+
+    def _class_name_attr(sub_tree: ast.Module, class_name: str) -> str | None:
+        """Find a class's `name = "..."` class-level attribute in a parsed module."""
+        for sub in ast.walk(sub_tree):
+            if isinstance(sub, ast.ClassDef) and sub.name == class_name:
+                for stmt in sub.body:
+                    if isinstance(stmt, ast.Assign):
+                        for tgt in stmt.targets:
+                            if isinstance(tgt, ast.Name) and tgt.id == "name" and \
+                               isinstance(stmt.value, ast.Constant) and \
+                               isinstance(stmt.value.value, str):
+                                return stmt.value.value
+        return None
+
+    def _resolve_imported_list(list_name: str) -> list[str] | None:
+        """Resolve a module-level list referenced in a for-loop to tool names.
+
+        Lists like CODE_MANIPULATION_TOOLS are imported from another module.
+        We follow the import to the source file, read the list's element class
+        names, and resolve each class's `name = "..."` class attribute. Returns
+        a list of resolved tool-name strings (best-effort), else None.
+        """
+        src_mod = imported_from.get(list_name)
+        if not src_mod:
+            return None
+        rel = Path(*src_mod.split(".")).with_suffix(".py")
+        # registry_init is <root>/backend/tools/tool_registry_init.py — walk up
+        # to find the repo root where the dotted-module path resolves to a file.
+        root_guess = registry_init
+        for _ in range(8):
+            root_guess = root_guess.parent
+            cand = root_guess / rel
+            if not cand.is_file():
+                continue
+            try:
+                sub_tree = ast.parse(cand.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                return None
+            class_names: list[str] | None = None
+            for sub in ast.walk(sub_tree):
+                if isinstance(sub, ast.Assign):
+                    for tgt in sub.targets:
+                        if isinstance(tgt, ast.Name) and tgt.id == list_name and \
+                           isinstance(sub.value, (ast.List, ast.Tuple)):
+                            class_names = [
+                                e.func.id for e in sub.value.elts
+                                if isinstance(e, ast.Call) and isinstance(e.func, ast.Name)
+                            ]
+            if class_names is None:
+                return None
+            resolved = [n for c in class_names if (n := _class_name_attr(sub_tree, c))]
+            return resolved
+        return None
+
+    def _handle_for_loop(stmt: ast.For) -> bool:
+        """Detect `for <v> in <NAME>: register_tool(<v>); registered.append(<v>.name)`.
+
+        On a match, resolve <NAME> to the list's element classes and their `name`
+        attributes and record each as registered. Returns True if handled as a
+        registration loop (so the normal pairing logic can skip this stmt)."""
+        if not isinstance(stmt.target, ast.Name):
+            return False
+        if not isinstance(stmt.iter, ast.Name):
+            return False
+        loop_var = stmt.target.id
+        iter_name = stmt.iter.id
+        has_register = False
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Call):
+                f = n.func
+                fname = (f.id if isinstance(f, ast.Name)
+                         else f.attr if isinstance(f, ast.Attribute) else None)
+                if fname in ("register_tool", "add_tool", "register") and any(
+                    isinstance(a, ast.Name) and a.id == loop_var for a in n.args
+                ):
+                    has_register = True
+        if not has_register:
+            return False
+        names = _resolve_imported_list(iter_name)
+        if not names:
+            # Couldn't resolve, but it IS a registration loop — return True so we
+            # don't mis-handle it, even though we add nothing.
+            return True
+        for nm in names:
+            out.setdefault(nm, {"name": nm, "class": None, "line": stmt.lineno})
+        return True
+
     def _walk_for_registrations(body: list[ast.stmt]) -> None:
         """Walk a function body; pair register_tool calls with subsequent append(name)."""
         pending_class: list[tuple[str | None, int]] = []  # (class_name, line)
         for stmt in body:
+            if isinstance(stmt, ast.For) and _handle_for_loop(stmt):
+                continue
             # Inspect the statement for register_tool calls
             for node in ast.walk(stmt):
                 if isinstance(node, ast.Call):
@@ -174,6 +337,24 @@ def _find_invocations(root: Path, tool_names: set[str]) -> dict[str, list[str]]:
 
 
 def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Never raises — returns an empty/INFO result on any internal failure."""
+    try:
+        return _analyze(root, extra_excludes)
+    except Exception as exc:  # pragma: no cover - last-resort guard
+        return {
+            "graph": {"registered_tools": [], "core_tools": [],
+                      "wired": [], "unwired": [], "unregistered": []},
+            "findings": [Finding(
+                kind=FindingKind.UNWIRED_TOOL,
+                severity=Severity.INFO,
+                summary=f"tool_graph.analyze failed internally: {exc!r}",
+            )],
+            "stats": {"applicable": False, "tool_registry_source": "ast_fallback",
+                      "error": repr(exc)},
+        }
+
+
+def _analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[str, Any]:
     registry_path = root / "backend" / "tools" / "tool_registry_init.py"
     chat_path = root / "backend" / "services" / "unified_chat_engine.py"
 
@@ -191,10 +372,22 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
                 "unregistered": [],
             },
             "findings": [],
-            "stats": {"applicable": False},
+            "stats": {"applicable": False, "tool_registry_source": "ast_fallback"},
         }
 
-    registered_names = set(registered.keys())
+    # Prefer the live registry when it can be probed: it sees loop-registered
+    # tools the AST pass may miss. Fall back to AST-only when the probe fails.
+    runtime_names, probe_info = _probe_runtime_registry(root)
+    if runtime_names:
+        tool_registry_source = "runtime"
+        # Synthesize graph entries for runtime-only names not seen by the AST.
+        for nm in runtime_names:
+            registered.setdefault(nm, {"name": nm, "class": None, "line": None})
+        registered_names = set(registered.keys()) | runtime_names
+    else:
+        tool_registry_source = "ast_fallback"
+        registered_names = set(registered.keys())
+
     core_set = set(core_tools)
     wired = sorted(registered_names & core_set)
     unwired = sorted(registered_names - core_set)
@@ -253,11 +446,14 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
         "findings": findings,
         "stats": {
             "applicable": True,
-            "registered_count": len(registered),
+            "registered_count": len(registered_names),
             "core_tool_count": len(core_tools),
             "tool_lists_found": list(breakdown.keys()),
             "wired_count": len(wired),
             "unwired_count": len(unwired),
             "unregistered_count": len(unregistered),
+            "tool_registry_source": tool_registry_source,
+            "runtime_probe": probe_info,
+            "runtime_tool_count": len(runtime_names),
         },
     }

@@ -120,7 +120,8 @@ def _backend_routes(root: Path, extra_excludes: frozenset[str]) -> list[dict]:
 
 JS_EXTS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 # Capture the URL (path) string in fetch / axios / apiClient calls — handles
-# template literals via a follow-up normalization step.
+# template literals via a follow-up normalization step. The first group of
+# each pattern is the raw URL (which may contain ${...} interpolations).
 FETCH_PATTERNS = [
     re.compile(r"""fetch\(\s*[`'"]([^`'"]+)[`'"]"""),
     re.compile(r"""axios\.(?:get|post|put|delete|patch)\(\s*[`'"]([^`'"]+)[`'"]"""),
@@ -129,11 +130,49 @@ FETCH_PATTERNS = [
 ]
 
 
+def _read_base_url_default(root: Path) -> str:
+    """Read the BASE_URL default from frontend/src/api/apiClient.js.
+
+    Matches `export const BASE_URL = (import.meta.env.X || "/api")...` and pulls
+    the literal default. Returns "/api" if the file/constant isn't found."""
+    api_client = root / "frontend" / "src" / "api" / "apiClient.js"
+    if not api_client.is_file():
+        return "/api"
+    try:
+        text = api_client.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return "/api"
+    # `BASE_URL = (import.meta.env.VITE_API_BASE_URL || "/api")` — take the
+    # fallback string literal. Also tolerate `BASE_URL = "/api"`.
+    m = re.search(r"""BASE_URL\s*=\s*\([^)]*\|\|\s*[`'"]([^`'"]+)[`'"]""", text)
+    if m:
+        return m.group(1).rstrip("/") or "/api"
+    m = re.search(r"""BASE_URL\s*=\s*[`'"]([^`'"]+)[`'"]""", text)
+    if m:
+        return m.group(1).rstrip("/") or "/api"
+    return "/api"
+
+
+def _resolve_js_url(raw: str, base_url: str) -> str:
+    """Resolve a raw frontend URL string into an absolute /api/... path.
+
+    - `${BASE_URL}` (and `${ BASE_URL }`) → the resolved base_url.
+    - any other `${VAR}` → a `<param>` segment (handled by _normalize later).
+    - collapses a doubled `/api/api` that results from base + leading-/api path.
+    """
+    resolved = re.sub(r"\$\{\s*BASE_URL\s*\}", base_url, raw)
+    # Collapse double /api/api that arises when a caller writes
+    # `${BASE_URL}/api/foo` (base already ends in /api).
+    resolved = re.sub(r"/api/api(?=/|$)", "/api", resolved)
+    return resolved
+
+
 def _frontend_callers(root: Path, extra_excludes: frozenset[str]) -> list[dict]:
     fe = root / "frontend" / "src"
     if not fe.is_dir():
         return []
 
+    base_url = _read_base_url_default(root)
     out: list[dict] = []
     for jsf in fe.rglob("*"):
         if not jsf.is_file() or jsf.suffix not in JS_EXTS:
@@ -148,11 +187,19 @@ def _frontend_callers(root: Path, extra_excludes: frozenset[str]) -> list[dict]:
             for pat in FETCH_PATTERNS:
                 for m in pat.finditer(line):
                     raw = m.group(1)
-                    # Only care about API-shaped paths
-                    if not raw.startswith(("/api/", "/socket.io/")) and "/api/" not in raw:
+                    # Resolve ${BASE_URL}/template literals BEFORE the prefix
+                    # filter, so apiClient-style callers aren't dropped.
+                    resolved = _resolve_js_url(raw, base_url)
+                    keep = (
+                        resolved.startswith(("/api/", "/socket.io/"))
+                        or "/api/" in resolved
+                        or "${BASE_URL}" in raw
+                    )
+                    if not keep:
                         continue
                     out.append({
                         "raw": raw,
+                        "resolved": resolved,
                         "file": str(jsf.relative_to(root)),
                         "line": line_no,
                     })
@@ -191,10 +238,10 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
     for r in routes:
         norm_routes[_normalize(r["path"])].append(r)
 
-    # Index callers by normalized path
+    # Index callers by normalized path (use the ${BASE_URL}-resolved URL).
     norm_calls: dict[str, list[dict]] = defaultdict(list)
     for c in callers:
-        norm_calls[_normalize(c["raw"])].append(c)
+        norm_calls[_normalize(c.get("resolved", c["raw"]))].append(c)
 
     findings: list[Finding] = []
 
@@ -235,8 +282,11 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
                 evidence={"prefix": prefix, "file_count": len(files)},
             ))
 
-    # 3. GHOST_ENDPOINT: route exists, no caller normalizes to it
+    # 3. GHOST_ENDPOINT: route exists, no caller normalizes to it.
+    # Collect candidates first, sort by path, then emit at most GHOST_LIMIT (LOW)
+    # plus one INFO rollup if there are more — keeps the findings panel signal-rich.
     called_paths = set(norm_calls.keys())
+    ghost_candidates: list[tuple[str, list[str], list[str]]] = []
     for norm_path, route_list in norm_routes.items():
         if norm_path in called_paths:
             continue
@@ -244,12 +294,30 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
         if norm_path.startswith("/socket.io"):
             continue
         files = sorted({r["file"] for r in route_list})
+        methods = sorted({m for r in route_list for m in r["methods"]})
+        ghost_candidates.append((norm_path, files, methods))
+
+    ghost_candidates.sort(key=lambda t: t[0])
+    GHOST_LIMIT = 25
+    ghost_total = len(ghost_candidates)
+    for norm_path, files, methods in ghost_candidates[:GHOST_LIMIT]:
         findings.append(Finding(
             kind=FindingKind.GHOST_ENDPOINT,
             severity=Severity.LOW,
             summary=f"{norm_path} — backend route with no frontend caller",
             paths=files,
-            evidence={"route": norm_path, "methods": sorted({m for r in route_list for m in r["methods"]})},
+            evidence={"route": norm_path, "methods": methods},
+        ))
+    ghost_shown = min(ghost_total, GHOST_LIMIT)
+    if ghost_total > GHOST_LIMIT:
+        findings.append(Finding(
+            kind=FindingKind.GHOST_ENDPOINT,
+            severity=Severity.INFO,
+            summary=(f"{ghost_total - GHOST_LIMIT} additional ghost endpoints "
+                     f"suppressed (run after A2 to reduce noise)"),
+            paths=[],
+            evidence={"suppressed": ghost_total - GHOST_LIMIT,
+                      "shown": ghost_shown, "total": ghost_total},
         ))
 
     # 4. GHOST_API_CALLER: frontend hits a path the backend doesn't serve
@@ -285,6 +353,8 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
             "frontend_callers": len(callers),
             "unique_called_paths": len(norm_calls),
             "ghost_endpoints": sum(1 for f in findings if f.kind == FindingKind.GHOST_ENDPOINT),
+            "ghost_endpoints_total": ghost_total,
+            "ghost_endpoints_shown": ghost_shown,
             "ghost_callers": sum(1 for f in findings if f.kind == FindingKind.GHOST_API_CALLER),
             "path_collisions": sum(1 for f in findings if f.kind == FindingKind.URL_PATH_COLLISION),
             "prefix_collisions": sum(1 for f in findings if f.kind == FindingKind.URL_PREFIX_COLLISION),

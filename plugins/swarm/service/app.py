@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from service.config import SwarmConfig, load_config, check_internet
+from service.deps_check import collect_dependency_status
 from service.models import generate_swarm_id
 from service.orchestrator import SwarmOrchestrator
 from service.plan_parser import parse_plan, predict_conflicts, auto_serialize_conflicts
@@ -108,12 +109,27 @@ def health():
         _config.offline_ping_target if _config else "api.anthropic.com",
         _config.offline_ping_timeout if _config else 2,
     )
+
+    # Static dependency inspection — tells the UI *why* something is unavailable
+    # (missing git / agent CLI / python deps) instead of a blank offline state.
+    try:
+        deps = collect_dependency_status()
+    except Exception as e:  # never let a healthcheck crash the health endpoint
+        logger.debug(f"Dependency check failed: {e}")
+        deps = {"dependencies": [], "missing": [], "ok": True}
+
+    # degrade if a launch-blocking dependency is missing, but the service itself
+    # is up and answering, so it's "degraded", not "unhealthy".
+    status = "healthy" if deps.get("ok", True) else "degraded"
+
     return {
-        "status": "healthy",
+        "status": status,
         "active_swarms": running,
         "total_swarms": len(_active_orchestrators),
         "online": online,
         "backends": list(_config.backends.keys()) if _config else [],
+        "dependencies": deps.get("dependencies", []),
+        "missing": deps.get("missing", []),
     }
 
 
@@ -229,15 +245,34 @@ def swarm_status(swarm_id: str):
 
 @app.get("/swarm/{swarm_id}/logs/{task_id}")
 def task_logs(swarm_id: str, task_id: str, lines: int = 50):
-    """Get logs for a specific agent in a swarm."""
+    """Get logs for a specific agent in a swarm.
+
+    While the orchestrator is in memory we read from it directly. Once a
+    swarm completes and the orchestrator is evicted, we fall back to tailing
+    the on-disk agent log inside the task's worktree (same recovery pattern
+    as the diff endpoint).
+    """
+    lines = min(lines, 500)
+
     with _lock:
         orch = _active_orchestrators.get(swarm_id)
 
-    if not orch:
-        raise HTTPException(404, f"Swarm not found or not active: {swarm_id}")
+    if orch:
+        logs = orch.get_task_logs(task_id, lines=lines)
+        return {"success": True, "logs": logs, "task_id": task_id}
 
-    logs = orch.get_task_logs(task_id, lines=min(lines, 500))
-    return {"success": True, "logs": logs, "task_id": task_id}
+    # No active orchestrator — try the worktree on disk.
+    repo_path = _get_default_repo()
+    if repo_path:
+        worktree_base = _config.worktree_base if _config else ".swarm-worktrees"
+        mgr = WorktreeManager.load_existing(repo_path, swarm_id, worktree_base)
+        if mgr:
+            info = mgr.manifest.worktrees.get(task_id)
+            if info and info.worktree_path and os.path.exists(info.worktree_path):
+                logs = _read_worktree_log(info.worktree_path, lines)
+                return {"success": True, "logs": logs, "task_id": task_id}
+
+    raise HTTPException(404, f"Swarm not found or worktree missing: {swarm_id}")
 
 
 @app.get("/swarm/{swarm_id}/diff/{task_id}")
@@ -553,6 +588,27 @@ def swarm_history(limit: int = 20):
 
 
 # --- Helpers ---
+
+# Agents write their log here, inside their worktree (see agent_backends/*).
+_AGENT_LOG_FILE = ".swarm-agent.log"
+
+
+def _read_worktree_log(worktree_path: str, lines: int) -> str:
+    """Tail the agent log file inside a worktree.
+
+    Returns the last `lines` lines (decode errors replaced), or a clear
+    placeholder if the log file doesn't exist yet.
+    """
+    log_path = Path(worktree_path) / _AGENT_LOG_FILE
+    if not log_path.exists():
+        return "(no log file)"
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return f"(could not read log file: {e})"
+    all_lines = text.split("\n")
+    return "\n".join(all_lines[-lines:])
+
 
 def _get_default_repo() -> Optional[Path]:
     """Get the default repo path from GUAARDVARK_ROOT or cwd."""

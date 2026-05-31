@@ -220,7 +220,7 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
             continue
         findings.append(Finding(
             kind=FindingKind.UNTESTED_MODULE,
-            severity=Severity.LOW,
+            severity=Severity.INFO,
             summary=f"No test found for module: {rel_str}",
             paths=[rel_str],
             evidence={"expected_test": f"test_{rel.stem}.py"},

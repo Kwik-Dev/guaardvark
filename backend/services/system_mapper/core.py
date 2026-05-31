@@ -125,6 +125,29 @@ def is_excluded(path: Path, extra_excludes: frozenset[str] = frozenset()) -> boo
     return any(part in excludes for part in path.parts)
 
 
+def filter_findings(
+    findings: list[dict],
+    *,
+    severities: set[str] | None = None,
+    kinds: set[str] | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """Filter a list of finding dicts by severity / kind, then optionally cap.
+
+    Operates on the dict form (as returned by Finding.to_dict() / cached in the
+    snapshot). `severities` and `kinds`, when given, are inclusive allow-sets;
+    `None` means "no filter on that axis". `limit` caps the result length.
+    Order is preserved (callers rank before filtering)."""
+    out = findings
+    if severities:
+        out = [f for f in out if f.get("severity") in severities]
+    if kinds:
+        out = [f for f in out if f.get("kind") in kinds]
+    if limit is not None and limit >= 0:
+        out = out[:limit]
+    return list(out)
+
+
 def codebase_map(
     root_path: str | Path,
     extra_excludes: frozenset[str] = frozenset(),
