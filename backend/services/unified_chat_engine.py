@@ -179,6 +179,28 @@ OUTREACH_TOOLS = ["outreach_status", "outreach_list_queue", "outreach_draft_post
 # so the LLM can pick MCP tools by name without going through mcp_execute.
 # Mutated in place so the TOOL_CONTEXT_KEYWORDS reference below stays live.
 MCP_NATIVE_TOOLS: List[str] = []
+# Code-repository intelligence tools (DocumentsPage "Code Repository" folders).
+# These read precomputed repo metadata by folder_id — architectural map,
+# import dependency graph, and AST-precise class/function extraction. The
+# embedding-based semantic selector was observed to surface get_repository_map
+# but under-rank the other two for natural "what does X depend on" / "show me
+# the Worker class" queries, so they also get a deterministic pin at the
+# selection chokepoint (see _pin_repo_intel_tools) keyed on REPO_INTEL_KEYWORDS.
+REPO_INTEL_TOOLS = ["get_repository_map", "get_dependency_graph", "read_ast_node"]
+REPO_INTEL_KEYWORDS = [
+    "repository", "repo map", "repo structure", "repository map", "code repo",
+    "dependency", "dependencies", "depends on", "depend on", "imported by",
+    "dependency graph", "import graph", "call graph", "module graph",
+    "what imports", "what depends", "architecture", "architectural",
+    "high-level map", "overview of the code", "ast", "read_ast_node",
+    "extract the class", "extract the function", "source of the class",
+    "get_repository_map", "get_dependency_graph",
+    # AST/class-source phrasings ("show me the source code of the Worker class
+    # in folder 746") — the dominant read_ast_node intent, plus the folder/repo
+    # context signal the DocumentsPage dashboard implies.
+    "source code of", "source of the", "the class", "the function",
+    "in folder", "in repo", "in the repository", "class in", "function in",
+]
 
 # URL / bare-domain detection — matches explicit URLs, www-prefixed hosts, and
 # bare domains with common TLDs. Deliberately does NOT match dotted identifiers
@@ -212,6 +234,7 @@ TOOL_CONTEXT_KEYWORDS = {
     "code": (["code", "script", "function", "file", ".py", ".js", ".jsx", ".ts", ".tsx",
               ".css", ".html", "generate code", "write code", "program", "source code",
               "edit source", "modify source"], CODE_TOOLS),
+    "repo_intelligence": (REPO_INTEL_KEYWORDS, REPO_INTEL_TOOLS),
     "content": (["wordpress", "blog post", "article", "content", "seo"], CONTENT_TOOLS),
     "desktop": (["launch app", "open app", "desktop", "gui", "notification", "clipboard"],
                 DESKTOP_TOOLS),
@@ -307,6 +330,24 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
                 selected.add(t)
 
     return list(selected)[:max_tools]
+
+
+def _pin_repo_intel_tools(message: str, selected: List[str], all_tool_names: List[str]) -> List[str]:
+    """Guarantee the repo-intelligence trio survives selection on repo queries.
+
+    The embedding-based semantic selector ranks get_repository_map well but was
+    observed to under-rank get_dependency_graph / read_ast_node for natural
+    "what does main.py depend on" / "show me the Worker class" phrasings — the
+    model then falls back to system_command / list_code_files. When the message
+    clearly expresses repo-intelligence intent, force the whole trio in (prepended
+    so a downstream cap never truncates them). Cheap: 3 tools, ~60 prompt tokens.
+    """
+    msg = (message or "").lower()
+    if not any(kw in msg for kw in REPO_INTEL_KEYWORDS):
+        return selected
+    available = set(all_tool_names)
+    pinned = [t for t in REPO_INTEL_TOOLS if t in available and t not in selected]
+    return pinned + list(selected) if pinned else selected
 
 
 def build_concise_tool_list(registry, tool_names: List[str]) -> str:
@@ -841,6 +882,12 @@ class UnifiedChatEngine:
                 if t not in merged and len(merged) < 15:
                     merged.append(t)
             selected_tools = merged
+
+        # Deterministic pin: the semantic selector under-ranks two of the three
+        # code-repository tools, so force the whole trio in when the message is
+        # clearly about a repo (map / dependencies / class extraction). Done
+        # after the router merge so the pin can't be truncated by the cap above.
+        selected_tools = _pin_repo_intel_tools(message, selected_tools, self.registry.list_tools())
 
         # Agent screen gate — when the user isn't actively watching the virtual
         # screen, hide the tools that drive it so the LLM can't decide to click

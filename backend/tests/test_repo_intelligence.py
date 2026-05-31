@@ -148,3 +148,55 @@ def test_dependency_graph_resolves_python_and_javascript_import_targets(app):
             "Repo/src/utils/helper.js",
             "Repo/src/widgets/index.ts",
         ]
+
+
+def test_analyze_repository_task_registered_and_routes_to_default():
+    """The toggle-repo async path dispatches analyze_repository_task; the worker
+    must have it registered. Regression: the module used @celery.task with a
+    top-level `from backend.celery_app import celery`, which hit a circular
+    import during create_celery_app() and left the task UNregistered — the
+    worker then rejected dispatches with 'Received unregistered task'. Fixed by
+    switching to @shared_task. This pins both registration and 'default' routing.
+    """
+    from backend.celery_app import celery
+    from backend.tasks.repo_analysis_tasks import analyze_repository_task  # noqa: F401
+
+    name = "backend.tasks.repo_analysis_tasks.analyze_repository_task"
+    assert name in celery.tasks, f"{name} not registered with the Celery app"
+
+    route = celery.amqp.router.route({}, name, args=[1], kwargs={})
+    queue = route.get("queue")
+    queue_name = queue.name if hasattr(queue, "name") else str(queue)
+    assert queue_name == "default", f"analyze_repository_task routed to {queue_name!r}, worker consumes 'default'"
+
+
+class TestRepoIntelToolPinning:
+    """The semantic tool selector under-ranks get_dependency_graph / read_ast_node
+    for natural repo queries (only get_repository_map ranks in), so chat couldn't
+    reach 2 of the 3 tools. _pin_repo_intel_tools force-includes the trio on
+    repo-intent messages. These pin that behavior."""
+
+    def _pin(self, message):
+        from backend.services.unified_chat_engine import _pin_repo_intel_tools, REPO_INTEL_TOOLS
+        # selected starts empty to prove the pin alone surfaces them
+        return set(_pin_repo_intel_tools(message, [], list(REPO_INTEL_TOOLS) + ["read_code", "system_command"]))
+
+    @pytest.mark.parametrize("message", [
+        "give me an architectural map of my code repository",
+        "in repo folder 746, what does main.py import or depend on?",
+        "show me the source code of the Worker class in folder 746",
+        "build the dependency graph of the repo",
+    ])
+    def test_repo_queries_pin_all_three_tools(self, message):
+        from backend.services.unified_chat_engine import REPO_INTEL_TOOLS
+        pinned = self._pin(message)
+        for tool in REPO_INTEL_TOOLS:
+            assert tool in pinned, f"{tool} not pinned for {message!r}"
+
+    @pytest.mark.parametrize("message", [
+        "play some music and turn up the volume",
+        "what's the weather like today",
+        "draft a reddit post about our launch",
+    ])
+    def test_non_repo_queries_pin_nothing(self, message):
+        assert self._pin(message) == set()

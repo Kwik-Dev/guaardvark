@@ -1,9 +1,18 @@
 import logging
-from backend.celery_app import celery
+
+from celery import shared_task
 
 logger = logging.getLogger(__name__)
 
-@celery.task(bind=True)
+
+# NOTE: use @shared_task (not @celery.task). Importing `celery` from
+# backend.celery_app at module top creates a circular import when celery_app
+# imports this module *during* create_celery_app() (the module-level `celery`
+# singleton doesn't exist yet), which silently leaves the task unregistered and
+# the worker rejects dispatched messages with "Received unregistered task".
+# @shared_task binds to the default app (set via celery.set_default()) and is the
+# pattern every other task module here uses.
+@shared_task(bind=True)
 def analyze_repository_task(self, folder_id):
     """
     Celery task to analyze a repository folder.

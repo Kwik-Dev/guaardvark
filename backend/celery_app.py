@@ -413,6 +413,17 @@ def create_celery_app():
     except ImportError as e:
         logger.warning(f"Could not import runtime-audit tasks: {e}")
 
+    try:
+        # Registers analyze_repository_task so /files/folder/<id>/toggle-repo can
+        # actually run repository analysis. Without this import the task is never
+        # registered and the worker rejects the dispatched message with
+        # "Received unregistered task ... analyze_repository_task" (KeyError),
+        # so marking a folder as a repository silently never analyzes it.
+        from backend.tasks.repo_analysis_tasks import analyze_repository_task  # noqa: F401
+        logger.info("Repository analysis task registered successfully")
+    except ImportError as e:
+        logger.warning(f"Could not import repository analysis task: {e}")
+
     logger.info("Celery app configured with enhanced performance settings and Beat schedule")
     return celery_app
 
