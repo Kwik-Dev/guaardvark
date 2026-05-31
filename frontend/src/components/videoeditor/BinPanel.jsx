@@ -16,6 +16,7 @@ const BinPanel = ({
   onAddMany,    // (BinClip[]) => void — bulk add (from OS upload)
   onRemove,
   warningsByClipId = {},  // {clipId: warning text}
+  planDecorationsByClipId = {},
 }) => {
   // OS file drop: upload → Document → bin tile.
   const { onDrop, onDragOver, uploading, progress, error } = useExternalDrop({
@@ -101,6 +102,8 @@ const BinPanel = ({
                 onSelect={onSelect}
                 onRemove={onRemove}
                 warning={warningsByClipId[c.clipId]}
+                keptRanges={planDecorationsByClipId[c.clipId]?.keptRanges}
+                durationSeconds={planDecorationsByClipId[c.clipId]?.durationSeconds}
               />
             ))}
           </Stack>

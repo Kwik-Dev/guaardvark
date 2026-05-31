@@ -12,7 +12,6 @@ import {
   IconButton,
   Chip,
   CircularProgress,
-  Alert,
   Tooltip,
 } from "@mui/material";
 import {
@@ -25,17 +24,34 @@ import {
   RocketLaunch as QuickRenderIcon,
 } from "@mui/icons-material";
 import PageLayout from "../components/layout/PageLayout";
+import ProjectBar from "../components/videoeditor/ProjectBar";
+import OpenProjectDialog from "../components/videoeditor/OpenProjectDialog";
 import MediaLibraryPanel from "../components/videoeditor/MediaLibraryPanel";
 import OverlayLayer from "../components/videoeditor/OverlayLayer";
 import BinPanel from "../components/videoeditor/BinPanel";
 import ArrangementPreview from "../components/videoeditor/ArrangementPreview";
 import OptionsPanel from "../components/videoeditor/OptionsPanel";
+import PlanStatusPanel from "../components/videoeditor/PlanStatusPanel";
 import { usePlanJob } from "../components/videoeditor/usePlanJob";
 import { useTimelineHistory } from "../components/videoeditor/useTimelineHistory";
 import { normalizeTimeline } from "../components/videoeditor/normalizeTimeline";
+import { buildPlanRequest, getKeptRangeDecorations, getPlanInputs } from "../components/videoeditor/buildPlanRequest";
 import { listVideoDocuments, listAudioDocuments, listImageDocuments } from "../api/videoOverlayService";
-import { listStyleRecipes, renderArrangement, openInShotcut, rescanClip, getClipHash } from "../api/videoEditorService";
-import { getJobsGate } from "../api/jobsService";
+import {
+  listStyleRecipes,
+  renderArrangement,
+  openInShotcut,
+  rescanClip,
+  getClipHash,
+  getVideoEditorErrorMessage,
+  getCurrentProject,
+  openProject,
+  createProject,
+  autosaveProjectDraft,
+  saveProject,
+  saveProjectAs,
+  renameProject,
+} from "../api/videoEditorService";
 import ReactGridLayout, { WidthProvider } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
@@ -89,7 +105,6 @@ const VideoEditorPage = () => {
   const [audioLibrary, setAudioLibrary] = useState([]);
   const [imageLibrary, setImageLibrary] = useState([]);
   const [loadingMedia, setLoadingMedia] = useState(false);
-  const [, setVideoDuration] = useState(0);  // for visual trim slider
   const [selectedItem, setSelectedItem] = useState(null);  // {type, id} for properties panel
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [rendering, setRendering] = useState(false);
@@ -99,7 +114,23 @@ const VideoEditorPage = () => {
   const [styleRecipeName, setStyleRecipeName] = useState("Default");
   const [recipes, setRecipes] = useState([]);
   const planJob = usePlanJob();
-  const [, setGate] = useState(null);
+  const {
+    start: startPlan,
+    clearResult: clearPlanResult,
+    updateClipAnalysis,
+    hydrate: hydratePlan,
+  } = planJob;
+
+  // --- Named-project state (file-per-project store on the backend). ---
+  const [currentProjectId, setCurrentProjectId] = useState(null);
+  const [projectName, setProjectName] = useState("Untitled");
+  const [isDirty, setIsDirty] = useState(false);
+  const [openProjectDialog, setOpenProjectDialog] = useState(false);
+  // Always-current id (for guarding in-flight autosave .then callbacks) and a
+  // monotonic load token so the latest New/Open/mount-load wins any race.
+  const currentIdRef = useRef(null);
+  const loadTokenRef = useRef(0);
+  useEffect(() => { currentIdRef.current = currentProjectId; }, [currentProjectId]);
   const [error, setError] = useState(null);
 
   // Director's Notes overrides — keyed by clip_id. Local until next Plan.
@@ -175,42 +206,154 @@ const VideoEditorPage = () => {
     }
   }, []);
 
-  // Restore the working session (bin / song / overlays / scan mode / recipe /
-  // overrides) on mount, then auto-save it (debounced) whenever it changes.
+  // --- Named-project working state ----------------------------------------
+  // The editable subset persisted per project (the layout/card grid stays a
+  // separate, GLOBAL state at /api/state/video-editor — not per project).
+  const buildEditable = useCallback(() => ({
+    timeline,
+    scanMode,
+    styleRecipeName,
+    clipOverrides,
+    plan: planJob.result ? { result: planJob.result } : null,
+  }), [timeline, scanMode, styleRecipeName, clipOverrides, planJob.result]);
+
+  const applyServerError = useCallback((e, fallback) => {
+    setError(e?.videoEditorMessage || getVideoEditorErrorMessage(e, fallback));
+  }, []);
+
+  // Load an opened project's payload into editor state (+ restore its cached
+  // arrangement so reopening doesn't force a re-Plan). Reseeds the autosave
+  // baseline so opening a project is never mistaken for an edit.
+  const loadProjectPayload = useCallback((p) => {
+    if (p.timeline) commitTimeline(() => normalizeTimeline(p.timeline));
+    setScanMode(p.scanMode || "both-and");
+    setStyleRecipeName(p.styleRecipeName || "Default");
+    setClipOverrides(p.clipOverrides || {});
+    if (p.plan?.result) hydratePlan(p.plan.result);
+    else clearPlanResult();
+    // Don't let a previous project's render output / pending Quick Render bleed
+    // across a switch (stale preview + Shotcut target, or a spurious auto-render).
+    setRenderResult(null);
+    setQuickRenderPending(false);
+    const meta = p._meta || { id: p.id, name: p.name, isDirty: false };
+    setCurrentProjectId(meta.id || null);
+    setProjectName(meta.name || "Untitled");
+    setIsDirty(!!meta.isDirty);
+    lastSavedSessionRef.current = null;  // re-baseline on next render
+  }, [commitTimeline, hydratePlan, clearPlanResult]);
+
+  // On mount: open the current project (migrating the legacy single session if
+  // present, else most-recent / fresh Untitled — handled server-side).
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/state/video-editor/session")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((s) => {
-        if (cancelled || !s) return;
-        if (s.timeline) commitTimeline(() => normalizeTimeline(s.timeline));
-        if (s.scanMode) setScanMode(s.scanMode);
-        if (s.styleRecipeName) setStyleRecipeName(s.styleRecipeName);
-        if (s.clipOverrides) setClipOverrides(s.clipOverrides);
-      })
-      .catch(() => {})
+    const myToken = ++loadTokenRef.current;
+    getCurrentProject()
+      // Token guard: a slow initial fetch must not clobber a user New/Open that
+      // happened while it was in flight.
+      .then((p) => { if (!cancelled && p && loadTokenRef.current === myToken) loadProjectPayload(p); })
+      .catch((e) => console.warn("video-editor project load failed:", e))
       .finally(() => { if (!cancelled) sessionLoadedRef.current = true; });
     return () => { cancelled = true; };
-  }, []);  // deps intentionally limited
+  }, [loadProjectPayload]);
 
+  // Debounced AUTOSAVE → writes the current project's DRAFT only (never the
+  // saved project file). Seeds its own baseline on the first post-load render so
+  // opening a project doesn't fire a spurious save or flip the dirty flag.
   useEffect(() => {
-    if (!sessionLoadedRef.current) return;
-    const payload = { timeline, scanMode, styleRecipeName, clipOverrides };
-    const serialized = JSON.stringify(payload);
+    if (!sessionLoadedRef.current || !currentProjectId) return;
+    const editable = buildEditable();
+    const serialized = JSON.stringify(editable);
+    if (lastSavedSessionRef.current === null) {
+      lastSavedSessionRef.current = serialized;  // baseline, not an edit
+      return;
+    }
     if (lastSavedSessionRef.current === serialized) return;  // nothing changed
+    // Eagerly mark dirty the moment local state diverges from the baseline — so
+    // a discard-confirm or the Save button reflects edits made inside the 800ms
+    // debounce window, not just after the autosave round-trip completes.
+    setIsDirty(true);
+    const pid = currentProjectId;  // target THIS project explicitly (race-safe)
     const t = setTimeout(() => {
       setIsSaving(true);
-      fetch("/api/state/video-editor/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...payload, lastSaved: new Date().toISOString() }),
-      })
-        .then((r) => { if (r.ok) { lastSavedSessionRef.current = serialized; setLastSaveTime(new Date()); } })
-        .catch((e) => console.warn("video-editor session save failed:", e))
+      autosaveProjectDraft(pid, editable)
+        .then(() => {
+          // Only update the baseline if we're still on the same project — a
+          // switch mid-flight must not poison the newly-opened project's state.
+          if (currentIdRef.current === pid) {
+            lastSavedSessionRef.current = serialized;
+            setLastSaveTime(new Date());
+          }
+        })
+        .catch((e) => console.warn("video-editor autosave failed:", e))
         .finally(() => setIsSaving(false));
     }, 800);
     return () => clearTimeout(t);
-  }, [timeline, scanMode, styleRecipeName, clipOverrides]);
+  }, [timeline, scanMode, styleRecipeName, clipOverrides, planJob.result, currentProjectId, buildEditable]);
+
+  // --- File-menu handlers (driven by ProjectBar) --------------------------
+  const confirmDiscardIfDirty = useCallback(
+    () => !isDirty || window.confirm("Discard unsaved changes in the current project?"),
+    [isDirty],
+  );
+
+  const handleProjectNew = useCallback(async () => {
+    if (!confirmDiscardIfDirty()) return;
+    setError(null);
+    const myToken = ++loadTokenRef.current;
+    try {
+      const p = await createProject("Untitled");
+      if (loadTokenRef.current === myToken) {
+        loadProjectPayload({ ...p, _meta: { id: p.id, name: p.name, isDirty: false } });
+      }
+    } catch (e) { applyServerError(e, "Could not create project"); }
+  }, [confirmDiscardIfDirty, loadProjectPayload, applyServerError]);
+
+  const handleOpenProjectById = useCallback(async (id) => {
+    if (!confirmDiscardIfDirty()) return;
+    setError(null);
+    const myToken = ++loadTokenRef.current;
+    try {
+      const p = await openProject(id);
+      if (loadTokenRef.current === myToken) loadProjectPayload(p);
+      setOpenProjectDialog(false);
+    } catch (e) { applyServerError(e, "Could not open project"); }
+  }, [confirmDiscardIfDirty, loadProjectPayload, applyServerError]);
+
+  const handleProjectSave = useCallback(async () => {
+    if (!currentProjectId) return;
+    setIsSaving(true);
+    try {
+      const editable = buildEditable();
+      const saved = await saveProject(currentProjectId, editable);
+      setProjectName(saved.name || projectName);
+      setIsDirty(false);
+      lastSavedSessionRef.current = JSON.stringify(editable);
+      setLastSaveTime(new Date());
+    } catch (e) { applyServerError(e, "Could not save project"); }
+    finally { setIsSaving(false); }
+  }, [currentProjectId, buildEditable, projectName, applyServerError]);
+
+  const handleProjectSaveAs = useCallback(async (name) => {
+    if (!currentProjectId) return;
+    setError(null);
+    try {
+      const editable = buildEditable();
+      const np = await saveProjectAs(currentProjectId, name, editable);
+      setCurrentProjectId(np.id);
+      setProjectName(np.name || name);
+      setIsDirty(false);
+      lastSavedSessionRef.current = JSON.stringify(editable);
+      setLastSaveTime(new Date());
+    } catch (e) { applyServerError(e, "Could not save project as"); }
+  }, [currentProjectId, buildEditable, applyServerError]);
+
+  const handleProjectRename = useCallback(async (name) => {
+    if (!currentProjectId) { setProjectName(name); return; }
+    try {
+      const r = await renameProject(currentProjectId, name);
+      setProjectName(r.name || name);
+    } catch (e) { applyServerError(e, "Could not rename project"); }
+  }, [currentProjectId, applyServerError]);
 
   const onLayoutChange = useCallback((next) => {
     if (!layoutLoadedRef.current) return;
@@ -235,24 +378,6 @@ const VideoEditorPage = () => {
     setMinimizedCards(next);
     saveLayoutState(layout, cardColors, next);
   }, [minimizedCards, layout, cardColors, saveLayoutState]);
-
-  // Phase 8 — poll the JobOperationGate so the Render button knows whether
-  // another exclusive job (training, etc.) is mid-flight. Refreshes every
-  // 5s; cheap call, returns a small JSON snapshot.
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const snapshot = await getJobsGate();
-        if (!cancelled) setGate(snapshot);
-      } catch (e) {
-        if (!cancelled) setGate(null);
-      }
-    };
-    tick();
-    const t = setInterval(tick, 5000);
-    return () => { cancelled = true; clearInterval(t); };
-  }, []);
 
   // Pull video + audio + image Documents into the media library. Three
   // tabs in the panel each render their own icon-grid.
@@ -300,6 +425,7 @@ const VideoEditorPage = () => {
         ],
       };
     });
+    clearPlanResult();
   };
 
   // Bin operations — used by BinPanel.
@@ -308,7 +434,8 @@ const VideoEditorPage = () => {
       if (prev.bin.some((c) => c.clipId === clip.clipId)) return prev;
       return { ...prev, bin: [...prev.bin, clip] };
     });
-  }, [commitTimeline]);
+    clearPlanResult();
+  }, [commitTimeline, clearPlanResult]);
 
   const handleBinAddMany = useCallback((clips) => {
     commitTimeline((prev) => {
@@ -316,11 +443,13 @@ const VideoEditorPage = () => {
       const fresh = clips.filter((c) => !existing.has(c.clipId));
       return { ...prev, bin: [...prev.bin, ...fresh] };
     });
-  }, [commitTimeline]);
+    clearPlanResult();
+  }, [commitTimeline, clearPlanResult]);
 
   const handleBinRemove = useCallback((clipId) => {
     commitTimeline((prev) => ({ ...prev, bin: prev.bin.filter((c) => c.clipId !== clipId) }));
-  }, [commitTimeline]);
+    clearPlanResult();
+  }, [commitTimeline, clearPlanResult]);
 
   // Master soundtrack = the one audio bin clip flagged isMasterSong. Toggling
   // one on clears the others (single-flag invariant); Plan reads the flagged clip.
@@ -333,7 +462,8 @@ const VideoEditorPage = () => {
           : on ? { ...c, isMasterSong: false } : c,
       ),
     }));
-  }, [commitTimeline]);
+    clearPlanResult();
+  }, [commitTimeline, clearPlanResult]);
 
   const handleSetClipVolume = useCallback((clipId, volume) => {
     commitTimeline((prev) => ({
@@ -342,9 +472,6 @@ const VideoEditorPage = () => {
     }));
   }, [commitTimeline]);
 
-  // Click on the preview to add a text element at that point. Phase 3 of
-  // the editor plan adds drag/resize/rotate handles via react-rnd or
-  // react-moveable; for now click-to-place + edit-in-properties.
   const handleDeleteText = (textId) => {
     commitTimeline((prev) => {
       return {
@@ -455,47 +582,38 @@ const VideoEditorPage = () => {
       .catch((e) => console.warn("recipes load failed:", e));
   }, []);
 
-  // Patch each bin clip with kept-ranges + duration from the Plan result so
-  // BinClipTile can render the kept-vs-cut strip.
-  useEffect(() => {
-    const result = planJob.result;
-    if (!result) return;
-    const kept = result.kept_ranges_by_clip || {};
-    commitTimeline((prev) => ({
-      ...prev,
-      bin: prev.bin.map((c) => ({
-        ...c,
-        keptRanges: kept[c.clipId] || null,
-        // For the strip, we need the SOURCE clip's duration, not the song's.
-        // We don't have it yet (would need an ffprobe round-trip); use the
-        // last kept-range endpoint as a pessimistic upper bound for display.
-        durationSeconds: kept[c.clipId]?.length
-          ? Math.max(...kept[c.clipId].map((r) => r[1]))
-          : c.durationSeconds,
-      })),
-    }));
-  }, [planJob.result]);  // deps intentionally limited
-
   // Master soundtrack = the flagged audio bin clip. Plan arranges the VIDEO
   // clips against it; audio/image clips aren't part of the auto-edit material.
-  const masterSong = timeline.bin.find((c) => c.kind === "audio" && c.isMasterSong) || null;
-  const canPlan = timeline.bin.some((c) => c.kind === "video") && !!masterSong && !planJob.planning;
+  const planInputs = useMemo(() => getPlanInputs(timeline), [timeline]);
+  const { masterSong, videoCount, hasMasterSong } = planInputs;
+  const canPlan = planInputs.canPlan && !planJob.planning;
+  const planDecorationsByClipId = useMemo(
+    () => getKeptRangeDecorations(planJob.result),
+    [planJob.result],
+  );
+
+  const handleScanModeChange = useCallback((next) => {
+    setScanMode(next);
+    clearPlanResult();
+  }, [clearPlanResult]);
+
+  const handleStyleRecipeNameChange = useCallback((next) => {
+    setStyleRecipeName(next);
+    clearPlanResult();
+  }, [clearPlanResult]);
 
   const handlePlan = useCallback(() => {
     if (!canPlan) return;
     setError(null);
     setRenderResult(null);
-    planJob.start({
-      bin_clips: timeline.bin
-        .filter((c) => c.kind === "video")
-        .map((c) => ({ clip_id: c.clipId, document_id: c.documentId })),
-      song_document_id: masterSong.documentId,
-      scan_mode: scanMode,
-      style_recipe_name: styleRecipeName,
-      seed: Math.floor(Math.random() * 1_000_000),
-      clip_overrides: clipOverrides,
-    });
-  }, [canPlan, planJob, timeline.bin, masterSong, scanMode, styleRecipeName, clipOverrides]);
+    startPlan(buildPlanRequest({
+      timeline,
+      masterSong,
+      scanMode,
+      styleRecipeName,
+      clipOverrides,
+    }));
+  }, [canPlan, startPlan, timeline, masterSong, scanMode, styleRecipeName, clipOverrides]);
 
   const handleQuickRender = useCallback(() => {
     if (!canPlan) return;
@@ -524,38 +642,33 @@ const VideoEditorPage = () => {
         delete next[clip.clipId];
         return next;
       });
-      // Patch the planJob result so the panel updates immediately. We don't
-      // have a setter from the hook, so this is intentionally optimistic:
-      // the next Plan run picks up the new cache anyway.
-      if (planJob.result?.clip_analyses) {
-        const idx = planJob.result.clip_analyses.findIndex((a) => a.clip_id === clip.clipId);
-        if (idx >= 0) {
-          planJob.result.clip_analyses[idx] = {
-            ...res.analysis,
-            clip_id: clip.clipId,
-            source_path: planJob.result.clip_analyses[idx].source_path,
-          };
-        }
-      }
+      updateClipAnalysis(clip.clipId, {
+        ...res.analysis,
+        source_path: selectedClipAnalysis?.source_path || res.analysis?.source_path,
+      });
     } catch (e) {
       console.error("rescan failed:", e);
-      setError(e.response?.data?.error?.message || e.message || "Re-analyze failed");
+      setError(e.videoEditorMessage || getVideoEditorErrorMessage(e, "Re-analyze failed"));
     } finally {
       setRescanInFlight(null);
     }
-  }, [selectedItem, timeline.bin, styleRecipeName, planJob.result]);
+  }, [selectedItem, timeline.bin, styleRecipeName, updateClipAnalysis, selectedClipAnalysis]);
 
   // Resolve the clip hash for the selected bin clip so DirectorsNotesPanel
   // can build frame-thumbnail URLs. Cached per documentId.
   const [clipHashByDocId, setClipHashByDocId] = useState({});
+  const [clipHashFailedByDocId, setClipHashFailedByDocId] = useState({});
   useEffect(() => {
     if (selectedItem?.type !== "bin") return;
     const clip = timeline.bin.find((c) => c.clipId === selectedItem.id);
-    if (!clip?.documentId || clipHashByDocId[clip.documentId]) return;
+    if (!clip?.documentId || clipHashByDocId[clip.documentId] || clipHashFailedByDocId[clip.documentId]) return;
     getClipHash({ document_id: clip.documentId })
       .then((h) => h && setClipHashByDocId((prev) => ({ ...prev, [clip.documentId]: h })))
-      .catch((e) => console.warn("clip-hash lookup failed:", e));
-  }, [selectedItem, timeline.bin, clipHashByDocId]);
+      .catch((e) => {
+        setClipHashFailedByDocId((prev) => ({ ...prev, [clip.documentId]: true }));
+        console.warn("clip-hash lookup skipped for this clip:", e.videoEditorMessage || e.message);
+      });
+  }, [selectedItem, timeline.bin, clipHashByDocId, clipHashFailedByDocId]);
 
   // A2 render: full multi-clip arrangement with per-clip filters + transitions.
   // Plugin synthesizes the .mlt and renders to .mp4 in one synchronous call.
@@ -578,7 +691,7 @@ const VideoEditorPage = () => {
       setRenderResult(res);
     } catch (e) {
       console.error("render failed:", e);
-      setError(e.response?.data?.error?.message || e.message || "Render failed");
+      setError(e.videoEditorMessage || getVideoEditorErrorMessage(e, "Render failed"));
     } finally {
       setRendering(false);
     }
@@ -593,7 +706,7 @@ const VideoEditorPage = () => {
     } else if (planJob.error) {
       setQuickRenderPending(false);
     }
-  }, [quickRenderPending, planJob.result, planJob.planning, planJob.error, rendering]);  // deps intentionally limited
+  }, [quickRenderPending, planJob.result, planJob.planning, planJob.error, rendering, handleRender]);
 
   const handleOpenInShotcut = useCallback(async () => {
     if (!renderResult?.mlt_path) return;
@@ -601,7 +714,7 @@ const VideoEditorPage = () => {
       await openInShotcut(renderResult.mlt_path);
     } catch (e) {
       console.error("openInShotcut failed:", e);
-      setError(e.response?.data?.error?.message || e.message || "Could not launch Shotcut");
+      setError(e.videoEditorMessage || getVideoEditorErrorMessage(e, "Could not launch Shotcut"));
     }
   }, [renderResult]);
 
@@ -639,10 +752,6 @@ const VideoEditorPage = () => {
                   controls
                   onPlay={() => setPreviewPlaying(true)}
                   onPause={() => setPreviewPlaying(false)}
-                  onLoadedMetadata={(e) => {
-                    const dur = e.target.duration;
-                    if (dur && isFinite(dur)) setVideoDuration(dur);
-                  }}
                   style={{ maxWidth: "100%", maxHeight: "100%", display: "block" }}
                 />
               ) : (
@@ -661,6 +770,17 @@ const VideoEditorPage = () => {
                   ...prev,
                   textElements: prev.textElements.map(t => t.id === id ? { ...t, x, y } : t)
                 }))}
+              />
+            </Box>
+
+            <Box sx={{ mt: 1 }}>
+              <PlanStatusPanel
+                planJob={planJob}
+                canPlan={canPlan}
+                videoCount={videoCount}
+                hasMasterSong={hasMasterSong}
+                warnings={planJob.result?.warnings || []}
+                compact
               />
             </Box>
 
@@ -691,7 +811,7 @@ const VideoEditorPage = () => {
                     disabled={!canPlan}
                   >
                     {planJob.planning && !quickRenderPending
-                      ? `Planning... ${Math.round((planJob.job?.progress || 0) * 100)}%`
+                      ? `Planning... ${Math.round((planJob.progress || 0) * 100)}%`
                       : "Plan"}
                   </Button>
                 </span>
@@ -724,7 +844,7 @@ const VideoEditorPage = () => {
                     disabled={!canPlan || rendering || quickRenderPending}
                   >
                     {quickRenderPending
-                      ? (rendering ? "Rendering..." : `Planning... ${Math.round((planJob.job?.progress || 0) * 100)}%`)
+                      ? (rendering ? "Rendering..." : `Planning... ${Math.round((planJob.progress || 0) * 100)}%`)
                       : "Quick Render"}
                   </Button>
                 </span>
@@ -751,9 +871,9 @@ const VideoEditorPage = () => {
             selectedClipAnalysis={selectedClipAnalysis}
             selectedText={selectedText}
             scanMode={scanMode}
-            setScanMode={setScanMode}
+            setScanMode={handleScanModeChange}
             styleRecipeName={styleRecipeName}
-            setStyleRecipeName={setStyleRecipeName}
+            setStyleRecipeName={handleStyleRecipeNameChange}
             recipes={recipes}
             planning={planJob.planning}
             onClipOverride={handleClipOverride}
@@ -780,27 +900,22 @@ const VideoEditorPage = () => {
             onAddMany={handleBinAddMany}
             onRemove={handleBinRemove}
             warningsByClipId={warningsByClipId}
+            planDecorationsByClipId={planDecorationsByClipId}
           />
         );
 
       case "arrangement":
         return (
           <Box sx={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-            {planJob.planning && (
-              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
-                <CircularProgress size={14} />
-                <Typography variant="caption" color="text.secondary">Planning…</Typography>
-              </Stack>
-            )}
+            <PlanStatusPanel
+              planJob={planJob}
+              canPlan={canPlan}
+              videoCount={videoCount}
+              hasMasterSong={hasMasterSong}
+              warnings={planJob.result?.warnings || []}
+            />
             <Box sx={{ flex: 1, overflow: "auto" }}>
               <ArrangementPreview arrangement={planJob.result?.arrangement} />
-              {planJob.result?.warnings?.length > 0 && (
-                <Alert severity="warning" sx={{ mt: 1 }}>
-                  {planJob.result.warnings.slice(0, 3).map((w, i) => (
-                    <div key={i}>{w}</div>
-                  ))}
-                </Alert>
-              )}
             </Box>
           </Box>
         );
@@ -812,10 +927,28 @@ const VideoEditorPage = () => {
 
   return (
     <PageLayout title="Video Editor" subtitle="Compose videos with overlays, audio, and text">
+      {/* Project File menu (New/Open/Save/Save As/Rename) + dirty indicator.
+          Named projects persist per-project; the card layout below stays global. */}
+      <ProjectBar
+        projectName={projectName}
+        isDirty={isDirty}
+        isSaving={isSaving}
+        onNew={handleProjectNew}
+        onOpen={() => setOpenProjectDialog(true)}
+        onSave={handleProjectSave}
+        onSaveAs={handleProjectSaveAs}
+        onRename={handleProjectRename}
+      />
+      <OpenProjectDialog
+        open={openProjectDialog}
+        onClose={() => setOpenProjectDialog(false)}
+        onOpenProject={handleOpenProjectById}
+        currentId={currentProjectId}
+      />
       {/* Window/card system — drag by the title bar, resize from any edge,
           double-click a header to minimize. Layout persists per-machine via
           /api/state/video-editor. Same pattern as the Documents & Code Editor pages. */}
-      <Box sx={{ height: "calc(100vh - 96px)", overflow: "auto", p: 0.5 }}>
+      <Box sx={{ height: "calc(100vh - 136px)", overflow: "auto", p: 0.5 }}>
         <GridLayout
           className="layout"
           layout={layout}

@@ -53,6 +53,12 @@ import CharacterPicker from '../components/filmcrew/CharacterPicker';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
+const debugLog = (...args) => {
+  if (import.meta.env.DEV) {
+    console.debug(...args);
+  }
+};
+
 // Utility function to sanitize text for display
 const sanitizeText = (text) => {
   if (!text) return '';
@@ -114,7 +120,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
   // Generation parameters
   const [params, setParams] = useState({
-    model: 'sd-1.5',
+    model: 'auto',
     style: 'realistic',
     quality_preset: 'standard',
     width: 512,
@@ -148,20 +154,33 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     { value: 'technical', label: 'Technical' }
   ];
 
-  // Model options
-  const modelOptions = [
-    { value: 'sd-1.5', label: 'SD 1.5 (Standard)', description: 'Reliable baseline, 512x512' },
-    { value: 'sd-turbo', label: 'SD Turbo (Fast)', description: 'Super fast generation, 4 steps' },
-    { value: 'dreamlike', label: 'Dreamlike Photoreal', description: 'Excellent photorealism' },
-    { value: 'deliberate', label: 'Deliberate v2', description: 'Versatile, multiple styles' },
-    { value: 'realistic-vision', label: 'Realistic Vision', description: 'Outstanding photorealism' },
-    { value: 'epic-realism', label: 'Epic Realism', description: 'Cinematic quality' },
-    { value: 'sd-xl', label: 'SD XL Base', description: 'High resolution, 1024x1024' },
-    { value: 'sdxl-turbo', label: 'SD XL Turbo', description: 'Fast high resolution' },
-    { value: 'openjourney', label: 'OpenJourney', description: 'Artistic, Midjourney-style' },
-    { value: 'analog', label: 'Analog Diffusion', description: 'Film photography aesthetic' },
-    { value: 'anything-v3', label: 'Anything v3', description: 'Anime/illustration style' }
-  ];
+  // Model options — fetched from the backend (/batch-image/models) so the list
+  // never drifts from the canonical catalog. "Auto" routes per-prompt.
+  const AUTO_MODEL_OPTION = {
+    value: 'auto',
+    label: 'Auto — best per prompt ⭐',
+    description: 'Router picks the best downloaded model for each prompt',
+  };
+  const [modelOptions, setModelOptions] = useState([AUTO_MODEL_OPTION]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE}/batch-image/models`);
+        const data = await response.json();
+        if (data.success && data.data?.models) {
+          const fetched = data.data.models.map(m => ({
+            value: m.id,
+            label: m.recommended ? `${m.label} ⭐` : m.label,
+            description: m.description || '',
+          }));
+          setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
+        }
+      } catch (e) {
+        debugLog('Failed to load image models', e);
+      }
+    })();
+  }, []);
 
   // Quality presets
   const qualityPresets = [
@@ -556,15 +575,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     setParams(prev => {
       let newParams = { ...prev, model: modelValue };
 
-      // Adjust dimensions based on model capabilities
-      if (modelValue.includes('xl') || modelValue === 'sd-xl' || modelValue === 'sdxl-turbo') {
+      // Adjust dimensions based on model capabilities.
+      // Modern high-res models (SDXL family, Z-Image) and 'auto' (router usually
+      // lands on one of these) generate native at 1024. The SD1.5-class photoreal
+      // finetunes (realistic-vision, epic-realism) are 512-native.
+      if (modelValue.includes('xl') || modelValue === 'zimage-turbo' || modelValue === 'auto') {
         newParams.width = 1024;
         newParams.height = 1024;
-      } else if (modelValue === 'sd-turbo') {
-        newParams.width = 512;
-        newParams.height = 512;
-        newParams.steps = 4; // Turbo models work best with 1-4 steps
-        newParams.guidance = 7.0;
       } else {
         newParams.width = 512;
         newParams.height = 512;
@@ -688,7 +705,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           });
         }
 
-        console.log('--- DEBUG: PROMPTS BEING SENT TO BACKEND:', promptsToGenerate);
+        debugLog('Batch image prompts prepared', { promptCount: promptsToGenerate.length });
 
         response = await fetch(`${API_BASE}/batch-image/generate/prompts`, {
           method: 'POST',

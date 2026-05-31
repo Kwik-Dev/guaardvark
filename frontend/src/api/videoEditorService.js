@@ -6,8 +6,47 @@ import axios from "axios";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
+export const getVideoEditorErrorMessage = (error, fallback = "Video Editor request failed") => {
+  const data = error?.response?.data;
+  if (!data) return error?.message || fallback;
+
+  const fromDetail = (detail) => {
+    if (!detail) return null;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail
+        .map((item) => {
+          if (!item || typeof item !== "object") return String(item);
+          const loc = Array.isArray(item.loc) ? item.loc.filter((part) => part !== "body").join(".") : "";
+          const msg = item.msg || item.message || JSON.stringify(item);
+          return loc ? `${loc}: ${msg}` : msg;
+        })
+        .join("; ");
+    }
+    if (typeof detail === "object") return detail.message || detail.error || JSON.stringify(detail);
+    return String(detail);
+  };
+
+  return (
+    fromDetail(data.error) ||
+    fromDetail(data.detail) ||
+    data.message ||
+    error?.message ||
+    fallback
+  );
+};
+
+const request = async (promise, fallback) => {
+  try {
+    return await promise;
+  } catch (error) {
+    error.videoEditorMessage = getVideoEditorErrorMessage(error, fallback);
+    throw error;
+  }
+};
+
 export const listStyleRecipes = async () => {
-  const res = await axios.get(`${API_BASE}/video-editor/recipes`);
+  const res = await request(axios.get(`${API_BASE}/video-editor/recipes`), "Could not load style recipes");
   return res.data?.recipes || [];
 };
 
@@ -33,7 +72,7 @@ export const submitPlan = async ({
   };
   if (song_document_id) body.song_document_id = song_document_id;
   if (song_path) body.song_path = song_path;
-  const res = await axios.post(`${API_BASE}/video-editor/plan`, body);
+  const res = await request(axios.post(`${API_BASE}/video-editor/plan`, body), "Could not submit Plan job");
   return res.data;
 };
 
@@ -43,7 +82,7 @@ export const rescanClip = async ({ document_id, source_path, style_recipe_name =
   const body = { style_recipe_name, n_frames };
   if (document_id) body.document_id = document_id;
   if (source_path) body.source_path = source_path;
-  const res = await axios.post(`${API_BASE}/video-editor/vision/rescan-clip`, body);
+  const res = await request(axios.post(`${API_BASE}/video-editor/vision/rescan-clip`, body), "Re-analyze failed");
   return res.data;
 };
 
@@ -52,7 +91,7 @@ export const getClipHash = async ({ document_id, source_path }) => {
   const body = {};
   if (document_id) body.document_id = document_id;
   if (source_path) body.source_path = source_path;
-  const res = await axios.post(`${API_BASE}/video-editor/vision/clip-hash`, body);
+  const res = await request(axios.post(`${API_BASE}/video-editor/vision/clip-hash`, body), "Clip thumbnail lookup failed");
   return res.data?.hash || null;
 };
 
@@ -62,7 +101,10 @@ export const frameThumbnailUrl = (clipHash, frameIndex) =>
 
 // Poll job state. Returns the full Job dict with .status, .progress, .result.
 export const getPlanJob = async (jobId) => {
-  const res = await axios.get(`${API_BASE}/video-editor/jobs/${encodeURIComponent(jobId)}`);
+  const res = await request(
+    axios.get(`${API_BASE}/video-editor/jobs/${encodeURIComponent(jobId)}`),
+    "Could not poll Plan job",
+  );
   return res.data;
 };
 
@@ -90,21 +132,101 @@ export const renderArrangement = async ({
   };
   if (song_document_id) body.song_document_id = song_document_id;
   if (audio_path) body.audio_path = audio_path;
-  const res = await axios.post(`${API_BASE}/video-editor/shotcut/compose-arrangement`, body);
+  const res = await request(
+    axios.post(`${API_BASE}/video-editor/shotcut/compose-arrangement`, body),
+    "Render failed",
+  );
   return res.data;
 };
 
 export const listFilterCatalog = async () => {
-  const res = await axios.get(`${API_BASE}/video-editor/catalog/filters`);
+  const res = await request(axios.get(`${API_BASE}/video-editor/catalog/filters`), "Could not load filters");
   return res.data?.categories || {};
 };
 
 export const listTransitionCatalog = async () => {
-  const res = await axios.get(`${API_BASE}/video-editor/catalog/transitions`);
+  const res = await request(axios.get(`${API_BASE}/video-editor/catalog/transitions`), "Could not load transitions");
   return res.data?.transitions || [];
 };
 
 export const openInShotcut = async (mlt_path) => {
-  const res = await axios.post(`${API_BASE}/video-editor/open-in-shotcut`, { mlt_path });
+  const res = await request(axios.post(`${API_BASE}/video-editor/open-in-shotcut`, { mlt_path }), "Could not launch Shotcut");
+  return res.data;
+};
+
+// ---------- Named projects -------------------------------------------------
+// Draft-buffer model: autosaveCurrentProject() writes a draft; saveProject()
+// is the explicit Save that promotes the draft to the named project file.
+const PROJECTS = `${API_BASE}/video-editor/projects`;
+
+// Gallery catalog: { currentId, projects: [{id,name,createdAt,updatedAt,posterDocumentId,clipCount}] }.
+export const listProjects = async () => {
+  const res = await request(axios.get(PROJECTS), "Could not list projects");
+  return res.data || { currentId: null, projects: [] };
+};
+
+// The project to open on load (migrates the legacy session / creates Untitled).
+// Returns the working state (draft if newer) plus a `_meta` { id, name, isDirty, savedAt, draftAt }.
+export const getCurrentProject = async () => {
+  const res = await request(axios.get(`${PROJECTS}/current`), "Could not load current project");
+  return res.data;
+};
+
+export const openProject = async (id) => {
+  const res = await request(axios.get(`${PROJECTS}/${encodeURIComponent(id)}`), "Could not open project");
+  return res.data;
+};
+
+export const createProject = async (name = "Untitled", editable = undefined) => {
+  const res = await request(axios.post(PROJECTS, { name, editable }), "Could not create project");
+  return res.data;
+};
+
+// Autosave → writes the draft of the current project. Returns { id, name, isDirty, savedAt, draftAt }.
+export const autosaveCurrentProject = async (editable) => {
+  const res = await request(axios.put(`${PROJECTS}/current`, editable), "Autosave failed");
+  return res.data;
+};
+
+// Autosave → writes the draft of a SPECIFIC project id (race-safe: targets the
+// project being edited regardless of the server's 'current' pointer).
+export const autosaveProjectDraft = async (id, editable) => {
+  const res = await request(
+    axios.put(`${PROJECTS}/${encodeURIComponent(id)}/draft`, editable),
+    "Autosave failed",
+  );
+  return res.data;
+};
+
+// Explicit Save → promote the draft (or send an explicit body) to the project file.
+export const saveProject = async (id, editable = undefined) => {
+  const res = await request(axios.put(`${PROJECTS}/${encodeURIComponent(id)}`, editable || {}), "Could not save project");
+  return res.data;
+};
+
+export const saveProjectAs = async (id, name, editable = undefined) => {
+  const res = await request(
+    axios.post(`${PROJECTS}/${encodeURIComponent(id)}/save-as`, { name, editable }),
+    "Could not save project as",
+  );
+  return res.data;
+};
+
+export const renameProject = async (id, name) => {
+  const res = await request(
+    axios.patch(`${PROJECTS}/${encodeURIComponent(id)}`, { name }),
+    "Could not rename project",
+  );
+  return res.data;
+};
+
+export const deleteProject = async (id) => {
+  const res = await request(axios.delete(`${PROJECTS}/${encodeURIComponent(id)}`), "Could not delete project");
+  return res.data;
+};
+
+// Reference-integrity report: { clips: [{clipId, status: ok|missing|stale}], missing, stale }.
+export const validateProject = async (id) => {
+  const res = await request(axios.post(`${PROJECTS}/${encodeURIComponent(id)}/validate`), "Could not validate project");
   return res.data;
 };
