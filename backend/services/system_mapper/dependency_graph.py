@@ -88,8 +88,16 @@ def _tarjan_scc(graph: dict[str, set[str]]) -> list[list[str]]:
     return cycles
 
 
-def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[str, Any]:
-    """Build dep graph and detect cycles. Returns dict with graph, findings, stats."""
+def analyze(root: Path, extra_excludes: frozenset[str] = frozenset(),
+            dynamic_modules: frozenset[str] | set[str] | None = None) -> dict[str, Any]:
+    """Build dep graph and detect cycles. Returns dict with graph, findings, stats.
+
+    `dynamic_modules` (B3): module names known to be reached via dynamic dispatch
+    (Celery task names, blueprint auto-registration, plugin.json, tool tables).
+    Such modules have no *static* importer but are very much alive at runtime, so
+    they are suppressed from the DORMANT_MODULE finding rather than flagged.
+    """
+    dynamic_modules = set(dynamic_modules or ())
     # 1. Discover all internal modules (those we own and can analyze)
     modules: dict[str, Path] = {}  # module_name -> path
     for py in root.rglob("*.py"):
@@ -168,8 +176,14 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
         for t in targets:
             importers[t].add(src)
 
+    dormant_suppressed_dynamic = 0
     for mod_name, path in modules.items():
         if importers.get(mod_name):
+            continue
+        # B3: reached only via dynamic dispatch (task name / blueprint / plugin /
+        # tool table) → alive at runtime, not dormant. Suppress the finding.
+        if mod_name in dynamic_modules:
+            dormant_suppressed_dynamic += 1
             continue
         rel = path.relative_to(root)
         rel_str = str(rel)
@@ -255,6 +269,7 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
             "over_coupled_hubs": [m for m, h in cycle_membership.items() if h >= 5],
             "untested_modules": sum(1 for f in findings
                                     if f.kind == FindingKind.UNTESTED_MODULE),
+            "dormant_suppressed_dynamic": dormant_suppressed_dynamic,
         },
     }
 

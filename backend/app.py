@@ -761,6 +761,43 @@ def _initialize_app_components(app):
         return response
 
     @app.after_request
+    def record_route_liveness(response):
+        """B5 route-liveness: record which Flask routes ACTUALLY served traffic.
+
+        Feeds the runtime-liveness layer (symbol_hits) with route hits the same
+        way Celery tasks are recorded, so the liveness consensus can tell a
+        dormant-looking route from a never-hit one. In-memory only on the hot
+        path; never fails a request.
+        """
+        try:
+            path = request.path or ""
+            # Skip noise: socket.io upgrades, health polls, and 404s (no endpoint).
+            if (path.startswith('/socket.io')
+                    or path.startswith('/api/health')
+                    or request.endpoint is None
+                    or response.status_code == 404):
+                return response
+            from backend.services.execution_context_tracker import (
+                get_tracker, MODE_FLASK_ROUTE,
+            )
+            blueprint = request.blueprint or ""
+            endpoint = request.endpoint or ""
+            symbol_id = f"route:{blueprint}.{endpoint}"
+            # The view function's module, best-effort.
+            module = ""
+            try:
+                view = app.view_functions.get(endpoint)
+                module = getattr(view, "__module__", "") or ""
+            except Exception:
+                module = ""
+            get_tracker().record_hit(
+                symbol_id, "route", endpoint, module, MODE_FLASK_ROUTE,
+            )
+        except Exception:  # never fail a request over an audit record
+            pass
+        return response
+
+    @app.after_request
     def cleanup_database_session(response):
         if request.path.startswith('/socket.io'):
             return response

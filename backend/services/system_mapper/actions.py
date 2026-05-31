@@ -22,6 +22,15 @@ _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "info": 3}
 # Finding kinds the agent can act on mechanically. Others (import cycles,
 # over-coupling) need human architectural judgement and are surfaced but not
 # pitched as one-click fixes.
+#
+# DELIBERATELY EXCLUDED — never add these:
+#   * dead-symbol           — static dead-code is best-effort; a wrong call deletes
+#                             real recovery logic (see dead_symbol.py docstring).
+#   * runtime-zombie / contextual-discovery / hot-path-spike (B4 liveness kinds) —
+#     these come from a RUNTIME TRACING WINDOW. A window that simply didn't span a
+#     once-a-month handler must NEVER auto-delete it. Liveness findings are advisory
+#     drift signals for a human, not auto-fix candidates. Adding them here would
+#     turn a missed trace into a destructive prune. Keep them out, permanently.
 DISPATCHABLE_KINDS = frozenset({
     "url-path-collision", "url-prefix-collision", "ghost-api-caller",
     "unwired-tool", "unregistered-tool", "backup-artifact",

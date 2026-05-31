@@ -22,9 +22,11 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Execution-mode bitfield. Phase 1 only uses bit 1 (celery task). Future modes
-# (http route = 2, cli = 4, tool = 8, ...) OR into the same column.
+# Execution-mode bitfield. Phase 1 only used bit 1 (celery task). Phase 2/3 adds
+# the http route mode (bit 2). Future modes (cli = 4, tool = 8, ...) OR into the
+# same column.
 MODE_CELERY_TASK = 1
+MODE_FLASK_ROUTE = 2
 
 
 class ExecutionContextTracker:
