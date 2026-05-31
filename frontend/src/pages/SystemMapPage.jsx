@@ -245,11 +245,16 @@ export default function SystemMapPage() {
     setDispatchingId(finding.id);
     try {
       const res = await dispatchFinding(finding.id);
-      setToast(
-        res?.success
-          ? "Dispatched to the self-improvement agent — review the proposed fix in Settings."
-          : `Dispatch returned no change${res?.result?.reason ? `: ${res.result.reason}` : "."}`,
-      );
+      // Backend now returns a top-level `reason` in every case: queued (async),
+      // gated (locked/disabled/running), not-dispatchable, or enqueue failure.
+      const reason = res?.reason || res?.result?.reason;
+      if (res?.queued) {
+        setToast(reason || "Dispatched to the self-improvement agent — running in the background.");
+      } else if (res?.success) {
+        setToast(reason || "Dispatched to the self-improvement agent — review the proposed fix in Settings.");
+      } else {
+        setToast(`Dispatch didn't run — ${reason || "no reason given"}`);
+      }
     } catch (e) {
       setToast(`Dispatch failed: ${e?.message || e}`);
     } finally {

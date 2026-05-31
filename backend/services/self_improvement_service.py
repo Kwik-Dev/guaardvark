@@ -145,6 +145,25 @@ class SelfImprovementService:
             return False
         return True
 
+    def dispatch_precheck(self) -> Dict[str, Any]:
+        """Public, side-effect-free check of whether a directed dispatch can run.
+
+        Returns {"ok": bool, "reason": str}. Lets callers (e.g. the System-Map
+        dispatch endpoint) show the user the REAL reason immediately instead of a
+        silent no-op, before queuing async work."""
+        if _is_codebase_locked():
+            return {"ok": False, "reason": (
+                "Codebase is locked (data/.codebase_lock or the codebase_locked "
+                "SystemSetting). Unlock via POST /api/self-improvement/lock-codebase "
+                "{\"locked\": false} to allow edits.")}
+        if not _is_self_improvement_enabled():
+            return {"ok": False, "reason": (
+                "Self-improvement is disabled — enable via POST "
+                "/api/self-improvement/toggle {\"enabled\": true}.")}
+        if self._running:
+            return {"ok": False, "reason": "A self-improvement run is already in progress."}
+        return {"ok": True, "reason": "ready"}
+
     def _error_fingerprint(self, file: str, line: int, error_type: str) -> str:
         raw = f"{file}:{line}:{error_type}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]

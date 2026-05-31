@@ -198,15 +198,60 @@ def dispatch(finding_id):
 
     finding = actions.find_finding(payload, finding_id)
     if finding is None:
-        return jsonify({"success": False, "error": "finding not found"}), 404
+        return jsonify({"success": False, "reason": "finding not found",
+                        "finding_id": finding_id}), 404
 
+    # (b) Authoritative dispatchability gate. The UI already hides the button for
+    # advisory kinds, but the endpoint must not run the fix engine for a
+    # liveness/dead-symbol/architectural finding even if called directly.
+    kind = finding.get("kind")
+    if kind not in actions.DISPATCHABLE_KINDS:
+        return jsonify({
+            "success": False, "finding_id": finding_id,
+            "reason": (f"Finding kind '{kind}' is advisory-only and is not "
+                       f"auto-dispatchable — review it manually."),
+        }), 200
+
+    # Synchronous precheck so the user gets the REAL reason immediately when the
+    # self-improvement agent can't run (locked / disabled / already running),
+    # instead of a silent no-op.
     try:
-        result = actions.dispatch_finding(finding, priority=body.get("priority", "medium"))
+        from backend.services.self_improvement_service import get_self_improvement_service
+        pre = get_self_improvement_service().dispatch_precheck()
+    except Exception as exc:  # service import/init failure → report, don't 500
+        logger.warning("dispatch precheck failed: %s", exc)
+        pre = {"ok": False, "reason": f"self-improvement unavailable: {exc}"}
+    if not pre.get("ok"):
+        return jsonify({"success": False, "finding_id": finding_id,
+                        "reason": pre.get("reason", "self-improvement cannot run")}), 200
+
+    # (b) Run the actual fix attempt ASYNCHRONOUSLY on Celery — submit_directed_task
+    # calls the LLM (and possibly the GPU); doing it inline would block/freeze the
+    # request thread.
+    description = actions.describe(finding)
+    priority = body.get("priority", "medium")
+    target_files = list(finding.get("paths") or [])
+    try:
+        from backend.celery_app import celery_app
+        async_res = celery_app.send_task(
+            "self_improvement.run_directed_async",
+            kwargs={"task_description": description,
+                    "target_files": target_files, "priority": priority},
+        )
+        return jsonify({
+            "success": True, "queued": True,
+            "task_id": getattr(async_res, "id", None),
+            "finding_id": finding_id,
+            "reason": ("Dispatched to the self-improvement agent — running in the "
+                       "background. Review the proposed fix (a PendingFix) in Settings."),
+        }), 202
     except Exception as exc:
-        logger.exception("dispatch failed")
-        return jsonify({"success": False, "error": str(exc)}), 500
-    return jsonify({"success": result.get("success", False), "result": result,
-                    "finding_id": finding_id})
+        logger.exception("dispatch enqueue failed")
+        return jsonify({
+            "success": False, "finding_id": finding_id,
+            "reason": (f"Could not queue the task — is the Celery worker running? "
+                       f"({exc})"),
+        }), 200
 
 
 @system_map_bp.route("/findings/<finding_id>/dismiss", methods=["POST"])
