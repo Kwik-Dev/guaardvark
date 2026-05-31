@@ -14,7 +14,7 @@ import {
   IconButton,
   Divider,
 } from '@mui/material';
-import { Code, Map, GitMerge, Close as CloseIcon } from 'lucide-react';
+import { Code, Map, GitMerge, X as CloseIcon } from 'lucide-react';
 import { useTheme } from '@mui/material/styles';
 
 const CodeRepoDashboard = ({ folder }) => {
