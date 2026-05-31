@@ -391,6 +391,48 @@ export const validateCodeIntelligent = async (context, rulesCutoff = false) => {
  * @param {string[]} filePaths - Array of file paths to read
  * @returns {Promise<Array>} Array of {filePath, success, content, language, error} objects
  */
+/**
+ * Debug code: analyze an error + stack trace and propose a fix.
+ * Ported from the retired codeAssistantService.js (its one unique function).
+ * Routes through the grounded /analyze endpoint so the model sees the real
+ * code rather than guessing from a description.
+ * @param {Object} context - { filePath, language, code|content, error, stackTrace }
+ * @param {boolean} rulesCutoff - Whether to bypass the rules system
+ * @returns {Promise<Object>} Debug analysis with suggested fix
+ */
+export const debugCodeIntelligent = async (context = {}, rulesCutoff = false) => {
+  const { filePath, language = "javascript", error, stackTrace } = context;
+  const code = context.code || context.content || "";
+
+  const debugPrompt = `Help debug this ${language} code that has an error.
+
+File: ${filePath || "untitled"}
+${error ? `Error: ${error}` : ""}
+${stackTrace ? `Stack trace:\n${stackTrace}` : ""}
+
+Please provide:
+1. Analysis of the error and its likely cause
+2. The specific line or section causing the issue
+3. A step-by-step debugging approach
+4. Corrected code with the fix applied
+5. Prevention strategies for similar errors
+
+Focus on clear, actionable solutions grounded in the code shown.`;
+
+  const result = await analyzeCodeIntelligent(
+    { ...context, content: code },
+    debugPrompt,
+    rulesCutoff
+  );
+
+  return {
+    success: result.success,
+    debugAnalysis: result.analysis,
+    originalCode: code,
+    error: result.error || error
+  };
+};
+
 export const readMultipleFiles = async (filePaths) => {
   try {
     if (!Array.isArray(filePaths) || filePaths.length === 0) {
@@ -639,6 +681,7 @@ export default {
   generateTestsIntelligent,
   getCodeCompletionIntelligent,
   validateCodeIntelligent,
+  debugCodeIntelligent,
   checkCodeIntelligenceHealth,
   readMultipleFiles,
   detectRelatedFiles,

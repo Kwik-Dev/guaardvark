@@ -156,6 +156,11 @@ class AgentRouter:
                     r"create.*(?:function|class|module)",
                     r"/codegen\b",
                     r"modify.*(?:file|code)",
+                    # "improve/refactor/optimize/rewrite this file" — must be
+                    # grounded in the real file, so route to codegen (reads
+                    # input_file), never to generate_file (fabricates).
+                    r"(?:improve|enhance|optimi[sz]e|refactor|rewrite|clean\s*up)\b"
+                    r"[\w\s]*(?:file|code|\.[A-Za-z0-9]+)",
                 ],
                 route_type=RouteType.TOOL_DIRECT,
                 tool_name="codegen"

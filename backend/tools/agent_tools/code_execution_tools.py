@@ -179,74 +179,10 @@ class ExecuteJavaScriptTool(BaseTool):
             )
 
 
-class ExecuteShellTool(BaseTool):
-    """Execute shell commands safely (wraps existing code_execution_api)"""
-    
-    name = "execute_shell"
-    description = "Execute shell commands safely with security restrictions"
-    is_dangerous = True
-    requires_approval = True
-    parameters = {
-        "command": ToolParameter(
-            name="command",
-            type="string",
-            required=True,
-            description="Shell command to execute"
-        ),
-        "timeout": ToolParameter(
-            name="timeout",
-            type="int",
-            required=False,
-            description="Timeout in seconds (default: 30)",
-            default=30
-        ),
-        "working_directory": ToolParameter(
-            name="working_directory",
-            type="string",
-            required=False,
-            description="Working directory for command execution",
-            default="/tmp"
-        )
-    }
-    
-    def execute(self, command: str, timeout: int = 30, working_directory: str = "/tmp") -> ToolResult:
-        """Execute shell command with security checks"""
-        try:
-            from backend.api.code_execution_api import execute_command, MAX_EXECUTION_TIME
-            
-            # Security check - block dangerous commands
-            dangerous_commands = [
-                'rm -rf', 'sudo', 'su', 'chmod 777', 'dd if=', 'mkfs', 
-                'fdisk', 'format', '>', '>>', '|', '&', ';', '$(', '`'
-            ]
-            
-            if any(dangerous in command.lower() for dangerous in dangerous_commands):
-                logger.warning(f"Blocked dangerous shell command: {command}")
-                return ToolResult(
-                    success=False,
-                    error="Command not allowed for security reasons"
-                )
-            
-            timeout = min(timeout, MAX_EXECUTION_TIME)
-            
-            # Execute with shell=True (inherently dangerous, but with security checks)
-            result = execute_command(command, timeout, working_directory, use_shell=True)
-            
-            return ToolResult(
-                success=result['success'],
-                output=result['output'],
-                error=result['stderr'] if not result['success'] else None,
-                metadata={
-                    'exit_code': result['exitCode'],
-                    'execution_time': result['executionTime'],
-                    'working_directory': working_directory
-                }
-            )
-            
-        except Exception as e:
-            logger.error(f"Shell command execution failed: {e}", exc_info=True)
-            return ToolResult(
-                success=False,
-                error=f"Execution failed: {str(e)}"
-            )
+# NOTE: ExecuteShellTool was removed 2026-05-31. It ran `use_shell=True` behind
+# a substring blocklist that is trivially bypassable (e.g. quoting, env-var
+# expansion, alternate command spellings), so it offered the appearance of
+# safety without the substance. Its removal was already flagged in CLAUDE.md.
+# For shell execution use the guarded /api/code-execution/shell endpoint, which
+# runs list-form commands without a shell.
 

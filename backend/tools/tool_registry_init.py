@@ -127,6 +127,36 @@ def register_code_tools() -> List[str]:
     return registered
 
 
+def register_file_operation_tools() -> List[str]:
+    """Register the document-processing file tool.
+
+    Only ProcessFileTool is registered: it extracts text from binary documents
+    (PDF/DOCX/Excel/images/CSV) via EnhancedFileProcessor — a capability no
+    other registered tool provides. ReadFileTool/ListFilesTool in the same
+    module are intentionally left UNregistered: they take raw filesystem paths
+    and bypass guarded_code_service's repo/lock/protected-file checks. Use the
+    guarded read_code/list_code_files tools for source instead.
+    """
+    global _tool_categories
+    registered = []
+    category = "files"
+
+    try:
+        from backend.tools.agent_tools.file_operation_tools import ProcessFileTool
+
+        register_tool(ProcessFileTool())
+        registered.append("process_file")
+        _tool_categories["process_file"] = category
+        logger.debug("Registered: ProcessFileTool")
+
+    except ImportError as e:
+        logger.error(f"Failed to import file operation tools: {e}")
+    except Exception as e:
+        logger.error(f"Failed to register file operation tools: {e}")
+
+    return registered
+
+
 def register_web_tools() -> List[str]:
     """Register web analysis and search tools"""
     global _tool_categories
@@ -541,6 +571,18 @@ def register_test_execution_tools() -> List[str]:
         logger.warning(f"Could not import code execution tools: {e}")
     except Exception as e:
         logger.error(f"Failed to register test execution tools: {e}")
+
+    # JavaScript/Node executor (is_dangerous + requires_approval gate it).
+    try:
+        from backend.tools.agent_tools.code_execution_tools import ExecuteJavaScriptTool
+        register_tool(ExecuteJavaScriptTool())
+        registered.append("execute_javascript")
+        _tool_categories["execute_javascript"] = category
+        logger.debug("Registered: ExecuteJavaScriptTool")
+    except ImportError as e:
+        logger.warning(f"Could not import JavaScript execution tool: {e}")
+    except Exception as e:
+        logger.error(f"Failed to register JavaScript execution tool: {e}")
     return registered
 
 
@@ -657,6 +699,7 @@ def initialize_all_tools() -> ToolRegistry:
     _registered_tools.extend(register_content_tools())
     _registered_tools.extend(register_generation_tools())
     _registered_tools.extend(register_code_tools())
+    _registered_tools.extend(register_file_operation_tools())
     _registered_tools.extend(register_web_tools())
     _registered_tools.extend(register_browser_tools())
     _registered_tools.extend(register_desktop_tools())

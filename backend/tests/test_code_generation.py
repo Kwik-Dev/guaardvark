@@ -93,3 +93,38 @@ class TestCodeGeneration:
             assert "greet" in content  # Original should be preserved
         finally:
             _cleanup_generated(filename)
+
+
+class TestCodeGenGrounding:
+    """Non-LLM guard tests for CodeGeneratorTool — backend/tools/code_tools.py.
+
+    These assert the tool refuses to FABRICATE: if the instructions name a real
+    file but no input_file was supplied, codegen must not invent a 'version' of
+    a file it never read. Runs without Ollama (the guard returns before any LLM
+    call), so it executes in the default test run.
+    """
+
+    def test_refuses_to_fabricate_when_referencing_existing_file(self, tmp_path):
+        from backend.tools.code_tools import CodeGeneratorTool
+
+        existing = tmp_path / "real_module.py"
+        existing.write_text("def f():\n    return 1\n")
+
+        tool = CodeGeneratorTool()
+        result = tool.execute(
+            output_filename="out.py",
+            instructions=f"Improve {existing} by adding type hints",
+            language="python",
+        )
+
+        assert result.success is False
+        assert "input_file" in result.error
+
+    def test_allows_genuine_new_file_generation(self, tmp_path, monkeypatch):
+        """A net-new file request that names no existing file must NOT be
+        blocked by the grounding guard."""
+        from backend.tools.code_tools import CodeGeneratorTool
+
+        tool = CodeGeneratorTool()
+        # Guard runs before the LLM; it should not trigger here.
+        assert tool._referenced_existing_file("Write a brand new helper.py with a greet function") is None

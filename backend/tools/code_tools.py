@@ -7,6 +7,7 @@ Wraps existing code intelligence services for agent system integration.
 
 import logging
 import os
+import re
 from typing import Any, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
@@ -143,6 +144,24 @@ class CodeGeneratorTool(BaseTool):
 
         return None
 
+    def _referenced_existing_file(self, instructions: str) -> Optional[str]:
+        """If the instructions name a file that already exists (uploaded or in
+        repo) but no input_file was supplied, return that name so we can refuse
+        rather than fabricate a "version" of a file we never read."""
+        for cand in re.findall(r"[\w./-]+\.[A-Za-z0-9]+", instructions or ""):
+            cand = cand.strip()
+            if not cand:
+                continue
+            try:
+                from backend.utils.uploaded_file_resolver import find_uploaded_file
+                if find_uploaded_file(cand):
+                    return cand
+            except Exception:
+                pass
+            if os.path.exists(cand):
+                return cand
+        return None
+
     def execute(self, **kwargs) -> ToolResult:
         """Generate or modify code based on instructions"""
         input_file = kwargs.get("input_file", "")
@@ -152,14 +171,30 @@ class CodeGeneratorTool(BaseTool):
         preserve_structure = kwargs.get("preserve_structure", True)
 
         try:
+            # Read input file first (no LLM needed).
+            input_content = self._read_input_file(input_file) if input_file else None
+
+            # Refuse to fabricate before doing any work: if nothing was read but
+            # the instructions name an existing file, require input_file rather
+            # than inventing a "version" of a file we never saw.
+            if not input_content:
+                referenced = self._referenced_existing_file(instructions)
+                if referenced:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"codegen received no readable input_file, but the instructions "
+                            f"reference '{referenced}', which exists. Generating without reading "
+                            f"it would fabricate. Re-call with input_file='{referenced}' so the "
+                            f"real content is read and preserved."
+                        ),
+                    )
+
             llm = self._get_llm()
 
             # Detect language
             if language == "auto":
                 language = self._detect_language(output_filename)
-
-            # Read input file if provided
-            input_content = self._read_input_file(input_file) if input_file else None
 
             # Build the generation prompt
             if input_content:

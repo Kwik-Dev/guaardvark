@@ -7,6 +7,7 @@ Wraps existing generation services for agent system integration.
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 from datetime import datetime
@@ -244,8 +245,19 @@ class FileGeneratorTool(BaseTool):
 
     name = "generate_file"
     description = (
-        "Generate new output file content (code, documents, data files) under data/outputs/files. "
-        "Does not edit existing source code; use edit_code for repo changes."
+        "Create a brand-NEW output file from a description, written under data/outputs/files. "
+        "It generates from the description ALONE and never reads any existing file. "
+        "Do NOT use it to improve, refactor, modify, or produce a new version of an existing or "
+        "uploaded file — it cannot see that file and would fabricate. For that, use `codegen` "
+        "with input_file=<path> (grounded copy) or `edit_code` (in-place repo change)."
+    )
+
+    # Verbs that signal "change something that already exists" rather than
+    # "make a new file". Used to refuse ungrounded modify-existing requests.
+    _MODIFY_VERBS = (
+        "improve", "enhance", "optimize", "optimise", "refactor", "modify",
+        "rewrite", "clean up", "cleanup", "improved version", "better version",
+        "fix the", "update the", "based on the existing", "based on the uploaded",
     )
 
     parameters = {
@@ -305,6 +317,54 @@ class FileGeneratorTool(BaseTool):
             return "config"
         return "unknown"
 
+    def _detect_modify_existing(self, filename, content_description):
+        """Detect a request to improve/modify a file that already exists.
+
+        generate_file builds its output from the description alone and never
+        reads source, so honoring such a request would fabricate a "version"
+        of a file it never saw. When that's what's being asked, return the
+        referenced filename so the caller can refuse and redirect. Returns
+        None when this is a legitimate new-file request.
+        """
+        desc = content_description or ""
+        desc_l = desc.lower()
+
+        # Candidate filenames: the output basename plus any file-looking
+        # tokens named in the description.
+        candidates = []
+        if filename:
+            candidates.append(os.path.basename(str(filename)))
+        candidates += re.findall(r"[\w./-]+\.[A-Za-z0-9]+", desc)
+
+        has_verb = any(v in desc_l for v in self._MODIFY_VERBS)
+
+        # Strongest signal: a named file actually resolves to real content we
+        # are NOT reading (uploaded chat file or in-repo source).
+        for cand in candidates:
+            cand = cand.strip()
+            if not cand:
+                continue
+            try:
+                from backend.utils.uploaded_file_resolver import find_uploaded_file
+                if find_uploaded_file(cand):
+                    return cand
+            except Exception:
+                pass
+            try:
+                from backend.services.guarded_code_service import read_repo_file
+                read_repo_file(cand)
+                return cand
+            except Exception:
+                pass
+
+        # Weaker signal: the wording explicitly targets an existing file even
+        # if we can't resolve it right now. Still ungrounded here.
+        if has_verb and re.search(r"\b(this|the existing|the uploaded|the current)\b[\w\s]*\bfile\b", desc_l):
+            named = next((c for c in candidates if c), filename)
+            return named
+
+        return None
+
     def _resolve_output_path(self, output_dir: str, filename: str) -> str:
         """Resolve a relative output filename safely beneath the output directory."""
         if not filename or not str(filename).strip():
@@ -342,6 +402,22 @@ class FileGeneratorTool(BaseTool):
         save_to_disk = kwargs.get("save_to_disk", True)
 
         try:
+            # Refuse ungrounded "improve an existing file" requests. This tool
+            # never reads source, so producing an "improved version" of a real
+            # file would be fabrication. Redirect to the grounded tools.
+            referenced = self._detect_modify_existing(filename, content_description)
+            if referenced:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"generate_file cannot improve or modify an existing file. It writes a "
+                        f"brand-new file from your description and never reads '{referenced}', so "
+                        f"any 'improved version' would be fabricated. Use `codegen` with "
+                        f"input_file='{referenced}' to generate a grounded modified copy, or "
+                        f"`edit_code` to change the file in place."
+                    ),
+                )
+
             # Detect file type if auto
             if file_type == "auto":
                 file_type = self._detect_file_type(filename)
