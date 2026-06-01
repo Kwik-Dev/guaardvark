@@ -215,3 +215,6 @@ pyrightconfig.json
 pytest.ini
 scripts/seed_demo_data.py
 scripts/seed_social_outreach_tasks.py
+
+# Google Indexing service-account key
+data/credentials/

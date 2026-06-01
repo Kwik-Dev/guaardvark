@@ -20,6 +20,7 @@ export * from "./ruleService";
 export * from "./modelService";
 // indexingService is not exported here to allow dynamic imports for code splitting
 // Import directly from "./indexingService" when needed
+export * from "./searchConsoleService";
 export * from "./trainingService";
 export * from "./chatService";
 export * from "./stateService";

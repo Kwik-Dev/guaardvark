@@ -58,6 +58,16 @@ COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", os.path.join(OUTPUT_DI
 VIDEO_GENERATION_BACKEND = os.environ.get("GUAARDVARK_VIDEO_BACKEND", "auto")  # "comfyui" | "offline" | "auto"
 COMFYUI_IDLE_TIMEOUT = int(os.environ.get("GUAARDVARK_COMFYUI_IDLE_TIMEOUT", "1800"))
 
+# Google Indexing API (Search Console URL submission)
+# Path to the service-account JSON key. Defaults inside the project; override
+# with GOOGLE_INDEXING_KEY_PATH to point at an existing key elsewhere.
+GOOGLE_INDEXING_KEY_PATH = _resolve_path(
+    "GOOGLE_INDEXING_KEY_PATH", "data/credentials/google-indexing.json"
+)
+# Default per-site daily submission cap (Indexing API quota is 200/day/project;
+# we stay under it). Per-site overrides live in the GoogleIndexingConfig table.
+GOOGLE_INDEXING_DAILY_CAP = int(os.environ.get("GOOGLE_INDEXING_DAILY_CAP", "190"))
+
 _config_logger = logging.getLogger(__name__)
 _config_logger.info(f"Config initialized - GUAARDVARK_ROOT: {GUAARDVARK_ROOT}")
 _config_logger.info(f"Config initialized - STORAGE_DIR: {STORAGE_DIR}")

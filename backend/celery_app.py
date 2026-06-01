@@ -84,6 +84,12 @@ def create_celery_app():
             'backend.tasks.*': {'queue': 'default'},
             'social_outreach.*': {'queue': 'default'},
             'memory.*': {'queue': 'default'},
+            # google_indexing.* tasks use custom names (not backend.tasks.*), so
+            # they need their own route — without it the on-demand
+            # google_indexing.submit_batch_for_site dispatched via .delay() falls
+            # to Celery's default 'celery' queue, which no worker consumes, and
+            # the "Submit to Index" button silently produces a ghost task.
+            'google_indexing.*': {'queue': 'default'},
         },
 
         beat_schedule={
@@ -105,6 +111,11 @@ def create_celery_app():
             'daily-backup': {
                 'task': 'maintenance.daily_backup',
                 'schedule': 86400.0,  # 24 hours
+                'options': {'queue': 'default'},
+            },
+            'google-indexing-drip': {
+                'task': 'google_indexing.drip_tick',
+                'schedule': 900.0,  # every 15 min; per-site daily quota caps real submissions
                 'options': {'queue': 'default'},
             },
             # Cluster heartbeat sweeper is scheduled conditionally below — only
@@ -423,6 +434,15 @@ def create_celery_app():
         logger.info("Repository analysis task registered successfully")
     except ImportError as e:
         logger.warning(f"Could not import repository analysis task: {e}")
+
+    try:
+        from backend.tasks.google_indexing_tasks import (  # noqa: F401
+            indexing_drip_tick,
+            submit_indexing_batch_for_site,
+        )
+        logger.info("Google Indexing tasks imported successfully")
+    except ImportError as e:
+        logger.warning(f"Could not import Google Indexing tasks: {e}")
 
     logger.info("Celery app configured with enhanced performance settings and Beat schedule")
     return celery_app

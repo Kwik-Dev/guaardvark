@@ -2815,3 +2815,93 @@ class SwarmMessage(db.Model):
         backref=db.backref("swarm_messages", cascade="all, delete-orphan"),
     )
 
+
+class GoogleIndexingConfig(db.Model):
+    """Per-website configuration for Google Indexing API submission.
+
+    The auto-drip on/off toggle lives here (not on the websites table) so that
+    enabling the feature requires no ALTER to an existing table — db.create_all()
+    creates this new table on startup.
+    """
+
+    __tablename__ = "google_indexing_config"
+    id = db.Column(db.Integer, primary_key=True)
+    website_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "websites.id", name="fk_gindex_cfg_website_id", ondelete="CASCADE"
+        ),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    enabled = db.Column(db.Boolean, default=False, nullable=False)  # auto-drip on/off
+    daily_cap = db.Column(db.Integer, default=190, nullable=False)
+    notification_type = db.Column(db.String(20), default="URL_UPDATED", nullable=False)
+    last_sitemap_sync = db.Column(db.DateTime, nullable=True)
+    last_run_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now())
+    updated_at = db.Column(
+        db.DateTime, default=lambda: datetime.now(), onupdate=lambda: datetime.now()
+    )
+
+    def to_dict(self):
+        return {
+            "website_id": self.website_id,
+            "enabled": self.enabled,
+            "daily_cap": self.daily_cap,
+            "notification_type": self.notification_type,
+            "last_sitemap_sync": (
+                self.last_sitemap_sync.isoformat() if self.last_sitemap_sync else None
+            ),
+            "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
+        }
+
+
+class GoogleIndexingSubmission(db.Model):
+    """One row per (website, url) submitted to the Google Indexing API.
+
+    Doubles as the work queue (rows with status='pending') and the durable
+    submission log (status='success'/'failed'). The unique (website_id, url)
+    constraint makes re-syncing a sitemap idempotent — only genuinely new URLs
+    get queued.
+    """
+
+    __tablename__ = "google_indexing_submissions"
+    id = db.Column(db.Integer, primary_key=True)
+    website_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "websites.id", name="fk_gindex_sub_website_id", ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True,
+    )
+    url = db.Column(db.String(2048), nullable=False, index=True)
+    notification_type = db.Column(db.String(20), default="URL_UPDATED", nullable=False)
+    # pending | success | failed
+    status = db.Column(db.String(20), default="pending", nullable=False, index=True)
+    http_status = db.Column(db.Integer, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now())
+    submitted_at = db.Column(db.DateTime, nullable=True)
+
+    __table_args__ = (
+        db.UniqueConstraint("website_id", "url", name="uq_gindex_website_url"),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "website_id": self.website_id,
+            "url": self.url,
+            "notification_type": self.notification_type,
+            "status": self.status,
+            "http_status": self.http_status,
+            "error": self.error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "submitted_at": (
+                self.submitted_at.isoformat() if self.submitted_at else None
+            ),
+        }
+

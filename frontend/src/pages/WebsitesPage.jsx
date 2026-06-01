@@ -47,6 +47,8 @@ import { getLogoUrl } from "../config/logoConfig";
 import { useNavigate } from "react-router-dom";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import TravelExploreIcon from "@mui/icons-material/TravelExplore";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import IndexingDialog from "../components/modals/IndexingDialog";
 
 const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
   return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
@@ -315,6 +317,12 @@ const WebsitesPage = () => {
   };
 
   const [crawlingIds, setCrawlingIds] = useState(new Set());
+  const [indexingSite, setIndexingSite] = useState(null);
+
+  const handleOpenIndexing = (site, e) => {
+    if (e) e.stopPropagation();
+    setIndexingSite(site);
+  };
 
   const handleCrawlWebsite = async (websiteId, e) => {
     if (e) e.stopPropagation();
@@ -525,6 +533,15 @@ const WebsitesPage = () => {
                     >
                       {crawlingIds.has(site.id) ? "Crawling..." : "Crawl"}
                     </Button>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<CloudUploadIcon />}
+                      onClick={(e) => handleOpenIndexing(site, e)}
+                      sx={{ flex: 1 }}
+                    >
+                      Index
+                    </Button>
                     {getWpSiteForWebsite(site.id) && (
                       <Button
                         size="small"
@@ -642,6 +659,14 @@ const WebsitesPage = () => {
                           >
                             {crawlingIds.has(site.id) ? "..." : "Crawl"}
                           </Button>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            startIcon={<CloudUploadIcon />}
+                            onClick={(e) => handleOpenIndexing(site, e)}
+                          >
+                            Index
+                          </Button>
                           {getWpSiteForWebsite(site.id) && (
                             <Button
                               size="small"
@@ -706,6 +731,12 @@ const WebsitesPage = () => {
           isSaving={isModalSaving}
         />
       )}
+      <IndexingDialog
+        open={!!indexingSite}
+        onClose={() => setIndexingSite(null)}
+        website={indexingSite}
+        onFeedback={setFeedback}
+      />
       </PageLayout>
     </ProjectStateErrorBoundary>
   );
