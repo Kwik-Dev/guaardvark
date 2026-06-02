@@ -6,6 +6,7 @@ from flask import Blueprint, request, jsonify, send_file
 
 from backend.models import db, Production, Project
 from backend.services.production_service import ProductionService
+from backend.services.swarm.script_markup import effective_cast_required
 
 bp = Blueprint("production_api", __name__, url_prefix="/api/production")
 log = logging.getLogger(__name__)
@@ -118,6 +119,9 @@ def get_production_subjects(prod_id):
             "ref_image_paths": s.ref_image_paths or [],
             "lora_path": s.lora_path,
             "training_status": s.training_status,
+            # Resolved cast requirement: True = identity-locked, needs a LoRA
+            # before casting can be confirmed; False = generated inline.
+            "cast_required": effective_cast_required(s.cast_required, s.kind),
         })
 
     return jsonify({"subjects": out})
@@ -160,6 +164,7 @@ def cast_subject(prod_id, subject_id):
         return jsonify({"error": "subject not found"}), 404
 
     training_job_id: str | None = None
+    needs_dispatch = False
 
     if action == "use_existing_lora":
         existing_id = body.get("existing_lora_id")
@@ -177,15 +182,21 @@ def cast_subject(prod_id, subject_id):
             return jsonify({"error": "ref_image_paths is required for train_from_uploads"}), 400
         subj.ref_image_paths = refs
         subj.training_status = "training"
-        try:
-            training_job_id = _dispatch_lora_train(subj.id)
-        except NotImplementedError:
-            log.debug("LoRA train dispatch deferred (lora_trainer not yet wired)")
-        except Exception as e:
-            log.warning(f"LoRA train dispatch failed for subject {subj.id}: {e}")
+        needs_dispatch = True
 
     elif action == "train_from_generated":
         subj.training_status = "training"
+        needs_dispatch = True
+
+    # Commit the status transition BEFORE dispatching the Celery task. The
+    # trainer reads training_status in a separate worker process/connection and
+    # skips anything not already committed as 'training' (idempotency guard in
+    # lora_trainer_tasks.py). Dispatching pre-commit raced the worker against
+    # this web transaction and produced zombie 'training' rows whose job
+    # silently skipped on a stale status. Commit first, then dispatch.
+    db.session.commit()
+
+    if needs_dispatch:
         try:
             training_job_id = _dispatch_lora_train(subj.id)
         except NotImplementedError:
@@ -193,7 +204,6 @@ def cast_subject(prod_id, subject_id):
         except Exception as e:
             log.warning(f"LoRA train dispatch failed for subject {subj.id}: {e}")
 
-    db.session.commit()
     return jsonify({
         "subject_id": subj.id,
         "training_status": subj.training_status,
@@ -221,10 +231,15 @@ def confirm_casting(prod_id):
     if not subjects:
         return jsonify({"error": "production has no subjects to cast"}), 400
 
+    # Only identity-locked cast members (cast_required) must have a trained
+    # LoRA. Props/environments are generated inline from their description and
+    # never block casting — that is what kept a "Microphone" prop from being
+    # confirmable when the screenwriter over-extracted it.
     incomplete = [
         {"id": s.id, "name": s.name, "training_status": s.training_status}
         for s in subjects
-        if not (s.lora_path or s.training_status in {"training", "trained"})
+        if effective_cast_required(s.cast_required, s.kind)
+        and not (s.lora_path or s.training_status in {"training", "trained"})
     ]
     if incomplete:
         return jsonify({"error": "all production subjects must be cast before continuing", "incomplete_subjects": incomplete}), 400

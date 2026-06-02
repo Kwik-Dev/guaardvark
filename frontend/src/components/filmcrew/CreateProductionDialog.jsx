@@ -89,6 +89,12 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
             onChange={(e) => setScriptText(e.target.value)}
             required
             placeholder="INT. ROOM - DAY..."
+            helperText={
+              "Casting markup (optional): [[Name]] pins a recurring cast member that gets its own " +
+              "trained LoRA · [[Name:prop]] pins with a kind · {{Name:prop}} keeps something as set " +
+              "dressing generated inline. By default only characters are cast; props & locations " +
+              "are generated inline."
+            }
           />
         </Box>
       </DialogContent>

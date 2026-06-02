@@ -12,6 +12,7 @@ from backend.services.swarm.agents.screenwriter import Screenwriter
 from backend.services.swarm.agents.cinematographer import Cinematographer
 from backend.services.swarm.agents.casting_director import CastingDirector
 from backend.services.swarm.agents.editor import Editor
+from backend.services.swarm.script_markup import parse_markup, apply_intents
 
 
 class _AgentNonOK(Exception):
@@ -160,23 +161,39 @@ def run_screenwriter(prod_id: int, llm=None):
         db.session.commit()
 
         agent = Screenwriter(llm=llm)
-        input_data = ctx.production.script_text
-        
+        # Parse deterministic casting markup BEFORE the LLM sees the script, so
+        # Gemma reads natural prose (markup syntax stripped, names kept) and the
+        # operator's intent is authoritative — not subject to model compliance.
+        markup = parse_markup(ctx.production.script_text)
+        input_data = markup.cleaned_text
+
         inv = agent.invoke(input_data)
         ctx.persist(inv, input_json={"script_text": input_data})
 
         out = inv.output
-        for subj in out.subjects:
-            existing = Subject.query.filter_by(name=subj.name, kind=subj.kind).first()
+        # Reconcile Gemma's guessed subjects with the markup intents. This sets
+        # each subject's final kind and whether it is an identity-locked cast
+        # member (cast_required) that must be LoRA-trained before the production
+        # can leave casting. Props/environments default to inline generation.
+        resolved_subjects = apply_intents(
+            [{"name": s.name, "kind": s.kind, "description": s.description} for s in out.subjects],
+            markup.intents,
+        )
+        for subj in resolved_subjects:
+            existing = Subject.query.filter_by(name=subj["name"], kind=subj["kind"]).first()
             if existing:
-                existing.description = subj.description
+                existing.description = subj["description"]
+                existing.cast_required = subj["cast_required"]
                 subject_to_link = existing
             else:
-                new_subj = Subject(name=subj.name, kind=subj.kind, description=subj.description)
+                new_subj = Subject(
+                    name=subj["name"], kind=subj["kind"],
+                    description=subj["description"], cast_required=subj["cast_required"],
+                )
                 db.session.add(new_subj)
                 db.session.flush()  # get ID
                 subject_to_link = new_subj
-                
+
             # Link to production
             ps = ProductionSubject(production_id=prod_id, subject_id=subject_to_link.id)
             db.session.add(ps)

@@ -77,38 +77,93 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
     }));
   };
 
+  // Does the in-form selection for a subject describe a complete cast action?
+  const hasValidFormAction = (subj) => {
+    const data = castingData[subj.id];
+    return Boolean(
+      data?.action &&
+      (data.action !== 'use_existing_lora' || data.existing_lora_id) &&
+      (data.action !== 'train_from_uploads' || (data.ref_image_paths && data.ref_image_paths.length > 0))
+    );
+  };
+
+  // Is this subject an identity-locked cast member that needs a trained LoRA?
+  // The backend sends the resolved `cast_required`; fall back to kind for any
+  // older payload that predates it. Props/environments (cast_required=false)
+  // are generated inline and never need casting.
+  const isCastRequired = (subj) =>
+    subj.cast_required ?? (subj.kind === 'character');
+
+  // Mirror the backend's casting/confirm gate (production_api.py): a subject is
+  // ready if it isn't an identity-locked cast member, OR it already has a
+  // trained/in-progress LoRA on the server, OR the user just picked a valid
+  // cast action for it. A cast-required subject whose prior training FAILED is
+  // NOT server-ready and must be re-cast here — the case the old form-only
+  // check missed, which enabled the button and produced a 400.
+  const subjectReady = (subj) => {
+    if (!isCastRequired(subj)) return true;
+    const serverReady = Boolean(
+      subj.lora_path || ['training', 'trained'].includes(subj.training_status)
+    );
+    return serverReady || hasValidFormAction(subj);
+  };
+
+  const notReadySubjects = () => subjectsToCast.filter((s) => !subjectReady(s));
+
   const isAllConfirmed = () => {
     if (subjectsToCast.length === 0) return false;
-    return subjectsToCast.every((subj) => {
-      const data = castingData[subj.id];
-      return Boolean(
-        data?.action &&
-        (data.action !== 'use_existing_lora' || data.existing_lora_id) &&
-        (data.action !== 'train_from_uploads' || (data.ref_image_paths && data.ref_image_paths.length > 0))
-      );
-    });
+    return subjectsToCast.every(subjectReady);
   };
 
   const handleConfirm = async () => {
     setConfirming(true);
     setError(null);
     try {
+      // Only POST a cast action for subjects the user actually re-cast in this
+      // form. Already-server-ready subjects (trained / mid-training) have no
+      // form action and would 400 the /cast endpoint with an undefined action.
       for (const subj of subjectsToCast) {
-        await castSubject(productionId, subj.id, castingData[subj.id]);
+        if (hasValidFormAction(subj)) {
+          await castSubject(productionId, subj.id, castingData[subj.id]);
+        }
       }
       await confirmCasting(productionId);
       await onCastingConfirmed();
     } catch (err) {
-      setError('Failed to confirm casting');
+      // Surface the backend's real reason instead of a generic failure. The
+      // confirm endpoint returns {error, incomplete_subjects:[{name,...}]}.
+      const data = err?.response?.data;
+      let msg = data?.error || err?.message || 'Failed to confirm casting';
+      const incomplete = data?.incomplete_subjects;
+      if (Array.isArray(incomplete) && incomplete.length) {
+        const names = incomplete
+          .map((s) => `${s.name}${s.training_status ? ` (${s.training_status})` : ''}`)
+          .join(', ');
+        msg = `${msg}: ${names}`;
+      }
+      setError(msg);
     } finally {
       setConfirming(false);
     }
+  };
+
+  const STATUS_COLOR = {
+    trained: 'success',
+    training: 'info',
+    failed: 'error',
   };
 
   return (
     <Box sx={{ mt: 3 }}>
       <Typography variant="h6" gutterBottom>Pick a face for your character</Typography>
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {!loading && subjectsToCast.length > 0 && notReadySubjects().length > 0 && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Pick a cast action for: {notReadySubjects().map((s) => s.name).join(', ')}.
+          {notReadySubjects().some((s) => s.training_status === 'failed') &&
+            ' A subject whose LoRA training failed must be re-cast before you can continue.'}
+        </Alert>
+      )}
       {!loading && subjectsToCast.length === 0 && (
         <Alert severity="info" sx={{ mb: 2 }}>
           No subjects yet — the Screenwriter agent will populate these from the script.
@@ -129,23 +184,40 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
           <TableBody>
             {subjectsToCast.map((subj) => (
               <TableRow key={subj.id}>
-                <TableCell>{subj.name}</TableCell>
+                <TableCell>
+                  {subj.name}
+                  {subj.training_status && (
+                    <Chip
+                      label={subj.training_status}
+                      size="small"
+                      color={STATUS_COLOR[subj.training_status] || 'default'}
+                      variant="outlined"
+                      sx={{ ml: 1 }}
+                    />
+                  )}
+                </TableCell>
                 <TableCell><Chip label={subj.kind} size="small" /></TableCell>
                 <TableCell>
-                  <FormControl component="fieldset">
-                    <RadioGroup
-                      row
-                      value={castingData[subj.id]?.action || ''}
-                      onChange={(e) => handleActionChange(subj.id, e.target.value)}
-                    >
-                      <FormControlLabel value="use_existing_lora" control={<Radio />} label="Existing LoRA" />
-                      <FormControlLabel value="train_from_uploads" control={<Radio />} label="Upload Photos" />
-                      <FormControlLabel value="train_from_generated" control={<Radio />} label="AI Generated" />
-                    </RadioGroup>
-                  </FormControl>
+                  {isCastRequired(subj) ? (
+                    <FormControl component="fieldset">
+                      <RadioGroup
+                        row
+                        value={castingData[subj.id]?.action || ''}
+                        onChange={(e) => handleActionChange(subj.id, e.target.value)}
+                      >
+                        <FormControlLabel value="use_existing_lora" control={<Radio />} label="Existing LoRA" />
+                        <FormControlLabel value="train_from_uploads" control={<Radio />} label="Upload Photos" />
+                        <FormControlLabel value="train_from_generated" control={<Radio />} label="AI Generated" />
+                      </RadioGroup>
+                    </FormControl>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary">
+                      Generated inline — no casting needed
+                    </Typography>
+                  )}
                 </TableCell>
                 <TableCell sx={{ minWidth: 250 }}>
-                  {castingData[subj.id]?.action === 'use_existing_lora' && (
+                  {isCastRequired(subj) && castingData[subj.id]?.action === 'use_existing_lora' && (
                     <Autocomplete
                       options={castLibrary.filter(l => l.lora_path)}
                       getOptionLabel={(option) => option.name}

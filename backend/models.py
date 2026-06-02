@@ -2699,6 +2699,14 @@ class Subject(db.Model):
     lora_path = db.Column(db.String(512), nullable=True)
     lora_version = db.Column(db.Integer, nullable=False, default=0)
     training_status = db.Column(db.String(32), nullable=False, default="untrained", index=True)
+    # Whether this Subject is an identity-locked cast member that REQUIRES a
+    # trained LoRA before a production can leave the casting stage. Characters
+    # default True; props/environments default False (they are generated inline
+    # from their description, no LoRA). The screenwriter sets this explicitly
+    # from script markup ([[pin]] / {{name:kind}}). NULL = legacy row predating
+    # this column → callers fall back to kind-based default
+    # (see script_markup.default_cast_required / effective_cast_required).
+    cast_required = db.Column(db.Boolean, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     updated_at = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
 

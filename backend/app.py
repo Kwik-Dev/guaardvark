@@ -1016,6 +1016,7 @@ try:
             for _tbl, _col, _ddl in (
                 ("subjects", "voice_id", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS voice_id VARCHAR(128)"),
                 ("subjects", "trigger_word", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS trigger_word VARCHAR(64)"),
+                ("subjects", "cast_required", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS cast_required BOOLEAN"),
                 ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
             ):
