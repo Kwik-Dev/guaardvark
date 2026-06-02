@@ -1145,9 +1145,13 @@ class ComfyUIVideoGenerator:
             logger.warning(f"Failed to interrupt ComfyUI: {e}")
             return False
 
-    def _queue_prompt(self, workflow: dict) -> Optional[str]:
+    def _queue_prompt(self, workflow: dict, client_id: Optional[str] = None) -> Optional[str]:
         try:
             payload = {"prompt": workflow}
+            # client_id scopes ComfyUI's /ws progress messages back to us so the
+            # progress bridge can hear this generation. (server.py:883)
+            if client_id:
+                payload["client_id"] = client_id
             response = requests.post(
                 f"{self.comfy_url}/prompt",
                 json=payload,
@@ -1534,9 +1538,29 @@ class ComfyUIVideoGenerator:
                                 node["inputs"]["clip"] = [new_clip, 0]
 
             logger.info("Sending workflow to ComfyUI...")
-            prompt_id = self._queue_prompt(workflow)
+            # ── Layer 1: live progress bridge ────────────────────────────────
+            # Listen to ComfyUI's /ws so the UI sees per-step progress instead of
+            # a silent /history poll. Additive + flag-gated + self-terminating —
+            # if it fails, generation proceeds exactly as before.
+            import uuid as _uuid
+            from backend.services.comfyui_progress_bridge import ComfyUIProgressBridge
+            client_id = _uuid.uuid4().hex
+            progress_bridge = ComfyUIProgressBridge()
+            try:
+                progress_bridge.start(
+                    client_id=client_id,
+                    process_id=item_id,
+                    comfy_url=self.comfy_url,
+                    workflow=workflow,
+                    extra={"batch_id": (request.metadata or {}).get("batch_id", "")},
+                )
+            except Exception as _be:
+                logger.warning(f"Progress bridge start failed (non-fatal): {_be}")
+
+            prompt_id = self._queue_prompt(workflow, client_id=client_id)
 
             if not prompt_id:
+                progress_bridge.stop()
                 result.error = "Failed to queue workflow in ComfyUI"
                 return result
 
@@ -1556,6 +1580,7 @@ class ComfyUIVideoGenerator:
                 gen_timeout = 600   # 10 min — lighter models
             logger.info(f"Waiting for ComfyUI to complete generation (prompt_id: {prompt_id}, timeout: {gen_timeout}s, steps: {steps}, upscale: {has_upscale}, high_res: {is_high_res})...")
             outputs = self._wait_for_completion(prompt_id, timeout=gen_timeout)
+            progress_bridge.stop()  # /history poll owns completion; bridge is done
 
             if not outputs:
                 result.error = "ComfyUI generation timed out or failed"
@@ -1651,6 +1676,47 @@ class SvdI2VGenerator:
         result = gen.generate_video(req)
         if not result.success or not result.video_path:
             raise RuntimeError(f"I2V failed: {result.error or 'no video produced'}")
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(result.video_path, output_path)
+        return output_path
+
+
+class Wan22I2VGenerator:
+    """Wan 2.2 image-to-video adapter for the Editor's I2VGenerator protocol.
+
+    This is the film pipeline's preferred animator (Layer 2 of the film-orchestrator
+    plan). Identity rides in the LoRA-consistent storyboard frame, exactly as with
+    the SVD/CogVideoX adapter — but UNLIKE that one, Wan 2.2 takes a text prompt
+    (motion guidance) and a LoRA (holds identity through motion), so we pass both.
+    Per-step progress is surfaced automatically by the Layer-1 ws bridge inside
+    generate_video. Short clips keep identity stable and VRAM in budget on 16 GB.
+    """
+
+    def __init__(self, fps: int = 24):
+        self.fps = fps
+
+    def i2v_from_image(
+        self, *, image_path: str, prompt: str, loras: list[str],
+        duration_seconds: float, output_path: str,
+    ) -> str:
+        # Clamp to a short clip — long Wan I2V drifts the face and blows 16 GB.
+        # generate_video handles Wan's "frames % 8 == 1" alignment internally.
+        frames = max(17, min(49, int(round(duration_seconds * self.fps)) or 25))
+        gen = get_video_generator()
+        req = VideoGenerationRequest(
+            model="wan22-14b-i2v",
+            prompt=prompt or "",
+            duration_frames=frames,
+            fps=self.fps,
+            enhance_prompt=False,
+            # Wan I2V honors a single LoRA — re-applying the character LoRA helps
+            # hold identity through motion (the frame anchors it; the LoRA steadies it).
+            lora_name=(loras[0] if loras else None),
+            metadata={"image_path": image_path},
+        )
+        result = gen.generate_video(req)
+        if not result.success or not result.video_path:
+            raise RuntimeError(f"Wan 2.2 I2V failed: {result.error or 'no video produced'}")
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(result.video_path, output_path)
         return output_path

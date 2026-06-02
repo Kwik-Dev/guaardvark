@@ -103,7 +103,12 @@ class RealLoraTrainer:
         except json.JSONDecodeError as e:
             raise RuntimeError(f"LoRA trainer daemon returned non-JSON: {response_line!r} ({e})") from e
 
-    def train_subject_lora(self, *, subject_id: int, subject_name: str, ref_image_paths: list[str], output_dir: str, trigger_word: str | None = None, **_) -> dict:
+    def train_subject_lora(self, *, subject_id: int, subject_name: str, ref_image_paths: list[str], output_dir: str, trigger_word: str | None = None, resolution: int = 768, **_) -> dict:
+        # resolution is the dominant VRAM lever for SDXL LoRA. Default 768 fits a
+        # 16 GB card alongside the bf16 + gradient-checkpointing the runner already
+        # does; bump to 1024 on a 24 GB+ card for sharper identity. Snap to /64 so
+        # the UNet doesn't choke on an odd size.
+        resolution = max(512, (int(resolution) // 64) * 64)
         if not ref_image_paths:
             return {"status": "failed", "error": "no reference images provided"}
 
@@ -151,7 +156,7 @@ class RealLoraTrainer:
                     "alpha": 16,
                     "steps": steps,
                     "learning_rate": 1.0e-4,
-                    "resolution": 1024,
+                    "resolution": resolution,
                     "seed": 42,
                     "instance_prompt": f"a photo of {token}"
                 }

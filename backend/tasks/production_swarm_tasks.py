@@ -108,6 +108,16 @@ def create_production_swarm_tasks(celery_app: Celery):
     def run_storyboard_artist_task(prod_id: int):
         with current_app.app_context():
             run_storyboard_artist(prod_id)
+            # Layer 3: hand the keyframe approval gate to the vision brain instead
+            # of the human, unless opted out. Safe to fire unconditionally —
+            # run_curator no-ops unless the production reached awaiting_approval.
+            if os.environ.get("GUAARDVARK_FILM_AUTOCURATE", "1") not in ("0", "false", "False", ""):
+                run_curator(prod_id)
+
+    @celery_app.task(name="production.run_curator")
+    def run_curator_task(prod_id: int):
+        with current_app.app_context():
+            run_curator(prod_id)
 
     @celery_app.task(name="production.run_editor")
     def run_editor_task(prod_id: int):
@@ -129,6 +139,7 @@ def create_production_swarm_tasks(celery_app: Celery):
         "run_casting_director": run_casting_director_task,
         "run_cinematographer": run_cinematographer_task,
         "run_storyboard_artist": run_storyboard_artist_task,
+        "run_curator": run_curator_task,
         "run_editor": run_editor_task,
         "regen_storyboard_shot": regen_storyboard_shot_task,
         "regen_shot_plan": regen_shot_plan_task,
@@ -369,16 +380,43 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
 
             db.session.commit()
 
+def run_curator(prod_id: int) -> dict:
+    """Layer 3 auto-curation: Gemma-4 vision judges each storyboard frame and sets
+    ProductionShot.approved, so the human only reviews the shots it flags. If every
+    shot passes, the gate advances awaiting_approval -> rendering and the editor is
+    dispatched — fully hands-off. Idempotent (no-ops unless at awaiting_approval)."""
+    import logging
+    from backend.services.film_curator_service import auto_curate
+    log = logging.getLogger(__name__)
+    summary = auto_curate(prod_id)
+    if summary.get("advanced_to_rendering"):
+        from backend.celery_app import celery
+        celery.send_task("production.run_editor", args=[prod_id])
+        log.info("Curator approved all shots for production %s -> rendering dispatched", prod_id)
+    elif not summary.get("skipped"):
+        log.info("Curator flagged shots %s for production %s -> awaiting human review",
+                 summary.get("flagged_shots"), prod_id)
+    return summary
+
+
 def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
     with _agent_run(prod_id, agent_name="editor", expected_stage="rendering", next_agent=None) as ctx:
         if ctx is None:
             return
 
         if i2v is None:
-            # SVD animates the LoRA-consistent storyboard frame — identity rides
-            # in the image, so no video-side LoRA is needed.
-            from backend.services.comfyui_video_generator import SvdI2VGenerator
-            i2v = SvdI2VGenerator()
+            # Animate each LoRA-consistent storyboard frame into a clip. Identity
+            # rides in the frame either way. Default = Wan 2.2 (Dean's pick — the
+            # CogVideoX output was rejected); GUAARDVARK_FILM_I2V=cogvideox reverts
+            # to the CogVideoX-backed adapter. Wan additionally re-applies the LoRA
+            # + prompt to steady identity through motion.
+            engine = os.environ.get("GUAARDVARK_FILM_I2V", "wan").strip().lower()
+            if engine in ("cogvideox", "cog", "svd"):
+                from backend.services.comfyui_video_generator import SvdI2VGenerator
+                i2v = SvdI2VGenerator()
+            else:
+                from backend.services.comfyui_video_generator import Wan22I2VGenerator
+                i2v = Wan22I2VGenerator()
 
         # Real service clients with graceful degradation: ffmpeg always present
         # (system binary), audio only when the plugin is up, timeline compose

@@ -33,6 +33,7 @@ import {
   FormControlLabel,
 } from "@mui/material";
 import PageLayout from "../components/layout/PageLayout";
+import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import {
   PlayArrow as PlayIcon,
   Refresh as RefreshIcon,
@@ -1109,6 +1110,23 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     if (!batchStatus || !batchStatus.results) return [];
     return batchStatus.results;
   }, [batchStatus]);
+
+  // Live per-step progress for the currently-rendering video. The batch bar only
+  // moves when a whole clip finishes; THIS shows "denoising 12/50" inside the
+  // active clip, fed by the ComfyUI ws progress bridge (process_type=video_render,
+  // process_id=item_id). Single GPU = at most one active render, so we just take
+  // the freshest non-terminal video_render process (preferring this batch's).
+  const { getProcessesByType, activeProcesses } = useUnifiedProgress();
+  const activeStep = useMemo(() => {
+    if (!batchStatus || batchStatus.status !== "running") return null;
+    const live = (getProcessesByType("video_render") || []).filter((p) =>
+      !["complete", "end", "error", "cancelled"].includes(p.status)
+    );
+    if (!live.length) return null;
+    const mine = live.filter((p) => p.additional_data?.batch_id === batchStatus.batch_id);
+    const pool = mine.length ? mine : live;
+    return pool.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
+  }, [batchStatus, getProcessesByType, activeProcesses]);
 
   const controlsDisabled = isGenerating;
 
@@ -2187,6 +2205,26 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     value={((batchStatus.completed_videos || 0) / (batchStatus.total_videos || 1)) * 100}
                   />
                 </Box>
+
+                {/* Live current-step (per-clip) progress from the ComfyUI ws bridge */}
+                {activeStep && (
+                  <Box sx={{ mb: 2 }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                      <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'capitalize' }}>
+                        {activeStep.message || 'Rendering…'}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {activeStep.progress || 0}%
+                      </Typography>
+                    </Box>
+                    <LinearProgress
+                      variant="determinate"
+                      value={activeStep.progress || 0}
+                      color="secondary"
+                      sx={{ height: 4, borderRadius: 2 }}
+                    />
+                  </Box>
+                )}
 
                 {batchStatus.status === 'completed' && (
                   <Button

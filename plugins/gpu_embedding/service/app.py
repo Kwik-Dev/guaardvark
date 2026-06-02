@@ -256,7 +256,7 @@ if __name__ == '__main__':
     # Get configuration
     config = get_service_config()
     host = config.get("host", "127.0.0.1")
-    port = config.get("port", 8203)  # 8203, NOT 5002 — that's the main backend's port
+    port = config.get("port", 8204)  # 8204 — moved off 8203 (lora_trainer owns 8203); NOT 5002 (backend)
     debug = config.get("debug", False)
     
     logger.info(f"Starting GPU Embedding Service on {host}:{port}")

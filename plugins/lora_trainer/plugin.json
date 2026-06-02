@@ -7,7 +7,7 @@
   "type": "service",
   "category": "training",
   "port": 8203,
-  "vram_estimate_mb": 18000,
+  "vram_estimate_mb": 14000,
   "core": false,
   "dependencies": [],
   "config": {

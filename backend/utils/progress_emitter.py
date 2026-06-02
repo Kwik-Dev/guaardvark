@@ -42,6 +42,7 @@ def emit_progress_event(
             "indexing": ProcessType.INDEXING,
             "file_generation": ProcessType.FILE_GENERATION,
             "image_generation": ProcessType.IMAGE_GENERATION,
+            "video_render": ProcessType.VIDEO_RENDER,
             "llm_processing": ProcessType.LLM_PROCESSING,
             "backup": ProcessType.BACKUP,
             "upload": ProcessType.UPLOAD,
@@ -55,9 +56,9 @@ def emit_progress_event(
             "processing": ProcessType.UNKNOWN,
             "unknown": ProcessType.UNKNOWN
         }
-        
+
         process_type_enum = process_type_mapping.get(process_type, ProcessType.UNKNOWN)
-        
+
         # Handle different status types
         if status == "start":
             # Create or update process

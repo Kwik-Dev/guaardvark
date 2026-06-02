@@ -6,11 +6,11 @@
   "author": "GUAARDVARK Team",
   "type": "service",
   "category": "indexing",
-  "port": 8203,
+  "port": 8204,
   "vram_estimate_mb": 0,
   "dependencies": [],
   "config": {
-    "service_url": "http://localhost:8203",
+    "service_url": "http://localhost:8204",
     "timeout": 30,
     "fallback_enabled": true,
     "model": "embeddinggemma:latest",
