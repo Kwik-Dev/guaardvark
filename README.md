@@ -6,7 +6,7 @@
 
 **Version 2.5.4** · [guaardvark.com](https://guaardvark.com)
 
-The self-hosted AI workstation. Autonomous agents that see your screen and control your apps. A three-tier neural routing engine. Parallel agent swarms across isolated git worktrees. Video generation, image upscaling to 4K/8K, RAG over your documents, voice interface, and a 60+ tool execution engine — all running locally on your hardware. Your machine. Your data. Your rules.
+The self-hosted AI workstation. Autonomous agents that see your screen and control your apps. A three-tier neural routing engine. Parallel agent swarms across isolated git worktrees. Video generation, image upscaling to 4K/8K, RAG over your documents, voice interface, and a 70+ tool execution engine — all running locally on your hardware. Your machine. Your data. Your rules.
 
 ## What's included
 
@@ -569,12 +569,12 @@ guaardvark files upload report.pdf      # Upload and index
 Browser / CLI (PyPI: guaardvark) / MCP Client (Claude Desktop, Cursor, etc.)
     | HTTP + WebSocket / stdio MCP
     v
-Flask (68+ REST blueprints + GraphQL + Socket.IO) · MCP Server (23 tools, 58 resources)
+Flask (68+ REST blueprints + GraphQL + Socket.IO) · MCP Server (31 tools, read-only outputs resources)
     |
     +-- AgentBrain (3-tier routing: Reflex → Instinct → Deliberation)
     |
 Service Layer (48 modules)
-|-- Agent Executor (ReACT loop + 60+ tools + BrainState)
+|-- Agent Executor (ReACT loop + 70+ tools + BrainState)
 |-- Screen Control (See-Think-Act-Verify + per-iteration reasoning stream)
 |-- RAG Pipeline (LlamaIndex + hybrid retrieval + Auto Researcher)
 |-- Self-Improvement Engine (detect → fix → verify → broadcast)
