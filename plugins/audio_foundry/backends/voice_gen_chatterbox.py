@@ -85,9 +85,13 @@ class ChatterboxBackend(AudioBackend):
         emotion = params.get("emotion")  # not all Chatterbox builds support this
         seed = params.get("seed")
         requested_format = params.get("output_format", "wav")
+        # Injected by the dispatcher for async jobs; absent (None) on the inline path.
+        progress_cb = params.get("progress_cb")
+        cancel_event = params.get("cancel_event")
 
         import torch
         import soundfile as sf
+        from backends.base import GenerationCancelled
 
         # Long-text chunking — single inference can OOM on very long inputs and
         # quality degrades past a few hundred characters. Naive splitter on the
@@ -107,32 +111,42 @@ class ChatterboxBackend(AudioBackend):
             len(text), len(chunks), bool(reference_clip), emotion,
         )
 
-        t0 = time.monotonic()
-        wav_segments = []
-        for chunk in chunks:
-            wav = self._model.generate(text=chunk, **gen_kwargs)
-            # Chatterbox returns a 1-D or 2-D torch tensor [samples] or [1, samples]
-            if hasattr(wav, "cpu"):
-                wav = wav.cpu().numpy()
-            if wav.ndim == 2:
-                wav = wav.squeeze(0)
-            wav_segments.append(wav)
-        gen_seconds = time.monotonic() - t0
-
-        # Concatenate segments. Numpy import is local — no extra top-level cost.
-        import numpy as np
-        audio = np.concatenate(wav_segments)
-
         self._output_root.mkdir(parents=True, exist_ok=True)
         asset_id = uuid.uuid4().hex
         out_path = self._output_root / f"{asset_id}.wav"
-        sf.write(str(out_path), audio, self._sample_rate)
 
-        # Post-process: normalization + format conversion (MP3).
-        # If post_process raises (ffmpeg missing, format invalid, OOM), the raw
-        # WAV at out_path used to leak forever. Reap it on failure; on success
-        # post_process either returns a new file (and we delete the raw WAV) or
-        # returns out_path itself (and we keep it).
+        # Stream each chunk straight to the WAV file. Buffering an hour of 24kHz
+        # mono in a Python list then np.concatenate would cost ~345 MB+; the
+        # SoundFile writer keeps memory flat regardless of total length.
+        total = len(chunks)
+        total_frames = 0
+        t0 = time.monotonic()
+        try:
+            with sf.SoundFile(
+                str(out_path), mode="w", samplerate=self._sample_rate,
+                channels=1, subtype="PCM_16",
+            ) as writer:
+                for i, chunk in enumerate(chunks):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise GenerationCancelled(f"cancelled after {i}/{total} chunks")
+                    wav = self._model.generate(text=chunk, **gen_kwargs)
+                    if hasattr(wav, "cpu"):
+                        wav = wav.cpu().numpy()
+                    if wav.ndim == 2:
+                        wav = wav.squeeze(0)
+                    writer.write(wav)
+                    total_frames += int(wav.shape[0])
+                    if progress_cb is not None:
+                        progress_cb(i + 1, total, "synthesizing")
+        except BaseException:
+            # Cancel or failure: don't leak a partial WAV.
+            out_path.unlink(missing_ok=True)
+            raise
+        gen_seconds = time.monotonic() - t0
+
+        # Post-process: normalization + optional MP3. NOTE: post_process uses
+        # pydub, which loads the whole file into memory — see HANDOFF §7 for the
+        # multi-hour caveat and the ffmpeg-streaming follow-up.
         try:
             final_path = self.post_process(out_path, output_format=requested_format)
         except Exception:
@@ -142,10 +156,10 @@ class ChatterboxBackend(AudioBackend):
             out_path.unlink(missing_ok=True)
         actual_format = final_path.suffix.lstrip(".").lower()
 
-        actual_duration = audio.shape[0] / self._sample_rate
+        actual_duration = total_frames / self._sample_rate
         logger.info(
-            "Chatterbox wrote %s — %.2fs audio in %.1fs wall",
-            final_path, actual_duration, gen_seconds,
+            "Chatterbox wrote %s — %.2fs audio in %.1fs wall (%d chunks)",
+            final_path, actual_duration, gen_seconds, total,
         )
 
         return GenerationResult(
@@ -155,7 +169,7 @@ class ChatterboxBackend(AudioBackend):
             meta={
                 "backend": self.name,
                 "text": text,
-                "chunks": len(chunks),
+                "chunks": total,
                 "reference_clip_path": str(reference_clip) if reference_clip else None,
                 "emotion": emotion,
                 "seed": seed,

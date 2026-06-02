@@ -11,11 +11,13 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ConfigDict
 
 from service.bootstrap import bootstrap
 from service.config_loader import load_config
 from service.dispatcher import Dispatcher, Intent, NotWired
+from service.jobs import JobManager
 from service.orchestrator_client import OrchestratorClient
 from service.registration import register_output
 
@@ -25,22 +27,27 @@ logger = logging.getLogger(__name__)
 # Kept lenient at skeleton phase. Each backend tightens its own fields when wired.
 
 class FxRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     prompt: str = Field(..., min_length=1)
     duration_s: float = Field(10.0, gt=0, le=47.0)
     output_format: str = Field("wav", pattern="^(wav|mp3)$")
     seed: Optional[int] = None
+    async_mode: bool = Field(False, alias="async")
 
 
 class VoiceRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     text: str = Field(..., min_length=1)
     backend: str = Field("auto", pattern="^(auto|chatterbox|kokoro)$")
     reference_clip_path: Optional[str] = None
     voice_id: Optional[str] = None
     emotion: Optional[str] = None
     output_format: str = Field("wav", pattern="^(wav|mp3)$")
+    async_mode: bool = Field(False, alias="async")
 
 
 class MusicRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     lyrics: Optional[str] = None
     style_prompt: str = Field(..., min_length=1)
     # Optional steering-away tags. ACE-Step drifts toward its strongest training
@@ -51,6 +58,7 @@ class MusicRequest(BaseModel):
     instrumental_only: bool = False
     output_format: str = Field("wav", pattern="^(wav|mp3)$")
     seed: Optional[int] = None
+    async_mode: bool = Field(False, alias="async")
 
 
 # ---------- app setup --------------------------------------------------------
@@ -83,6 +91,84 @@ _orch_client = OrchestratorClient(
 
 _dispatcher = Dispatcher(orchestrator=_orch_client)
 bootstrap(_dispatcher, _config)
+
+
+# ---- async job plumbing -----------------------------------------------------
+from pathlib import Path as _Path
+
+_PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent.parent
+_out_dir = _PROJECT_ROOT / _config.get("runtime", {}).get("output", {}).get("dir", "data/outputs/audio")
+_async_cfg = _config.get("runtime", {}).get("async", {}) or {}
+# Back-compat: honor the old celery.async_threshold_s if async.threshold_s is absent.
+_ASYNC_THRESHOLD_S = float(
+    _async_cfg.get("threshold_s",
+                   _config.get("runtime", {}).get("celery", {}).get("async_threshold_s", 5))
+)
+_CHARS_PER_SEC_EST = float(_async_cfg.get("chars_per_sec_est", 30))
+_MUSIC_RT_FACTOR = float(_async_cfg.get("music_realtime_factor", 1.5))
+_FX_RT_FACTOR = float(_async_cfg.get("fx_realtime_factor", 1.2))
+_ASYNC_ENABLED = bool(_async_cfg.get("enabled", True))
+
+
+def _finalize(result) -> dict:
+    """Register the output and build the response dict. Shared by the inline
+    path and the async worker so the shape is identical."""
+    reg_cfg = _config.get("runtime", {}).get("registration", {})
+    doc = None
+    if reg_cfg.get("enabled", True):
+        doc = register_output(
+            result,
+            backend_url=reg_cfg.get("backend_url", "http://localhost:5002"),
+            folder=reg_cfg.get("folder", "Audio"),
+        )
+    return {
+        "path": str(result.path),
+        "duration_s": result.duration_s,
+        "sample_rate": result.sample_rate,
+        "meta": result.meta,
+        "document_id": doc.get("id") if doc else None,
+    }
+
+
+def _job_runner(intent_value: str, params: dict, progress_cb, cancel_event) -> dict:
+    result = _dispatcher.generate(
+        Intent(intent_value), progress_cb=progress_cb, cancel_event=cancel_event, **params,
+    )
+    return _finalize(result)
+
+
+_jobs = JobManager(
+    runner=_job_runner,
+    jobs_dir=_out_dir / ".jobs",
+    retention=int(_async_cfg.get("job_retention", 50)),
+)
+
+
+def _estimate_seconds(intent: Intent, params: dict) -> float:
+    if intent == Intent.VOICE:
+        return len(params.get("text", "")) / max(_CHARS_PER_SEC_EST, 1.0)
+    if intent == Intent.MUSIC:
+        return float(params.get("duration_s", 60.0)) * _MUSIC_RT_FACTOR
+    if intent == Intent.FX:
+        return float(params.get("duration_s", 10.0)) * _FX_RT_FACTOR
+    return 0.0
+
+
+def _dispatch(intent: Intent, req) -> Any:
+    """Inline if short / async not requested; otherwise queue a job and 202."""
+    params = req.model_dump(exclude_none=True)
+    want_async = bool(params.pop("async_mode", False))
+    est = _estimate_seconds(intent, params)
+    if _ASYNC_ENABLED and want_async and est >= _ASYNC_THRESHOLD_S:
+        job_id = _jobs.submit(intent.value, params)
+        return JSONResponse(status_code=202, content={
+            "mode": "async",
+            "job_id": job_id,
+            "status": "queued",
+            "estimate_s": round(est, 1),
+            "poll_url": f"/jobs/{job_id}",
+        })
+    return _run(intent, params)
 
 
 # ---------- endpoints --------------------------------------------------------
@@ -200,29 +286,52 @@ def list_voices() -> dict[str, Any]:
 
 
 @app.post("/generate/fx")
-def generate_fx(req: FxRequest) -> dict[str, Any]:
-    return _run(Intent.FX, req.model_dump(exclude_none=True))
+def generate_fx(req: FxRequest) -> Any:
+    return _dispatch(Intent.FX, req)
 
 
 @app.post("/generate/voice")
-def generate_voice(req: VoiceRequest) -> dict[str, Any]:
-    return _run(Intent.VOICE, req.model_dump(exclude_none=True))
+def generate_voice(req: VoiceRequest) -> Any:
+    return _dispatch(Intent.VOICE, req)
 
 
 @app.post("/generate/music")
-def generate_music(req: MusicRequest) -> dict[str, Any]:
-    return _run(Intent.MUSIC, req.model_dump(exclude_none=True))
+def generate_music(req: MusicRequest) -> Any:
+    return _dispatch(Intent.MUSIC, req)
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str) -> dict[str, Any]:
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown job id")
+    return job
+
+
+@app.get("/jobs")
+def list_jobs() -> dict[str, Any]:
+    return {"jobs": _jobs.list()}
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict[str, Any]:
+    if not _jobs.cancel(job_id):
+        raise HTTPException(status_code=404, detail="Unknown or already-finished job")
+    return {"job_id": job_id, "status": "cancelling"}
 
 
 # ---------- helpers ----------------------------------------------------------
 
 def _run(intent: Intent, params: dict[str, Any]) -> dict[str, Any]:
-    """Thin wrapper around dispatcher — translates NotWired to 501, real errors to 500.
+    """Synchronous generate (short inputs / async not requested).
 
-    Also registers the resulting file with the main Guaardvark backend so it shows
-    up in DocumentsPage. Registration is non-fatal — a failure there doesn't kill
-    the generate response; the file is on disk either way.
+    Translates NotWired to 501, real errors to 500. Registration of the output
+    as a Document happens in _finalize (shared with the async worker) and is
+    non-fatal — a failure there doesn't kill the response; the file is on disk.
     """
+    # progress_cb/cancel_event are popped if a caller ever sent them by mistake.
+    params.pop("progress_cb", None)
+    params.pop("cancel_event", None)
     try:
         result = _dispatcher.generate(intent, **params)
     except NotWired as e:
@@ -231,20 +340,4 @@ def _run(intent: Intent, params: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:
         logger.exception("Generation failed for intent=%s", intent.value)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-
-    reg_cfg = _config.get("runtime", {}).get("registration", {})
-    doc = None
-    if reg_cfg.get("enabled", True):
-        doc = register_output(
-            result,
-            backend_url=reg_cfg.get("backend_url", "http://localhost:5002"),
-            folder=reg_cfg.get("folder", "Audio"),
-        )
-
-    return {
-        "path": str(result.path),
-        "duration_s": result.duration_s,
-        "sample_rate": result.sample_rate,
-        "meta": result.meta,
-        "document_id": doc.get("id") if doc else None,
-    }
+    return _finalize(result)

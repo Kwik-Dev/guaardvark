@@ -1,5 +1,5 @@
 // frontend/src/pages/AudioFoundryPage.jsx
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState, useRef } from "react";
 import {
   Box,
   Typography,
@@ -124,6 +124,10 @@ const AudioFoundryPage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  // Async-job state: a long transcript returns 202 + job_id and we poll.
+  const [progress, setProgress] = useState(null);  // {current,total,status} while a job runs
+  const [jobId, setJobId] = useState(null);
+  const pollRef = useRef(null);
 
   // Form States
   const [voiceText, setVoiceText] = useState("");
@@ -218,6 +222,74 @@ const AudioFoundryPage = () => {
     setError(null);
   };
 
+  // ----- Async job polling -------------------------------------------------
+  // Large transcripts/songs run as a background job in the plugin (no more 504
+  // on a held-open HTTP request). Submit returns 202 + job_id; we poll status.
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  // Stop polling if the user navigates away mid-job.
+  useEffect(() => () => stopPolling(), []);
+
+  // The plugin registers the file as a Document and returns `document_id`. The
+  // browser plays it back via the Documents download route (which serves
+  // WAV/MP3 inline). The raw filesystem `path` is for backend logs only — it's
+  // never reachable from the browser.
+  const finishWithResult = (data) => {
+    const docId = data.document_id;
+    if (!docId) {
+      setError(
+        "Audio was generated but couldn't be registered as a Document. " +
+        "Check audio_foundry.log — the POST to /api/outputs/register may have failed."
+      );
+    } else {
+      setResult({ ...data, full_url: `${API_BASE}/files/document/${docId}/download` });
+    }
+  };
+
+  const beginPolling = (id) => {
+    stopPolling();
+    setProgress({ current: 0, total: 0, status: "queued" });
+    pollRef.current = setInterval(async () => {
+      try {
+        const { data } = await axios.get(`${API_BASE}/audio-foundry/jobs/${id}`);
+        setProgress({
+          current: data.progress?.current ?? 0,
+          total: data.progress?.total ?? 0,
+          status: data.status,
+        });
+        if (data.status === "done") {
+          stopPolling();
+          finishWithResult(data.result || {});
+          setProgress(null); setJobId(null); setLoading(false);
+        } else if (data.status === "error") {
+          stopPolling();
+          setError(data.error || "Generation failed in the background job.");
+          setProgress(null); setJobId(null); setLoading(false);
+        } else if (data.status === "cancelled") {
+          stopPolling();
+          setProgress(null); setJobId(null); setLoading(false);
+        }
+      } catch (err) {
+        // Job lost (plugin restarted) → stop and tell the user. Transient
+        // network blips just retry on the next tick.
+        if (err.response?.status === 404) {
+          stopPolling();
+          setError("Generation job was lost (the audio service may have restarted). Please retry.");
+          setProgress(null); setJobId(null); setLoading(false);
+        }
+      }
+    }, 3000);
+  };
+
+  const handleCancelJob = async () => {
+    if (!jobId) return;
+    try { await axios.post(`${API_BASE}/audio-foundry/jobs/${jobId}/cancel`); } catch (_) {}
+    // The poll loop will observe status === "cancelled" and reset.
+  };
+
   const generateAudio = async (type) => {
     setLoading(true);
     setError(null);
@@ -246,28 +318,24 @@ const AudioFoundryPage = () => {
         payload = { prompt: fxPrompt, duration_s: duration };
       }
 
-      const res = await axios.post(`${API_BASE}/audio-foundry${endpoint}`, payload);
-      // The audio_foundry service registers the file as a Document and returns
-      // its `document_id`. The browser plays it back via the Documents download
-      // route (which serves WAV/MP3 inline so <audio> can stream it). The raw
-      // filesystem `path` in the response is for backend logs/debug only — it's
-      // never reachable from the browser.
-      const docId = res.data.document_id;
-      if (!docId) {
-        throw new Error(
-          "Audio was generated but couldn't be registered as a Document. " +
-          "Check audio_foundry.log — the registration POST to /api/outputs/register may have failed."
-        );
+      const res = await axios.post(
+        `${API_BASE}/audio-foundry${endpoint}`,
+        { ...payload, async: true },
+      );
+      if (res.status === 202 && res.data?.job_id) {
+        setJobId(res.data.job_id);
+        beginPolling(res.data.job_id);
+        return;  // keep `loading` true; polling clears it on terminal status
       }
-      setResult({
-        ...res.data,
-        full_url: `${API_BASE}/files/document/${docId}/download`,
-      });
+      finishWithResult(res.data);  // inline (short text) — unchanged behavior
     } catch (err) {
       console.error("Audio generation failed:", err);
       setError(err.response?.data?.detail || "Generation failed. Please check backend logs.");
-    } finally {
       setLoading(false);
+    } finally {
+      // Inline + error paths set loading=false above / in catch; the async path
+      // intentionally leaves it true until the poll loop resolves.
+      if (!pollRef.current) setLoading(false);
     }
   };
 
@@ -374,23 +442,22 @@ const AudioFoundryPage = () => {
       };
       if (negativePrompt) payload.negative_prompt = negativePrompt;
 
-      const res = await axios.post(`${API_BASE}/audio-foundry/generate/music`, payload);
-      const docId = res.data.document_id;
-      if (!docId) {
-        throw new Error(
-          "Audio was generated but couldn't be registered as a Document. " +
-          "Check audio_foundry.log — the registration POST to /api/outputs/register may have failed."
-        );
+      const res = await axios.post(
+        `${API_BASE}/audio-foundry/generate/music`,
+        { ...payload, async: true },
+      );
+      if (res.status === 202 && res.data?.job_id) {
+        setJobId(res.data.job_id);
+        beginPolling(res.data.job_id);
+        return;  // keep `loading` true; polling clears it on terminal status
       }
-      setResult({
-        ...res.data,
-        full_url: `${API_BASE}/files/document/${docId}/download`,
-      });
+      finishWithResult(res.data);  // inline (short song) — unchanged behavior
     } catch (err) {
       console.error("Music generation failed:", err);
       setError(err.response?.data?.detail || err.response?.data?.error || "Generation failed. Please check backend logs.");
-    } finally {
       setLoading(false);
+    } finally {
+      if (!pollRef.current) setLoading(false);
     }
   };
 
@@ -800,9 +867,31 @@ const AudioFoundryPage = () => {
 
               {loading && (
                 <Box sx={{ flexGrow: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                  <CircularProgress size={80} sx={{ mb: 3, color: getTabColor() }} />
+                  <CircularProgress
+                    size={80}
+                    sx={{ mb: 3, color: getTabColor() }}
+                    variant={progress && progress.total > 0 ? "determinate" : "indeterminate"}
+                    value={progress && progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : undefined}
+                  />
                   <Typography variant="h5" fontWeight="bold">Synthesizing Waves...</Typography>
-                  <Typography color="text.secondary">Generating high-fidelity audio on local GPU.</Typography>
+                  <Typography color="text.secondary">
+                    {progress && progress.total > 0
+                      ? `Chunk ${progress.current}/${progress.total} (~${Math.round((progress.current / progress.total) * 100)}%)`
+                      : progress && progress.status === "queued"
+                        ? "Queued… waiting for the GPU."
+                        : "Generating high-fidelity audio on local GPU."}
+                  </Typography>
+                  {jobId && (
+                    <Button
+                      size="small"
+                      color="warning"
+                      variant="outlined"
+                      onClick={handleCancelJob}
+                      sx={{ mt: 2 }}
+                    >
+                      Cancel
+                    </Button>
+                  )}
                 </Box>
               )}
 

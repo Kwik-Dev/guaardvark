@@ -14,6 +14,15 @@ from pathlib import Path
 from typing import Any
 
 
+class GenerationCancelled(Exception):
+    """Raised by a backend when a job's cancel Event is set mid-generation.
+
+    Distinct from a real error so the job manager records 'cancelled', not
+    'error', and so the voice_gen 'auto' path does NOT fall back to Kokoro on a
+    user cancel.
+    """
+
+
 @dataclass
 class GenerationResult:
     """What every backend returns.

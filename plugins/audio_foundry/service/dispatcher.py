@@ -96,11 +96,21 @@ class Dispatcher:
                 for intent, backend in self._backends.items()
             }
 
-    def generate(self, intent: Intent, **params: Any) -> GenerationResult:
+    def generate(
+        self,
+        intent: Intent,
+        *,
+        progress_cb: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
+        **params: Any,
+    ) -> GenerationResult:
         """Run a generation request. Loads the backend if cold.
 
         Serializes requests for the same intent, but allows different intents
         to proceed in parallel (VRAM permitting, mediated by orchestrator).
+
+        progress_cb/cancel_event are forwarded to the backend for async jobs;
+        both default to None, so the inline path is byte-for-byte unchanged.
         """
         # 1. Get the intent lock to serialize requests for this specific model
         with self._intent_locks[intent]:
@@ -118,7 +128,9 @@ class Dispatcher:
             self._last_used[intent] = time.monotonic()
             
             try:
-                result = backend.generate(**params)
+                result = backend.generate(
+                    progress_cb=progress_cb, cancel_event=cancel_event, **params,
+                )
                 # Signal success to orchestrator so eviction timer can reset
                 self._orch.release(f"{_SLOT_PREFIX}:{intent.value}")
                 

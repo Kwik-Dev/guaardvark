@@ -59,8 +59,18 @@ gpu:
   # 0 disables auto-unload. Measured from last successful generation.
   idle_unload_s: 300
 
+async:
+  enabled: true
+  threshold_s: 5            # est. generation time over this runs as a background job
+  chars_per_sec_est: 30     # voice: ~220-char chunk renders in ~7s → ~30 chars/s
+  music_realtime_factor: 1.5
+  fx_realtime_factor: 1.2
+  job_retention: 50         # finished job records (+files) kept before pruning
+  poll_hint_s: 3            # advisory client poll interval
+
 celery:
-  # Requests with estimated duration over this run async via Celery queue.
-  # Under this, we block the HTTP request and return the result inline.
+  # Legacy block — superseded by `async:` above. Kept for back-compat: the
+  # service falls back to celery.async_threshold_s if async.threshold_s is unset.
+  # Requests with estimated duration over this run async as a background job.
   async_threshold_s: 5
   queue_name: audio_gen

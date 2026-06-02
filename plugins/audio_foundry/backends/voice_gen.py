@@ -22,7 +22,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from backends.base import AudioBackend, GenerationResult
+from backends.base import AudioBackend, GenerationResult, GenerationCancelled
 from backends.voice_gen_chatterbox import ChatterboxBackend
 from backends.voice_gen_kokoro import KokoroBackend
 
@@ -79,9 +79,12 @@ class VoiceGenBackend(AudioBackend):
         if requested == "kokoro":
             return self._gen_with(self._kokoro, params)
 
-        # auto: prefer Chatterbox, fall back to Kokoro on any runtime error.
+        # auto: prefer Chatterbox, fall back to Kokoro on any runtime error —
+        # but NOT on a user cancel.
         try:
             return self._gen_with(self._chatterbox, params)
+        except GenerationCancelled:
+            raise
         except Exception as e:
             logger.warning(
                 "Chatterbox generate failed (%s) — retrying with Kokoro fallback", e,

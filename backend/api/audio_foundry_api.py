@@ -196,6 +196,32 @@ def generate_fx():
     return body, status_code
 
 
+# ---------- Async job lifecycle ---------------------------------------------
+#
+# Large transcripts return 202 + job_id from /generate/* (when the client sends
+# async:true). These routes proxy the plugin's job status/list/cancel so the
+# frontend can poll. Status/cancel are quick — QUICK_TIMEOUT, not the 600s
+# generation timeout, so a slow status call fails fast instead of hanging.
+
+
+@audio_foundry_bp.route("/jobs/<job_id>", methods=["GET"])
+def job_status(job_id):
+    body, status_code = _proxy_get(f"/jobs/{job_id}")
+    return body, status_code
+
+
+@audio_foundry_bp.route("/jobs", methods=["GET"])
+def jobs_list():
+    body, status_code = _proxy_get("/jobs")
+    return body, status_code
+
+
+@audio_foundry_bp.route("/jobs/<job_id>/cancel", methods=["POST"])
+def job_cancel(job_id):
+    body, status_code = _proxy_post(f"/jobs/{job_id}/cancel", {}, QUICK_TIMEOUT)
+    return body, status_code
+
+
 # ---------- Voice reference clips (Chatterbox cloning) ----------------------
 #
 # Chatterbox does zero-shot voice cloning from a 5-10s reference audio clip.
