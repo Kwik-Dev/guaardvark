@@ -20,6 +20,7 @@ export const JOB_KINDS = {
   BATCH_CSV: "batch_csv",
   VIDEO_RENDER: "video_render",
   OUTREACH: "outreach",
+  WEBSITE: "website",
   UNIFIED_PROGRESS: "unified",
 };
 
@@ -38,6 +39,7 @@ export const JOB_KINDS_FOR_ACTIVITY_PAGE = [
   JOB_KINDS.EXPERIMENT,
   JOB_KINDS.DEMO,
   JOB_KINDS.OUTREACH,
+  JOB_KINDS.WEBSITE,
   JOB_KINDS.UNIFIED_PROGRESS,
   'production',
   'lora_train',

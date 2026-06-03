@@ -68,26 +68,29 @@ def submit_route(website_id):
     data = request.get_json(silent=True) or {}
     sync_first = data.get("sync", True)
     max_n = data.get("max_n")  # None => up to remaining daily quota
+    schedule_at = data.get("schedule_at")  # ISO datetime → schedule for later
 
     try:
-        from backend.tasks.google_indexing_tasks import submit_indexing_batch_for_site
+        # Route through a first-class Task so the run is visible in Activity and
+        # schedulable, instead of a raw Celery dispatch.
+        from backend.services.website_jobs.job_service import queue_index_run
 
-        async_result = submit_indexing_batch_for_site.delay(
-            website_id, max_n=max_n, sync_first=sync_first
+        payload = queue_index_run(
+            website_id,
+            max_n=max_n,
+            sync_first=sync_first,
+            created_by="search_console",
+            schedule_at=schedule_at,
         )
         from backend.services import google_indexing_service as gis
 
-        return (
-            jsonify(
-                {
-                    "queued": True,
-                    "job_id": getattr(async_result, "id", None),
-                    "message": "Submission job queued; URLs will be submitted in the background.",
-                    "status": gis.get_status(website_id),
-                }
-            ),
-            202,
+        payload["status"] = gis.get_status(website_id)
+        payload.setdefault(
+            "message",
+            "Submission job queued; URLs will be submitted in the background.",
         )
+        payload["queued"] = True
+        return jsonify(payload), 202
     except Exception as e:
         logger.error(
             "submit dispatch failed for site %s: %s", website_id, e, exc_info=True

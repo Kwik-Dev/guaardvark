@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import defer, joinedload, selectinload
 
 # --- Database Models ---
-from backend.models import Client, Document, Project, Website, db
+from backend.models import Client, Document, Project, Website, WebsitePage, db
 
 # --- End Database Models ---
 
@@ -97,6 +97,7 @@ def website_to_dict(website):
         "url": website.url,
         "sitemap": website.sitemap,  # Original sitemap field from model
         "competitor_url": getattr(website, "competitor_url", None),
+        "local_path": getattr(website, "local_path", None),
         "project": project_info,
         "client": client_info,
         "document_count": doc_count,  # Add document count
@@ -228,6 +229,10 @@ def create_website_route():
     competitor_url = data.get("competitor_url")
     competitor_url_cleaned = competitor_url.strip() if competitor_url else None
 
+    # Extract local_path (local source folder for swarm/agent code runs)
+    local_path = data.get("local_path")
+    local_path_cleaned = local_path.strip() if local_path else None
+
     try:
         project_id = int(project_id_str)
         project_exists = db.session.query(
@@ -282,10 +287,11 @@ def create_website_route():
 
     try:
         new_website = Website(
-            url=url, 
-            sitemap=sitemap_cleaned, 
+            url=url,
+            sitemap=sitemap_cleaned,
             competitor_url=competitor_url_cleaned,
-            project_id=project_id, 
+            local_path=local_path_cleaned,
+            project_id=project_id,
             client_id=client_id
         )
         db.session.add(new_website)
@@ -401,6 +407,16 @@ def update_website_route(website_id):
             if website.competitor_url != new_competitor_url_stripped:
                 website.competitor_url = new_competitor_url_stripped
                 updated_fields.append("competitor_url")
+
+        # Handle local_path (local source folder for swarm/agent code runs)
+        if "local_path" in data:
+            new_local_path = data.get("local_path")
+            new_local_path_stripped = (
+                new_local_path.strip() if new_local_path else None
+            )
+            if website.local_path != new_local_path_stripped:
+                website.local_path = new_local_path_stripped
+                updated_fields.append("local_path")
 
         if "project_id" in data:
             new_project_id_val = data.get("project_id")
@@ -698,6 +714,11 @@ def get_website_details_route(website_id):
 
 @websites_bp.route("/<int:website_id>/scrape", methods=["POST"])
 def scrape_website_route(website_id):
+    """Queue a background sitemap crawl (Task-backed). Returns 202 immediately.
+
+    Replaces the old synchronous single-page scrape: a crawl now walks the
+    sitemap, persists each page as a WebsitePage, and shows up in Activity.
+    """
     logger = current_app.logger if current_app else logging.getLogger(__name__)
     logger.info(f"API: Received POST /api/websites/{website_id}/scrape request")
 
@@ -710,18 +731,118 @@ def scrape_website_route(website_id):
         logger.warning(f"API Error (SCRAPE): Website {website_id} not found")
         return jsonify({"error": "Website not found"}), 404
 
-    scrape_options = request.get_json() if request.is_json else {}
+    options = request.get_json(silent=True) if request.is_json else {}
+    options = options or {}
+    max_pages = options.get("max_pages")
+    schedule_at = options.get("schedule_at")  # ISO datetime → schedule for later
 
     try:
-        from backend.utils import web_scraper
+        from backend.services.website_jobs.job_service import queue_crawl_run
 
-        result = web_scraper.scrape_website(website.url)
+        payload = queue_crawl_run(
+            website_id, max_pages=max_pages, created_by="websites", schedule_at=schedule_at
+        )
     except Exception as e:
-        logger.error(f"Scrape failed for {website.url}: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        logger.error(
+            f"Failed to queue crawl for website {website_id}: {e}", exc_info=True
+        )
+        return (
+            jsonify(
+                {
+                    "error": "Could not queue crawl job (is the Celery worker running?)",
+                    "details": str(e),
+                }
+            ),
+            503,
+        )
 
-    if website:
-        website.last_crawled = datetime.now()
-        db.session.commit()
+    return jsonify(payload), 202
 
-    return jsonify(result), 200
+
+@websites_bp.route("/<int:website_id>/code-run", methods=["POST"])
+def code_run_route(website_id):
+    """Queue a local CODE run (swarm/agent) on the website's local_path folder.
+
+    Body: {mode: 'swarm'|'agent', instructions?: str, schedule_at?: ISO}.
+    Returns 202 with the Task payload. Phase 2D — swarm mode needs the swarm plugin
+    enabled + an LLM; agent mode is gated pending external-folder tool rooting.
+    """
+    logger = current_app.logger if current_app else logging.getLogger(__name__)
+    if db.session.get(Website, website_id) is None:
+        return jsonify({"error": "Website not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    mode = (data.get("mode") or "swarm").strip().lower()
+    instructions = data.get("instructions") or ""
+    schedule_at = data.get("schedule_at")
+
+    try:
+        from backend.services.website_jobs.job_service import queue_code_run
+
+        payload = queue_code_run(
+            website_id,
+            mode=mode,
+            instructions=instructions,
+            created_by="websites",
+            schedule_at=schedule_at,
+        )
+        return jsonify(payload), 202
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        logger.error(f"Failed to queue code run for website {website_id}: {e}", exc_info=True)
+        return jsonify({"error": "Could not queue code run", "details": str(e)}), 503
+
+
+@websites_bp.route("/<int:website_id>/pages", methods=["GET"])
+def list_website_pages_route(website_id):
+    """List crawled pages for a website (newest crawl first). Content omitted."""
+    logger = current_app.logger if current_app else logging.getLogger(__name__)
+    if db.session.get(Website, website_id) is None:
+        return jsonify({"error": "Website not found"}), 404
+
+    status_filter = request.args.get("status")
+    try:
+        limit = min(int(request.args.get("limit", 200)), 1000)
+    except (ValueError, TypeError):
+        limit = 200
+    try:
+        offset = max(int(request.args.get("offset", 0)), 0)
+    except (ValueError, TypeError):
+        offset = 0
+
+    try:
+        query = db.session.query(WebsitePage).filter_by(website_id=website_id)
+        if status_filter:
+            query = query.filter_by(status=status_filter)
+        total = query.count()
+        rows = (
+            query.order_by(WebsitePage.crawled_at.desc(), WebsitePage.id.desc())
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
+        return (
+            jsonify(
+                {
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "pages": [r.to_dict(include_content=False) for r in rows],
+                }
+            ),
+            200,
+        )
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error(f"API Error (GET pages for {website_id}): {e}", exc_info=True)
+        return jsonify({"error": "Database error fetching pages", "details": str(e)}), 500
+
+
+@websites_bp.route("/<int:website_id>/pages/<int:page_id>", methods=["GET"])
+def get_website_page_route(website_id, page_id):
+    """Get one crawled page including its full content."""
+    page = db.session.get(WebsitePage, page_id)
+    if page is None or page.website_id != website_id:
+        return jsonify({"error": "Page not found"}), 404
+    return jsonify(page.to_dict(include_content=True)), 200

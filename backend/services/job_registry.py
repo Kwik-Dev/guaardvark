@@ -83,6 +83,35 @@ def adapt_outreach_task(row) -> Job:
     )
 
 
+def adapt_website_task(row) -> Job:
+    """Website Task row (type=website_*) → Job."""
+    progress = float(row.progress) if row.progress is not None else None
+    status = map_status(JobKind.WEBSITE, row.status)
+
+    return Job(
+        id=f"website:{row.id}",
+        kind=JobKind.WEBSITE,
+        native_id=row.id,
+        status=status,
+        label=row.name or f"Website task #{row.id}",
+        progress=progress,
+        started_at=row.created_at,
+        finished_at=row.updated_at if status.is_terminal else None,
+        duration_s=_compute_duration(row.created_at, row.updated_at if status.is_terminal else None),
+        cancellable=status.is_active,
+        parent_id=f"task:{row.parent_task_id}" if getattr(row, "parent_task_id", None) else None,
+        error_message=getattr(row, "error_message", None),
+        metadata={
+            "type": row.type,
+            "task_id": row.id,
+            "website_id": getattr(row, "website_id", None),
+            "target_website": getattr(row, "target_website", None),
+            "task_job_id": getattr(row, "job_id", None),
+            "workflow_config": _safe_json(getattr(row, "workflow_config", None)),
+        },
+    )
+
+
 def adapt_training_job(row) -> Job:
     """TrainingJob → Job. Pulls progress, current_step/total_steps,
     pipeline_stage, and the live PID from the dedicated training schema."""
@@ -287,6 +316,7 @@ def _load_unified_progress(process_id):
 REGISTRY: dict[JobKind, tuple[LoaderFn, AdapterFn]] = {
     JobKind.TASK: (_load_task, adapt_task),
     JobKind.OUTREACH: (_load_task, adapt_outreach_task),
+    JobKind.WEBSITE: (_load_task, adapt_website_task),
     JobKind.TRAINING: (_load_training, adapt_training_job),
     JobKind.SELF_IMPROVEMENT: (_load_self_improvement, adapt_self_improvement),
     JobKind.EXPERIMENT: (_load_experiment, adapt_experiment),

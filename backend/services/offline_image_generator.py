@@ -69,6 +69,7 @@ class ImageGenerationRequest:
     enhance_hands: bool = True
     restore_faces: bool = True
     face_restoration_weight: float = 0.5
+    remove_background: bool = False  # post-process with rembg -> transparent RGBA PNG
 
 @dataclass
 class ImageGenerationResult:
@@ -850,6 +851,17 @@ Negative Prompt: {negative_prompt}""",
                 # Auto-router: pick the best downloaded model for this prompt.
                 if request.model in (None, "", "auto"):
                     request.model = self._auto_select_model(request.prompt, request.style)
+                    # Crisp typography: few-step TURBO models (Z-Image-Turbo, SDXL-Turbo)
+                    # render type soft and drop characters. For text/logo intent, prefer
+                    # non-turbo SDXL base (native 1024, full CFG steps) when it's downloaded.
+                    if (
+                        self._has_text_intent(request.prompt)
+                        and "sd-xl" in self.available_models
+                        and request.model in (None, "", "auto", "zimage-turbo", "sdxl-turbo")
+                    ):
+                        if request.model != "sd-xl":
+                            logger.info(f"Text intent: routing {request.model} -> sd-xl for crisper type")
+                        request.model = "sd-xl"
 
                 model_id = self.available_models.get(request.model, self.default_model)
                 logger.info(f"Using model: {request.model} -> {model_id}")
@@ -906,6 +918,16 @@ Negative Prompt: {negative_prompt}""",
 
                 text_mode = self._has_text_intent(request.prompt)
                 if text_mode:
+                    # Crisp text/logos need a larger canvas — at 512 the type renders
+                    # as mush. Bump capable models to 1024 when the request is below it
+                    # (within the per-model max already clamped above: 1536 for these).
+                    if family in ("sdxl", "zimage") and request.width < 1024 and request.height < 1024:
+                        logger.info(
+                            f"Text intent: enlarging canvas {request.width}x{request.height} -> 1024x1024 for legible type"
+                        )
+                        request.width = 1024
+                        request.height = 1024
+                        result.image_size = (request.width, request.height)
                     # On-image text requested: keep the prompt verbatim so the exact
                     # (quoted) characters dominate. Enhancement boilerplate dilutes
                     # text tokens and makes the model drop/garble letters.
@@ -976,7 +998,13 @@ Negative Prompt: {negative_prompt}""",
                     )
                 elif self._device == "cuda":
                     try:
-                        with torch.autocast("cuda"):
+                        # Match autocast dtype to the LOADED model dtype. The model is
+                        # loaded in bf16 on Ada+ (see _load_pipeline), but autocast's
+                        # CUDA default is fp16 — which overflows SDXL's VAE to NaN and
+                        # yields a pure-black image. bf16 has fp32-range exponents, so
+                        # this keeps SDXL/SD output correct.
+                        _ac_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                        with torch.autocast("cuda", dtype=_ac_dtype):
                             output = self._pipeline(
                                 prompt=enhanced_prompt,
                                 negative_prompt=combined_negative,
@@ -1076,6 +1104,17 @@ Negative Prompt: {negative_prompt}""",
                             logger.debug("Skipping face restoration - no faces detected in prompt")
                     else:
                         logger.debug("Face restoration requested but service not available")
+
+                # Optional: knock out the background → transparent RGBA PNG (icons,
+                # clip-art, logos). Post-process pass; diffusion itself outputs opaque RGB.
+                if getattr(request, "remove_background", False):
+                    try:
+                        from rembg import remove as _rembg_remove
+                        image = _rembg_remove(image)  # returns an RGBA PIL image
+                        image.save(image_path, "PNG")  # PNG preserves the alpha channel
+                        logger.info("Transparent background applied (rembg)")
+                    except Exception as e:
+                        logger.error(f"Background removal failed (rembg): {e}")
 
                 result.success = True
                 result.image_path = str(image_path)

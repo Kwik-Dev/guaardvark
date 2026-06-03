@@ -218,3 +218,7 @@ scripts/seed_social_outreach_tasks.py
 
 # Google Indexing service-account key
 data/credentials/
+
+# Swarm internal secret (never publish) + per-film cast reference images (runtime, machine-local)
+data/.swarm_internal_secret
+data/cast_refs/

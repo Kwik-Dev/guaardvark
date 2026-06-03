@@ -245,6 +245,9 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     params['restore_faces'] = data.get('restore_faces', False)
     params['face_restoration_weight'] = float(data.get('face_restoration_weight', 0.5))
 
+    # Transparent-background (rembg post-process) — RGBA PNG for icons/clip-art/logos
+    params['remove_background'] = bool(data.get('remove_background', False))
+
     # User context
     params['user_id'] = data.get('user_id')
     params['project_id'] = data.get('project_id')

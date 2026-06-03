@@ -77,6 +77,7 @@ class BatchImageRequest:
     enhance_hands: bool = True
     restore_faces: bool = False
     face_restoration_weight: float = 0.5
+    remove_background: bool = False
 
 @dataclass
 class BatchImageResult:
@@ -104,6 +105,7 @@ class BatchGenerationStatus:
     restore_faces: bool = False
     face_restoration_weight: float = 0.5
     generate_thumbnails: bool = True
+    remove_background: bool = False
 
 class BatchImageGenerator:
 
@@ -298,6 +300,7 @@ class BatchImageGenerator:
         try:
             restore_faces = getattr(batch_status, 'restore_faces', False)
             face_restoration_weight = getattr(batch_status, 'face_restoration_weight', 0.5)
+            remove_background = getattr(batch_status, 'remove_background', False)
 
             # Character casting: a selected character carries a trained SDXL LoRA.
             # OfflineImageGenerator can't apply LoRAs, so route through the
@@ -325,7 +328,8 @@ class BatchImageGenerator:
                     enhance_faces=prompt.enhance_faces,
                     enhance_hands=prompt.enhance_hands,
                     restore_faces=restore_faces,
-                    face_restoration_weight=face_restoration_weight
+                    face_restoration_weight=face_restoration_weight,
+                    remove_background=remove_background
                 )
 
                 result = self.image_generator.generate_image(gen_request)
@@ -419,6 +423,7 @@ class BatchImageGenerator:
                     {
                         "prompt_id": r.prompt_id,
                         "success": r.success,
+                        "status": "completed" if r.success else "failed",
                         "image_path": r.image_path,
                         "thumbnail_path": r.thumbnail_path,
                         "generation_time": r.generation_time,
@@ -441,6 +446,47 @@ class BatchImageGenerator:
         except Exception as e:
             logger.error(f"Failed to save batch metadata: {e}")
 
+    @staticmethod
+    def _image_gpu_exclusive_enabled() -> bool:
+        """Opt-in: when 'image_gpu_exclusive' is set, batch image acquires the same
+        GPU arbiters as batch video (evicting Ollama to free VRAM). Default OFF so
+        normal operation is unchanged (Dean manages VRAM manually today)."""
+        try:
+            from backend.utils.settings_utils import get_setting
+            return bool(get_setting("image_gpu_exclusive", default=False, cast=bool))
+        except Exception:
+            return False
+
+    def _acquire_gpu_exclusive(self, batch_id: str):
+        """Acquire in-memory GPU gate + file lock (stops Ollama). Mirrors
+        batch_video_generator. Returns (gate_cm, coordinator). Raises on contention."""
+        from backend.services.job_operation_gate import get_gate
+        from backend.services.job_types import JobKind
+        from backend.services.gpu_resource_coordinator import get_gpu_coordinator
+        gate = get_gate()
+        # Shared GPU-exclusive lock — same identity video uses so image/video take turns.
+        gate_cm = gate.gpu_exclusive(JobKind.VIDEO_RENDER, batch_id)
+        gate_cm.__enter__()
+        coordinator = get_gpu_coordinator()
+        lock_result = coordinator.acquire_for_video_generation(batch_id=batch_id, lease_seconds=1800)
+        if not lock_result.get("success"):
+            gate_cm.__exit__(None, None, None)
+            raise RuntimeError(f"GPU busy: {lock_result.get('error')}")
+        return gate_cm, coordinator
+
+    def _release_gpu_exclusive(self, gate_cm, coordinator):
+        """Release in reverse acquire order; restart Ollama. Best-effort, never raises."""
+        if coordinator is not None:
+            try:
+                coordinator.release_video_generation_lock(restart_ollama=True)
+            except Exception as e:
+                logger.warning(f"GPU coordinator release failed: {e}")
+        if gate_cm is not None:
+            try:
+                gate_cm.__exit__(None, None, None)
+            except Exception as e:
+                logger.warning(f"GPU gate release failed: {e}")
+
     def start_batch_generation(self, request: BatchImageRequest) -> str:
         if not self.service_available:
             raise RuntimeError("Batch image generation service not available")
@@ -460,12 +506,42 @@ class BatchImageGenerator:
         batch_status.restore_faces = request.restore_faces
         batch_status.face_restoration_weight = request.face_restoration_weight
         batch_status.generate_thumbnails = request.generate_thumbnails
+        batch_status.remove_background = request.remove_background
 
         with self.batch_lock:
             self.active_batches[batch_id] = batch_status
 
         def run_batch():
+            gate_cm = None
+            gpu_coord = None
             try:
+                # Opt-in GPU exclusivity (default OFF): take the same arbiters as
+                # batch video so image gen reliably gets VRAM (evicts Ollama).
+                if self._image_gpu_exclusive_enabled():
+                    try:
+                        gate_cm, gpu_coord = self._acquire_gpu_exclusive(batch_id)
+                        logger.info(f"Batch {batch_id} acquired GPU-exclusive lock (image_gpu_exclusive ON)")
+                    except Exception as ge:
+                        logger.error(f"Batch {batch_id} could not acquire GPU lock: {ge}")
+                        batch_status.status = "error"
+                        batch_status.error = f"Could not acquire GPU: {ge}"
+                        batch_status.end_time = datetime.now()
+                        if request.save_metadata:
+                            try:
+                                self._save_batch_metadata(batch_status, output_dir)
+                            except Exception:
+                                pass
+                        if self.progress_system:
+                            try:
+                                self.progress_system.error_process(
+                                    process_id=batch_id,
+                                    message=f"Could not acquire GPU: {ge}",
+                                    additional_data={"batch_id": batch_id},
+                                )
+                            except Exception:
+                                pass
+                        return
+
                 batch_status.status = "running"
                 batch_status.start_time = datetime.now()
 
@@ -558,7 +634,16 @@ class BatchImageGenerator:
                                         batch_status.failed_images += 1
 
                 batch_status.end_time = datetime.now()
-                batch_status.status = "completed" if batch_status.status != "cancelled" else "cancelled"
+                if batch_status.status == "cancelled":
+                    pass  # leave cancelled
+                elif batch_status.completed_images == 0 and batch_status.failed_images > 0:
+                    # Every image failed (e.g. CUDA OOM) — surface as error, not a
+                    # misleading "completed" with zero images.
+                    batch_status.status = "error"
+                    if not batch_status.error:
+                        batch_status.error = "All images failed to generate."
+                else:
+                    batch_status.status = "completed"
 
                 if request.save_metadata:
                     self._save_batch_metadata(batch_status, output_dir)
@@ -614,6 +699,17 @@ class BatchImageGenerator:
                                 "total": batch_status.total_images
                             }
                         )
+                    elif batch_status.status == "error":
+                        self.progress_system.error_process(
+                            process_id=batch_id,
+                            message=f"Batch generation failed: {batch_status.error or 'all images failed'}",
+                            additional_data={
+                                "batch_id": batch_id,
+                                "completed": batch_status.completed_images,
+                                "failed": batch_status.failed_images,
+                                "total": batch_status.total_images
+                            }
+                        )
                     else:
                         self.progress_system.cancel_process(
                             process_id=batch_id,
@@ -643,6 +739,9 @@ class BatchImageGenerator:
                         message=f"Batch generation error: {str(e)}",
                         additional_data={"batch_id": batch_id, "error": str(e)}
                     )
+            finally:
+                # Always release the GPU-exclusive lock (no-op if not acquired).
+                self._release_gpu_exclusive(gate_cm, gpu_coord)
 
         thread = threading.Thread(target=run_batch, daemon=True)
         thread.start()
@@ -1150,7 +1249,7 @@ class BatchImageGenerator:
         batch_params = ['max_workers', 'preserve_order', 'generate_thumbnails', 
                        'save_metadata', 'user_id', 'project_id', 'content_preset',
                        'auto_enhance', 'enhance_anatomy', 'enhance_faces', 'enhance_hands',
-                       'restore_faces', 'face_restoration_weight']
+                       'restore_faces', 'face_restoration_weight', 'remove_background']
 
         return BatchImageRequest(
             batch_id=batch_id,
@@ -1167,7 +1266,7 @@ class BatchImageGenerator:
         batch_params = ['max_workers', 'preserve_order', 'generate_thumbnails', 
                        'save_metadata', 'user_id', 'project_id', 'content_preset',
                        'auto_enhance', 'enhance_anatomy', 'enhance_faces', 'enhance_hands',
-                       'restore_faces', 'face_restoration_weight']
+                       'restore_faces', 'face_restoration_weight', 'remove_background']
 
         prompts = [
             BatchPrompt(

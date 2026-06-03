@@ -1019,6 +1019,8 @@ try:
                 ("subjects", "cast_required", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS cast_required BOOLEAN"),
                 ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
+                # Local source folder for swarm/agent code runs (added Phase 2).
+                ("websites", "local_path", "ALTER TABLE websites ADD COLUMN IF NOT EXISTS local_path VARCHAR(2048)"),
             ):
                 try:
                     from sqlalchemy import text as _sa_text

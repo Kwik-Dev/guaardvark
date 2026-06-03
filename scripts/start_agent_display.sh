@@ -949,7 +949,7 @@ esac
 # ---------------------------------------------------------------------------
 # Manual verification after running start.sh:
 # ---------------------------------------------------------------------------
-#   1. Connect noVNC at localhost:5999 (password: guaardvark)
+#   1. Connect noVNC at localhost:5999 (passwordless, localhost-only — x11vnc -nopw)
 #   2. Should see: blue/blue-gradient wallpaper, Documents/Downloads/Outreach Drafts
 #      folder icons on desktop, clickable Firefox icon, bottom taskbar
 #   3. Take a screenshot for documentation: scrot data/training/desktop_baseline.png

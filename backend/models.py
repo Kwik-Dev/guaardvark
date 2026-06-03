@@ -463,7 +463,14 @@ class Task(db.Model):
             {"id": self.client_ref.id, "name": self.client_ref.name} if self.client_ref else None
         )
         website_info = (
-            {"id": self.website_ref.id, "name": self.website_ref.name, "url": self.website_ref.url} if self.website_ref else None
+            # Website has no `name` column — fall back to its URL as the label.
+            {
+                "id": self.website_ref.id,
+                "name": getattr(self.website_ref, "name", None) or self.website_ref.url,
+                "url": self.website_ref.url,
+            }
+            if self.website_ref
+            else None
         )
         return {
             "id": self.id,
@@ -640,6 +647,9 @@ class Website(db.Model):
     url = db.Column(db.String(2048), nullable=False, unique=True)
     sitemap = db.Column(db.String(2048), nullable=True)
     competitor_url = db.Column(db.String(2048), nullable=True)  # Competitor website for analysis
+    # Local folder holding this site's static source on disk — the working dir
+    # for swarm/agent code runs (auto-detect git vs. edit-in-place).
+    local_path = db.Column(db.String(2048), nullable=True)
     status = db.Column(db.String(50), default="pending", index=True)
     last_crawled = db.Column(db.DateTime, nullable=True)
     project_id = db.Column(
@@ -692,6 +702,7 @@ class Website(db.Model):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "document_count": doc_count,
+            "local_path": self.local_path,
         }
 
 
@@ -2912,4 +2923,78 @@ class GoogleIndexingSubmission(db.Model):
                 self.submitted_at.isoformat() if self.submitted_at else None
             ),
         }
+
+
+class WebsitePage(db.Model):
+    """One row per page discovered+fetched from a website's sitemap.
+
+    The source of truth for the "Pages" tab. Decoupled from the Document/folder
+    model — a crawled web page is not an uploaded file. The unique (website_id,
+    url) constraint makes re-crawling idempotent: only genuinely new URLs are
+    inserted, already-seen ones are skipped.
+    """
+
+    __tablename__ = "website_pages"
+    id = db.Column(db.Integer, primary_key=True)
+    website_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "websites.id", name="fk_website_page_site_id", ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True,
+    )
+    url = db.Column(db.String(2048), nullable=False, index=True)
+    title = db.Column(db.Text, nullable=True)
+    content = db.Column(db.Text, nullable=True)  # parsed body text
+    slug = db.Column(db.String(500), nullable=True, index=True)
+    meta_description = db.Column(db.Text, nullable=True)
+    meta_keywords = db.Column(db.Text, nullable=True)
+    featured_image = db.Column(db.String(2048), nullable=True)
+    og_metadata = db.Column(db.Text, nullable=True)  # JSON: all <meta> tags
+    last_modified_sitemap = db.Column(db.DateTime, nullable=True)  # <lastmod>
+    # crawled | error
+    status = db.Column(db.String(50), default="crawled", nullable=False, index=True)
+    error_message = db.Column(db.Text, nullable=True)
+    crawled_at = db.Column(db.DateTime, default=lambda: datetime.now(), index=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now())
+    updated_at = db.Column(
+        db.DateTime, default=lambda: datetime.now(), onupdate=lambda: datetime.now()
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint("website_id", "url", name="uq_website_page_url"),
+    )
+
+    def to_dict(self, include_content: bool = True):
+        og_data = {}
+        if self.og_metadata:
+            try:
+                og_data = json.loads(self.og_metadata)
+            except (json.JSONDecodeError, TypeError):
+                og_data = {}
+        out = {
+            "id": self.id,
+            "website_id": self.website_id,
+            "url": self.url,
+            "title": self.title,
+            "slug": self.slug,
+            "meta_description": self.meta_description,
+            "meta_keywords": self.meta_keywords,
+            "featured_image": self.featured_image,
+            "og_metadata": og_data,
+            "last_modified_sitemap": (
+                self.last_modified_sitemap.isoformat()
+                if self.last_modified_sitemap
+                else None
+            ),
+            "status": self.status,
+            "error_message": self.error_message,
+            "crawled_at": self.crawled_at.isoformat() if self.crawled_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_content:
+            out["content"] = self.content
+        return out
 

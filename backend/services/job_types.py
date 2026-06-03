@@ -35,6 +35,7 @@ class JobKind(str, Enum):
     PRODUCTION = "production"           # ViMax-style production pipeline parent
     LORA_TRAIN = "lora_train"           # Per-Subject LoRA training (child of PRODUCTION)
     OUTREACH = "outreach"               # Social outreach Task rows and progress events
+    WEBSITE = "website"                 # Website Task rows (crawl/index/code, type=website_*)
     UNIFIED_PROGRESS = "unified"        # in-memory-only process
 
 
@@ -159,9 +160,17 @@ def map_status(kind: JobKind, native_status: str | None) -> JobStatus:
     if not native_status:
         return JobStatus.PENDING
 
+    # native_status may be a str OR an enum — the unified progress system passes a
+    # ProcessStatus enum whose .value is the lowercase status string ("complete",
+    # "error", …). Coerce to a string before normalizing so .lower() never throws
+    # and crashes the /api/jobs collector (which then corrupts the streamed response).
+    if not isinstance(native_status, str):
+        native_status = getattr(native_status, "value", None) or str(native_status)
+
     table = {
         JobKind.TASK: _TASK_STATUS_MAP,
         JobKind.OUTREACH: _TASK_STATUS_MAP,
+        JobKind.WEBSITE: _TASK_STATUS_MAP,
         JobKind.TRAINING: _TRAINING_STATUS_MAP,
         JobKind.UNIFIED_PROGRESS: _UNIFIED_PROGRESS_STATUS_MAP,
         JobKind.VIDEO_RENDER: _UNIFIED_PROGRESS_STATUS_MAP,

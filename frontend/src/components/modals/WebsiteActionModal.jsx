@@ -45,6 +45,7 @@ const WebsiteActionModal = ({
     url: "",
     sitemap_url: "",
     competitor_url: "",
+    local_path: "",
     project_id: "",
     client_id: "",
   });
@@ -205,6 +206,7 @@ const WebsiteActionModal = ({
           url: websiteData.url || "",
           sitemap_url: websiteData.sitemap_url || websiteData.sitemap || "",
           competitor_url: websiteData.competitor_url || "",
+          local_path: websiteData.local_path || "",
           project_id: websiteData.project_id || "",
           client_id: websiteData.client_id || "",
         });
@@ -242,6 +244,7 @@ const WebsiteActionModal = ({
           url: "",
           sitemap_url: "",
           competitor_url: "",
+          local_path: "",
           project_id: "",
           client_id: "",
         });
@@ -268,6 +271,7 @@ const WebsiteActionModal = ({
         url: "",
         sitemap_url: "",
         competitor_url: "",
+        local_path: "",
         project_id: "",
         client_id: "",
       });
@@ -635,6 +639,7 @@ const WebsiteActionModal = ({
       url: formData.url.trim(),
       sitemap_url: formData.sitemap_url.trim() || null,
       competitor_url: formData.competitor_url.trim() || null,
+      local_path: (formData.local_path || "").trim() || null,
       project_id: finalProjectId,
       client_id: finalClientId,
     };
@@ -728,6 +733,20 @@ const WebsiteActionModal = ({
                 onChange={handleInputChange}
                 disabled={isSaving}
                 helperText="Reference competitor for content generation and analysis"
+              />
+            </Grid>
+            <Grid item xs={12}>
+              <TextField
+                fullWidth
+                margin="dense"
+                id="website-local-path-modal"
+                name="local_path"
+                label="Local folder path (Optional)"
+                placeholder="/home/llamax1/DEV3/UnifiedPageGen/outputs/example.com"
+                value={formData.local_path}
+                onChange={handleInputChange}
+                disabled={isSaving}
+                helperText="Local source folder for this site — the working dir for swarm/agent code runs"
               />
             </Grid>
             <Grid item xs={12}>

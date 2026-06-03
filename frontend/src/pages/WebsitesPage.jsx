@@ -193,17 +193,13 @@ const WebsitesPage = () => {
   }, [fetchWebsitesAndProjects]);
 
   useEffect(() => {
+    // Deep links (?websiteId=N) now route to the website detail page rather than
+    // opening the settings modal in place.
     const idParam = searchParams.get("websiteId");
-    if (idParam && websites.length > 0) {
-      const site = websites.find((s) => String(s.id) === idParam);
-      if (site) {
-        handleOpenActionModal(site);
-        const params = new URLSearchParams(searchParams);
-        params.delete("websiteId");
-        setSearchParams(params, { replace: true });
-      }
+    if (idParam) {
+      navigate(`/websites/${idParam}`, { replace: true });
     }
-  }, [websites, searchParams, setSearchParams]);
+  }, [searchParams, navigate]);
 
   const handleOpenActionModal = (website = null) => {
     setCurrentWebsiteForModal(website);
@@ -328,11 +324,10 @@ const WebsitesPage = () => {
     if (e) e.stopPropagation();
     setCrawlingIds(prev => new Set([...prev, websiteId]));
     try {
-      await scrapeWebsite(websiteId);
-      setFeedback({ open: true, message: "Website crawled successfully", severity: "success" });
-      fetchWebsitesAndProjects(); // Refresh to update last_crawled
+      const res = await scrapeWebsite(websiteId);
+      setFeedback({ open: true, message: res?.message || "Crawl queued — watch Activity for progress.", severity: "success" });
     } catch (err) {
-      setFeedback({ open: true, message: `Crawl failed: ${err.message || "Unknown error"}`, severity: "error" });
+      setFeedback({ open: true, message: `Could not queue crawl: ${err.message || "Unknown error"}`, severity: "error" });
     } finally {
       setCrawlingIds(prev => {
         const next = new Set(prev);
@@ -433,7 +428,7 @@ const WebsitesPage = () => {
                   }}
                 >
                   <CardActionArea
-                    onClick={() => handleOpenActionModal(site)}
+                    onClick={() => navigate(`/websites/${site.id}`)}
                     sx={{
                       flexGrow: 1,
                       display: "flex",
@@ -596,7 +591,7 @@ const WebsitesPage = () => {
                     <TableRow
                       key={site.id}
                       hover
-                      onClick={() => handleOpenActionModal(site)}
+                      onClick={() => navigate(`/websites/${site.id}`)}
                       onContextMenu={(e) => handleContextMenu(e, site)}
                       sx={{
                         "&:hover": {

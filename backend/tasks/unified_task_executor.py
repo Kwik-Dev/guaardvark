@@ -594,6 +594,104 @@ def execute_unified_task(self, task_id: int):
                 logger.warning(f"Social outreach handler failed: {e}", exc_info=True)
                 output = {"error": str(e)}
 
+        # Website crawl — walk the sitemap and persist each page as a WebsitePage.
+        if output is None and task_type == 'website_crawl':
+            try:
+                update_progress(15, "Starting website crawl…")
+                wf = task.get('workflow_config') or {}
+                website_id = wf.get('website_id')
+                max_pages = wf.get('max_pages')
+                from backend.services.website_crawl_service import (
+                    crawl_website_sitemap,
+                    DEFAULT_MAX_PAGES,
+                )
+                result = crawl_website_sitemap(
+                    int(website_id),
+                    max_pages=int(max_pages) if max_pages else DEFAULT_MAX_PAGES,
+                    progress_callback=update_progress,
+                )
+                # On success, reflect the crawl on the Website row itself.
+                if result.get("success"):
+                    try:
+                        from backend.models import Website, db
+                        from datetime import datetime as _dt
+                        site = db.session.get(Website, int(website_id))
+                        if site:
+                            site.last_crawled = _dt.now()
+                            site.status = "active"
+                            db.session.commit()
+                    except Exception as site_err:
+                        logger.warning(f"Could not update website after crawl: {site_err}")
+                output = result
+                handler_used = 'website_crawl'
+            except Exception as e:
+                logger.warning(f"Website crawl handler failed: {e}", exc_info=True)
+                output = {"error": str(e)}
+
+        # Website index submit — sync the sitemap then submit pending URLs to Google.
+        if output is None and task_type == 'website_index_submit':
+            try:
+                wf = task.get('workflow_config') or {}
+                website_id = int(wf.get('website_id'))
+                max_n = wf.get('max_n')
+                sync_first = wf.get('sync_first', True)
+                from backend.services import google_indexing_service as gis
+                result = {"website_id": website_id}
+                if sync_first:
+                    update_progress(25, "Syncing sitemap…")
+                    result["sync"] = gis.sync_sitemap(website_id)
+                update_progress(55, "Submitting pending URLs to Google…")
+                result["batch"] = gis.process_site_batch(
+                    website_id, max_n=int(max_n) if max_n else None
+                )
+                update_progress(90, "Indexing submission complete")
+                output = result
+                handler_used = 'website_index_submit'
+            except Exception as e:
+                logger.warning(f"Website index submit handler failed: {e}", exc_info=True)
+                output = {"error": str(e)}
+
+        # Website CODE run — swarm/agent edits on the site's local source folder.
+        if output is None and task_type in ('website_code_swarm', 'website_code_agent'):
+            try:
+                import os
+                wf = task.get('workflow_config') or {}
+                local_path = (wf.get('local_path') or '').strip()
+                mode = wf.get('mode') or ('swarm' if task_type.endswith('swarm') else 'agent')
+                if not local_path or not os.path.isdir(local_path):
+                    output = {"error": f"local_path not found on disk: {local_path}"}
+                elif mode == 'agent':
+                    # Agent mode requires rooting the code tools at an EXTERNAL folder.
+                    # The current tools resolve get_physical_path(Folder.path) under uploads/,
+                    # so an unrooted agent would edit the Guaardvark repo. Refuse until the
+                    # rooting is designed (register local_path as a Folder/repo, or thread a
+                    # workspace root through the tool registry). No wrong-dir edits.
+                    output = {"error": "agent code mode not yet supported — local_path tool-rooting is pending design; use swarm mode."}
+                else:
+                    update_progress(30, f"Launching swarm on {local_path} (git={wf.get('is_git')})")
+                    import requests as _rq
+                    port = os.environ.get("FLASK_PORT", "5002")
+                    body = {
+                        "repo_path": local_path,
+                        "self_code": False,  # external website folder, never the Guaardvark repo
+                        "instructions": wf.get("instructions") or "",
+                        "acknowledge_dirty_tree": True,
+                    }
+                    try:
+                        resp = _rq.post(f"http://localhost:{port}/api/swarm/launch", json=body, timeout=45)
+                        data = resp.json() if resp.content else {}
+                        if resp.status_code >= 400:
+                            output = {"error": f"swarm launch failed ({resp.status_code}): {data.get('error') or data}"}
+                        else:
+                            output = {"success": True, "swarm": data, "local_path": local_path,
+                                      "note": "Swarm launched — track progress on the Swarm page."}
+                    except Exception as conn_err:
+                        output = {"error": f"Could not reach swarm service (is the swarm plugin enabled?): {conn_err}"}
+                handler_used = task_type
+            except Exception as e:
+                logger.warning(f"Website code handler failed: {e}", exc_info=True)
+                output = {"error": str(e)}
+
         # Fall back to generic LLM execution
         if output is None:
             update_progress(20, "Using generic LLM execution...")

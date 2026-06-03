@@ -18,6 +18,62 @@ export const getWebsites = async (queryParams = {}) => {
   }
 };
 
+export const getWebsite = async (websiteId) => {
+  if (!websiteId) return { error: "Website ID is required." };
+  try {
+    const response = await fetch(`${BASE_URL}/websites/${websiteId}`);
+    const data = await handleResponse(response);
+    if (typeof data === "object" && data !== null && data.error)
+      throw new Error(data.error);
+    return data;
+  } catch (err) {
+    console.error(
+      `websiteService: Error getting website ${websiteId}:`,
+      err.message,
+    );
+    throw err;
+  }
+};
+
+export const getWebsitePages = async (websiteId, params = {}) => {
+  if (!websiteId) return { error: "Website ID is required." };
+  try {
+    const qs = new URLSearchParams(params).toString();
+    const response = await fetch(
+      `${BASE_URL}/websites/${websiteId}/pages${qs ? `?${qs}` : ""}`,
+    );
+    const data = await handleResponse(response);
+    if (typeof data === "object" && data !== null && data.error)
+      throw new Error(data.error);
+    return data;
+  } catch (err) {
+    console.error(
+      `websiteService: Error getting pages for ${websiteId}:`,
+      err.message,
+    );
+    throw err;
+  }
+};
+
+export const getWebsitePage = async (websiteId, pageId) => {
+  if (!websiteId || !pageId) return { error: "Website ID and Page ID are required." };
+  try {
+    const response = await fetch(
+      `${BASE_URL}/websites/${websiteId}/pages/${pageId}`,
+    );
+    const data = await handleResponse(response);
+    if (typeof data === "object" && data !== null && data.error)
+      throw new Error(data.error);
+    return data;
+  } catch (err) {
+    console.error(
+      `websiteService: Error getting page ${pageId} for ${websiteId}:`,
+      err.message,
+    );
+    throw err;
+  }
+};
+
 export const createWebsite = async (websiteData) => {
   if (!websiteData || !websiteData.url || !websiteData.project_id) {
     return { error: "URL and Project ID are required for creating a website." };

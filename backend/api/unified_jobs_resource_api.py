@@ -31,6 +31,7 @@ from backend.services.job_registry import (
     REGISTRY,
     adapt_task,
     adapt_outreach_task,
+    adapt_website_task,
     adapt_training_job,
     adapt_self_improvement,
     adapt_experiment,
@@ -58,11 +59,29 @@ _MAX_LIMIT = 500
 def _collect_tasks(*, since: datetime | None, limit: int) -> Iterable[Job]:
     from backend.models import Task as DBTask, db
     q = db.session.query(DBTask).order_by(DBTask.updated_at.desc())
-    q = q.filter((DBTask.type.is_(None)) | (~DBTask.type.like("social_outreach_%")))
+    # Outreach and website tasks are carved into their own kinds (OUTREACH /
+    # WEBSITE) — exclude them here so they aren't double-listed under TASK.
+    q = q.filter(
+        (DBTask.type.is_(None))
+        | (~DBTask.type.like("social_outreach_%") & ~DBTask.type.like("website_%"))
+    )
     if since:
         q = q.filter(DBTask.updated_at >= since)
     for row in q.limit(limit).all():
         yield adapt_task(row)
+
+
+def _collect_website(*, since: datetime | None, limit: int) -> Iterable[Job]:
+    from backend.models import Task as DBTask, db
+    q = (
+        db.session.query(DBTask)
+        .filter(DBTask.type.like("website_%"))
+        .order_by(DBTask.updated_at.desc())
+    )
+    if since:
+        q = q.filter(DBTask.updated_at >= since)
+    for row in q.limit(limit).all():
+        yield adapt_website_task(row)
 
 
 def _collect_outreach(*, since: datetime | None, limit: int) -> Iterable[Job]:
@@ -159,6 +178,7 @@ def _collect_unified_progress(*, since, limit) -> Iterable[Job]:
 _COLLECTORS = {
     JobKind.TASK: _collect_tasks,
     JobKind.OUTREACH: _collect_outreach,
+    JobKind.WEBSITE: _collect_website,
     JobKind.TRAINING: _collect_training,
     JobKind.SELF_IMPROVEMENT: _collect_self_improvement,
     JobKind.EXPERIMENT: _collect_experiments,
