@@ -729,6 +729,21 @@ def get_available_vram() -> Dict[str, Any]:
     return get_gpu_coordinator().get_available_vram()
 
 
+def has_gpu() -> bool:
+    """Canonical GPU-presence check for the whole backend.
+
+    nvidia-smi/pynvml based (via the coordinator) — deliberately NOT torch.cuda, because
+    `CUDA_VISIBLE_DEVICES` is set at import time in indexing_service / llama_index_local_config,
+    which makes torch's view unreliable. Cheap after the first call (the coordinator caches the
+    no-GPU verdict). Returns False on any probe failure (conservative: callers treat "unknown"
+    as no-GPU and keep models resident rather than churn).
+    """
+    try:
+        return bool(get_gpu_coordinator().get_available_vram().get("success"))
+    except Exception:
+        return False
+
+
 def unload_ollama_models(ollama_url: str = "http://localhost:11434") -> Dict[str, Any]:
     """Unload Ollama models. Convenience wrapper for get_gpu_coordinator().unload_ollama_models()"""
     return get_gpu_coordinator().unload_ollama_models(ollama_url)

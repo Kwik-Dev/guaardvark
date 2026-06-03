@@ -1,5 +1,6 @@
 
 import datetime
+import json
 import logging
 import os
 import time
@@ -140,6 +141,220 @@ index: Optional[VectorStoreIndex] = None
 storage_context: Optional[StorageContext] = None
 
 _index_operation_lock = threading.RLock()
+
+# BM25 retriever cache. BM25Retriever.from_defaults() re-tokenizes the ENTIRE docstore, so
+# rebuilding it on every query is expensive. Cache keyed on (id(docstore), doc_count):
+# id(docstore) changes on reindex/reload, doc_count changes on in-place insert_nodes() — so
+# the cache self-invalidates on both adds and reindex without instrumenting every mutation
+# site. Guarded by the same _index_operation_lock as the index globals.
+_bm25_cache: dict = {}  # id(docstore) -> {"doc_count": int, "top_k": int, "retriever": BM25Retriever}
+
+
+def _get_cached_bm25_retriever(docstore, similarity_top_k: int):
+    """Return a cached BM25Retriever for this docstore, rebuilding only when the docstore
+    object identity or its document count changes. Returns None if BM25 is unavailable."""
+    try:
+        from llama_index.retrievers.bm25 import BM25Retriever
+    except ImportError:
+        return None
+    try:
+        doc_count = len(getattr(docstore, "docs", {}) or {})
+    except Exception:
+        doc_count = -1
+    ds_id = id(docstore)
+    with _index_operation_lock:
+        cached = _bm25_cache.get(ds_id)
+        if cached and cached["doc_count"] == doc_count and cached["top_k"] == similarity_top_k:
+            return cached["retriever"]
+        retriever = BM25Retriever.from_defaults(docstore=docstore, similarity_top_k=similarity_top_k)
+        _bm25_cache[ds_id] = {"doc_count": doc_count, "top_k": similarity_top_k, "retriever": retriever}
+        return retriever
+
+
+def _adaptive_alpha(query: str, base_alpha: float) -> float:
+    """Query-aware hybrid weight (vector weight). Keyword/identifier/quoted/short queries
+    lean toward BM25 (lower vector weight); long prose leans toward vector. `base_alpha`
+    (the env GUAARDVARK_HYBRID_SEARCH_ALPHA) is the anchor/override. Pure CPU heuristic —
+    calibrate the bands with the RAG eval harness."""
+    import re
+    q = (query or "").strip()
+    n = len(q.split())
+    keywordish = (
+        n <= 3
+        or '"' in q or "'" in q
+        or bool(re.search(r"[A-Za-z0-9_]+\.[A-Za-z0-9_]+", q))   # dotted.path
+        or bool(re.search(r"[a-z0-9]_[a-z0-9]", q))              # snake_case
+        or bool(re.search(r"[a-z][A-Z]", q))                      # camelCase
+    )
+    if keywordish:
+        return max(0.1, min(base_alpha, 0.25))
+    if n >= 12:  # long prose → lean vector
+        return min(0.7, max(base_alpha, 0.55))
+    return base_alpha
+
+
+def _mmr_rerank(results: list, top_k: int = 8, lambda_: float = 0.7) -> list:
+    """CPU-only MMR reranker over the already-retrieved top candidates. Balances relevance
+    (retrieval score) against diversity (token-Jaccard overlap) to demote near-redundant
+    chunks. Zero VRAM, no model — safe on CPU/Pi. On any failure returns `results` as-is."""
+    try:
+        if not results or len(results) <= 2:
+            return results
+        import re as _re
+        working = results[:top_k]
+        tail = results[top_k:]
+
+        scores = [float(r.get("score", 0.0) or 0.0) if isinstance(r, dict) else 0.0 for r in working]
+        lo, hi = min(scores), max(scores)
+        span = (hi - lo) or 1.0
+        rel = [(s - lo) / span for s in scores]  # normalize relevance to [0,1]
+
+        def _toks(r):
+            t = r.get("text", "") if isinstance(r, dict) else ""
+            return set(_re.findall(r"[a-z0-9]+", t.lower()))
+        tok_sets = [_toks(r) for r in working]
+
+        def _jacc(a, b):
+            if not a or not b:
+                return 0.0
+            union = len(a | b)
+            return (len(a & b) / union) if union else 0.0
+
+        remaining = list(range(len(working)))
+        first = max(remaining, key=lambda i: rel[i])
+        selected = [first]
+        remaining.remove(first)
+        while remaining:
+            best_i, best_mmr = None, None
+            for i in remaining:
+                max_sim = max((_jacc(tok_sets[i], tok_sets[j]) for j in selected), default=0.0)
+                mmr = lambda_ * rel[i] - (1.0 - lambda_) * max_sim
+                if best_mmr is None or mmr > best_mmr:
+                    best_mmr, best_i = mmr, i
+            selected.append(best_i)
+            remaining.remove(best_i)
+
+        return [working[i] for i in selected] + tail
+    except Exception as e:
+        logger.debug(f"MMR rerank skipped: {e}")
+        return results
+
+
+def _under_resource_pressure() -> bool:
+    """True when running the vector (embedding) leg of retrieval is risky right now: GPU
+    present but VRAM headroom low, OR no GPU and system RAM is low. Callers fall back to
+    BM25-only (CPU, no embedding) instead of thrashing. Best-effort → False if undeterminable."""
+    try:
+        from backend.services.gpu_resource_coordinator import has_gpu, get_available_vram
+        if has_gpu():
+            info = get_available_vram()
+            if info.get("success"):
+                return info.get("available_mb", 0) < int(os.environ.get("GUAARDVARK_RAG_MIN_VRAM_MB", "1500"))
+            return False
+        import psutil
+        return psutil.virtual_memory().percent >= float(os.environ.get("GUAARDVARK_RAG_MAX_RAM_PCT", "92"))
+    except Exception:
+        return False
+
+
+# Query-embedding cache: (model, query) -> (vector, ts). Repeated/identical retrieval queries
+# skip the embed call. Bounded LRU + TTL; keyed by active model so a model change can't serve
+# stale vectors. Helps CPU-only hosts most (where embedding is slowest).
+import time as _time
+from collections import OrderedDict as _OrderedDict
+_query_embed_cache = _OrderedDict()
+_QUERY_EMBED_CACHE_MAX = int(os.environ.get("GUAARDVARK_QUERY_EMBED_CACHE_SIZE", "256"))
+_QUERY_EMBED_CACHE_TTL = float(os.environ.get("GUAARDVARK_QUERY_EMBED_CACHE_TTL", "300"))
+
+
+def _get_cached_query_embedding(query: str):
+    """Return the query-side embedding for `query`, cached with TTL. Uses Settings.embed_model
+    .get_query_embedding — same model and query-side semantics as the retriever, so the vector
+    is in the index's space (important for asymmetric models). None on failure → the retriever
+    embeds it itself."""
+    try:
+        from llama_index.core import Settings
+        embed_model = getattr(Settings, "embed_model", None)
+        if embed_model is None:
+            return None
+        from backend.config import get_active_embedding_model
+        key = (get_active_embedding_model(), query)
+        now = _time.time()
+        with _index_operation_lock:
+            hit = _query_embed_cache.get(key)
+            if hit is not None:
+                vec, ts = hit
+                if now - ts <= _QUERY_EMBED_CACHE_TTL:
+                    _query_embed_cache.move_to_end(key)
+                    return vec
+                del _query_embed_cache[key]
+        vec = embed_model.get_query_embedding(query)
+        if not vec:
+            return None
+        with _index_operation_lock:
+            _query_embed_cache[key] = (vec, now)
+            _query_embed_cache.move_to_end(key)
+            while len(_query_embed_cache) > _QUERY_EMBED_CACHE_MAX:
+                _query_embed_cache.popitem(last=False)
+        return vec
+    except Exception as e:
+        logger.debug(f"Query-embed cache skipped: {e}")
+        return None
+
+
+def _persist_dir_for(project_id=None) -> str:
+    """Resolve the on-disk index directory for a project (mirrors get_or_create_index)."""
+    from backend.config import INDEX_ROOT, PROJECT_INDEX_MODE
+    index_mode = os.getenv("GUAARDVARK_PROJECT_INDEX_MODE", PROJECT_INDEX_MODE)
+    index_root = os.getenv("GUAARDVARK_INDEX_ROOT", INDEX_ROOT)
+    if index_mode == "per_project" and project_id:
+        return os.path.join(index_root, str(project_id))
+    return index_root
+
+
+def _index_embedding_meta_path(persist_dir: str) -> str:
+    return os.path.join(persist_dir, "embedding_meta.json")
+
+
+def _record_index_embedding_model(project_id=None):
+    """Stamp the active embedding model onto the index dir (best-effort). Called whenever
+    content is indexed, so the sidecar reflects the model the index was actually built with."""
+    try:
+        from backend.config import get_active_embedding_model
+        persist_dir = _persist_dir_for(project_id)
+        os.makedirs(persist_dir, exist_ok=True)
+        with open(_index_embedding_meta_path(persist_dir), "w") as f:
+            json.dump({"embedding_model": get_active_embedding_model()}, f)
+    except Exception as e:
+        logger.debug(f"Could not record index embedding model: {e}")
+
+
+def _check_index_embedding_model(project_id=None) -> bool:
+    """True if the index's embedding model matches the active one (dimension-lock). On a
+    mismatch, logs an actionable 'reindex required' message and returns False so the caller
+    skips vector search instead of hitting a silent dimension-mismatch error. Backfills the
+    sidecar when missing (a pre-existing index is assumed to match the current model)."""
+    try:
+        from backend.config import get_active_embedding_model
+        active = get_active_embedding_model()
+        path = _index_embedding_meta_path(_persist_dir_for(project_id))
+        if not os.path.exists(path):
+            _record_index_embedding_model(project_id)  # backfill for pre-existing indexes
+            return True
+        with open(path) as f:
+            stored = (json.load(f) or {}).get("embedding_model")
+        if stored and stored != active:
+            logger.warning(
+                "RAG index was built with embedding model '%s' but the active model is '%s'. "
+                "Vector search is disabled until the index is rebuilt (Settings -> reset/reindex). "
+                "Returning no results to avoid dimension-mismatch errors.",
+                stored, active,
+            )
+            return False
+        return True
+    except Exception as e:
+        logger.debug(f"Index embedding-model check skipped: {e}")
+        return True
 _persistence_lock = threading.Lock()
 
 
@@ -427,25 +642,47 @@ def _initialize_index(storage_path: str):
                     storage_context = None
 
 
-def deduplicate_chunks(chunks: list, similarity_threshold: float = 0.85) -> list:
-    """Remove near-duplicate retrieved chunks based on embedding similarity."""
+def deduplicate_chunks(chunks: list, similarity_threshold: float = None) -> list:
+    """Remove near-duplicate retrieved chunks based on embedding similarity.
+
+    Embeds with the ACTIVE embedding model (same vector space as the index) via the
+    EmbeddingRouter's single batched call — not a hardcoded second model in an O(N)
+    loop. The threshold is model-aware (cosine distributions differ per model). Dedup
+    is best-effort: on any failure or shape mismatch the original chunks are returned
+    unchanged (we never drop retrieval results because dedup couldn't run).
+    """
     if len(chunks) <= 1:
         return chunks
 
     try:
-        import ollama as ollama_client
-        from backend.config import CHUNK_SIMILARITY_THRESHOLD
-        threshold = similarity_threshold or CHUNK_SIMILARITY_THRESHOLD
+        from backend.config import get_active_embedding_model, get_dedup_threshold
+        from backend.utils.embedding_router import get_embedding_router
+
+        active_model = get_active_embedding_model()
+        threshold = similarity_threshold if similarity_threshold is not None else get_dedup_threshold(active_model)
 
         exp_config = get_experiment_config()
         if exp_config and "dedup_threshold" in exp_config:
             threshold = exp_config["dedup_threshold"]
 
-        texts = [c.get("text", "") if isinstance(c, dict) else getattr(c, "text", str(c)) for c in chunks]
-        embeddings = []
-        for text in texts:
-            resp = ollama_client.embeddings(model="nomic-embed-text", prompt=text[:500])
-            embeddings.append(resp["embedding"])
+        texts = [
+            (c.get("text", "") if isinstance(c, dict) else getattr(c, "text", str(c)))[:500]
+            for c in chunks
+        ]
+
+        # One batched call against the active model (correct vector space), instead of
+        # N sequential calls to a hardcoded model.
+        embeddings = get_embedding_router().get_embeddings_batch(texts)
+
+        # Negative-case guard: router must return one non-empty vector per text. Anything
+        # else (down router, partial batch) → skip dedup rather than build a bad matrix.
+        if (not embeddings or len(embeddings) != len(texts)
+                or any(not e for e in embeddings)):
+            logger.warning(
+                "Chunk dedup skipped: embedding shape mismatch "
+                f"(got {len(embeddings) if embeddings else 0}, expected {len(texts)}, model={active_model})"
+            )
+            return chunks
 
         import numpy as np
         emb_array = np.array(embeddings)
@@ -468,7 +705,10 @@ def deduplicate_chunks(chunks: list, similarity_threshold: float = 0.85) -> list
 
         deduped = [chunks[i] for i in sorted(keep)]
         if len(deduped) < len(chunks):
-            logger.info(f"Deduplicated {len(chunks)} chunks to {len(deduped)}")
+            logger.info(
+                f"Deduplicated {len(chunks)} chunks to {len(deduped)} "
+                f"(model={active_model}, threshold={threshold})"
+            )
         return deduped
 
     except Exception as e:
@@ -493,6 +733,11 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
 
         if not query or not isinstance(query, str):
             logger.warning("search_with_llamaindex: Invalid query input")
+            return []
+
+        # Dimension-lock: refuse vector search if the index was built with a different
+        # embedding model (proactive + actionable, vs. the old silent post-hoc empty return).
+        if not _check_index_embedding_model(project_id):
             return []
 
         max_chunks = max(1, min(max_chunks, 50))
@@ -522,23 +767,53 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
         # Hybrid search: add BM25 retrieval alongside vector search
         hybrid_alpha = float(os.environ.get("GUAARDVARK_HYBRID_SEARCH_ALPHA", "0.3"))
         retriever = base_retriever  # Default to vector-only
+        use_query_embedding = True  # False only when we fall back to BM25-only (no vector leg)
 
         if hybrid_alpha > 0.0 and storage_context is not None:
             try:
-                from llama_index.retrievers.bm25 import BM25Retriever
                 from llama_index.core.retrievers import QueryFusionRetriever
 
-                bm25_retriever = BM25Retriever.from_defaults(
-                    docstore=storage_context.docstore,
-                    similarity_top_k=effective_top_k,
-                )
-                retriever = QueryFusionRetriever(
-                    retrievers=[base_retriever, bm25_retriever],
-                    similarity_top_k=effective_top_k,
-                    num_queries=1,
-                    mode="reciprocal_rerank",
-                )
-                logger.info(f"Using hybrid search (BM25 + vector, alpha={hybrid_alpha})")
+                bm25_retriever = _get_cached_bm25_retriever(storage_context.docstore, effective_top_k)
+                if bm25_retriever is None:
+                    raise ImportError("BM25Retriever unavailable")
+
+                # Resource-pressure fallback: under VRAM/RAM pressure, skip the vector leg
+                # entirely (no query embedding) and serve BM25-only rather than thrash.
+                if _under_resource_pressure():
+                    logger.warning(
+                        "RAG degraded: resource pressure → BM25-only retrieval (vector embedding skipped)"
+                    )
+                    retriever = bm25_retriever
+                    use_query_embedding = False  # don't embed the query under pressure
+                else:
+                    # Effective vector weight (alpha). Adaptive per-query unless disabled.
+                    eff_alpha = hybrid_alpha
+                    if os.environ.get("GUAARDVARK_HYBRID_ADAPTIVE_ALPHA", "true").lower() == "true":
+                        eff_alpha = _adaptive_alpha(query if isinstance(query, str) else "", hybrid_alpha)
+                    eff_alpha = max(0.0, min(1.0, eff_alpha))
+
+                    try:
+                        # relative_score is the only fusion mode that honors retriever_weights.
+                        # Order matches retrievers=[vector, bm25] → [eff_alpha, 1-eff_alpha].
+                        retriever = QueryFusionRetriever(
+                            retrievers=[base_retriever, bm25_retriever],
+                            similarity_top_k=effective_top_k,
+                            num_queries=1,
+                            mode="relative_score",
+                            retriever_weights=[eff_alpha, 1.0 - eff_alpha],
+                        )
+                    except (TypeError, ValueError) as weight_err:
+                        # Older llama-index without relative_score/retriever_weights → plain RRF.
+                        logger.debug(f"Weighted fusion unavailable ({weight_err}); using reciprocal_rerank")
+                        retriever = QueryFusionRetriever(
+                            retrievers=[base_retriever, bm25_retriever],
+                            similarity_top_k=effective_top_k,
+                            num_queries=1,
+                            mode="reciprocal_rerank",
+                        )
+                    logger.info(
+                        f"Hybrid search (vector={eff_alpha:.2f}, bm25={1.0 - eff_alpha:.2f}, base_alpha={hybrid_alpha})"
+                    )
             except ImportError:
                 logger.debug("BM25Retriever not available, using vector-only search")
             except Exception as e:
@@ -548,6 +823,12 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
 
         if isinstance(query, str):
             query_bundle = QueryBundle(query_str=query)
+            # Reuse a cached query embedding so the vector leg skips re-embedding. Skipped
+            # under resource pressure (BM25-only path embeds nothing).
+            if use_query_embedding:
+                cached_vec = _get_cached_query_embedding(query)
+                if cached_vec is not None:
+                    query_bundle.embedding = cached_vec
         else:
             query_bundle = query
 
@@ -577,6 +858,10 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
 
         # Deduplicate near-identical chunks
         results = deduplicate_chunks(results)
+
+        # CPU-only MMR rerank of the top candidates (relevance × diversity). Zero VRAM.
+        if os.environ.get("GUAARDVARK_RERANK_ENABLED", "true").lower() == "true":
+            results = _mmr_rerank(results)
 
         # Expand results with cross-file dependency context
         try:
@@ -649,6 +934,7 @@ def add_text_to_index(text: str, metadata: Dict[str, Any], project_id: Optional[
                 return False
 
             local_index.insert_nodes(valid_nodes)
+            _record_index_embedding_model(project_id)  # stamp the model the index was built with
 
             with _persistence_lock:
                 persist_dir = getattr(storage_context, "persist_dir", None)
@@ -1255,6 +1541,7 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
             
             with _index_operation_lock:
                 index.insert_nodes(nodes)
+                _record_index_embedding_model(getattr(db_document, "project_id", None))  # stamp model
 
                 logger.info(f"Persisting index for {db_document.filename}")
                 progress_system.update_process(process_id, 90, f"Persisting index: {db_document.filename}")

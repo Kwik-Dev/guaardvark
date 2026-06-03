@@ -542,7 +542,8 @@ class EnhancedChatManager:
         """Initialize index manager with configuration flags"""
         if self._index_manager is None and get_global_index_manager:
             try:
-                if get_setting("advanced_rag_enabled", default=True, cast=bool):
+                from backend.config import default_advanced_rag
+                if get_setting("advanced_rag_enabled", default=default_advanced_rag(), cast=bool):
                     self._index_manager = get_global_index_manager()
                     logger.info("Advanced Index Manager activated")
                 else:
@@ -558,7 +559,8 @@ class EnhancedChatManager:
         """Initialize RAG chunker with configuration flags"""
         if self._rag_chunker is None and EnhancedRAGChunker:
             try:
-                if get_setting("advanced_rag_enabled", default=True, cast=bool):
+                from backend.config import default_advanced_rag
+                if get_setting("advanced_rag_enabled", default=default_advanced_rag(), cast=bool):
                     self._rag_chunker = EnhancedRAGChunker()
                     logger.info("Enhanced RAG Chunker activated")
                 else:

@@ -133,6 +133,29 @@ SELF_HEALING_WINDOW_MINUTES = int(os.environ.get("GUAARDVARK_SELF_HEALING_WINDOW
 COMPACTION_THRESHOLD = float(os.environ.get("GUAARDVARK_COMPACTION_THRESHOLD", "0.7"))
 CHUNK_SIMILARITY_THRESHOLD = float(os.environ.get("GUAARDVARK_CHUNK_SIMILARITY_THRESHOLD", "0.85"))
 
+# Per-model dedup cosine thresholds. Cosine-similarity distributions differ by embedding
+# model, so a single global threshold mis-dedups (drops everything or nothing) when the
+# active model changes. Match on a substring of the active model name; unknown models fall
+# back to CHUNK_SIMILARITY_THRESHOLD. Calibrate new entries with the RAG eval harness —
+# do NOT guess values. The global env var still overrides everything.
+CHUNK_SIMILARITY_THRESHOLDS_BY_MODEL = {
+    "nomic-embed-text": 0.85,  # historical default this constant was tuned against
+}
+
+
+def get_dedup_threshold(model_name: str) -> float:
+    """Resolve the near-duplicate cosine threshold for the active embedding model.
+
+    Falls back to CHUNK_SIMILARITY_THRESHOLD for any model without a calibrated entry
+    (and logs once-uncalibrated at debug), so behavior is never worse than the legacy
+    global threshold.
+    """
+    name = (model_name or "").lower()
+    for key, val in CHUNK_SIMILARITY_THRESHOLDS_BY_MODEL.items():
+        if key in name:
+            return val
+    return CHUNK_SIMILARITY_THRESHOLD
+
 # RAG Autoresearch configuration
 AUTORESEARCH_ENABLED = os.environ.get("GUAARDVARK_AUTORESEARCH_ENABLED", "true").lower() == "true"
 AUTORESEARCH_IDLE_MINUTES = int(os.environ.get("GUAARDVARK_AUTORESEARCH_IDLE_MINUTES", "10"))
@@ -301,11 +324,50 @@ def get_default_llm():
 
 def get_embedding_vram_estimates() -> dict:
     return {
+        "qwen3-embedding:4b-q4_K_M": {"vram_mb": 2400, "dimensions": 2560},
+        "qwen3-embedding": {"vram_mb": 2400, "dimensions": 2560},
         "embeddinggemma:latest": {"vram_mb": 800, "dimensions": 768},
         "embeddinggemma": {"vram_mb": 800, "dimensions": 768},
         "nomic-embed-text": {"vram_mb": 400, "dimensions": 768},
         "all-minilm": {"vram_mb": 150, "dimensions": 384},
     }
+
+
+def get_embedding_keep_alive():
+    """Hardware-aware keep_alive for embedding-model Ollama clients.
+
+    - GPU present: a short TTL (env GUAARDVARK_EMBED_KEEP_ALIVE_GPU, default "5m") so the
+      model frees VRAM after idle but isn't reloaded on every query within a session.
+    - No GPU: keep resident (env GUAARDVARK_EMBED_KEEP_ALIVE_CPU, default "-1") so a
+      CPU-resident model isn't reloaded from disk every idle cycle. RAM-pressure eviction is
+      handled separately by the orchestrator — so "resident" does NOT mean "pinned forever".
+    Returns an int when the value is numeric (Ollama: seconds, -1 = forever), else the string.
+    """
+    try:
+        from backend.services.gpu_resource_coordinator import has_gpu
+        gpu = has_gpu()
+    except Exception:
+        gpu = False
+    val = (os.environ.get("GUAARDVARK_EMBED_KEEP_ALIVE_GPU", "5m") if gpu
+           else os.environ.get("GUAARDVARK_EMBED_KEEP_ALIVE_CPU", "-1"))
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return val
+
+
+def default_advanced_rag() -> bool:
+    """Hardware-aware default for advanced_rag when neither DB setting nor env var is set.
+    ON (vector RAG) with a GPU; OFF on CPU-only so a fresh Pi/laptop install isn't running
+    heavy vector retrieval out of the box. Env GUAARDVARK_ADVANCED_RAG always overrides."""
+    env = os.environ.get("GUAARDVARK_ADVANCED_RAG")
+    if env is not None:
+        return env.lower() == "true"
+    try:
+        from backend.services.gpu_resource_coordinator import has_gpu
+        return has_gpu()
+    except Exception:
+        return True
 
 
 def _get_gpu_vram_info() -> dict:
@@ -381,6 +443,7 @@ def get_active_embedding_model() -> str:
     # (mxbai, snowflake, bge) which are interchangeable without reindexing.
     candidate_models = [
         "mxbai-embed-large",
+        "qwen3-embedding:4b-q4_K_M",
         "snowflake-arctic-embed:l",
         "bge-m3",
         "snowflake-arctic-embed2",

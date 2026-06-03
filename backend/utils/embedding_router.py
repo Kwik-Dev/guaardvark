@@ -239,7 +239,7 @@ class EmbeddingRouter:
         """Get or create GPU embedding client (default Ollama, uses VRAM)."""
         if self._gpu_embedding is None:
             try:
-                from backend.config import get_active_embedding_model
+                from backend.config import get_active_embedding_model, get_embedding_keep_alive
                 from llama_index.embeddings.ollama import OllamaEmbedding
 
                 model_name = get_active_embedding_model()
@@ -248,6 +248,7 @@ class EmbeddingRouter:
                 self._gpu_embedding = OllamaEmbedding(
                     model_name=model_name,
                     base_url=self._get_ollama_base_url(),
+                    keep_alive=get_embedding_keep_alive(),  # orchestrator owns eviction; see config
                 )
                 self._gpu_embedding.model_name = model_name
 
@@ -264,7 +265,7 @@ class EmbeddingRouter:
         """Get or create CPU embedding client (Ollama with num_gpu=0, zero VRAM)."""
         if self._cpu_embedding is None:
             try:
-                from backend.config import get_active_embedding_model
+                from backend.config import get_active_embedding_model, get_embedding_keep_alive
                 from llama_index.embeddings.ollama import OllamaEmbedding
 
                 model_name = get_active_embedding_model()
@@ -274,6 +275,7 @@ class EmbeddingRouter:
                     model_name=model_name,
                     base_url=self._get_ollama_base_url(),
                     ollama_additional_kwargs={"num_gpu": 0},
+                    keep_alive=get_embedding_keep_alive(),  # orchestrator owns eviction; see config
                 )
                 self._cpu_embedding.model_name = model_name
 

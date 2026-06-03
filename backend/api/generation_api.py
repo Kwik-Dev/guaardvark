@@ -443,10 +443,10 @@ Generate the complete file content now:"""
                     if rag_results and len(rag_results) > 0:
                         context_parts.append("VECTOR SEARCH RESULTS:")
                         for i, result in enumerate(rag_results):
-                            if result and result.get('content'):  # Ensure result has content
+                            if result and result.get('text'):  # search_with_llamaindex returns 'text', not 'content'
                                 context_parts.append(f"CHUNK {i+1} (Score: {result.get('score', 0.0):.3f}):")
                                 context_parts.append(f"Source: {result.get('metadata', {}).get('source_filename', 'Unknown')}")
-                                context_parts.append(f"Content: {result.get('content', '')}")
+                                context_parts.append(f"Content: {result.get('text', '')}")
                                 context_parts.append("---")
                     else:
                         logger.info(f"RAG search returned no relevant results for query: {prompt_text[:100]} - this is normal for new content generation")

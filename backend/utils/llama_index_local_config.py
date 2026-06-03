@@ -105,14 +105,16 @@ def force_local_llama_index_config():
         # Configure embedding model via VRAM-aware selection in config.py
         try:
             from llama_index.embeddings.ollama import OllamaEmbedding
-            from backend.config import get_active_embedding_model
+            from backend.config import get_active_embedding_model, get_embedding_keep_alive
 
             model_name = get_active_embedding_model()
             local_embed_model = OllamaEmbedding(
                 model_name=model_name,
                 base_url="http://localhost:11434",
                 ollama_additional_kwargs={"mirostat": 0},
-                keep_alive=0,  # Unload embedding model after use to free VRAM for chat LLM
+                # Hardware-aware: short TTL on GPU (frees VRAM after idle, no per-query churn),
+                # resident on CPU-only (no disk reload every cycle). See config.get_embedding_keep_alive.
+                keep_alive=get_embedding_keep_alive(),
             )
             if not hasattr(local_embed_model, "model_name"):
                 local_embed_model.model_name = model_name
@@ -173,7 +175,7 @@ def get_local_embedding_model():
     """
     # Use direct Ollama embedding to avoid circular imports and initialization hangs
     try:
-        from backend.config import get_active_embedding_model
+        from backend.config import get_active_embedding_model, get_embedding_keep_alive
         from llama_index.embeddings.ollama import OllamaEmbedding
 
         model_name = get_active_embedding_model()
@@ -182,6 +184,7 @@ def get_local_embedding_model():
         return OllamaEmbedding(
             model_name=model_name,
             base_url="http://localhost:11434",
+            keep_alive=get_embedding_keep_alive(),  # consistent with the primary client
         )
     except Exception as e:
         logger.error(f"Failed to initialize Ollama embedding: {e}")

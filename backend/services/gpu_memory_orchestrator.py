@@ -680,12 +680,39 @@ class GPUMemoryOrchestrator:
 
             self._stop_event.wait(self._sync_interval_s)
 
+    @staticmethod
+    def _cpu_ram_pressure() -> bool:
+        """True when system RAM is under pressure (CPU-only hosts). Best-effort via psutil."""
+        try:
+            import psutil
+            import os as _os
+            return psutil.virtual_memory().percent >= float(
+                _os.environ.get("GUAARDVARK_RAG_MAX_RAM_PCT", "92")
+            )
+        except Exception:
+            return False
+
     def _evict_idle_models(self):
-        """Evict models that have been idle longer than the timeout."""
+        """Evict models idle longer than the timeout.
+
+        On CPU-only hosts, embedding models are NOT idle-evicted — reloading a CPU-resident
+        model from disk every cycle is pure waste (there is no VRAM to reclaim). They are only
+        evicted under real system-RAM pressure. On GPU hosts, behavior is unchanged.
+        """
         now = time.time()
+        try:
+            from backend.services.gpu_resource_coordinator import has_gpu
+            gpu_present = has_gpu()
+        except Exception:
+            gpu_present = True  # detection failure → preserve prior (GPU) behavior
         with self._lock:
             for slot in list(self._registry.values()):
                 if slot.state != SlotState.LOADED:
+                    continue
+                # CPU-only embedding-churn guard.
+                if (not gpu_present
+                        and slot.model_type == ModelType.OLLAMA_EMBEDDING
+                        and not self._cpu_ram_pressure()):
                     continue
                 idle_s = now - slot.last_used
                 if idle_s > self._idle_timeout_s:

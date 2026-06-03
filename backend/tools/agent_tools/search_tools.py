@@ -56,10 +56,10 @@ class SearchCodebaseTool(BaseTool):
             # Format results
             formatted_results = []
             for i, result in enumerate(results):
-                if result and result.get('content'):
+                if result and result.get('text'):
                     formatted_results.append({
                         'rank': i + 1,
-                        'text': result.get('content', ''),
+                        'text': result.get('text', ''),
                         'source': result.get('metadata', {}).get('source_filename', 'Unknown'),
                         'score': result.get('score', 0.0)
                     })
