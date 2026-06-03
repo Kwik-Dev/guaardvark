@@ -215,17 +215,34 @@ const Sidebar = () => {
             }}
           >
             <Avatar
+              component={NavLink}
+              // Static for now; later this can be SettingsPage-configurable or route to Agent Chat.
+              to="/dashboard"
               src={systemLogo ? `/api/uploads/${systemLogo}` : undefined}
               sx={{
                 width: 36,
                 height: 36,
-                border: 1,
-                borderColor: "divider",
-                bgcolor: "primary.main",
+                border: "1px solid rgba(255, 255, 255, 0.24)",
+                bgcolor: "#000",
+                color: "#fff",
                 flexShrink: 0,
+                textDecoration: "none",
+                p: systemLogo ? 0.5 : 0,
+                transition: theme.transitions.create(["border-color", "box-shadow"], {
+                  duration: 150,
+                }),
+                "&:hover": {
+                  borderColor: "rgba(255, 255, 255, 0.6)",
+                  boxShadow: "0 0 0 2px rgba(255, 255, 255, 0.08)",
+                },
+                "& .MuiAvatar-img": {
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                },
               }}
             >
-              {!systemLogo && <GuaardvarkLogo size={24} />}
+              {!systemLogo && <GuaardvarkLogo size={24} color="#fff" />}
             </Avatar>
             {isExpanded && (
               <Typography
