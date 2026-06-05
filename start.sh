@@ -267,13 +267,20 @@ check_python_version() {
     local major=${ver%%.*}
     local minor=${ver#*.}
     minor=${minor%%.*}
-    if [ "$major" -lt 3 ] || { [ "$major" -eq 3 ] && [ "$minor" -lt 12 ]; }; then
-        vader_error "Python >=3.12 required. Install via: apt-get install -y python3 python3-venv python3-dev python3-pip"
+    # Python 3.12 ONLY. The ML stack (numpy<2.0, mediapipe, basicsr/gfpgan,
+    # realesrgan) has no wheels for 3.13/3.14 yet, so anything newer sails into
+    # a marathon of build failures (issue #35). Fail fast with the real reason
+    # instead. NOTE: the old logic was inverted — it returned success for 3.13+
+    # and fell through to a failure for 3.12, the one version that works.
+    if [ "$major" -ne 3 ] || [ "$minor" -lt 12 ]; then
+        vader_error "Python 3.12 is required (found $ver). Install it: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev python3.12-distutils', then re-run."
         return 1
     fi
-    if [ "$major" -eq 3 ] && [ "$minor" -ge 13 ]; then
-        return 0
+    if [ "$minor" -ge 13 ]; then
+        vader_error "Python $ver is not supported yet — the ML dependencies (numpy<2.0, mediapipe, basicsr/gfpgan) have no wheels for 3.13+. Please use Python 3.12: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev', create the venv with python3.12, then re-run."
+        return 1
     fi
+    return 0
 }
 
 check_node_version() {
@@ -814,7 +821,7 @@ vader_separator
 
 vader_step 2 "Checking environment dependencies..."
 if ! check_with_cache "python_check" check_python_version; then
-    vader_error "Python 3.12+ required. Exiting."
+    vader_error "Python 3.12 required. Exiting."
     exit 1
 fi
 if ! check_with_cache "node_check" check_node_version; then

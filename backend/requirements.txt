@@ -1,5 +1,9 @@
 # backend/requirements.txt
 # Consolidated requirements for Guaardvark
+#
+# REQUIRES PYTHON 3.12. Do not install on 3.13/3.14 — numpy<2.0, mediapipe,
+# basicsr/gfpgan and realesrgan have no wheels for those yet and the build
+# fails (issue #35). Create the venv with python3.12 before installing.
 
 # pkg_resources guard — setuptools >=81 dropped pkg_resources, which several
 # ML libs in this stack still import (resemble-perth via chatterbox-tts hit

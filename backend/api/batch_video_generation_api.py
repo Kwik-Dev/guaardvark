@@ -522,16 +522,30 @@ VIDEO_MODEL_REGISTRY = {
         "hf_filename": "CogVideoX_1_5_5b_I2V_bf16.safetensors",
         "local_subdir": "checkpoints",
         "check_files": ["CogVideoX_1_5_5b_I2V_bf16.safetensors"],
+        # ComfyUI's CogVideoX workflow loads the T5 encoder via CLIPLoader.
+        "requires": ["t5-encoder"],
         "size_gb": 10.4,
         "vram_mb": 16000,
         "type": "cogvideox",
     },
+    # Wan GGUFs live in HighNoise/ and LowNoise/ subfolders in the repo, but
+    # ComfyUI's UnetLoaderGGUF loads them flat from models/unet/. The `files`
+    # spec below maps each repo path (`src`) to the exact on-disk name ComfyUI
+    # expects (`dst`), so we pull ONLY the two Q5_K_M experts — not all 13
+    # quants — and they land where both the loader and the install-check look.
     "wan22-14b": {
         "name": "Wan 2.2 14B MoE (GGUF Q5_K)",
         "description": "State-of-the-art video gen. Two-expert MoE architecture, best quality on 16GB GPU. Requires both HighNoise + LowNoise experts.",
         "hf_repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
         "local_subdir": "unet",
+        "files": [
+            {"src": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf", "dst": "Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf"},
+            {"src": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q5_K_M.gguf", "dst": "Wan2.2-T2V-A14B-LowNoise-Q5_K_M.gguf"},
+        ],
         "check_files": ["Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf", "Wan2.2-T2V-A14B-LowNoise-Q5_K_M.gguf"],
+        # A WAN unet is useless without its VAE + text encoder — installing this
+        # model pulls them too, so one click yields a render-ready setup.
+        "requires": ["wan-vae", "wan-umt5"],
         "size_gb": 21.0,
         "vram_mb": 11000,
         "type": "wan",
@@ -540,8 +554,15 @@ VIDEO_MODEL_REGISTRY = {
         "name": "Wan 2.2 14B I2V MoE (GGUF Q5_K)",
         "description": "Top-tier image-to-video. Same MoE architecture as Wan 2.2 T2V — start frame conditions an 81-frame clip. Beats CogVideoX I2V on motion + cinematic feel.",
         "hf_repo": "QuantStack/Wan2.2-I2V-A14B-GGUF",
-        "local_subdir": "unet/Wan2.2-I2V",
+        "local_subdir": "unet",
+        # I2V experts are loaded from a nested unet/Wan2.2-I2V/<HighNoise|LowNoise>/
+        # path (see comfyui_video_generator WAN22_MODELS), so dst keeps that nesting.
+        "files": [
+            {"src": "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf", "dst": "Wan2.2-I2V/HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf"},
+            {"src": "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf", "dst": "Wan2.2-I2V/LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf"},
+        ],
         "check_files": ["Wan2.2-I2V/HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf", "Wan2.2-I2V/LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf"],
+        "requires": ["wan-vae", "wan-umt5"],
         "size_gb": 21.0,
         "vram_mb": 11000,
         "type": "wan",
@@ -550,8 +571,12 @@ VIDEO_MODEL_REGISTRY = {
         "name": "Wan 2.1/2.2 VAE",
         "description": "Required by all Wan video models. Shared between versions.",
         "hf_repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
-        "hf_filename": "VAE/Wan2.1_VAE.safetensors",
         "local_subdir": "vae",
+        # Repo name is Wan2.1_VAE.safetensors; ComfyUI's VAELoader expects the
+        # lowercase wan_2.1_vae.safetensors — download maps one to the other.
+        "files": [
+            {"src": "VAE/Wan2.1_VAE.safetensors", "dst": "wan_2.1_vae.safetensors"},
+        ],
         "check_files": ["wan_2.1_vae.safetensors"],
         "size_gb": 0.25,
         "vram_mb": 0,
@@ -561,8 +586,10 @@ VIDEO_MODEL_REGISTRY = {
         "name": "UMT5-XXL Text Encoder (FP8)",
         "description": "Required by Wan 2.1/2.2 models for text encoding.",
         "hf_repo": "Osrivers/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-        "hf_filename": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
         "local_subdir": "text_encoders",
+        "files": [
+            {"src": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "dst": "umt5_xxl_fp8_e4m3fn_scaled.safetensors"},
+        ],
         "check_files": ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"],
         "size_gb": 6.3,
         "vram_mb": 0,
@@ -572,9 +599,14 @@ VIDEO_MODEL_REGISTRY = {
         "name": "T5-XXL Text Encoder (FP8)",
         "description": "Required by CogVideoX models for text encoding.",
         "hf_repo": "comfyanonymous/flux_text_encoders",
-        "hf_filename": "t5xxl_fp8_e4m3fn.safetensors",
-        "local_subdir": "clip/t5",
-        "check_files": ["t5xxl_fp8_e4m3fn.safetensors"],
+        "local_subdir": "clip",
+        # CogVideoX workflow's CLIPLoader loads clip/t5/google_t5-v1_1-xxl_
+        # encoderonly-fp8_e4m3fn.safetensors — the flux t5xxl fp8 IS that
+        # encoder, just under a different name, so we rename on download.
+        "files": [
+            {"src": "t5xxl_fp8_e4m3fn.safetensors", "dst": "t5/google_t5-v1_1-xxl_encoderonly-fp8_e4m3fn.safetensors"},
+        ],
+        "check_files": ["t5/google_t5-v1_1-xxl_encoderonly-fp8_e4m3fn.safetensors"],
         "size_gb": 4.6,
         "vram_mb": 0,
         "type": "encoder",
@@ -620,12 +652,34 @@ def _check_model_downloaded(model_id: str) -> bool:
     return True
 
 
+def _resolve_download_plan(model_id: str) -> List[str]:
+    """Expand a model id into [model + required companions], order-preserving.
+
+    A WAN unet is dead weight without its VAE + text encoder; CogVideoX needs
+    its T5 encoder. `requires` in the registry declares those companions so one
+    Install click yields a render-ready set instead of a half-installed model.
+    """
+    plan: List[str] = []
+
+    def _add(mid: str):
+        if mid in plan or mid not in VIDEO_MODEL_REGISTRY:
+            return
+        plan.append(mid)
+        for dep in VIDEO_MODEL_REGISTRY[mid].get("requires", []):
+            _add(dep)
+
+    _add(model_id)
+    return plan
+
+
 @batch_video_bp.route("/models", methods=["GET"])
 def list_video_models():
     """List all video models and their installation status."""
     try:
         models = []
         for model_id, info in VIDEO_MODEL_REGISTRY.items():
+            plan = _resolve_download_plan(model_id)
+            requires = info.get("requires", [])
             models.append({
                 "id": model_id,
                 "name": info["name"],
@@ -633,7 +687,17 @@ def list_video_models():
                 "type": info["type"],
                 "size_gb": info["size_gb"],
                 "vram_mb": info["vram_mb"],
+                # is_downloaded = this model's own files present.
+                # is_ready = model + every required companion present (truly usable).
                 "is_downloaded": _check_model_downloaded(model_id),
+                "is_ready": all(_check_model_downloaded(e) for e in plan),
+                "requires": requires,
+                # Total bytes an Install click will fetch (model + missing deps).
+                "install_size_gb": round(
+                    sum(VIDEO_MODEL_REGISTRY[e]["size_gb"]
+                        for e in plan if not _check_model_downloaded(e)),
+                    2,
+                ),
             })
         return success_response({"models": models})
     except Exception as e:
@@ -654,7 +718,12 @@ def download_video_model():
         if model_id not in VIDEO_MODEL_REGISTRY:
             return error_response(f"Unknown model: {model_id}", 400)
 
-        if _check_model_downloaded(model_id):
+        # Build the install plan: the model itself plus any required companion
+        # models (a WAN unet needs its VAE + text encoder, etc.). Dedupe while
+        # preserving order. Only entries that aren't already on disk get pulled.
+        plan = _resolve_download_plan(model_id)
+        pending = [eid for eid in plan if not _check_model_downloaded(eid)]
+        if not pending:
             return success_response({"message": f"{model_id} is already installed"})
 
         with _video_model_download_lock:
@@ -662,7 +731,7 @@ def download_video_model():
                 return error_response(
                     f"Already downloading: {_video_model_download_status['current_model']}", 409
                 )
-            model_info = VIDEO_MODEL_REGISTRY[model_id]
+            plan_total_gb = round(sum(VIDEO_MODEL_REGISTRY[e]["size_gb"] for e in pending), 2)
             _video_model_download_status = {
                 "is_downloading": True,
                 "current_model": model_id,
@@ -671,47 +740,96 @@ def download_video_model():
                 "error": None,
                 "speed_mbps": 0,
                 "downloaded_gb": 0,
-                "total_gb": model_info["size_gb"],
+                "total_gb": plan_total_gb,
             }
 
-        def _download_task(mid, minfo):
+        def _download_task(plan_ids):
             global _video_model_download_status
+            import shutil
             _start_time = time.time()
-            total_bytes = int(minfo["size_gb"] * 1024**3)
+
+            def _dir_bytes(d: Path) -> int:
+                total = 0
+                if d.exists():
+                    for f in d.rglob("*"):
+                        try:
+                            if f.is_file():
+                                total += f.stat().st_size
+                        except OSError:
+                            pass
+                return total
+
+            def _pull_one(einfo, local_dir):
+                """Pull a single registry entry's files into local_dir."""
+                if "files" in einfo:
+                    # Explicit per-file pulls: only the bytes we actually need,
+                    # placed at the exact name ComfyUI's loaders expect.
+                    for spec in einfo["files"]:
+                        dst = local_dir / spec["dst"]
+                        if dst.exists() and dst.stat().st_size > 0:
+                            continue
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        got = Path(hf_hub_download(
+                            repo_id=einfo["hf_repo"],
+                            filename=spec["src"],
+                            local_dir=str(local_dir),
+                        ))
+                        if got.resolve() != dst.resolve():
+                            shutil.move(str(got), str(dst))
+                elif "hf_filename" in einfo:
+                    hf_hub_download(
+                        repo_id=einfo["hf_repo"],
+                        filename=einfo["hf_filename"],
+                        local_dir=str(local_dir),
+                    )
+                    if einfo["check_files"][0] != einfo["hf_filename"]:
+                        src = local_dir / einfo["hf_filename"]
+                        dst = local_dir / einfo["check_files"][0]
+                        if src.exists() and not dst.exists():
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(str(src), str(dst))
+                else:
+                    snapshot_download(
+                        repo_id=einfo["hf_repo"],
+                        local_dir=str(local_dir),
+                    )
 
             try:
                 from huggingface_hub import hf_hub_download, snapshot_download
 
                 models_dir = _get_comfyui_models_dir()
-                local_dir = models_dir / minfo["local_subdir"]
-                local_dir.mkdir(parents=True, exist_ok=True)
+                # Resolve each entry's target dir up front and snapshot a baseline
+                # so progress reflects ONLY the bytes this run adds (dirs like
+                # unet/ may already hold other models). Unique dirs only, so a
+                # shared dir isn't double-counted.
+                entries = []
+                for eid in plan_ids:
+                    einfo = VIDEO_MODEL_REGISTRY[eid]
+                    ldir = models_dir / einfo["local_subdir"]
+                    ldir.mkdir(parents=True, exist_ok=True)
+                    entries.append((eid, einfo, ldir))
+                uniq_dirs = list({str(ldir): ldir for (_, _, ldir) in entries}.values())
+                total_bytes = int(sum(e[1]["size_gb"] for e in entries) * 1024**3)
+                baselines = {str(d): _dir_bytes(d) for d in uniq_dirs}
 
                 with _video_model_download_lock:
                     _video_model_download_status["status"] = "downloading"
 
-                # Monitor download progress by watching file sizes on disk
+                # Progress = (current bytes across target dirs) − baseline. This
+                # tracks the real .incomplete staging that hf_hub_download writes
+                # under local_dir; the old monitor watched ~/.cache/huggingface/hub
+                # (the wrong place when local_dir is set) and sat frozen at 0%.
                 stop_monitor = threading.Event()
 
                 def _monitor_progress():
                     while not stop_monitor.is_set():
                         try:
-                            # Sum up all .incomplete and final files in the HF cache + local_dir
-                            downloaded = 0
-                            # Check HF cache (downloads go here first)
-                            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
-                            if cache_dir.exists():
-                                for f in cache_dir.rglob("*.incomplete"):
-                                    downloaded += f.stat().st_size
-                            # Check target files
-                            for cf in minfo["check_files"]:
-                                target = local_dir / cf
-                                if target.exists():
-                                    downloaded += target.stat().st_size
-
+                            downloaded = sum(
+                                max(0, _dir_bytes(d) - baselines[str(d)]) for d in uniq_dirs
+                            )
                             elapsed = time.time() - _start_time
                             speed = (downloaded / (1024 * 1024)) / max(elapsed, 0.1)
                             pct = min(int((downloaded / max(total_bytes, 1)) * 100), 99)
-
                             with _video_model_download_lock:
                                 _video_model_download_status.update({
                                     "progress": pct,
@@ -726,17 +844,17 @@ def download_video_model():
                 monitor_thread.start()
 
                 try:
-                    if "hf_filename" in minfo:
-                        hf_hub_download(
-                            repo_id=minfo["hf_repo"],
-                            filename=minfo["hf_filename"],
-                            local_dir=str(local_dir),
-                        )
-                    else:
-                        snapshot_download(
-                            repo_id=minfo["hf_repo"],
-                            local_dir=str(local_dir),
-                        )
+                    for eid, einfo, ldir in entries:
+                        with _video_model_download_lock:
+                            _video_model_download_status["current_model"] = eid
+                        _pull_one(einfo, ldir)
+                        # Verify each entry's files actually landed — no placebo
+                        # "completed" when the check paths are still empty.
+                        if not _check_model_downloaded(eid):
+                            raise RuntimeError(
+                                f"Download of {eid} finished but expected files are "
+                                f"missing under {ldir}"
+                            )
                 finally:
                     stop_monitor.set()
                     monitor_thread.join(timeout=2)
@@ -744,21 +862,10 @@ def download_video_model():
                 with _video_model_download_lock:
                     _video_model_download_status.update({
                         "progress": 100,
-                        "downloaded_gb": minfo["size_gb"],
-                        "total_gb": minfo["size_gb"],
+                        "downloaded_gb": _video_model_download_status["total_gb"],
+                        "status": "completed",
                     })
-
-                # Rename file if check_files expects a different name
-                if "hf_filename" in minfo and minfo["check_files"][0] != minfo["hf_filename"]:
-                    src = local_dir / minfo["hf_filename"]
-                    dst = local_dir / minfo["check_files"][0]
-                    if src.exists() and not dst.exists():
-                        import shutil
-                        shutil.copy2(str(src), str(dst))
-
-                with _video_model_download_lock:
-                    _video_model_download_status["status"] = "completed"
-                logger.info(f"Video model downloaded: {mid}")
+                logger.info(f"Video model(s) downloaded: {', '.join(plan_ids)}")
 
             except Exception as e:
                 logger.error(f"Video model download failed: {e}", exc_info=True)
@@ -772,14 +879,12 @@ def download_video_model():
                 with _video_model_download_lock:
                     _video_model_download_status["is_downloading"] = False
 
-        thread = threading.Thread(
-            target=_download_task, args=(model_id, VIDEO_MODEL_REGISTRY[model_id])
-        )
+        thread = threading.Thread(target=_download_task, args=(pending,))
         thread.daemon = True
         thread.start()
 
         return success_response({
-            "message": f"Started downloading {model_id}",
+            "message": f"Started downloading {', '.join(pending)}",
             "status": "downloading",
         })
     except Exception as e:

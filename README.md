@@ -475,6 +475,11 @@ A supervised, auditable framework for drafting and posting authentic comments on
 
 ## Quick Start
 
+> **Python 3.12 is required.** 3.13 and 3.14 are not supported yet — core ML
+> dependencies (`numpy<2.0`, `mediapipe`, `basicsr`/`gfpgan`) don't publish wheels
+> for them, so installing on a newer Python fails to build. `./start.sh` checks
+> this for you; if you install dependencies by hand, use a 3.12 interpreter.
+
 ```bash
 git clone https://github.com/guaardvark/guaardvark.git
 cd guaardvark
@@ -544,7 +549,7 @@ guaardvark files upload report.pdf      # Upload and index
 
 | Dependency | Version | Notes |
 |-----------|---------|-------|
-| Python | 3.12+ | Backend |
+| Python | 3.12 only | Backend. 3.13/3.14 not yet supported — the ML stack (numpy<2.0, mediapipe, basicsr/gfpgan) has no wheels for them. |
 | Node.js | 20+ | Frontend build |
 | PostgreSQL | 14+ | Auto-installed |
 | Redis | 5.0+ | Auto-installed |

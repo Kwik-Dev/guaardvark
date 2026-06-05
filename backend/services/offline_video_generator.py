@@ -252,7 +252,12 @@ class OfflineVideoGenerator:
             if models_str:
                 logger.info(f"Video generation service available with AI support: {', '.join(models_str)}")
             else:
-                logger.info("Video generation service available (placeholder mode only)")
+                logger.warning(
+                    "Offline video generator loaded but NO AI model is available "
+                    "(diffusers/CogVideoX/SVD not installed). Real video generation "
+                    "will fail until a model is installed or ComfyUI is set up; "
+                    "blank-placeholder fallback is disabled by default."
+                )
 
     def _make_output_dirs(self, batch_dir: Path, item_id: str) -> Tuple[Path, Path, Path]:
         item_dir = batch_dir / item_id
@@ -1029,7 +1034,27 @@ class OfflineVideoGenerator:
                     logger.warning(f"Model {request.model} not available")
 
             if not frame_paths:
-                logger.info("Using placeholder frame generation")
+                # Zero-placebo guard: never emit a solid-color stand-in clip and
+                # then report success. When no real AI backend produced frames
+                # (model missing, diffusers absent, ComfyUI down), fail loudly with
+                # an actionable message so the caller knows the model isn't there —
+                # rather than handing back a "blank video" the system swears worked.
+                # A placeholder is only ever produced when a caller *explicitly*
+                # opts in (dev/preview), via metadata["allow_placeholder"].
+                allow_placeholder = bool((request.metadata or {}).get("allow_placeholder"))
+                if not allow_placeholder:
+                    result.success = False
+                    if not result.error:
+                        result.error = (
+                            "No video model produced any frames. The offline AI video "
+                            "backend is unavailable (diffusers/CogVideoX not installed) "
+                            "and ComfyUI is not running. Install a video model via "
+                            "Video Generator → Manage Models and make sure ComfyUI is "
+                            "set up. Refusing to emit a blank placeholder clip."
+                        )
+                    logger.error(f"Video generation produced no frames: {result.error}")
+                    return result
+                logger.info("Using placeholder frame generation (explicitly allowed)")
                 frame_paths = self._generate_placeholder_frames(
                     frames_dir=frames_dir,
                     num_frames=max(1, request.duration_frames),

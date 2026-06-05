@@ -40,6 +40,50 @@ if [ -f "$COMFYUI_REQS" ]; then
         "$VENV_PYTHON" -m pip install -r "$COMFYUI_REQS" --quiet 2>&1 | tail -5
         echo "$REQS_HASH" > "$REQS_STAMP"
     fi
+
+    # Self-heal the ComfyUI frontend package. After an Interconnector sync the
+    # ComfyUI core can update to expect a newer comfyui-frontend-package than the
+    # venv has — the md5 stamp above misses it when requirements.txt is byte-
+    # identical but the *installed* package drifted — and ComfyUI throws the
+    # "please reinstall comfyui-frontend-package" error at startup. Compare the
+    # installed version to the pin and reinstall just that one package if off.
+    PINNED_FE=$(grep -E '^comfyui-frontend-package==' "$COMFYUI_REQS" 2>/dev/null | head -1 | cut -d= -f3 || true)
+    if [ -n "$PINNED_FE" ]; then
+        INSTALLED_FE=$("$VENV_PYTHON" -c "import comfyui_frontend_package as f; print(getattr(f,'__version__',''))" 2>/dev/null || true)
+        if [ "$INSTALLED_FE" != "$PINNED_FE" ]; then
+            echo "ComfyUI frontend drift ('$INSTALLED_FE' != '$PINNED_FE') — reinstalling..."
+            "$VENV_PYTHON" -m pip install --quiet "comfyui-frontend-package==$PINNED_FE" 2>&1 | tail -3
+        fi
+    fi
+fi
+
+# Install requirements for the video-critical custom nodes. The WAN/CogVideoX
+# workflows depend on these nodes (GGUF unet loader, VideoHelperSuite combine,
+# RIFE interpolation, KJNodes, CogVideoX wrapper), and their Python deps live in
+# each node's own requirements.txt — not ComfyUI's. This is why comfyui.log
+# shows ModuleNotFoundError for node deps. Scoped to this allowlist on purpose:
+# the heavier face nodes (InstantID/IPAdapter → insightface) often fail to build
+# and aren't on the video path. Hash-stamped so it only reruns when deps change.
+CN_DIR="$COMFYUI_DIR/custom_nodes"
+CN_STAMP="$PLUGIN_ROOT/.custom_nodes_installed"
+VIDEO_NODES="ComfyUI-GGUF ComfyUI-VideoHelperSuite ComfyUI-Frame-Interpolation ComfyUI-KJNodes ComfyUI-CogVideoXWrapper"
+if [ -d "$CN_DIR" ]; then
+    CN_REQ_FILES=""
+    for node in $VIDEO_NODES; do
+        [ -f "$CN_DIR/$node/requirements.txt" ] && CN_REQ_FILES="$CN_REQ_FILES $CN_DIR/$node/requirements.txt"
+    done
+    if [ -n "$CN_REQ_FILES" ]; then
+        CN_HASH=$(cat $CN_REQ_FILES 2>/dev/null | md5sum | cut -d' ' -f1 || true)
+        CN_STAMP_HASH=""
+        [ -f "$CN_STAMP" ] && CN_STAMP_HASH=$(cat "$CN_STAMP" 2>/dev/null)
+        if [ "$CN_HASH" != "$CN_STAMP_HASH" ]; then
+            echo "Installing video custom-node requirements..."
+            for req in $CN_REQ_FILES; do
+                "$VENV_PYTHON" -m pip install -r "$req" --quiet 2>&1 | tail -2
+            done
+            echo "$CN_HASH" > "$CN_STAMP"
+        fi
+    fi
 fi
 
 # Log file

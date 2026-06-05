@@ -141,7 +141,7 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
               return (
                 <ListItem key={model.id} divider sx={{ py: 1.5 }}>
                   <ListItemIcon>
-                    <MovieCreationIcon color={model.is_downloaded ? "primary" : "action"} />
+                    <MovieCreationIcon color={(model.is_ready ?? model.is_downloaded) ? "primary" : "action"} />
                   </ListItemIcon>
                   <ListItemText
                     primary={
@@ -180,7 +180,7 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
                           {downloadStatus.downloaded_gb.toFixed(1)} / {downloadStatus.total_gb.toFixed(1)} GB
                         </Typography>
                       </Box>
-                    ) : model.is_downloaded ? (
+                    ) : (model.is_ready ?? model.is_downloaded) ? (
                       <Chip
                         icon={<CheckCircleIcon />}
                         label="Installed"
@@ -189,15 +189,27 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
                         variant="outlined"
                       />
                     ) : (
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        startIcon={<CloudDownloadIcon />}
-                        onClick={() => handleDownload(model.id)}
-                        disabled={isDownloading}
-                      >
-                        Install
-                      </Button>
+                      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          startIcon={<CloudDownloadIcon />}
+                          onClick={() => handleDownload(model.id)}
+                          disabled={isDownloading}
+                        >
+                          {model.install_size_gb ? `Install (${model.install_size_gb} GB)` : "Install"}
+                        </Button>
+                        {model.requires?.length > 0 && (
+                          <Typography variant="caption" color="text.secondary" noWrap>
+                            includes {model.requires.length} required file{model.requires.length > 1 ? "s" : ""}
+                          </Typography>
+                        )}
+                        {model.is_downloaded && !(model.is_ready ?? true) && (
+                          <Typography variant="caption" color="warning.main" noWrap>
+                            model present — missing dependencies
+                          </Typography>
+                        )}
+                      </Box>
                     )}
                   </Box>
                 </ListItem>
