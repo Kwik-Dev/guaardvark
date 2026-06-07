@@ -899,18 +899,24 @@ def _initialize_app_components(app):
     from backend.utils.blueprint_discovery import auto_register_blueprints
     auto_register_blueprints(app)
 
-    # Resume any in-flight productions after a crash. DB-driven — no in-memory state to lose.
+    # Resume any in-flight video projects (productions + music videos, + future kinds)
+    # after a crash. DB-driven — no in-memory state to lose. One registry-driven pass,
+    # per-kind isolated so one kind's failure can't strand another. The music-video
+    # generating stage's per-clip tail-call rides this: a re-dispatched clip_generator
+    # no-ops past already-done clips and continues from the cursor.
     # Note: `db` is the module-level import (line 401). Importing it locally here
     # would silently make every other `db` reference in create_app() local-by-assignment
     # and break the function. Don't re-import.
     try:
-        from backend.services.production_service import ProductionService
+        from backend.services.video_project_registry import resume_all_kinds, VIDEO_KINDS
         with app.app_context():
-            resumed = ProductionService(db.session).resume_all()
-            if resumed:
-                app.logger.info(f"Production pipeline resumed {resumed} in-flight production(s) from DB state")
+            for kind, resumed in resume_all_kinds(db.session).items():
+                if resumed:
+                    app.logger.info(
+                        f"{VIDEO_KINDS[kind].label} pipeline resumed {resumed} in-flight run(s) from DB state"
+                    )
     except Exception as e:
-        app.logger.warning(f"Production resume failed (non-critical): {e}")
+        app.logger.warning(f"Video project resume failed (non-critical): {e}")
 
     from backend.middleware.cluster_proxy_middleware import cluster_proxy_before_request
     app.before_request(cluster_proxy_before_request)

@@ -29,6 +29,12 @@ def _fresh_gpu_gate(monkeypatch):
     import backend.services.job_operation_gate as jog
     fresh = jog.JobOperationGate()
     monkeypatch.setattr(jog, "_GATE_SINGLETON", fresh)
+    # The render surfaces now go through gpu_session, which on a real claim runs
+    # VRAM reclaim (evict Ollama / free ComfyUI). Neutralize it here so these
+    # pipeline unit tests never touch the network/GPU — reclaim is exercised by
+    # test_gpu_resource_policy instead.
+    import backend.services.gpu_resource_policy as grp
+    monkeypatch.setattr(grp, "reclaim_gpu", lambda **kw: None)
     return fresh
 
 

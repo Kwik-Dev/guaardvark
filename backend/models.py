@@ -2671,18 +2671,24 @@ class JobHistory(db.Model):
         }
 
 
-class Production(db.Model):
-    """A ViMax-style production run. Owns the swarm pipeline state."""
-    __tablename__ = "productions"
+class VideoProjectLifecycleMixin:
+    """The lifecycle spine every video-project kind shares (Production, MusicVideo, …).
+
+    These are the columns the shared ``PipelineService`` state machine reads/writes —
+    status / current_stage / settings_json / error_blob + name + timestamps + id.
+    Declared ONCE here (mirrors the P0.1 behavior dedup) so the engine can treat any
+    kind uniformly; ``isinstance(row, VideoProjectLifecycleMixin)`` == "this is a video
+    project." DDL is byte-identical to the pre-extraction inline columns — important
+    because this repo syncs schema with ``db.create_all()`` (creates, never ALTERs), so
+    only the unambiguous PLAIN columns live here. Per-table bits that would differ —
+    ``project_id``'s FK constraint name and the ``project`` backref — stay on each
+    subclass to keep the generated DDL exactly the same.
+    """
+    #: Stable kind discriminator; subclasses override. Not a DB column (no ALTER).
+    KIND: str = "video"
 
     id = db.Column(db.Integer, primary_key=True)
-    project_id = db.Column(
-        db.Integer,
-        db.ForeignKey("projects.id", name="fk_production_project_id", ondelete="SET NULL"),
-        nullable=True, index=True,
-    )
     name = db.Column(db.String(255), nullable=False)
-    script_text = db.Column(db.Text, nullable=False)
     status = db.Column(db.String(64), nullable=False, default="draft", index=True)
     current_stage = db.Column(db.String(64), nullable=False, default="draft")
     settings_json = db.Column(db.JSON, nullable=False, default=dict)
@@ -2690,7 +2696,63 @@ class Production(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     updated_at = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
 
+    @property
+    def kind(self) -> str:
+        return self.KIND
+
+
+class Production(VideoProjectLifecycleMixin, db.Model):
+    """A ViMax-style production run. Owns the swarm pipeline state."""
+    __tablename__ = "productions"
+    KIND = "film"
+
+    project_id = db.Column(
+        db.Integer,
+        db.ForeignKey("projects.id", name="fk_production_project_id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    script_text = db.Column(db.Text, nullable=False)
+
     project = db.relationship("Project", backref="productions")
+
+
+class MusicVideo(VideoProjectLifecycleMixin, db.Model):
+    """A song-driven music-video run. Owns its own swarm-style pipeline state.
+
+    Shares the lifecycle spine (status/current_stage/error_blob/settings_json + name +
+    timestamps + id) via VideoProjectLifecycleMixin, so the music_video state machine +
+    tasks read 1:1 against the same PipelineService as Production — but it is a SEPARATE
+    table because a music video is song+style shaped, not script/shot/subject shaped.
+    """
+    __tablename__ = "music_videos"
+    KIND = "music_video"
+
+    project_id = db.Column(
+        db.Integer,
+        db.ForeignKey("projects.id", name="fk_music_video_project_id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    # The uploaded song. FK is SET NULL on delete (don't block a Document delete);
+    # song_path caches the resolved on-disk path so an in-flight render survives it.
+    # Presence is required at creation time (enforced in the API), not at the column.
+    song_document_id = db.Column(
+        db.Integer,
+        db.ForeignKey("documents.id", name="fk_music_video_song_document_id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    song_path = db.Column(db.String(512), nullable=True)
+    style_prompt = db.Column(db.Text, nullable=False)
+    # [{index, start_s, end_s, energy, section_label}] — the energy-aware cut plan.
+    cut_plan = db.Column(db.JSON, nullable=True)
+    # [{index, start, end, clip_path, status}] — the per-clip generation cursor.
+    clips = db.Column(db.JSON, nullable=True)
+    output_document_id = db.Column(
+        db.Integer,
+        db.ForeignKey("documents.id", name="fk_music_video_output_document_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    project = db.relationship("Project", backref="music_videos")
 
 
 class Subject(db.Model):

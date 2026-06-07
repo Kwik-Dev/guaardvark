@@ -1646,6 +1646,20 @@ def get_video_generator() -> ComfyUIVideoGenerator:
     return _video_generator_instance
 
 
+def resolve_generated_video_path(result, output_dir) -> Path:
+    """Absolute path to the file produced by ``ComfyUIVideoGenerator.generate_video``.
+
+    generate_video returns ``result.video_path`` RELATIVE to ``request.output_dir``
+    (it does ``relative_to(batch_dir)`` at the very end). Any caller that set
+    ``output_dir`` MUST rejoin it here before touching the file — otherwise the bare
+    relative path is read against cwd and ``shutil.copyfile`` dies with ENOENT. This
+    is the single source of truth for that resolution (shared by both i2v adapters
+    and the music-video clip path). Absolute paths pass through unchanged.
+    """
+    vp = Path(result.video_path)
+    return vp if vp.is_absolute() else (Path(output_dir) / vp)
+
+
 class SvdI2VGenerator:
     """Adapts the SVD image-to-video path to the Editor's I2VGenerator protocol.
 
@@ -1665,19 +1679,21 @@ class SvdI2VGenerator:
         # SVD retired — use CogVideoX-5b I2V to animate the single identity frame.
         # Clamp to a short clip (≤25 frames) to keep VRAM in budget on 16 GB.
         frames = max(14, min(25, int(round(duration_seconds * self.fps)) or 25))
+        out_dir = Path(output_path).parent
+        out_dir.mkdir(parents=True, exist_ok=True)
         gen = get_video_generator()
         req = VideoGenerationRequest(
             model="cogvideox-5b-i2v",
             duration_frames=frames,
             fps=self.fps,
             enhance_prompt=False,
+            output_dir=out_dir,                      # known base → result path resolves
             metadata={"image_path": image_path},
         )
         result = gen.generate_video(req)
         if not result.success or not result.video_path:
             raise RuntimeError(f"I2V failed: {result.error or 'no video produced'}")
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(result.video_path, output_path)
+        shutil.copyfile(resolve_generated_video_path(result, out_dir), output_path)
         return output_path
 
 
@@ -1702,6 +1718,8 @@ class Wan22I2VGenerator:
         # Clamp to a short clip — long Wan I2V drifts the face and blows 16 GB.
         # generate_video handles Wan's "frames % 8 == 1" alignment internally.
         frames = max(17, min(49, int(round(duration_seconds * self.fps)) or 25))
+        out_dir = Path(output_path).parent
+        out_dir.mkdir(parents=True, exist_ok=True)
         gen = get_video_generator()
         req = VideoGenerationRequest(
             model="wan22-14b-i2v",
@@ -1709,6 +1727,7 @@ class Wan22I2VGenerator:
             duration_frames=frames,
             fps=self.fps,
             enhance_prompt=False,
+            output_dir=out_dir,                      # known base → result path resolves
             # Wan I2V honors a single LoRA — re-applying the character LoRA helps
             # hold identity through motion (the frame anchors it; the LoRA steadies it).
             lora_name=(loras[0] if loras else None),
@@ -1717,6 +1736,5 @@ class Wan22I2VGenerator:
         result = gen.generate_video(req)
         if not result.success or not result.video_path:
             raise RuntimeError(f"Wan 2.2 I2V failed: {result.error or 'no video produced'}")
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(result.video_path, output_path)
+        shutil.copyfile(resolve_generated_video_path(result, out_dir), output_path)
         return output_path

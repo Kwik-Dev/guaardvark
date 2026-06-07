@@ -508,26 +508,27 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
         # production render shows up in /api/jobs/active and the gate snapshot,
         # exactly like a standalone editor render.
         from backend.utils.unified_progress_system import get_unified_progress, ProcessType
-        from backend.services.job_operation_gate import get_gate, GpuBusyError
+        from backend.services.job_operation_gate import GpuBusyError
+        from backend.services.gpu_resource_policy import gpu_session
         from backend.services.job_types import JobKind
         from backend.services.production_documents import register_production_output
 
         progress = get_unified_progress()
-        gate = get_gate()
         render_id = f"prod_{prod_id}"
         job_id = progress.create_process(
             ProcessType.VIDEO_RENDER,
             f"Rendering production {prod_id}: {ctx.production.name}",
             additional_data={"production_id": prod_id},
         )
-        # Claim the GPU exclusively for the render. Previously this only
-        # register_running()'d (visibility, no real exclusivity) — a second
-        # render or a training job could load the GPU concurrently and OOM the
-        # shared 16GB card. gpu_exclusive serializes on the in-memory gate; on
-        # contention GpuBusyError fails the stage cleanly (caught below ->
-        # progress.error_process; _agent_run marks the stage failed).
+        # Claim the GPU exclusively for the render via the unified front door.
+        # gpu_session delegates to the in-memory gate (same fail-fast GpuBusyError,
+        # caught below -> progress.error_process; _agent_run marks the stage failed)
+        # and, once we hold the slot, evicts Ollama (a chat's resident gemma can't
+        # fight WAN on 16GB — parity with the music-video render) and frees ComfyUI
+        # so the storyboard stage's resident FLUX doesn't OOM the first shot's i2v.
+        # (Per-shot i2v<->TTS interleave reclaim is a separate P0.3c refinement.)
         try:
-            with gate.gpu_exclusive(JobKind.VIDEO_RENDER, render_id):
+            with gpu_session(JobKind.VIDEO_RENDER, render_id, evict_ollama=True, free_comfyui=True):
                 progress.update_process(job_id, 5, f"Rendering {len(shot_inputs)} shots")
                 res = editor.render(
                     production_id=prod_id,

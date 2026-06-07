@@ -1,0 +1,310 @@
+"""Music-video pipeline state machine. DB-persisted, crash-resumable.
+
+Owns the transition graph for a MusicVideo through its stages:
+  draft → analyzing → awaiting_approval → generating → assembling → complete
+
+Cloned 1:1 from production_service.py (the proven swarm pattern): every
+transition is a single atomic UPDATE-WHERE commit, so re-dispatching at a stage
+other than an agent's expected predecessor is a no-op. That idempotency is what
+makes crash-resume + the per-clip tail-call dispatch (see music_video_tasks.py)
+safe against double-fires.
+
+Also home to the PURE, deterministic cut-cadence planner (`compute_cut_plan`) —
+no I/O, no GPU — so it unit-tests in isolation.
+"""
+from __future__ import annotations
+
+import math
+import subprocess
+from typing import Any
+
+from backend.models import MusicVideo
+from backend.services.pipeline_service import (
+    PipelineService,
+    TERMINAL_STATUSES,  # noqa: F401  re-exported for back-compat
+    _coerce_error,      # noqa: F401  re-exported for back-compat
+)
+
+
+VALID_TRANSITIONS: dict[str, str] = {
+    "draft": "analyzing",
+    "analyzing": "awaiting_approval",
+    "awaiting_approval": "generating",
+    "generating": "assembling",
+    "assembling": "complete",
+}
+
+
+# Maps a current_stage to the agent that resumes work there. None means the
+# stage is user-gated (no auto-resume on boot).
+STAGE_TO_AGENT: dict[str, str | None] = {
+    "draft": None,                 # pre-pipeline — kickoff advances out of it
+    "analyzing": "analyzer",
+    "awaiting_approval": None,      # USER GATE: cost approval before any GPU spend
+    "generating": "clip_generator",  # self-re-dispatching per-clip generator
+    "assembling": "assembler",
+}
+
+
+# --- Cut cadence (pure) ------------------------------------------------------
+
+MIN_CLIP_S = 0.6   # floor: never emit a cut shorter than this
+
+
+def _beats_per_cut(energy: float, emin: float, emax: float) -> int:
+    """Map a section's energy to how many beats one cut should span.
+
+    High energy → cut every beat (K=1); quietest → every 8 beats. Normalized
+    WITHIN this song so the spread is relative, not absolute.
+    """
+    if emax <= emin:
+        return 2
+    t = (energy - emin) / (emax - emin)   # 0..1
+    return max(1, round(8 - 7 * t))       # t=1 → 1 beat; t=0 → 8 beats
+
+
+def _section_for(t: float, sections: list[dict[str, Any]]) -> dict[str, Any]:
+    """Section covering time ``t`` (seconds); falls back to the last section."""
+    for sec in sections:
+        if sec["start"] <= t < sec["end"]:
+            return sec
+    return sections[-1]
+
+
+def _split_long_cuts(cuts: list[dict[str, Any]], max_cut_s: float | None) -> list[dict[str, Any]]:
+    """Split any cut longer than ``max_cut_s`` into near-equal forward sub-cuts.
+
+    WHY: a generated i2v clip is at most ~``max_clip_s`` seconds of real forward
+    motion (the WAN frame clamp). If the planner emits a slot longer than a clip
+    can fill, the only ways to cover it are reverse (the moonwalk) or a freeze. So
+    instead we make the planner size its slots to what a forward clip can deliver:
+    a cut of length L becomes ``ceil(L / max_cut_s)`` equal sub-cuts, each ≤
+    max_cut_s. One clip per sub-cut, all forward. ``max_cut_s`` is
+    ``max_clip_s × max_stretch`` — the per-video stretch budget (see _settings).
+
+    No-op when ``max_cut_s`` is falsy (keeps the planner pure for unit tests).
+    """
+    if not max_cut_s or max_cut_s <= 0:
+        return cuts
+    out: list[dict[str, Any]] = []
+    for c in cuts:
+        length = c["end_s"] - c["start_s"]
+        if length <= max_cut_s + 1e-6:
+            out.append(c)
+            continue
+        n_sub = math.ceil(length / max_cut_s)
+        sub = length / n_sub
+        for j in range(n_sub):
+            s0 = c["start_s"] + j * sub
+            s1 = c["end_s"] if j == n_sub - 1 else c["start_s"] + (j + 1) * sub
+            out.append({**c, "start_s": s0, "end_s": s1})
+    return out
+
+
+def compute_cut_plan(
+    beat_times: list[float],
+    sections: list[dict[str, Any]],
+    duration: float,
+    max_cut_s: float | None = None,
+) -> list[dict[str, Any]]:
+    """Build an energy-aware, beat-snapped cut plan covering [0, duration].
+
+    Returns ordered cuts: [{index, start_s, end_s, energy, section_label}].
+    - Boundaries (except the final one) are exact beat timestamps.
+    - Slow cuts in low-energy sections, near-every-beat in high-energy ones.
+    - Every cut respects MIN_CLIP_S; the final cut is snapped to the song end so
+      audio and video coterminate. Deterministic — same inputs → same plan.
+    - When ``max_cut_s`` is given, no cut exceeds it (long holds are split into
+      forward sub-cuts) so a forward clip can always fill its slot without a
+      reverse. ``None`` (default) leaves cut lengths untouched.
+    """
+    if not sections:
+        sections = [{"label": "unlabeled", "start": 0.0, "end": duration, "mean_energy": 0.0}]
+
+    # No beats detected → one cut for the whole song (degenerate but valid).
+    if not beat_times:
+        sec = sections[0]
+        cuts = [{
+            "start_s": 0.0, "end_s": duration,
+            "energy": sec.get("mean_energy", 0.0), "section_label": sec.get("label", "unlabeled"),
+        }]
+        cuts = _split_long_cuts(cuts, max_cut_s)
+        for i, c in enumerate(cuts):
+            c["index"] = i
+        return cuts
+
+    energies = [s.get("mean_energy", 0.0) for s in sections]
+    emin, emax = min(energies), max(energies)
+
+    cuts: list[dict[str, Any]] = []
+    n = len(beat_times)
+    bi = 0          # index of the next beat to consume
+    cut_start = 0.0
+
+    while bi < n:
+        sec = _section_for(cut_start, sections)
+        k = _beats_per_cut(sec.get("mean_energy", 0.0), emin, emax)
+        end_i = min(bi + k - 1, n - 1)      # beat index that ends this cut
+        cut_end = beat_times[end_i]
+        # Floor: extend forward by whole beats until the cut clears MIN_CLIP_S.
+        while cut_end - cut_start < MIN_CLIP_S and end_i < n - 1:
+            end_i += 1
+            cut_end = beat_times[end_i]
+        cuts.append({
+            "start_s": cut_start,
+            "end_s": cut_end,
+            "energy": sec.get("mean_energy", 0.0),
+            "section_label": sec.get("label", "unlabeled"),
+        })
+        cut_start = cut_end
+        bi = end_i + 1
+
+    # Tail: snap the last boundary to the song end (covers the post-final-beat
+    # outro) so the video runs exactly as long as the audio.
+    cuts[-1]["end_s"] = duration
+    # If snapping somehow left a sub-floor runt, fold it into its predecessor.
+    if len(cuts) > 1 and (cuts[-1]["end_s"] - cuts[-1]["start_s"]) < MIN_CLIP_S:
+        cuts[-2]["end_s"] = duration
+        cuts.pop()
+
+    # Size every slot to what a forward clip can fill (no reverse needed).
+    cuts = _split_long_cuts(cuts, max_cut_s)
+
+    for i, c in enumerate(cuts):
+        c["index"] = i
+    return cuts
+
+
+def probe_duration(path: str) -> float:
+    """Duration of a media file in seconds via ffprobe. 0.0 if unknown."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(out.stdout.strip())
+    except (ValueError, subprocess.SubprocessError, OSError):
+        return 0.0
+
+
+def fill_clip_to_duration(
+    src_clip: str,
+    target_s: float,
+    output_path: str,
+    *,
+    fps: int = 24,
+    width: int = 1080,
+    height: int = 1920,
+    method: str = "forward",
+    max_stretch: float = 2.0,
+) -> str:
+    """Fill/trim a short generated clip to EXACTLY ``target_s`` seconds.
+
+    WHY THIS EXISTS (memory obs #721, the pipeline's highest functional risk):
+    WAN i2v clamps every clip to ~0.7-2.0s regardless of the requested duration,
+    and the MLT composer does NOT auto-stretch a source to fill a longer timeline
+    slot — it leaves the remainder blank, so audio drifts over black. So before
+    assembly each clip must be made exactly as long as its cut interval.
+
+    METHODS (per-video ``settings_json.fill_method``):
+    - ``forward`` (default): forward motion only — NO reverse. Slow the clip with
+      ``setpts`` to cover the slot, capped at ``max_stretch`` so it never freezes;
+      if the slot is still longer (rare — the planner sizes cuts to ≤
+      max_clip_s×max_stretch, see compute_cut_plan), hold the last frame
+      (``tpad``) for the remainder. Directional motion (walking crows) stays
+      forward — this is the moonwalk fix.
+    - ``boomerang``: the legacy forward+reverse concat (seamless, no loop-jump,
+      but motion reverses halfway — the moonwalk). Kept as an opt-in because it
+      reads fine for abstract/ambient clips.
+    - ``loop``: forward repeat via input ``-stream_loop`` (continuous, clean
+      timestamps; a visible jump at each loop seam but motion never reverses).
+
+    A ``-t target_s`` hard-trims so the output is EXACT for any case — the
+    assembler contract (music_video_tasks: source_out == cut_len) depends on it.
+    Pure ffmpeg — zero GPU; the caller runs it OUTSIDE the GPU gate.
+    """
+    src_len = probe_duration(src_clip) or 5.0
+    cover = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1"
+    input_opts: list[str] = []
+
+    if method == "boomerang":
+        # Legacy: forward + reverse. Seamless but reverses motion (the moonwalk).
+        boomerang_len = 2 * src_len
+        k = (target_s / boomerang_len) if target_s > boomerang_len else 1.0
+        graph = (
+            f"[0:v]reverse[r];[0:v][r]concat=n=2:v=1[bm];"
+            f"[bm]{cover},setpts={k:.4f}*PTS,format=yuv420p[v]"
+        )
+    elif method == "loop":
+        # Forward-only repeat. -stream_loop loops the demuxer with continuous,
+        # monotonic timestamps (no filtergraph PTS games); -t trims to exact.
+        input_opts = ["-stream_loop", "-1"]
+        graph = f"[0:v]{cover},format=yuv420p[v]"
+    else:  # "forward" (default) — forward motion only, never reversed
+        needed = (target_s / src_len) if src_len > 0 else 1.0
+        # k<1 → slot shorter than clip (play forward at normal speed, trim);
+        # 1≤k≤max_stretch → slow forward to fill exactly; k capped at max_stretch.
+        k = min(max(needed, 1.0), max_stretch)
+        graph = f"[0:v]{cover},setpts={k:.4f}*PTS,format=yuv420p"
+        if needed > max_stretch + 1e-6:
+            # Slot longer than the max-stretched clip → hold the last frame for the
+            # remainder (forward freeze, never a reverse). -t trims the held tail.
+            graph += f",tpad=stop_mode=clone:stop_duration={target_s:.4f}"
+        graph += "[v]"
+
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error", *input_opts, "-i", src_clip,
+        "-filter_complex", graph, "-map", "[v]",
+        "-t", f"{target_s:.4f}", "-r", str(fps), "-an",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"fill_clip_to_duration failed: {result.stderr[-500:]}")
+    return output_path
+
+
+class MusicVideoService(PipelineService):
+    """Coordinates state transitions on MusicVideo rows.
+
+    Takes a SQLAlchemy session (Flask-SQLAlchemy's ``db.session`` works).
+    Optionally wire a ``gate`` (JobOperationGate) for GPU exclusivity. The
+    lifecycle plumbing lives in ``PipelineService``; this class adds the
+    music-video ``create()`` and the song-shaped cut/clip helpers above.
+    """
+
+    model_cls = MusicVideo
+    valid_transitions = VALID_TRANSITIONS
+    stage_to_agent = STAGE_TO_AGENT
+    task_namespace = "music_video"
+
+    # --- Lifecycle ---------------------------------------------------------
+
+    def create(
+        self,
+        *,
+        name: str,
+        song_document_id: int | None,
+        song_path: str | None,
+        style_prompt: str,
+        project_id: int | None,
+        settings: dict | None = None,
+    ) -> MusicVideo:
+        mv = MusicVideo(
+            name=name,
+            song_document_id=song_document_id,
+            song_path=song_path,
+            style_prompt=style_prompt,
+            project_id=project_id,
+            status="draft",
+            current_stage="draft",
+            settings_json=settings or {},
+        )
+        self.s.add(mv)
+        self.s.commit()
+        return mv
+
+    # State-machine plumbing (advance_if_predecessor / fail_stage /
+    # find_non_terminal / dispatch_agent / resume_all / gpu_stage) is inherited
+    # from PipelineService, driven by the class attributes set above.
