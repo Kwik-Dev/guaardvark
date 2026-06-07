@@ -27,6 +27,20 @@ export const approveMusicVideo = async (id) => {
   return response.data;
 };
 
+/** Clear one past generation from the log. */
+export const deleteMusicVideo = async (id) => {
+  const response = await axios.delete(`${API_BASE}/music-video/${id}`);
+  return response.data;
+};
+
+/** Clear finished generations (complete/failed), or all with {all:true}. */
+export const clearMusicVideos = async ({ all = false } = {}) => {
+  const response = await axios.delete(`${API_BASE}/music-video`, {
+    params: all ? { all: true } : {},
+  });
+  return response.data;
+};
+
 /** Serve URL for a rendered output Document (same pattern as the Video Editor). */
 export const documentDownloadUrl = (docId) =>
   `${API_BASE}/files/document/${docId}/download`;

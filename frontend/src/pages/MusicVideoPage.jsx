@@ -14,9 +14,12 @@ import {
   Collapse,
   MenuItem,
   Link,
+  IconButton,
+  Tooltip,
 } from "@mui/material";
 import MusicVideoIcon from "@mui/icons-material/MusicVideo";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
+import CloseIcon from "@mui/icons-material/Close";
 
 import { uploadFile } from "../api/documentService";
 import {
@@ -24,6 +27,8 @@ import {
   getMusicVideo,
   createMusicVideo,
   approveMusicVideo,
+  deleteMusicVideo,
+  clearMusicVideos,
   documentDownloadUrl,
 } from "../api/musicVideoService";
 
@@ -144,6 +149,48 @@ const MusicVideoPage = () => {
     }
   };
 
+  const handleDelete = async (id, label) => {
+    if (!window.confirm(`Remove "${label}" from the log? The entry is cleared; any rendered output file is left on disk.`)) {
+      return;
+    }
+    setError(null);
+    try {
+      await deleteMusicVideo(id);
+      if (selectedId === id) {
+        setSelectedId(null);
+        setDetail(null);
+      }
+      await refreshList();
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message || "Delete failed.");
+    }
+  };
+
+  const handleClearFinished = async () => {
+    const finished = videos.filter(
+      (v) => v.current_stage === "complete" || (v.status || "").startsWith("failed"),
+    );
+    if (finished.length === 0) return;
+    if (!window.confirm(`Clear ${finished.length} finished generation(s) from the log?`)) {
+      return;
+    }
+    setError(null);
+    try {
+      await clearMusicVideos({ all: false });
+      if (selectedId && finished.some((v) => v.id === selectedId)) {
+        setSelectedId(null);
+        setDetail(null);
+      }
+      await refreshList();
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message || "Clear failed.");
+    }
+  };
+
+  const finishedCount = videos.filter(
+    (v) => v.current_stage === "complete" || (v.status || "").startsWith("failed"),
+  ).length;
+
   return (
     <Box sx={{ p: 3, height: "100%", overflow: "auto" }}>
       <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 2 }}>
@@ -235,7 +282,17 @@ const MusicVideoPage = () => {
           </Paper>
 
           <Paper variant="outlined" sx={{ p: 2 }}>
-            <Typography variant="subtitle1" sx={{ mb: 1 }}>Your music videos</Typography>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+              <Typography variant="subtitle1">Your music videos</Typography>
+              {finishedCount > 0 && (
+                <Link
+                  component="button" type="button" variant="caption" underline="hover"
+                  color="text.secondary" onClick={handleClearFinished}
+                >
+                  Clear finished ({finishedCount})
+                </Link>
+              )}
+            </Stack>
             {videos.length === 0 && (
               <Typography variant="body2" color="text.secondary">None yet.</Typography>
             )}
@@ -250,12 +307,21 @@ const MusicVideoPage = () => {
                     borderColor: v.id === selectedId ? "primary.main" : "divider",
                   }}
                 >
-                  <Stack direction="row" justifyContent="space-between" alignItems="center">
-                    <Typography variant="body2" noWrap sx={{ mr: 1 }}>{v.name}</Typography>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
+                    <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>{v.name}</Typography>
                     <Chip
                       size="small" label={v.current_stage}
                       color={stageColor(v.current_stage, v.status)}
                     />
+                    <Tooltip title="Remove from log">
+                      <IconButton
+                        size="small"
+                        onClick={(e) => { e.stopPropagation(); handleDelete(v.id, v.name); }}
+                        sx={{ opacity: 0.5, "&:hover": { opacity: 1 } }}
+                      >
+                        <CloseIcon fontSize="inherit" />
+                      </IconButton>
+                    </Tooltip>
                   </Stack>
                 </Paper>
               ))}

@@ -93,6 +93,8 @@ const DashboardPage = () => {
     CARD_MARGIN_PX,
     COLS_COUNT,
     ROW_HEIGHT_PX,
+    cardGridW,
+    cardGridH,
     cardMinGridW,
     cardMinGridH,
   } = gridSettings;
@@ -434,11 +436,27 @@ const DashboardPage = () => {
     applyZIndexToDOM(cardId, newMaxZIndex);
   }, [maxZIndex, applyZIndexToDOM]);
 
+  // ── Responsive reflow (scalars) ───────────────────────────────────────────
+  // The grid uses a fixed COLS_COUNT (175) with a responsive pixel width, so on a
+  // narrow viewport every card scales down proportionally — "two thin". Rather than
+  // shrink (or hide cards off the right edge), once a default card would drop below
+  // MIN_CARD_PX we re-pack the cards into a grid whose columns are always >=300px,
+  // wrapping into more rows (see repackLayout below). Only NORMAL mode reflows;
+  // the preset modes (compact/layered/modex) are intentional density views.
+  const MIN_CARD_PX = 300;
+  const TARGET_CARD_PX = 320; // floor(width/this) cards per row keeps each >=~314px
+  const naturalCardPx = COLS_COUNT > 0 ? (cardGridW / COLS_COUNT) * gridWidth : 0;
+  const isNarrow = layoutMode === "normal" && naturalCardPx > 0 && naturalCardPx < MIN_CARD_PX;
+  const cardsPerRow = Math.max(1, Math.floor(gridWidth / TARGET_CARD_PX));
+
   // Use onDragStop/onResizeStop instead of onLayoutChange.
   // onLayoutChange fires on EVERY layout change including programmatic ones (toggle),
   // which overwrites preset positions. onDragStop/onResizeStop only fire on USER actions.
   const onUserLayoutChange = useCallback(
     (newLayout) => {
+      // In the narrow re-packed view the layout is derived from the saved free
+      // layout — don't let drags/resizes here overwrite the user's wide layout.
+      if (isNarrow) return;
       const validLayout = newLayout.filter((item) => item !== undefined);
       // Only persist to normalLayoutRef in normal mode — dragging in
       // compact/layered modes must NOT pollute the normal layout.
@@ -450,7 +468,7 @@ const DashboardPage = () => {
       // Re-apply z-indices after RGL finishes — drag end resets inline styles
       requestAnimationFrame(() => applyAllZIndices());
     },
-    [cardColors, minimizedCards, saveDashboardState, layoutMode, applyAllZIndices],
+    [cardColors, minimizedCards, saveDashboardState, layoutMode, applyAllZIndices, isNarrow],
   );
 
   const handleCardColorChange = useCallback(
@@ -622,6 +640,36 @@ const DashboardPage = () => {
 
   }, [layoutMode, layout, cardColors, minimizedCards, originalDimensions, defaultFixedLayout, compactLayout, layeredLayout, saveDashboardState, gridWidth, COLS_COUNT, ROW_HEIGHT_PX, cardMinGridW]);
 
+  // ── Responsive reflow (helpers) ───────────────────────────────────────────
+  // Scalar inputs (isNarrow/cardsPerRow) are computed earlier, above the layout
+  // callbacks, so onUserLayoutChange can read isNarrow. These build the packed view.
+  const repackLayout = useCallback(
+    (base) => {
+      const ordered = [...base].sort((a, b) => (a.y - b.y) || (a.x - b.x));
+      const span = Math.max(cardMinGridW, Math.floor(COLS_COUNT / cardsPerRow));
+      const out = [];
+      let y = 0;
+      for (let i = 0; i < ordered.length; i += cardsPerRow) {
+        const row = ordered.slice(i, i + cardsPerRow);
+        const rowH = row.reduce((m, it) => Math.max(m, it.h || cardGridH), 0);
+        // Lock drag/resize in the packed view — per-item flags override the
+        // grid-level isDraggable, so they must be cleared here too.
+        row.forEach((it, c) =>
+          out.push({ ...it, x: c * span, y, w: span, h: it.h, isDraggable: false, isResizable: false }),
+        );
+        y += rowH;
+      }
+      return out;
+    },
+    [cardsPerRow, COLS_COUNT, cardMinGridW, cardGridH],
+  );
+
+  // What RGL actually renders: the packed view when narrow, the raw layout otherwise.
+  const renderedLayout = useMemo(
+    () => (isNarrow ? repackLayout(layout) : layout),
+    [isNarrow, repackLayout, layout],
+  );
+
   const LayoutModeIcon = LAYOUT_MODE_ICONS[layoutMode];
 
   if (!initialStateLoaded) {
@@ -716,7 +764,7 @@ const DashboardPage = () => {
           <ReactGridLayout
             key={layoutKey}
             className="layout"
-            layout={layout}
+            layout={renderedLayout}
             style={{
               transition: "all 0.2s ease-out",
             }}
@@ -725,8 +773,8 @@ const DashboardPage = () => {
             width={gridWidth}
             containerPadding={[CONTAINER_PADDING_PX, CONTAINER_PADDING_PX]}
             margin={[CARD_MARGIN_PX, CARD_MARGIN_PX]}
-            isDraggable={true}
-            isResizable={true}
+            isDraggable={!isNarrow}
+            isResizable={!isNarrow}
             compactType={null}
             preventCollision={false}
             useCSSTransforms={false}
@@ -738,7 +786,7 @@ const DashboardPage = () => {
             onResizeStop={onUserLayoutChange}
             resizeHandles={["s", "w", "e", "n", "sw", "nw", "se", "ne"]}
           >
-            {layout.map((layoutItem) => {
+            {renderedLayout.map((layoutItem) => {
               const cardId = layoutItem.i;
               const CardComponent = cardComponents[cardId];
               const isMinimized = minimizedCards[cardId] || false;

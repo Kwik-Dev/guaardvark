@@ -132,6 +132,45 @@ def get_music_video(mv_id):
     return jsonify(_mv_dict(mv))
 
 
+@bp.delete("/<int:mv_id>")
+def delete_music_video(mv_id):
+    """Clear one music video from the log.
+
+    Removes the MusicVideo row only — the rendered output Document (if any) and
+    any uploaded song are left intact; this just clears the generation entry the
+    operator sees in the list.
+    """
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    db.session.delete(mv)
+    db.session.commit()
+    return jsonify({"deleted": mv_id})
+
+
+@bp.delete("")
+def clear_music_videos():
+    """Bulk-clear music videos from the log.
+
+    Default: only terminal entries (``complete`` or ``failed*``) — the safe
+    "clear finished" sweep. Pass ``?all=true`` to clear every entry regardless
+    of stage (still leaves output Documents on disk).
+    """
+    clear_all = (request.args.get("all") or "").lower() in ("1", "true", "yes")
+    rows = MusicVideo.query.all()
+
+    def _is_terminal(mv: MusicVideo) -> bool:
+        status = (mv.status or "")
+        return mv.current_stage == "complete" or status.startswith("failed")
+
+    targets = rows if clear_all else [mv for mv in rows if _is_terminal(mv)]
+    deleted = [mv.id for mv in targets]
+    for mv in targets:
+        db.session.delete(mv)
+    db.session.commit()
+    return jsonify({"deleted": deleted, "count": len(deleted)})
+
+
 @bp.post("/<int:mv_id>/approve")
 def approve(mv_id):
     """Cost gate: release per-clip generation only on explicit operator approval."""

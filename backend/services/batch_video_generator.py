@@ -735,6 +735,10 @@ class BatchVideoGenerator:
                 batches.append(entry)
         except Exception as e:  # pragma: no cover
             logger.error(f"Failed to list video batches: {e}")
+        # Newest first so the Video Library shows recent work at the top (and any
+        # caller capping the list keeps the most recent batches). start_time is an
+        # ISO-8601 string when present; missing/unknown sort to the bottom.
+        batches.sort(key=lambda b: b.get("start_time") or b.get("end_time") or "", reverse=True)
         return batches
 
     def delete_batch(self, batch_id: str) -> bool:

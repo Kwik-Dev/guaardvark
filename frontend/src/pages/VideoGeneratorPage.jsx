@@ -2413,10 +2413,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   <RefreshIcon />
                 </IconButton>
               </Stack>
+              <Box sx={{ maxHeight: 520, overflowY: 'auto', pr: 0.5 }}>
               <Grid container spacing={2}>
                 {batches.map((b) => {
                   const dateStr = formatVideoDate(b.start_time || b.end_time);
                   const videoCount = b.completed_videos ?? 0;
+                  const rawName = b.display_name || `Batch ${b.batch_id.slice(0, 8)}`;
+                  // Backend trims new names to ~40 chars; legacy batches may hold a
+                  // full prompt. Cap defensively so a long name can't push the card down.
+                  const label = rawName.length > 42 ? rawName.slice(0, 41).trimEnd() + '…' : rawName;
                   return (
                   <Grid item xs={6} sm={4} md={3} key={b.batch_id}>
                     <Box
@@ -2507,8 +2512,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       </Box>
                       {/* Batch label */}
                       <Box sx={{ pt: 0.75, px: 0.5 }}>
-                        <Typography variant="caption" noWrap sx={{ fontWeight: 500, display: 'block' }}>
-                          {b.display_name || `Batch ${b.batch_id.slice(0, 8)}`}
+                        <Typography variant="caption" noWrap title={rawName} sx={{ fontWeight: 500, display: 'block' }}>
+                          {label}
                         </Typography>
                         <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>
                           {dateStr}
@@ -2519,6 +2524,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   );
                 })}
               </Grid>
+              </Box>
               {batches.length === 0 && (
                 <Box sx={{ textAlign: 'center', py: 4 }}>
                   <VideoIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />

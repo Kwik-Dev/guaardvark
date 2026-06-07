@@ -21,8 +21,12 @@ const createGridSettings = () => {
   const ROW_HEIGHT_PX = 10;
   const cardGridW = Math.round(CARD_TARGET_PIXEL_WIDTH / COL_WIDTH_PX);
   const cardGridH = Math.round(CARD_TARGET_PIXEL_HEIGHT / ROW_HEIGHT_PX);
-  const minResizablePixelW = 100;
-  const minResizablePixelH = 100;
+  // Floor for every RGL-based card page (Dashboard, FileManager, StickyNotes, …).
+  // 300px is the conventional minimum readable card width — below it cards go
+  // "two thin" and content clips. Default target stays 350px; this just stops
+  // resize/compact presets from shrinking a card past 300px.
+  const minResizablePixelW = 300;
+  const minResizablePixelH = 180;
   const cardMinGridW = Math.max(
     1,
     Math.round(minResizablePixelW / COL_WIDTH_PX),
