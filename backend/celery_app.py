@@ -84,6 +84,9 @@ def create_celery_app():
             'backend.tasks.*': {'queue': 'default'},
             'social_outreach.*': {'queue': 'default'},
             'memory.*': {'queue': 'default'},
+            # Custom-named like production.* — explicit route so the per-clip
+            # tail-call dispatch can't fall to the unconsumed 'celery' queue.
+            'music_video.*': {'queue': 'default'},
             # google_indexing.* tasks use custom names (not backend.tasks.*), so
             # they need their own route — without it the on-demand
             # google_indexing.submit_batch_for_site dispatched via .delay() falls
@@ -334,6 +337,13 @@ def create_celery_app():
         logger.info("LoRA trainer tasks registered successfully")
     except ImportError as e:
         logger.warning(f"Could not import lora_trainer tasks: {e}")
+
+    try:
+        from backend.tasks.music_video_tasks import create_music_video_tasks
+        create_music_video_tasks(celery_app)
+        logger.info("Music video tasks registered successfully")
+    except ImportError as e:
+        logger.warning(f"Could not import music video tasks: {e}")
 
     try:
         from backend.tasks.social_outreach_tasks import (

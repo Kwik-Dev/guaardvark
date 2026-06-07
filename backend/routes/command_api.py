@@ -1,22 +1,39 @@
 from flask import Blueprint, request
 
-from backend.utils.response_utils import success_response
+from backend.utils.response_utils import success_response, error_response
 
 command_bp = Blueprint("command_api", __name__, url_prefix="/api/command")
 
 
 @command_bp.route("/analyze", methods=["POST"])
 def analyze_command():
-    """Placeholder endpoint for /analyze chat command."""
-    data = request.get_json() or {}
-    return success_response(data=data, message="Analyze command executed")
+    """/analyze chat command — NOT YET IMPLEMENTED.
+
+    Tracked objective (MASTER_TASKS): wire this to the real code-intelligence
+    analyze flow (backend/api/code_intelligence_api.analyze_code) once the
+    chat-command contract is defined (what gets analyzed: pasted code? current
+    file? repo folder?). It previously echoed the request body back as
+    "executed" — a success that did no work. Until implemented, report honestly.
+    """
+    return error_response(
+        "The /analyze command is not implemented yet.",
+        status_code=501,
+        error_code="NOT_IMPLEMENTED",
+    )
 
 
 @command_bp.route("/codefile", methods=["POST"])
 def codefile_command():
-    """Placeholder endpoint for /codefile chat command."""
-    data = request.get_json() or {}
-    return success_response(data=data, message="Codefile command executed")
+    """/codefile chat command — NOT YET IMPLEMENTED.
+
+    Tracked objective (MASTER_TASKS): wire to the real code read/write path once
+    the contract is defined. Previously echoed the body back as "executed".
+    """
+    return error_response(
+        "The /codefile command is not implemented yet.",
+        status_code=501,
+        error_code="NOT_IMPLEMENTED",
+    )
 
 
 @command_bp.route("/websearch", methods=["POST"])
@@ -30,9 +47,10 @@ def websearch_command():
         query = data.get("query", data.get("message", ""))
 
         if not query:
-            return success_response(
-                data={"error": "No query provided"},
-                message="Please provide a search query"
+            return error_response(
+                "Please provide a search query.",
+                status_code=400,
+                error_code="NO_QUERY",
             )
 
         logger.info(f"/websearch command: '{query}'")
@@ -80,18 +98,18 @@ def websearch_command():
             )
         else:
             error = search_results.get("error", "Unknown error")
-            return success_response(
-                data={
-                    "query": query,
-                    "error": error,
-                    "response": f"Web search failed: {error}"
-                },
-                message="Web search failed"
+            return error_response(
+                f"Web search failed: {error}",
+                status_code=502,
+                error_code="WEB_SEARCH_FAILED",
+                data={"query": query, "error": error},
             )
 
     except Exception as e:
         logger.error(f"/websearch command error: {e}", exc_info=True)
-        return success_response(
+        return error_response(
+            f"Web search error: {str(e)}",
+            status_code=500,
+            error_code="WEB_SEARCH_ERROR",
             data={"error": str(e)},
-            message=f"Web search error: {str(e)}"
         )

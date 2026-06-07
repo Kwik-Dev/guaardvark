@@ -371,6 +371,70 @@ def query_index(query_text, project_id=None, top_k=3):
         logger.error(f"Error querying index: {e}")
         return None
 
+def _sanitize_vector_store_dimensions(storage_context_obj, persist_dir: Optional[str] = None) -> int:
+    """Prune embeddings whose dimension != the majority dimension in the store.
+
+    A model switch (e.g. bge-m3 1024-dim -> qwen3-embedding 2560-dim) can leave a
+    few stale-dim vectors behind. SimpleVectorStore.query() does np.array(all
+    embeddings) and raises "setting an array element with a sequence ... inhomogeneous
+    shape" on mixed dims, which kills the ENTIRE vector leg of hybrid search (RAG then
+    silently degrades to nothing). The dimension-lock checks the model NAME, not
+    per-vector dims, so it misses intra-store contamination. This prunes the minority
+    so search survives, and re-persists. Returns the number of vectors removed.
+    Wrapped non-fatally — a sanitizer failure must never block index load.
+    """
+    removed = 0
+    try:
+        from collections import Counter
+        stores = []
+        vs = getattr(storage_context_obj, "vector_store", None)
+        if vs is not None:
+            stores.append(vs)
+        vstores = getattr(storage_context_obj, "vector_stores", None)
+        if isinstance(vstores, dict):
+            stores.extend(vstores.values())
+
+        seen: set = set()
+        for store in stores:
+            data = getattr(store, "data", None) or getattr(store, "_data", None)
+            emb = getattr(data, "embedding_dict", None)
+            if not emb or id(emb) in seen:
+                continue
+            seen.add(id(emb))
+            dims = Counter(len(v) for v in emb.values() if isinstance(v, (list, tuple)))
+            if len(dims) <= 1:
+                continue  # homogeneous — nothing to fix
+            majority_dim = dims.most_common(1)[0][0]
+            bad = [k for k, v in emb.items()
+                   if not isinstance(v, (list, tuple)) or len(v) != majority_dim]
+            if not bad:
+                continue
+            t2r = getattr(data, "text_id_to_ref_doc_id", None)
+            meta = getattr(data, "metadata_dict", None)
+            for k in bad:
+                emb.pop(k, None)
+                if isinstance(t2r, dict):
+                    t2r.pop(k, None)
+                if isinstance(meta, dict):
+                    meta.pop(k, None)
+            removed += len(bad)
+            logger.warning(
+                "[DIM-SANITIZE] Pruned %d stale-dimension vector(s) (kept dim=%d, "
+                "dropped minority %s) — stale embedding-model leftovers that would crash "
+                "vector search. A full reindex is recommended to restore that content.",
+                len(bad), majority_dim, dict(dims),
+            )
+        if removed and persist_dir:
+            try:
+                storage_context_obj.persist(persist_dir=persist_dir)
+                logger.warning("[DIM-SANITIZE] Persisted cleaned vector store to %s", persist_dir)
+            except Exception as e:
+                logger.error("[DIM-SANITIZE] Failed to persist cleaned store: %s", e)
+    except Exception as e:
+        logger.error("[DIM-SANITIZE] sanitizer error (non-fatal): %s", e)
+    return removed
+
+
 def get_or_create_index(project_id: Optional[str] = None):
     try:
         from flask import current_app
@@ -581,6 +645,9 @@ def _initialize_index(storage_path: str):
 
             index = index_instance
             storage_context = storage_context_instance
+            # Self-heal mixed-dimension contamination from a past embedding-model switch
+            # before any query hits np.array(embeddings) and crashes the vector leg.
+            _sanitize_vector_store_dimensions(storage_context_instance, abs_storage_path)
             logger.info(f"Successfully loaded index from {abs_storage_path}")
         except Exception as e:
             # Common case: storage dir has docstore.json but index_store.json was purged,
@@ -890,7 +957,14 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
         return []
 
 
-def add_text_to_index(text: str, metadata: Dict[str, Any], project_id: Optional[str] = None) -> bool:
+def add_text_to_index(text: str, metadata: Dict[str, Any], project_id: Optional[str] = None) -> Optional[bool]:
+    """Add text to the vector index.
+
+    Returns: True = indexed; False = a real failure (no index / exception);
+    None = nothing to index (content produced no chunkable text — a benign skip,
+    not an error). None stays falsy so existing truthiness checks are unchanged,
+    but callers that care can distinguish empty (None) from failed (False).
+    """
     global index, storage_context
 
     try:
@@ -919,8 +993,8 @@ def add_text_to_index(text: str, metadata: Dict[str, Any], project_id: Optional[
         
         with _index_operation_lock:
             if not nodes or len(nodes) == 0:
-                logger.warning("BUG FIX 3: No valid nodes to insert, skipping")
-                return False
+                logger.warning("add_text_to_index: content produced no nodes — nothing to index")
+                return None  # empty, not a failure
             
             valid_nodes = []
             for node in nodes:
@@ -930,8 +1004,8 @@ def add_text_to_index(text: str, metadata: Dict[str, Any], project_id: Optional[
                     logger.warning(f"BUG FIX 3: Skipping invalid node: {type(node)}")
             
             if not valid_nodes:
-                logger.error("BUG FIX 3: No valid nodes after validation")
-                return False
+                logger.warning("add_text_to_index: all nodes were empty/invalid — nothing to index")
+                return None  # empty content, not a failure
 
             local_index.insert_nodes(valid_nodes)
             _record_index_embedding_model(project_id)  # stamp the model the index was built with
@@ -1911,6 +1985,22 @@ def _is_valid_status_transition(current_status: str, new_status: str) -> bool:
         
     return new_status in valid_transitions.get(current_status, [])
 
+def _session_in_transaction() -> bool:
+    """Whether the current DB session is already inside a transaction.
+
+    SQLAlchemy 2.0's `scoped_session` does NOT proxy `in_transaction()` (only the
+    real Session does), so `db.session.in_transaction()` raises AttributeError and
+    used to abort every status update -> every HTTP-triggered index. Calling the
+    scoped_session (`db.session()`) returns the real Session, which has it. Mirrors
+    the guarded pattern in backend/utils/context_bridge.py.
+    """
+    try:
+        sess = db.session() if callable(db.session) else db.session
+        return bool(sess.in_transaction())
+    except Exception:
+        return False
+
+
 def update_document_status(
     doc_id: int, status: str, error_message: Optional[str] = None
 ):
@@ -1937,7 +2027,7 @@ def update_document_status(
             # otherwise start a fresh one. Porting this was traced to the nested-
             # async / "Event loop is closed" errors we hit earlier — a SQLAlchemy
             # exception here can corrupt the httpx/anyio event loop downstream.
-            if db.session.in_transaction():
+            if _session_in_transaction():
                 ctx = db.session.begin_nested()
             else:
                 ctx = db.session.begin()

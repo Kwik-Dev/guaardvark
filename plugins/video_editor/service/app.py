@@ -32,6 +32,7 @@ from mlt.frame_math import FrameRate
 from mlt.mlt_parser import MediaAsset, ProjectProfile
 from mlt.mlt_writer import plan_cuts_from_beats, write_project
 from mlt.render import MeltNotFound, render_mlt
+from mlt.song_structure import analyze_song
 from mlt.timeline_compose import compose_arrangement, compose_timeline, timeline_from_payload
 from mlt.filters import PRESET_CATEGORIES as FILTER_CATEGORIES
 from mlt.transitions import PRESETS as TRANSITION_PRESETS
@@ -84,6 +85,14 @@ class BeatSyncRequest(BaseModel):
     seed: Optional[int] = None
     render_mp4: bool = Field(False, description="If true, also encode final MP4 via melt.")
     register: bool = Field(True, description="POST outputs to backend as Documents.")
+
+
+class SongAnalyzeRequest(BaseModel):
+    """Read-only audio analysis: tempo + beats + energy-labeled sections."""
+
+    audio_path: str = Field(..., description="Absolute path to the song file.")
+    section_count: int = Field(4, ge=1, description="Number of energy sections to segment.")
+    tightness: int = Field(100, ge=1, description="librosa beat_track rigidity.")
 
 
 class AutoEditorRequest(BaseModel):
@@ -215,6 +224,23 @@ def get_job(job_id: str) -> dict[str, Any]:
 
 
 # ---------- write endpoints --------------------------------------------------
+
+@app.post("/analyze")
+def analyze(req: SongAnalyzeRequest) -> dict[str, Any]:
+    """Analyze a song → tempo, beat_times (seconds), and energy-labeled sections.
+
+    Synchronous: librosa beat/onset analysis on a typical song is a few seconds,
+    and callers (e.g. the music-video cut planner) want the structure inline
+    before deciding anything. Read-only — touches no files, schedules no render.
+    """
+    _require_paths(req.audio_path)
+    structure = analyze_song(
+        req.audio_path,
+        section_count=req.section_count,
+        tightness=req.tightness,
+    )
+    return structure.to_dict()
+
 
 @app.post("/beat-sync/render")
 def beat_sync_render(req: BeatSyncRequest) -> dict[str, Any]:

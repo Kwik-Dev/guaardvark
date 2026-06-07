@@ -224,17 +224,35 @@ class RAGAutoresearchService:
         finally:
             self._running = False
             self._current_experiment_id = None
+            # The whole loop runs inside an app context pushed by the caller; tidy
+            # the scoped session so a long-lived daemon doesn't leak connections.
+            try:
+                from backend.models import db
+                db.session.remove()
+            except Exception:
+                pass
             logger.info(f"Autoresearch loop ended after {count} experiments")
 
     def _check_prerequisites(self) -> bool:
-        """Verify system is ready for autoresearch."""
+        """Verify system is ready for autoresearch.
+
+        Fail CLOSED: the corpus check hits the DB and needs a Flask app context.
+        The caller (run_loop's thread target) is responsible for pushing one. If it
+        didn't — or the check otherwise errors — we must NOT proceed without the
+        corpus gate, so we return False instead of silently barrelling ahead.
+        """
         try:
-            from flask import current_app
             if not self.eval_harness.has_sufficient_corpus():
                 logger.warning("Insufficient corpus for autoresearch")
                 return False
-        except RuntimeError:
-            pass
+        except RuntimeError as e:
+            # Almost always "Working outside of application context" — a real
+            # prerequisite-verification failure, not a reason to run anyway.
+            logger.error(f"Prerequisite check could not run (no app context?): {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Prerequisite check failed: {e}")
+            return False
         return True
 
     # --- DB operations ---

@@ -81,14 +81,40 @@ def cleanup_progress_jobs():
 @system_bp.route("/health-check", methods=["GET"])
 def system_health_check():
     try:
-        return success_response("System health check completed", {
-            "status": "healthy",
-            "timestamp": "2025-08-02T19:15:00Z",
-            "components": {
-                "progress_system": "operational",
-                "cleanup_script": "available"
-            }
-        })
+        from datetime import datetime, timezone
+
+        components = {}
+
+        # Component 1: unified progress system — cheap in-process probe (no I/O):
+        # if we can fetch the active-process snapshot, it's operational.
+        try:
+            from backend.utils.unified_progress_system import get_unified_progress
+            get_unified_progress().get_active_processes()
+            components["progress_system"] = "operational"
+        except Exception as e:
+            logger.warning(f"progress_system health probe failed: {e}")
+            components["progress_system"] = "unavailable"
+
+        # Component 2: cleanup script — it's invoked via subprocess by
+        # /cleanup-progress-jobs, so "available" means the file actually exists.
+        cleanup_script = Path(__file__).parent.parent.parent / "scripts" / "cleanup_stuck_progress_jobs.py"
+        components["cleanup_script"] = "available" if cleanup_script.exists() else "missing"
+
+        # Healthy only if every probed component is in its good state.
+        good = {"progress_system": "operational", "cleanup_script": "available"}
+        status = "healthy" if all(components[k] == v for k, v in good.items()) else "degraded"
+
+        # NOTE: success_response signature is (data, message) — pass by keyword so the
+        # health payload lands in `data`, not `message` (the old positional call had
+        # these swapped, burying the real status in the message field).
+        return success_response(
+            data={
+                "status": status,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "components": components,
+            },
+            message="System health check completed",
+        )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return error_response(str(e), 500, "HEALTH_CHECK_ERROR") 
+        return error_response(str(e), 500, "HEALTH_CHECK_ERROR")

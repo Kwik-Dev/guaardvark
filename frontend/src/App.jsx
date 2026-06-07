@@ -57,6 +57,7 @@ const OutreachPage = lazy(() => import("./pages/OutreachPage"));
 const VoiceChatPage = lazy(() => import("./pages/VoiceChatPage"));
 const SystemMapPage = lazy(() => import("./pages/SystemMapPage"));
 const FilmCrewPage = lazy(() => import("./pages/FilmCrewPage"));
+const MusicVideoPage = lazy(() => import("./pages/MusicVideoPage"));
 import Sidebar from "./components/layout/Sidebar";
 import ProgressFooterBar from "./components/layout/ProgressFooterBar";
 import { StatusProvider } from "./contexts/StatusContext";
@@ -460,6 +461,16 @@ const AppContainer = () => {
                           <AppLayout>
                             <ErrorBoundary>
                               <FilmCrewPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/music-video"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <MusicVideoPage />
                             </ErrorBoundary>
                           </AppLayout>
                         }

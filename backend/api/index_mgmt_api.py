@@ -316,16 +316,165 @@ def reset_index():
 
 @index_mgmt_bp.route("/purge-index", methods=["POST"])
 def purge_index():
-    """Purge selected portions of the index based on provided options."""
+    """Purge selected indexed content. Honors the PurgeIndexModal options:
+    purgeDocuments / purgeEmbeddings / purgeMetadata (bools) + afterDate/beforeDate
+    (YYYY-MM-DD). Was a placebo that only acknowledged the request; now does real work
+    and reports honest counts.
+    """
     logger.info("API: Received POST /api/meta/purge-index request")
     options = request.get_json(silent=True) or {}
-    logger.info(f"Purge Index options received: {options}")
-    return (
-        jsonify(
-            {"message": "Purge request acknowledged.", "received_options": options}
-        ),
-        200,
-    )
+    purge_documents = bool(options.get("purgeDocuments"))
+    purge_embeddings = bool(options.get("purgeEmbeddings"))
+    purge_metadata = bool(options.get("purgeMetadata"))
+    after_date = (options.get("afterDate") or "").strip()
+    before_date = (options.get("beforeDate") or "").strip()
+
+    if not (purge_documents or purge_embeddings or purge_metadata):
+        return jsonify({"error": "Select at least one of: Indexed Documents, Embeddings, Metadata."}), 400
+
+    # Resolve the index (same on-demand load fallback as optimize_index)
+    index_instance = current_app.config.get("LLAMA_INDEX_INDEX")
+    storage_dir = current_app.config.get("STORAGE_DIR")
+    if (not index_instance or not hasattr(index_instance, "storage_context")) and initialize_llama_index_from_service:
+        try:
+            result = initialize_llama_index_from_service()
+            index_instance = result[0] if isinstance(result, tuple) else result
+            if index_instance and hasattr(index_instance, "storage_context"):
+                current_app.config["LLAMA_INDEX_INDEX"] = index_instance
+        except Exception as e:
+            logger.error(f"Purge Index: on-demand index load failed: {e}")
+    if not index_instance or not hasattr(index_instance, "storage_context"):
+        return jsonify({"error": "No index available. Index some documents first."}), 503
+    if not (db and Document):
+        return jsonify({"error": "Database not available"}), 503
+
+    try:
+        from datetime import datetime
+
+        # 1) Resolve target document_ids via the optional date window (None => all).
+        target_ids = None
+        if after_date or before_date:
+            q = Document.query
+            if after_date:
+                try:
+                    q = q.filter(Document.indexed_at >= datetime.fromisoformat(after_date))
+                except ValueError:
+                    return jsonify({"error": f"Invalid afterDate '{after_date}' (expected YYYY-MM-DD)."}), 400
+            if before_date:
+                try:
+                    q = q.filter(Document.indexed_at <= datetime.fromisoformat(before_date + "T23:59:59"))
+                except ValueError:
+                    return jsonify({"error": f"Invalid beforeDate '{before_date}' (expected YYYY-MM-DD)."}), 400
+            target_ids = {str(d.id) for d in q.all()}
+            if not target_ids:
+                return jsonify({"message": "No documents matched the date range; nothing purged.",
+                                "nodes_removed": 0, "metadata_cleared": 0, "documents_reset": 0}), 200
+
+        docstore = index_instance.storage_context.docstore
+
+        # 2) Map docstore nodes -> owning document_id; collect what's in scope.
+        ref_ids_to_delete = set()
+        node_ids_in_scope = []
+        for node_id, node in list(docstore.docs.items()):
+            meta = getattr(node, "metadata", {}) or {}
+            doc_id = str(meta.get("document_id") or "")
+            if target_ids is not None and doc_id not in target_ids:
+                continue
+            node_ids_in_scope.append(node_id)
+            ref = getattr(node, "ref_doc_id", None)
+            if ref:
+                ref_ids_to_delete.add(ref)
+
+        removed_nodes = 0
+        cleared_metadata = 0
+
+        # 3a) Remove documents/embeddings: delete_ref_doc removes nodes + their vectors
+        #     (and docstore entries when purging the documents themselves).
+        if purge_documents or purge_embeddings:
+            for ref in ref_ids_to_delete:
+                try:
+                    index_instance.delete_ref_doc(ref, delete_from_docstore=purge_documents)
+                    removed_nodes += 1
+                except Exception as e:
+                    logger.warning(f"Purge Index: delete_ref_doc({ref}) failed: {e}")
+        # 3b) Metadata-only purge (keep the nodes): clear their metadata entries.
+        elif purge_metadata:
+            sc = index_instance.storage_context
+            stores = []
+            vs = getattr(sc, "vector_store", None)
+            if vs is not None:
+                stores.append(vs)
+            vdict = getattr(sc, "vector_stores", None)
+            if isinstance(vdict, dict):
+                stores.extend(vdict.values())
+            for store in stores:
+                data = getattr(store, "data", None) or getattr(store, "_data", None)
+                md = getattr(data, "metadata_dict", None)
+                if isinstance(md, dict):
+                    for node_id in node_ids_in_scope:
+                        if md.pop(node_id, None) is not None:
+                            cleared_metadata += 1
+
+        # 4) Persist, then reset DB status for purged docs so they can be re-indexed.
+        try:
+            index_instance.storage_context.persist(persist_dir=storage_dir)
+        except Exception as e:
+            logger.warning(f"Purge Index: persist failed: {e}")
+
+        documents_reset = 0
+        if purge_documents or purge_embeddings:
+            upd = Document.query
+            if target_ids is not None:
+                upd = upd.filter(Document.id.in_([int(x) for x in target_ids]))
+            documents_reset = upd.update(
+                {"index_status": "INDEXING", "indexed_at": None, "error_message": None},
+                synchronize_session=False,
+            )
+            db.session.commit()
+
+        msg = (f"Purge complete — nodes_removed={removed_nodes}, metadata_cleared={cleared_metadata}, "
+               f"documents_reset={documents_reset} (scope: {'date-filtered' if target_ids is not None else 'all'}).")
+        logger.info(f"Purge Index: {msg}")
+        return jsonify({"message": msg, "nodes_removed": removed_nodes,
+                        "metadata_cleared": cleared_metadata, "documents_reset": documents_reset}), 200
+    except Exception as e:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        logger.error(f"Purge Index: error: {e}", exc_info=True)
+        return jsonify({"error": f"Purge failed: {e}"}), 500
+
+
+@index_mgmt_bp.route("/index-errors", methods=["GET"])
+def index_errors():
+    """List documents whose indexing FAILED (index_status='ERROR'), with the error
+    message, so failures are visible instead of masked as task 'success'. Read-only.
+    """
+    logger.info("API: Received GET /api/meta/index-errors request")
+    if not (db and Document):
+        return jsonify({"error": "Database not available"}), 503
+    try:
+        limit = request.args.get("limit", 200, type=int)
+        limit = max(1, min(limit, 1000))
+        rows = (
+            Document.query
+            .filter(Document.index_status == "ERROR")
+            .order_by(Document.indexed_at.desc())
+            .limit(limit)
+            .all()
+        )
+        errors = [{
+            "id": d.id,
+            "filename": getattr(d, "filename", None),
+            "folder_id": getattr(d, "folder_id", None),
+            "error_message": getattr(d, "error_message", None),
+            "indexed_at": d.indexed_at.isoformat() if getattr(d, "indexed_at", None) else None,
+        } for d in rows]
+        return jsonify({"count": len(errors), "errors": errors}), 200
+    except Exception as e:
+        logger.error(f"Index Errors: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @index_mgmt_bp.route("/rebuild-index", methods=["POST"])
@@ -474,6 +623,51 @@ def optimize_index():
                 logger.info(f"Optimize Index: Removed orphaned ref_doc_id={ref_id}")
             except Exception as e:
                 logger.warning(f"Optimize Index: Failed to remove ref_doc_id={ref_id}: {e}")
+
+        # Fallback: nodes with NO resolvable owning Document — ref_doc_id is None AND
+        # metadata.document_id is missing or doesn't resolve. The primary loop above
+        # skips these entirely (line collecting only truthy ref_doc_ids), so genuine
+        # orphans (incl. stale-model leftovers) accumulate forever. Remove them
+        # directly from the vector store data dicts + docstore.
+        unowned_node_ids = []
+        for node_id, node in list(docstore.docs.items()):
+            if getattr(node, "ref_doc_id", None):
+                continue  # had a ref_doc_id -> handled by the loop above
+            meta = getattr(node, "metadata", {}) or {}
+            doc_id = meta.get("document_id")
+            owner = None
+            if doc_id:
+                try:
+                    owner = db.session.get(Document, int(doc_id))
+                except (ValueError, TypeError):
+                    owner = None
+            if owner is None:
+                unowned_node_ids.append(node_id)
+
+        if unowned_node_ids:
+            sc = index_instance.storage_context
+            stores = []
+            vs = getattr(sc, "vector_store", None)
+            if vs is not None:
+                stores.append(vs)
+            vdict = getattr(sc, "vector_stores", None)
+            if isinstance(vdict, dict):
+                stores.extend(vdict.values())
+            for node_id in unowned_node_ids:
+                try:
+                    for store in stores:
+                        data = getattr(store, "data", None) or getattr(store, "_data", None)
+                        if data is None:
+                            continue
+                        for attr in ("embedding_dict", "text_id_to_ref_doc_id", "metadata_dict"):
+                            d = getattr(data, attr, None)
+                            if isinstance(d, dict):
+                                d.pop(node_id, None)
+                    docstore.docs.pop(node_id, None)
+                    removed += 1
+                except Exception as e:
+                    logger.warning(f"Optimize Index: Failed to remove unowned node {node_id}: {e}")
+            logger.info(f"Optimize Index: Removed {len(unowned_node_ids)} unowned (no-document) node(s)")
 
         # Persist changes
         if removed > 0:

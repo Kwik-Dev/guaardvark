@@ -1447,9 +1447,23 @@ def health_check():
     """Health check for code intelligence service"""
     try:
         logger.info("Health check called")
-        llm_available = get_llm_instance is not None
+
+        # REAL LLM availability — ask llm_service for an actual configured instance.
+        # (The module-local get_llm_instance is a no-op mock that always returns None,
+        # so the old `get_llm_instance is not None` checked a function object and was
+        # always True.) get_llm_instance() just reads current_app.config — cheap, no
+        # model load — so it's safe on a health ping.
+        try:
+            from backend.utils.llm_service import get_llm_instance as _real_get_llm
+            llm_available = _real_get_llm() is not None
+        except Exception as e:
+            logger.warning(f"LLM availability probe failed: {e}")
+            llm_available = False
         logger.info(f"LLM available check: {llm_available}")
-        chat_available = send_chat_message_internal is not None
+
+        # REAL chat availability — this module's chat path runs through the enhanced
+        # chat manager; reflect whether it actually imported and is wired.
+        chat_available = bool(_chat_manager_available and get_chat_manager)
         logger.info(f"Chat available check: {chat_available}")
 
         # Get active model information
@@ -1460,13 +1474,23 @@ def health_check():
             logger.warning(f"Could not get active model: {e}")
             active_model = "unknown"
 
+        # Tiered, honest status — no "fully_functional_offline" claim when nothing works.
+        if llm_available and chat_available:
+            status = "ready"
+        elif llm_available or chat_available:
+            status = "degraded"
+        else:
+            status = "unavailable"
+
         return success_response({
-            "status": "healthy",
-            "mode": "fully_functional_offline",
+            "status": status,
             "active_model": active_model,
             "llm_available": llm_available,
             "chat_available": chat_available,
             "timestamp": datetime.now().isoformat(),
+            # Declared surface area (routes that exist), NOT a runtime health claim.
+            # Field names kept as `endpoints`/`capabilities` for the existing
+            # frontend consumer (codeIntelligenceService.checkCodeIntelligenceHealth).
             "endpoints": [
                 "/analyze", "/generate", "/edit", "/explain",
                 "/refactor", "/generate-tests", "/completion", "/validate"

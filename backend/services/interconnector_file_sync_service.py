@@ -156,8 +156,16 @@ class InterconnectorFileSyncService:
                     return True
             
             elif pattern_lower.endswith("/"):
-                if pattern_lower.rstrip("/") in file_path_lower:
-                    logger.debug(f"[FILE_SYNC] File excluded by pattern '{pattern}': {file_path}")
+                # Directory pattern: match on PATH SEGMENT boundaries, not a bare
+                # substring. The old `rstrip("/") in file_path_lower` excluded any
+                # path that merely CONTAINED the word — e.g. "build/" silently
+                # dropped frontend/.../buildPlanRequest.js (broke a client rebuild),
+                # "data/" would drop dataService.js, "dist/" -> distance.js, etc.
+                # Wrap both sides in "/" so "build/" matches .../build/... only.
+                norm = "/" + file_path_lower.replace("\\", "/").strip("/") + "/"
+                needle = "/" + pattern_lower.strip("/") + "/"
+                if needle in norm:
+                    logger.debug(f"[FILE_SYNC] File excluded by dir pattern '{pattern}': {file_path}")
                     return True
             
             else:

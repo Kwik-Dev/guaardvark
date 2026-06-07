@@ -1444,8 +1444,12 @@ def get_bulk_generation_status():
             if process.process_type == ProcessType.CSV_PROCESSING
         }
         
+        # Real readiness signal: reaching here means the unified progress system
+        # answered (a failure would have raised → 500 below), so the subsystem is
+        # reachable. Report idle/busy from the actual process count instead of a
+        # hardcoded "available" that never reflected anything.
         return jsonify({
-            "status": "available",
+            "status": "busy" if bulk_processes else "idle",
             "active_processes": len(bulk_processes),
             "processes": [
                 {
@@ -1457,7 +1461,8 @@ def get_bulk_generation_status():
                 }
                 for process_id, process in bulk_processes.items()
             ],
-            "capabilities": {
+            # Declared limits (static config), NOT a runtime health claim.
+            "declared_capabilities": {
                 "max_concurrent_workers": 20,
                 "max_daily_capacity": 43200,
                 "supported_formats": ["csv"],

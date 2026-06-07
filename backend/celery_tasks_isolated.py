@@ -104,6 +104,14 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
         with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
 
+        # Postgres text columns reject NUL (0x00) bytes ("A string literal cannot
+        # contain NUL characters"), which silently failed the whole index for files
+        # carrying stray nulls. Strip them at ingestion so the document still indexes.
+        if "\x00" in content:
+            null_count = content.count("\x00")
+            content = content.replace("\x00", "")
+            logger.warning(f"Stripped {null_count} NUL byte(s) from document {document_id} before indexing")
+
         # Determine file type and language
         file_ext = os.path.splitext(file_path)[1].lower()
         code_extensions = {'.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.cpp', '.c', '.h', '.cs', '.php', '.rb', '.go', '.rs', '.swift', '.kt', '.scala'}
@@ -157,7 +165,8 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
 
             # BUG FIX #3: Move import outside or handle circular import better
             # Actually index into LlamaIndex vector store
-            vector_indexed = False
+            # vector_outcome: indexed | empty | failed | skipped
+            vector_outcome = "skipped"
             try:
                 # Import here to avoid circular dependencies at module level
                 from backend.services.indexing_service import add_text_to_index
@@ -176,32 +185,42 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
                     'entity_type': metadata['file_type']
                 }
 
-                # Add to vector index - this enables RAG search
+                # Add to vector index - this enables RAG search.
+                # add_text_to_index returns: truthy=indexed, None=empty (nothing to
+                # index), False=real failure.
                 project_id_str = str(document.get('project_id')) if document.get('project_id') else None
                 vector_result = add_text_to_index(content, metadata=doc_metadata, project_id=project_id_str)
                 if vector_result:
+                    vector_outcome = "indexed"
                     logger.info(f"Successfully added document {document_id} to vector index")
                     update_progress(95, f'Vector indexing complete for {document["filename"]}')
-                    vector_indexed = True
+                elif vector_result is None:
+                    vector_outcome = "empty"
+                    logger.info(f"Document {document_id} stored but had no chunkable content — nothing to vector-index")
                 else:
-                    logger.warning(f"Vector indexing failed for document {document_id}")
+                    vector_outcome = "failed"
+                    logger.warning(f"Vector indexing returned a failure for document {document_id}")
 
             except ImportError as import_error:
+                vector_outcome = "skipped"
                 logger.warning(f"Could not import indexing_service (may be expected in isolated worker): {import_error}")
             except Exception as vector_error:
+                vector_outcome = "failed"
                 logger.error(f"Vector indexing failed for document {document_id}: {vector_error}")
-                # Don't fail the entire indexing if vector indexing fails
-                # Database storage is still successful
 
-            # Log success with detailed information
-            logger.info(f"Successfully indexed document {document_id} using enhanced code-aware method:")
-            logger.info(f"  - File: {document['filename']}")
-            logger.info(f"  - Type: {metadata['file_type']}")
-            logger.info(f"  - Language: {metadata['language']}")
-            logger.info(f"  - Strategy: {metadata['processing_strategy']}")
-            logger.info(f"  - Content stored: {len(content)} characters")
-            logger.info(f"  - Vector indexed: Available for RAG search")
+            # Honest outcome. A document that is stored but NOT searchable because the
+            # vector index genuinely FAILED must not be reported as a clean success —
+            # return False so index_document_task marks it ERROR (retryable). Empty
+            # content and the expected isolated-worker skip are NOT failures: the row
+            # is stored, there is just nothing (more) to search.
+            if vector_outcome == "failed":
+                logger.error(f"Document {document_id}: content stored but vector indexing FAILED — not searchable")
+                return False
 
+            logger.info(
+                f"Indexed document {document_id} ('{document['filename']}', "
+                f"{metadata['language']}, {len(content)} chars) — vector: {vector_outcome}"
+            )
             return True
 
         except Exception:

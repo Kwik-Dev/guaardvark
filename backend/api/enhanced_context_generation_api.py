@@ -278,10 +278,18 @@ def test_enhanced_integration():
         except Exception as e:
             test_results["entity_enhancer"] = {"status": "error", "error": str(e)}
         
-        # Test 2: Web Scraper
+        # Test 2: Web Scraper — readiness probe (import + callable), NOT a live
+        # fetch. A successful import alone only proves the module parsed; verify the
+        # entry point is actually callable before claiming "available".
         try:
             from backend.api.web_search_api import extract_website_content
-            test_results["web_scraper"] = {"status": "available"}
+            if callable(extract_website_content):
+                test_results["web_scraper"] = {"status": "available", "checked": "import+callable"}
+            else:
+                test_results["web_scraper"] = {
+                    "status": "error",
+                    "error": "extract_website_content imported but is not callable",
+                }
         except Exception as e:
             test_results["web_scraper"] = {"status": "error", "error": str(e)}
         

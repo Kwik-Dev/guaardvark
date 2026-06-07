@@ -50,6 +50,7 @@ import QueueIcon from "@mui/icons-material/Queue";
 import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
 import MovieFilterIcon from "@mui/icons-material/MovieFilter";
 import LocalMoviesIcon from "@mui/icons-material/LocalMovies";
+import MusicVideoIcon from "@mui/icons-material/MusicVideo";
 import BubbleChartIcon from "@mui/icons-material/BubbleChart";
 import PhotoLibraryIcon from "@mui/icons-material/PhotoLibrary";
 import VideoCameraBackIcon from "@mui/icons-material/VideoCameraBack";
@@ -82,6 +83,7 @@ const navGroups = [
     label: "Studio",
     items: [
       { text: "Film Crew", icon: <LocalMoviesIcon />, path: "/film-crew" },
+      { text: "Music Video", icon: <MusicVideoIcon />, path: "/music-video" },
       { text: "Video Editor", icon: <MovieFilterIcon />, path: "/video-editor" },
       { text: "Video Gen", icon: <VideoCameraBackIcon />, path: "/video" },
       { text: "Image Gen", icon: <ImageIcon />, path: "/batch-images" },

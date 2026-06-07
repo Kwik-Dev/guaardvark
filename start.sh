@@ -1437,13 +1437,36 @@ fi
 
 export FLASK_PORT
 export VITE_PORT
-vader_info "Launching frontend (production build) in background..."
-nohup $NPM_CMD run preview -- --host --port=$VITE_PORT >> "$FRONTEND_LOG_FILE" 2>&1 &
-FRONTEND_PID=$!
-echo "$FRONTEND_PID" > "$SCRIPT_DIR/pids/frontend.pid"
-sleep 3
 
-if ! kill -0 $FRONTEND_PID > /dev/null 2>&1; then
+# Always build before serving. `vite preview` is a static server over dist/ with no
+# watch/HMR — if we skip the build, it happily serves whatever stale bundle is on disk.
+# The earlier mtime-gated check is a best-effort optimization; this is the guarantee.
+# On build failure the behavior is HONEST, not silent:
+#   - if a previous dist exists, we serve it but scream loudly (better than a dead
+#     frontend on a local workstation) so the operator knows the code is stale;
+#   - if there is NO dist at all, there is nothing to serve — we abort the launch.
+FRONTEND_CAN_SERVE=1
+vader_info "Building frontend (production) before serving..."
+if (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$FRONTEND_LOG_FILE" 2>&1); then
+    vader_success "Frontend build complete"
+elif [ -f "$FRONTEND_DIR/dist/index.html" ]; then
+    vader_error "Frontend build FAILED — serving the LAST-GOOD (stale) dist. Code is NOT current. Fix the build; see $FRONTEND_LOG_FILE"
+else
+    vader_error "Frontend build FAILED and no prior dist exists — cannot serve frontend. See $FRONTEND_LOG_FILE"
+    FRONTEND_CAN_SERVE=0
+fi
+
+if [ "$FRONTEND_CAN_SERVE" -eq 1 ]; then
+    vader_info "Launching frontend (production build) in background..."
+    nohup $NPM_CMD run preview -- --host --port=$VITE_PORT >> "$FRONTEND_LOG_FILE" 2>&1 &
+    FRONTEND_PID=$!
+    echo "$FRONTEND_PID" > "$SCRIPT_DIR/pids/frontend.pid"
+    sleep 3
+fi
+
+if [ "$FRONTEND_CAN_SERVE" -ne 1 ]; then
+    vader_warn "Frontend not launched (no servable dist). Backend continues; fix the build then re-run."
+elif ! kill -0 $FRONTEND_PID > /dev/null 2>&1; then
     vader_error "Frontend process exited unexpectedly. Check $FRONTEND_LOG_FILE."
     cd "$SCRIPT_DIR"
 else

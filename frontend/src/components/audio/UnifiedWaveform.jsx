@@ -106,16 +106,66 @@ const UnifiedWaveform = ({
     return () => cancelAnimationFrame(animationFrameRef.current);
   }, [mode, audioLevels, playbackLevels, isActive, mainColor, height, numBars, barGap, borderRadius]);
 
-  // Handle static file "placeholder" levels
+  // Decode the REAL audio file into an amplitude envelope via the WebAudio API.
+  // (Previously this drew a fake sin()+random() "aesthetic" waveform that showed
+  // bars unrelated to the actual audio — a placebo. Now we read the file.)
   useEffect(() => {
-    if (mode === "playback" && src) {
-      // For now, we generate a stable "aesthetic" waveform for the file
-      // In a later phase, we can use WebAudio API to decode the actual buffer
-      const fakeLevels = Array.from({ length: numBars }, (_, i) => 
-        0.1 + Math.abs(Math.sin(i * 0.2)) * 0.4 + Math.random() * 0.1
-      );
-      setPlaybackLevels(fakeLevels);
-    }
+    if (mode !== "playback" || !src) return;
+
+    let cancelled = false;
+    let audioCtx;
+
+    const decode = async () => {
+      try {
+        const resp = await fetch(src);
+        if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
+        const arrayBuf = await resp.arrayBuffer();
+
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) throw new Error("WebAudio API unavailable");
+        audioCtx = new Ctx();
+        // decodeAudioData is async/off the render thread — large files won't freeze UI.
+        const audioBuf = await audioCtx.decodeAudioData(arrayBuf);
+        if (cancelled) return;
+
+        // Downsample channel 0 into numBars RMS buckets = perceived loudness per slice.
+        const channel = audioBuf.getChannelData(0);
+        const block = Math.floor(channel.length / numBars) || 1;
+        const levels = new Array(numBars).fill(0);
+        for (let i = 0; i < numBars; i++) {
+          const start = i * block;
+          let sum = 0;
+          for (let j = 0; j < block; j++) {
+            const s = channel[start + j] || 0;
+            sum += s * s;
+          }
+          levels[i] = Math.sqrt(sum / block);
+        }
+        // Normalize to the tallest bucket so quiet files still render visibly.
+        const peak = Math.max(...levels, 0.0001);
+        const norm = levels.map((v) => Math.max(0.05, v / peak));
+        if (!cancelled) setPlaybackLevels(norm);
+      } catch (err) {
+        // Honest failure: a flat low baseline, NOT invented bars that would imply
+        // we analyzed audio we couldn't actually read.
+        if (!cancelled) {
+          console.warn("UnifiedWaveform: could not decode audio for", src, err);
+          setPlaybackLevels(new Array(numBars).fill(0.08));
+        }
+      } finally {
+        if (audioCtx && audioCtx.state !== "closed") {
+          try { await audioCtx.close(); } catch (_) { /* ignore */ }
+        }
+      }
+    };
+
+    decode();
+    return () => {
+      cancelled = true;
+      if (audioCtx && audioCtx.state !== "closed") {
+        try { audioCtx.close(); } catch (_) { /* ignore */ }
+      }
+    };
   }, [mode, src, numBars]);
 
   return (

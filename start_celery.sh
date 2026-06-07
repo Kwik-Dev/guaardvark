@@ -51,7 +51,16 @@ start_worker() {
 
   local pid=$!
   echo $pid > "$SCRIPT_DIR/pids/celery_${worker_name}.pid"
-  vader_success "Worker $worker_name started (PID: $pid)"
+  # nohup backgrounding only proves we launched it, not that it survived. Give it a
+  # moment and verify the process is actually alive (catches immediate crashes:
+  # bad broker URL, import error, port clash) before announcing success.
+  sleep 2
+  if kill -0 "$pid" 2>/dev/null; then
+    vader_success "Worker $worker_name started (PID: $pid)"
+  else
+    vader_error "Worker $worker_name FAILED to start (died immediately) — see $LOGS_DIR/celery_${worker_name}.log"
+    return 1
+  fi
 }
 
 start_beat() {
@@ -75,9 +84,17 @@ start_beat() {
     --logfile="$LOGS_DIR/celery_beat.log" \
     >> "$LOGS_DIR/celery_beat.log" 2>&1 &
 
-  # Beat writes its own pidfile via --pidfile; the $! here can race with
-  # that, so just log what we launched and trust beat to drop the file.
-  vader_success "Celery beat started (launcher PID: $!)"
+  # $! is the celery-beat process itself (nohup runs it directly, no subshell).
+  # Beat also drops its own --pidfile shortly after; that write can race, so we
+  # verify liveness via the PID we hold rather than trusting the file's existence.
+  local beat_pid=$!
+  sleep 2
+  if kill -0 "$beat_pid" 2>/dev/null; then
+    vader_success "Celery beat started (PID: $beat_pid)"
+  else
+    vader_error "Celery beat FAILED to start (died immediately: corrupt schedule? import error?) — see $LOGS_DIR/celery_beat.log"
+    return 1
+  fi
 }
 
 worker_count=$(check_workers)

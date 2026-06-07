@@ -508,22 +508,36 @@ def web_search():
 def search_status():
     try:
         web_enabled = get_web_access()
-        
+
+        # Probe the REAL building blocks — import + callable only, NO network I/O
+        # (a status poll must never hammer DuckDuckGo / weather APIs; see SSRF/DOS
+        # trap). Each of these is a module-level function in this file.
+        probes = {
+            "website_scraping": callable(globals().get("extract_website_content")),
+            "duckduckgo_search": callable(globals().get("perform_duckduckgo_search")),
+            "weather_api": callable(globals().get("get_weather_info")),
+        }
+
+        def _svc_state(code_ok):
+            if not code_ok:
+                return "unavailable"            # code path missing/broken
+            return "available" if web_enabled else "disabled_by_policy"
+
+        services = {name: _svc_state(ok) for name, ok in probes.items()}
+
+        # Capabilities reflect what can ACTUALLY run now: the code exists AND web
+        # access is enabled by policy. With web off, they're policy-disabled, not True.
         capabilities = {
-            "website_analysis": True,
-            "general_search": True,
-            "weather_lookup": True
+            "website_analysis": bool(web_enabled and probes["website_scraping"]),
+            "general_search": bool(web_enabled and probes["duckduckgo_search"]),
+            "weather_lookup": bool(web_enabled and probes["weather_api"]),
         }
-        
-        services = {
-            "website_scraping": "available",
-            "duckduckgo_search": "available",
-            "weather_api": "available"
-        }
-        
-        if capabilities["general_search"] and capabilities["website_analysis"]:
+
+        if not web_enabled:
+            service_status = "disabled_by_policy"
+        elif capabilities["general_search"] and capabilities["website_analysis"]:
             service_status = "operational"
-        elif capabilities["website_analysis"]:
+        elif capabilities["website_analysis"] or capabilities["general_search"]:
             service_status = "limited"
         else:
             service_status = "unavailable"

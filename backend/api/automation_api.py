@@ -102,12 +102,23 @@ def stop_browser():
         
         service = get_browser_service()
         _run_async(service.shutdown())
-        
+
+        # shutdown() best-effort-closes pages/context/browser and sets
+        # initialized=False, active_pages=0 only if it actually completed. Report
+        # success from the REAL post-state, not unconditionally.
+        state = service.get_state()
+        stopped = (not state.get("initialized")) and state.get("active_pages", 0) == 0
+        if stopped:
+            return jsonify({
+                "success": True,
+                "message": "Browser stopped",
+                "state": state
+            })
         return jsonify({
-            "success": True,
-            "message": "Browser stopped",
-            "state": service.get_state()
-        })
+            "success": False,
+            "error": "Browser did not fully stop",
+            "state": state
+        }), 500
         
     except Exception as e:
         logger.error(f"Error stopping browser: {e}")

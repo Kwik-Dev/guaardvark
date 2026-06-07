@@ -635,7 +635,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
           <Box sx={{ mt: 1, display: "flex", justifyContent: "flex-end" }}>
             <StatusChip
               source={message.source || "nephew"}
-              status="connected"
+              status="authored"
               label={message.badge}
               sx={{ height: 20, fontSize: "0.65rem" }}
             />

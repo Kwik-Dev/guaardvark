@@ -216,6 +216,11 @@ def adapt_unified_progress(event: dict[str, Any]) -> Job:
     """
     process_id = event.get("process_id") or event.get("job_id") or "unknown"
     process_type = event.get("process_type") or event.get("processType") or "processing"
+    # process_type can arrive as a ProcessType enum (from unified_progress_system).
+    # Coerce to its string value so the "outreach" comparison below actually matches
+    # AND it stays JSON-serializable in label/metadata — a raw enum here was 500-ing
+    # the whole GET /api/jobs response ("ProcessType is not JSON serializable").
+    process_type = getattr(process_type, "value", process_type)
     kind = JobKind.OUTREACH if process_type == "outreach" else JobKind.UNIFIED_PROGRESS
     native_id = process_id
     if kind == JobKind.OUTREACH and str(process_id).startswith("task_"):

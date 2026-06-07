@@ -56,6 +56,10 @@ const STATUS_MAP = {
   running: { color: "warning", icon: <ScheduleIcon fontSize="inherit" /> },
   enabled: { color: "success", icon: <CheckCircleIcon fontSize="inherit" /> },
   disabled: { color: "default", icon: <ErrorIcon fontSize="inherit" /> },
+  // Provenance, NOT liveness: marks WHO authored a (historical) message. Neutral
+  // styling, no green "connected" checkmark — the source icon/color carries identity.
+  // Use this for message/source badges instead of faking a live "connected" state.
+  authored: { color: "default", icon: null },
 };
 
 // Source-to-background color mapping for chip variants

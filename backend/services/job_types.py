@@ -60,6 +60,21 @@ class JobStatus(str, Enum):
         return self in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.PAUSED)
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursively coerce values json.dumps can't encode (enums -> .value,
+    datetimes -> isoformat) inside free-form structures like Job.metadata.
+    Keeps one collector's stray enum from 500-ing the whole /api/jobs response."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 @dataclass
 class Job:
     """The canonical wire format every consumer sees.
@@ -88,8 +103,13 @@ class Job:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Wire-format serialization. ISO datetimes; enum values, not enum repr."""
-        d = asdict(self)
+        """Wire-format serialization. ISO datetimes; enum values, not enum repr.
+
+        `metadata` is free-form, so defensively coerce any nested enum/datetime it
+        carries — a single unserializable extra from one collector must not 500 the
+        whole GET /api/jobs response (it has, twice: ProcessStatus then ProcessType).
+        """
+        d = _json_safe(asdict(self))
         d["kind"] = self.kind.value
         d["status"] = self.status.value
         if self.started_at is not None:

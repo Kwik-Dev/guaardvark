@@ -339,7 +339,12 @@ AGENT_DISPLAY_SCRIPT="$SCRIPT_DIR/scripts/start_agent_display.sh"
 if [ -x "$AGENT_DISPLAY_SCRIPT" ]; then
     vader_info "Stopping agent virtual display..."
     bash "$AGENT_DISPLAY_SCRIPT" stop 2>&1 | while read line; do vader_info "  $line"; done
-    vader_success "Agent virtual display stopped."
+    # PIPESTATUS[0] is the stop script's real exit code (the `while` is last in the pipe).
+    if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+        vader_success "Agent virtual display stopped."
+    else
+        vader_warn "Agent virtual display stop reported errors (exit ${PIPESTATUS[0]}). Check above."
+    fi
 fi
 
 # ── Stop enabled plugins (Discord bot, etc.) ──
@@ -357,8 +362,11 @@ for plugin_dir in "$SCRIPT_DIR"/plugins/*/; do
 
     if [ -f "$stop_script" ] && [ -f "$pid_file" ]; then
         vader_info "Stopping $plugin_name plugin..."
-        bash "$stop_script" 2>/dev/null
-        vader_success "$plugin_name stopped."
+        if bash "$stop_script" 2>/dev/null; then
+            vader_success "$plugin_name stopped."
+        else
+            vader_warn "$plugin_name stop script exited non-zero — may not have stopped cleanly."
+        fi
     elif [ -f "$pid_file" ]; then
         kill_and_cleanup "${plugin_name}_bot"
     fi

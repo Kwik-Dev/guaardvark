@@ -263,7 +263,10 @@ const FolderPropertiesModal = ({
               />
               {isRepository && folderData.repo_metadata && (
                 <Box sx={{ mt: 1, display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                  {folderData.repo_metadata.languages?.map((lang) => (
+                  {(Array.isArray(folderData.repo_metadata.languages)
+                    ? folderData.repo_metadata.languages
+                    : Object.keys(folderData.repo_metadata.languages || {})
+                  ).map((lang) => (
                     <Chip key={lang} label={lang} size="small" variant="outlined" />
                   ))}
                   {folderData.repo_metadata.frameworks?.map((fw) => (

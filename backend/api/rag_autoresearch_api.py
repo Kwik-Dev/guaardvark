@@ -19,7 +19,18 @@ def start_loop():
         return jsonify({"error": "Already running"}), 409
     max_exp = request.json.get("max_experiments", 0) if request.is_json else 0
     import threading
-    t = threading.Thread(target=svc.run_loop, kwargs={"max_experiments": max_exp}, daemon=True)
+    from flask import current_app
+
+    # run_loop touches the DB (corpus check, experiment logging) on every iteration,
+    # all of which needs a Flask app context. A bare thread has none, so capture the
+    # real app object here (inside the request context) and push it inside the thread.
+    app = current_app._get_current_object()
+
+    def _runner():
+        with app.app_context():
+            svc.run_loop(max_experiments=max_exp)
+
+    t = threading.Thread(target=_runner, daemon=True)
     t.start()
     return jsonify({"status": "started"})
 

@@ -23,13 +23,22 @@ MimeType=
 Keywords=AI;Assistant;LLM;Chat;
 EOF
 
-cp "$DESKTOP_FILE" "$INSTALLED_FILE"
+if ! cp "$DESKTOP_FILE" "$INSTALLED_FILE"; then
+    echo "ERROR: failed to copy desktop file to $INSTALLED_FILE" >&2
+    exit 1
+fi
 
-chmod +x "$SCRIPT_DIR/start.sh"
+if ! chmod +x "$SCRIPT_DIR/start.sh"; then
+    echo "ERROR: failed to chmod +x $SCRIPT_DIR/start.sh" >&2
+    exit 1
+fi
 
 if command -v update-desktop-database &> /dev/null; then
-    update-desktop-database "$INSTALL_DIR"
-    echo "Desktop database updated"
+    if update-desktop-database "$INSTALL_DIR"; then
+        echo "Desktop database updated"
+    else
+        echo "WARNING: update-desktop-database failed; launcher copied but menu may not refresh until next login" >&2
+    fi
 fi
 
 echo "Desktop launcher installed successfully!"

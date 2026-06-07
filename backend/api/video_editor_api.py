@@ -26,6 +26,8 @@ video_editor_bp = Blueprint("video_editor", __name__, url_prefix="/api/video-edi
 
 PLUGIN_URL = "http://127.0.0.1:8207"
 QUICK_TIMEOUT = 10        # /health, /status, /config, /jobs
+ANALYZE_TIMEOUT = 120     # /analyze — synchronous librosa pass; a few seconds for
+                          # a typical song, generous for long/large files.
 RENDER_TIMEOUT = 1200     # /beat-sync/render returns a job_id immediately,
                           # but a synchronous melt encode can take ~minutes;
                           # keep generous in case render_mp4=true is requested.
@@ -187,6 +189,19 @@ def get_job(job_id: str):
 
 
 # ---------- write-side --------------------------------------------------------
+
+@video_editor_bp.route("/analyze", methods=["POST"])
+def analyze_song_route():
+    """Analyze a song → tempo + beat_times + energy sections. Resolves a song document id."""
+    payload = flask_request.get_json(silent=True) or {}
+    if not payload.get("audio_path"):
+        doc_id = payload.pop("song_document_id", None) or payload.pop("audio_document_id", None)
+        resolved = _resolve_document(doc_id)
+        if resolved:
+            payload["audio_path"] = resolved
+    body, status_code = _proxy_post("/analyze", payload, timeout=ANALYZE_TIMEOUT)
+    return jsonify(body), status_code
+
 
 @video_editor_bp.route("/beat-sync/render", methods=["POST"])
 def beat_sync_render():
