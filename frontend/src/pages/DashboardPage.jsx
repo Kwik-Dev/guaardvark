@@ -439,15 +439,32 @@ const DashboardPage = () => {
   // ── Responsive reflow (scalars) ───────────────────────────────────────────
   // The grid uses a fixed COLS_COUNT (175) with a responsive pixel width, so on a
   // narrow viewport every card scales down proportionally — "two thin". Rather than
-  // shrink (or hide cards off the right edge), once a default card would drop below
-  // MIN_CARD_PX we re-pack the cards into a grid whose columns are always >=300px,
-  // wrapping into more rows (see repackLayout below). Only NORMAL mode reflows;
-  // the preset modes (compact/layered/modex) are intentional density views.
+  // shrink (or hide cards off the right edge), once a mode's target card would drop
+  // below MIN_CARD_PX we re-pack the cards into a grid whose columns are always
+  // >=300px, wrapping into more rows (see repackLayout below). Both card-grid modes
+  // reflow (normal AND compact); the bar modes (layered/modex) are intentional narrow
+  // strips and are left alone.
   const MIN_CARD_PX = 300;
-  const TARGET_CARD_PX = 320; // floor(width/this) cards per row keeps each >=~314px
-  const naturalCardPx = COLS_COUNT > 0 ? (cardGridW / COLS_COUNT) * gridWidth : 0;
-  const isNarrow = layoutMode === "normal" && naturalCardPx > 0 && naturalCardPx < MIN_CARD_PX;
-  const cardsPerRow = Math.max(1, Math.floor(gridWidth / TARGET_CARD_PX));
+  const reflowEligible = layoutMode === "normal" || layoutMode === "compact";
+  // RGL's real geometry: colWidth = (width - margin*(cols-1) - padding*2)/cols, and a
+  // card spanning `span` cols renders at colWidth*span + (span-1)*margin px. (colWidth
+  // can be "negative" with this many columns — it nets out positive once the in-card
+  // margins are added, which is exactly how RGL itself computes it.)
+  const colWidthPx =
+    COLS_COUNT > 0
+      ? (gridWidth - CARD_MARGIN_PX * (COLS_COUNT - 1) - CONTAINER_PADDING_PX * 2) / COLS_COUNT
+      : 0;
+  const cardPx = (span) => colWidthPx * span + Math.max(0, span - 1) * CARD_MARGIN_PX;
+  // A target card for the active mode (compact cards are ~0.71x normal). If a target
+  // card would render under MIN_CARD_PX at the current width, we re-pack.
+  const targetCols = layoutMode === "compact" ? Math.round(cardGridW * 0.71) : cardGridW;
+  const isNarrow = reflowEligible && gridWidth > 0 && cardPx(targetCols) < MIN_CARD_PX;
+  // Most cards per row whose column still renders >=300px (using RGL's real width).
+  let cardsPerRow = 1;
+  for (let n = 2; n <= 8; n++) {
+    if (cardPx(Math.floor(COLS_COUNT / n)) >= MIN_CARD_PX) cardsPerRow = n;
+    else break;
+  }
 
   // Use onDragStop/onResizeStop instead of onLayoutChange.
   // onLayoutChange fires on EVERY layout change including programmatic ones (toggle),
@@ -646,22 +663,25 @@ const DashboardPage = () => {
   const repackLayout = useCallback(
     (base) => {
       const ordered = [...base].sort((a, b) => (a.y - b.y) || (a.x - b.x));
-      const span = Math.max(cardMinGridW, Math.floor(COLS_COUNT / cardsPerRow));
+      // floor() keeps cardsPerRow*span <= COLS_COUNT (no overflow); the cardsPerRow
+      // loop already guarantees span*colWidth >= 300px.
+      const span = Math.floor(COLS_COUNT / cardsPerRow);
       const out = [];
       let y = 0;
       for (let i = 0; i < ordered.length; i += cardsPerRow) {
         const row = ordered.slice(i, i + cardsPerRow);
         const rowH = row.reduce((m, it) => Math.max(m, it.h || cardGridH), 0);
         // Lock drag/resize in the packed view — per-item flags override the
-        // grid-level isDraggable, so they must be cleared here too.
+        // grid-level isDraggable, so they must be cleared here too. minW:1 keeps
+        // RGL from clamping the packed width back up to a saved minW.
         row.forEach((it, c) =>
-          out.push({ ...it, x: c * span, y, w: span, h: it.h, isDraggable: false, isResizable: false }),
+          out.push({ ...it, x: c * span, y, w: span, h: it.h, minW: 1, isDraggable: false, isResizable: false }),
         );
         y += rowH;
       }
       return out;
     },
-    [cardsPerRow, COLS_COUNT, cardMinGridW, cardGridH],
+    [cardsPerRow, COLS_COUNT, cardGridH],
   );
 
   // What RGL actually renders: the packed view when narrow, the raw layout otherwise.
