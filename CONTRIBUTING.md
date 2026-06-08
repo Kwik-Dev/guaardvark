@@ -63,18 +63,20 @@ The startup script handles everything on first run — PostgreSQL, Redis, Python
 
 ```
 backend/           Flask app — API endpoints, services, models
-  api/             68 REST blueprint modules
-  services/        48 business logic modules
-  tools/           Agent-callable tools
+  api/             ~90+ API modules (auto-discovered via blueprint_discovery)
+  services/        Core business logic + guarded_code_service, plugin runner, etc.
+  tools/           ~70 tool classes (registered; policy-gated for MCP)
   tests/           Test suite
 frontend/          React/Vite app
-  src/pages/       31 page components
-  src/components/  129 UI components
-  src/stores/      Zustand state management
-cli/               Guaardvark CLI
-plugins/           GPU service plugins (Ollama, ComfyUI)
-scripts/           Utility and system scripts
+  src/pages/       ~38 page routes
+  src/components/  Many UI components (chat, agent, videoeditor, documents, swarm, etc.)
+  src/stores/      Zustand + contexts
+cli/               Guaardvark CLI (`llx` / PyPI `guaardvark`); 24 command modules
+plugins/           10+ GPU service plugins (each with plugin.json manifest)
+scripts/           Operator scripts, system-manager, dep_reconciler, etc.
 ```
+
+See also `AGENTS.md`, `CLAUDE.md`, and `GROK.md` (in root) for project orientation, self-coding rules, and how AI agents are expected to work in this repo.
 
 ### Running Tests
 

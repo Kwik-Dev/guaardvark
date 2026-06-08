@@ -4,70 +4,72 @@
 
 # Guaardvark
 
-**Version 2.5.4** · [guaardvark.com](https://guaardvark.com)
+**See the [VERSION](VERSION) file for the current release** · [guaardvark.com](https://guaardvark.com)
 
-The self-hosted AI workstation. Autonomous agents that see your screen and control your apps. A three-tier neural routing engine. Parallel agent swarms across isolated git worktrees. Video generation, image upscaling to 4K/8K, RAG over your documents, voice interface, and a 70+ tool execution engine — all running locally on your hardware. Your machine. Your data. Your rules.
+The self-hosted, offline-first AI workstation. Autonomous agents that see a real virtual desktop and control apps. A three-tier neural router (AgentBrain). Parallel coding agent swarms in isolated git worktrees. Local video (Wan 2.2, CogVideoX), 4K/8K upscaling, full-song music + neural voice, RAG over your documents, voice chat, and a 70+ tool engine — everything on your hardware. Your machine. Your data. Your rules.
 
-## What's included
+> **For the exhaustive feature list, models, surfaces, and plugin details, see [CAPABILITIES.md](CAPABILITIES.md).** This README focuses on the marquee experience, quick start, and what makes Guaardvark different.
 
-A full creative-professional AI workstation, all running locally:
+## Highlights (as of latest release)
 
-**Generation**
-- **Video (Text-to-Video, Image-to-Video)** — Wan 2.2, CogVideoX 2B/5B, SVD-XT. No workflow graph required: paste a list of prompts, pick a model and resolution, hit go. The queue handles the rest while you start the next batch.
-- **Audio Studio** — music generation (ACE-Step, full songs with vocals or instrumental), sound-effect lab (Stable Audio Open), neural voice (Chatterbox + Kokoro), and 6 Piper voice profiles out of the box.
-- **Voice Cloning** — gated behind an explicit consent prompt before any clone is created or used.
-- **Image generation** — Stable Diffusion via Diffusers with batch queue, face restoration, anatomy and detail controls.
-- **Image + Video Upscaling** — 4K and 8K via HAT-L, RealESRGAN family, NMKD-Superscale, Foolhardy Remacri. Two-pass mode for maximum quality. Frame-by-frame video processing.
-- **Batch CSV Generator** — generate unique web pages, post content, or structured data from a CSV using your indexed knowledge base as ground truth. Marketing copy, product pages, unique-content campaigns at scale.
-- **File Generation** — code, text, docs, images, video, audio in one queue.
+- **Video & Audio Production** — Wan 2.2 (T2V + I2V), CogVideoX, SVD; ACE-Step full-song generation with LLM tag polish; Chatterbox/Kokoro neural voice + Piper; explicit consent-gated voice cloning; frame-by-frame 4K/8K upscaling.
+- **AgentBrain + Screen Agents** — Reflex/Instinct/Deliberation routing. Agents drive a real Ubuntu/XFCE desktop on a virtual display (`:99`), see with vision models (Gemma4 native `box_2d`), use closed-loop servo targeting, and stream per-step reasoning.
+- **Swarm Orchestrator & Film Crew** — Up to 20 parallel agents in isolated git worktrees with dependency-aware merging. Five-role production pipeline (Screenwriter → Casting (LoRAs) → Cinematographer → Storyboard → Editor).
+- **Self-Improvement & Safety** — Scheduled/reactive/directed bug detection + agent fixes with verification. Optional "Uncle Claude" (Anthropic) guardian review + codebase lock + Pending Fixes queue. Cross-machine learning via Interconnector.
+- **MCP (both directions)** — Stdio MCP server with default-deny policy (desktop/agent/system/browser tools hidden by default). Exposes dozens of tools + read-only output resources. Also calls external MCP servers.
+- **Supervised Outreach** — Draft + grade + human-approve pipeline for Reddit (fully wired), Discord/Twitter/Facebook (in flight). Persona, cadence gates, full audit log, kill switch.
+- **RAG + Code Intelligence** — Hybrid retrieval, AST-aware code chunking, per-project indexes, repo dependency graphs, `get_repository_map` / `read_ast_node` tools, System Mapper constellation view.
+- **GPU Orchestration** — System Resource Orchestrator arbitrates VRAM across plugins (Ollama, ComfyUI, Audio Foundry, etc.). CPU offload, predictive preload, conflict detection.
 
-**Editing**
-- **Video Editor** — Shotcut-lite timeline with three lanes (video / text / audio), drag-and-drop from the media library, real text overlay rendering via ffmpeg, visual trim sliders, keyboard shortcuts, one-step undo.
-- **Video Text Overlay** — standalone tool for the simpler one-off case.
+---
 
-**Agents & Automation**
-- **Autonomous screen agents** — agents see a real virtual desktop (Xvfb :99), move the mouse, click, type, navigate browsers, and verify their own actions.
-- **AgentBrain** — three-tier neural routing: Reflex (<100ms), Instinct (1–3s), Deliberation (5–30s).
-- **Agent Training System** — visual hand-eye-coordination teaching: bracket a session with Begin/End Lesson, walk the agent through a flow with thumbs-up pearls, the system distills a structured replayable lesson with parameterized steps.
-- **Agent Memory + Learning** — system-message persistent knowledge that survives reboots, recipe induction from successful tasks (Agent Workflow Memory pattern), vision-actionable knowledge with no cached pixel coordinates.
-- **Agent Swarms** — up to 20 parallel coding agents, each in an isolated git worktree on its own branch. Dependency-ordered merging. Flight Mode (fully offline). Backends: Claude Code, Cline/OpenClaw via local Ollama.
-- **Agents · Agent Tools · Virtual Agent Screen** — explorable surfaces for each capability, with a draggable VNC viewer that works on any page.
-- **Voice Chat** — Whisper.cpp transcribes, the agent thinks, Piper speaks. Toggle with `/voice`.
-- **Outreach System** — supervised AI for social-media engagement (Reddit, Discord, Twitter/X, Facebook) grounded in your indexed knowledge. Full detail below.
-- **Self-Improvement** — detects test failures, dispatches an agent to read the offending code and fix it, verifies, broadcasts to other instances. Optional Anthropic-API guardian review.
-- **Auto Researcher** — autonomous RAG-pipeline optimizer that experiments with parameters, keeps wins, reverts losses.
+## Marquee Capabilities
 
-**Workflow Surfaces**
-- **File Manager** — drag from your real desktop into the in-app File Manager. Color-code files, copy & paste, drag-and-drop reorganize. Folder / List / Media views. Right-click menus (copy, paste, delete, recursive index). Files attach to clients, projects, websites, notes, or code repos.
-- **Notes Manager** · **Media Manager** · **Project Management** · **Client Management** · **Websites Management** — consistent grid+detail UI for the working surfaces a small business actually uses. Cross-linked: documents attach to projects attach to clients attach to websites.
-- **Dashboard** — live status grid: model health, GPU usage, RAG state, agent activity, plugin states.
-- **Code Editor** — Monaco-based IDE with right-click "explain", "fix", "generate" via the AI assistant.
-- **Code Analyzer · Code Repos** — repo-level understanding and per-repo indexing.
-- **Task Scheduler** — cron-style scheduling for any agent task or generation job.
-- **Rules & Prompts** — import/export rules and prompts as a portable bundle.
+**Generation & Editing (all local, no cloud APIs)**
+- Text-to-Video / Image-to-Video (Wan 2.2 14B MoE, CogVideoX 2B/5B, SVD-XT) with batch queues, quality tiers, frame interpolation, prompt enhancement, and one-click jump to ComfyUI for custom workflows.
+- Audio Studio (Audio Foundry plugin): ACE-Step 3.5B music (vocals or instrumental, Suno-style chips + LLM polish), Stable Audio Open FX/ambience, Chatterbox + Kokoro neural TTS, Piper fallback, consent-gated voice cloning.
+- Image gen (Stable Diffusion + batch + face/anatomy controls) + powerful 4K/8K GPU upscaling (Real-ESRGAN family, HAT-L, NMKD, Foolhardy, two-pass, video frame-by-frame).
+- Built-in Video Editor (Shotcut-lite 3-lane timeline: video/text/audio, real `ffmpeg drawtext` overlays, drag-and-drop from media library, visual trims, undo, keyboard shortcuts).
 
-**Integration**
-- **ComfyUI Backend** — managed as a plugin, used as the execution layer for advanced video pipelines.
-- **WordPress Connectivity** — push generated content directly into a WordPress site via a companion plugin. Functional today; ships with security disclaimers and a finishing-pass on the roadmap before the plugin moves out of beta.
+**Agents, Automation & Swarms**
+- AgentBrain three-tier router (Reflex <100 ms pattern match, Instinct single-shot, Deliberation full ReACT).
+- Real-desktop screen agents (Xvfb + XFCE `:99`, Gemma4 vision + closed-loop servo, 45+ deterministic recipes, live per-iteration reasoning stream in chat, draggable VNC viewer everywhere).
+- Swarm: parallel agents in isolated git worktrees (Claude Code or fully local Cline/OpenClaw via Ollama), Flight Mode (offline), dependency-ordered merge, cost tracking, up to 20 concurrent.
+- Film Crew: 5 specialized agents that turn a logline into a finished video (script → casting with LoRAs → shots → keyframes → edit).
+- Self-improvement engine (test → agent fix → verify → broadcast) with guardian review and kill switches.
+- Supervised social outreach (Reddit fully working; others drafting+review ready) with persona, grading, cadence, audit, and global kill switch.
+- MCP server + client integration (Claude Desktop, Cursor, etc.).
 
-**Platform**
-- **Plugin System** — every heavy capability (ComfyUI, Vision Pipeline, Audio Foundry, Upscaling, Discord, Swarm) is a managed plugin with health monitoring, port-based orphan cleanup, and a **System Resource Orchestrator** that arbitrates VRAM between them so two big models don't fight for the GPU.
-- **CPU Offload** for models that don't fit in VRAM.
-- **GPU + CPU Resource Monitor** — live, always visible.
-- **Interconnector / Cluster** — install Guaardvark on multiple local machines, master/client architecture with approval workflows, automatic load balancing across the fleet, hardware profile auto-detection.
-- **Model Management** — download voice/video/image models from HuggingFace with progress tracking. Quick-switch between local Ollama models. Quick-switch embedding models grouped by parameter count.
-- **Backup & Restore** — granular or full system backup, schema-migration-aware restore, cross-version compatible.
-- **Advanced Settings** — debugging toggles, RAG knobs, cache controls, diagnostic tools, test runners, self-improvement controls — exposed in the UI, not hidden behind a "config files only" wall.
+**Knowledge, Code & Workflow**
+- Strong RAG (hybrid BM25 + vector, AST code chunking, entity extraction, RAG Autoresearch, per-project isolation).
+- Monaco code editor + Code Analyzer + per-repo indexing + dependency graphs + System Mapper (constellation view of the whole codebase).
+- Full desktop-grade file/project/client/website/notes/media management with cross-links and recursive indexing.
+- Task scheduler (Celery beat), Rules & Prompts (portable bundles), Interconnector for multi-machine clusters (master/client, approval gates, learning broadcast).
+- 10+ managed plugins with health checks, port orphan cleanup, and a real GPU Memory Orchestrator.
 
-<p align="center">
-  <img src="docs/screenshots/guaardvark-demo.gif" alt="Guaardvark Demo" width="100%">
-</p>
+**Platform & Ops**
+- Everything stays on your machine by default. Flight Mode is real and end-to-end tested.
+- Plugin system + resource orchestrator so big models don't fight for VRAM.
+- Backup/restore (granular or full, schema-migration aware), advanced settings surfaced in UI, live GPU/CPU monitoring.
+- CLI (`llx` / PyPI `guaardvark`), browser UI, and MCP.
 
-<p align="center">
-  <img src="docs/screenshots/swarm-demo.gif" alt="Agent Swarm — parallel Claude Code agents across isolated git worktrees" width="100%">
-  <br>
-  <em>Agent Swarm — parse a plan, spawn parallel agents in isolated git worktrees, resolve the dependency DAG, merge back to main.</em>
-</p>
+See [CAPABILITIES.md](CAPABILITIES.md) for the complete enumerated list (models, exact tool counts, plugin manifests, page surfaces, etc.).
+
+---
+
+## Why local?
+
+|                          | Cloud platforms                            | **Guaardvark**                            |
+|--------------------------|--------------------------------------------|-------------------------------------------|
+| **Where your data lives** | Their servers                              | Your machine. Period.                     |
+| **Per-token / per-minute fees** | Always on the meter                  | Free. Generate all night if you want.     |
+| **Content policy**        | Their rules                                | Your rules.                               |
+| **Custom models / LoRAs** | Whatever they expose                       | Any GGUF, any LoRA, any embedding model   |
+| **Works offline**         | No                                         | Yes. Flight Mode tested end-to-end.       |
+| **Agents drive a real desktop** | Sandboxed browsers                   | Real Ubuntu/XFCE on your hardware         |
+| **Swarms of parallel agents** | Per-task billing scales nastily        | 20 agents in parallel; only cost is power |
+| **Multi-machine clusters** | "Talk to sales"                            | Built-in. Master/client, approval gates   |
+| **Lock-in**               | Migrate at your own risk                   | It's your computer. Move it whenever.     |
 
 ### Why local?
 
@@ -102,17 +104,26 @@ Every frame generated on a single desktop GPU. No cloud. No stock footage. No AP
 
 [![Gotham Rising — AI-Generated Short Film](https://img.youtube.com/vi/8MdtM3HurJo/maxresdefault.jpg)](https://www.youtube.com/watch?v=8MdtM3HurJo)
 
+> Full visual gallery (dashboard, video generator, swarm planner, agents, plugins, media library, etc.) lives on [guaardvark.com](https://guaardvark.com) and in the repo under `docs/local-workspace-only/screenshots/` (operator notes; a small curated public subset may be added to `docs/screenshots/` for GitHub rendering).
+
 ---
 
 ## What Makes This Different
 
+### Security, Privacy & Local Guarantees
+
+- Everything runs locally by default. No telemetry or cloud phoning home unless you explicitly enable the Interconnector (master/client with approval workflows).
+- **Flight Mode** — fully offline operation with automatic network detection and local-model fallback. Swarm and agent tasks have been validated end-to-end without internet.
+- **Self-improvement safety** — three modes (Scheduled / Reactive / Directed). Every proposed code change can be reviewed by "Uncle Claude" (Anthropic API guardian) before application. Codebase lock toggle + Pending Fixes queue for human staging/approval. Fixes can be broadcast to connected family members.
+- **MCP server** uses a strong default-deny policy (`backend/mcp/config.py`): desktop control, agent execution, system/shell, browser automation, and test execution tools are hidden by default. Only safer tools + read-only `guaardvark://outputs/` resources are exposed unless you explicitly allowlist.
+- **Outreach** is supervised by default (drafts queue; nothing posts without explicit Approve). Kill switch, per-platform cadence limits, full JSONL audit trail, and persona enforcement.
+- **Voice cloning** requires an explicit consent prompt. Reference clips stay under your control.
+- **WordPress connectivity** ships with security disclaimers and is treated as opt-in/beta until a final hardening pass.
+- Your data, models, LoRAs, and generated media never leave the machine unless you choose to push them.
+
 ### AgentBrain — Three-Tier Neural Routing
 
 Every message is routed through a three-tier decision engine that picks the fastest path to the right answer. Reflexes fire in under a millisecond. Instinct handles single-shot requests in one LLM call. Deliberation spins up a full ReACT reasoning loop when the problem demands it.
-
-| Agent Control | Agent Tools |
-|:-:|:-:|
-| ![Agents](docs/screenshots/agents-page.png) | ![Tools](docs/screenshots/agent-tools-page.png) |
 
 | Tier | Name | Latency | LLM Calls | When It Fires |
 |------|------|---------|-----------|---------------|
@@ -120,10 +131,9 @@ Every message is routed through a three-tier decision engine that picks the fast
 | 2 | **Instinct** | 1–3s | 1 | Single-shot questions, web searches, image generation, vision tasks |
 | 3 | **Deliberation** | 5–30s | 3–10 | Multi-step research, analysis chains, complex agent tasks |
 
-- **Automatic escalation** — Tier 2 can signal complexity and hand off to Tier 3 mid-response
-- **Agent-screen gating** — when the virtual screen isn't being viewed, vision models fall through to the normal ReACT loop with the full tool registry instead of always trying to drive the screen. Click and type tools only appear when a user actually has the agent screen open.
-- **BrainState singleton** — pre-computes tool schemas, model capabilities, system prompts, and reflex tables at startup so routing adds zero overhead
-- **Warm-up** — background thread loads the active model into VRAM before the first request arrives
+- **Automatic escalation** — Tier 2 can signal complexity and hand off to Tier 3 mid-response.
+- **Agent-screen gating** — vision/desktop tools are only in scope when the virtual screen is active.
+- **BrainState singleton** + warm-up thread for zero-overhead routing and fast first-token times.
 
 ### Autonomous Screen Agents
 
@@ -174,18 +184,15 @@ The **LoRA Trainer plugin** ships alongside — train character/environment/prop
 
 ### Model Context Protocol (MCP)
 
-Guaardvark speaks MCP both ways — exposes its tools to any MCP client (Claude Desktop, Cursor, IDE plugins) and calls tools from any MCP server you connect.
+Guaardvark speaks MCP both ways — exposes its tools to any MCP client (Claude Desktop, Cursor, IDE plugins, etc.) and can call tools from connected external MCP servers.
 
-- **As a server** — `backend/mcp/` runs a stdio MCP server. **23 native tools** exposed (chat, RAG, files, image generation, agent control) plus **58 output resources** (file contents, generated images, search results) accessible via MCP's resource protocol. Tested against Claude Desktop end-to-end.
-- **As a client** — `mcp_connect` registers external MCP servers at runtime, `mcp_execute` calls any tool on a connected server, and the live tool inventory surfaces in the chat LLM's tool list so models can pick MCP tools by name without going through `mcp_execute`.
+- **As a server** — `python -m backend.mcp` (stdio). Strong default-deny policy (see `backend/mcp/config.py`): categories such as `desktop`, `agent_control`, `system`, `browser`, `test_execution`, and `mcp` meta-tools are denied by default. Dozens of safer tools (chat, RAG, files, generation, memory, etc.) plus read-only `guaardvark://outputs/` resources are exposed. Fully tested with Claude Desktop and similar clients.
+- **As a client** — `mcp_connect` / `mcp_execute` + live tool inventory so the chat LLM can discover and use tools from other MCP servers by name.
+- Audit logging, timeouts, and circuit breakers are built in.
 
 ### Video Generation Pipeline
 
 State-of-the-art video generation running entirely on your GPU. No cloud APIs, no per-minute billing, no content restrictions.
-
-| Video Generation | Plugin System |
-|:-:|:-:|
-| ![Video Gen](docs/screenshots/video-generation-page.png) | ![Plugins](docs/screenshots/plugins-page.png) |
 
 | Model | Type | Max Duration | Native Resolution | VRAM |
 |-------|------|-------------|-------------------|------|
@@ -255,10 +262,6 @@ Upscale images and video frames to 4K (3840px) or 8K (7680px) resolution using G
 
 Chat grounded in your documents. Upload files, build a knowledge base, and ask questions. The AI reads and understands your content — not just keyword matching.
 
-| Chat with Agent Screen | Agent YouTube Search |
-|:-:|:-:|
-| ![Chat](docs/screenshots/chat-agent-youtube-search.png) | ![Agent YouTube](docs/screenshots/chat-agent-youtube-search-wide.png) |
-
 - **Hybrid retrieval** — BM25 keyword + vector semantic search combined
 - **Smart chunking** — code files get AST-informed chunking, prose gets semantic splitting
 - **Multiple embedding models** — switch between lightweight (300M) and high-quality (4B+) via UI
@@ -307,169 +310,9 @@ A supervised, auditable framework for drafting and posting authentic comments on
 
 ---
 
-## Full Feature Set
+**For the complete, enumerated reference** (every tool category, exact model support, plugin manifests, page routes, RAG details, self-improvement internals, vision pipeline, dependency reconciler, backup format, advanced settings, etc.) see **[CAPABILITIES.md](CAPABILITIES.md)**.
 
-### AI & Chat
-- **60+ registered tools** across 13 categories — web search, direct URL fetch, browser automation, code execution, file management, media control, desktop automation, MCP integration, knowledge base, image generation, agent control, memory management
-- **`fetch_url` primitive** — single-purpose URL fetcher separate from `web_search`, so the model picks the right tool on the first try when you name a specific domain
-- **9 specialized agents** — code assistant, content creator, research agent, browser automation, vision control, and more
-- **ReACT agent loop** — iterative reasoning, action, observation with tool execution guard and circuit breaker
-- **Streaming responses** via Socket.IO with conversational fast-path (~700ms)
-- **Tool call transparency** — collapsible tool call cards showing parameters, results, timing, and success/error status inline in chat
-- **Agent mode toggle** — `/agent` flips the session into screen-control mode (every message becomes a task); `/chat` (or `/exit`) flips back. Sticky per session, mode stored server-side, orange chip in the UI shows when active.
-- **Per-iteration thinking display** — screen-control tasks stream every Think step (action, target, full reasoning) into chat as the loop runs. Persists in history.
-- Runtime model switching — swap LLMs through the UI, GPU memory managed automatically
-- Voice interface — Whisper.cpp STT + Piper TTS with narration and voiceover
-- Session history with search, grouping, previews, and persistent tool call data
-- **Persistent memory** — save facts, instructions, and context across sessions with automatic LLM injection
-- **Uncle Claude escalation** — optional Anthropic API integration for problems that need a bigger model, with monthly token budgeting
-
-### Image Generation
-- Stable Diffusion via Diffusers library — batch queue with auto-registration to the file system
-- Face restoration, anatomy enhancement, and detail controls
-- Image library with thumbnail grid, lightbox preview, keyboard navigation, batch operations
-- **Bates-numbered output** — generated files auto-registered with timestamped sequential naming
-
-### Audio Studio
-- ACE-Step v1 (3.5B) for full-song music generation with vocals or instrumental-only
-- Stable Audio Open for FX and short ambient pieces
-- Chatterbox + Kokoro neural TTS, plus 6 Piper voice profiles
-- Voice cloning with explicit consent gating
-- Suno-style chip-prompt UX with optional LLM "Polish" pass for ACE-Step's tag vocabulary
-- In-app audio player modal — generated audio doesn't trigger downloads
-- Suno bulk-export landing in the local DocumentsPage
-
-### Video Editor
-- Three-lane timeline (video / text / audio) with drag-and-drop from the Media Library
-- Real text overlay rendering via `ffmpeg drawtext` (9 positions, outline + box options)
-- Visual trim slider, keyboard shortcuts, one-step undo
-- Tabbed icon-grid library with counts in tab labels
-- JobOperationGate hook so renders coordinate VRAM with other GPU-heavy jobs
-
-### Outreach System
-- Reddit / Discord / Twitter-X / Facebook drafting + queueing
-- Reddit posting fully wired; other platforms in flight
-- Three-layer safety (kill switch + supervised mode + cadence gates)
-- Persona system + audit log + on-demand passes
-- Indexed-knowledge citations grounded in your documents
-
-### Voice + Voice Chat
-- Whisper.cpp for speech-to-text, Piper for text-to-speech
-- Hands-free conversation mode toggled by `/voice`
-- Narration buttons on assistant responses for any message
-- Continuous voice chat with VAD-driven turn-taking
-
-### Agent & Code Tools
-- **Monaco code editor** — built-in IDE with AI-powered explain, fix, and generate via right-click context menu
-- **Code Analyzer** — repo-level static analysis surfaced in the editor
-- **Code Repos** — per-repo indexing and cross-repo search
-- **Self-demo system** — automated feature tour with screen recording and TTS narration
-- **Media viewer** — inline document and media previews with thumbnail strip navigation
-
-### File & Document Management
-- Desktop-style UI — draggable folder icons, resizable windows, right-click context menus
-- Drag from your real desktop into the in-app File Manager (preserves folder structure)
-- Color-code files, copy/paste, drag-and-drop reorganize
-- Folder / List / Media views; switch on the fly
-- Right-click menus: copy, paste, delete, recursive-index
-- Files attach to clients, projects, websites, notes, or code repos for organized retrieval
-- **Notes Manager** · **Media Manager** — first-class surfaces alongside Documents
-
-### Project · Client · Website Management
-- Grid+detail UI for each — consistent shape, easy to learn one and know all three
-- Cross-linked: documents attach to projects, projects attach to clients, clients attach to websites
-- Per-project knowledge base isolation for RAG
-- Per-website settings carry through to outreach personas and WordPress integration
-
-### WordPress Connectivity
-- Companion plugin pushes generated content (text, images, video, audio) directly into a WordPress site
-- Functional today; ships with explicit security disclaimers
-- Roadmap: finishing pass + security hardening before the plugin moves out of beta
-- Treat as opt-in for now — read the disclaimer before deploying to a production site
-
-### Task Scheduler
-- Cron-style scheduling for any agent task or generation job
-- Manage from the Tasks page; live status mirrored to the Activity feed
-- Backed by Celery beat with persistent job history that survives restarts
-
-### Rules & Prompts
-- System prompts and behavior rules stored as portable bundles
-- Import/export to share between machines or back up before risky tweaks
-- COMMAND_RULE entries surface as custom slash commands in the chat input
-
-### Multi-Machine Sync (Interconnector)
-- Connect multiple Guaardvark instances into a family that shares code, learnings, and model configs
-- Master/client architecture with approval workflows and pre-sync backups
-- Hardware profile auto-detection on each node
-- Routing-table builder distributes workloads across the fleet by capability
-
-### Plugin System
-- **Managed plugins** with health monitoring, port-based orphan cleanup, and auto-restore on restart
-- **Manifest vs. runtime-state separation** — `plugin.json` is a static manifest (same bytes on every machine); live state (enabled, auto_start, config) lives in `data/plugin_state.json` (gitignored). Toggling from the UI writes only to runtime state — the manifest never mutates
-- **Available plugins**: Ollama, ComfyUI, Audio Foundry, Vision Pipeline, Upscaling, Swarm Orchestrator, LoRA Trainer, Discord Bot, GPU Embedding, Training
-- **System Resource Orchestrator** arbitrates VRAM between plugins so they don't trample each other
-- **CPU Offload** for models that don't fit in VRAM
-- Live GPU + CPU resource monitor, persistent across the UI
-- Model download management from HuggingFace with progress tracking — voice, video, image models
-
-### Vision Pipeline
-- Real-time frame analysis via Ollama vision models with adaptive FPS throttling
-- Two-layer change detection — perceptual hash + semantic analysis
-- Local camera capture with device enumeration and stream management
-- Context buffer with sliding window and compression
-
-### Self-Improvement & Research
-- **Self-Improvement Engine** — detect → fix → verify → broadcast loop with three modes (Scheduled, Reactive, Directed)
-- **Auto Researcher** — autonomous RAG-pipeline optimizer that experiments with parameters, keeps wins, reverts losses
-- **Pending Fixes queue** — stage, review, approve, or reject proposed code changes
-- **Cross-machine learning** — fixes propagate to all connected Interconnector nodes
-
-### System Mapper
-- **Constellation view** — d3-force-driven visualization of the entire codebase (700+ nodes in the current repo)
-- **Dependency + reachability analysis** — Python import graph + JS module graph + cross-language references, plus dead-code detection for files imported but never executed
-- **Lifecycle tagging** — every file gets `live` / `dormant` / `stale` based on usage patterns; drives ongoing cleanup work
-- **AI-navigable** — agents use the map to understand the codebase before making changes
-
-### Dependency Reconciler
-- **Branch-aware sync** — on `git checkout`, inspects venv / requirements.txt / Alembic head / package.json and re-syncs only what differs between branches
-- **Single-master migrations** — `schema_sync.py` is the authoritative schema source; saves you from "I just switched branches and now nothing works"
-- **TDD-driven** — 87 tests cover branch switches, partial states, and rollback scenarios
-
-### Backup & Restore
-- Granular per-area backups (data only, full, code) or single-shot full system
-- Schema-migration-aware restore so an older backup can come back to a newer schema cleanly
-- Cross-version compatible
-
-### Advanced Settings
-- Debugging toggles, RAG knobs, cache controls, diagnostic tools, test runners, self-improvement controls
-- Surfaced in the UI, not hidden behind a "config files only" wall
-- Sectioned by area (Chat, RAG, Memory, Voice, Agents, Plugins, etc.) for quick navigation
-
-### System
-- Dashboard with live status cards for model health, GPU, self-improvement, RAG, plugins, agent activity
-- Celery background task system with live progress
-- Six built-in themes
-- Container support with Containerfile for isolated testing
-
----
-
-## Screenshots
-
-| Dashboard | Code Editor |
-|:-:|:-:|
-| ![Dashboard](docs/screenshots/dashboard-page.png) | ![Code Editor](docs/screenshots/code-editor-page.png) |
-
-| Media Library | Video Generation |
-|:-:|:-:|
-| ![Media](docs/screenshots/media-library-page.png) | ![Video Gen](docs/screenshots/video-generation-page.png) |
-
-| Plugins | Swarm Plan Editor |
-|:-:|:-:|
-| ![Plugins](docs/screenshots/plugins-page.png) | ![Swarm](docs/screenshots/swarm-plan-editor.png) |
-
-| Settings — RAG | Settings — Memory |
-|:-:|:-:|
-| ![Settings RAG](docs/screenshots/settings-page-rag.png) | ![Settings Memory](docs/screenshots/settings-page-memory.png) |
+The sections above cover the experience and differentiators. The rest of this README focuses on getting started, requirements, architecture notes, operations, and contributing.
 
 ---
 
@@ -488,7 +331,7 @@ cd guaardvark
 
 First run handles everything: Python venv, Node dependencies, PostgreSQL, Redis, Ollama, Whisper.cpp, database migrations, frontend build, and all services. Requires your system password once for PostgreSQL setup.
 
-| Service | URL |
+| Service | URL (defaults; see `.env` for `VITE_PORT` / `FLASK_PORT`) |
 |---------|-----|
 | Web UI | http://localhost:5173 |
 | API | http://localhost:5000 |
@@ -514,17 +357,17 @@ The CLI connects to a running Guaardvark instance or launches a lightweight embe
 
 ## CLI
 
-41 commands with tab completion and fuzzy matching. Install from PyPI or use the built-in REPL.
+~40 commands/subcommands (24 command modules) with tab completion and fuzzy matching. The PyPI package is `guaardvark`; the command is often `llx` when working from the source tree (`cd cli && pip install -e .`).
 
 ```bash
-guaardvark                              # Interactive REPL
+guaardvark                              # Interactive REPL (or `llx`)
 guaardvark status                       # System dashboard
 guaardvark chat "explain this codebase" # Chat with RAG context
 guaardvark search "query"               # Semantic search
 guaardvark files upload report.pdf      # Upload and index
 ```
 
-### REPL Slash Commands
+### REPL Slash Commands (examples)
 
 ```
 /imagine <prompt>       Generate an image from text
@@ -568,39 +411,72 @@ guaardvark files upload report.pdf      # Upload and index
 
 ---
 
-## Architecture
+## Architecture (simplified)
 
 ```
 Browser / CLI (PyPI: guaardvark) / MCP Client (Claude Desktop, Cursor, etc.)
     | HTTP + WebSocket / stdio MCP
     v
-Flask (68+ REST blueprints + GraphQL + Socket.IO) · MCP Server (31 tools, read-only outputs resources)
+Flask (~90+ API modules, auto-discovered) + GraphQL + Socket.IO
     |
     +-- AgentBrain (3-tier routing: Reflex → Instinct → Deliberation)
     |
-Service Layer (48 modules)
-|-- Agent Executor (ReACT loop + 70+ tools + BrainState)
-|-- Screen Control (See-Think-Act-Verify + per-iteration reasoning stream)
-|-- RAG Pipeline (LlamaIndex + hybrid retrieval + Auto Researcher)
-|-- Self-Improvement Engine (detect → fix → verify → broadcast)
-|-- Generation Services (image, video, music, voice, content)
-|-- Swarm Orchestrator (parallel agents + git worktree isolation)
-|-- Film Crew (5-role production swarm + LoRA Trainer)
-|-- Servo Controller (closed-loop vision targeting + calibration)
-|-- Vision Pipeline (frame analysis + camera capture)
-|-- System Mapper (codebase constellation + dependency / reachability)
-|-- Dependency Reconciler (branch-aware venv / migration / npm sync)
-\-- Interconnector (multi-machine sync + cluster bridge)
+Service Layer (many modules; plugin sidecars for heavy GPU work)
+|-- Agent Executor (ReACT + ~70 tool classes + BrainState)
+|-- Screen Control (See-Think-Act-Verify + live reasoning stream)
+|-- RAG + Autoresearch + Entity extraction
+|-- Self-Improvement (detect/fix/verify/broadcast + guardian)
+|-- Generation (image/video/audio/voice/content)
+|-- Swarm + Film Crew (isolated worktrees + 5-role pipeline)
+|-- Servo + Vision Pipeline
+|-- System Mapper / Repo intelligence (AST dependency graphs)
+|-- GPU Memory Orchestrator + Plugin runner (CUDA sidecar safety)
+\-- Interconnector (multi-machine sync + cluster)
     |
 +---+---+---+---+---+
 v   v   v   v   v   v
-PostgreSQL  Redis  Ollama  Agent Display    ComfyUI
-            Celery         (Xvfb :99 + XFCE)
-                           x11vnc :5999
+PostgreSQL  Redis  Ollama  Agent Display (:99 + XFCE + x11vnc)  ComfyUI / Audio Foundry (plugins)
+            Celery
 ```
 
+**Notes:**
+- Many components (blueprints, tool registry, plugins) are discovered or declared at runtime.
+- Exact counts drift between releases; see source and CAPABILITIES.md.
+- `backend/mcp/config.py` controls the default-deny policy for the MCP server.
+
 **Frontend:** React 18 · Vite · Material-UI v5 · Zustand · Apollo Client · Monaco Editor · Socket.IO  
-**Models:** Gemma4 · Llama 3 · Moondream · Stable Diffusion · Wan 2.2 · CogVideoX · Real-ESRGAN · HAT
+**Core models & engines:** Gemma4 / Llama-family / Moondream (vision) · Stable Diffusion · Wan 2.2 / CogVideoX · ACE-Step / Chatterbox / Kokoro / Piper · Real-ESRGAN family + HAT · Whisper.cpp
+
+---
+
+## Roadmap (high-level signals)
+
+See the more detailed view in the project plans and CAPABILITIES for status.
+
+**Near term / in flight**
+- Polish + full platform support for supervised outreach (Discord, X, Facebook posting).
+- Stronger tier-gated memory and conversation context.
+- Continued video/music pipeline unification and Film Crew robustness.
+- Plugin GPU auto-orchestration (intent-driven start/stop based on route + VRAM).
+- Repo intelligence surfaces and more AST-precise agent tools.
+
+**Longer term / research**
+- Singing voice cloning (Applio-style) with consent + watermarking.
+- Cluster metrics + better multi-node UI bridge.
+- Video editor multi-clip + advanced timeline UX.
+- Embeddings-backed semantic memory recall (via the gpu_embedding plugin).
+
+**Not on the roadmap**
+- Cloud-by-default or SaaS-hosted primary experience. Local-first is the product.
+
+---
+
+## Release & Docs Maintenance (for contributors)
+
+- Version source of truth: root `VERSION` file. `backend/app.py`, the CLI, and setup.py read it. Avoid hard-coding the version string in README.md, CAPABILITIES.md, or README_zh.md.
+- On release: verify public screenshots (only `og-image.jpg` is committed to `docs/screenshots/`; other assets live in `docs/local-workspace-only/screenshots/`), spot-check counts (blueprints via discovery, exposed MCP tools, plugin manifests, CLI catalog), and make sure the "See VERSION" line and CAPABILITIES link are current.
+- `npm run build` in `frontend/` before trusting JSX-related docs or claiming UI completeness (the production Rollup build is strict).
+- AGENTS.md + CLAUDE.md + GROK.md are the orientation files for AI coding sessions in this workspace.
 
 ---
 
@@ -620,6 +496,8 @@ Star the repo if you find it interesting — it helps with visibility.
 
 We welcome contributions! See the [Contributing Guide](CONTRIBUTING.md) to get started.
 
+**For AI coding agents and heavy contributors:** read [AGENTS.md](AGENTS.md) (required reading order), [CLAUDE.md](CLAUDE.md), and [GROK.md](GROK.md). They document the self-coding chokepoint (`guarded_code_service.py::apply_exact_replacement`), operator preferences, dead-code conventions, and verification habits.
+
 Looking for something to work on? Check out issues labeled [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
 ---
@@ -629,5 +507,5 @@ Looking for something to work on? Check out issues labeled [`good first issue`](
 [MIT License](LICENSE) — Copyright (c) 2025-2026 Albenze, Inc.
 
 <p align="center">
-  <img src="docs/screenshots/guaardvark-mascot.png" alt="Guaardvark mascot" width="110" height="107">
+  <em>Guaardvark mascot</em>
 </p>
