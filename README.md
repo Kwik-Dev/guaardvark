@@ -104,7 +104,7 @@ Every frame generated on a single desktop GPU. No cloud. No stock footage. No AP
 
 [![Gotham Rising — AI-Generated Short Film](https://img.youtube.com/vi/8MdtM3HurJo/maxresdefault.jpg)](https://www.youtube.com/watch?v=8MdtM3HurJo)
 
-> Full visual gallery (dashboard, video generator, swarm planner, agents, plugins, media library, etc.) lives on [guaardvark.com](https://guaardvark.com) and in the repo under `docs/local-workspace-only/screenshots/` (operator notes; a small curated public subset may be added to `docs/screenshots/` for GitHub rendering).
+> Full visual gallery (dashboard, video generator, swarm planner, agents, plugins, media library, etc.) is available on [guaardvark.com](https://guaardvark.com).
 
 ---
 
@@ -474,7 +474,7 @@ See the more detailed view in the project plans and CAPABILITIES for status.
 ## Release & Docs Maintenance (for contributors)
 
 - Version source of truth: root `VERSION` file. `backend/app.py`, the CLI, and setup.py read it. Avoid hard-coding the version string in README.md, CAPABILITIES.md, or README_zh.md.
-- On release: verify public screenshots (only `og-image.jpg` is committed to `docs/screenshots/`; other assets live in `docs/local-workspace-only/screenshots/`), spot-check counts (blueprints via discovery, exposed MCP tools, plugin manifests, CLI catalog), and make sure the "See VERSION" line and CAPABILITIES link are current.
+- On release: verify that public screenshots in `docs/screenshots/` are up to date, spot-check counts (blueprints via discovery, exposed MCP tools, plugin manifests, CLI catalog), and make sure the "See VERSION" line and CAPABILITIES link are current. Most visual assets live in a separate non-public directory.
 - `npm run build` in `frontend/` before trusting JSX-related docs or claiming UI completeness (the production Rollup build is strict).
 - AGENTS.md + CLAUDE.md + GROK.md are the orientation files for AI coding sessions in this workspace.
 
@@ -496,7 +496,7 @@ Star the repo if you find it interesting — it helps with visibility.
 
 We welcome contributions! See the [Contributing Guide](CONTRIBUTING.md) to get started.
 
-**For AI coding agents and heavy contributors:** read [AGENTS.md](AGENTS.md) (required reading order), [CLAUDE.md](CLAUDE.md), and [GROK.md](GROK.md). They document the self-coding chokepoint (`guarded_code_service.py::apply_exact_replacement`), operator preferences, dead-code conventions, and verification habits.
+**For AI coding agents and heavy contributors:** read [AGENTS.md](AGENTS.md) (required reading order), [CLAUDE.md](CLAUDE.md), and [GROK.md](GROK.md). They document the self-coding chokepoint (`guarded_code_service.py::apply_exact_replacement`), project conventions, dead-code handling, and verification habits.
 
 Looking for something to work on? Check out issues labeled [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
