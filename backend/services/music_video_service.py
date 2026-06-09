@@ -308,3 +308,106 @@ class MusicVideoService(PipelineService):
     # State-machine plumbing (advance_if_predecessor / fail_stage /
     # find_non_terminal / dispatch_agent / resume_all / gpu_stage) is inherited
     # from PipelineService, driven by the class attributes set above.
+
+    # --- Plan / Director helpers (pre-approval editing & re-planning) --------
+
+    def update_clip_prompts(self, mv_id: int, prompt_updates: dict[int, str]) -> MusicVideo | None:
+        """Update per-cut prompts on the clips list (used for operator edits before approval).
+
+        prompt_updates: {index: "new prompt text", ...}
+        Only mutates while the video is at 'awaiting_approval' (safe window).
+        Returns the refreshed MusicVideo or None if not found / not editable.
+        """
+        mv = self.s.get(self.model_cls, mv_id)
+        if not mv or mv.current_stage != "awaiting_approval":
+            return None
+        if not prompt_updates:
+            return mv
+
+        import copy
+        clips = copy.deepcopy(mv.clips or [])
+        changed = False
+        for c in clips:
+            idx = c.get("index")
+            if isinstance(idx, int) and idx in prompt_updates:
+                new_p = (prompt_updates[idx] or "").strip()
+                if new_p:
+                    c["prompt"] = new_p
+                    changed = True
+        if changed:
+            mv.clips = clips
+            self.s.commit()
+        return mv
+
+    def regenerate_director_prompts(
+        self,
+        mv_id: int,
+        *,
+        feedback: str | None = None,
+        planning_mode: str | None = None,
+    ) -> MusicVideo | None:
+        """Re-run the Director over the *existing* cut_plan to produce fresh per-cut prompts.
+
+        Safe only before generation has started (primarily 'awaiting_approval').
+        Respects the stored director_enabled flag. If disabled, this is a no-op (keeps global style).
+        The planning_mode and feedback (extra_guidance) are applied for this regeneration and
+        also persisted into settings_json so the chosen approach travels with the MV.
+        Returns the refreshed MV or None.
+        """
+        mv = self.s.get(self.model_cls, mv_id)
+        if not mv or not mv.cut_plan:
+            return None
+        if mv.current_stage not in ("awaiting_approval", "analyzing"):
+            # Allow during analyzing in theory, but the common case is the approval gate.
+            if mv.current_stage != "awaiting_approval":
+                return None
+
+        s = dict(mv.settings_json or {})
+        if not s.get("director_enabled", True):
+            # Director off — nothing to regenerate; leave prompts as global style copies.
+            return mv
+
+        from backend.services.music_video_director import _generate_storyline_and_prompts
+
+        mode = planning_mode or s.get("planning_mode", "narrative")
+        guidance = feedback or s.get("director_guidance")
+
+        try:
+            res = _generate_storyline_and_prompts(
+                mv.style_prompt,
+                mv.cut_plan,
+                planning_mode=mode,
+                extra_guidance=guidance,
+                user_treatment=s.get("user_treatment") or s.get("director_treatment"),
+            )
+            prompts = res["prompts"]
+            treatment = res.get("treatment")
+            if treatment:
+                s = dict(mv.settings_json or {})
+                s["director_treatment"] = treatment
+                mv.settings_json = s
+        except Exception:  # noqa: BLE001
+            # On any surprise, leave existing prompts untouched (graceful).
+            log = __import__("logging").getLogger(__name__)
+            log.warning("regenerate_director_prompts failed for music_video %s; leaving prior prompts", mv_id)
+            return mv
+
+        if not prompts:
+            return mv
+
+        import copy
+        clips = copy.deepcopy(mv.clips or [])
+        for c in clips:
+            idx = c.get("index")
+            if isinstance(idx, int) and idx < len(prompts):
+                c["prompt"] = prompts[idx]
+
+        # Persist chosen mode/guidance for future (and for the actual generation later)
+        s["planning_mode"] = mode
+        if guidance:
+            s["director_guidance"] = guidance
+        mv.settings_json = s
+        mv.clips = clips
+        self.s.commit()
+
+        return mv

@@ -54,13 +54,15 @@ def _settings(mv: MusicVideo) -> dict:
     # it's already 16:9 there's no crop. Bump to 1280x720 for more detail if VRAM allows.
     s.setdefault("i2v_width", 832)
     s.setdefault("i2v_height", 480)
-    # i2v engine. DEFAULT "wan" (Wan 2.2 14B Q5 GGUF) — quality-first: it's the only
-    # animator that actually fits 16GB (dual high/low-noise model that swaps, ~11GB
-    # at a time) AND produces real motion. Higher quality available by pointing at
-    # Q6/Q8 quants. "cogvideox" is an opt-in "weak/experimental" path (the on-disk
-    # fp8 is a broken 0-byte download and bf16 OOMs at 16GB — so it's not usable
-    # here without a working quant). Override per-row via settings_json.i2v_engine.
-    s.setdefault("i2v_engine", "wan")
+    # i2v model selection. Prefer explicit "i2v_model" (e.g. "wan22-14b-i2v") for full
+    # flexibility like the main VideoGeneratorPage. Falls back to the legacy i2v_engine
+    # mapping for backward compat.
+    # Wan 2.2 I2V is generally the highest quality motion option available for the
+    # storyboard → i2v flow.
+    if not s.get("i2v_model"):
+        engine = s.get("i2v_engine", "wan")
+        s["i2v_model"] = "wan22-14b-i2v" if engine == "wan" else "cogvideox-5b-i2v"
+    s.setdefault("i2v_engine", "wan")  # keep for _max_clip_s etc.
     # --- Playback / cost tuning (per-video; surfaced in the create form) -------
     # fill_method: how a short generated clip is stretched to fill its cut slot.
     #   "forward"   — forward motion only, slow-to-fill (DEFAULT; fixes the moonwalk)
@@ -79,9 +81,19 @@ def _settings(mv: MusicVideo) -> dict:
     # 2=double, 4=quad). The "more frames" lever for smooth slow-mo. Default 2
     # preserves the prior implicit behavior (VideoGenerationRequest's own default).
     s.setdefault("interpolation_multiplier", 2)
+    # style_recipe_name: controls global filter/transition palettes for the final Shotcut edit
+    # (e.g. "Music Video", "Cinematic", "Grunge" from data/agent/style_recipes). Lets the
+    # planner and assembler use appropriate editing tools.
+    s.setdefault("style_recipe_name", "default")
     # Director: per-cut distinct prompts (the storyboard layer). ON by default; set
     # False to fall back to one global style_prompt for every clip (the old behavior).
     s.setdefault("director_enabled", True)
+    # planning_mode: "narrative" (default — continuity + subjects) or "visual" / "mood_arc"
+    # (abstract, energy-driven visual progression / tone poem, better for instrumental / soundtrack / thinking music).
+    s.setdefault("planning_mode", "narrative")
+    # Optional free-text guidance that was provided at regen time (or at create) and fed
+    # to the Director as extra instructions for the mood arc / specific direction.
+    s.setdefault("director_guidance", None)
     return s
 
 
@@ -205,25 +217,54 @@ def run_analyzer(mv_id: int):
         if not plan:
             raise RuntimeError("cut planner produced no cuts")
 
-        # Director: a DISTINCT, narratively-connected visual prompt per cut (instead
-        # of reusing one global style for every clip). Runs here — pre-approval, no
-        # GPU — and degrades to the global style on any failure (no regression).
+        # Director: now generates an actual VISUAL STORYLINE (narrative arc mapped to
+        # the song sections + energy) first, then distinct per-cut prompts that advance
+        # that storyline. This prevents the "every cut is just the global style repeated"
+        # problem. Still degrades gracefully to the old behavior on any LLM failure.
+        shot_plans = {}
         if s.get("director_enabled", True):
-            from backend.services.music_video_director import generate_scene_prompts
-            prompts = generate_scene_prompts(mv.style_prompt, plan)
+            from backend.services.music_video_director import _generate_storyline_and_prompts
+            result = _generate_storyline_and_prompts(
+                mv.style_prompt,
+                plan,
+                planning_mode=s.get("planning_mode", "narrative"),
+                extra_guidance=s.get("director_guidance"),
+                user_treatment=s.get("user_treatment") or s.get("director_treatment"),
+            )
+            prompts = result["prompts"]
+            treatment = result.get("treatment")
+            shot_plans = {s.get("index"): s for s in (result.get("shots") or []) if isinstance(s, dict)}
+            if treatment:
+                s = dict(mv.settings_json or {})
+                s["director_treatment"] = treatment
+                mv.settings_json = s
         else:
             prompts = [mv.style_prompt] * len(plan)
 
+        # Enrich clips with Director's editing decisions (duration, transition, filter)
+        # so the final Shotcut assembly can use real cinematic editing instead of hard-coded hard-cuts.
         mv.song_path = song  # cache the resolved path for later stages
         mv.cut_plan = plan
-        mv.clips = [
-            {"index": c["index"], "start": c["start_s"], "end": c["end_s"],
-             "clip_path": None, "status": "pending", "prompt": prompts[c["index"]]}
-            for c in plan
-        ]
+        mv.clips = []
+        for c in plan:
+            idx = c["index"]
+            sp = shot_plans.get(idx, {})
+            clip = {
+                "index": idx,
+                "start": c["start_s"],
+                "end": c["end_s"],
+                "clip_path": None,
+                "status": "pending",
+                "prompt": prompts[idx] if idx < len(prompts) else mv.style_prompt,
+                "duration_seconds": sp.get("duration_seconds"),
+                "transition_to_next": sp.get("transition_to_next"),
+                "filter_preset": sp.get("filter_preset"),
+            }
+            mv.clips.append(clip)
         db.session.commit()
-        log.info("music_video %s analyzed: %d cuts over %.1fs (director=%s)",
-                 mv_id, len(plan), structure["duration_seconds"], s.get("director_enabled", True))
+        log.info("music_video %s analyzed: %d cuts over %.1fs (director=%s, has_treatment=%s)",
+                 mv_id, len(plan), structure["duration_seconds"], s.get("director_enabled", True),
+                 bool(mv.settings_json.get("director_treatment") if isinstance(mv.settings_json, dict) else False))
 
 
 # --- Stage: generating (self-re-dispatching, one clip per invocation) --------
@@ -238,9 +279,15 @@ def run_clip_generator(mv_id: int):
     if not mv or mv.current_stage != "generating":
         return
 
+    if (mv.status or "").startswith("cancelled"):
+        logger.info(f"Music video {mv_id} is cancelled; stopping clip generation")
+        return
+
     clips = list(mv.clips or [])
     target = None
     for c in clips:
+        if c.get("status") == "cancelled":
+            continue
         on_disk = c.get("clip_path") and os.path.exists(c["clip_path"])
         if not (c.get("status") == "done" and on_disk):
             target = c
@@ -278,9 +325,14 @@ def run_clip_generator(mv_id: int):
 
 
 def _generate_one_clip(mv: MusicVideo, clip: dict):
-    """FLUX still → WAN i2v → fill-to-duration for a single cut.
+    """(Optional pre-curated storyboard still) → WAN i2v → fill-to-duration for a single cut.
 
-    GPU work (still + i2v) is wrapped in the JobOperationGate's VIDEO_RENDER slot
+    If the clip has a "storyboard_path" from the earlier "Generate Storyboards" review
+    phase (and it exists), we reuse that reviewed keyframe as the i2v init image instead
+    of re-generating a fresh still. This supports the thumbnails-first + individual
+    regen workflow.
+
+    GPU work (still or i2v) is wrapped in the JobOperationGate's VIDEO_RENDER slot
     so it serializes against training/other renders on the shared card. The ffmpeg
     fill is CPU-only and runs OUTSIDE the gate (don't hold the GPU for ffmpeg).
 
@@ -305,18 +357,35 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     out_dir = _clip_dir(mv.id)
     still_path = str(out_dir / f"still_{idx}.png")
     final_path = str(out_dir / f"clip_{idx}.mp4")
-    target_s = float(clip["end"]) - float(clip["start"])
+    base_target_s = float(clip["end"]) - float(clip["start"])
+    # Planner (Director) can suggest artistic duration for this shot (longer for drama, shorter for punch).
+    # Use it for the i2v source generation (more precise, saves resources on long slow sections via later stretch).
+    # The fill and assembly will still map to the full timeline slot for audio sync.
+    suggested = clip.get("duration_seconds")
+    target_s = float(suggested) if suggested and 0.5 < float(suggested) <= base_target_s * 2.5 else base_target_s
     out_fps = s["fps"]   # final clip fps (the fill step re-times to this)
 
-    # Engine selection. CogVideoX-5b: 14-25 frames @7fps, no LoRA — faster/lighter.
-    # Wan 2.2 14B: 17-49 frames @24fps — higher motion quality, much slower.
-    engine = s.get("i2v_engine", "cogvideox")
-    if engine == "wan":
-        i2v_model, i2v_fps = "wan22-14b-i2v", 24
+    # Engine / model selection. Full model id (wan22-14b-i2v etc.) is now first-class
+    # so users can pick via GUI (similar to VideoGeneratorPage). The still (keyframe)
+    # is generated first (SDXL path when LoRA consistency is on), then fed to the chosen I2V.
+    # Wan 2.2 I2V is preferred for quality when the user has the GPU budget.
+    i2v_model = s.get("i2v_model", "wan22-14b-i2v")
+    if "wan" in i2v_model.lower():
+        i2v_fps = 24
         frames = max(17, min(49, int(round(target_s * i2v_fps)) or 25))
     else:
-        i2v_model, i2v_fps = "cogvideox-5b-i2v", 7
+        i2v_fps = 7
         frames = max(14, min(25, int(round(target_s * i2v_fps)) or 25))
+
+    # If the user has already curated storyboards (via the "thumbnails first" review
+    # flow), reuse the reviewed storyboard image as the init for i2v instead of
+    # re-generating a fresh still. This honors individual storyboard approvals/regens.
+    pregen_storyboard = clip.get("storyboard_path")
+    use_pregen_storyboard = bool(pregen_storyboard and os.path.exists(pregen_storyboard))
+    if use_pregen_storyboard:
+        img = pregen_storyboard
+    else:
+        img = None  # will be set by still generation below
 
     # gpu_session = the unified front door: claims the JobOperationGate slot (same
     # fail-fast GpuBusyError + 8s cooldown) and, once we hold it, evicts Ollama so an
@@ -325,13 +394,26 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     # music-video render previously didn't (documented gap). The mid-session
     # _comfyui_free_vram() below stays explicit (the FLUX→i2v evict is mid-block).
     with gpu_session(JobKind.VIDEO_RENDER, f"mv_{mv.id}_{idx}", evict_ollama=True):
-        img = ComfyUIImageGenerator().generate_image(
-            prompt=clip_prompt, loras=[], output_path=still_path,
-            width=s["still_width"], height=s["still_height"], seed=1000 + idx,
-        )
-        # Evict FLUX before the animator loads — the i2v nodes don't ask ComfyUI to
-        # make room, so without this the animator OOMs on a FLUX-full card.
-        _comfyui_free_vram()
+        if not use_pregen_storyboard:
+            # Keyframe (storyboard still) generation.
+            # When use_lora_consistency is true (or loras are present), the SDXL+LoRA path
+            # in ComfyUIImageGenerator is required for identity. When false, we can in the
+            # future swap to FLUX or other high-aesthetic models for prettier keyframes
+            # before feeding to the chosen I2V (Wan2.2 I2V etc.).
+            kf_steps = s.get("keyframe_steps") or 30
+            img = ComfyUIImageGenerator().generate_image(
+                prompt=clip_prompt, loras=[], output_path=still_path,
+                width=s["still_width"], height=s["still_height"], seed=1000 + idx,
+                steps=kf_steps,
+            )
+            # Evict FLUX before the animator loads — the i2v nodes don't ask ComfyUI to
+            # make room, so without this the animator OOMs on a FLUX-full card.
+            _comfyui_free_vram()
+        else:
+            # Using a user-curated storyboard from the review phase. Still ensure the
+            # card is clean before loading the i2v models (same free as the still path).
+            _comfyui_free_vram()
+
         req_kwargs = dict(
             model=i2v_model,
             prompt=clip_prompt,
@@ -387,6 +469,11 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
 def run_assembler(mv_id: int):
     """Compose the filled clips against their exact cut timestamps with the song
     as the audio track; render the final mp4 via the MLT/melt plugin."""
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv and (mv.status or "").startswith("cancelled"):
+        logger.info(f"Music video {mv_id} is cancelled; skipping assemble")
+        return
+
     with _mv_run(mv_id, expected_stage="assembling", next_agent=None) as mv:
         if mv is None:
             return
@@ -402,10 +489,12 @@ def run_assembler(mv_id: int):
         s = _settings(mv)
         arrangement_clips = []
         for c in clips:
-            # source_out = the planned cut length: fill_clip_to_duration made the
-            # clip exactly this long, so timeline slot == source length == no blank
-            # gap (the obs-#721 sync fix realized at the assembly contract).
-            cut_len = float(c["end"]) - float(c["start"])
+            # Always use the full energy-planned cut length for the timeline slot and source_out
+            # (ensures audio sync, no gaps). The Director's duration_seconds suggestion (if any)
+            # was already used at i2v generation time to produce a more precise/shorter source clip
+            # that then gets stretched via fill_method + max_stretch for artistic slowmo or punch.
+            base_cut_len = float(c["end"]) - float(c["start"])
+
             arrangement_clips.append({
                 "clip_id": f"mv{mv_id}_{c['index']}",
                 "source_path": c["clip_path"],
@@ -413,14 +502,15 @@ def run_assembler(mv_id: int):
                 "timeline_start": float(c["start"]),
                 "timeline_end": float(c["end"]),
                 "source_in": 0.0,
-                "source_out": cut_len,
-                "filter_preset": "none",
-                "transition_to_next": "hard-cut",
+                "source_out": base_cut_len,
+                "filter_preset": c.get("filter_preset") or "none",
+                "transition_to_next": c.get("transition_to_next") or "hard-cut",
             })
 
         song_duration = mv.cut_plan[-1]["end_s"] if mv.cut_plan else None
+        style_recipe = s.get("style_recipe_name", "default")
         body = {
-            "arrangement": {"style_recipe_name": "default", "seed": 0, "clips": arrangement_clips},
+            "arrangement": {"style_recipe_name": style_recipe, "seed": 0, "clips": arrangement_clips},
             "audio_path": mv.song_path,
             "audio_volume": 1.0,
             "song_duration_seconds": song_duration,

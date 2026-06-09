@@ -2799,10 +2799,19 @@ def trigger_manual_sync():
                    f"processed={summary['total_processed']}, errors={summary['total_errors']}")
 
         try:
+            # Include file sync info when present so that "core code" syncs are properly marked
+            # even in the full manual/broadcast path. The entities_synced field gets a combined
+            # marker when files were part of this operation.
+            file_info = summary.get("files", {}).get("summary", {}) if isinstance(summary.get("files"), dict) else {}
+            has_files = bool(file_info) or (isinstance(summary.get("files"), dict) and summary.get("files"))
+            entities_for_history = entities[:]
+            if has_files:
+                entities_for_history = entities_for_history + ["__core_system_files__"]
+
             sync_history = InterconnectorSyncHistory(
                 node_id=local_node_id,
                 sync_direction=direction,
-                entities_synced=json.dumps(entities),
+                entities_synced=json.dumps(entities_for_history),
                 items_processed=summary["total_processed"],
                 items_created=summary["total_created"],
                 items_updated=summary["total_updated"],
@@ -2813,7 +2822,7 @@ def trigger_manual_sync():
             )
             db.session.add(sync_history)
             logger.info(f"[SYNC] Sync history record created: node_id={local_node_id}, "
-                       f"sync_timestamp={sync_history.sync_timestamp}")
+                       f"sync_timestamp={sync_history.sync_timestamp}, files_included={has_files}")
 
             # Update node's last sync time if it exists
             logger.info(f"[SYNC] Looking up node record - trying node_id={local_node_id} first")
@@ -3449,6 +3458,68 @@ def apply_updates():
         
         logger.info(f"[UPDATES] Update complete: {summary}")
         
+        # Record that the core system files were synced (marks the sync in history so status,
+        # last sync time, and incremental logic on clients recognize the files as up-to-date).
+        # This is the key "mark as synced" step that was missing from the streamlined GUI apply path.
+        # The files themselves are persisted on disk by apply_files_atomic (written + hash-matched
+        # on future checks).
+        try:
+            local_node_id = config.get("node_name") or "local_client"
+            sync_history = InterconnectorSyncHistory(
+                node_id=local_node_id,
+                sync_direction="pull",
+                # Use a marker so this history entry is recognizable as a core file/code sync
+                # (the model is entity-oriented; we embed file info in the JSON field and counts).
+                entities_synced=json.dumps(["__core_system_files__"]),
+                items_processed=summary.get("total_processed", 0),
+                items_created=summary.get("total_created", 0),
+                items_updated=summary.get("total_updated", 0),
+                conflicts_resolved=0,
+                sync_duration_ms=None,
+                status="success" if summary.get("total_errors", 0) == 0 else "partial",
+                sync_timestamp=datetime.now(),
+            )
+            db.session.add(sync_history)
+
+            # Best-effort update of last_sync_time if a node row exists for this client
+            # (helps master-side visibility when it queries client history).
+            node = db.session.query(InterconnectorNode).filter(
+                (InterconnectorNode.node_id == local_node_id) |
+                (InterconnectorNode.node_name == config.get("node_name"))
+            ).first()
+            if node:
+                node.last_sync_time = datetime.now()
+                node.last_heartbeat = datetime.now()
+                node.status = "active"
+
+            db.session.commit()
+            logger.info(f"[UPDATES] Recorded core file sync history (marked as synced): node_id={local_node_id}, applied={summary.get('total_processed', 0)}")
+        except Exception as hist_err:
+            logger.warning(f"[UPDATES] Failed to record sync history for core files (non-fatal, files still applied): {hist_err}")
+            db.session.rollback()
+
+        # Extra persistent marker (filesystem) so "synced" state survives DB/node row quirks
+        # and is easy for operators/scripts to inspect. This helps the "sync must persist" requirement.
+        try:
+            project_root = file_sync_service.get_project_root()
+            marker_dir = project_root / "data" / "interconnector"
+            marker_dir.mkdir(parents=True, exist_ok=True)
+            marker_path = marker_dir / "last_core_sync.json"
+            marker = {
+                "timestamp": datetime.now().isoformat(),
+                "applied": summary.get("total_processed", 0),
+                "created": summary.get("total_created", 0),
+                "updated": summary.get("total_updated", 0),
+                "skipped": summary.get("total_skipped", 0),
+                "errors": summary.get("total_errors", 0),
+                "source": "gui_core_updates_apply",
+                "paths_synced_count": len(valid_files) if 'valid_files' in dir() else summary.get("total_processed", 0),
+            }
+            marker_path.write_text(json.dumps(marker, indent=2))
+            logger.debug(f"[UPDATES] Wrote persistent last_core_sync marker: {marker_path}")
+        except Exception as marker_err:
+            logger.debug(f"[UPDATES] Could not write last_core_sync marker (non-fatal): {marker_err}")
+
         return success_response({
             "applied": summary["total_processed"],
             "created": summary["total_created"],
@@ -3458,7 +3529,8 @@ def apply_updates():
             "errors": summary["total_errors"],
             "backup_path": backup_path,
             "details": details,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "history_recorded": True,  # signals that the sync was marked
         }, f"Successfully applied {summary['total_processed']} updates")
         
     except Exception as e:

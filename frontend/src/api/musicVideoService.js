@@ -44,3 +44,43 @@ export const clearMusicVideos = async ({ all = false } = {}) => {
 /** Serve URL for a rendered output Document (same pattern as the Video Editor). */
 export const documentDownloadUrl = (docId) =>
   `${API_BASE}/files/document/${docId}/download`;
+
+/** Update per-cut prompts (and optionally the global style_prompt) before approval.
+ *  Body shape: { prompts: { "0": "new prompt for cut 0", ... }, style_prompt?: "..." }
+ *  or { clips: [ { index: 0, prompt: "..." }, ... ] }
+ */
+export const updateMusicVideoPlan = async (id, data) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/plan`, data);
+  return response.data;
+};
+
+/** Re-run the Director over the existing cut plan (pre-approval only).
+ *  Optional: { feedback: "more abstract, focus on textures and slow camera...", planning_mode: "visual" }
+ */
+export const regenerateMusicVideoPlan = async (id, data = {}) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/regenerate-plan`, data);
+  return response.data;
+};
+
+/** Reset a completed (or failed) music video back to the plan approval stage so it can be re-rendered
+ * (with the same or edited treatment/prompts/settings). Useful for re-doing with different seeds, models, or tweaks.
+ */
+export const replanMusicVideo = async (id) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/replan`);
+  return response.data;
+};
+
+export const cancelMusicVideo = async (id) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/cancel`);
+  return response.data;
+};
+
+export const generateMusicVideoStoryboards = async (id) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/generate-storyboards`);
+  return response.data;
+};
+
+export const regenMusicVideoStoryboard = async (id, index, data = {}) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/regen-storyboard/${index}`, data);
+  return response.data;
+};

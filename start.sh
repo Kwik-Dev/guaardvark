@@ -92,14 +92,19 @@ if [ -f "$MANAGER_SCRIPT" ]; then
     if [ ! -L "$SCRIPT_DIR/manager" ]; then
         ln -sf "scripts/system-manager/system-manager" "$SCRIPT_DIR/manager"
     fi
-    if [ -f "$SCRIPT_DIR/backend/venv/bin/flask" ]; then
+    # Stronger guard: trigger repair on fresh install (no venv) *or* incomplete/broken venv.
+    # The old "only if flask binary exists" check was a chicken-and-egg that skipped
+    # the only code path capable of running `pip install -r requirements*` on first run.
+    VENV_PY="$SCRIPT_DIR/backend/venv/bin/python"
+    if [ -x "$VENV_PY" ] && "$VENV_PY" -c "import numpy, flask, celery" >/dev/null 2>&1; then
         if ! "$MANAGER_SCRIPT" check "$SCRIPT_DIR"; then
             vader_warn "Environment issues detected by System Manager."
             vader_info "Auto-repairing environment..."
             "$MANAGER_SCRIPT" repair "$SCRIPT_DIR" || vader_warn "Auto-repair had issues, continuing with startup..."
         fi
     else
-        vader_info "Fresh install detected (no venv). Skipping system-manager check."
+        vader_info "Fresh or incomplete install detected (no usable venv). Running system-manager repair..."
+        "$MANAGER_SCRIPT" repair "$SCRIPT_DIR" || vader_warn "System-manager repair had issues; step 5 bootstrap will take over."
     fi
 fi
 
@@ -745,8 +750,112 @@ ensure_npm_package() {
         (cd "$FRONTEND_DIR" && npm install --save-dev "$pkg" >> "$SETUP_LOG" 2>&1)
 }
 
+# -------------------------------------------------------------------
+# Strong bootstrap helpers (restores intelligent first-run / repair behavior)
+# These are the core of the fix: create venv is not enough — we must ensure
+# it actually contains the requirements, and do the same for frontend.
+# We prefer the project's own tools (system-manager repair already called above,
+# dep_reconciler for full state/CRITICAL_PACKAGES/pytorch, npm ci for lock safety).
+# -------------------------------------------------------------------
+
+backend_venv_healthy() {
+    [ -x "$VENV_DIR/bin/python" ] || return 1
+    "$VENV_DIR/bin/python" -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+try:
+    import numpy, flask, celery, redis, psycopg2
+    import backend.config
+    print('OK')
+except Exception:
+    sys.exit(1)
+" >/dev/null 2>&1
+}
+
+ensure_backend_python_environment() {
+    # Under --fast we still repair a completely broken venv (otherwise nothing works).
+    # We only fast-skip when the probe already says it's healthy.
+    if [ "$FAST_START" -eq 1 ] && backend_venv_healthy; then
+        return 0
+    fi
+
+    local needed=0
+    if [ ! -d "$VENV_DIR" ]; then
+        needed=1
+    elif ! backend_venv_healthy; then
+        needed=1
+    fi
+
+    if [ "$needed" -eq 1 ]; then
+        vader_info "Python environment incomplete or first-time setup — bootstrapping dependencies (logged to $SETUP_LOG)..."
+        source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv for bootstrap"; return 1; }
+
+        # requirements-base first (matches system-manager + leaves room for smart torch)
+        if [ -f "$BACKEND_DIR/requirements-base.txt" ]; then
+            pip install -r "$BACKEND_DIR/requirements-base.txt" >> "$SETUP_LOG" 2>&1 || true
+        fi
+        if [ -f "$BACKEND_DIR/requirements.txt" ]; then
+            pip install -r "$BACKEND_DIR/requirements.txt" >> "$SETUP_LOG" 2>&1 || true
+        fi
+
+        # The smart GPU/CUDA PyTorch installer (also called by dep_reconciler)
+        if [ -f "$SCRIPT_DIR/scripts/install_pytorch.sh" ]; then
+            bash "$SCRIPT_DIR/scripts/install_pytorch.sh" >> "$SETUP_LOG" 2>&1 || vader_warn "install_pytorch.sh exited non-zero (GPU mode may be limited)"
+        fi
+
+        # Full reconciler pass for state tracking, CRITICAL_PACKAGES verification, cli_venv, etc.
+        if command -v python >/dev/null 2>&1; then
+            python -m scripts.dep_reconciler --force --only backend_venv,cli_venv --repo-root "$SCRIPT_DIR" >> "$SETUP_LOG" 2>&1 || \
+                vader_warn "dep_reconciler had issues (see setup.log); basic pip may still have succeeded"
+        fi
+
+        deactivate
+
+        if backend_venv_healthy; then
+            vader_success "Backend Python environment bootstrapped and healthy"
+            date +%s > "$VENV_DIR/.guaardvark_bootstrap_ts" 2>/dev/null || true
+        else
+            vader_error "Bootstrap did not produce a working Python environment."
+            vader_info "See $SETUP_LOG for details. Recommended manual steps:"
+            vader_info "  ./scripts/dep_reconciler.py --force"
+            vader_info "  or: ./scripts/system-manager/system-manager repair ."
+            return 1
+        fi
+    fi
+    return 0
+}
+
+ensure_frontend_deps() {
+    local nm="$FRONTEND_DIR/node_modules"
+    local lock="$FRONTEND_DIR/package-lock.json"
+    local stamp="$FRONTEND_DIR/.npm_stamp"
+
+    if [ "$FAST_START" -eq 1 ] && [ -d "$nm" ]; then
+        return 0
+    fi
+
+    # Run npm ci (lockfile-strict, same strategy as scripts/dep_reconciler/reconcilers/frontend.py)
+    # only when truly needed: missing node_modules, or lockfile newer than our stamp.
+    if [ ! -d "$nm" ] || [ ! -f "$stamp" ] || [ "$lock" -nt "$stamp" 2>/dev/null ]; then
+        vader_info "Ensuring frontend dependencies (using npm ci for lockfile safety)..."
+        if (cd "$FRONTEND_DIR" && npm ci >> "$SETUP_LOG" 2>&1); then
+            touch "$stamp" 2>/dev/null || true
+            vader_success "Frontend node_modules ready"
+        else
+            vader_warn "npm ci failed — trying npm install (may touch package-lock.json)"
+            if (cd "$FRONTEND_DIR" && npm install >> "$SETUP_LOG" 2>&1); then
+                touch "$stamp" 2>/dev/null || true
+            else
+                vader_error "Frontend dependency installation failed. See $SETUP_LOG"
+                return 1
+            fi
+        fi
+    fi
+    return 0
+}
+
 vader_header
-vader_title "  Guaardvark Startup Script v5.1 - Smart Install Mode"
+vader_title "  Guaardvark Startup Script v5.1 - Smart Install Mode (intelligent bootstrap restored)"
 vader_header
 
 ACTIVE_MODEL_FILE="$GUAARDVARK_STORAGE_DIR/active_model.txt"
@@ -867,6 +976,22 @@ if ! command_exists ffmpeg; then
         VOICE_AVAILABLE=0
     fi
 fi
+
+# Early hardware profile (critical for cluster/Interconnector and operator visibility).
+# We do this with system python + explicit PYTHONPATH so it works *before* the venv
+# is populated and independent of any Python package state. The later call in step 8
+# will refresh it with the project venv when available.
+mkdir -p "$HOME/.guaardvark"
+if PYTHONPATH="$SCRIPT_DIR" python3 -m backend.services.hardware_detector \
+        --output "$HOME/.guaardvark/hardware.json" >> "$SETUP_LOG" 2>&1; then
+    # Only print on success the first time or when it actually wrote something useful
+    if [ -f "$HOME/.guaardvark/hardware.json" ]; then
+        vader_success "Hardware profile written (~/.guaardvark/hardware.json)"
+    fi
+else
+    vader_info "Hardware profile probe (non-fatal; will retry after venv bootstrap)"
+fi
+
 vader_separator
 
 vader_step 3 "Ensuring Redis service is running..."
@@ -890,13 +1015,30 @@ if [ ! -d "$VENV_DIR" ]; then
     $PYTHON_CMD -m venv "$VENV_DIR" || { vader_error "Failed to create venv"; exit 1; }
 fi
 
+if [ "$FIRST_SETUP_DONE" -eq 0 ]; then
+    vader_header
+    vader_title "  First-time / recovery setup — installing core dependencies"
+    vader_header
+    vader_info "This can take several minutes on first run (PyTorch, etc.). Progress is logged to $SETUP_LOG"
+fi
+
 source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv"; exit 1; }
 
-# Dependency reconciliation is intentionally disabled during startup. It was
-# blocking otherwise healthy boots when the reconciler drift check failed.
-# Run scripts/dep_reconciler.py manually when dependency repair is needed.
-vader_info "Dependency reconciliation skipped"
-deactivate
+# The real bootstrap work (was previously skipped with "Dependency reconciliation skipped").
+# This is the key part of the strong fix: after creation (or if broken) we now ensure
+# the venv actually has the packages via ensure_backend_python_environment.
+if ! ensure_backend_python_environment; then
+    vader_error "Python bootstrap failed. Cannot continue."
+    # ensure_... already deactivated on its error path
+    cd "$SCRIPT_DIR"
+    exit 1
+fi
+
+# The ensure function manages its own activate/deactivate when it performs work.
+# We only need to ensure we are not left inside the venv here.
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    deactivate 2>/dev/null || true
+fi
 
 # --- CLI tool setup ---
 # This block only handles the symlink installation into ~/.local/bin.
@@ -1192,22 +1334,38 @@ cd "$SCRIPT_DIR"
 # Refresh ~/.guaardvark/hardware.json on every boot so the Interconnector has
 # a current picture of this box. Cluster routing is off by default; this
 # profile is harmless in solo mode (just a file on disk).
+#
+# We now always set PYTHONPATH explicitly and have a fallback so the detector
+# works reliably even if the venv python has limited packages.
 ensure_hardware_profile() {
     mkdir -p "$HOME/.guaardvark"
-    if [ -d "$SCRIPT_DIR/backend/venv" ]; then
-        # Pipe verbose detector output to the setup log; emit one consistently-
-        # styled line via vader_success/warn so it matches the rest of the boot
-        # output instead of arriving in the shell's default color.
-        if (cd "$SCRIPT_DIR" && "$SCRIPT_DIR/backend/venv/bin/python" -m backend.services.hardware_detector \
+    local wrote=0
+
+    # Prefer the project venv python (full context) if it exists and works
+    if [ -x "$VENV_DIR/bin/python" ]; then
+        if (cd "$SCRIPT_DIR" && PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/python" -m backend.services.hardware_detector \
                 --output "$HOME/.guaardvark/hardware.json") >> "$SETUP_LOG" 2>&1; then
-            vader_success "Hardware profile written to ~/.guaardvark/hardware.json"
-        else
-            vader_warn "hardware_detector failed (non-fatal)"
+            wrote=1
         fi
+    fi
+
+    # Fallback to system python3 + PYTHONPATH (the detector is mostly stdlib + subprocess)
+    if [ "$wrote" -eq 0 ]; then
+        if PYTHONPATH="$SCRIPT_DIR" python3 -m backend.services.hardware_detector \
+                --output "$HOME/.guaardvark/hardware.json" >> "$SETUP_LOG" 2>&1; then
+            wrote=1
+        fi
+    fi
+
+    if [ "$wrote" -eq 1 ] && [ -f "$HOME/.guaardvark/hardware.json" ]; then
+        vader_success "Hardware profile refreshed (~/.guaardvark/hardware.json)"
     else
-        vader_warn "Backend venv missing — skipping hardware profile"
+        vader_warn "Hardware profile refresh had issues (non-fatal)"
     fi
 }
+
+# Call the (now hardened) hardware profile refresh. We already did an early
+# best-effort version in step 2; this one runs after venv work and prefers the venv python.
 ensure_hardware_profile
 
 # Export the persistent node_id so the backend knows who it is without
@@ -1220,8 +1378,11 @@ fi
 vader_info "Setting up frontend..."
 cd "$FRONTEND_DIR" || { vader_error "Failed to cd to $FRONTEND_DIR"; exit 1; }
 
-# Frontend dependency installs are intentionally not part of startup. The old
-# sentinel block ran `npm install`, mutating package-lock.json during boot.
+# We now ensure frontend deps are present before any build (using the same
+# npm ci strategy as the dep_reconciler). This fixes the "vite not found"
+# and "no node_modules" class of failures on first run / after clean.
+# The small ensure_npm_package calls below are for specific dev deps only.
+ensure_frontend_deps
 
 ensure_npm_package rollup-plugin-polyfill-node
 
@@ -1251,6 +1412,28 @@ if [ ! -f "$VENV_DIR/bin/activate" ]; then
 fi
 
 source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv for Flask."; cd "$SCRIPT_DIR"; exit 1; }
+
+# Strong post-bootstrap validation (the heart of the fix).
+# If the ensure_ steps above did their job, this will pass quickly.
+# If something is still wrong we fail here with a clear message instead of
+# a confusing ModuleNotFoundError 30 lines later in the app.
+if ! python -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+import numpy, flask, celery
+import backend.config, backend.models, backend.app
+print('Post-bootstrap core imports: OK')
+" 2>&1; then
+    vader_error "Post-bootstrap validation failed — core packages (numpy/flask/...) are still missing."
+    vader_info "See $SETUP_LOG. Run one of:"
+    vader_info "  ./scripts/dep_reconciler.py --force"
+    vader_info "  ./scripts/system-manager/system-manager repair ."
+    vader_info "Then re-run ./start.sh"
+    deactivate
+    cd "$SCRIPT_DIR"
+    exit 1
+fi
+vader_success "Post-bootstrap validation passed (core Python environment is usable)"
 
 # Quick import validation (catches stale cache / missing symbols after sync)
 if [ "$FAST_START" -eq 0 ]; then
@@ -1446,6 +1629,8 @@ export VITE_PORT
 #     frontend on a local workstation) so the operator knows the code is stale;
 #   - if there is NO dist at all, there is nothing to serve — we abort the launch.
 FRONTEND_CAN_SERVE=1
+# Belt-and-suspenders: make sure node_modules are present before the guaranteed build
+ensure_frontend_deps
 vader_info "Building frontend (production) before serving..."
 if (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$FRONTEND_LOG_FILE" 2>&1); then
     vader_success "Frontend build complete"
