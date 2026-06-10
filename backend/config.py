@@ -249,6 +249,16 @@ DEFAULT_EMBEDDING_MODEL = None
 OLLAMA_BASE_URL = "http://localhost:11434"
 ACTIVE_MODEL_FILE = os.path.join(STORAGE_DIR, "active_model.json")
 
+# --- Cloud LLM providers (optional, opt-in; OFF by default) -------------------
+# Local Ollama is always the default. Cloud providers are gated behind a master
+# "cloud_models_enabled" DB setting (see services/llm_provider.py) AND the
+# provider's API key being present below. Keys live in .env (never the DB).
+# Embeddings/RAG always stay on local Ollama regardless of the chat provider.
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "").strip()
+MISTRAL_BASE_URL = os.environ.get("GUAARDVARK_MISTRAL_BASE_URL", "https://api.mistral.ai/v1").rstrip("/")
+MISTRAL_DEFAULT_MODEL = os.environ.get("GUAARDVARK_MISTRAL_MODEL", "mistral-large-latest").strip()
+MISTRAL_REQUEST_TIMEOUT = int(os.environ.get("GUAARDVARK_MISTRAL_TIMEOUT", "120"))
+
 # GPU Memory Orchestrator settings
 GPU_QUALITY_TIER = os.environ.get("GUAARDVARK_GPU_QUALITY_TIER", "balanced")
 GPU_EVICTION_GRACE_SECONDS = int(os.environ.get("GUAARDVARK_GPU_EVICTION_GRACE", "30"))

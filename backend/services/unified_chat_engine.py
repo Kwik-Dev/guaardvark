@@ -1884,6 +1884,14 @@ class UnifiedChatEngine:
             return text, 0, 0
 
         model_name = getattr(self.llm, "model", "gemma4:e4b")
+        # Provider dispatch: when the master cloud toggle is on AND a cloud
+        # provider is selected, route generation to its API. The streaming loop
+        # below is provider-agnostic — mistral_provider.chat() yields chunks in
+        # the same shape ollama.chat() does.
+        from backend.services import llm_provider as _llm_provider
+        _use_cloud = _llm_provider.is_mistral_active()
+        if _use_cloud:
+            model_name = _llm_provider.get_mistral_model()
         accumulated = []
         accumulated_thinking = []
         input_tokens = 0
@@ -1891,8 +1899,8 @@ class UnifiedChatEngine:
 
         # Detect thinking models (gemma4, deepseek-r1, etc.) that put output
         # in the "thinking" field and may crash Ollama's JSON serializer
-        # when thinking content contains XML-like tags.
-        is_thinking_model = any(t in model_name.lower() for t in ("deepseek-r1", "thinking", "gemma4", "gemma-4"))
+        # when thinking content contains XML-like tags. (N/A for cloud providers.)
+        is_thinking_model = (not _use_cloud) and any(t in model_name.lower() for t in ("deepseek-r1", "thinking", "gemma4", "gemma-4"))
 
         # Track <think>...</think> blocks in the content stream so we can
         # suppress them from being emitted as visible tokens.
@@ -1943,24 +1951,36 @@ class UnifiedChatEngine:
             # gated additionally on model 'tools' capability — see _run_chat). When
             # active we pass Ollama's native tools=[...] schema; the model returns
             # structured tool_calls in message.tool_calls rather than inline XML.
-            _native_active = bool(getattr(self, "_native_toolcalls_active", False))
+            # Native tool-calling applies to the local Ollama path only; a cloud
+            # provider streams text and tool-calls ride the XML path (see
+            # mistral_provider docstring), so it's disabled when cloud is active.
+            _native_active = (not _use_cloud) and bool(getattr(self, "_native_toolcalls_active", False))
             _native_schema = getattr(self, "_native_tools_schema", None)
             if _native_active:
                 # Reset the per-call native tool-call sink so a prior iteration's
                 # calls never leak into this one.
                 self._native_pending_tool_calls = None
 
-            from backend.config import get_chat_keep_alive
-            _chat_kwargs = dict(
-                model=model_name,
-                messages=call_messages,
-                stream=True,
-                options=opts,
-                keep_alive=get_chat_keep_alive(),  # don't re-pin the model 24h on every chat burst (VRAM squat)
-            )
-            if _native_active and _native_schema:
-                _chat_kwargs["tools"] = _native_schema
-            stream = ollama.chat(**_chat_kwargs)
+            if _use_cloud:
+                from backend.services import mistral_provider
+                stream = mistral_provider.chat(
+                    model=model_name,
+                    messages=call_messages,
+                    stream=True,
+                    options=opts,
+                )
+            else:
+                from backend.config import get_chat_keep_alive
+                _chat_kwargs = dict(
+                    model=model_name,
+                    messages=call_messages,
+                    stream=True,
+                    options=opts,
+                    keep_alive=get_chat_keep_alive(),  # don't re-pin the model 24h on every chat burst (VRAM squat)
+                )
+                if _native_active and _native_schema:
+                    _chat_kwargs["tools"] = _native_schema
+                stream = ollama.chat(**_chat_kwargs)
 
             # XML filter: stream tokens to client until <tool_call is detected,
             # then suppress further emission (tool calls are announced separately).

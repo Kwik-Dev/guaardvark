@@ -60,6 +60,21 @@ def _safe_content(message) -> Optional[str]:
 
 
 def get_llm_instance() -> Optional[LLM]:
+    # Cloud provider routing: when the master cloud toggle is on AND a cloud
+    # provider (e.g. Mistral) is the active selection, hand back a cloud-backed
+    # LlamaIndex LLM so every .chat()/.complete() caller routes to the API.
+    # Resolved per-call (cheap) so the toggle takes effect without a restart.
+    # Falls through to the local Ollama instance otherwise (and on any error).
+    try:
+        from backend.services import llm_provider as _llm_provider
+        if _llm_provider.is_mistral_active():
+            from backend.services import mistral_provider
+            cloud_llm = mistral_provider.make_llamaindex_llm(_llm_provider.get_mistral_model())
+            if cloud_llm is not None:
+                return cloud_llm  # type: ignore
+    except Exception as e:  # noqa: BLE001 - never let provider logic break LLM access
+        logger.warning("Cloud provider resolution failed, falling back to Ollama: %s", e)
+
     if not current_app:
         logger.error("Flask current_app context not available.")
         return None
