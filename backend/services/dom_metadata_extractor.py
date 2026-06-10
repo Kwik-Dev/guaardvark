@@ -529,7 +529,7 @@ class DOMMetadataExtractor:
             "HOME": os.environ.get("HOME") or str(Path.home()),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "USER": os.environ.get("USER", "llamax1"),
+            "USER": os.environ.get("USER", "user"),
             # Force X11 even when host is Wayland.
             "WAYLAND_DISPLAY": "",
             "XDG_SESSION_TYPE": "x11",
