@@ -1,4 +1,9 @@
-"""REST API for selecting the active LLM provider (Ollama vs Mistral)."""
+"""REST API for the cloud-models layer: master toggle, provider selection, keys-status, test.
+
+Local Ollama is always available. Cloud providers (currently Mistral) are gated
+behind the master `cloud_models_enabled` switch (off by default) AND their API
+key. Keys live in .env; only the toggle + selection state live in the DB.
+"""
 import logging
 
 from flask import Blueprint, request
@@ -12,23 +17,29 @@ llm_provider_bp = Blueprint("llm_provider", __name__, url_prefix="/api/llm")
 
 @llm_provider_bp.route("/provider", methods=["GET"])
 def get_provider():
-    """Current provider + what's available, for the settings toggle."""
+    """Full state for the settings UI: master toggle, active provider, whether a
+    cloud provider is live (the 'data leaves your machine' indicator), the
+    provider list with per-provider key availability, and the active Mistral model."""
     from backend.services import llm_provider as lp
-    return success_response(data={
-        "provider": lp.get_active_provider(),
-        "ollama_available": True,
-        "mistral_available": lp.mistral_available(),
-        "mistral_model": lp.get_mistral_model(),
-        "providers": [
-            {"id": lp.OLLAMA, "label": "Ollama (local)", "available": True},
-            {"id": lp.MISTRAL, "label": "Mistral (cloud API)", "available": lp.mistral_available()},
-        ],
-    })
+    return success_response(data=lp.provider_state())
+
+
+@llm_provider_bp.route("/cloud-enabled", methods=["POST"])
+def set_cloud_enabled():
+    """Master switch. Body: {"enabled": true|false}. When turned off, chat
+    immediately reverts to local Ollama regardless of provider selection."""
+    from backend.services import llm_provider as lp
+    body = request.get_json(silent=True) or {}
+    enabled = bool(body.get("enabled"))
+    lp.set_cloud_models_enabled(enabled)
+    return success_response(data=lp.provider_state(),
+                            message=f"Cloud models {'enabled' if enabled else 'disabled'}")
 
 
 @llm_provider_bp.route("/provider", methods=["POST"])
 def set_provider():
-    """Switch the active provider. Body: {"provider": "ollama"|"mistral"}."""
+    """Switch the active chat provider. Body: {"provider": "ollama"|"mistral"}.
+    Rejects a cloud provider when the master toggle is off or its key is missing."""
     from backend.services import llm_provider as lp
     body = request.get_json(silent=True) or {}
     provider = body.get("provider", "")
@@ -36,7 +47,7 @@ def set_provider():
         active = lp.set_active_provider(provider)
     except ValueError as e:
         return error_response(str(e), 400)
-    return success_response(data={"provider": active}, message=f"LLM provider set to {active}")
+    return success_response(data=lp.provider_state(), message=f"LLM provider set to {active}")
 
 
 @llm_provider_bp.route("/provider/models", methods=["GET"])
