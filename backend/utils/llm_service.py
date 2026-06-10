@@ -60,6 +60,20 @@ def _safe_content(message) -> Optional[str]:
 
 
 def get_llm_instance() -> Optional[LLM]:
+    # When the user has switched the provider to Mistral, hand back a
+    # Mistral-backed LlamaIndex LLM so every `.chat()/.complete()` caller routes
+    # to the cloud API. Resolved per-call (cheap) so the toggle takes effect
+    # without a restart. Falls through to the cached Ollama instance otherwise.
+    try:
+        from backend.services import llm_provider as _llm_provider
+        if _llm_provider.is_mistral_active():
+            from backend.services import mistral_provider
+            mistral_llm = mistral_provider.make_llamaindex_llm(_llm_provider.get_mistral_model())
+            if mistral_llm is not None:
+                return mistral_llm  # type: ignore
+    except Exception as e:  # noqa: BLE001 - never let provider logic break LLM access
+        logger.warning("Mistral provider resolution failed, falling back to Ollama: %s", e)
+
     if not current_app:
         logger.error("Flask current_app context not available.")
         return None

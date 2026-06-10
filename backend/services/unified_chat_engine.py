@@ -1771,7 +1771,16 @@ class UnifiedChatEngine:
                 emit_fn("chat:token", {"content": text, "session_id": session_id})
             return text, 0, 0
 
+        # Provider dispatch: route generation to Mistral's API when the user has
+        # selected it (runtime toggle), else stay on local Ollama. The streaming
+        # loop below is provider-agnostic because mistral_provider.chat() yields
+        # chunks in the same shape ollama.chat() does.
+        from backend.services import llm_provider as _llm_provider
+        _use_mistral = _llm_provider.is_mistral_active()
+
         model_name = getattr(self.llm, "model", "gemma4:e4b")
+        if _use_mistral:
+            model_name = _llm_provider.get_mistral_model()
         accumulated = []
         accumulated_thinking = []
         input_tokens = 0
@@ -1780,7 +1789,7 @@ class UnifiedChatEngine:
         # Detect thinking models (gemma4, deepseek-r1, etc.) that put output
         # in the "thinking" field and may crash Ollama's JSON serializer
         # when thinking content contains XML-like tags.
-        is_thinking_model = any(t in model_name.lower() for t in ("deepseek-r1", "thinking", "gemma4", "gemma-4"))
+        is_thinking_model = (not _use_mistral) and any(t in model_name.lower() for t in ("deepseek-r1", "thinking", "gemma4", "gemma-4"))
 
         # Track <think>...</think> blocks in the content stream so we can
         # suppress them from being emitted as visible tokens.
@@ -1827,12 +1836,21 @@ class UnifiedChatEngine:
             if is_thinking_model:
                 call_messages = self._sanitize_messages_for_thinking_model(messages)
 
-            stream = ollama.chat(
-                model=model_name,
-                messages=call_messages,
-                stream=True,
-                options=opts,
-            )
+            if _use_mistral:
+                from backend.services import mistral_provider
+                stream = mistral_provider.chat(
+                    model=model_name,
+                    messages=call_messages,
+                    stream=True,
+                    options=opts,
+                )
+            else:
+                stream = ollama.chat(
+                    model=model_name,
+                    messages=call_messages,
+                    stream=True,
+                    options=opts,
+                )
 
             # XML filter: stream tokens to client until <tool_call is detected,
             # then suppress further emission (tool calls are announced separately).

@@ -71,6 +71,53 @@ export const setModel = async (modelName) => {
 
 
 
+// --- LLM provider (Ollama vs Mistral cloud) ---
+
+const unwrap = (data) => (data?.data !== undefined ? data.data : data);
+
+export const getLlmProvider = async () => {
+  const response = await fetch(`${BASE_URL}/llm/provider`);
+  const data = await handleResponse(response);
+  if (data?.error) throw new Error(data?.error?.message || data.error);
+  return unwrap(data);
+};
+
+export const setLlmProvider = async (provider) => {
+  const response = await fetch(`${BASE_URL}/llm/provider`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  const data = await handleResponse(response);
+  if (data?.error) throw new Error(data?.error?.message || data.error);
+  return unwrap(data);
+};
+
+export const getMistralModels = async () => {
+  const response = await fetch(`${BASE_URL}/llm/provider/models?provider=mistral`);
+  const data = await handleResponse(response);
+  if (data?.error) throw new Error(data?.error?.message || data.error);
+  return Array.isArray(unwrap(data)?.models) ? unwrap(data).models : [];
+};
+
+export const setMistralModel = async (model) => {
+  const response = await fetch(`${BASE_URL}/llm/provider/mistral-model`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  const data = await handleResponse(response);
+  if (data?.error) throw new Error(data?.error?.message || data.error);
+  return unwrap(data);
+};
+
+export const testMistral = async () => {
+  const response = await fetch(`${BASE_URL}/llm/provider/test`, { method: "POST" });
+  const data = await handleResponse(response);
+  if (data?.error) throw new Error(data?.error?.message || data.error);
+  return unwrap(data);
+};
+
 export const getModelStatus = async () => {
   try {
     const response = await fetch(`${BASE_URL}/model/status`);
