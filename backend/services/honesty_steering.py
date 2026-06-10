@@ -63,7 +63,10 @@ class HonestySteering:
             from steering_vectors import SteeringVector
             import torch
 
-            self._steering_vector = torch.load(self.vector_path)
+            # weights_only=True refuses arbitrary pickle opcodes — a steering vector is a
+            # plain tensor/state-dict, and this file type is synced between machines by the
+            # Interconnector, so a malicious .pt must not be able to execute code at load.
+            self._steering_vector = torch.load(self.vector_path, weights_only=True)
             self._activation_steering_available = True
             logger.info(f"Loaded steering vector from {self.vector_path}")
 

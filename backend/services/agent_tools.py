@@ -270,6 +270,79 @@ class ToolRegistry:
 
         return li_tools
 
+    def as_ollama_tools(self, tool_names: Optional[List[str]] = None,
+                        tool_filter: str = None) -> List[Dict[str, Any]]:
+        """Convert registered tools to Ollama's native ``tools=[...]`` schema.
+
+        Returns a list of ``{"type": "function", "function": {...}}`` dicts in
+        the shape Ollama's chat API expects for native function calling.  This
+        is a PARALLEL emitter to ``as_llama_index_tools`` — it reuses the same
+        ``ToolParameter`` metadata (name/type/required/description) without
+        altering the existing LlamaIndex mapping.
+
+        Args:
+            tool_names: Optional explicit allow-list of tool names to emit
+                (e.g. the in-scope ``selected_tools`` for a chat turn).  When
+                provided, only those tools are emitted (preserving order).
+            tool_filter: Optional 'vision' filter, mirroring the other emitters.
+
+        The execution path is unchanged: the model returns structured
+        ``tool_calls`` referencing these names, and the caller routes them
+        through ``execute_tool()`` exactly like the XML path.
+        """
+        # JSON-Schema type strings (Ollama forwards these to the model's
+        # function-calling template, which expects standard JSON-schema types).
+        JSON_TYPE_MAP = {
+            'string': 'string', 'str': 'string',
+            'int': 'integer', 'integer': 'integer',
+            'float': 'number', 'number': 'number',
+            'bool': 'boolean', 'boolean': 'boolean',
+            'list': 'array', 'array': 'array',
+            'dict': 'object', 'object': 'object',
+        }
+
+        if tool_names is not None:
+            tools = [self.tools[n] for n in tool_names if n in self.tools]
+        else:
+            tools = list(self.tools.values())
+
+        if tool_filter == 'vision':
+            VISION_TOOL_NAMES = {
+                'agent_mode_start', 'agent_mode_stop', 'agent_task_execute',
+                'agent_screen_capture', 'agent_status', 'web_search',
+            }
+            tools = [t for t in tools if t.name in VISION_TOOL_NAMES
+                     or t.name.startswith('agent_')]
+
+        ollama_tools = []
+        for tool in tools:
+            properties = {}
+            required = []
+            for pname, param in tool.parameters.items():
+                json_type = JSON_TYPE_MAP.get(param.type, 'string')
+                prop: Dict[str, Any] = {
+                    'type': json_type,
+                    'description': param.description or '',
+                }
+                properties[pname] = prop
+                if param.required:
+                    required.append(pname)
+
+            ollama_tools.append({
+                'type': 'function',
+                'function': {
+                    'name': tool.name,
+                    'description': tool.description,
+                    'parameters': {
+                        'type': 'object',
+                        'properties': properties,
+                        'required': required,
+                    },
+                },
+            })
+
+        return ollama_tools
+
     def _coerce_params(self, tool: BaseTool, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """Robustly coerce values to types defined in tool parameters."""
         coerced = {}

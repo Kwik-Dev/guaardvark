@@ -270,6 +270,37 @@ def _read_saved_model_name():
     return None
 
 
+def _hardware_default_llm() -> str:
+    """Hardware-aware hard fallback for the default chat model.
+
+    Mirrors the get_chat_keep_alive / default_advanced_rag hardware-detection pattern
+    in this file: on a small box (≤8GB RAM) or ARM (aarch64/arm64), a fresh install
+    should default to a 1-3B tag so first-run chat actually loads; otherwise the
+    8B-class default. GUAARDVARK_DEFAULT_LLM always overrides. Detection failure
+    falls back to today's behavior ("llama3.1:latest") — defensive, never crashes.
+    """
+    env = os.environ.get("GUAARDVARK_DEFAULT_LLM")
+    if env:
+        return env
+    try:
+        import platform
+        arch = platform.machine().lower()
+        ram_gb = 0
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        ram_gb = int(line.split()[1]) / 1024 / 1024
+                        break
+        except OSError:
+            ram_gb = 0
+        if arch in ("aarch64", "arm64") or (0 < ram_gb <= 8):
+            return "llama3.2:1b"
+    except Exception:
+        pass
+    return "llama3.1:latest"
+
+
 def get_default_llm():
     """Return the active LLM model name.
 
@@ -282,7 +313,7 @@ def get_default_llm():
         response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
         if response.status_code != 200:
             saved = _read_saved_model_name()
-            return saved or "llama3.1:latest"
+            return saved or _hardware_default_llm()
 
         models = response.json().get('models', [])
         available_names = {m.get('name', '') for m in models}
@@ -319,7 +350,7 @@ def get_default_llm():
         pass
 
     saved = _read_saved_model_name()
-    return saved or "llama3.1:latest"
+    return saved or _hardware_default_llm()
 
 
 def get_embedding_vram_estimates() -> dict:
@@ -350,6 +381,33 @@ def get_embedding_keep_alive():
         gpu = False
     val = (os.environ.get("GUAARDVARK_EMBED_KEEP_ALIVE_GPU", "5m") if gpu
            else os.environ.get("GUAARDVARK_EMBED_KEEP_ALIVE_CPU", "-1"))
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return val
+
+
+def get_chat_keep_alive():
+    """Hardware-aware keep_alive for the chat LLM Ollama clients.
+
+    The chat model (~10-12GB) used to be pinned "24h" at every instantiation, which made
+    it squat the GPU on this shared 16GB box — the documented root cause of image/video
+    CUDA OOM (decision 2026-06-01: move to a short TTL). This mirrors get_embedding_keep_alive:
+    - GPU present: a short TTL (env GUAARDVARK_CHAT_KEEP_ALIVE_GPU, default "15m") so the
+      model frees VRAM after idle and the GPU orchestrator's eviction actually sticks instead
+      of being re-pinned on the next chat call. A ~1-2s reload after >15m idle is acceptable UX.
+    - No GPU: keep resident (env GUAARDVARK_CHAT_KEEP_ALIVE_CPU, default "-1") so a CPU box
+      isn't reloading the model from disk every idle cycle. RAM-pressure eviction is handled
+      separately by the orchestrator — "resident" does NOT mean "pinned forever".
+    Returns an int when numeric (Ollama: seconds, -1 = forever), else the string (e.g. "15m").
+    """
+    try:
+        from backend.services.gpu_resource_coordinator import has_gpu
+        gpu = has_gpu()
+    except Exception:
+        gpu = False
+    val = (os.environ.get("GUAARDVARK_CHAT_KEEP_ALIVE_GPU", "15m") if gpu
+           else os.environ.get("GUAARDVARK_CHAT_KEEP_ALIVE_CPU", "-1"))
     try:
         return int(val)
     except (TypeError, ValueError):

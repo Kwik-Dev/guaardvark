@@ -131,9 +131,15 @@ vader_info "File descriptor limit set to: $(ulimit -n)"
 vader_header "Enhanced Celery Worker Startup"
 vader_info "Starting workers..."
 
-start_worker "main" "health,default,indexing,generation" 1 1536000
+# SINGLE-GPU INVARIANT: all GPU-bearing queues live on ONE worker so the in-process
+# JobOperationGate (a 1-slot mutex that can't arbitrate across worker PIDs) is authoritative.
+# Previously `generation`/`default` (video renders) ran on main while `training_gpu` (LoRA)
+# ran on the training worker — two separate PIDs could each launch a GPU task and OOM the
+# 16GB card. training_gpu now rides on main; the training worker keeps CPU-only `training`.
+# main's max-memory-per-child bumped to 4GB since it now carries the heavy GPU/LoRA work.
+start_worker "main" "health,default,indexing,generation,training_gpu" 1 4096000
 
-start_worker "training" "training,training_gpu" 1 4096000
+start_worker "training" "training" 1 4096000
 
 start_beat
 

@@ -559,13 +559,25 @@ def _initialize_app_components(app):
         
         def poll_celery_progress():
             last_modified_times = {}
+            terminal_files = set()  # file_keys we've already classified terminal/reaped
             poll_count = 0
             TERMINAL_STATUSES = {'complete', 'error', 'cancelled', 'end'}
             STALE_THRESHOLD = 2700  # 45 minutes - indexing can take 15-25 min per doc
+            # Adaptive cadence: this loop is also the ONLY stale-job reaper, so
+            # it must keep running forever. But on an idle, offline box the old
+            # fixed 1s sleep was a per-second stat storm for nothing. So we poll
+            # fast (ACTIVE_INTERVAL) only while there is at least one live
+            # (non-terminal) job, and back off to IDLE_INTERVAL otherwise. The
+            # idle interval still comfortably beats the 45-min stale threshold,
+            # and the Redis pub/sub relay (below) already delivers live progress
+            # promptly, so backing off here costs no responsiveness.
+            ACTIVE_INTERVAL = 1     # seconds, while jobs are in flight
+            IDLE_INTERVAL = 15      # seconds, when nothing is running
 
             while True:
                 try:
                     poll_count += 1
+                    active_jobs = 0
 
                     progress_dir = Path(config.OUTPUT_DIR) / ".progress_jobs"
                     if progress_dir.exists():
@@ -576,8 +588,14 @@ def _initialize_app_components(app):
                                 current_mtime = metadata_file.stat().st_mtime
                                 file_key = str(metadata_file)
 
-                                # Skip files that haven't changed since last poll
+                                # Skip files that haven't changed since last poll.
+                                # An unchanged file we last saw as non-terminal is
+                                # still an in-flight job (it may simply not have
+                                # ticked this second), so keep counting it active
+                                # until it goes terminal or trips the stale reaper.
                                 if file_key in last_modified_times and last_modified_times[file_key] == current_mtime:
+                                    if file_key not in terminal_files:
+                                        active_jobs += 1
                                     continue
 
                                 # Mark stale non-terminal files as error (zombie job cleanup)
@@ -596,6 +614,7 @@ def _initialize_app_components(app):
                                     except Exception:
                                         pass
                                     last_modified_times[file_key] = current_mtime
+                                    terminal_files.add(file_key)
                                     continue
 
                                 with open(metadata_file, 'r') as f:
@@ -605,7 +624,12 @@ def _initialize_app_components(app):
                                 job_status = metadata.get('status', 'unknown')
                                 if job_status in TERMINAL_STATUSES:
                                     last_modified_times[file_key] = current_mtime
+                                    terminal_files.add(file_key)
                                     continue
+
+                                # Non-terminal, freshly-changed job: it's live.
+                                active_jobs += 1
+                                terminal_files.discard(file_key)
 
                                 event_data = {
                                     'job_id': metadata.get('job_id', 'unknown'),
@@ -628,10 +652,24 @@ def _initialize_app_components(app):
                             except Exception as e:
                                 app.logger.warning(f"Error processing progress file {metadata_file}: {e}")
 
-                    if poll_count % 30 == 0:
-                        app.logger.debug(f"Celery progress polling active - monitoring {len(last_modified_times)} files")
+                        # Drop tracking state for progress files that no longer
+                        # exist so these dicts/sets don't grow without bound.
+                        present = {str(mf) for mf in metadata_files}
+                        for stale_key in [k for k in last_modified_times if k not in present]:
+                            last_modified_times.pop(stale_key, None)
+                            terminal_files.discard(stale_key)
 
-                    time.sleep(1)
+                    if poll_count % 30 == 0:
+                        app.logger.debug(
+                            f"Celery progress polling active - monitoring {len(last_modified_times)} files, "
+                            f"{active_jobs} live"
+                        )
+
+                    # Adaptive cadence: only stat every second while work is in
+                    # flight; otherwise back off so an idle box stays quiet. The
+                    # stale reaper still runs every IDLE_INTERVAL, well under the
+                    # 45-min threshold.
+                    time.sleep(ACTIVE_INTERVAL if active_jobs > 0 else IDLE_INTERVAL)
                 except Exception as e:
                     app.logger.error(f"Error in Celery progress polling: {e}")
                     time.sleep(5)
@@ -918,8 +956,11 @@ def _initialize_app_components(app):
     except Exception as e:
         app.logger.warning(f"Video project resume failed (non-critical): {e}")
 
-    from backend.middleware.cluster_proxy_middleware import cluster_proxy_before_request
-    app.before_request(cluster_proxy_before_request)
+    try:
+        from backend.middleware.cluster_proxy_middleware import cluster_proxy_before_request
+        app.before_request(cluster_proxy_before_request)
+    except ImportError as e:
+        app.logger.warning("Cluster proxy middleware unavailable (sync backend/middleware/): %s", e)
 
     try:
         from backend.services.browser_automation_service import register_browser_shutdown

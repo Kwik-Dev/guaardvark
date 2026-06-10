@@ -1,5 +1,5 @@
 // frontend/src/components/modals/VideoModelsModal.jsx
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -36,6 +36,15 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
   });
   const [error, setError] = useState(null);
 
+  // The parent passes a fresh `showMessage` closure on every render. Keep it in a
+  // ref so our fetch callbacks (and the effects that depend on them) stay stable —
+  // otherwise the parent's polling re-renders recreate fetchDownloadStatus every
+  // tick, re-firing the mount effect and making the modal flash/refetch endlessly.
+  const showMessageRef = useRef(showMessage);
+  useEffect(() => {
+    showMessageRef.current = showMessage;
+  }, [showMessage]);
+
   const fetchModels = useCallback(async () => {
     try {
       setLoading(true);
@@ -59,18 +68,18 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
         const status = res.data.data;
         setDownloadStatus(status);
         if (!status.is_downloading && status.status === "completed") {
-          showMessage?.("Model download completed!", "success");
+          showMessageRef.current?.("Model download completed!", "success");
           fetchModels();
           setDownloadStatus((prev) => ({ ...prev, status: "idle", current_model: null }));
         } else if (!status.is_downloading && status.status === "failed") {
-          showMessage?.(`Download failed: ${status.error}`, "error");
+          showMessageRef.current?.(`Download failed: ${status.error}`, "error");
           setDownloadStatus((prev) => ({ ...prev, status: "idle", current_model: null }));
         }
       }
     } catch (err) {
       console.error("Failed to fetch download status", err);
     }
-  }, [fetchModels, showMessage]);
+  }, [fetchModels]);
 
   useEffect(() => {
     if (open) {
@@ -95,7 +104,7 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
       const res = await axios.post("/api/batch-video/models/download", { model_id: modelId });
       if (res.data.success) {
         const model = models.find((m) => m.id === modelId);
-        showMessage?.(`Started downloading ${model?.name || modelId}...`, "info");
+        showMessageRef.current?.(`Started downloading ${model?.name || modelId}...`, "info");
         setDownloadStatus({
           is_downloading: true,
           current_model: modelId,
@@ -106,13 +115,13 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
           total_gb: model?.size_gb || 0,
         });
       } else {
-        showMessage?.(res.data.error || "Failed to start download", "error");
+        showMessageRef.current?.(res.data.error || "Failed to start download", "error");
       }
     } catch (err) {
       if (err.response?.status === 409) {
-        showMessage?.("A download is already in progress.", "warning");
+        showMessageRef.current?.("A download is already in progress.", "warning");
       } else {
-        showMessage?.(err.message || "Error starting download", "error");
+        showMessageRef.current?.(err.message || "Error starting download", "error");
       }
     }
   };

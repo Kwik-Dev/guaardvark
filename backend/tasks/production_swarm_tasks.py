@@ -528,7 +528,11 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
         # so the storyboard stage's resident FLUX doesn't OOM the first shot's i2v.
         # (Per-shot i2v<->TTS interleave reclaim is a separate P0.3c refinement.)
         try:
-            with gpu_session(JobKind.VIDEO_RENDER, render_id, evict_ollama=True, free_comfyui=True):
+            # vram_estimate_mb debits the GPU orchestrator budget so this ~14GB render is
+            # VISIBLE to it (it can evict competing in-process models) — without it the
+            # render and a resident chat model both think they own the 16GB card.
+            with gpu_session(JobKind.VIDEO_RENDER, render_id, evict_ollama=True, free_comfyui=True,
+                             vram_estimate_mb=14000):
                 progress.update_process(job_id, 5, f"Rendering {len(shot_inputs)} shots")
                 res = editor.render(
                     production_id=prod_id,

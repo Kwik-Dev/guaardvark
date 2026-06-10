@@ -55,6 +55,139 @@ else
     vader_info "Using active virtualenv: $VIRTUAL_ENV"
 fi
 
+# ---------------------------------------------------------------------------
+# Accelerator branching.
+#
+# Historically this installer branched ONLY on `nvidia-smi`: every non-NVIDIA
+# host (AMD ROCm, Apple Silicon, plain CPU) got the whl/cpu wheel. That meant
+# AMD boxes ran torch on the CPU and Macs never got MPS. We now branch FIRST on
+# the two previously-missing accelerators (Apple Metal, AMD ROCm); if neither
+# applies we fall through to the original NVIDIA-or-CPU logic UNCHANGED.
+#
+# Detection order is deliberate:
+#   1. Darwin (uname)         -> default PyPI wheel (MPS-capable; never cpu URL)
+#   2. AMD ROCm (rocm-smi /   -> whl/rocmX.Y  (version overridable via env)
+#      hardware.json vendor)
+#   3. NVIDIA (nvidia-smi)    -> existing CUDA-arch logic (unchanged)
+#   4. anything else / failed -> existing whl/cpu fallback (unchanged)
+#
+# The ROCm wheel index version is overridable so a host on a newer/older ROCm
+# runtime can pin it without editing this script:
+#     GUAARDVARK_ROCM_WHL=rocm6.2 bash scripts/install_pytorch.sh
+ROCM_WHL="${GUAARDVARK_ROCM_WHL:-rocm6.3}"
+HARDWARE_JSON="${GUAARDVARK_HARDWARE_JSON:-$HOME/.guaardvark/hardware.json}"
+
+# --- helper: does hardware.json report an AMD GPU? -------------------------
+# hardware_detector.py writes {"gpu": {"vendor": "amd", ...}}. We treat that as
+# a secondary AMD signal in case rocm-smi isn't on PATH yet (fresh provision).
+# Pure text probe (no python/jq dependency) so it works before the venv exists.
+_hardware_json_says_amd() {
+    [ -f "$HARDWARE_JSON" ] || return 1
+    grep -q '"vendor"[[:space:]]*:[[:space:]]*"amd"' "$HARDWARE_JSON" 2>/dev/null
+}
+
+UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+
+# === Branch 1: Apple Silicon / Intel Mac (Metal/MPS) =======================
+if [ "$UNAME_S" = "Darwin" ]; then
+    vader_success "macOS (Darwin) detected"
+    vader_section "Accelerator: Apple Metal (MPS)"
+    vader_detail "Platform:      $(uname -m 2>/dev/null || echo unknown)"
+    vader_detail "PyTorch Index: default PyPI (MPS-capable wheel)"
+    vader_detail "Note:          NOT using the whl/cpu index — that wheel has no MPS."
+    echo ""
+    vader_info "Installing default PyTorch (MPS where the OS/GPU supports it)..."
+    echo ""
+    # Mac: do NOT pass an --index-url. The default PyPI macOS wheel is the
+    # MPS-capable build; the whl/cpu index would strip Metal support. Swap-safety
+    # uninstall first (same rationale as the other branches) but no CUDA/triton
+    # cleanup — those never exist on macOS — and no pynvml removal.
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
+    pip install --upgrade --force-reinstall torch torchvision torchaudio
+
+    vader_section "Verification:"
+    python3 << 'EOF'
+import torch
+print(f"    PyTorch Version:    {torch.__version__}")
+mps = getattr(torch.backends, "mps", None)
+avail = bool(mps and mps.is_available())
+print(f"    MPS Available:      {avail}")
+try:
+    dev = "mps" if avail else "cpu"
+    t = torch.zeros(1, device=dev)
+    print(f"    {dev.upper()} Tensor Test:    PASSED")
+except Exception as e:
+    print(f"    Tensor Test:        FAILED ({e})")
+    # Fall back to a CPU tensor so the verification still proves torch works.
+    try:
+        torch.zeros(1)
+        print("    CPU Tensor Test:    PASSED")
+    except Exception as e2:
+        print(f"    CPU Tensor Test:    FAILED ({e2})")
+EOF
+
+    vader_header "PyTorch Installation Complete"
+    exit 0
+fi
+
+# === Branch 2: AMD ROCm ====================================================
+# rocm-smi on PATH is the primary signal; hardware.json vendor=="amd" is the
+# fallback. We intentionally do NOT trigger ROCm just because nvidia-smi is
+# absent — that would regress the CPU path for non-AMD machines.
+if command -v rocm-smi &> /dev/null || _hardware_json_says_amd; then
+    if command -v rocm-smi &> /dev/null; then
+        vader_success "AMD ROCm runtime detected (rocm-smi)"
+    else
+        vader_success "AMD GPU detected (hardware.json vendor=amd)"
+    fi
+    vader_section "Accelerator: AMD ROCm"
+    vader_detail "Platform:       $(uname -m 2>/dev/null || echo unknown)"
+    vader_detail "PyTorch Index:  https://download.pytorch.org/whl/${ROCM_WHL}"
+    vader_detail "ROCm wheel:     ${ROCM_WHL} (override with GUAARDVARK_ROCM_WHL)"
+    echo ""
+    vader_info "Installing PyTorch with ROCm (${ROCM_WHL}) support..."
+    echo ""
+    # Swap-safety: clean prior torch + any lingering CUDA/triton bloat from a
+    # previous build, then force-reinstall the ROCm variant (the +rocm local
+    # tag collides with +cpu/+cuXXX in pip's resolver, same as the CUDA path).
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
+    pip freeze 2>/dev/null | grep -iE "^(nvidia-|cuda-bindings|cuda-pathfinder|cuda-toolkit|triton)" | awk -F'==' '{print $1}' | xargs -r pip uninstall -y 2>/dev/null | tail -3 || true
+    pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/${ROCM_WHL}"
+
+    vader_section "Verification:"
+    python3 << 'EOF'
+import torch
+print(f"    PyTorch Version:    {torch.__version__}")
+# ROCm torch reports through the CUDA API surface (torch.cuda.is_available()
+# is True, torch.version.hip is set). Report both so a misbuild is obvious.
+print(f"    HIP Version:        {getattr(torch.version, 'hip', None)}")
+print(f"    GPU Available:      {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    try:
+        print(f"    GPU Device:         {torch.cuda.get_device_name(0)}")
+    except Exception as e:
+        print(f"    GPU Device:         N/A ({e})")
+    try:
+        torch.zeros(1).cuda()
+        print("    GPU Tensor Test:    PASSED")
+    except Exception as e:
+        print(f"    GPU Tensor Test:    FAILED ({e})")
+else:
+    print("    Mode:               CPU-only (ROCm wheel installed but GPU not visible)")
+    try:
+        torch.zeros(1)
+        print("    CPU Tensor Test:    PASSED")
+    except Exception as e:
+        print(f"    CPU Tensor Test:    FAILED ({e})")
+EOF
+
+    vader_header "PyTorch Installation Complete"
+    exit 0
+fi
+
+# === Branch 3 + 4: NVIDIA (CUDA arch logic) or CPU fallback ================
+# Everything below is the ORIGINAL installer, unchanged. Reached only when the
+# host is not macOS and not AMD/ROCm.
 # Detect if NVIDIA GPU is present
 if command -v nvidia-smi &> /dev/null; then
     vader_success "NVIDIA driver detected"

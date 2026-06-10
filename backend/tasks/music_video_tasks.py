@@ -25,6 +25,7 @@ from backend.services.music_video_service import (
     MusicVideoService,
     compute_cut_plan,
     fill_clip_to_duration,
+    probe_duration,
 )
 from backend.services.plugin_bridge import ensure_plugin_running, PluginUnavailable
 
@@ -155,6 +156,70 @@ def _resolve_song_path(mv: MusicVideo) -> str | None:
     return None
 
 
+def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tuple[list[str], str]:
+    """Resolve the trained LoRA path(s) for the music-video keyframe and prepend
+    each Subject's trigger word to the prompt — mirroring Film Crew's
+    production_swarm_tasks._shot_loras_and_prompt. A LoRA only locks identity
+    when the token it was trained on is actually present at inference, so the
+    trigger words go INTO the prompt, not just the LoraLoader chain.
+
+    Honest source-of-truth note: the MusicVideo model has NO cast/subject join
+    table (unlike Production → ProductionSubject), and the create form sends only
+    a `use_lora_consistency` boolean — no subject picker. So the ONLY place a
+    trained-LoRA reference can come from today is settings_json. We honor, in
+    priority order, whatever the settings actually carry:
+      1. explicit on-disk paths in settings `loras` / `lora_paths` (list[str]);
+      2. `subject_ids` (list[int]) → Subject.lora_path + trigger_word — this is
+         the seam a future MV cast picker would write into, and resolving it now
+         means that picker works with zero further changes here.
+    Returns ([], base_prompt) — i.e. a NO-OP — when LoRA consistency is off or no
+    reference is reachable, so non-cast videos behave exactly as before.
+    """
+    if not s.get("use_lora_consistency"):
+        return [], base_prompt
+
+    lora_paths: list[str] = []
+    triggers: list[str] = []
+
+    # (1) explicit paths in settings (accept either key name).
+    explicit = s.get("loras") or s.get("lora_paths") or []
+    if isinstance(explicit, (list, tuple)):
+        for p in explicit:
+            if isinstance(p, str) and p.strip():
+                lora_paths.append(p.strip())
+
+    # (2) subject_ids → trained Subject LoRAs (the cast seam, mirrors Film Crew).
+    subject_ids = s.get("subject_ids") or []
+    if isinstance(subject_ids, (list, tuple)) and subject_ids:
+        from backend.models import Subject
+        for sid in subject_ids:
+            subj = db.session.get(Subject, sid)
+            if subj and subj.lora_path:
+                lora_paths.append(subj.lora_path)
+                triggers.append((subj.trigger_word or subj.name or "").strip())
+
+    # De-dupe paths while preserving order.
+    seen: set[str] = set()
+    lora_paths = [p for p in lora_paths if not (p in seen or seen.add(p))]
+    triggers = [t for t in triggers if t]
+
+    if not lora_paths:
+        log.info(
+            "music_video %s: use_lora_consistency is ON but no trained LoRA "
+            "reference was reachable from settings (no loras/lora_paths and no "
+            "subject_ids → Subject.lora_path) — keyframe will render off-model.",
+            mv.id,
+        )
+        return [], base_prompt
+
+    prompt = base_prompt
+    if triggers:
+        prompt = f"{', '.join(triggers)}, {base_prompt}"
+    log.info("music_video %s keyframe: applying %d LoRA(s) %s",
+             mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths])
+    return lora_paths, prompt
+
+
 @contextmanager
 def _mv_run(mv_id: int, *, expected_stage: str, next_agent: str | None):
     """Stage guard + auto-advance, mirroring production_swarm_tasks._agent_run.
@@ -194,6 +259,7 @@ def run_analyzer(mv_id: int):
         if mv is None:
             return
         ensure_plugin_running("video_editor")
+        ensure_plugin_running("ollama")  # Director planning requires the Ollama service/daemon for per-cut prompts
         song = _resolve_song_path(mv)
         if not song:
             raise RuntimeError("song file not found on disk")
@@ -217,6 +283,25 @@ def run_analyzer(mv_id: int):
         if not plan:
             raise RuntimeError("cut planner produced no cuts")
 
+        # Bias the cut planner for slow/dreamlike treatments (user's "slow motion" intent and the treatment's "Motion is Slow").
+        # This produces fewer, longer cuts so the edit feels dreamy rather than frantic, even if the raw audio energy is high.
+        # The max_stretch setting (slowdown) is already used for max_cut_s, but we also dampen energy effect here.
+        slow_pace = False
+        treatment_text = (s.get("user_treatment") or s.get("director_treatment") or mv.style_prompt or "").lower()
+        if any(kw in treatment_text for kw in ["slow", "dreamlike", "gliding", "drifting", "ethereal", "motion is slow", "slow and dreamlike"]):
+            slow_pace = True
+
+        if slow_pace:
+            # Recompute plan with energy dampened so even "high energy" sections get longer cuts.
+            # This respects the artistic intent from the treatment ("Motion is Slow", dreamlike) over the raw librosa energy.
+            # Combined with high max_stretch (slow motion setting), this produces the desired long, stretched, atmospheric shots
+            # instead of many short frantic ones.
+            plan = compute_cut_plan(
+                structure["beat_times"], structure["sections"], structure["duration_seconds"],
+                max_cut_s=max_cut_s,
+                slow_pace=True,
+            )
+
         # Director: now generates an actual VISUAL STORYLINE (narrative arc mapped to
         # the song sections + energy) first, then distinct per-cut prompts that advance
         # that storyline. This prevents the "every cut is just the global style repeated"
@@ -231,6 +316,13 @@ def run_analyzer(mv_id: int):
                 extra_guidance=s.get("director_guidance"),
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),
             )
+            # If a rich user-provided treatment was supplied, we can also store the
+            # raw treatment the Director produced/refined so the UI can show the
+            # final version the agent settled on.
+            if result.get("treatment"):
+                s = dict(mv.settings_json or {})
+                s["director_treatment"] = result.get("treatment")
+                mv.settings_json = s
             prompts = result["prompts"]
             treatment = result.get("treatment")
             shot_plans = {s.get("index"): s for s in (result.get("shots") or []) if isinstance(s, dict)}
@@ -249,13 +341,16 @@ def run_analyzer(mv_id: int):
         for c in plan:
             idx = c["index"]
             sp = shot_plans.get(idx, {})
+            # Prefer the unique visual prompt from the detailed shot plan (produced by the Director from the treatment)
+            # over the flat prompts list. This ensures we get the per-cut variation the model was instructed to create.
+            shot_prompt = sp.get("prompt") or (prompts[idx] if idx < len(prompts) else mv.style_prompt)
             clip = {
                 "index": idx,
                 "start": c["start_s"],
                 "end": c["end_s"],
                 "clip_path": None,
                 "status": "pending",
-                "prompt": prompts[idx] if idx < len(prompts) else mv.style_prompt,
+                "prompt": shot_prompt,
                 "duration_seconds": sp.get("duration_seconds"),
                 "transition_to_next": sp.get("transition_to_next"),
                 "filter_preset": sp.get("filter_preset"),
@@ -357,12 +452,15 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     out_dir = _clip_dir(mv.id)
     still_path = str(out_dir / f"still_{idx}.png")
     final_path = str(out_dir / f"clip_{idx}.mp4")
-    base_target_s = float(clip["end"]) - float(clip["start"])
+    base_slot_s = float(clip["end"]) - float(clip["start"])
     # Planner (Director) can suggest artistic duration for this shot (longer for drama, shorter for punch).
-    # Use it for the i2v source generation (more precise, saves resources on long slow sections via later stretch).
-    # The fill and assembly will still map to the full timeline slot for audio sync.
+    # This controls only the *generated motion* length for the i2v call (saves VRAM/compute on long dreamy shots).
+    # The *filled output clip file* is always produced at exactly the full timeline slot length so that
+    # the MLT assembly (source_out + timeline slots) matches the actual media duration on disk. This
+    # contract is required for audio sync and to prevent timing drift or underruns in the .mlt.
     suggested = clip.get("duration_seconds")
-    target_s = float(suggested) if suggested and 0.5 < float(suggested) <= base_target_s * 2.5 else base_target_s
+    motion_len_s = float(suggested) if suggested and 0.5 < float(suggested) <= base_slot_s * 2.5 else base_slot_s
+    fill_target_s = base_slot_s   # always the full cut slot for the final clip_*.mp4
     out_fps = s["fps"]   # final clip fps (the fill step re-times to this)
 
     # Engine / model selection. Full model id (wan22-14b-i2v etc.) is now first-class
@@ -372,10 +470,10 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     i2v_model = s.get("i2v_model", "wan22-14b-i2v")
     if "wan" in i2v_model.lower():
         i2v_fps = 24
-        frames = max(17, min(49, int(round(target_s * i2v_fps)) or 25))
+        frames = max(17, min(49, int(round(motion_len_s * i2v_fps)) or 25))
     else:
         i2v_fps = 7
-        frames = max(14, min(25, int(round(target_s * i2v_fps)) or 25))
+        frames = max(14, min(25, int(round(motion_len_s * i2v_fps)) or 25))
 
     # If the user has already curated storyboards (via the "thumbnails first" review
     # flow), reuse the reviewed storyboard image as the init for i2v instead of
@@ -393,7 +491,10 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     # card — the chat engine + training already do this before heavy GPU work; the
     # music-video render previously didn't (documented gap). The mid-session
     # _comfyui_free_vram() below stays explicit (the FLUX→i2v evict is mid-block).
-    with gpu_session(JobKind.VIDEO_RENDER, f"mv_{mv.id}_{idx}", evict_ollama=True):
+    # vram_estimate_mb makes this keyframe+i2v render visible to the GPU orchestrator's
+    # budget so it evicts competing in-process models instead of both fighting for 16GB.
+    with gpu_session(JobKind.VIDEO_RENDER, f"mv_{mv.id}_{idx}", evict_ollama=True,
+                     vram_estimate_mb=14000):
         if not use_pregen_storyboard:
             # Keyframe (storyboard still) generation.
             # When use_lora_consistency is true (or loras are present), the SDXL+LoRA path
@@ -401,8 +502,13 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             # future swap to FLUX or other high-aesthetic models for prettier keyframes
             # before feeding to the chosen I2V (Wan2.2 I2V etc.).
             kf_steps = s.get("keyframe_steps") or 30
+            # Thread the trained character/style LoRA(s) into the SDXL keyframe so
+            # identity actually shows up in the still that the i2v then animates
+            # (mirrors Film Crew's storyboard_artist). No-op unless LoRA
+            # consistency is on AND a LoRA reference is reachable from settings.
+            kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, clip_prompt)
             img = ComfyUIImageGenerator().generate_image(
-                prompt=clip_prompt, loras=[], output_path=still_path,
+                prompt=kf_prompt, loras=kf_loras, output_path=still_path,
                 width=s["still_width"], height=s["still_height"], seed=1000 + idx,
                 steps=kf_steps,
             )
@@ -441,8 +547,10 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
 
     # Fill to the EXACT cut length (memory #721 sync fix) — CPU ffmpeg, no gate.
     # method=forward keeps motion forward (no moonwalk); max_stretch caps slowdown.
+    # fill_target_s (the full slot) guarantees the written clip_*.mp4 duration matches
+    # the source_out + timeline slot the assembler will declare for the .mlt.
     fill_clip_to_duration(
-        str(wan_abs), target_s, final_path,
+        str(wan_abs), fill_target_s, final_path,
         fps=out_fps, width=s["width"], height=s["height"],
         method=s["fill_method"], max_stretch=float(s["max_stretch"]),
     )
@@ -461,7 +569,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             break
     mv.clips = clips
     db.session.commit()
-    log.info("music_video %s clip %s done (%.2fs)", mv.id, idx, target_s)
+    log.info("music_video %s clip %s done (%.2fs)", mv.id, idx, fill_target_s)
 
 
 # --- Stage: assembling -------------------------------------------------------
@@ -489,11 +597,13 @@ def run_assembler(mv_id: int):
         s = _settings(mv)
         arrangement_clips = []
         for c in clips:
-            # Always use the full energy-planned cut length for the timeline slot and source_out
-            # (ensures audio sync, no gaps). The Director's duration_seconds suggestion (if any)
-            # was already used at i2v generation time to produce a more precise/shorter source clip
-            # that then gets stretched via fill_method + max_stretch for artistic slowmo or punch.
+            # Use the full energy-planned cut length for timeline slot (audio sync).
+            # Prefer the *actual* duration of the filled clip file on disk for source_out
+            # (defensive against any pre-fix renders or rounding). This ensures the .mlt
+            # chains/entries request a play length that the avformat producer can actually deliver.
             base_cut_len = float(c["end"]) - float(c["start"])
+            actual_dur = probe_duration(c["clip_path"]) or base_cut_len
+            source_out = min(actual_dur, base_cut_len)
 
             arrangement_clips.append({
                 "clip_id": f"mv{mv_id}_{c['index']}",
@@ -502,7 +612,7 @@ def run_assembler(mv_id: int):
                 "timeline_start": float(c["start"]),
                 "timeline_end": float(c["end"]),
                 "source_in": 0.0,
-                "source_out": base_cut_len,
+                "source_out": source_out,
                 "filter_preset": c.get("filter_preset") or "none",
                 "transition_to_next": c.get("transition_to_next") or "hard-cut",
             })
@@ -531,6 +641,21 @@ def run_assembler(mv_id: int):
         mp4_doc = next((d for d in docs if _is_mp4(d)), None) or (docs[0] if docs else None)
         if mp4_doc:
             mv.output_document_id = mp4_doc.get("id")
+
+        # Convenience copy: put a nicely-named .mlt next to the music_video's clips/
+        # so the user can easily find and open "the shotcut file" for this project
+        # without hunting in the opaque mlt-projects/ hash dir. The XML still uses
+        # absolute paths to the clips, so it is self-contained for Shotcut.
+        try:
+            mlt_path = result.get("mlt_path")
+            if mlt_path and os.path.exists(mlt_path):
+                nice_mlt = _clip_dir(mv_id).parent / f"music_video_{mv_id}.mlt"
+                import shutil
+                shutil.copy2(mlt_path, nice_mlt)
+                log.info("music_video %s: convenience .mlt also at %s", mv_id, nice_mlt)
+        except Exception:  # noqa: BLE001
+            pass
+
         db.session.commit()
         log.info("music_video %s assembled → %s (doc %s)",
                  mv_id, result.get("rendered_mp4"), mv.output_document_id)

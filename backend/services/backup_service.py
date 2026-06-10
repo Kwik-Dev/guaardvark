@@ -30,6 +30,17 @@ from backend import config, models
 
 logger = logging.getLogger(__name__)
 
+# Minimum number of table entries a healthy pg_dump must contain.
+#
+# The app declares 42 SQLAlchemy models. A real dump's pg_restore TOC lists at
+# least one TABLE entry per persisted model (plus indexes/constraints/sequences,
+# which we don't count). We set the floor comfortably below 42 to tolerate
+# legitimate variance (association tables, models not yet migrated, abstract
+# bases) while still catching the failure mode this guard exists for: an empty
+# or near-empty dump shipped because pg_dump silently produced garbage. A dump
+# listing < 30 tables is treated as a placebo backup and fails the task.
+MIN_DUMP_TABLE_COUNT = 30
+
 
 # Standard patterns to ignore in all backups (junk, temporary, or generated files).
 #
@@ -380,7 +391,10 @@ def _create_pg_dump(dest_path: Path) -> bool:
         if result.returncode == 0:
             size_mb = dest_path.stat().st_size / (1024 * 1024)
             logger.info("PostgreSQL dump created: %s (%.2f MB)", dest_path, size_mb)
-            return True
+            # Restore-verify: a dump that pg_dump "succeeded" on is still a
+            # placebo if it's empty/unlistable. Prove it can be read back and
+            # contains a sane number of tables before trusting it.
+            return _verify_pg_dump(dest_path)
         else:
             logger.error("pg_dump failed (rc=%d): %s", result.returncode, result.stderr)
             return False
@@ -395,14 +409,101 @@ def _create_pg_dump(dest_path: Path) -> bool:
         return False
 
 
-def _restore_pg_dump(dump_path: Path) -> bool:
+def _verify_pg_dump(dump_path: Path) -> bool:
+    """Verify a freshly written pg_dump is restorable and non-trivial.
+
+    Deep verification (preferred): run ``pg_restore --list`` against the dump
+    and count the ``TABLE`` entries in the archive's table of contents. This
+    reads the dump exactly the way a restore would parse it, without touching
+    the live database, and proves the archive is well-formed. We require at
+    least ``MIN_DUMP_TABLE_COUNT`` tables so a near-empty dump can't pass.
+
+    Shallow fallback: if the ``pg_restore`` binary is unavailable, we cannot
+    parse the custom-format archive ourselves, so we degrade to a
+    file-exists + size>0 check and log loudly that deep verification was
+    skipped. This is weaker (it won't catch a truncated/corrupt archive that
+    is still non-empty) but is the best we can do without the tool.
+
+    Returns:
+        True if the dump passes verification, False if it should be rejected.
+    """
+    # Basic existence / non-empty gate (cheap, always runs).
+    try:
+        if not dump_path.exists() or dump_path.stat().st_size == 0:
+            logger.error("pg_dump verification failed: dump missing or empty: %s", dump_path)
+            return False
+    except OSError as e:
+        logger.error("pg_dump verification failed: cannot stat %s: %s", dump_path, e)
+        return False
+
+    try:
+        result = subprocess.run(
+            ["pg_restore", "--list", str(dump_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        # No pg_restore: degrade to the shallow size check we already passed.
+        logger.warning(
+            "pg_restore not found — deep dump verification SKIPPED. "
+            "Accepting dump on file-size>0 check only (%s, %d bytes). "
+            "Install postgresql-client to enable table-count verification.",
+            dump_path, dump_path.stat().st_size,
+        )
+        return True
+    except subprocess.TimeoutExpired:
+        logger.error("pg_dump verification failed: pg_restore --list timed out")
+        return False
+    except Exception as e:
+        logger.error("pg_dump verification failed: pg_restore --list error: %s", e)
+        return False
+
+    if result.returncode != 0:
+        logger.error(
+            "pg_dump verification failed: dump is unlistable (rc=%d): %s",
+            result.returncode, result.stderr[:500],
+        )
+        return False
+
+    # Count TABLE entries in the TOC. Lines look like:
+    #   "123; 1259 16456 TABLE public clients guaardvark"
+    table_count = sum(
+        1 for line in result.stdout.splitlines()
+        if " TABLE " in line and not line.lstrip().startswith(";")
+    )
+    if table_count < MIN_DUMP_TABLE_COUNT:
+        logger.error(
+            "pg_dump verification failed: dump lists only %d tables "
+            "(expected >= %d) — treating as a placebo backup.",
+            table_count, MIN_DUMP_TABLE_COUNT,
+        )
+        return False
+
+    logger.info("pg_dump verified: %d tables listed (>= %d floor)", table_count, MIN_DUMP_TABLE_COUNT)
+    return True
+
+
+def _restore_pg_dump(dump_path: Path, sanity_check=None) -> bool:
     """Restore a PostgreSQL dump file using pg_restore.
 
     Args:
         dump_path: Path to the .pgdump file.
+        sanity_check: Optional zero-arg callable invoked AFTER a restore that
+            otherwise looks successful. It must return True if the restored DB
+            is sane (e.g. an expected row/table is present) and False/raise
+            otherwise. This is the post-restore assertion hook: a restore is
+            only reported as success if this also passes. If None, the caller
+            is responsible for verifying the restored data out-of-band (a
+            restore reported True here is "pg_restore did not error", NOT "the
+            data is proven correct" — see the follow-up note below).
 
     Returns:
-        True if restore succeeded, False otherwise.
+        True if restore succeeded (and sanity_check, if given, passed).
+
+    Follow-up: deep restore verification (row counts vs. the dump's manifest,
+    pgvector index integrity) is not yet wired here. Pass ``sanity_check`` from
+    the caller, or run a smoke query against the restored DB, until that lands.
     """
     db_url = config.DATABASE_URL
     if not db_url or not db_url.startswith("postgresql"):
@@ -425,6 +526,7 @@ def _restore_pg_dump(dump_path: Path) -> bool:
                 "--no-acl",
                 "--clean",
                 "--if-exists",
+                "--exit-on-error",  # stop on the first real restore error
                 str(dump_path),
             ],
             env=env,
@@ -432,17 +534,46 @@ def _restore_pg_dump(dump_path: Path) -> bool:
             text=True,
             timeout=300,
         )
-        # pg_restore returns non-zero on warnings (e.g. "relation already exists")
-        # so we only fail on actual error output
+
+        restore_ok = False
         if result.returncode == 0:
             logger.info("PostgreSQL restore completed successfully")
-            return True
-        elif "error" in result.stderr.lower() and "warning" not in result.stderr.lower():
-            logger.error("pg_restore failed (rc=%d): %s", result.returncode, result.stderr)
-            return False
+            restore_ok = True
         else:
-            logger.warning("pg_restore completed with warnings: %s", result.stderr[:500])
-            return True
+            # With --exit-on-error a non-zero rc is a genuine failure. We no
+            # longer treat "stderr merely mentions a warning" as success — that
+            # heuristic let partial/failed restores report success. The only
+            # benign non-zero case we still tolerate is the post-restore summary
+            # "errors ignored on restore: N" where N is 0 (no objects failed).
+            stderr_lower = result.stderr.lower()
+            m = re.search(r"errors ignored on restore:\s*(\d+)", stderr_lower)
+            if m and int(m.group(1)) == 0:
+                logger.warning(
+                    "pg_restore exited non-zero (rc=%d) but reported 0 ignored "
+                    "errors; treating as success. stderr: %s",
+                    result.returncode, result.stderr[:500],
+                )
+                restore_ok = True
+            else:
+                logger.error(
+                    "pg_restore failed (rc=%d): %s",
+                    result.returncode, result.stderr[:1000],
+                )
+                return False
+
+        # Post-restore sanity assertion: a restore that pg_restore is happy with
+        # can still leave the DB in a state the caller knows is wrong. Only
+        # report success if the optional sanity_check agrees.
+        if restore_ok and sanity_check is not None:
+            try:
+                if not sanity_check():
+                    logger.error("pg_restore post-restore sanity check returned False")
+                    return False
+            except Exception as e:
+                logger.error("pg_restore post-restore sanity check raised: %s", e)
+                return False
+
+        return restore_ok
     except FileNotFoundError:
         logger.error("pg_restore command not found. Install postgresql-client.")
         return False
@@ -639,12 +770,30 @@ def create_data_backup(components: List[str] | None = None, name: str | None = N
                     except Exception as e:
                         logger.warning("Failed to copy plugins directory: %s", e)
 
-            # Create PostgreSQL database dump
+            # Create PostgreSQL database dump.
+            #
+            # _create_pg_dump() now restore-verifies its own output, so a True
+            # return means the dump exists, is listable, and contains a sane
+            # number of tables. If the configured DB is PostgreSQL and the dump
+            # fails verification, refuse to ship a placebo backup: raise so the
+            # caller (e.g. the daily_backup task) records a failure and retries
+            # rather than archiving a zip with a missing/empty DB dump.
             pg_dump_path = tmp / "data" / "database" / "guaardvark.pgdump"
+            db_url = config.DATABASE_URL
+            db_is_postgres = bool(db_url) and db_url.startswith("postgresql")
             if _create_pg_dump(pg_dump_path):
                 data["pg_dump_included"] = True
+            elif db_is_postgres:
+                # PostgreSQL is the configured backend but we could not produce
+                # a verified dump — this backup would be missing its database.
+                raise RuntimeError(
+                    "PostgreSQL dump failed verification; refusing to ship a "
+                    "data backup without a valid database dump"
+                )
             else:
-                logger.warning("PostgreSQL dump not included in data backup")
+                # Non-PostgreSQL backend (e.g. SQLite): the DB lives in the
+                # copied data directory, so a missing pg_dump is expected.
+                logger.info("PostgreSQL dump not included (non-PostgreSQL backend)")
 
             # Re-write manifest with pg_dump flag
             with open(json_path, "w", encoding="utf-8") as f:
@@ -856,6 +1005,7 @@ def create_full_backup(name: str | None = None) -> str:
                 "backend/tasks/",
                 "backend/migrations/",
                 "backend/handlers/",
+                "backend/middleware/",
                 "backend/agents/",
                 "backend/plugins/",
 
@@ -1225,6 +1375,7 @@ def create_code_release(name: str | None = None) -> str:
                 "backend/tasks/",
                 "backend/migrations/",
                 "backend/handlers/",
+                "backend/middleware/",
                 "backend/agents/",
                 "backend/plugins/",
                 

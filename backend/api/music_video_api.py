@@ -93,7 +93,7 @@ def _mv_dict(mv: MusicVideo) -> dict:
     if s.get("planning_mode"):
         out["planning_mode"] = s.get("planning_mode")
     out["use_lora_consistency"] = s.get("use_lora_consistency", False)
-    out["keyframe_model"] = s.get("keyframe_model", "sdxl")
+    out["keyframe_model"] = s.get("keyframe_model", "flux-schnell")
     out["i2v_model"] = s.get("i2v_model") or ("wan22-14b-i2v" if s.get("i2v_engine", "wan") == "wan" else "cogvideox-5b-i2v")
     # The rich visual treatment / short story the Director (acting as screenwriter) invented.
     # This is the creative foundation — per-cut prompts should advance this treatment.
@@ -334,7 +334,7 @@ def cancel_music_video(mv_id):
     mv.clips = clips
     db.session.commit()
 
-    logger.info(f"Music video {mv_id} cancelled by user at stage {mv.current_stage}")
+    log.info(f"Music video {mv_id} cancelled by user at stage {mv.current_stage}")
     return jsonify(_mv_dict(mv))
 
 
@@ -394,7 +394,9 @@ def generate_storyboards(mv_id):
         out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboards_{mv_id}", evict_ollama=True):
+        # vram_estimate_mb (~SDXL still) makes storyboard gen visible to the GPU orchestrator budget.
+        with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboards_{mv_id}", evict_ollama=True,
+                         vram_estimate_mb=10000):
             for c in clips:
                 if c.get("storyboard_path") and os.path.exists(c.get("storyboard_path")):
                     continue  # already have one
@@ -485,7 +487,9 @@ def regen_mv_storyboard(mv_id, idx):
 
     still_path = str(out_dir / f"storyboard_{idx}.png")
     try:
-        with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboard_{mv_id}_{idx}", evict_ollama=True):
+        # vram_estimate_mb (~SDXL still) makes single-storyboard regen visible to the orchestrator budget.
+        with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboard_{mv_id}_{idx}", evict_ollama=True,
+                         vram_estimate_mb=10000):
             ComfyUIImageGenerator().generate_image(
                 prompt=prompt,
                 loras=[],
@@ -531,6 +535,7 @@ def _settings_for_mv(mv):
     s.setdefault("still_width", 1024)
     s.setdefault("still_height", 576)
     s.setdefault("keyframe_steps", 20)
+    s.setdefault("keyframe_model", "flux-schnell")
     return s
 
 

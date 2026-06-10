@@ -919,6 +919,48 @@ class UnifiedChatEngine:
             options=options,
         )
 
+        # ── Native tool-calling gate (feature-flagged, default OFF) ──────────
+        # GUAARDVARK_NATIVE_TOOLCALLS toggles passing Ollama's native tools=[...]
+        # schema in the Tier 2 streaming call and reading structured
+        # message.tool_calls instead of XML-in-content. Defaults OFF so the
+        # live chat path is byte-identical to the XML+regex path until Dean
+        # validates the on-path against a live tool-capable model.
+        #
+        # The native path only activates when BOTH the flag is on AND the
+        # active model advertises the "tools" capability via Ollama; otherwise
+        # we fall through to the unchanged XML path.
+        self._native_toolcalls_active = False
+        self._native_tools_schema = None
+        self._native_pending_tool_calls = None  # filled by _call_llm_streaming
+        try:
+            import os as _os
+            _flag_on = _os.environ.get("GUAARDVARK_NATIVE_TOOLCALLS", "").strip().lower() in (
+                "1", "true", "yes", "on"
+            )
+            if _flag_on:
+                from backend.utils.ollama_resource_manager import model_supports_tools
+                if model_supports_tools(model_name):
+                    self._native_tools_schema = self.registry.as_ollama_tools(
+                        tool_names=selected_tools
+                    )
+                    if self._native_tools_schema:
+                        self._native_toolcalls_active = True
+                        logger.info(
+                            f"[UNIFIED_ENGINE] NATIVE tool-calling ACTIVE for "
+                            f"model={model_name} ({len(self._native_tools_schema)} tools)"
+                        )
+                else:
+                    logger.info(
+                        f"[UNIFIED_ENGINE] GUAARDVARK_NATIVE_TOOLCALLS on but "
+                        f"model={model_name} lacks 'tools' capability — using XML path"
+                    )
+        except Exception as _native_err:
+            # Any failure setting up the native path must NOT break chat —
+            # fall back to the XML path silently (flag-off behavior).
+            logger.warning(f"[UNIFIED_ENGINE] native tool-call setup failed, using XML path: {_native_err}")
+            self._native_toolcalls_active = False
+            self._native_tools_schema = None
+
         logger.info(
             f"[UNIFIED_ENGINE] session={session_id} model={model_name} "
             f"tools={len(selected_tools)} history={len(history)} "
@@ -1080,19 +1122,32 @@ class UnifiedChatEngine:
                 }
 
             # 6c. Parse for tool calls
-            # Thinking models output bracket-format tool calls (e.g. [tool_call])
-            # because we sanitize the system prompt. Convert back to XML for the parser.
-            parse_input = llm_response
-            if "[tool_call]" in llm_response or "[tool]" in llm_response:
-                parse_input = (llm_response
-                    .replace("[tool_call]", "<tool_call>")
-                    .replace("[/tool_call]", "</tool_call>")
-                    .replace("[tool]", "<tool>")
-                    .replace("[/tool]", "</tool>"))
-                # Convert [param_name]value[/param_name] back to XML
-                parse_input = re.sub(r'\[(\w+)\]', r'<\1>', parse_input)
-                parse_input = re.sub(r'\[/(\w+)\]', r'</\1>', parse_input)
-            parsed = parse_tool_calls_xml(parse_input)
+            # NATIVE PATH: when native tool-calling is active, the model returns
+            # structured tool_calls in message.tool_calls (captured out-of-band by
+            # _call_llm_streaming into self._native_pending_tool_calls). Build the
+            # SAME ToolCallResponse the XML parser yields so every downstream stage
+            # (tool_jobs, guard, executor, observation collation) is unchanged.
+            parsed = None
+            if getattr(self, "_native_toolcalls_active", False):
+                _native_calls = getattr(self, "_native_pending_tool_calls", None)
+                self._native_pending_tool_calls = None  # consume
+                parsed = self._native_tool_calls_to_response(_native_calls, llm_response)
+
+            if parsed is None:
+                # XML path (flag off, or native produced no structured calls).
+                # Thinking models output bracket-format tool calls (e.g. [tool_call])
+                # because we sanitize the system prompt. Convert back to XML for the parser.
+                parse_input = llm_response
+                if "[tool_call]" in llm_response or "[tool]" in llm_response:
+                    parse_input = (llm_response
+                        .replace("[tool_call]", "<tool_call>")
+                        .replace("[/tool_call]", "</tool_call>")
+                        .replace("[tool]", "<tool>")
+                        .replace("[/tool]", "</tool>"))
+                    # Convert [param_name]value[/param_name] back to XML
+                    parse_input = re.sub(r'\[(\w+)\]', r'<\1>', parse_input)
+                    parse_input = re.sub(r'\[/(\w+)\]', r'</\1>', parse_input)
+                parsed = parse_tool_calls_xml(parse_input)
 
             # 6d. No tool calls -> final answer
             if parsed.tool_calls:
@@ -1742,6 +1797,63 @@ class UnifiedChatEngine:
 
         return None  # Not a media command
 
+    def _native_tool_calls_to_response(self, native_calls, llm_response: str):
+        """Convert Ollama-native message.tool_calls into a ToolCallResponse.
+
+        Mirrors what parse_tool_calls_xml produces so the rest of the ReACT loop
+        (tool_jobs build, guard pre-filter, executor, observation collation) is
+        completely format-agnostic and unchanged.
+
+        Ollama native tool calls look like:
+            {"function": {"name": "web_search", "arguments": {"query": "..."}}}
+        ``arguments`` is normally a dict, but some runners emit it as a JSON
+        string — handle both. Returns a ToolCallResponse; when there are no
+        structured calls, returns one with an empty tool_calls list and
+        final_answer = the streamed content (the model's final text answer),
+        which makes the loop terminate exactly like the XML "no tool calls" path.
+        """
+        from backend.utils.agent_output_parser import ToolCall, ToolCallResponse
+
+        tool_calls = []
+        for raw in (native_calls or []):
+            try:
+                fn = raw.get("function") if isinstance(raw, dict) else getattr(raw, "function", None)
+                if fn is None:
+                    continue
+                name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
+                args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", None)
+                if not name:
+                    continue
+                if isinstance(args, str):
+                    try:
+                        import json as _json
+                        args = _json.loads(args)
+                    except Exception:
+                        args = {"_raw": args}
+                if not isinstance(args, dict):
+                    args = {}
+                tool_calls.append(ToolCall(
+                    tool_name=name,
+                    parameters=args,
+                    reasoning="(native function call)",
+                ))
+            except Exception as _conv_err:
+                logger.warning(f"[UNIFIED_ENGINE] failed to convert native tool_call {raw!r}: {_conv_err}")
+                continue
+
+        if tool_calls:
+            return ToolCallResponse(
+                thoughts=(llm_response.strip() or None),
+                tool_calls=tool_calls,
+                final_answer=None,
+            )
+        # No structured calls — the streamed content is the final answer.
+        return ToolCallResponse(
+            thoughts=None,
+            tool_calls=[],
+            final_answer=(llm_response.strip() or None),
+        )
+
     def _call_llm_streaming(self, messages: List[Dict[str, str]], emit_fn: Callable,
                              session_id: str, emit_tokens: bool = True,
                              max_tokens: int = 768
@@ -1827,28 +1939,64 @@ class UnifiedChatEngine:
             if is_thinking_model:
                 call_messages = self._sanitize_messages_for_thinking_model(messages)
 
-            stream = ollama.chat(
+            # Native tool-calling path (feature-flagged via GUAARDVARK_NATIVE_TOOLCALLS,
+            # gated additionally on model 'tools' capability — see _run_chat). When
+            # active we pass Ollama's native tools=[...] schema; the model returns
+            # structured tool_calls in message.tool_calls rather than inline XML.
+            _native_active = bool(getattr(self, "_native_toolcalls_active", False))
+            _native_schema = getattr(self, "_native_tools_schema", None)
+            if _native_active:
+                # Reset the per-call native tool-call sink so a prior iteration's
+                # calls never leak into this one.
+                self._native_pending_tool_calls = None
+
+            from backend.config import get_chat_keep_alive
+            _chat_kwargs = dict(
                 model=model_name,
                 messages=call_messages,
                 stream=True,
                 options=opts,
+                keep_alive=get_chat_keep_alive(),  # don't re-pin the model 24h on every chat burst (VRAM squat)
             )
+            if _native_active and _native_schema:
+                _chat_kwargs["tools"] = _native_schema
+            stream = ollama.chat(**_chat_kwargs)
 
             # XML filter: stream tokens to client until <tool_call is detected,
             # then suppress further emission (tool calls are announced separately).
+            #
+            # NATIVE PATH: tool calls arrive in the structured message.tool_calls
+            # field (NOT inline in content), so the <tool_call XML heuristic must
+            # not fire — we accumulate native tool_calls separately and stream the
+            # visible content tokens normally (no XML suppression).
             xml_detected = False
+            _native_tool_calls_acc = []  # collected message.tool_calls (native path)
             for chunk in stream:
                 if is_aborted(session_id):
                     break
                 msg = chunk.get("message", {})
                 token = msg.get("content", "")
                 thinking_token = msg.get("thinking", "")
+                # Native path: collect any structured tool_calls from this chunk.
+                if _native_active:
+                    _tc = None
+                    try:
+                        _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+                    except Exception:
+                        _tc = None
+                    if _tc:
+                        _native_tool_calls_acc.extend(_tc)
                 if token:
                     accumulated.append(token)
                     if emit_tokens and not xml_detected:
                         # Check if we've hit a tool_call tag in the accumulated text
-                        # Use last 20 chunks to handle slow-chunk Ollama streams
-                        if "<tool_call" in "".join(accumulated[-20:]) or "<tool>" in "".join(accumulated[-20:]):
+                        # Use last 20 chunks to handle slow-chunk Ollama streams.
+                        # On the native path tool calls are out-of-band (structured
+                        # message.tool_calls), so this XML heuristic must never fire.
+                        if not _native_active and (
+                            "<tool_call" in "".join(accumulated[-20:])
+                            or "<tool>" in "".join(accumulated[-20:])
+                        ):
                             xml_detected = True
                         else:
                             # Filter out <think>...</think> blocks from content stream
@@ -1908,6 +2056,13 @@ class UnifiedChatEngine:
             if not content and thinking:
                 logger.info(f"Using thinking field as response ({len(thinking)} chars, model: {model_name})")
                 content = thinking
+
+            # Native path: hand the collected structured tool_calls back to the
+            # ReACT loop out-of-band (the return signature is fixed at
+            # (text, in_tok, out_tok) for the XML path). The loop converts these
+            # into the SAME ToolCallResponse the XML parser produces.
+            if _native_active:
+                self._native_pending_tool_calls = _native_tool_calls_acc or None
 
             return content, input_tokens, output_tokens
 

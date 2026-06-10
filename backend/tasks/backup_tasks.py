@@ -1,7 +1,7 @@
 # backend/tasks/backup_tasks.py
 """Automated backup Celery tasks.
 
-Provides a daily backup task that creates a full backup and
+Provides a daily backup task that creates a data backup and
 cleans up auto-generated backups older than 30 days.
 """
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def daily_backup(self):
     """Create a daily automatic backup and clean up old auto-backups.
 
-    Scheduled via Celery Beat (every 24 hours). Creates a full backup
+    Scheduled via Celery Beat (every 24 hours). Creates a data backup
     with an 'auto_daily_' prefix and removes auto backups older than
     30 days to prevent disk bloat.
     """

@@ -636,8 +636,11 @@ check_ollama_model() {
     if [ "$OLLAMA_AVAILABLE" -eq 0 ]; then
         return 0
     fi
-    local model_name="llama2"
-    timeout 5 ollama list 2>/dev/null | grep -q "$model_name"
+    # Pass when ANY chat (non-embed) model is installed — the system doesn't default
+    # to a single fixed tag (it auto-selects via config.get_default_llm, gemma/llama3
+    # family), and the fresh-install bootstrap guarantees one. The old check grepped
+    # the literal "llama2", a model the system never defaults to → always failed.
+    timeout 5 ollama list 2>/dev/null | grep -viE 'embed|minilm' | grep -qE '[a-zA-Z0-9].*:'
 }
 
 run_health_checks() {
@@ -796,6 +799,30 @@ ensure_backend_python_environment() {
         fi
         if [ -f "$BACKEND_DIR/requirements.txt" ]; then
             pip install -r "$BACKEND_DIR/requirements.txt" >> "$SETUP_LOG" 2>&1 || true
+        fi
+
+        # Optional CV/face-restoration extra (P3-10). These deps (gfpgan/realesrgan/
+        # basicsr/facexlib/controlnet-aux/mediapipe) lack reliable aarch64 wheels and
+        # used to abort the whole install on a Pi. Install them only when explicitly
+        # forced (GUAARDVARK_INSTALL_CV=1) OR auto-detected as a non-ARM GPU box.
+        # Failure here WARNS but never fails the core install — face-restore just stays
+        # disabled (its consumers import lazily inside try/except).
+        if [ -f "$BACKEND_DIR/requirements-cv.txt" ]; then
+            _cv_arch="$(uname -m 2>/dev/null || echo unknown)"
+            _cv_want=0
+            if [ "${GUAARDVARK_INSTALL_CV:-0}" = "1" ]; then
+                _cv_want=1
+            elif command_exists nvidia-smi && nvidia-smi >/dev/null 2>&1 \
+                 && [ "$_cv_arch" != "aarch64" ] && [ "$_cv_arch" != "arm64" ]; then
+                _cv_want=1
+            fi
+            if [ "$_cv_want" -eq 1 ]; then
+                vader_info "Installing optional CV/face-restoration deps (requirements-cv.txt)..."
+                pip install -r "$BACKEND_DIR/requirements-cv.txt" >> "$SETUP_LOG" 2>&1 \
+                    || vader_warn "Optional CV deps failed to install (face-restore stays disabled; non-fatal). Retry later: pip install -r backend/requirements-cv.txt"
+            else
+                vader_info "Skipping optional CV deps (no GPU or ARM arch). Force with GUAARDVARK_INSTALL_CV=1"
+            fi
         fi
 
         # The smart GPU/CUDA PyTorch installer (also called by dep_reconciler)
@@ -1167,6 +1194,56 @@ if command_exists nvidia-smi && [ ! -f "$GPU_SUDOERS" ]; then
     fi
 fi
 
+# ── Ollama daemon tuning env (P1-6) ──
+# These MUST be exported BEFORE `ollama serve` is launched below, otherwise the
+# user-spawned fallback daemon (Step 4) never inherits them. (The previous block
+# at ~line 1465 ran AFTER the launch, so the knobs were dead for the fallback path
+# and irrelevant to the systemd path — see scripts/ollama-systemd-dropin.conf for
+# that side.) Guarded by GUAARDVARK_OLLAMA_TUNING (default on; set =0 to disable).
+# KV-cache q8_0 + flash-attention are GPU wins (harmless-but-pointless on CPU), so
+# they are gated on the same nvidia-smi GPU detection start.sh already uses.
+if [ "${GUAARDVARK_OLLAMA_TUNING:-1}" != "0" ]; then
+    export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-2}"
+    export OLLAMA_NUM_CTX="${OLLAMA_NUM_CTX:-8192}"
+    export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-15m}"
+    if command_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
+        export OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
+        export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}"
+        vader_info "Ollama tuning: KV-cache q8_0 + flash-attention enabled (GPU detected)"
+    else
+        vader_info "Ollama tuning: NUM_PARALLEL/NUM_CTX/KEEP_ALIVE set (no GPU — skipping KV-cache/flash-attn)"
+    fi
+else
+    vader_info "Ollama tuning disabled (GUAARDVARK_OLLAMA_TUNING=0)"
+fi
+
+# ── Ollama systemd drop-in installer (P1-6 fix-b) ──
+# The preferred launch path below is `sudo systemctl start ollama`, which inherits
+# systemd's environment — NOT this shell's. So the exports above don't reach a
+# systemd-managed daemon. This step installs a [Service] Environment= drop-in
+# (scripts/ollama-systemd-dropin.conf) carrying the same vars, IF: tuning is on,
+# the drop-in isn't already installed, a GPU is present (the knobs are GPU wins),
+# and non-interactive sudo is available. It does NOT restart a running ollama —
+# it applies on the next daemon restart (logged). If sudo is unavailable, it logs
+# a one-line manual instruction. Guarded by GUAARDVARK_OLLAMA_TUNING.
+OLLAMA_DROPIN_SRC="$SCRIPT_DIR/scripts/ollama-systemd-dropin.conf"
+OLLAMA_DROPIN_DST="/etc/systemd/system/ollama.service.d/guaardvark-tuning.conf"
+if [ "${GUAARDVARK_OLLAMA_TUNING:-1}" != "0" ] && command_exists systemctl \
+   && [ -f "$OLLAMA_DROPIN_SRC" ] && command_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
+    if [ -f "$OLLAMA_DROPIN_DST" ] && cmp -s "$OLLAMA_DROPIN_SRC" "$OLLAMA_DROPIN_DST"; then
+        : # already installed and current — nothing to do
+    elif sudo -n true 2>/dev/null; then
+        if sudo -n install -D -m 0644 "$OLLAMA_DROPIN_SRC" "$OLLAMA_DROPIN_DST" 2>/dev/null \
+           && sudo -n systemctl daemon-reload 2>/dev/null; then
+            vader_success "Ollama systemd tuning drop-in installed (applies on next ollama restart; not force-restarting)"
+        else
+            vader_info "Could not install Ollama systemd drop-in (non-critical); manual: sudo install -D -m 0644 '$OLLAMA_DROPIN_SRC' '$OLLAMA_DROPIN_DST' && sudo systemctl daemon-reload && sudo systemctl restart ollama"
+        fi
+    else
+        vader_info "Ollama systemd tuning available — to apply, run: sudo install -D -m 0644 '$OLLAMA_DROPIN_SRC' '$OLLAMA_DROPIN_DST' && sudo systemctl daemon-reload && sudo systemctl restart ollama"
+    fi
+fi
+
 # Check if Ollama plugin is enabled. Honors the user_enabled overlay in
 # data/plugin_state.json (UI toggle) and falls back to plugin.json default.
 OLLAMA_PLUGIN_JSON="$SCRIPT_DIR/plugins/ollama/plugin.json"
@@ -1229,6 +1306,75 @@ elif [ "$OLLAMA_ENABLED" = "False" ]; then
     vader_info "Ollama plugin is disabled — skipping startup"
 else
     vader_warn "Ollama CLI not available; skipping service check."
+fi
+
+# ── Fresh-install model bootstrap (P0-3) ──
+# A fresh box boots with ZERO models → first chat 404s and RAG's
+# get_active_embedding_model() throws. start.sh never pulled anything before.
+# This step: if Ollama is up and is missing a chat and/or embedding model, pull a
+# small hardware-appropriate default of each. Sizes are chosen by RAM + arch:
+#   ≤8GB RAM or aarch64  → chat llama3.2:1b   + embed nomic-embed-text
+#   otherwise            → chat llama3.1:8b   + embed nomic-embed-text
+# Models are per-machine (Ollama-local, under data/ for this box) — NOT synced via
+# the Interconnector, so every node bootstraps its own. Guarded by
+# GUAARDVARK_BOOTSTRAP_MODELS (default on; set =0 to skip pulls entirely).
+if [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ] \
+   && [ "${GUAARDVARK_BOOTSTRAP_MODELS:-1}" != "0" ] \
+   && curl -sf --max-time 3 http://localhost:11434/ >/dev/null 2>&1; then
+
+    # Detect RAM(GB) + arch. Prefer hardware_detector's hardware.json if present
+    # (authoritative, already arch/RAM-aware); else fall back to uname + meminfo.
+    BOOT_RAM_GB=0
+    BOOT_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+    HW_JSON="${HOME}/.guaardvark/hardware.json"
+    if [ -f "$HW_JSON" ] && command_exists python3; then
+        _hw=$(python3 -c "import json,sys
+try:
+    d=json.load(open('$HW_JSON'))
+    print(int(d.get('ram',{}).get('total_gb',0) or 0), d.get('arch','') or '')
+except Exception:
+    print('0','')" 2>/dev/null)
+        if [ -n "$_hw" ]; then
+            BOOT_RAM_GB=$(echo "$_hw" | awk '{print $1}')
+            [ -n "$(echo "$_hw" | awk '{print $2}')" ] && BOOT_ARCH="$(echo "$_hw" | awk '{print $2}')"
+        fi
+    fi
+    if [ "${BOOT_RAM_GB:-0}" -eq 0 ] && [ -r /proc/meminfo ]; then
+        _kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null)
+        [ -n "$_kb" ] && BOOT_RAM_GB=$(( _kb / 1024 / 1024 ))
+    fi
+
+    # Pick defaults by hardware. GUAARDVARK_DEFAULT_LLM / GUAARDVARK_EMBEDDING_MODEL
+    # override the chat / embed choice respectively (matches config.py overrides).
+    if [ "${BOOT_RAM_GB:-0}" -le 8 ] && [ "${BOOT_RAM_GB:-0}" -gt 0 ] || [ "$BOOT_ARCH" = "aarch64" ] || [ "$BOOT_ARCH" = "arm64" ]; then
+        BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.2:1b}"
+        vader_info "Model bootstrap: small-hardware tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
+    else
+        BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.1:8b}"
+        vader_info "Model bootstrap: standard tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
+    fi
+    BOOT_EMBED_MODEL="${GUAARDVARK_EMBEDDING_MODEL:-nomic-embed-text}"
+
+    BOOT_LIST="$(timeout 10 ollama list 2>/dev/null || true)"
+    # A "chat model" is any non-embed tag. Detect absence of either class.
+    if ! echo "$BOOT_LIST" | grep -viE 'embed|minilm' | grep -qE '[a-zA-Z0-9].*:'; then
+        vader_info "No chat model found — pulling $BOOT_CHAT_MODEL (one-time, ~minutes)..."
+        ollama pull "$BOOT_CHAT_MODEL" >> "$LOGS_DIR/ollama_bootstrap.log" 2>&1 \
+            && vader_success "Chat model ready: $BOOT_CHAT_MODEL" \
+            || vader_warn "Failed to pull $BOOT_CHAT_MODEL (non-critical; see logs/ollama_bootstrap.log). Pull manually: ollama pull $BOOT_CHAT_MODEL"
+    else
+        vader_success "Chat model already present"
+    fi
+    if ! echo "$BOOT_LIST" | grep -qiE 'embed|minilm'; then
+        vader_info "No embedding model found — pulling $BOOT_EMBED_MODEL (one-time)..."
+        ollama pull "$BOOT_EMBED_MODEL" >> "$LOGS_DIR/ollama_bootstrap.log" 2>&1 \
+            && vader_success "Embedding model ready: $BOOT_EMBED_MODEL" \
+            || vader_warn "Failed to pull $BOOT_EMBED_MODEL (non-critical; RAG stays disabled until present). Pull manually: ollama pull $BOOT_EMBED_MODEL"
+    else
+        vader_success "Embedding model already present"
+    fi
+elif [ "${GUAARDVARK_BOOTSTRAP_MODELS:-1}" = "0" ]; then
+    vader_info "Model bootstrap disabled (GUAARDVARK_BOOTSTRAP_MODELS=0)"
 fi
 vader_separator
 
@@ -1417,14 +1563,18 @@ source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv for Fl
 # If the ensure_ steps above did their job, this will pass quickly.
 # If something is still wrong we fail here with a clear message instead of
 # a confusing ModuleNotFoundError 30 lines later in the app.
-if ! python -c "
+_POST_BOOTSTRAP_ERR=$("$VENV_DIR/bin/python" -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
 import numpy, flask, celery
 import backend.config, backend.models, backend.app
 print('Post-bootstrap core imports: OK')
-" 2>&1; then
-    vader_error "Post-bootstrap validation failed — core packages (numpy/flask/...) are still missing."
+" 2>&1)
+_POST_BOOTSTRAP_RC=$?
+if [ "$_POST_BOOTSTRAP_RC" -ne 0 ]; then
+    vader_error "Post-bootstrap validation failed:"
+    printf '%s\n' "$_POST_BOOTSTRAP_ERR"
+    vader_info "(Often a missing synced module — not necessarily numpy/flask.)"
     vader_info "See $SETUP_LOG. Run one of:"
     vader_info "  ./scripts/dep_reconciler.py --force"
     vader_info "  ./scripts/system-manager/system-manager repair ."
@@ -1589,7 +1739,10 @@ else
 
     ulimit -n 65535
 
-    nohup celery -A backend.celery_app.celery worker --loglevel=info --concurrency=2 >> "$LOGS_DIR/celery.log" 2>&1 &
+    # --concurrency=1 --pool=solo: prefork forks workers AFTER the parent may have initialized
+    # CUDA, which is the documented leaked-semaphore death class (PIDs 3047360/3065470). solo +
+    # single concurrency also upholds the single-GPU invariant (never two GPU tasks at once).
+    nohup celery -A backend.celery_app.celery worker --loglevel=info --concurrency=1 --pool=solo >> "$LOGS_DIR/celery.log" 2>&1 &
     CELERY_PID=$!
     echo "$CELERY_PID" > "$SCRIPT_DIR/pids/celery.pid"
     vader_success "Single Celery worker started (PID: $CELERY_PID)"
