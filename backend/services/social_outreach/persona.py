@@ -106,9 +106,20 @@ RELEVANCE_KEYWORDS = [
 # guarded register. Now we trust the model's natural voice and let
 # PITCH.md carry the facts. If a model's natural voice drifts off-tone,
 # nudge the file, not the code.
-_OUTWARD_FACING_FRAMING = """\
-You are writing a comment or post under Dean Albenze's Guaardvark account.
-The pitch sheet below is the source of truth — don't invent features
+# Operator identity for outward-facing copy. A fresh install must NEVER post under
+# a real person's name, so this defaults to a generic, name-free reference. Set
+# GUAARDVARK_OPERATOR_NAME in your .env to personalize the voice (recommended — so
+# your outreach reads as a person, not a faceless brand).
+_OPERATOR_NAME = (os.environ.get("GUAARDVARK_OPERATOR_NAME") or "").strip()
+_ACCOUNT_REF = f"{_OPERATOR_NAME}'s Guaardvark account" if _OPERATOR_NAME else "the Guaardvark account"
+_VIDEO_OWNER_REF = (
+    f"{_OPERATOR_NAME}'s own Guaardvark YouTube videos" if _OPERATOR_NAME
+    else "the Guaardvark channel's own YouTube videos"
+)
+
+_OUTWARD_FACING_FRAMING = (
+    f"You are writing a comment or post under {_ACCOUNT_REF}.\n"
+    """The pitch sheet below is the source of truth — don't invent features
 that aren't in it, don't fabricate URLs, don't claim more than what's
 written. Within those guardrails, write in your own voice.
 
@@ -128,6 +139,7 @@ than to force a mention.
 
 Return JSON: {"draft": "<comment text>", "grade": 0.0-1.0, "reason": "<one line>"}.
 """
+)
 
 # Framing for SELF-SHARE posts (we're submitting our own link to a community,
 # not commenting on someone else's thread). Distinct from _OUTWARD_FACING_FRAMING
@@ -136,9 +148,9 @@ Return JSON: {"draft": "<comment text>", "grade": 0.0-1.0, "reason": "<one line>
 # model to refuse a legitimate share task ("there's no thread, so I'll skip").
 # We also leave the JSON SHAPE to the user prompt so reddit can ask for
 # {title, body} and discord/etc can ask for {draft}.
-_SHARE_FRAMING_SYSTEM = """\
-You are writing a SELF-SHARE post under Dean Albenze's Guaardvark account.
-This is a fresh top-level post (or message), NOT a reply to an existing
+_SHARE_FRAMING_SYSTEM = (
+    f"You are writing a SELF-SHARE post under {_ACCOUNT_REF}.\n"
+    """This is a fresh top-level post (or message), NOT a reply to an existing
 thread. The pitch sheet below is the source of truth — don't invent
 features that aren't in it, don't fabricate URLs, don't claim more than
 what's written. Within those guardrails, write in your own voice.
@@ -148,14 +160,15 @@ that respects the target community's vibe and doesn't read as low-effort
 spam?". 0.7+ is post-worthy. The user prompt specifies the exact JSON
 schema to return — follow that schema, not a generic one.
 """
+)
 
 
 # Framing for REPLIES on Guaardvark's OWN YouTube videos. Different audience
 # (already engaged, watched the video) so different posture (no pitch,
 # no link, no marketing gate). Same factual ground from PITCH.md.
-_REPLY_FRAMING = """\
-You are writing a REPLY to a comment left on one of Dean Albenze's own
-Guaardvark YouTube videos. The viewer already watched and engaged — you
+_REPLY_FRAMING = (
+    f"You are writing a REPLY to a comment left on one of {_VIDEO_OWNER_REF}.\n"
+    """The viewer already watched and engaged — you
 are NOT pitching to a stranger. Be human about it. Don't paste the link,
 don't recap the video, don't sell. Answer questions if asked, take critique
 on the merits, acknowledge kindness briefly without overselling gratitude.
@@ -170,6 +183,7 @@ off-topic, wholly generic praise), return draft="" and grade=0.0.
 
 Return JSON: {"draft": "<reply text>", "grade": 0.0-1.0, "reason": "<one line>"}.
 """
+)
 
 
 def _compose_outward_facing_system() -> str:
