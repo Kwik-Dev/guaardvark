@@ -43,15 +43,53 @@ def _get_redis():
         return None
 
 
+_direct_engine = None
+
+
+def _get_direct_engine():
+    """SQLAlchemy engine for reads outside Flask app context (Celery beat early-exit)."""
+    global _direct_engine
+    if _direct_engine is None:
+        from sqlalchemy import create_engine
+
+        url = os.environ.get(
+            "DATABASE_URL",
+            "postgresql://guaardvark:guaardvark@localhost:5432/guaardvark",
+        )
+        _direct_engine = create_engine(url, pool_pre_ping=True)
+    return _direct_engine
+
+
+def _read_setting_direct(key: str, default: str) -> str:
+    try:
+        from sqlalchemy import text
+
+        with _get_direct_engine().connect() as conn:
+            row = conn.execute(
+                text("SELECT value FROM settings WHERE key = :key"),
+                {"key": key},
+            ).fetchone()
+            if row and row[0] is not None:
+                return str(row[0])
+    except Exception as e:
+        logger.warning("direct setting read failed for %s: %s", key, e)
+    return default
+
+
 def _read_setting(key: str, default: str) -> str:
     try:
-        from backend.models import Setting
-        row = Setting.query.filter_by(key=key).first()
-        if row and row.value is not None:
-            return str(row.value)
+        from flask import has_app_context
+
+        if has_app_context():
+            from backend.models import Setting
+
+            row = Setting.query.filter_by(key=key).first()
+            if row and row.value is not None:
+                return str(row.value)
+            return default
     except Exception as e:
         logger.warning("setting read failed for %s: %s", key, e)
-    return default
+    return _read_setting_direct(key, default)
 
 
 def is_enabled() -> bool:
@@ -130,6 +168,144 @@ def record_post(platform: str) -> None:
     r.set(REDIS_KEY_LAST_POST.format(platform=platform), str(now))
     r.zadd(REDIS_KEY_DAILY_LIST.format(platform=platform), {str(now): now})
     r.expire(REDIS_KEY_DAILY_LIST.format(platform=platform), CADENCE_DAILY_WINDOW_SECONDS + 60)
+
+
+def _celery_message_is_outreach(raw) -> bool:
+    """True if a Redis-broker Celery message is a social_outreach.* task."""
+    try:
+        import json
+
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        msg = json.loads(raw)
+        task = (msg.get("headers") or {}).get("task") or ""
+        return task.startswith("social_outreach.")
+    except Exception:
+        return False
+
+
+def drain_pending_outreach_tasks(queues: tuple[str, ...] = ("default", "celery")) -> dict:
+    """Revoke in-flight and drop queued social_outreach.* broker messages."""
+    purged = 0
+    revoked = 0
+    errors: list[str] = []
+
+    try:
+        from backend.celery_app import celery
+
+        insp = celery.control.inspect(timeout=3.0)
+        prefix = "social_outreach."
+        for snapshot in (
+            insp.active() or {},
+            insp.reserved() or {},
+        ):
+            for _worker, tasks in snapshot.items():
+                for task in tasks:
+                    name = task.get("name") or ""
+                    if name.startswith(prefix):
+                        celery.control.revoke(
+                            task["id"],
+                            terminate=True,
+                            signal="SIGTERM",
+                        )
+                        revoked += 1
+        for _worker, entries in (insp.scheduled() or {}).items():
+            for entry in entries:
+                req = entry.get("request") or {}
+                name = req.get("name") or ""
+                if name.startswith(prefix):
+                    celery.control.revoke(req["id"], terminate=False)
+                    revoked += 1
+    except Exception as e:
+        errors.append(f"revoke: {e}")
+
+    r = _get_redis()
+    if r is None:
+        errors.append("purge: redis unavailable")
+    else:
+        try:
+            for queue_name in queues:
+                length = r.llen(queue_name)
+                if not length:
+                    continue
+                kept: list = []
+                for raw in r.lrange(queue_name, 0, -1):
+                    if _celery_message_is_outreach(raw):
+                        purged += 1
+                    else:
+                        kept.append(raw)
+                pipe = r.pipeline()
+                pipe.delete(queue_name)
+                if kept:
+                    pipe.rpush(queue_name, *kept)
+                pipe.execute()
+        except Exception as e:
+            errors.append(f"purge: {e}")
+
+    return {"purged": purged, "revoked": revoked, "errors": errors}
+
+
+def cancel_outreach_task_rows() -> dict:
+    """Mark queued/in-progress Task-backed outreach runs as cancelled."""
+    cancelled = 0
+    revoked = 0
+    errors: list[str] = []
+
+    try:
+        from flask import has_app_context
+
+        if not has_app_context():
+            return {"cancelled_tasks": 0, "revoked_tasks": 0, "errors": ["no app context"]}
+
+        from backend.models import Task, db
+
+        rows = (
+            Task.query.filter(Task.task_handler == "social_outreach")
+            .filter(Task.status.in_(("queued", "pending", "in-progress")))
+            .all()
+        )
+        if not rows:
+            return {"cancelled_tasks": 0, "revoked_tasks": 0, "errors": errors}
+
+        try:
+            from backend.celery_app import celery
+        except Exception as e:
+            celery = None
+            errors.append(f"celery import: {e}")
+
+        for row in rows:
+            if celery and row.celery_task_id:
+                try:
+                    celery.control.revoke(
+                        row.celery_task_id,
+                        terminate=True,
+                        signal="SIGTERM",
+                    )
+                    revoked += 1
+                except Exception as e:
+                    errors.append(f"revoke task {row.id}: {e}")
+            row.status = "cancelled"
+            cancelled += 1
+        db.session.commit()
+    except Exception as e:
+        errors.append(f"cancel tasks: {e}")
+        try:
+            from backend.models import db
+
+            db.session.rollback()
+        except Exception:
+            pass
+
+    return {"cancelled_tasks": cancelled, "revoked_tasks": revoked, "errors": errors}
+
+
+def apply_kill_switch() -> dict:
+    """Hard-stop outreach: flip off, drain broker queue, cancel Task rows."""
+    set_enabled(False)
+    result = {"enabled": False}
+    result.update(drain_pending_outreach_tasks())
+    result.update(cancel_outreach_task_rows())
+    return result
 
 
 def cadence_status() -> dict:

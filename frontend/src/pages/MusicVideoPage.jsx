@@ -39,6 +39,7 @@ import {
 } from "../api/musicVideoService";
 
 const POLL_MS = 5000;
+const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
 const TERMINAL = (s) => s === "complete" || (s || "").startsWith("failed");
 
 // Local presentational + interactive component for the cut plan + Director prompts.
@@ -487,7 +488,7 @@ const MusicVideoPage = () => {
   // LoRA consistency: when true, route keyframe through SDXL + LoRAs (required for trained cast/characters).
   // When false, more options for beautiful output (better keyframe models + top-tier I2V like Wan2.2).
   const [useLoraConsistency, setUseLoraConsistency] = useState(false);
-  const [keyframeModel, setKeyframeModel] = useState("sdxl"); // "sdxl" | "sdxl-lora" | "flux-schnell" | ...
+  const [keyframeModel, setKeyframeModel] = useState(DEFAULT_KEYFRAME_MODEL);
   const [i2vModel, setI2vModel] = useState("wan22-14b-i2v");
 
   // I2V-capable models (subset from VideoGeneratorPage MODEL_OPTIONS for consistency)
@@ -575,7 +576,7 @@ const MusicVideoPage = () => {
       setDirectorEnabled(true);
       setPlanningMode("narrative");
       setUseLoraConsistency(false);
-      setKeyframeModel("sdxl");
+      setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
       setI2vModel("wan22-14b-i2v");
       // Reset any future advanced model params here too
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -795,7 +796,7 @@ const MusicVideoPage = () => {
                         if (checked) {
                           setKeyframeModel("sdxl-lora");
                         } else if (keyframeModel === "sdxl-lora") {
-                          setKeyframeModel("sdxl");
+                          setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
                         }
                       }}
                       id="lora-consistency"
@@ -836,9 +837,9 @@ const MusicVideoPage = () => {
                     disabled={useLoraConsistency}
                     sx={{ mt: 1 }}
                   >
-                    <MenuItem value="sdxl-lora">SDXL + LoRAs (identity lock)</MenuItem>
+                    <MenuItem value="flux-schnell">FLUX.1-schnell (fast, beautiful stills) — default</MenuItem>
                     <MenuItem value="sdxl">SDXL (no LoRA)</MenuItem>
-                    <MenuItem value="flux-schnell">FLUX.1-schnell (fast, beautiful stills)</MenuItem>
+                    <MenuItem value="sdxl-lora">SDXL + LoRAs (identity lock)</MenuItem>
                     {/* Future: flux-dev, sdxl-turbo, etc. */}
                   </TextField>
                 </Stack>

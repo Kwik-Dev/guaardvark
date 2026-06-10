@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -42,9 +43,13 @@ The treatment must:
 
 Step 2 — Break the treatment into specific, distinct shot plans, one per cut.
 
-CRITICAL SEPARATION OF CONCERNS:
-- The top-level "treatment" is the only place for narrative, character names, full backstory, plot points, or emotional journey. It can be story-like.
-- Each "shots[].prompt" MUST be a PURE VISUAL PROMPT ONLY. It must NEVER contain character names (use consistent visual descriptors instead, e.g. "the tall scarred man in the long duster coat" or simply describe what is seen), backstory, or plot exposition. These prompts are fed directly to image generators (FLUX/SDXL) and then i2v, so they must be optimized for visual output.
+CRITICAL SEPARATION OF CONCERNS (strictly enforce):
+- The top-level "treatment" field is the ONLY place allowed to contain narrative, character names, backstory, emotional journey, or plot points. It can read like a dreamlike short story or screenplay treatment.
+- Every "shots[].prompt" MUST be a PURE VISUAL PROMPT ONLY. 
+  - NEVER use character names (use consistent visual descriptors drawn from the treatment instead, e.g. "the pale woman with dark flowing hair and luminous eyes" or simply describe what the camera sees).
+  - NEVER include backstory, plot exposition, or "the character is X because of Y".
+  - Focus exclusively on what an image generator + i2v needs: subject appearance (visual only), setting, framing/composition, camera angle and movement, lighting, color palette and contrast, texture, atmosphere, mood/emotion as conveyed purely through image, key recurring style elements.
+  - These prompts are fed directly to FLUX/SDXL for keyframes and then to i2v, so they must be optimized for visual consistency and cinematic quality.
 
 Each shot plan must:
 - Visually realize one specific moment from the treatment.
@@ -64,7 +69,7 @@ Return ONLY valid JSON, no extra prose:
   "shots": [
     {
       "index": <int>,
-      "prompt": "<pure visual description only — no names, no backstory, no plot. Focus on consistency, visuals, motion, style, emotion, color, camera angle, framing, lighting, texture.>",
+      "prompt": "<PURE VISUAL PROMPT ONLY — no names, no backstory, no plot. Example: 'ethereal woman with dark flowing hair in flowing white dress, standing at the edge of a still dark lake under fractured silver moonlight, extreme shallow depth of field, soft bokeh, slow drifting camera, deep indigo and warm amber palette, volumetric god rays, dreamlike impressionist atmosphere'>",
       "duration_seconds": <float or null>,
       "transition_to_next": "<hard-cut | luma-wipe | cross-dissolve | ... or null>",
       "filter_preset": "<none | warm-tint | high-contrast | ... or null>"
@@ -224,40 +229,106 @@ def _generate_storyline_and_prompts(
     treatment_block = ""
     if user_treatment and user_treatment.strip():
         treatment_block = (
-            f"\n\nUSER-PROVIDED VISUAL TREATMENT / STORY (use this as the authoritative screenplay; "
-            f"map its beats and narrative progression to the song sections and energy contour):\n"
+            f"\n\nUSER-PROVIDED VISUAL TREATMENT / STORY (this is the authoritative screenplay. "
+            f"Use its visual language, motifs, atmosphere, and emotional arc as the source of truth. "
+            f"Map its beats and progression to the specific song sections and energy values in the CUTS list below):\n"
             f"{user_treatment.strip()}\n\n"
-            "Respect this treatment exactly. Do not invent a different story. Adapt the pacing and visuals to the CUTS."
+            "Respect this treatment exactly. Do not invent a different story. Adapt the pacing and visuals to the CUTS. "
+            "The treatment may contain narrative elements — those belong ONLY in the top-level treatment field."
         )
 
     try:
         import ollama
         model = _resolve_model(model)
+        log.info("music video director using ollama model=%s for %d cuts (has_user_treatment=%s)", model, n, bool(user_treatment))
         user = (
             f"STYLE: {style_prompt}\n\n"
             f"CUTS ({n} total):\n{json.dumps(_cut_brief(cut_plan))}\n\n"
             f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
-            "First write (or refine) the TREATMENT if needed (narrative, names, and story are allowed here). "
-            "Then produce the shots. CRITICAL: every shots[].prompt must be a PURE VISUAL PROMPT ONLY — no character names, no backstory, no plot points. "
-            "Use only visual descriptors for consistency. Focus exclusively on what the camera sees: subject visuals, setting, framing, camera angle/motion, lighting, color, mood as image, style, texture, atmosphere. "
-            "Return the JSON now."
+            "TASK:\n"
+            "1. Produce (or lightly refine) the top-level 'treatment' field using the provided user treatment as the main source. This field can contain the full dreamlike story and artistic directives.\n"
+            "2. For the 'shots' array: Create **one completely unique visual prompt for each individual cut** in the CUTS list above.\n"
+            "   - The prompts MUST be different from each other.\n"
+            "   - Vary them according to each cut's 'section' label and 'energy' value.\n"
+            "   - Low energy cuts (intro/build): calmer, more atmospheric, wider framing, slower implied motion, using the 'loss' and 'searching' visual language from the treatment.\n"
+            "   - High energy cuts (drop): more intense, dynamic compositions, tighter framing, stronger contrast, using the 'convergence' and 'intensity' language.\n"
+            "   - Every shots[].prompt must be a PURE VISUAL PROMPT ONLY — no character names, no backstory, no plot points. Use only visual descriptors for consistency (e.g. recurring visual motifs like 'fractured silver moonlight on still water').\n"
+            "   - Focus exclusively on: subject visuals, setting, framing, camera angle/motion, lighting, color palette, texture, atmosphere, mood as pure image, style elements from the treatment.\n"
+            "Return ONLY the JSON with 'treatment' and 'shots' (one shot per cut, in the exact order of the CUTS list). Indexes must match the CUTS exactly."
         )
-        resp = ollama.chat(
-            model=model,
-            format="json",
-            messages=[
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": user},
-            ],
-            options={"temperature": 0.7},
-        )
+        # Small retry for transient "ollama not ready" after plugin ensure/start (e.g. daemon just came up)
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = ollama.chat(
+                    model=model,
+                    format="json",
+                    messages=[
+                        {"role": "system", "content": _SYSTEM},
+                        {"role": "user", "content": user},
+                    ],
+                    options={"temperature": 0.7},
+                )
+                break
+            except Exception as e:  # connection, server busy, etc.
+                if attempt == 2:
+                    raise
+                log.info("director ollama.chat attempt %d failed (%s), retrying after short delay", attempt+1, e)
+                import time
+                time.sleep(1.5 * (attempt + 1))
         content = resp["message"]["content"]
         data = _parse_full_director_output(content, n)
-        prompts_map = data.get("prompts", {})
+        prompts_map = data.get("prompts", {}) or {}
         treatment = data.get("treatment")
 
+        # If the (possibly rich) first response gave us nothing usable, try a second,
+        # much simpler "shots only" call. Small models often choke on the full treatment +
+        # CUTS + editing fields + strict separation all in one go. The recovery prompt
+        # has a tiny contract focused purely on distinct visual prompts.
         if not prompts_map:
-            log.warning("director returned no usable prompts; using global style for all %d cuts", n)
+            try:
+                simple_sys = (
+                    "You are a precise visual prompt generator. Output ONLY valid JSON. "
+                    "No prose, no fences, no extra keys."
+                )
+                simple_user = (
+                    f"STYLE: {style_prompt}\n\n"
+                    f"CUTS ({n} total):\n{json.dumps(_cut_brief(cut_plan))}\n\n"
+                    f"{treatment_block}\n\n"
+                    "TASK: Return ONLY this JSON shape (one entry per cut, indexes exact):\n"
+                    '{"shots": [{"index": 0, "prompt": "pure visual for cut 0 (subject, framing, camera, lighting, color, texture, atmosphere; no names, no plot)"}, ...]}\n'
+                    "Make every prompt DISTINCT. Vary framing, motion implication, lighting, or density by the cut's energy and section. Pure visual descriptors only."
+                )
+                resp2 = ollama.chat(
+                    model=model,
+                    format="json",
+                    messages=[
+                        {"role": "system", "content": simple_sys},
+                        {"role": "user", "content": simple_user},
+                    ],
+                    options={"temperature": 0.65},
+                )
+                content2 = resp2["message"]["content"]
+                data2 = _parse_full_director_output(content2, n)
+                if data2.get("prompts"):
+                    prompts_map = data2.get("prompts", {})
+                    treatment = treatment or data2.get("treatment")
+                    # Prefer recovery shots (they carry duration/transition/filter if the simple call produced them)
+                    if data2.get("shots"):
+                        data["shots"] = data2.get("shots")
+            except Exception:  # noqa: BLE001
+                pass  # recovery failed; we will fallback below
+
+        if not prompts_map:
+            # Diagnostic: show a safe prefix of what the model actually emitted so we can see
+            # structure mistakes (fences, wrong keys, empty prompts, prose, etc.) without dumping
+            # potentially long user treatment or full PII.
+            head = (content or "")[:1200].replace("\n", "\\n")
+            log.warning(
+                "director returned no usable prompts; using global style for all %d cuts. "
+                "raw_head=%s",
+                n, head
+            )
             return {"prompts": fallback_prompts, "treatment": treatment, "shots": []}
 
         out: list[str] = []
@@ -277,38 +348,83 @@ def _generate_storyline_and_prompts(
 
 def _parse_full_director_output(content: str, n: int) -> dict:
     """Tolerant parser that extracts the rich 'treatment' (or legacy 'storyline') plus per-shot prompts.
-    Returns {'treatment': str|None, 'prompts': {index: prompt}}"""
-    try:
-        data = json.loads(content)
-    except (ValueError, TypeError):
-        start, end = content.find("{"), content.rfind("}")
-        if start == -1 or end <= start:
-            return {"treatment": None, "prompts": {}}
+    Returns {'treatment': str|None, 'prompts': {index: prompt}, 'shots': list}.
+    Hardened for small models that may: wrap in fences/prose, use alternate keys (visual_prompt etc),
+    emit string indexes, use top-level list or 'cuts'/'scenes'/'plan' instead of 'shots', or return
+    slightly malformed but salvageable JSON."""
+    if not content or not isinstance(content, str):
+        return {"treatment": None, "prompts": {}, "shots": []}
+
+    # Strip common markdown fences / prose wrappers so the {..} extract sees real JSON first.
+    c = content.strip()
+    # Remove leading ```json or ``` and trailing ```
+    c = re.sub(r'^```(?:json)?\s*', '', c, flags=re.IGNORECASE)
+    c = re.sub(r'\s*```$', '', c)
+    c = c.strip()
+
+    data = None
+    for candidate in (c, content):  # try cleaned then original
         try:
-            data = json.loads(content[start:end + 1])
+            data = json.loads(candidate)
+            break
         except (ValueError, TypeError):
-            return {"treatment": None, "prompts": {}}
+            pass
+    if data is None:
+        # Last-chance: locate the largest plausible {...} block
+        start, end = c.find("{"), c.rfind("}")
+        if start != -1 and end > start:
+            try:
+                data = json.loads(c[start:end + 1])
+            except (ValueError, TypeError):
+                pass
+    if data is None:
+        # Try the legacy tolerant helper (handles some bare-list cases)
+        return {"treatment": None, "prompts": _parse_prompts(content, n), "shots": []}
 
     result = {"treatment": None, "prompts": {}, "shots": []}
 
+    # If the whole thing is a list, treat it as the shots array (some models do this).
+    if isinstance(data, list):
+        data = {"shots": data}
+
     if isinstance(data, dict):
-        # Prefer new "treatment" key (rich screenwriting-style output).
-        # Fall back to legacy "storyline" for older runs.
         treatment = data.get("treatment") or data.get("storyline")
         if isinstance(treatment, str) and treatment.strip():
             result["treatment"] = treatment.strip()
 
-        # Shots
-        shots = data.get("shots") if isinstance(data.get("shots"), list) else None
+        # Accept several possible names for the per-cut list
+        shots = None
+        for key in ("shots", "cuts", "scenes", "plan", "shot_plans", "clips"):
+            val = data.get(key)
+            if isinstance(val, list):
+                shots = val
+                break
+        if not shots and isinstance(data.get("shots"), list):
+            shots = data.get("shots")
+
         if shots:
             for i, item in enumerate(shots):
                 if not isinstance(item, dict):
                     continue
                 idx = item.get("index", i)
-                prompt = item.get("prompt") or item.get("description")
+                if isinstance(idx, str):
+                    try:
+                        idx = int(idx.strip())
+                    except (ValueError, TypeError):
+                        idx = i
+                if isinstance(idx, (int, float)):
+                    idx = int(idx)
+
+                # Try many possible prompt field names small models might emit
+                prompt = None
+                for pk in ("prompt", "description", "visual_prompt", "image_prompt", "text",
+                           "caption", "visual", "scene_prompt", "image", "shot"):
+                    p = item.get(pk)
+                    if isinstance(p, str) and p.strip():
+                        prompt = p.strip()
+                        break
                 if isinstance(idx, int) and isinstance(prompt, str) and prompt.strip():
                     result["prompts"][idx] = prompt.strip()
-                    # Collect full shot plan for editing decisions
                     shot_plan = {
                         "index": idx,
                         "prompt": prompt.strip(),
@@ -318,7 +434,7 @@ def _parse_full_director_output(content: str, n: int) -> dict:
                     }
                     result["shots"].append(shot_plan)
 
-    # Fallback to old shape if needed
+    # Final legacy fallback (covers bare list at top level etc.)
     if not result["prompts"]:
         result["prompts"] = _parse_prompts(content, n)
 

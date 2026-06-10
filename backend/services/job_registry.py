@@ -251,6 +251,63 @@ def adapt_unified_progress(event: dict[str, Any]) -> Job:
     )
 
 
+def adapt_video_gen(status) -> Job:
+    """BatchVideoStatus (or dict) → Job for the Jobs page."""
+    if isinstance(status, dict):
+        batch_id = status.get("batch_id") or status.get("id") or "unknown"
+        native_status = status.get("status")
+        total = int(status.get("total_videos") or 0)
+        completed = int(status.get("completed_videos") or 0)
+        failed = int(status.get("failed_videos") or 0)
+        metadata = status.get("metadata") or {}
+        error = status.get("error")
+        start_time = _parse_ts(status.get("start_time"))
+        end_time = _parse_ts(status.get("end_time"))
+        is_running = bool(status.get("is_running"))
+    else:
+        batch_id = status.batch_id
+        native_status = status.status
+        total = status.total_videos
+        completed = status.completed_videos
+        failed = status.failed_videos
+        metadata = status.metadata or {}
+        error = status.error
+        start_time = status.start_time
+        end_time = status.end_time
+        is_running = native_status == "running"
+
+    status_enum = map_status(JobKind.VIDEO_GEN, native_status)
+    display = metadata.get("display_name") or batch_id
+    label = f"VideoGen: {display}"
+    progress = None
+    if total > 0:
+        progress = round((completed + failed) / total * 100, 1)
+
+    return Job(
+        id=f"video_gen:{batch_id}",
+        kind=JobKind.VIDEO_GEN,
+        native_id=batch_id,
+        status=status_enum,
+        label=label,
+        progress=progress,
+        started_at=start_time,
+        finished_at=end_time if status_enum.is_terminal else None,
+        duration_s=_compute_duration(start_time, end_time if status_enum.is_terminal else None),
+        cancellable=status_enum.is_active,
+        error_message=error,
+        metadata={
+            "batch_id": batch_id,
+            "total_videos": total,
+            "completed_videos": completed,
+            "failed_videos": failed,
+            "display_name": metadata.get("display_name"),
+            "model": metadata.get("model"),
+            "is_running": is_running,
+            "queue_position": metadata.get("queue_position"),
+        },
+    )
+
+
 def adapt_batch_csv(row: dict[str, Any]) -> Job:
     """batch_job_rows → Job. The bare-SQL table has no SQLAlchemy model,
     so callers pass a dict from the row's column read."""
@@ -315,6 +372,11 @@ def _load_unified_progress(process_id):
     return snapshot.get(process_id)
 
 
+def _load_video_gen(batch_id):
+    from backend.services.batch_video_generator import get_batch_video_generator
+    return get_batch_video_generator().get_batch_status(str(batch_id))
+
+
 # Per-kind (loader, adapter) pairs. Add a new kind here + a single adapter
 # function and the rest of the system (API resource, socket emitter,
 # Tasks/Jobs page) picks it up automatically.
@@ -327,6 +389,7 @@ REGISTRY: dict[JobKind, tuple[LoaderFn, AdapterFn]] = {
     JobKind.EXPERIMENT: (_load_experiment, adapt_experiment),
     JobKind.DEMO: (_load_demo_step, adapt_demo_step),
     JobKind.UNIFIED_PROGRESS: (_load_unified_progress, adapt_unified_progress),
+    JobKind.VIDEO_GEN: (_load_video_gen, adapt_video_gen),
 }
 
 

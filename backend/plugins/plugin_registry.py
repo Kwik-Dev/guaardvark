@@ -122,6 +122,7 @@ class PluginRegistry:
                 'port': metadata.port,
                 'vram_estimate_mb': metadata.vram_estimate_mb,
                 'plugin_dir': str(self._plugin_dirs.get(plugin_id, '')),
+                'config': metadata.config.to_dict(),
             })
         return result
     

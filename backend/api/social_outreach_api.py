@@ -61,8 +61,7 @@ def enable():
 
 @social_outreach_bp.post("/kill")
 def kill():
-    kill_switch.set_enabled(False)
-    return jsonify({"enabled": False})
+    return jsonify(kill_switch.apply_kill_switch())
 
 
 @social_outreach_bp.post("/supervised")

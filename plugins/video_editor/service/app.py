@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from mlt.auto_editor_runner import run_auto_editor
 from mlt.beat_detector import BeatFilterParams, detect_beats
@@ -72,6 +72,7 @@ app.add_middleware(
 # ---------- request models ---------------------------------------------------
 
 class BeatSyncRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     audio_path: str = Field(..., description="Absolute path to soundtrack file.")
     video_paths: list[str] = Field(..., min_length=1, description="Source video pool.")
     fps_num: int = Field(30)
@@ -96,6 +97,7 @@ class SongAnalyzeRequest(BaseModel):
 
 
 class AutoEditorRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     input_path: str
     threshold: float = Field(0.04, ge=0.0, le=1.0)
     margin: str = Field("0.2sec")
@@ -143,6 +145,7 @@ class VisionScanBody(BaseModel):
 
 class ComposeArrangementBody(BaseModel):
     """Multi-clip render path used by VideoEditorPage after Plan completes."""
+    model_config = ConfigDict(protected_namespaces=())
 
     arrangement: dict[str, Any]                # full Arrangement.to_dict()
     audio_path: Optional[str] = None
@@ -163,6 +166,7 @@ class ShotcutComposeRequest(BaseModel):
     endpoint already consumes; paths are absolute (Flask proxy resolves
     document_id → path before forwarding).
     """
+    model_config = ConfigDict(protected_namespaces=())
 
     video_path: str
     audio_path: Optional[str] = None

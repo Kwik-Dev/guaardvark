@@ -37,6 +37,7 @@ from backend.services.job_registry import (
     adapt_experiment,
     adapt_demo_step,
     adapt_unified_progress,
+    adapt_video_gen,
     get_job,
     parse_job_id,
 )
@@ -173,6 +174,31 @@ def _collect_unified_progress(*, since, limit) -> Iterable[Job]:
         count += 1
 
 
+def _collect_video_gen(*, since, limit) -> Iterable[Job]:
+    """Batch video generation jobs from BatchVideoGenerator."""
+    try:
+        from backend.services.batch_video_generator import get_batch_video_generator
+    except ImportError:
+        return
+    generator = get_batch_video_generator()
+    rows = generator.list_batches_for_jobs(limit=limit)
+    count = 0
+    for row in rows:
+        if count >= limit:
+            break
+        if since:
+            raw_ts = row.get("start_time") or row.get("end_time")
+            if raw_ts:
+                try:
+                    ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                    if ts.replace(tzinfo=None) < since.replace(tzinfo=None):
+                        continue
+                except ValueError:
+                    pass
+        yield adapt_video_gen(row)
+        count += 1
+
+
 # Per-kind collector dispatch. Adding a new kind = add adapter + loader to
 # job_registry.py + add a collector here. The list endpoint picks it up.
 _COLLECTORS = {
@@ -184,6 +210,7 @@ _COLLECTORS = {
     JobKind.EXPERIMENT: _collect_experiments,
     JobKind.DEMO: _collect_demo_steps,
     JobKind.UNIFIED_PROGRESS: _collect_unified_progress,
+    JobKind.VIDEO_GEN: _collect_video_gen,
 }
 
 

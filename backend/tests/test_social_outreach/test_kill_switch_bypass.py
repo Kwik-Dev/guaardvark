@@ -37,17 +37,85 @@ def test_approved_draft_dispatcher_skips_when_kill_switch_off(app, db_session, m
     db_session.add(row)
     db_session.commit()
 
-    monkeypatch.setattr(
-        social_outreach_tasks,
-        "_with_app_context",
-        lambda fn, *args, **kwargs: fn(*args, **kwargs),
-    )
+    bootstrap_called = {"n": 0}
 
-    result = social_outreach_tasks.tick_process_approved_drafts.run()
+    def _fail_bootstrap(*_args, **_kwargs):
+        bootstrap_called["n"] += 1
+        raise AssertionError("must not bootstrap Flask when kill switch is off")
+
+    monkeypatch.setattr(social_outreach_tasks, "_with_app_context", _fail_bootstrap)
+
+    with app.app_context():
+        result = social_outreach_tasks.tick_process_approved_drafts.run()
 
     db_session.refresh(row)
+    assert bootstrap_called["n"] == 0
     assert result == {"processed": 0, "reason": "kill_switch_off"}
     assert row.status == "approved"
+
+
+def test_beat_ticks_skip_without_flask_bootstrap(app, db_session, monkeypatch):
+    """Beat ticks must read the kill switch before importing backend.app."""
+    from backend.models import Setting
+    from backend.tasks import social_outreach_tasks
+
+    db_session.add(Setting(key="social_outreach_enabled", value="false"))
+    db_session.commit()
+
+    bootstrap_called = {"n": 0}
+
+    def _fail_bootstrap(*_args, **_kwargs):
+        bootstrap_called["n"] += 1
+        raise AssertionError("must not bootstrap Flask when kill switch is off")
+
+    monkeypatch.setattr(social_outreach_tasks, "_with_app_context", _fail_bootstrap)
+
+    ticks = (
+        social_outreach_tasks.tick_reddit_outreach,
+        social_outreach_tasks.tick_self_share,
+        social_outreach_tasks.tick_recon_youtube_replies,
+    )
+    with app.app_context():
+        for tick in ticks:
+            result = tick.run()
+            assert result.get("reason") == "kill_switch_off"
+    assert bootstrap_called["n"] == 0
+
+
+def test_kill_endpoint_drains_pending_outreach(monkeypatch):
+    """POST /kill must flip off and drain queued outreach broker work."""
+    from backend.api import social_outreach_api
+
+    calls = []
+
+    def fake_apply_kill_switch():
+        calls.append("apply")
+        return {
+            "enabled": False,
+            "purged": 3,
+            "revoked": 1,
+            "cancelled_tasks": 2,
+            "revoked_tasks": 1,
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        social_outreach_api.kill_switch,
+        "apply_kill_switch",
+        fake_apply_kill_switch,
+    )
+
+    app = __import__("flask").Flask(__name__)
+    app.register_blueprint(social_outreach_api.social_outreach_bp)
+    client = app.test_client()
+    resp = client.post("/api/social-outreach/kill")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["enabled"] is False
+    assert body["purged"] == 3
+    assert body["cancelled_tasks"] == 2
+    assert calls == ["apply"]
 
 
 def test_run_pass_refuses_to_queue_when_kill_switch_off(app, client, db_session):

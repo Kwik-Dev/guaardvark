@@ -428,6 +428,27 @@ def cancel_batch(batch_id: str):
         return error_response(str(e), 500)
 
 
+@batch_video_bp.route("/cancel-all", methods=["POST"])
+def cancel_all_batches():
+    """Cancel every queued/running video generation batch.
+
+    Used by stop.sh and plugin shutdown so disabling ComfyUI or tearing down
+    the stack actually kills in-flight VideoGen work instead of leaving the
+    worker thread spinning against a dead backend.
+    """
+    try:
+        generator = get_batch_video_generator()
+        cancelled = generator.cancel_all_active(reason="Cancelled by shutdown")
+        return success_response({
+            "cancelled": cancelled,
+            "count": len(cancelled),
+            "message": f"Cancelled {len(cancelled)} batch(es)",
+        })
+    except Exception as e:
+        logger.error(f"Failed to cancel all batches: {e}")
+        return error_response(str(e), 500)
+
+
 @batch_video_bp.route("/delete/<batch_id>", methods=["DELETE"])
 def delete_batch(batch_id: str):
     try:

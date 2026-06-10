@@ -31,6 +31,7 @@ class JobKind(str, Enum):
     EXPERIMENT = "experiment"
     DEMO = "demo"
     BATCH_CSV = "batch_csv"             # batch_job_rows (bare SQL)
+    VIDEO_GEN = "video_gen"             # batch video generation (BatchVideoGenerator)
     VIDEO_RENDER = "video_render"       # editor renders (lands in Phase 7 of editor plan)
     PRODUCTION = "production"           # ViMax-style production pipeline parent
     LORA_TRAIN = "lora_train"           # Per-Subject LoRA training (child of PRODUCTION)
@@ -193,6 +194,7 @@ def map_status(kind: JobKind, native_status: str | None) -> JobStatus:
         JobKind.WEBSITE: _TASK_STATUS_MAP,
         JobKind.TRAINING: _TRAINING_STATUS_MAP,
         JobKind.UNIFIED_PROGRESS: _UNIFIED_PROGRESS_STATUS_MAP,
+        JobKind.VIDEO_GEN: _GENERIC_STATUS_MAP,
         JobKind.VIDEO_RENDER: _UNIFIED_PROGRESS_STATUS_MAP,
     }.get(kind, _GENERIC_STATUS_MAP)
 

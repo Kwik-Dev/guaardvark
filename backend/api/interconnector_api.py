@@ -286,7 +286,7 @@ def _seed_default_profiles():
             "profile_type": "full",
             "description": "Full sync: code, scripts, and system-wide config (rules).",
             "entity_config": {"entities": ["rules"]},
-            "file_config": {"paths": ["backend/api/", "backend/services/", "backend/utils/", "backend/routes/", "frontend/src/", "scripts/", "start.sh", "stop.sh", "start_redis.sh", "start_celery.sh"], "include_patterns": ["**/*.py", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.sh"]},
+            "file_config": {"paths": ["backend/api/", "backend/services/", "backend/middleware/", "backend/utils/", "backend/routes/", "frontend/src/", "scripts/", "start.sh", "stop.sh", "start_redis.sh", "start_celery.sh"], "include_patterns": ["**/*.py", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.sh"]},
             "is_default": True,
         },
         {
@@ -294,7 +294,7 @@ def _seed_default_profiles():
             "profile_type": "code_only",
             "description": "Only code and scripts, no config data.",
             "entity_config": {"entities": []},
-            "file_config": {"paths": ["backend/api/", "backend/services/", "backend/utils/", "frontend/src/", "scripts/", "start.sh", "stop.sh", "start_redis.sh", "start_celery.sh"], "include_patterns": ["**/*.py", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.sh"]},
+            "file_config": {"paths": ["backend/api/", "backend/services/", "backend/middleware/", "backend/utils/", "frontend/src/", "scripts/", "start.sh", "stop.sh", "start_redis.sh", "start_celery.sh"], "include_patterns": ["**/*.py", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.sh"]},
             "is_default": False,
         },
         {
@@ -1834,6 +1834,7 @@ def test_file_scanning():
         critical_files = [
             "backend/api/interconnector_api.py",
             "backend/services/interconnector_file_sync_service.py",
+            "backend/middleware/cluster_proxy_middleware.py",
             "backend/models.py",
         ]
         found_critical = []

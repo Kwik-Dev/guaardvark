@@ -206,6 +206,18 @@ def test_sanitize_is_idempotent():
     assert "ANTHROPIC_API_KEY=sk-ant-real-key" in twice
 
 
+def test_code_release_includes_cluster_middleware(app):
+    """Regression: cluster proxy middleware must ship in code-release zips."""
+    with app.app_context():
+        path = backup_service.create_code_release()
+        with zipfile.ZipFile(path, "r") as zf:
+            names = zf.namelist()
+            meta = json.load(zf.open("guaardvark_backup.json"))
+        assert "backend/middleware/cluster_proxy_middleware.py" in names
+        assert "backend/middleware/__init__.py" in names
+        assert meta["backup_type"] == "code_release"
+
+
 def test_sanitize_preserves_unrelated_lines():
     env = (
         "FLASK_PORT=5002\n"

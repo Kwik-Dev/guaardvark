@@ -520,6 +520,15 @@ def execute_unified_task(self, task_id: int):
         # Social outreach tasks — discover + draft + (maybe) post on a platform.
         if output is None and task_type and task_type.startswith('social_outreach_'):
             try:
+                from backend.services.social_outreach.kill_switch import is_enabled
+
+                if not is_enabled():
+                    update_task_status(task_id, 'cancelled', error_message='outreach disabled (kill switch)')
+                    return {
+                        'skipped': True,
+                        'reason': 'kill_switch_off',
+                        'task_id': task_id,
+                    }
                 update_progress(20, f"Running Outreach pass: {task_type}")
                 wf = task.get('workflow_config') or {}
                 if task_type == 'social_outreach_reddit':

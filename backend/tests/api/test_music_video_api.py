@@ -115,3 +115,51 @@ def test_get_surfaces_estimate_at_gate(client, app, tmp_path):
     assert data["clips_done"] == 0
     assert data["estimate"]["clips_to_generate"] == 40
     assert data["estimate"]["estimated_seconds"] == 40 * 75
+
+
+def test_cancel_generating_music_video(client, app, tmp_path):
+    with app.app_context():
+        doc = _song_doc(tmp_path)
+        svc = MusicVideoService(db.session)
+        mv = svc.create(
+            name="x",
+            song_document_id=doc.id,
+            song_path=str(tmp_path / "song.wav"),
+            style_prompt="x",
+            project_id=None,
+        )
+        mv.current_stage = "generating"
+        mv.status = "generating"
+        mv.clips = [
+            {"index": 0, "start": 0, "end": 1, "clip_path": None, "status": "pending"},
+            {"index": 1, "start": 1, "end": 2, "clip_path": "/tmp/done.mp4", "status": "done"},
+        ]
+        db.session.commit()
+        mv_id = mv.id
+
+    resp = client.post(f"/api/music-video/{mv_id}/cancel")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "cancelled"
+    assert data["clips"][0]["status"] == "cancelled"
+    assert data["clips"][1]["status"] == "done"
+
+
+def test_cancel_rejects_non_cancellable_stage(client, app, tmp_path):
+    with app.app_context():
+        doc = _song_doc(tmp_path)
+        svc = MusicVideoService(db.session)
+        mv = svc.create(
+            name="x",
+            song_document_id=doc.id,
+            song_path=str(tmp_path / "song.wav"),
+            style_prompt="x",
+            project_id=None,
+        )
+        mv.current_stage = "complete"
+        mv.status = "complete"
+        db.session.commit()
+        mv_id = mv.id
+
+    resp = client.post(f"/api/music-video/{mv_id}/cancel")
+    assert resp.status_code == 409

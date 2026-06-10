@@ -81,9 +81,16 @@ def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
     monkeypatch.setattr(mvt.requests, "post", lambda *a, **k: _Resp(structure), raising=False)
     # Mock the Director so the analyzer doesn't make a real LLM call — assert it gets
     # wired and its per-cut prompts land on the clips.
+    # NOTE: analyzer does a direct "from ... import _generate_storyline_and_prompts"
+    # (not the public wrapper), so we must patch the internal it actually calls.
     import backend.services.music_video_director as director
-    monkeypatch.setattr(director, "generate_scene_prompts",
-                        lambda style, plan, **kw: [f"scene {c['index']}" for c in plan])
+    def _fake_director(style, plan, **kw):
+        return {
+            "prompts": [f"scene {c['index']}" for c in plan],
+            "treatment": None,
+            "shots": [],
+        }
+    monkeypatch.setattr(director, "_generate_storyline_and_prompts", _fake_director)
 
     mvt.run_analyzer(mv.id)
     db.session.refresh(mv)

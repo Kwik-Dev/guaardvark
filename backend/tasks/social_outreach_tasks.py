@@ -22,6 +22,15 @@ from celery import shared_task
 logger = logging.getLogger(__name__)
 
 
+def _skip_if_kill_switch_off() -> dict | None:
+    """Early exit before Flask bootstrap — beat ticks must not load the app when disabled."""
+    from backend.services.social_outreach.kill_switch import is_enabled
+
+    if not is_enabled():
+        return {"skipped": True, "reason": "kill_switch_off"}
+    return None
+
+
 def _with_app_context(fn, *args, **kwargs):
     """Run fn inside the Flask app context so DB/Setting/audit calls work.
 
@@ -39,12 +48,18 @@ def _with_app_context(fn, *args, **kwargs):
 
 @shared_task(name="social_outreach.engage_with_subreddit", bind=True)
 def engage_with_subreddit(self, subreddit: str, task_id: Any = None) -> dict:
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return skipped
     from backend.services.social_outreach.reddit_outreach import RedditOutreachLoop
     return _with_app_context(RedditOutreachLoop().run_one_pass, subreddit, task_id=task_id)
 
 
 @shared_task(name="social_outreach.self_share", bind=True)
 def self_share(self, subreddit: str, link_url: str, task_id: Any = None) -> dict:
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return skipped
     from backend.services.social_outreach.self_share import SelfShareLoop
     return _with_app_context(SelfShareLoop().run_one_pass, subreddit, link_url, task_id=task_id)
 
@@ -100,6 +115,9 @@ def _next_target(category: str, items: list[str]) -> str | None:
 @shared_task(name="social_outreach.tick_reddit_outreach", bind=True)
 def tick_reddit_outreach(self) -> dict:
     """Beat tick — pick the next outreach sub from targets.json and run a pass."""
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return skipped
     targets = _load_targets()
     subs = (targets.get("reddit") or {}).get("outreach_subs") or []
     sub = _next_target("reddit_outreach", subs)
@@ -119,6 +137,9 @@ def tick_draft_candidates(self) -> dict:
     Disabled by default in beat schedule — fire on demand via /run-pass
     or by enabling the schedule entry.
     """
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return skipped
     from backend.services.social_outreach.content_agent import (
         ContentAgent,
         DEFAULT_BATCH_SIZE,
@@ -135,6 +156,9 @@ def tick_recon_reddit(self) -> dict:
     no servo path is involved. Disabled by default in celery_app.py beat
     schedule — flip the schedule entry to enable.
     """
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return skipped
     targets = _load_targets()
     subs = (targets.get("reddit") or {}).get("outreach_subs") or []
     sub = _next_target("reddit_recon", subs)
@@ -157,6 +181,9 @@ def tick_recon_youtube(self) -> dict:
     so successive ticks scan different angles of the keyword space rather
     than repeatedly hitting the same query.
     """
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return skipped
     targets = _load_targets()
     profiles = (targets.get("youtube") or {}).get("keyword_profiles") or []
     profile = _next_target("youtube_recon", profiles)
@@ -183,6 +210,9 @@ def tick_recon_youtube_replies(self) -> dict:
     each monitored video. Manual seeding via
     `recon.enqueue_youtube_reply_candidate(...)` still works end-to-end.
     """
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return skipped
     from backend.services.social_outreach.recon import RecondAgent
     return _with_app_context(RecondAgent().scout_youtube_my_video_replies)
 
@@ -190,6 +220,9 @@ def tick_recon_youtube_replies(self) -> dict:
 @shared_task(name="social_outreach.tick_self_share", bind=True)
 def tick_self_share(self) -> dict:
     """Beat tick — pick next share sub + URL, submit a link post."""
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return skipped
     targets = _load_targets()
     subs = (targets.get("reddit") or {}).get("share_subs") or []
     sub = _next_target("reddit_share", subs)
@@ -205,11 +238,11 @@ def tick_self_share(self) -> dict:
 @shared_task(name="social_outreach.tick_process_approved_drafts", bind=True)
 def tick_process_approved_drafts(self) -> dict:
     """Beat tick — process UI-approved drafts for Reddit and YouTube."""
-    def _run():
-        from backend.services.social_outreach import kill_switch
-        if not kill_switch.is_enabled():
-            return {"processed": 0, "reason": "kill_switch_off"}
+    skipped = _skip_if_kill_switch_off()
+    if skipped:
+        return {"processed": 0, "reason": "kill_switch_off"}
 
+    def _run():
         from backend.models import SocialOutreachLog, db
         from backend.services.social_outreach.reddit_outreach import post_comment_via_servo as reddit_post_comment, record_post_via_backend
         from backend.services.social_outreach.youtube_outreach import (

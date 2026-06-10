@@ -255,7 +255,7 @@ def emit_family_learning(learning_data: dict):
 def handle_subscribe_gpu():
     """Allow clients to subscribe to GPU VRAM status updates."""
     join_room("gpu_status")
-    logger.info("Client subscribed to GPU status updates")
+    logger.debug("Client subscribed to GPU status updates")
     # Send immediate snapshot
     try:
         from backend.services.gpu_memory_orchestrator import get_orchestrator
@@ -263,6 +263,20 @@ def handle_subscribe_gpu():
         emit("gpu:status", snapshot)
     except Exception as e:
         logger.debug(f"Could not send initial GPU status: {e}")
+
+
+@socketio.on("subscribe_plugins")
+def handle_subscribe_plugins():
+    """Subscribe to plugin list pushes (replaces HTTP polling on /plugins)."""
+    from flask import request as flask_request
+    from backend.services.plugin_status_emitter import PLUGINS_STATUS_ROOM, emit_plugins_snapshot
+
+    join_room(PLUGINS_STATUS_ROOM)
+    logger.debug("Client subscribed to plugin status updates")
+    try:
+        emit_plugins_snapshot("subscribe", to_sid=flask_request.sid)
+    except Exception as e:
+        logger.debug(f"Could not send initial plugin status: {e}")
 
 
 @socketio.on("gpu:intent")

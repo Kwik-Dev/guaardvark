@@ -86,6 +86,7 @@ echo "Log: $LOG_FILE"
 cd "$PLUGIN_ROOT"
 PYTHONPATH="$PLUGIN_ROOT:$PYTHONPATH" \
 python -m uvicorn service.app:app --host 0.0.0.0 --port "$SERVICE_PORT" --workers 1 \
+    --no-access-log \
     >> "$LOG_FILE" 2>&1 &
 
 PID_DIR="$PROJECT_ROOT/pids"

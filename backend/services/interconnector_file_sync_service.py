@@ -49,6 +49,7 @@ class InterconnectorFileSyncService:
             "backend/utils/",
             "backend/routes/",
             "backend/handlers/",
+            "backend/middleware/",
             "backend/agents/",
             "backend/plugins/",
             "backend/tools/",

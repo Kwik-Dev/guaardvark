@@ -323,7 +323,7 @@ class PluginManager:
             if self._plugin_status.get(plugin_id) == PluginStatus.STOPPED:
                 logger.info(f"Restoring plugin: {plugin_id} (was running before shutdown)")
                 try:
-                    result = self.start_plugin(plugin_id)
+                    result = self._restore_plugin_with_retry(plugin_id)
                     if result.get('success'):
                         logger.info(f"Restored plugin: {plugin_id}")
                     else:
@@ -336,6 +336,7 @@ class PluginManager:
         # Clean up: sync state file to match reality (removes stale entries
         # from plugins that were disabled or stopped between reboots)
         self._save_running()
+        self._broadcast_plugins_status("boot")
 
     def _save_running(self) -> None:
         """Persist the current running set via the state store."""
@@ -514,6 +515,33 @@ class PluginManager:
             pass
         return payload
 
+    def _broadcast_plugins_status(self, reason: str = "") -> None:
+        """Push plugin list to Socket.IO subscribers (replaces HTTP polling)."""
+        try:
+            from backend.services.plugin_status_emitter import emit_plugins_snapshot
+            emit_plugins_snapshot(reason)
+        except Exception:
+            pass
+
+    def _restore_plugin_with_retry(self, plugin_id: str, max_attempts: int = 3) -> Dict[str, Any]:
+        """Boot restore with cooldown-aware retries (global gate between plugins)."""
+        result: Dict[str, Any] = {"success": False, "error": "not attempted"}
+        for attempt in range(max_attempts):
+            result = self.start_plugin(plugin_id)
+            if result.get("success"):
+                return result
+            cooldown = float(result.get("cooldown_remaining") or 0)
+            if result.get("gated") and cooldown > 0 and attempt < max_attempts - 1:
+                wait_s = cooldown + 0.5
+                logger.info(
+                    f"Restore {plugin_id} gated ({result.get('error')}), "
+                    f"retry {attempt + 1}/{max_attempts} in {wait_s:.1f}s"
+                )
+                time.sleep(wait_s)
+                continue
+            break
+        return result
+
     def start_plugin(self, plugin_id: str) -> Dict[str, Any]:
         """
         Start a plugin.
@@ -534,12 +562,14 @@ class PluginManager:
             return {'success': False, 'error': 'Plugin is disabled. Enable it first.'}
 
         if self._plugin_status.get(plugin_id) == PluginStatus.RUNNING:
+            self._broadcast_plugins_status(f"start:{plugin_id}:already_running")
             return {'success': True, 'message': 'Plugin already running'}
 
         # ── Traffic light: rate-limit rapid clicks and enforce GPU exclusivity ──
         acquired, cooldown, reason = self._gate.try_acquire(plugin_id)
         if not acquired:
             logger.info(f"Plugin start rejected by gate: {plugin_id} — {reason} ({cooldown:.1f}s)")
+            self._broadcast_plugins_status(f"gate:{plugin_id}")
             return {
                 'success': False,
                 'error': reason,
@@ -635,6 +665,7 @@ class PluginManager:
         finally:
             # Always release the gate, even on error — start the cooldown clock.
             self._gate.release(plugin_id)
+            self._broadcast_plugins_status(f"start:{plugin_id}")
     
     def stop_plugin(self, plugin_id: str) -> Dict[str, Any]:
         """
@@ -653,15 +684,18 @@ class PluginManager:
 
         current_status = self._plugin_status.get(plugin_id)
         if current_status == PluginStatus.STOPPED:
+            self._broadcast_plugins_status(f"stop:{plugin_id}:already_stopped")
             return {'success': True, 'message': 'Plugin already stopped'}
 
         if current_status == PluginStatus.DISABLED:
+            self._broadcast_plugins_status(f"stop:{plugin_id}:disabled")
             return {'success': True, 'message': 'Plugin is disabled'}
 
         # ── Traffic light: rate-limit rapid clicks and enforce GPU exclusivity ──
         acquired, cooldown, reason = self._gate.try_acquire(plugin_id)
         if not acquired:
             logger.info(f"Plugin stop rejected by gate: {plugin_id} — {reason} ({cooldown:.1f}s)")
+            self._broadcast_plugins_status(f"gate:{plugin_id}")
             return {
                 'success': False,
                 'error': reason,
@@ -673,6 +707,22 @@ class PluginManager:
             plugin_dir = self.registry.get_plugin_dir(plugin_id)
             if not plugin_dir:
                 return {'success': False, 'error': 'Plugin directory not found'}
+
+            # Video generation rides ComfyUI — cancel in-flight batches before
+            # killing the sidecar so the worker doesn't keep spinning.
+            if plugin_id == "comfyui":
+                try:
+                    from backend.services.batch_video_generator import get_batch_video_generator
+                    cancelled = get_batch_video_generator().cancel_all_active(
+                        reason="Cancelled because ComfyUI plugin was stopped"
+                    )
+                    if cancelled:
+                        logger.info(
+                            "Stopped ComfyUI plugin: cancelled %d video batch(es): %s",
+                            len(cancelled), cancelled,
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to cancel video batches before stopping ComfyUI: {e}")
 
             # Set status to stopping
             self._plugin_status[plugin_id] = PluginStatus.STOPPING
@@ -722,6 +772,7 @@ class PluginManager:
         finally:
             # Always release the gate, even on error — start the cooldown clock.
             self._gate.release(plugin_id)
+            self._broadcast_plugins_status(f"stop:{plugin_id}")
     
     def restart_plugin(self, plugin_id: str) -> Dict[str, Any]:
         """Restart a plugin by stopping and starting it"""
@@ -787,12 +838,24 @@ class PluginManager:
 
         self._plugin_status[plugin_id] = PluginStatus.STOPPED
         logger.info(f"Plugin enabled (user pref): {plugin_id}")
+        self._broadcast_plugins_status(f"enable:{plugin_id}")
         return {'success': True, 'message': 'Plugin enabled'}
 
     def disable_plugin(self, plugin_id: str) -> Dict[str, Any]:
         """Disable a plugin via the user_enabled overlay (stops it first if running)."""
         if not self.registry.is_registered(plugin_id):
             return {'success': False, 'error': f'Plugin not found: {plugin_id}'}
+
+        # ComfyUI disable must also kill in-flight VideoGen batches even when the
+        # sidecar is already stopped — the backend worker can still be spinning.
+        if plugin_id == "comfyui":
+            try:
+                from backend.services.batch_video_generator import get_batch_video_generator
+                get_batch_video_generator().cancel_all_active(
+                    reason="Cancelled because ComfyUI plugin was disabled"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to cancel video batches while disabling ComfyUI: {e}")
 
         # Stop if running — same behavior as before; intuitive UX.
         if self._plugin_status.get(plugin_id) == PluginStatus.RUNNING:
@@ -819,6 +882,7 @@ class PluginManager:
 
         self._plugin_status[plugin_id] = PluginStatus.DISABLED
         logger.info(f"Plugin disabled (user pref): {plugin_id}")
+        self._broadcast_plugins_status(f"disable:{plugin_id}")
         return {'success': True, 'message': 'Plugin disabled'}
 
     def _unload_all_ollama_models(self) -> None:

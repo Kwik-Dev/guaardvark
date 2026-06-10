@@ -57,30 +57,39 @@ if [ -f "$COMFYUI_REQS" ]; then
     fi
 fi
 
-# Install requirements for the video-critical custom nodes. The WAN/CogVideoX
-# workflows depend on these nodes (GGUF unet loader, VideoHelperSuite combine,
-# RIFE interpolation, KJNodes, CogVideoX wrapper), and their Python deps live in
-# each node's own requirements.txt — not ComfyUI's. This is why comfyui.log
-# shows ModuleNotFoundError for node deps. Scoped to this allowlist on purpose:
-# the heavier face nodes (InstantID/IPAdapter → insightface) often fail to build
-# and aren't on the video path. Hash-stamped so it only reruns when deps change.
+# Install requirements for custom nodes. ComfyUI auto-loads every subdir under
+# custom_nodes/, so any node that declares a requirements.txt needs its Python
+# deps satisfied in the shared backend venv, otherwise you get noisy
+# ModuleNotFoundError tracebacks at every ComfyUI startup (Impact-Pack → piexif,
+# Crystools → deepdiff, PuLID/InstantID → insightface, etc.).
+#
+# We now discover *all* such requirements.txt (not just a video-only allowlist)
+# so that commonly-installed nodes via ComfyUI-Manager (Impact, Crystools, etc.)
+# get their easy deps. Heavier ones (insightface-based) will usually still fail
+# to build here — we log a warning and continue; those nodes simply won't load.
+# This is acceptable for music-video / film-crew paths (they don't depend on face
+# analysis nodes). Hash-stamped over the *concat* of all req files so we only
+# re-run when something actually changed.
 CN_DIR="$COMFYUI_DIR/custom_nodes"
 CN_STAMP="$PLUGIN_ROOT/.custom_nodes_installed"
-VIDEO_NODES="ComfyUI-GGUF ComfyUI-VideoHelperSuite ComfyUI-Frame-Interpolation ComfyUI-KJNodes ComfyUI-CogVideoXWrapper"
 if [ -d "$CN_DIR" ]; then
-    CN_REQ_FILES=""
-    for node in $VIDEO_NODES; do
-        [ -f "$CN_DIR/$node/requirements.txt" ] && CN_REQ_FILES="$CN_REQ_FILES $CN_DIR/$node/requirements.txt"
-    done
+    CN_REQ_FILES=$(find "$CN_DIR" -mindepth 2 -maxdepth 2 -name requirements.txt -type f 2>/dev/null | sort || true)
     if [ -n "$CN_REQ_FILES" ]; then
         CN_HASH=$(cat $CN_REQ_FILES 2>/dev/null | md5sum | cut -d' ' -f1 || true)
         CN_STAMP_HASH=""
         [ -f "$CN_STAMP" ] && CN_STAMP_HASH=$(cat "$CN_STAMP" 2>/dev/null)
         if [ "$CN_HASH" != "$CN_STAMP_HASH" ]; then
-            echo "Installing video custom-node requirements..."
+            echo "Installing custom-node requirements (all nodes with requirements.txt)..."
+            set +e
             for req in $CN_REQ_FILES; do
+                node_name=$(basename "$(dirname "$req")")
+                echo "  - $node_name"
                 "$VENV_PYTHON" -m pip install -r "$req" --quiet 2>&1 | tail -2
+                if [ $? -ne 0 ]; then
+                    echo "    WARNING: pip install failed for $node_name (see above). Node will be disabled at runtime."
+                fi
             done
+            set -e
             echo "$CN_HASH" > "$CN_STAMP"
         fi
     fi

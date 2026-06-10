@@ -3,6 +3,7 @@
 
 import collections
 import logging
+import subprocess
 from pathlib import Path
 
 import requests as http_requests
@@ -13,6 +14,60 @@ from ..plugins import get_plugin_manager
 logger = logging.getLogger(__name__)
 
 plugins_bp = Blueprint("plugins", __name__, url_prefix="/api/plugins")
+
+# Log basenames under LOG_DIR. Order matters — first existing file wins.
+# Keep in sync with plugins/*/scripts/start.sh LOG_FILE assignments.
+PLUGIN_LOG_CANDIDATES: dict[str, list[str]] = {
+    "comfyui": ["comfyui.log"],
+    "ollama": ["ollama_serve.log", "ollama.log"],
+    "video_editor": ["video_editor.log"],
+    "gpu_embedding": ["gpu_embedding_service.log"],
+    "discord": ["discord_bot.log"],
+    "swarm": ["swarm.log"],
+    "vision_pipeline": ["vision_pipeline.log"],
+    "upscaling": ["upscaling.log"],
+    "audio_foundry": ["audio_foundry.log"],
+}
+
+
+def _tail_text_file(path: Path, lines: int) -> tuple[str, int]:
+    with open(path, "r", errors="replace") as f:
+        tail = collections.deque(f, maxlen=lines)
+    log_text = "".join(tail)
+    return log_text, len(tail)
+
+
+def _read_plugin_log_text(plugin_id: str, lines: int) -> tuple[str, int, str]:
+    """Return (log_text, line_count, source_label)."""
+    from backend.config import LOG_DIR
+
+    candidates = PLUGIN_LOG_CANDIDATES.get(plugin_id, [f"{plugin_id}.log"])
+    log_dir = Path(LOG_DIR)
+    for name in candidates:
+        path = log_dir / name
+        if path.is_file():
+            text, count = _tail_text_file(path, lines)
+            return text, count, str(path)
+
+    if plugin_id == "ollama":
+        try:
+            result = subprocess.run(
+                [
+                    "journalctl", "-u", "ollama",
+                    "-n", str(lines), "--no-pager", "-o", "short-iso",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                rows = result.stdout.splitlines()
+                return result.stdout, len(rows), "journalctl:ollama"
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+    return "", 0, ""
 
 
 @plugins_bp.route("", methods=["GET"])
@@ -25,7 +80,7 @@ def list_plugins():
         logger.debug(f"Plugin manager retrieved: {manager is not None}")
         
         plugins = manager.list_plugins()
-        logger.info(f"Retrieved {len(plugins)} plugins from manager")
+        logger.debug(f"Retrieved {len(plugins)} plugins from manager")
         
         return success_response(
             data={
@@ -76,6 +131,11 @@ def start_plugin(plugin_id):
         result = manager.start_plugin(plugin_id)
 
         if result.get('success'):
+            try:
+                from backend.services.plugin_bridge import mark_user_controlled
+                mark_user_controlled(plugin_id)
+            except Exception:
+                pass
             return success_response(
                 data=result,
                 message=result.get('message', 'Plugin started')
@@ -106,6 +166,11 @@ def stop_plugin(plugin_id):
         result = manager.stop_plugin(plugin_id)
 
         if result.get('success'):
+            try:
+                from backend.services.plugin_bridge import mark_user_released
+                mark_user_released(plugin_id)
+            except Exception:
+                pass
             return success_response(
                 data=result,
                 message=result.get('message', 'Plugin stopped')
@@ -179,6 +244,11 @@ def disable_plugin(plugin_id):
         result = manager.disable_plugin(plugin_id)
         
         if result.get('success'):
+            try:
+                from backend.services.plugin_bridge import mark_user_released
+                mark_user_released(plugin_id)
+            except Exception:
+                pass
             return success_response(
                 data=result,
                 message=result.get('message', 'Plugin disabled')
@@ -251,6 +321,17 @@ def refresh_plugins():
         return error_response(str(e), 500, "PLUGINS_REFRESH_ERROR")
 
 
+@plugins_bp.route("/orchestrator/state", methods=["GET"])
+def plugin_orchestrator_state():
+    """Auto-orchestrator claims and last route (for Plugins UI / debugging)."""
+    try:
+        from backend.services.plugin_bridge import get_orchestrator_state
+        return success_response(data=get_orchestrator_state(), message="Plugin orchestrator state")
+    except Exception as e:
+        logger.error(f"Error reading orchestrator state: {e}", exc_info=True)
+        return error_response(str(e), 500, "PLUGIN_ORCHESTRATOR_STATE_ERROR")
+
+
 @plugins_bp.route("/status", methods=["GET"])
 def get_all_status():
     """Get status of all plugins."""
@@ -271,33 +352,21 @@ def get_plugin_logs(plugin_id):
         lines = int(request.args.get('lines', 100))
         lines = min(lines, 500)
 
-        log_file_map = {
-            'comfyui': 'comfyui.log',
-            'ollama': 'ollama.log',
-            'gpu_embedding': 'gpu_embedding_service.log',
-            'discord': 'discord_bot.log',
-            'swarm': 'swarm.log',
-            'vision_pipeline': 'vision_pipeline.log',
-            'upscaling': 'upscaling.log',
-        }
+        log_text, line_count, source = _read_plugin_log_text(plugin_id, lines)
+        if not log_text:
+            if plugin_id not in PLUGIN_LOG_CANDIDATES:
+                return success_response(
+                    data={"logs": "", "lines": 0},
+                    message="No log file configured",
+                )
+            return success_response(
+                data={"logs": "", "lines": 0},
+                message="Log file not found",
+            )
 
-        log_name = log_file_map.get(plugin_id)
-        if not log_name:
-            return success_response(data={"logs": "", "lines": 0}, message="No log file configured")
-
-        from backend.config import LOG_DIR
-        log_path = Path(LOG_DIR) / log_name
-
-        if not log_path.exists():
-            return success_response(data={"logs": "", "lines": 0}, message="Log file not found")
-
-        with open(log_path, 'r', errors='replace') as f:
-            tail = collections.deque(f, maxlen=lines)
-
-        log_text = ''.join(tail)
         return success_response(
-            data={"logs": log_text, "lines": len(tail)},
-            message="Logs retrieved"
+            data={"logs": log_text, "lines": line_count, "source": source},
+            message="Logs retrieved",
         )
     except Exception as e:
         logger.error(f"Error reading plugin logs: {e}", exc_info=True)

@@ -71,6 +71,23 @@ _plugin_running() {
     [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null
 }
 
+# ── Cancel in-flight VideoGen batches (backend may still be up) ──
+FLASK_PORT=${FLASK_PORT:-5000}
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    _flask_port_env=$(grep -oP '^FLASK_PORT=\K.*' "$SCRIPT_DIR/.env" 2>/dev/null)
+    [ -n "$_flask_port_env" ] && FLASK_PORT="$_flask_port_env"
+fi
+
+if command -v curl >/dev/null 2>&1; then
+    cancel_resp=$(curl -sf --max-time 5 -X POST "http://localhost:${FLASK_PORT}/api/batch-video/cancel-all" 2>/dev/null)
+    if [ -n "$cancel_resp" ] && command -v python3 >/dev/null 2>&1; then
+        cancelled_count=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); r=d.get('data',d); print(r.get('count', 0))" <<< "$cancel_resp" 2>/dev/null)
+        if [ -n "$cancelled_count" ] && [ "$cancelled_count" -gt 0 ] 2>/dev/null; then
+            vader_info "Cancelled ${cancelled_count} in-flight VideoGen batch(es)."
+        fi
+    fi
+fi
+
 # ── Stop ComfyUI first (free GPU memory before other shutdowns) ──
 # Only check ComfyUI if it's enabled or actually running
 comfyui_enabled=$(_plugin_enabled "comfyui")
@@ -83,30 +100,7 @@ if [ "$comfyui_enabled" = "False" ] && [ "$comfyui_running" = false ]; then
     vader_info "ComfyUI: not enabled, skipping."
 else
 
-# Check if a video generation is actively running before killing ComfyUI.
-# If the backend is reachable, query the video status endpoint.
-FLASK_PORT=${FLASK_PORT:-5000}
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    _flask_port_env=$(grep -oP '^FLASK_PORT=\K.*' "$SCRIPT_DIR/.env" 2>/dev/null)
-    [ -n "$_flask_port_env" ] && FLASK_PORT="$_flask_port_env"
-fi
-
-video_active=false
-if command -v curl >/dev/null 2>&1; then
-    video_status=$(curl -sf --max-time 3 "http://localhost:${FLASK_PORT}/api/gpu/comfyui/status" 2>/dev/null)
-    if [ -n "$video_status" ] && command -v python3 >/dev/null 2>&1; then
-        is_gen=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); r=d.get('data',d); print(r.get('is_generating', False))" <<< "$video_status" 2>/dev/null)
-        if [ "$is_gen" = "True" ]; then
-            video_active=true
-        fi
-    fi
-fi
-
-if [ "$video_active" = true ]; then
-    vader_warn "Video generation is actively running — deferring ComfyUI shutdown."
-    vader_warn "ComfyUI will be stopped after generation completes (idle timeout)."
-else
-    # 1. Use the plugin's own stop script if it exists
+# 1. Use the plugin's own stop script if it exists
     COMFYUI_STOP_SCRIPT="$SCRIPT_DIR/plugins/comfyui/scripts/stop.sh"
     if [ -f "$COMFYUI_STOP_SCRIPT" ]; then
         vader_info "Running ComfyUI plugin stop script..."
@@ -151,11 +145,10 @@ else
         fi
     fi
 
-    if [ "$comfyui_stopped" = true ]; then
-        vader_success "ComfyUI shutdown complete."
-    else
-        vader_info "ComfyUI was not running."
-    fi
+if [ "$comfyui_stopped" = true ]; then
+    vader_success "ComfyUI shutdown complete."
+else
+    vader_info "ComfyUI was not running."
 fi
 fi  # end comfyui_enabled/running check
 

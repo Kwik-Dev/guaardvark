@@ -189,6 +189,19 @@ def _cancel_batch_csv(native_id: str) -> bool:
     return False
 
 
+def _cancel_video_gen(native_id: str) -> bool:
+    """Cancel a batch video generation job."""
+    try:
+        from backend.services.batch_video_generator import get_batch_video_generator
+    except ImportError:
+        return False
+    try:
+        return bool(get_batch_video_generator().cancel_batch(str(native_id)))
+    except Exception as e:
+        logger.warning("cancel_video_gen: %s failed (%s)", native_id, e)
+        return False
+
+
 def _cancel_video_render(native_id: str) -> bool:
     """Editor render — SIGTERM the ffmpeg subprocess. Lives in the editor
     plan (plans/2026-04-29-video-editor.md) which adds a render queue;
@@ -205,6 +218,7 @@ CANCEL_DISPATCH: dict[JobKind, Callable[[str], bool]] = {
     JobKind.EXPERIMENT: _cancel_experiment,
     JobKind.DEMO: _cancel_demo,
     JobKind.BATCH_CSV: _cancel_batch_csv,
+    JobKind.VIDEO_GEN: _cancel_video_gen,
     JobKind.VIDEO_RENDER: _cancel_video_render,
     JobKind.UNIFIED_PROGRESS: _cancel_unified_progress,
 }

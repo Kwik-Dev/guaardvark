@@ -237,6 +237,8 @@ class BatchVideoGenerator:
             except Exception as e:
                 logger.debug(f"Failed to emit WebSocket update for batch {batch_status.batch_id}: {e}")
 
+            self._emit_canonical_job_event(batch_status)
+
         except Exception as e:  # pragma: no cover - best effort
             logger.warning(f"Failed to save batch metadata: {e}")
 
@@ -633,6 +635,166 @@ class BatchVideoGenerator:
                 logger.error(f"Failed to cancel batch {batch_id}: {e}")
                 return False
         return False
+
+    @staticmethod
+    def _emit_canonical_job_event(batch_status: BatchVideoStatus) -> None:
+        """Push video_gen updates to the unified jobs:* socket channel."""
+        try:
+            from backend.services.job_registry import adapt_video_gen
+            from backend.socketio_instance import socketio
+            job_dict = adapt_video_gen(batch_status).to_dict()
+            socketio.emit("job:event", job_dict, to="jobs:all", namespace="/")
+            socketio.emit("job:event", job_dict, to="jobs:video_gen", namespace="/")
+        except Exception as e:
+            logger.debug(f"Failed to emit canonical job event for {batch_status.batch_id}: {e}")
+
+    _ACTIVE_STATUSES = frozenset({"queued", "pending", "running", "processing"})
+
+    def list_active_batches(self) -> List[BatchVideoStatus]:
+        """In-memory and on-disk batches that are still queued or running."""
+        seen: set[str] = set()
+        active: List[BatchVideoStatus] = []
+
+        with self.batch_lock:
+            running_id = self._running_batch_id
+            for batch_id, status in self.active_batches.items():
+                if status.status in self._ACTIVE_STATUSES:
+                    active.append(status)
+                    seen.add(batch_id)
+
+        try:
+            for batch_dir in self.base_output_dir.iterdir():
+                if not batch_dir.is_dir():
+                    continue
+                batch_id = batch_dir.name
+                if batch_id in seen:
+                    continue
+                metadata_file = batch_dir / "batch_metadata.json"
+                if not metadata_file.exists():
+                    continue
+                try:
+                    with open(metadata_file, "r") as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+                if data.get("status") not in self._ACTIVE_STATUSES:
+                    continue
+                loaded = self.get_batch_status(batch_id)
+                if loaded:
+                    active.append(loaded)
+                    seen.add(batch_id)
+        except Exception as e:
+            logger.warning(f"Failed to scan for active batches: {e}")
+
+        return active
+
+    def list_batches_for_jobs(self, *, limit: int = 100) -> List[Dict]:
+        """Snapshot for /api/jobs — active batches first, then recent history."""
+        snapshot: List[Dict] = []
+        seen: set[str] = set()
+
+        with self.batch_lock:
+            running_id = self._running_batch_id
+            order = list(self.queue_order)
+
+        position = 0
+        for batch_id in order:
+            with self.batch_lock:
+                status = self.active_batches.get(batch_id)
+            if not status:
+                continue
+            position += 1
+            entry = self._batch_status_to_job_row(status, position=position, is_running=batch_id == running_id)
+            snapshot.append(entry)
+            seen.add(batch_id)
+
+        for status in self.list_active_batches():
+            if status.batch_id in seen:
+                continue
+            entry = self._batch_status_to_job_row(
+                status,
+                position=None,
+                is_running=(status.batch_id == self._running_batch_id),
+            )
+            snapshot.append(entry)
+            seen.add(status.batch_id)
+
+        for row in self.list_batches():
+            batch_id = row.get("batch_id")
+            if not batch_id or batch_id in seen:
+                continue
+            row = dict(row)
+            row.setdefault("metadata", {})
+            if row.get("display_name"):
+                row["metadata"]["display_name"] = row["display_name"]
+            snapshot.append(row)
+            seen.add(batch_id)
+            if len(snapshot) >= limit:
+                break
+
+        return snapshot[:limit]
+
+    @staticmethod
+    def _batch_status_to_job_row(
+        status: BatchVideoStatus,
+        *,
+        position: int | None,
+        is_running: bool,
+    ) -> Dict:
+        metadata = dict(status.metadata or {})
+        if position is not None:
+            metadata["queue_position"] = position
+        metadata["is_running"] = is_running
+        return {
+            "batch_id": status.batch_id,
+            "status": status.status,
+            "total_videos": status.total_videos,
+            "completed_videos": status.completed_videos,
+            "failed_videos": status.failed_videos,
+            "start_time": status.start_time.isoformat() if status.start_time else None,
+            "end_time": status.end_time.isoformat() if status.end_time else None,
+            "error": status.error,
+            "metadata": metadata,
+            "display_name": metadata.get("display_name"),
+            "is_running": is_running,
+        }
+
+    def cancel_all_active(self, reason: str = "Cancelled by system shutdown") -> List[str]:
+        """Cancel every queued/running batch and release GPU resources."""
+        cancelled: List[str] = []
+        for status in self.list_active_batches():
+            batch_id = status.batch_id
+            if self.cancel_batch(batch_id):
+                cancelled.append(batch_id)
+                if not status.error:
+                    status.error = reason
+                    self._save_metadata(status)
+
+        if cancelled:
+            try:
+                self.video_generator.interrupt()
+            except Exception as e:
+                logger.warning(f"cancel_all_active: ComfyUI interrupt failed: {e}")
+
+        try:
+            gpu_coordinator = get_gpu_coordinator()
+            gpu_coordinator.release_video_generation_lock(restart_ollama=False)
+        except Exception as e:
+            logger.warning(f"cancel_all_active: GPU lock release failed: {e}")
+
+        try:
+            from backend.services.job_operation_gate import get_gate
+            from backend.services.job_types import JobKind
+            gate = get_gate()
+            snap = gate.snapshot()
+            holder = snap.get("gpu_holder") or {}
+            if holder.get("kind") == JobKind.VIDEO_RENDER.value:
+                gate.release_gpu_exclusive(JobKind.VIDEO_RENDER, str(holder.get("native_id", "")))
+        except Exception as e:
+            logger.warning(f"cancel_all_active: gate release failed: {e}")
+
+        logger.info(f"cancel_all_active: cancelled {len(cancelled)} batch(es): {cancelled}")
+        return cancelled
 
     def list_queue(self) -> List[Dict]:
         """Snapshot of the current queue for the UI panel.

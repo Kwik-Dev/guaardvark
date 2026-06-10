@@ -101,11 +101,45 @@ def _split_long_cuts(cuts: list[dict[str, Any]], max_cut_s: float | None) -> lis
     return out
 
 
+def _coarsen_cuts_for_slow_pace(cuts: list[dict[str, Any]], duration: float) -> list[dict[str, Any]]:
+    """When the user/treatment asked for slow/dreamlike pacing, aggressively merge
+    adjacent cuts so the final edit has fewer, longer, more atmospheric holds instead
+    of frantic beat-sliced micro-cuts. This runs *after* the energy-based grouping
+    but *before* the max_cut_s split (so we don't fight the forward-clip budget).
+    Target: roughly one cut every 2-4s for dreamy material (user can still override
+    via max_stretch for the fill slowdown).
+    """
+    if not cuts or len(cuts) <= 1:
+        return cuts
+    # Rough target: for a short song aim for ~8-14 cuts max; for longer scale gently.
+    target_max = max(6, int(duration / 2.2))
+    if len(cuts) <= target_max:
+        return cuts
+
+    out: list[dict[str, Any]] = [dict(cuts[0])]
+    for c in cuts[1:]:
+        if len(out) >= target_max:
+            out.append(dict(c))
+            continue
+        prev = out[-1]
+        p_len = prev["end_s"] - prev["start_s"]
+        c_len = c["end_s"] - c["start_s"]
+        e_delta = abs(float(prev.get("energy", 0.0)) - float(c.get("energy", 0.0)))
+        # Merge if combined is still reasonable or energies are similar (calm section)
+        if (p_len + c_len < 5.5) or (e_delta < 0.18 and p_len < 4.0):
+            prev["end_s"] = c["end_s"]
+            prev["energy"] = (float(prev.get("energy", 0.0)) + float(c.get("energy", 0.0))) / 2.0
+        else:
+            out.append(dict(c))
+    return out
+
+
 def compute_cut_plan(
     beat_times: list[float],
     sections: list[dict[str, Any]],
     duration: float,
     max_cut_s: float | None = None,
+    slow_pace: bool = False,
 ) -> list[dict[str, Any]]:
     """Build an energy-aware, beat-snapped cut plan covering [0, duration].
 
@@ -144,6 +178,11 @@ def compute_cut_plan(
     while bi < n:
         sec = _section_for(cut_start, sections)
         k = _beats_per_cut(sec.get("mean_energy", 0.0), emin, emax)
+        if slow_pace:
+            # For slow/dreamlike treatments, force longer cuts even on high detected energy.
+            # Stronger bias + post-merge below so a 29s dreamy song doesn't become 20+ micro-cuts.
+            k = max(k, 4)
+            k = int(k * 2.5)
         end_i = min(bi + k - 1, n - 1)      # beat index that ends this cut
         cut_end = beat_times[end_i]
         # Floor: extend forward by whole beats until the cut clears MIN_CLIP_S.
@@ -166,6 +205,9 @@ def compute_cut_plan(
     if len(cuts) > 1 and (cuts[-1]["end_s"] - cuts[-1]["start_s"]) < MIN_CLIP_S:
         cuts[-2]["end_s"] = duration
         cuts.pop()
+
+    if slow_pace:
+        cuts = _coarsen_cuts_for_slow_pace(cuts, duration)
 
     # Size every slot to what a forward clip can fill (no reverse needed).
     cuts = _split_long_cuts(cuts, max_cut_s)
@@ -367,6 +409,8 @@ class MusicVideoService(PipelineService):
             # Director off — nothing to regenerate; leave prompts as global style copies.
             return mv
 
+        from backend.services.plugin_bridge import ensure_plugin_running
+        ensure_plugin_running("ollama")  # Director requires Ollama daemon for per-cut visual prompts from treatment
         from backend.services.music_video_director import _generate_storyline_and_prompts
 
         mode = planning_mode or s.get("planning_mode", "narrative")

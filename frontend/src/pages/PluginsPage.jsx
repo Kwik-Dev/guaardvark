@@ -49,6 +49,8 @@ import {
 import { useSnackbar } from '../components/common/SnackbarProvider';
 import PageLayout from '../components/layout/PageLayout';
 import { ContextualLoader } from '../components/common/LoadingStates';
+import { io } from 'socket.io-client';
+import { SOCKET_URL } from '../api/apiClient';
 import {
   listPlugins,
   startPlugin,
@@ -58,11 +60,11 @@ import {
   refreshPlugins,
   updatePluginConfig,
   getPluginLogs,
-  getLiveGpuStats,
   startVisionCamera,
   stopVisionCamera,
   getVisionCameraStatus,
 } from '../api/pluginsService';
+import { getGpuStatus } from '../api/gpuService';
 
 // ── Constants ──────────────────────────────────────────────────────────
 const TOTAL_VRAM_MB = 16384; // 16GB
@@ -93,24 +95,10 @@ const GPU_HEAVY_THRESHOLD_MB = 3000;
 const isGpuHeavy = (plugin) => (plugin?.vram_estimate_mb || 0) >= GPU_HEAVY_THRESHOLD_MB;
 
 // ── VRAM Budget Bar ────────────────────────────────────────────────────
-const VramBudgetBar = ({ plugins }) => {
-  const [gpuStats, setGpuStats] = useState(null);
-
-  useEffect(() => {
-    const fetchGpu = async () => {
-      try {
-        const res = await getLiveGpuStats();
-        if (res.success) setGpuStats(res.data);
-      } catch { /* ignore */ }
-    };
-    fetchGpu();
-    const interval = setInterval(fetchGpu, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const totalMb = gpuStats?.total_mb || TOTAL_VRAM_MB;
-  const usedMb = gpuStats?.used_mb || 0;
-  const freeMb = gpuStats?.free_mb || totalMb;
+const VramBudgetBar = ({ plugins, gpuVram }) => {
+  const totalMb = gpuVram?.total_mb || TOTAL_VRAM_MB;
+  const usedMb = gpuVram?.used_mb || 0;
+  const freeMb = gpuVram?.free_mb ?? (totalMb - usedMb);
   const usedPct = (usedMb / totalMb) * 100;
 
   const activePlugins = plugins.filter(
@@ -124,25 +112,17 @@ const VramBudgetBar = ({ plugins }) => {
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <GpuIcon fontSize="small" />
           <Typography variant="subtitle2">
-            GPU VRAM {gpuStats?.gpu_name ? `— ${gpuStats.gpu_name}` : ''}
+            GPU VRAM {gpuVram?.gpu_name ? `— ${gpuVram.gpu_name}` : ''}
           </Typography>
         </Box>
         <Stack direction="row" spacing={2} alignItems="center">
-          {gpuStats && (
-            <>
-              <Chip
-                size="small"
-                label={`${gpuStats.utilization_pct}% util`}
-                color={gpuStats.utilization_pct > 80 ? 'warning' : 'default'}
-                variant="outlined"
-              />
-              <Chip
-                size="small"
-                label={`${gpuStats.temperature_c}°C`}
-                color={gpuStats.temperature_c > 80 ? 'error' : 'default'}
-                variant="outlined"
-              />
-            </>
+          {gpuVram?.utilization_percent != null && (
+            <Chip
+              size="small"
+              label={`${gpuVram.utilization_percent}% util`}
+              color={gpuVram.utilization_percent > 80 ? 'warning' : 'default'}
+              variant="outlined"
+            />
           )}
           <Typography variant="body2" color="text.secondary">
             {(usedMb / 1024).toFixed(1)} / {(totalMb / 1024).toFixed(1)} GB
@@ -561,15 +541,17 @@ const ConfigDialog = ({ open, plugin, onClose, onSave }) => {
               size="small"
             />
           )}
-          <FormControlLabel
-            control={
-              <Switch
-                checked={config.fallback_enabled ?? true}
-                onChange={(e) => setConfig({ ...config, fallback_enabled: e.target.checked })}
-              />
-            }
-            label="Enable fallback to CPU"
-          />
+          {plugin.config?.fallback_enabled !== undefined && (
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={config.fallback_enabled ?? true}
+                  onChange={(e) => setConfig({ ...config, fallback_enabled: e.target.checked })}
+                />
+              }
+              label="Enable fallback to CPU"
+            />
+          )}
         </Stack>
       </DialogContent>
       <DialogActions>
@@ -609,12 +591,23 @@ const RestartOllamaDialog = ({ open, onClose, onConfirm, loading }) => {
 };
 
 // ── Page ───────────────────────────────────────────────────────────────
+const applyPluginsPayload = (payload, setPlugins, setLoading, setError) => {
+  const list = payload?.plugins;
+  if (!Array.isArray(list)) return;
+  setPlugins(list);
+  setLoading(false);
+  setError(null);
+};
+
 const PluginsPage = () => {
   const [plugins, setPlugins] = useState([]);
+  const [gpuVram, setGpuVram] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [configPlugin, setConfigPlugin] = useState(null);
   const { showMessage } = useSnackbar();
+  const socketRef = useRef(null);
+  const cooldownTimerRef = useRef(null);
 
   // Restart Ollama dialog state (shown after stopping ComfyUI)
   const [showRestartOllama, setShowRestartOllama] = useState(false);
@@ -642,11 +635,77 @@ const PluginsPage = () => {
     return null;
   }, []);
 
+  // One-shot HTTP load + Socket.IO pushes (no polling — keeps logs quiet).
   useEffect(() => {
     fetchPlugins();
-    const interval = setInterval(fetchPlugins, 10000);
-    return () => clearInterval(interval);
+
+    const loadGpuOnce = async () => {
+      try {
+        const data = await getGpuStatus();
+        if (data?.vram) setGpuVram(data.vram);
+      } catch { /* gpu card optional */ }
+    };
+    loadGpuOnce();
+
+    const socket = io(SOCKET_URL, {
+      reconnection: true,
+      reconnectionAttempts: 5,
+      transports: ['websocket', 'polling'],
+    });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      socket.emit('subscribe_plugins');
+      socket.emit('subscribe_gpu');
+    });
+
+    socket.on('plugins:status', (payload) => {
+      applyPluginsPayload(payload, setPlugins, setLoading, setError);
+    });
+
+    socket.on('gpu:status', (payload) => {
+      if (payload?.vram) setGpuVram(payload.vram);
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
   }, [fetchPlugins]);
+
+  // Local 1s countdown for gate cooldowns (no HTTP re-fetch).
+  useEffect(() => {
+    const hasCooldown = plugins.some((p) => (p.cooldown_remaining || 0) > 0);
+    if (!hasCooldown) {
+      if (cooldownTimerRef.current) {
+        clearInterval(cooldownTimerRef.current);
+        cooldownTimerRef.current = null;
+      }
+      return undefined;
+    }
+    if (cooldownTimerRef.current) return undefined;
+
+    cooldownTimerRef.current = setInterval(() => {
+      setPlugins((prev) => {
+        const next = prev.map((p) => ({
+          ...p,
+          cooldown_remaining: Math.max(0, (p.cooldown_remaining || 0) - 1),
+        }));
+        if (!next.some((p) => (p.cooldown_remaining || 0) > 0) && cooldownTimerRef.current) {
+          clearInterval(cooldownTimerRef.current);
+          cooldownTimerRef.current = null;
+        }
+        return next;
+      });
+    }, 1000);
+
+    return () => {
+      if (cooldownTimerRef.current) {
+        clearInterval(cooldownTimerRef.current);
+        cooldownTimerRef.current = null;
+      }
+    };
+  }, [plugins]);
 
   // Find a running GPU-heavy plugin that contends for VRAM with the one being
   // started. At most one heavy plugin runs at a time, so the first match is the
@@ -700,22 +759,24 @@ const PluginsPage = () => {
           const cd = data.cooldown_remaining ? Math.ceil(data.cooldown_remaining) : null;
           const suffix = cd ? ` (wait ${cd}s)` : '';
           showMessage(`${data.error || 'Cooling down'}${suffix}`, 'warning');
-          await fetchPlugins(); // refresh to pick up the cooldown_remaining
+          if (cd) {
+            setPlugins((prev) => prev.map((p) => (
+              p.id === pluginId ? { ...p, cooldown_remaining: cd } : p
+            )));
+          }
           return;
         }
         showMessage(response.message || `Plugin ${action} successful`, 'success');
-        const fresh = await fetchPlugins();
 
-        // After stopping ComfyUI, offer to restart Ollama if it's not running.
-        // Read from the *fresh* plugin list returned by fetchPlugins — the
-        // `plugins` state variable still holds the pre-stop snapshot here
-        // because React hasn't re-rendered yet.
+        // After stopping ComfyUI, offer to restart Ollama once socket/HTTP state settles.
         if (action === 'stop' && pluginId === 'comfyui') {
-          const list = fresh || plugins;
-          const ollamaPlugin = list.find((p) => p.id === 'ollama');
-          if (ollamaPlugin && ollamaPlugin.enabled && ollamaPlugin.status !== 'running') {
-            setShowRestartOllama(true);
-          }
+          setTimeout(async () => {
+            const list = (await fetchPlugins()) || plugins;
+            const ollamaPlugin = list.find((p) => p.id === 'ollama');
+            if (ollamaPlugin?.enabled && ollamaPlugin.status !== 'running') {
+              setShowRestartOllama(true);
+            }
+          }, 400);
         }
       } else {
         showMessage(response.message || `Failed to ${action} plugin`, 'error');
@@ -801,7 +862,7 @@ const PluginsPage = () => {
       )}
 
       {/* VRAM Budget Bar */}
-      {plugins.length > 0 && <VramBudgetBar plugins={plugins} />}
+      {plugins.length > 0 && <VramBudgetBar plugins={plugins} gpuVram={gpuVram} />}
 
       {loading && plugins.length === 0 ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>

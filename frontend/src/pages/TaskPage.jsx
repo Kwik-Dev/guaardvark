@@ -13,6 +13,8 @@ import {
   Divider,
   FormControl,
   InputLabel,
+  IconButton,
+  LinearProgress,
   ListItemIcon,
   ListItemText,
   Menu,
@@ -21,12 +23,21 @@ import {
   Paper,
   Select,
   Snackbar,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Typography,
 } from "@mui/material";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import AddIcon from "@mui/icons-material/Add";
+import CancelIcon from "@mui/icons-material/Cancel";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import CodeIcon from "@mui/icons-material/Code";
 import TableChartIcon from "@mui/icons-material/TableChart";
 import AnalyticsIcon from "@mui/icons-material/Analytics";
@@ -43,6 +54,7 @@ import {
   updateTask,
   duplicateTask,
 } from "../api";
+import { listJobs, cancelJob as cancelUnifiedJob, JOB_KINDS } from "../api/jobsService";
 import { processTaskQueue } from "../api/taskService";
 import { useStatus } from "../contexts/StatusContext";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
@@ -94,6 +106,10 @@ const TaskPage = () => {
   // Context menu state
   const [contextMenu, setContextMenu] = useState(null);
   const [contextItem, setContextItem] = useState(null);
+
+  const [videoGenJobs, setVideoGenJobs] = useState([]);
+  const [videoGenLoading, setVideoGenLoading] = useState(false);
+  const [videoGenError, setVideoGenError] = useState(null);
 
   const handleContextMenu = (e, task = null) => {
     e.preventDefault();
@@ -154,12 +170,56 @@ const TaskPage = () => {
     }
   }, []);
 
+  const fetchVideoGenJobs = useCallback(async () => {
+    setVideoGenLoading(true);
+    setVideoGenError(null);
+    try {
+      const data = await listJobs({
+        kinds: [JOB_KINDS.VIDEO_GEN],
+        statuses: ["pending", "running", "paused"],
+        limit: 50,
+      });
+      setVideoGenJobs(data?.jobs || []);
+    } catch (err) {
+      setVideoGenError(err.response?.data?.error || err.message || "Failed to load VideoGen jobs");
+    } finally {
+      setVideoGenLoading(false);
+    }
+  }, []);
+
+  const handleCancelVideoGenJob = async (jobId) => {
+    try {
+      const res = await cancelUnifiedJob(jobId);
+      if (res?.cancelled) {
+        setFeedback({
+          open: true,
+          message: "VideoGen job cancelled",
+          severity: "success",
+        });
+        fetchVideoGenJobs();
+      } else {
+        setFeedback({
+          open: true,
+          message: res?.reason || "Could not cancel VideoGen job",
+          severity: "warning",
+        });
+      }
+    } catch (err) {
+      setFeedback({
+        open: true,
+        message: err.response?.data?.error || err.message || "Cancel failed",
+        severity: "error",
+      });
+    }
+  };
+
   // Load data on component mount
   useEffect(() => {
     fetchTasks();
     fetchProjects();
     fetchAvailableModels();
-  }, []);
+    fetchVideoGenJobs();
+  }, [fetchVideoGenJobs]);
 
   // Auto-refresh when tasks are running
   useEffect(() => {
@@ -170,6 +230,12 @@ const TaskPage = () => {
     const interval = setInterval(() => { fetchTasks(); }, 10000);
     return () => clearInterval(interval);
   }, [tasks, fetchTasks]);
+
+  useEffect(() => {
+    if (videoGenJobs.length === 0) return;
+    const interval = setInterval(() => { fetchVideoGenJobs(); }, 10000);
+    return () => clearInterval(interval);
+  }, [videoGenJobs.length, fetchVideoGenJobs]);
 
   // Removed sorting and progress handlers - now handled in TaskCard component
 
@@ -614,6 +680,84 @@ const TaskPage = () => {
           onTaskDeleted={handleTaskDeleted}
           onTaskDuplicated={handleTaskDuplicated}
         />
+
+        {/* VideoGen jobs — queued/running batches from /api/jobs */}
+        <Paper sx={{ p: 2, mb: 2, borderRadius: 2 }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
+            <Box>
+              <Typography variant="subtitle1" fontWeight={600}>
+                Video Generation Jobs
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                Queued and running batches from the VideoGen pipeline
+              </Typography>
+            </Box>
+            <IconButton size="small" onClick={fetchVideoGenJobs} title="Refresh VideoGen jobs">
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Stack>
+
+          {videoGenError && (
+            <Alert severity="error" sx={{ mb: 1.5 }}>{videoGenError}</Alert>
+          )}
+          {videoGenLoading && <LinearProgress sx={{ mb: 1 }} />}
+
+          {videoGenJobs.length === 0 && !videoGenLoading ? (
+            <Typography variant="body2" color="text.secondary">
+              No pending VideoGen jobs.
+            </Typography>
+          ) : (
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ fontWeight: 600 }}>Label</TableCell>
+                  <TableCell sx={{ fontWeight: 600 }}>Status</TableCell>
+                  <TableCell sx={{ fontWeight: 600, width: 180 }}>Progress</TableCell>
+                  <TableCell sx={{ fontWeight: 600, width: 120 }} align="right">Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {videoGenJobs.map((job) => (
+                  <TableRow key={job.id} hover>
+                    <TableCell>{job.label}</TableCell>
+                    <TableCell>
+                      <Chip label={job.status} size="small" color={job.status === "running" ? "info" : "default"} />
+                    </TableCell>
+                    <TableCell>
+                      {job.progress != null ? (
+                        <Stack direction="row" spacing={1} alignItems="center">
+                          <Box sx={{ width: 80 }}>
+                            <LinearProgress
+                              variant="determinate"
+                              value={Math.max(0, Math.min(100, job.progress))}
+                              sx={{ height: 6, borderRadius: 3 }}
+                            />
+                          </Box>
+                          <Typography variant="caption">{Math.round(job.progress)}%</Typography>
+                        </Stack>
+                      ) : (
+                        <Typography variant="caption" color="text.secondary">—</Typography>
+                      )}
+                    </TableCell>
+                    <TableCell align="right">
+                      {job.cancellable && (
+                        <Button
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                          startIcon={<CancelIcon />}
+                          onClick={() => handleCancelVideoGenJob(job.id)}
+                        >
+                          Cancel
+                        </Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </Paper>
 
         {/* Filter bar */}
         <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
