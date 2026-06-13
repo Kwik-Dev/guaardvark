@@ -156,8 +156,8 @@ def schedule_periodic_cleanup(celery_app: Celery):
     from celery.schedules import crontab
     
     # Set up periodic tasks
-    celery_app.conf.beat_schedule = {
-        **celery_app.conf.beat_schedule,
+    # .update() mutation (not = {**}) per infra HIGH finding (fragile on import order).
+    celery_app.conf.beat_schedule.update({
         'cleanup-old-chat-sessions': {
             'task': 'cleanup_old_chat_sessions',
             'schedule': crontab(hour=2, minute=0),  # Daily at 2 AM
@@ -182,6 +182,7 @@ def schedule_periodic_cleanup(celery_app: Celery):
             'task': 'periodic_chat_cleanup',
             'schedule': crontab(hour=4, minute=0, day_of_week=0),  # Weekly on Sunday at 4 AM (legacy)
         },
+    })
     }
     
     logger.info("Scheduled enhanced periodic cleanup tasks (chat data + progress jobs)") 

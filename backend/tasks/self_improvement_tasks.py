@@ -137,8 +137,10 @@ def schedule_self_improvement_tasks(celery_app: Celery):
     # max(1, …): crontab(hour="*/0") raises and crashes beat startup; guard the 0 case.
     interval_hours = max(1, int(__import__("os").environ.get("GUAARDVARK_SELF_IMPROVEMENT_INTERVAL", "6")))
 
-    celery_app.conf.beat_schedule = {
-        **getattr(celery_app.conf, "beat_schedule", {}),
+    # Mutation with .update() (not = {**}) per infra team audit (HIGH):
+    # avoids fragility on import order / Celery conf dict identity.
+    # Matches the safe pattern in rag_autoresearch_tasks.
+    celery_app.conf.beat_schedule.update({
         "self-improvement-check": {
             "task": "self_improvement.scheduled_check",
             "schedule": crontab(minute=0, hour=f"*/{interval_hours}"),
@@ -151,4 +153,4 @@ def schedule_self_improvement_tasks(celery_app: Celery):
             "task": "self_improvement.optimize_servo_async",
             "schedule": crontab(minute=15, hour="*/3"),  # Every 3 hours — are we clicking straight?
         },
-    }
+    })

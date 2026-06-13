@@ -222,8 +222,8 @@ def _reconcile_and_emit_impl():
 
 def schedule_runtime_audit_tasks(celery_app: Celery):
     """Merge runtime-audit beat entries into the existing beat schedule."""
-    celery_app.conf.beat_schedule = {
-        **getattr(celery_app.conf, "beat_schedule", {}),
+    # .update() (mutation) per infra HIGH (fragile {**} on import/Celery conf).
+    celery_app.conf.beat_schedule.update({
         "runtime-audit-flush-hits": {
             "task": "runtime_audit.flush_hits",
             "schedule": 300.0,  # every 5 minutes
@@ -239,4 +239,4 @@ def schedule_runtime_audit_tasks(celery_app: Celery):
             "schedule": 43200.0,  # every 12 hours
             "options": {"queue": "default"},
         },
-    }
+    })
