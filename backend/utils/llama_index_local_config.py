@@ -126,16 +126,23 @@ def force_local_llama_index_config():
         logger.warning("nest_asyncio not found. Async event loops might conflict.")
 
     try:
-        # Configure CUDA for optimal performance
-        # Only disable CUDA for Celery workers to prevent multiprocessing issues
-        if os.environ.get('CELERY_WORKER_MODE', 'false').lower() != 'true':
-            # Enable CUDA for main application
-            os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Use GPU 0
-            logger.info("CUDA enabled for LlamaIndex - using GPU acceleration")
-        else:
-            # CPU-only for Celery workers to prevent multiprocessing issues
+        # Per edge-portability audit: remove unconditional CUDA_VISIBLE at import
+        # (breaks CPU/ARM boxes). Probe for NVIDIA; workers stay CPU.
+        if os.environ.get('CELERY_WORKER_MODE', 'false').lower() == 'true':
             os.environ['CUDA_VISIBLE_DEVICES'] = ''
             logger.info("CUDA disabled for Celery worker - using CPU")
+        else:
+            try:
+                import subprocess
+                if subprocess.run(['nvidia-smi'], capture_output=True, timeout=3).returncode == 0:
+                    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+                    logger.info("CUDA enabled for LlamaIndex - using GPU acceleration")
+                else:
+                    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+                    logger.info("No NVIDIA GPU - LlamaIndex using CPU")
+            except Exception:
+                os.environ['CUDA_VISIBLE_DEVICES'] = ''
+                logger.info("GPU probe failed - LlamaIndex using CPU")
 
         os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Disable tokenizer parallelism
         # Import LlamaIndex core components

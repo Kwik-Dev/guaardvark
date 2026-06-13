@@ -110,9 +110,19 @@ def voices():
 
 @audio_foundry_bp.route("/generate/voice", methods=["POST"])
 def generate_voice():
+    data = flask_request.get_json(silent=True) or {}
+    ref = data.get("reference_clip_path")
+    if ref:
+        # Consent enforcement (voice specialist audit): reference must have been
+        # uploaded via /voice-clips/upload (which creates .consent sidecar) and
+        # be safe. This blocks arbitrary FS paths for cloning without consent.
+        p = Path(ref)
+        consent = p.with_name(p.name + ".consent")
+        if not p.exists() or not consent.exists() or not _is_safe_ref_path(p):
+            return {"error": "Invalid or unconsented reference_clip_path (upload via UI for consent)"}, 403
     body, status_code = _proxy_post(
         "/generate/voice",
-        flask_request.get_json(silent=True) or {},
+        data,
         GENERATION_TIMEOUT,
     )
     return body, status_code
@@ -309,6 +319,11 @@ def upload_voice_clip():
         target.unlink(missing_ok=True)
         logger.exception("voice clip upload failed")
         return {"error": str(e)}, 500
+
+    # Consent sidecar for enforcement (per voice team audit): generate/voice with
+    # reference_clip_path will require the sibling .consent to exist (created only
+    # via this upload path). Prevents arbitrary FS paths for cloning.
+    (target.with_name(target.name + ".consent")).touch()
 
     return {
         "id": asset_id,

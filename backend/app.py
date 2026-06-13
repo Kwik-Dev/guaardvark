@@ -504,6 +504,22 @@ def _initialize_app_components(app):
         supports_credentials = True
         app.logger.info(f"Development CORS: Allowing {len(allowed_origins)} origins")
 
+    # Always allow LAN private-IP origins for local workstation access from phones,
+    # tablets, or other browsers on the same network. This is the primary enabler for
+    # "go to the printed LAN IP + VITE_PORT and use chat/voice". The patterns were
+    # previously only added in interconnector master mode; we now include them
+    # unconditionally (additive) because this is a personal offline AI machine, not
+    # a public service. The interconnector block below may still run for cluster cases.
+    lan_patterns = [
+        r"http://192\.168\.\d+\.\d+:\d+",
+        r"http://10\.\d+\.\d+\.\d+:\d+",
+        r"http://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
+        r"https://192\.168\.\d+\.\d+:\d+",
+        r"https://10\.\d+\.\d+\.\d+:\d+",
+        r"https://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
+    ]
+    allowed_origins = lan_patterns + allowed_origins
+
     interconnector_master_mode = False
     try:
         from backend.api.interconnector_api import _get_config
@@ -511,18 +527,9 @@ def _initialize_app_components(app):
         if interconnector_config:
             if interconnector_config.get("node_mode") == "master":
                 interconnector_master_mode = True
-                import re
-                lan_patterns = [
-                    r"http://192\.168\.\d+\.\d+:\d+",
-                    r"http://10\.\d+\.\d+\.\d+:\d+",
-                    r"http://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
-                    r"https://192\.168\.\d+\.\d+:\d+",
-                    r"https://10\.\d+\.\d+\.\d+:\d+",
-                    r"https://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
-                ]
-                allowed_origins = lan_patterns + allowed_origins
+                # (patterns already prepended above for general LAN UI access)
                 supports_credentials = False
-                app.logger.info("CORS: Master mode - allowing LAN origins for interconnector")
+                app.logger.info("CORS: Master mode active for interconnector (LAN patterns already enabled)")
             master_url = interconnector_config.get("master_url")
             if master_url:
                 from urllib.parse import urlparse
@@ -537,7 +544,17 @@ def _initialize_app_components(app):
 
     CORS(
         app,
-        resources={r"/api/*": {"origins": allowed_origins}, r"/health*": {"origins": allowed_origins}},
+        # Apply CORS to everything. The security boundary is the `allowed_origins` list
+        # (localhost variants + VITE_FRONTEND_URL + private LAN IP regex patterns).
+        # This is required because the frontend (when using an absolute VITE_API_BASE_URL
+        # pointing at the backend on a different port or LAN IP) makes direct calls to many
+        # top-level routes that are *not* under /api/* (e.g. some /voice/*, /model, /clients,
+        # /tasks, /meta/*, /gpu/*, /settings/*, /enhanced-chat/*, /plugins, /memory, /projects,
+        # /claude/*, /self-improvement/*, /autoresearch/*, /agent-control/*, /interconnector/*,
+        # /system/*, /files/*, etc.). Previously only /api/* and /health* were covered, so
+        # cross-origin requests from a LAN-loaded (or localhost + baked-LAN) frontend hit
+        # "CORS header ‘Access-Control-Allow-Origin’ missing".
+        resources={r"/*": {"origins": allowed_origins}},
         supports_credentials=supports_credentials,
         allow_headers=["Content-Type", "Authorization", "X-API-Key"],
         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -612,7 +629,7 @@ def _initialize_app_components(app):
                                                 json.dump(stale_meta, f, indent=4)
                                             app.logger.info(f"Marked stale job as error: {stale_meta.get('job_id', 'unknown')}")
                                     except Exception:
-                                        pass
+                                        logger.warning(f"Failed to mark stale job {stale_meta.get('job_id')} as error (non-fatal)", exc_info=True)  # noqa: BLE001
                                     last_modified_times[file_key] = current_mtime
                                     terminal_files.add(file_key)
                                     continue
@@ -832,6 +849,7 @@ def _initialize_app_components(app):
                 symbol_id, "route", endpoint, module, MODE_FLASK_ROUTE,
             )
         except Exception:  # never fail a request over an audit record
+            logger.warning("Failed to record route liveness (non-fatal)", exc_info=True)
             pass
         return response
 

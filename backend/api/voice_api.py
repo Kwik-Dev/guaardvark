@@ -20,9 +20,8 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 from backend.utils.response_utils import success_response, error_response
 
-# Audio Foundry plugin endpoint — Chatterbox primary, Kokoro fallback.
-# When the plugin is disabled or unreachable, /voice/narrate transparently
-# falls back to Piper so the button never breaks. See plugins/audio_foundry/.
+# Audio Foundry plugin endpoint — Kokoro primary (natural, fast per team voice audit),
+# Chatterbox for reference-clip cloning. Fallback to Piper. See plugins/audio_foundry/.
 AUDIO_FOUNDRY_URL = os.environ.get("AUDIO_FOUNDRY_URL", "http://127.0.0.1:8206")
 
 # --- Blueprint Definition ---
@@ -1213,8 +1212,8 @@ def stream_tts(stream_id):
     return Response(generate_audio(), mimetype="audio/wav")
 
 def _try_audio_foundry_voice(text: str, output_format: str, narrations_dir: str) -> Optional[Dict]:
-    """Hand the request off to the Audio Foundry plugin (Chatterbox primary,
-    Kokoro fallback). Returns a Piper-shaped response dict on success, or None
+    """Hand the request off to the Audio Foundry plugin (Kokoro primary for natural conversational TTS per team audit,
+    with Chatterbox for cloning). Returns a Piper-shaped response dict on success, or None
     when the plugin is disabled, unreachable, or errors out — caller falls
     back to Piper so the user never sees a broken button.
 
@@ -1224,7 +1223,7 @@ def _try_audio_foundry_voice(text: str, output_format: str, narrations_dir: str)
     try:
         resp = requests.post(
             f"{AUDIO_FOUNDRY_URL}/generate/voice",
-            json={"text": text, "backend": "auto", "output_format": output_format},
+            json={"text": text, "backend": "kokoro", "output_format": output_format},
             timeout=(2, 180),  # 2s connect — fails fast when plugin is off
         )
     except requests.exceptions.RequestException as e:

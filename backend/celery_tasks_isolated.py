@@ -235,7 +235,7 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
         try:
             update_document_status(document_id, "ERROR", f"Enhanced indexing failed: {str(e)}")
         except Exception:
-            pass
+            logger.warning(f"Failed to mark document {document_id} ERROR (non-fatal)", exc_info=True)  # noqa: BLE001 - status update must not mask original error
         return False
 
 

@@ -41,7 +41,7 @@ psutil==5.9.8
 # recommended start.sh wiring documented in requirements-cv.txt's header / the
 # P3-10b report. Left here (still imports cleanly everywhere) to avoid a
 # behavior change start.sh isn't yet wired for; flagged for GPU-only gating.
-nvidia-ml-py>=12.0.0  # GPU-only (pynvml); see note above — gate to NVIDIA hosts
+# nvidia-ml-py>=12.0.0  # GPU-only (pynvml) — now gated (see dep_reconciler and start.sh; not in base to avoid FutureWarning on CPU/ARM per edge audit)
 
 # Web Scraping & File Processing
 beautifulsoup4==4.12.3

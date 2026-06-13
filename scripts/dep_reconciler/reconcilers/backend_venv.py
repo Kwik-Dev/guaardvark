@@ -90,6 +90,13 @@ class BackendVenv(Reconciler):
                 if rc != 0:
                     log.write(f"WARN: install_pytorch.sh exited {rc}; backend may run without GPU torch\n")
                     # Don't fail the reconciler — torch absence is a degraded mode, not a crash.
+
+            # Gate nvidia-ml-py (pynvml) per edge audit: uninstall on non-GPU to
+            # prevent FutureWarning / unconditional dep on CPU/ARM/Pi (see
+            # requirements.txt comment and gpu_resource_coordinator).
+            if not self._gpu_uuid():
+                log.write("No GPU — gating/uninstalling nvidia-ml-py/pynvml\n")
+                self._run_subprocess([sys.executable, "-m", "pip", "uninstall", "-y", "nvidia-ml-py", "pynvml"], log)
                     # The post-install LLM-module check will catch hard failures.
             return 0
 

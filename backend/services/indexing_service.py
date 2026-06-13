@@ -13,12 +13,24 @@ logger = logging.getLogger(__name__)
 from backend.utils.experiment_context import get_experiment_config
 import backend.utils.llama_index_local_config
 
+# Per edge-portability audit: remove unconditional CUDA_VISIBLE_DEVICES at
+# import time (causes "device 0 does not exist" on CPU/ARM boxes). Only set
+# for GPU hosts; workers stay CPU.
 if os.environ.get('CELERY_WORKER_MODE', 'false').lower() == 'true':
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
     logger.info("CUDA disabled for Celery worker - using CPU")
 else:
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    logger.info("CUDA enabled for indexing service - using GPU acceleration")
+    try:
+        import subprocess
+        if subprocess.run(['nvidia-smi'], capture_output=True, timeout=3).returncode == 0:
+            os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+            logger.info("CUDA enabled for indexing service - using GPU acceleration")
+        else:
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            logger.info("No NVIDIA GPU detected - indexing using CPU")
+    except Exception:
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+        logger.info("GPU probe failed - indexing using CPU for safety")
     
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
