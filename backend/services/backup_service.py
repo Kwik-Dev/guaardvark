@@ -493,10 +493,10 @@ def _restore_pg_dump(dump_path: Path, sanity_check=None) -> bool:
             otherwise looks successful. It must return True if the restored DB
             is sane (e.g. an expected row/table is present) and False/raise
             otherwise. This is the post-restore assertion hook: a restore is
-            only reported as success if this also passes. If None, the caller
-            is responsible for verifying the restored data out-of-band (a
-            restore reported True here is "pg_restore did not error", NOT "the
-            data is proven correct" — see the follow-up note below).
+            only reported as success if this also passes.
+            Defaults to a basic public table count >=30 (pg_restore -l style
+            smoke per infra audit / charter "backup never restored is placebo").
+            Caller can still pass custom for deeper checks (pgvector indexes etc.).
 
     Returns:
         True if restore succeeded (and sanity_check, if given, passed).
@@ -563,8 +563,36 @@ def _restore_pg_dump(dump_path: Path, sanity_check=None) -> bool:
 
         # Post-restore sanity assertion: a restore that pg_restore is happy with
         # can still leave the DB in a state the caller knows is wrong. Only
-        # report success if the optional sanity_check agrees.
-        if restore_ok and sanity_check is not None:
+        # report success if the sanity_check agrees.
+        # Default to a basic table-count smoke (per infra audit / charter:
+        # "a backup never restored is a placebo"; "pg_restore -l table-count assert").
+        if restore_ok:
+            if sanity_check is None:
+                def _default_sanity() -> bool:
+                    try:
+                        env2 = os.environ.copy()
+                        env2["PGPASSWORD"] = params["password"]
+                        res = subprocess.run(
+                            [
+                                "psql", "-h", params["host"], "-p", params["port"],
+                                "-U", params["user"], "-d", params["dbname"],
+                                "-t", "-c",
+                                "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';"
+                            ],
+                            env=env2, capture_output=True, text=True, timeout=30
+                        )
+                        if res.returncode == 0:
+                            count_str = (res.stdout or "").strip()
+                            count = int(count_str) if count_str else 0
+                            logger.info("default restore sanity: %d public tables", count)
+                            return count >= 30  # reasonable floor for Guaardvark schema
+                        logger.warning("default restore sanity psql failed rc=%s", res.returncode)
+                        return False
+                    except Exception as e:
+                        logger.warning("default restore sanity failed: %s", e)
+                        return False
+                sanity_check = _default_sanity
+
             try:
                 if not sanity_check():
                     logger.error("pg_restore post-restore sanity check returned False")
