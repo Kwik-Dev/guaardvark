@@ -496,14 +496,15 @@ def _restore_pg_dump(dump_path: Path, sanity_check=None) -> bool:
             only reported as success if this also passes.
             Defaults to a basic public table count >=30 (pg_restore -l style
             smoke per infra audit / charter "backup never restored is placebo").
-            Caller can still pass custom for deeper checks (pgvector indexes etc.).
+            Caller can still pass custom for deeper checks (e.g. indexes if ever wired, row counts).
 
     Returns:
         True if restore succeeded (and sanity_check, if given, passed).
 
     Follow-up: deep restore verification (row counts vs. the dump's manifest,
-    pgvector index integrity) is not yet wired here. Pass ``sanity_check`` from
+    index integrity) is not yet wired here. Pass ``sanity_check`` from
     the caller, or run a smoke query against the restored DB, until that lands.
+    Note (RAG audit): the vector store is SimpleVectorStore (JSON, in-memory), not pgvector.
     """
     db_url = config.DATABASE_URL
     if not db_url or not db_url.startswith("postgresql"):

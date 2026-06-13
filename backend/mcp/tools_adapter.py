@@ -86,11 +86,18 @@ def collect_exposed_tools(config: MCPConfig) -> list[tuple[BaseTool, mcp_types.T
         if tool is None:
             continue
         category = categories.get(name)
+        is_dangerous = bool(getattr(tool, "is_dangerous", False))
+        requires_approval = bool(getattr(tool, "requires_approval", False))
+        if category and category not in (config.tools.deny_categories or []) and not is_dangerous and not requires_approval:
+            # Per security audit (LOW): explicit warning for tools that lack flags but live in
+            # potentially side-effecting categories. Helps catch missing annotations.
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Tool '{name}' (cat={category}) lacks is_dangerous/requires_approval but may perform side effects")
         allowed, reason = tool_is_exposed(
             tool_name=name,
             category=category,
-            is_dangerous=bool(getattr(tool, "is_dangerous", False)),
-            requires_approval=bool(getattr(tool, "requires_approval", False)),
+            is_dangerous=is_dangerous,
+            requires_approval=requires_approval,
             policy=config.tools,
         )
         if not allowed:

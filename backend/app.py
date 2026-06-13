@@ -1657,7 +1657,7 @@ def health_celery():
         try:
             previous_status = _celery_health_cache["data"][0].get_json().get("status")
         except Exception:
-            pass
+            app.logger.warning("Failed to read previous celery health status (non-fatal)", exc_info=True)  # noqa: BLE001
 
     try:
         from backend.celery_app import celery
@@ -1893,7 +1893,7 @@ def handle_internal_server_error(e):
                         traceback_str=tb_str[-2000:],
                     )
     except Exception:
-        pass  # Never let SI tracking break error handling
+        app.logger.warning("Failed to record self-improvement error (non-fatal)", exc_info=True)  # noqa: BLE001
     app.logger.error(f"Internal Server Error (500): {e}", exc_info=True)
     try:
         if db and db.session:
