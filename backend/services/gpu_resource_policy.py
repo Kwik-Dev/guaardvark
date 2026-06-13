@@ -129,13 +129,27 @@ def gpu_session(
 
     gate = get_gate()
     _slot = slot_id or f"{getattr(kind, 'value', kind)}:{op_id}"
-    with gate.gpu_exclusive(kind, op_id, on_busy=on_busy) as acquired:
-        if acquired:
-            reclaim_gpu(evict_ollama=evict_ollama, free_comfyui=free_comfyui)
-            if vram_estimate_mb:
-                _orchestrator_request(_slot, vram_estimate_mb)
-        try:
+    acquired = False
+    try:
+        with gate.gpu_exclusive(kind, op_id, on_busy=on_busy) as acq:
+            acquired = acq
+            if acquired:
+                reclaim_gpu(evict_ollama=evict_ollama, free_comfyui=free_comfyui)
+                if vram_estimate_mb:
+                    _orchestrator_request(_slot, vram_estimate_mb)
             yield acquired
-        finally:
+            # Success path for the unit of work: transition LOADING -> LOADED so
+            # the orchestrator's tracked_vram and eviction scoring are accurate.
+            # Particularly important for high-estimate VIDEO_RENDER slots used by
+            # music-video / film-crew (the main ~14GB consumers). Without this,
+            # slots linger as LOADING and inflate tracked / prevent proper idle
+            # eviction (vram specialist rec).
             if acquired and vram_estimate_mb:
-                _orchestrator_release(_slot)
+                try:
+                    from backend.services.gpu_memory_orchestrator import get_orchestrator
+                    get_orchestrator().mark_model_loaded(_slot)
+                except Exception:
+                    pass  # best-effort; release below will still run
+    finally:
+        if acquired and vram_estimate_mb:
+            _orchestrator_release(_slot)

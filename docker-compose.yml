@@ -80,7 +80,11 @@ services:
         cd /app &&
         flask db upgrade 2>/dev/null;
         python -m flask run --host 0.0.0.0 --port 5000 &
-        celery -A backend.celery_app.celery worker --loglevel=info --concurrency=2 &
+        # Single-concurrency solo worker for the GPU-bearing queues (generation + training_gpu).
+        # Matches start_celery.sh and the JobOperationGate + gpu_session single-GPU invariant.
+        # concurrency=2 + prefork here was a known source of CUDA fork deaths + double-ownership
+        # (see plugin_runner.py docstring and prior vram audit). Use solo or concurrency=1.
+        celery -A backend.celery_app.celery worker --loglevel=info --concurrency=1 --pool=solo &
         wait
       "
 
