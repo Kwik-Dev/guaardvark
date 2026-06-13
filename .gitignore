@@ -222,3 +222,23 @@ data/credentials/
 # Swarm internal secret (never publish) + per-film cast reference images (runtime, machine-local)
 data/.swarm_internal_secret
 data/cast_refs/
+
+# --- Personal operator docs & AI-assistant session files (2026-06-13) ---
+# These were previously protected ONLY by .git/info/exclude, which is per-clone
+# and never shared — so a fresh clone or a stray `git add -A` could track and
+# publish them. Promoted here into the tracked .gitignore (same reasoning as the
+# firefox_profile promotion above) so the protection is durable and travels with
+# the repo. These are local operator context — NEVER for the public mirror.
+# NOTE: the repo-root CLAUDE.md ignored here is Dean's PRIVATE operator file. If a
+# public contributor-facing CLAUDE.md is ever wanted, it must live at a DIFFERENT
+# path (e.g. docs/ARCHITECTURE.md) to avoid colliding with / leaking this one.
+/CLAUDE.md
+/GEMINI.md
+/KNOWN_BUGS.md
+/AGENT_SESSION_SAVE.md
+/SESSION_HANDOFF*.md
+*.code-workspace
+/guaardvark_backup.json
+/AGENTS.md
+/PUSH_PREVIEW.md
+docs/local-workspace-only/
