@@ -7,6 +7,34 @@ import rollupNodePolyFill from "rollup-plugin-polyfill-node";
 const FLASK_PORT = process.env.FLASK_PORT || process.env.FLASK_RUN_PORT || 5000;
 const VITE_PORT = process.env.VITE_PORT || 5173;
 
+// Extra hostnames/IPs allowed to reach the dev server (comma-separated).
+// Set VITE_ALLOWED_HOSTS to your LAN IP (e.g. "192.168.1.108") to reach the UI
+// from another device, or "all" to skip the host check entirely (trusted nets only).
+const EXTRA_ALLOWED_HOSTS = (process.env.VITE_ALLOWED_HOSTS || "")
+  .split(",")
+  .map((h) => h.trim())
+  .filter(Boolean);
+const ALLOWED_HOSTS = EXTRA_ALLOWED_HOSTS.includes("all")
+  ? "all"
+  : ["localhost", "127.0.0.1", ".local", ...EXTRA_ALLOWED_HOSTS];
+
+// Shared by both the dev (`server`) and production-preview (`preview`) servers.
+// The frontend calls a relative "/api" and connects the socket to the page
+// origin, so whichever server serves the page must proxy these to Flask.
+const PROXY = {
+  "/api": {
+    target: `http://localhost:${FLASK_PORT}`,
+    changeOrigin: true,
+    secure: false,
+  },
+  "/socket.io": {
+    target: `http://localhost:${FLASK_PORT}`,
+    changeOrigin: true,
+    secure: false,
+    ws: true,
+  },
+};
+
 export default defineConfig({
   plugins: [react()],
   test: {
@@ -70,23 +98,17 @@ export default defineConfig({
     host: '0.0.0.0',
     port: parseInt(VITE_PORT),
     strictPort: true,
-    allowedHosts: [
-      'localhost',
-      '127.0.0.1',
-      '.local',
-    ],
-    proxy: {
-      "/api": {
-        target: `http://localhost:${FLASK_PORT}`,
-        changeOrigin: true,
-        secure: false,
-      },
-      "/socket.io": {
-        target: `http://localhost:${FLASK_PORT}`,
-        changeOrigin: true,
-        secure: false,
-        ws: true,
-      },
-    },
+    allowedHosts: ALLOWED_HOSTS,
+    proxy: PROXY,
+  },
+  // `start.sh` serves the production build via `vite preview`, which does NOT
+  // share the `server:` block above — so host allowlist + API/WS proxy must be
+  // repeated here, or LAN clients get "Blocked request" and /api + sockets 404.
+  preview: {
+    host: '0.0.0.0',
+    port: parseInt(VITE_PORT),
+    strictPort: true,
+    allowedHosts: ALLOWED_HOSTS,
+    proxy: PROXY,
   },
 });

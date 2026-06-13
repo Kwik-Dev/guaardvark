@@ -103,7 +103,10 @@ if [ -f "$MANAGER_SCRIPT" ]; then
     fi
 fi
 
-PYTHON_CMD="python3"
+# Interpreter used for the version gate and venv creation. Override when the
+# system `python3` isn't 3.12 (e.g. deadsnakes installs `python3.12` side-by-side
+# without repointing the symlink): `PYTHON_CMD=python3.12 ./start.sh`.
+PYTHON_CMD="${PYTHON_CMD:-python3}"
 NPM_CMD="npm"
 OLLAMA_SERVICE_NAME="ollama"
 BACKEND_DIR="$SCRIPT_DIR/backend"
@@ -258,12 +261,12 @@ check_with_cache() {
 }
 
 check_python_version() {
-    if ! command_exists python3; then
-        vader_error "python3 not found. Install via: apt-get install -y python3 python3-venv python3-dev python3-pip"
+    if ! command_exists "$PYTHON_CMD"; then
+        vader_error "$PYTHON_CMD not found. Install via: apt-get install -y python3 python3-venv python3-dev python3-pip"
         return 1
     fi
     local ver
-    ver=$(python3 --version 2>&1 | awk '{print $2}')
+    ver=$("$PYTHON_CMD" --version 2>&1 | awk '{print $2}')
     local major=${ver%%.*}
     local minor=${ver#*.}
     minor=${minor%%.*}
@@ -273,7 +276,7 @@ check_python_version() {
     # instead. NOTE: the old logic was inverted — it returned success for 3.13+
     # and fell through to a failure for 3.12, the one version that works.
     if [ "$major" -ne 3 ] || [ "$minor" -lt 12 ]; then
-        vader_error "Python 3.12 is required (found $ver). Install it: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev python3.12-distutils', then re-run."
+        vader_error "Python 3.12 is required (found $ver). Install it: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev' (on Ubuntu 22.04, add the deadsnakes PPA first; note 3.12 has no distutils package), then re-run with 'PYTHON_CMD=python3.12 ./start.sh'."
         return 1
     fi
     if [ "$minor" -ge 13 ]; then
@@ -892,10 +895,46 @@ fi
 
 source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv"; exit 1; }
 
-# Dependency reconciliation is intentionally disabled during startup. It was
-# blocking otherwise healthy boots when the reconciler drift check failed.
+# Dependency reconciliation (drift repair) is intentionally disabled during
+# startup — it was blocking otherwise healthy boots when its drift check failed.
 # Run scripts/dep_reconciler.py manually when dependency repair is needed.
+#
+# Initial install is NOT optional, though: a freshly created venv has no
+# packages, so the backend dies on `import numpy`. Install the requirements
+# (and PyTorch via the smart installer) once, gated by a marker file so normal
+# boots stay fast. Delete the marker to force a reinstall.
 vader_info "Dependency reconciliation skipped"
+DEPS_MARKER="$VENV_DIR/.deps_installed"
+if [ ! -f "$DEPS_MARKER" ]; then
+    vader_info "Installing Python dependencies (first run; this takes a while)..."
+    "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip wheel
+    if "$VENV_DIR/bin/pip" install -r "$BACKEND_DIR/requirements.txt"; then
+        vader_success "Python dependencies installed"
+        # PyTorch is installed separately — the smart installer picks the right
+        # CUDA/CPU build for this machine. Non-fatal: generation features need
+        # it, but the API boots without it.
+        if [ -f "$SCRIPT_DIR/scripts/install_pytorch.sh" ]; then
+            vader_info "Installing PyTorch (GPU-aware)..."
+            bash "$SCRIPT_DIR/scripts/install_pytorch.sh" || vader_warn "PyTorch install failed (non-fatal; generation features unavailable)."
+            # install_pytorch.sh runs `pip install --upgrade ... --index-url .../whl/<ver>`,
+            # which drags numpy 2.x and an old setuptools in — both violate the pins in
+            # requirements.txt (the ML stack needs numpy<2.0; llama-index needs
+            # setuptools>=80.9.0). Re-assert the constrained versions without touching
+            # torch (--no-deps).
+            vader_info "Re-pinning numpy/setuptools after PyTorch install..."
+            "$VENV_DIR/bin/pip" install --no-deps --force-reinstall \
+                'numpy<2.0,>=1.26.4' 'setuptools>=80.9.0,<81' >/dev/null 2>&1 \
+                || vader_warn "Could not re-pin numpy/setuptools — check 'pip check'."
+        fi
+        touch "$DEPS_MARKER"
+    else
+        vader_error "Python dependency install failed. Fix the error above, then re-run. (Delete $DEPS_MARKER is not needed; it was not created.)"
+        deactivate
+        exit 1
+    fi
+else
+    vader_info "Python dependencies present (delete $DEPS_MARKER to force reinstall)"
+fi
 deactivate
 
 # --- CLI tool setup ---
@@ -1369,8 +1408,8 @@ echo "$BACKEND_PID" > "$SCRIPT_DIR/pids/backend.pid"
 
 sleep 4
 
-if ! is_port_listening "$FLASK_PORT" 30 "Backend"; then
-    vader_error "Backend failed to start listening on port $FLASK_PORT after 30 seconds."
+if ! is_port_listening "$FLASK_PORT" 90 "Backend"; then
+    vader_error "Backend failed to start listening on port $FLASK_PORT after 90 seconds."
     if [ -f "$BACKEND_STARTUP_LOG_FILE" ]; then
         vader_error "Last 10 lines of startup log:"
         tail -n 10 "$BACKEND_STARTUP_LOG_FILE"
