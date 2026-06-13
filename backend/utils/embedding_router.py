@@ -241,21 +241,29 @@ class EmbeddingRouter:
             try:
                 from backend.config import get_active_embedding_model, get_embedding_keep_alive
                 from llama_index.embeddings.ollama import OllamaEmbedding
+                from backend.utils.llama_index_local_config import get_embedding_instructions
 
                 model_name = get_active_embedding_model()
                 self._active_model_name = model_name
 
-                self._gpu_embedding = OllamaEmbedding(
-                    model_name=model_name,
-                    base_url=self._get_ollama_base_url(),
-                    keep_alive=get_embedding_keep_alive(),  # orchestrator owns eviction; see config
-                )
+                query_inst, text_inst = get_embedding_instructions(model_name)
+                ollama_kwargs = {
+                    "model_name": model_name,
+                    "base_url": self._get_ollama_base_url(),
+                    "keep_alive": get_embedding_keep_alive(),  # orchestrator owns eviction; see config
+                }
+                if query_inst:
+                    ollama_kwargs["query_instruction"] = query_inst
+                if text_inst:
+                    ollama_kwargs["text_instruction"] = text_inst
+
+                self._gpu_embedding = OllamaEmbedding(**ollama_kwargs)
                 self._gpu_embedding.model_name = model_name
 
                 if hasattr(self._gpu_embedding, 'embed_dim'):
                     self._embed_dim = self._gpu_embedding.embed_dim
 
-                logger.info(f"GPU embedding client initialized: {model_name}")
+                logger.info(f"GPU embedding client initialized: {model_name} (asymmetric prefixes: {bool(query_inst)})")
             except Exception as e:
                 logger.error(f"Failed to initialize GPU embedding: {e}")
                 raise
@@ -267,19 +275,27 @@ class EmbeddingRouter:
             try:
                 from backend.config import get_active_embedding_model, get_embedding_keep_alive
                 from llama_index.embeddings.ollama import OllamaEmbedding
+                from backend.utils.llama_index_local_config import get_embedding_instructions
 
                 model_name = get_active_embedding_model()
                 self._active_model_name = model_name
 
-                self._cpu_embedding = OllamaEmbedding(
-                    model_name=model_name,
-                    base_url=self._get_ollama_base_url(),
-                    ollama_additional_kwargs={"num_gpu": 0},
-                    keep_alive=get_embedding_keep_alive(),  # orchestrator owns eviction; see config
-                )
+                query_inst, text_inst = get_embedding_instructions(model_name)
+                ollama_kwargs = {
+                    "model_name": model_name,
+                    "base_url": self._get_ollama_base_url(),
+                    "ollama_additional_kwargs": {"num_gpu": 0},
+                    "keep_alive": get_embedding_keep_alive(),  # orchestrator owns eviction; see config
+                }
+                if query_inst:
+                    ollama_kwargs["query_instruction"] = query_inst
+                if text_inst:
+                    ollama_kwargs["text_instruction"] = text_inst
+
+                self._cpu_embedding = OllamaEmbedding(**ollama_kwargs)
                 self._cpu_embedding.model_name = model_name
 
-                logger.info(f"CPU embedding client initialized: {model_name} (num_gpu=0)")
+                logger.info(f"CPU embedding client initialized: {model_name} (num_gpu=0, asymmetric: {bool(query_inst)})")
             except Exception as e:
                 logger.error(f"Failed to initialize CPU embedding: {e}")
                 raise
