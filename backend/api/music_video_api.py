@@ -188,7 +188,12 @@ def clear_music_videos():
 
     def _is_terminal(mv: MusicVideo) -> bool:
         status = (mv.status or "")
-        return mv.current_stage == "complete" or status.startswith("failed")
+        return (
+            mv.current_stage == "complete"
+            or status.startswith("failed")
+            or status.startswith("cancelled")
+            or mv.current_stage == "cancelled"
+        )
 
     targets = rows if clear_all else [mv for mv in rows if _is_terminal(mv)]
     deleted = [mv.id for mv in targets]
@@ -327,6 +332,12 @@ def cancel_music_video(mv_id):
         return jsonify({"error": f"Cannot cancel at stage '{mv.current_stage}'"}), 409
 
     mv.status = "cancelled"
+    # Also advance the stage to a terminal "cancelled" value so UI (which keys
+    # heavily on current_stage for progress/labels/active filters) and resume
+    # logic immediately see it as done. The per-clip guards already short-circuit
+    # on status.startswith("cancelled"), but making the stage explicit prevents
+    # "still shows as generating" after cancel and stops resume dispatches.
+    mv.current_stage = "cancelled"
     clips = mv.clips or []
     for c in clips:
         if c.get("status") == "pending":
@@ -376,7 +387,7 @@ def generate_storyboards(mv_id):
         orch = get_orchestrator()
         orch.on_route_intent("/music-video/storyboard")
     except Exception:
-        pass  # non-fatal; orchestrator may not be fully initialized
+        logger.warning("Failed to signal GPU orchestrator for music-video storyboard (non-fatal)", exc_info=True)  # noqa: BLE001 - audit must not break generation path per infra/security audit
 
     s = _settings_for_mv(mv)  # small helper below or inline
     from backend.services.comfyui_image_generator import ComfyUIImageGenerator
@@ -390,7 +401,7 @@ def generate_storyboards(mv_id):
         out_dir = _clip_dir(mv.id)
     except Exception:
         from pathlib import Path
-        out_dir = Path("data/outputs/videos") / f"music_video_{mv_id}" / "clips"
+        out_dir = Path("data/outputs/videos") / f"music_video_{mv_id}" / "clips"  # fallback; non-fatal per bare-excepts audit (infra/security)
         out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -449,7 +460,7 @@ def regen_mv_storyboard(mv_id, idx):
         orch = get_orchestrator()
         orch.on_route_intent("/music-video/storyboard")
     except Exception:
-        pass
+        logger.warning("Failed to signal GPU orchestrator for music-video (non-fatal)", exc_info=True)  # noqa: BLE001 - audit must not break path per infra/security audit
 
     body = request.get_json(silent=True) or {}
     prompt_override = body.get("prompt")
@@ -473,7 +484,7 @@ def regen_mv_storyboard(mv_id, idx):
         out_dir = _clip_dir(mv.id)
     except Exception:
         from pathlib import Path
-        out_dir = Path("data/outputs/videos") / f"music_video_{mv_id}" / "clips"
+        out_dir = Path("data/outputs/videos") / f"music_video_{mv_id}" / "clips"  # fallback; non-fatal per bare-excepts audit (infra/security)
         out_dir.mkdir(parents=True, exist_ok=True)
 
     # Support optional "variation" for different outputs with the same prompt.

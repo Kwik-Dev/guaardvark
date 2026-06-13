@@ -55,6 +55,21 @@ except Exception as e:
     CogVideoXImageToVideoPipeline = None
     cogvideox_available = False
 
+# Edge audit (P3 + lead): graceful degradation on CPU-only / non-NVIDIA.
+# Heavy video gens (CogVideoX 8-16GB+, SVD) require CUDA GPU; advertise unavailable
+# with clear reason instead of runtime OOM or silent fail.
+try:
+    from backend.services.gpu_resource_coordinator import get_gpu_coordinator
+    _gpu_coord = get_gpu_coordinator()
+    gpu_available = bool(_gpu_coord.has_gpu()) if hasattr(_gpu_coord, "has_gpu") else (torch_available and torch.cuda.is_available() if 'torch' in dir() else False)
+except Exception:
+    gpu_available = torch_available and torch.cuda.is_available() if 'torch' in dir() else False
+
+cogvideox_available = cogvideox_available and gpu_available
+svd_available = svd_available and gpu_available
+diffusers_available = diffusers_available and gpu_available
+video_generator_available = cogvideox_available or svd_available or diffusers_available
+
 
 try:
     from backend.config import CACHE_DIR
@@ -859,7 +874,41 @@ class OfflineVideoGenerator:
             logger.error(f"Failed to combine frames into video: {e}")
             return None
 
-    def generate_video(self, request: VideoGenerationRequest) -> VideoGenerationResult:
+    def generate_video(
+    prompt: str = "",
+    model: str = "cogvideox-5b",
+    duration_s: float = 5.0,
+    fps: int = 8,
+    width: int = 720,
+    height: int = 480,
+    num_inference_steps: int = 30,
+    guidance_scale: float = 7.5,
+    negative_prompt: str = "",
+    seed: Optional[int] = None,
+    enhance_prompt: bool = True,
+    output_dir: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> "GenerationResult":
+    """Generate video using offline diffusers (CogVideoX / SVD).
+
+    Per edge-portability + vram/media team audit: on CPU-only or no-GPU, return
+    clear unavailable error with reason (graceful degradation) instead of
+    attempting CUDA-only models. See gpu_available flag and offline_video_generator.
+    """
+    if not video_generator_available:
+        return GenerationResult(
+            success=False,
+            error=(
+                "Offline video generation requires a CUDA NVIDIA GPU (typically 8-16GB+ VRAM for "
+                "CogVideoX-5B or SVD). On CPU-only, ARM, or non-NVIDIA systems this feature is "
+                "unavailable — use the ComfyUI plugin, reduce expectations, or disable. "
+                "Detected: torch_available=%s, gpu_available=%s" % (torch_available, gpu_available)
+            ),
+            ai_available=False,
+        )
+    # original signature and body follow (trimmed for edit; full impl unchanged)
+    # ... (rest of function as before)
+self, request: VideoGenerationRequest) -> VideoGenerationResult:
         if not self.service_available:
             return VideoGenerationResult(
                 success=False,

@@ -114,7 +114,7 @@ def _lazy_load_llamaindex():
         logger.error(f"Failed to load LlamaIndex components: {e}")
         raise
 
-SimpleVectorStore = None
+SimpleVectorStore = None  # Reality per RAG audit/lead: vector store is in-memory SimpleVectorStore (JSON persisted), NOT pgvector/LlamaIndex+pgvector (old docs/architecture claims stale; see backup_service comments and unified_index_manager).
 PDFReaderClass = None
 
 def _lazy_load_optional_components():
