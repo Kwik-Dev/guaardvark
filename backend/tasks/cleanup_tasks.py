@@ -183,6 +183,5 @@ def schedule_periodic_cleanup(celery_app: Celery):
             'schedule': crontab(hour=4, minute=0, day_of_week=0),  # Weekly on Sunday at 4 AM (legacy)
         },
     })
-    }
     
     logger.info("Scheduled enhanced periodic cleanup tasks (chat data + progress jobs)") 
