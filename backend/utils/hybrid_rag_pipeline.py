@@ -1,8 +1,46 @@
 #!/usr/bin/env python3
 """
-Hybrid RAG Pipeline
-Combines dense (semantic) and sparse (keyword) retrieval with query expansion and reranking
+Hybrid RAG Pipeline (DEAD / UNROUTED per team audit)
+
+**Status (RAG specialist + lead P1-4):** Completely unrouted dead code.
+The live hybrid is in indexing_service.py (QueryFusionRetriever + cached BM25 + adaptive alpha + MMR).
+This file duplicates it and is never imported (grep confirmed zero external users).
+Divergence risk + maintenance tax. Gated behind env + DeprecationWarning.
+
+To re-enable (not recommended): GUAARDVARK_USE_LEGACY_HYBRID=1
+Better: delete or move to _archive/ after verifying no one relies on the exact API.
 """
+
+import os
+import warnings
+
+if not os.getenv("GUAARDVARK_USE_LEGACY_HYBRID"):
+    warnings.warn(
+        "hybrid_rag_pipeline is dead/unrouted (RAG audit). "
+        "Live hybrid is indexing_service.QueryFusionRetriever + BM25. "
+        "Set GUAARDVARK_USE_LEGACY_HYBRID=1 only for emergency rollback.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    def create_hybrid_rag_pipeline(*a, **k):
+        raise RuntimeError(
+            "Legacy HybridRAGPipeline disabled (see hybrid_rag_pipeline.py header). "
+            "Use backend.services.indexing_service or get_embedding_router paths."
+        )
+
+    # Provide no-op stubs so any stray import doesn't hard-crash in weird contexts
+    class HybridRAGPipeline:  # type: ignore
+        def __init__(self, *a, **k):
+            raise RuntimeError("Legacy disabled - see top of file")
+
+    def get_hybrid_rag_pipeline(*a, **k):
+        return create_hybrid_rag_pipeline(*a, **k)
+
+    # Note: we do NOT sys.exit or otherwise poison the import.
+    # The create_ / class will raise on use. This keeps any accidental
+    # "import hybrid..." from exploding unrelated code while still
+    # blocking the divergence.
 
 # Force local LlamaIndex configuration BEFORE any LlamaIndex imports
 import backend.utils.llama_index_local_config
