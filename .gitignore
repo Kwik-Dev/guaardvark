@@ -222,3 +222,18 @@ data/credentials/
 # Swarm internal secret (never publish) + per-film cast reference images (runtime, machine-local)
 data/.swarm_internal_secret
 data/cast_refs/
+
+# --- Local AI-assistant / operator files (keep out of the repo) ---
+# Per-developer AI coding-agent context and session files. These hold local,
+# machine-specific notes and should never be tracked or published. Ignored here
+# (not just per-clone via .git/info/exclude) so a fresh clone or a stray
+# `git add -A` cannot accidentally commit them. The architecture/setup guide for
+# contributors lives at docs/ARCHITECTURE.md instead.
+/CLAUDE.md
+/GEMINI.md
+/AGENTS.md
+/KNOWN_BUGS.md
+/AGENT_SESSION_SAVE.md
+/SESSION_HANDOFF*.md
+*.code-workspace
+docs/local-workspace-only/

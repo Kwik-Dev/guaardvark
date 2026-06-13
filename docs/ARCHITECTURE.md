@@ -1,6 +1,6 @@
-# CLAUDE.md
+# Architecture & Setup Guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides an architecture overview plus setup/build/test guidance for the project — useful for both human contributors and AI coding agents (e.g. Claude Code).
 
 ## What this is
 

@@ -35,7 +35,7 @@ Open an issue using the **Feature Request** template. Describe the use case — 
 
 ### Improve Documentation
 
-Documentation lives in the README, CLAUDE.md, and inline code comments. If something confused you, it'll confuse others — fixes welcome.
+Documentation lives in the README, `docs/ARCHITECTURE.md`, and inline code comments. If something confused you, it'll confuse others — fixes welcome.
 
 ---
 
@@ -76,7 +76,7 @@ plugins/           10+ GPU service plugins (each with plugin.json manifest)
 scripts/           Operator scripts, system-manager, dep_reconciler, etc.
 ```
 
-See also `AGENTS.md`, `CLAUDE.md`, and `GROK.md` (in root) for project orientation, self-coding rules, and how AI agents are expected to work in this repo.
+See also [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for project orientation, the architecture overview, and setup/build/test guidance.
 
 ### Running Tests
 

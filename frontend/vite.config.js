@@ -21,17 +21,22 @@ const ALLOWED_HOSTS = EXTRA_ALLOWED_HOSTS.includes("all")
 // Shared by both the dev (`server`) and production-preview (`preview`) servers.
 // The frontend calls a relative "/api" and connects the socket to the page
 // origin, so whichever server serves the page must proxy these to Flask.
+// `xfwd: true` forwards the originating client IP as X-Forwarded-For — the backend
+// auth_guard relies on it to still recognize a LAN device (proxied via loopback)
+// as remote, so proxying the UI does not silently bypass the host check.
 const PROXY = {
   "/api": {
     target: `http://localhost:${FLASK_PORT}`,
     changeOrigin: true,
     secure: false,
+    xfwd: true,
   },
   "/socket.io": {
     target: `http://localhost:${FLASK_PORT}`,
     changeOrigin: true,
     secure: false,
     ws: true,
+    xfwd: true,
   },
 };
 

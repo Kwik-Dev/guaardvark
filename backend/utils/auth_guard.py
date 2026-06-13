@@ -44,6 +44,16 @@ PROTECTED_DELETE_PREFIXES = (
     '/api/backups/',
 )
 
+# Explicitly safe operations that are exempt from the host check even though they
+# live under an otherwise-protected prefix. /api/meta is shared by many blueprints
+# (jobs, index management, diagnostics) that MUST stay protected, but clearing
+# __pycache__ is a non-destructive maintenance op (regenerable .pyc only; the
+# module-purge that could destabilize the server is disabled) that the operator
+# wants reachable from the LAN UI. Keep this list tiny and genuinely harmless.
+SAFE_EXEMPT_PREFIXES = (
+    '/api/meta/clear-pycache',
+)
+
 # Mutation-only protection: GET/HEAD/OPTIONS stay public for the local UI, but any
 # non-GET (create/cancel/delete/run) requires auth/localhost — same model as the
 # /api/memory hardening. Stops a random LAN host from wiping jobs/tasks/schedules.
@@ -62,9 +72,32 @@ def _is_localhost(addr):
     return addr in ('127.0.0.1', '::1', 'localhost')
 
 
+def _effective_client_ip():
+    """Real client IP, accounting for the trusted local Vite proxy.
+
+    `start.sh` serves the production UI via `vite preview`, whose proxy forwards
+    /api and /socket.io to Flask from 127.0.0.1 — so a LAN device's request would
+    otherwise look local and bypass this guard entirely. The Vite proxy sets
+    X-Forwarded-For (xfwd) with the originating client. We trust that header ONLY
+    when the direct TCP peer is loopback (i.e. it came through our own local
+    proxy). A LAN attacker connecting straight to the backend port has a
+    non-loopback peer, so a forged X-Forwarded-For from them is ignored.
+    """
+    peer = request.remote_addr
+    if peer in ('127.0.0.1', '::1'):
+        xff = request.headers.get('X-Forwarded-For', '')
+        if xff:
+            # Leftmost entry is the original client.
+            return xff.split(',')[0].strip()
+    return peer
+
+
 def _is_protected():
     """Check if the current request targets a protected endpoint."""
     path = request.path
+    for prefix in SAFE_EXEMPT_PREFIXES:
+        if path.startswith(prefix):
+            return False
     for prefix in PROTECTED_PREFIXES:
         if path.startswith(prefix):
             return True
@@ -98,11 +131,14 @@ def check_endpoint_auth():
     api_key = os.environ.get('GUAARDVARK_API_KEY')
 
     if not api_key:
-        # No key configured — localhost-only access
-        if _is_localhost(request.remote_addr):
+        # No key configured — localhost-only access. Use the effective client IP
+        # so a LAN device proxied through the local Vite preview is still treated
+        # as remote (the proxy makes request.remote_addr loopback otherwise).
+        client_ip = _effective_client_ip()
+        if _is_localhost(client_ip):
             return None
         logger.warning(
-            f"[AUTH] Blocked remote access to {request.path} from {request.remote_addr}"
+            f"[AUTH] Blocked remote access to {request.path} from {client_ip}"
         )
         return jsonify({"error": "Access denied from remote host"}), 403
 

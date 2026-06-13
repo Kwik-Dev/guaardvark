@@ -36,7 +36,92 @@ def app():
     def memory_list():
         return {"ok": True}
 
+    @test_app.route("/api/meta/clear-pycache", methods=["POST"])
+    def clear_pycache():
+        return {"ok": True}
+
+    @test_app.route("/api/meta/rebuild-index", methods=["POST"])
+    def meta_mutation():
+        return {"ok": True}
+
     return test_app
+
+
+def test_clear_pycache_allowed_from_remote_host(app, monkeypatch):
+    # Safe maintenance op: exempt from the host check even though /api/meta is
+    # otherwise mutation-protected, so the operator can clear cache from the LAN UI.
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/meta/clear-pycache",
+        environ_base={"REMOTE_ADDR": "192.168.1.20"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
+def test_other_meta_mutation_still_blocked_from_remote_host(app, monkeypatch):
+    # The carve-out must be narrow: other /api/meta mutations stay protected.
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/meta/rebuild-index",
+        environ_base={"REMOTE_ADDR": "192.168.1.20"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Access denied from remote host"
+
+
+def test_lan_device_via_local_proxy_is_still_treated_as_remote(app, monkeypatch):
+    # Request arrives from the loopback Vite proxy (REMOTE_ADDR=127.0.0.1) but
+    # X-Forwarded-For carries the real LAN client → must still be blocked.
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/files/write",
+        headers={"X-Forwarded-For": "192.168.1.20"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Access denied from remote host"
+
+
+def test_forged_xff_from_direct_remote_peer_is_ignored(app, monkeypatch):
+    # A LAN attacker connecting straight to the backend (non-loopback peer) cannot
+    # spoof localhost by setting X-Forwarded-For — the header is only trusted from
+    # a loopback peer (our own proxy).
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/files/write",
+        headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "192.168.1.20"},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "Access denied from remote host"
+
+
+def test_genuine_localhost_via_proxy_is_allowed(app, monkeypatch):
+    # Operator on the box: browser → loopback proxy → backend, XFF also loopback.
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/files/write",
+        headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
 
 
 def test_remote_file_mutation_is_blocked_without_api_key(app, monkeypatch):
