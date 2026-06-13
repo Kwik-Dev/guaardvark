@@ -92,6 +92,10 @@ ROUTE_MODEL_MAP: Dict[str, List[ModelNeed]] = {
     "/images":          [ModelNeed("sd:pipeline", priority=85)],
     "/batch-images":    [ModelNeed("sd:pipeline", priority=85)],
     "/video":           [ModelNeed("video:pipeline", priority=95, exclusive=True)],
+    "/video-editor":    [ModelNeed("video:pipeline", priority=80)],
+    "/video-text-overlay": [ModelNeed("video:pipeline", priority=70)],
+    "/music-video":     [ModelNeed("video:pipeline", priority=95, exclusive=True)],
+    "/film-crew":       [ModelNeed("video:pipeline", priority=90, exclusive=True)],
     "/documents":       [ModelNeed("ollama:embedding", priority=60, required=False)],
     "/settings":        [],
     "/":                [],  # Dashboard — no models needed, good time to idle-evict
@@ -244,6 +248,19 @@ class GPUMemoryOrchestrator:
                     if available - safety_margin_mb < vram_estimate_mb:
                         needed = vram_estimate_mb - (available - safety_margin_mb)
                         self._evict_until_free(needed, exclude=[slot_id])
+
+                    # Post-evict re-probe (vram-gpu-orchestrator rec): after eviction,
+                    # re-query actual available (fragmentation, other processes). Require
+                    # the safety margin before registering the slot. If still short,
+                    # log but admit (best-effort; load may still OOM but we tried).
+                    vram2 = self._get_vram_info()
+                    if vram2.get("success"):
+                        avail2 = vram2["available_mb"]
+                        if avail2 - safety_margin_mb < vram_estimate_mb:
+                            logger.warning(
+                                f"Post-evict still short for {slot_id}: avail={avail2}MB "
+                                f"need~{vram_estimate_mb} margin={safety_margin_mb}MB; admitting anyway"
+                            )
 
             # Register the slot
             now = time.time()
@@ -761,11 +778,17 @@ class GPUMemoryOrchestrator:
             return {"success": False, "available_mb": 0, "total_mb": 0, "used_mb": 0}
 
     def _infer_model_type(self, slot_id: str) -> ModelType:
-        """Infer ModelType from slot_id prefix convention."""
+        """Infer ModelType from slot_id prefix convention.
+        Accepts both the in-process "video:" convention and the job-gate
+        "video_render:" / "VIDEO_RENDER:" slots used by gpu_session callers
+        (music-video, production, editor renders, etc.). These are all heavy
+        GPU video work that should be tracked as VIDEO_PIPELINE for eviction
+        and accounting.
+        """
         lower = slot_id.lower()
         if lower.startswith("sd:"):
             return ModelType.SD_PIPELINE
-        elif lower.startswith("video:"):
+        elif lower.startswith("video:") or "video_render" in lower:
             return ModelType.VIDEO_PIPELINE
         elif lower.startswith("whisper:"):
             return ModelType.WHISPER

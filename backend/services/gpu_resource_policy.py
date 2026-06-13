@@ -153,3 +153,19 @@ def gpu_session(
     finally:
         if acquired and vram_estimate_mb:
             _orchestrator_release(_slot)
+
+            # Proactive cleanup for VIDEO slots on gpu_session release (vram specialist rec):
+            # If this was a high-VRAM video_render (music-video, film-crew, etc.), free
+            # ComfyUI resident models and force-evict the slot from the orchestrator
+            # registry so tracked_vram drops immediately (instead of waiting for idle
+            # timeout or next exclusive route). Prevents lingering LOADED/LOADING bookings
+            # after a ~14GB render finishes. Best-effort, non-fatal.
+            slot_lower = _slot.lower()
+            if "video" in slot_lower or "video_render" in slot_lower:
+                try:
+                    free_comfyui_vram()
+                    from backend.services.gpu_memory_orchestrator import get_orchestrator
+                    get_orchestrator().force_evict(_slot)
+                    log.info(f"Proactive free_comfyui + force_evict for video slot {_slot} on release")
+                except Exception:
+                    pass
