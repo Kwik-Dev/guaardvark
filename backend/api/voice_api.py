@@ -1063,6 +1063,7 @@ def text_to_speech():
         
         text = data.get("text")
         voice = data.get("voice", DEFAULT_VOICE)
+        stream = bool(data.get("stream", False))
         
         if not text:
             return jsonify({"error": "Text is required"}), 400
@@ -1099,6 +1100,20 @@ def text_to_speech():
 
         af_result = _try_audio_foundry_voice(text_for_tts, "wav", narrations_dir)
         if af_result is not None:
+            if stream:
+                # Streaming response for first-chunk latency (voice specialist rec).
+                # Client gets audio bytes as soon as first sentence is ready.
+                def audio_stream():
+                    r = requests.post(
+                        f"{AUDIO_FOUNDRY_URL}/generate/voice/stream",
+                        json={"text": text_for_tts, "backend": "kokoro", "output_format": "wav", "voice_id": voice},
+                        stream=True,
+                        timeout=(2, 180),
+                    )
+                    for chunk in r.iter_content(chunk_size=4096):
+                        if chunk:
+                            yield chunk
+                return Response(audio_stream(), mimetype="audio/wav")
             # _try_audio_foundry_voice yields a /voice/audio/<file> path (the
             # /narrate convention, consumed under BASE_URL=/api). The
             # /text-to-speech consumer (VoiceContext.speak) prepends BACKEND_URL

@@ -27,6 +27,8 @@ DEFAULT_DENY_CATEGORIES: List[str] = [
     "test_execution",  # execute_python (arbitrary python)
     "browser",         # puppeteer-style browser driving
     "mcp",             # meta-tools; exposing them creates recursion loops
+    "mcp_native",      # native proxies for external MCP servers (postgres, redis, fs, etc.)
+                       # must be explicitly allowed; prevents silent bypass of default-deny
 ]
 
 

@@ -169,3 +169,36 @@ class KokoroBackend(AudioBackend):
                 "generation_seconds": round(gen_seconds, 2),
             },
         )
+
+    def stream(self, **params: Any):
+        """Yield (wav_chunk_bytes, is_first) tuples for sentence-by-sentence streaming playback.
+
+        Per voice specialist audit: this enables first audible speech after the first Kokoro
+        iteration (~hundreds of ms for short sentence) instead of waiting for the entire
+        text to be synthesized and written to a single file.
+
+        Each yielded chunk is a complete small WAV (with its own header) so it can be
+        played immediately in <audio> or concatenated client-side. Cross-sentence joins
+        may need crossfade for smoothness.
+        """
+        if not self._pipelines:
+            raise RuntimeError("Kokoro not loaded; call load() first")
+
+        text: str = params["text"]
+        voice = params.get("voice_id") or self._default_voice
+        lang_code = self._lang_code_for(voice)
+        pipeline = self._get_or_load_pipeline(lang_code)
+
+        import numpy as np
+        import soundfile as sf
+        import io
+
+        first = True
+        for _, _, audio_tensor in pipeline(text, voice=voice):
+            arr = audio_tensor.cpu().numpy() if hasattr(audio_tensor, "cpu") else np.asarray(audio_tensor)
+            buf = io.BytesIO()
+            sf.write(buf, arr, self._sample_rate, format='WAV')
+            buf.seek(0)
+            chunk = buf.read()
+            yield chunk, first
+            first = False

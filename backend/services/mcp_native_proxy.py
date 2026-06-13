@@ -145,6 +145,11 @@ def register_native_proxies(server: str, tools: List[Dict[str, Any]]) -> List[st
     for mcp_tool in tools or []:
         try:
             cls = _make_proxy_class(server, mcp_tool)
+            # Mark as mcp_native so the default-deny policy in mcp/config hides it
+            # unless explicitly allowed (closes the native proxy exposure gap).
+            # External MCP servers (fs, postgres, redis, ...) are powerful and
+            # must not leak by default.
+            cls.category = "mcp_native"
             registry.register(cls())
             names.append(cls.name)
         except Exception as exc:

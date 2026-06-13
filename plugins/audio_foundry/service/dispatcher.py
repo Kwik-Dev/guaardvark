@@ -151,6 +151,42 @@ class Dispatcher:
                 # and the orchestrator already knows we are LOADED.
                 raise
 
+    def stream(self, intent: Intent, **params: Any):
+        """Streaming generation for lower perceived latency (voice specialist rec).
+
+        For VOICE intent with Kokoro, yields (chunk_bytes, is_first) from the backend's
+        stream() method. Falls back to full generation wrapped as single chunk if the
+        backend doesn't support stream.
+
+        Loading and locking same as generate().
+        """
+        with self._intent_locks[intent]:
+            with self._state_lock:
+                backend = self._backends.get(intent)
+                if backend is None:
+                    raise NotWired(f"No backend registered for intent: {intent.value}")
+
+                if not backend.is_loaded:
+                    self._load_with_orchestrator(intent, backend)
+
+            import time
+            self._last_used[intent] = time.monotonic()
+
+            if hasattr(backend, 'stream'):
+                try:
+                    return backend.stream(**params)
+                except Exception:
+                    # fall back
+                    pass
+
+            # Fallback: full generate, yield the whole file as one "chunk"
+            result = backend.generate(**params)
+            self._orch.release(f"{_SLOT_PREFIX}:{intent.value}")
+            def _one_chunk():
+                with open(result.path, "rb") as f:
+                    yield f.read(), True
+            return _one_chunk()
+
     def unload(self, intent: Intent) -> bool:
         """Release VRAM for an intent. Returns True if unloaded, False if not registered/busy."""
         # Attempt to get the intent lock without blocking. If it's blocked,

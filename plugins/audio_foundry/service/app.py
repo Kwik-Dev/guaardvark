@@ -295,6 +295,43 @@ def generate_voice(req: VoiceRequest) -> Any:
     return _dispatch(Intent.VOICE, req)
 
 
+@app.post("/generate/voice/stream")
+def generate_voice_stream(req: VoiceRequest) -> Any:
+    """Streaming voice for first-chunk low latency (voice specialist audit rec).
+
+    Yields WAV chunks as Kokoro synthesizes sentence-by-sentence. First chunk
+    playable immediately (header included per chunk).
+    """
+    from starlette.responses import StreamingResponse
+    params = req.model_dump(exclude_none=True)
+    # Force inline load for stream path (chat texts are short)
+    with _dispatcher._intent_locks[Intent.VOICE]:
+        with _dispatcher._state_lock:
+            backend = _dispatcher._backends.get(Intent.VOICE)
+            if backend is None:
+                raise NotWired("No voice backend registered")
+            if not backend.is_loaded:
+                _dispatcher._load_with_orchestrator(Intent.VOICE, backend)
+    _dispatcher._last_used[Intent.VOICE] = __import__("time").monotonic()
+    backend = _dispatcher._backends[Intent.VOICE]
+    if hasattr(backend, "stream"):
+        raw_gen = backend.stream(**params)
+    else:
+        # fallback: full file as one chunk
+        res = backend.generate(**params)
+        def _one():
+            with open(res.path, "rb") as f:
+                yield f.read()
+        raw_gen = _one()
+    def byte_stream():
+        for item in raw_gen:
+            if isinstance(item, (tuple, list)):
+                yield item[0]
+            else:
+                yield item
+    return StreamingResponse(byte_stream(), media_type="audio/wav")
+
+
 @app.post("/generate/music")
 def generate_music(req: MusicRequest) -> Any:
     return _dispatch(Intent.MUSIC, req)
