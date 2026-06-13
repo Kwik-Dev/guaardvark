@@ -92,20 +92,25 @@ if [ -f "$MANAGER_SCRIPT" ]; then
     if [ ! -L "$SCRIPT_DIR/manager" ]; then
         ln -sf "scripts/system-manager/system-manager" "$SCRIPT_DIR/manager"
     fi
-    if [ -f "$SCRIPT_DIR/backend/venv/bin/flask" ]; then
+    # Stronger guard: trigger repair on fresh install (no venv) *or* incomplete/broken venv.
+    # The old "only if flask binary exists" check was a chicken-and-egg that skipped
+    # the only code path capable of running `pip install -r requirements*` on first run.
+    VENV_PY="$SCRIPT_DIR/backend/venv/bin/python"
+    if [ -x "$VENV_PY" ] && "$VENV_PY" -c "import numpy, flask, celery" >/dev/null 2>&1; then
         if ! "$MANAGER_SCRIPT" check "$SCRIPT_DIR"; then
             vader_warn "Environment issues detected by System Manager."
             vader_info "Auto-repairing environment..."
             "$MANAGER_SCRIPT" repair "$SCRIPT_DIR" || vader_warn "Auto-repair had issues, continuing with startup..."
         fi
     else
-        vader_info "Fresh install detected (no venv). Skipping system-manager check."
+        vader_info "Fresh or incomplete install detected (no usable venv). Running system-manager repair..."
+        "$MANAGER_SCRIPT" repair "$SCRIPT_DIR" || vader_warn "System-manager repair had issues; step 5 bootstrap will take over."
     fi
 fi
 
 # Interpreter used for the version gate and venv creation. Override when the
 # system `python3` isn't 3.12 (e.g. deadsnakes installs `python3.12` side-by-side
-# without repointing the symlink): `PYTHON_CMD=python3.12 ./start.sh`.
+# without repointing the symlink): `PYTHON_CMD=python3.12 ./start.sh` (or set it in .env).
 PYTHON_CMD="${PYTHON_CMD:-python3}"
 NPM_CMD="npm"
 OLLAMA_SERVICE_NAME="ollama"
@@ -549,6 +554,22 @@ check_frontend_build() {
     return 0
 }
 
+# get_lan_ips - return space-separated list of private LAN IPv4 addresses suitable
+# for "access from phone on the same network". Used for the prominent LAN Access
+# section and to opt the detected LAN IP into VITE_ALLOWED_HOSTS so `vite preview`
+# (which carries its own proxy + host allowlist) will serve the page over the LAN.
+get_lan_ips() {
+    local ips
+    # Prefer hostname -I (common on Debian/Ubuntu etc.); fall back to ip tool.
+    if command -v hostname >/dev/null 2>&1; then
+        ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | tr '\n' ' ' | sed 's/ $//')
+    fi
+    if [ -z "$ips" ] && command -v ip >/dev/null 2>&1; then
+        ips=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -E '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | tr '\n' ' ' | sed 's/ $//')
+    fi
+    echo "$ips"
+}
+
 
 
 is_port_listening() {
@@ -634,8 +655,11 @@ check_ollama_model() {
     if [ "$OLLAMA_AVAILABLE" -eq 0 ]; then
         return 0
     fi
-    local model_name="llama2"
-    timeout 5 ollama list 2>/dev/null | grep -q "$model_name"
+    # Pass when ANY chat (non-embed) model is installed — the system doesn't default
+    # to a single fixed tag (it auto-selects via config.get_default_llm, gemma/llama3
+    # family), and the fresh-install bootstrap guarantees one. The old check grepped
+    # the literal "llama2", a model the system never defaults to → always failed.
+    timeout 5 ollama list 2>/dev/null | grep -viE 'embed|minilm' | grep -qE '[a-zA-Z0-9].*:'
 }
 
 run_health_checks() {
@@ -748,8 +772,142 @@ ensure_npm_package() {
         (cd "$FRONTEND_DIR" && npm install --save-dev "$pkg" >> "$SETUP_LOG" 2>&1)
 }
 
+# -------------------------------------------------------------------
+# Strong bootstrap helpers (restores intelligent first-run / repair behavior)
+# These are the core of the fix: create venv is not enough — we must ensure
+# it actually contains the requirements, and do the same for frontend.
+# We prefer the project's own tools (system-manager repair already called above,
+# dep_reconciler for full state/CRITICAL_PACKAGES/pytorch, npm ci for lock safety).
+# -------------------------------------------------------------------
+
+backend_venv_healthy() {
+    [ -x "$VENV_DIR/bin/python" ] || return 1
+    "$VENV_DIR/bin/python" -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+try:
+    import numpy, flask, celery, redis, psycopg2
+    import backend.config
+    print('OK')
+except Exception:
+    sys.exit(1)
+" >/dev/null 2>&1
+}
+
+ensure_backend_python_environment() {
+    # Under --fast we still repair a completely broken venv (otherwise nothing works).
+    # We only fast-skip when the probe already says it's healthy.
+    if [ "$FAST_START" -eq 1 ] && backend_venv_healthy; then
+        return 0
+    fi
+
+    local needed=0
+    if [ ! -d "$VENV_DIR" ]; then
+        needed=1
+    elif ! backend_venv_healthy; then
+        needed=1
+    fi
+
+    if [ "$needed" -eq 1 ]; then
+        vader_info "Python environment incomplete or first-time setup — bootstrapping dependencies (logged to $SETUP_LOG)..."
+        source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv for bootstrap"; return 1; }
+
+        # requirements-base first (matches system-manager + leaves room for smart torch)
+        if [ -f "$BACKEND_DIR/requirements-base.txt" ]; then
+            pip install -r "$BACKEND_DIR/requirements-base.txt" >> "$SETUP_LOG" 2>&1 || true
+        fi
+        if [ -f "$BACKEND_DIR/requirements.txt" ]; then
+            pip install -r "$BACKEND_DIR/requirements.txt" >> "$SETUP_LOG" 2>&1 || true
+        fi
+
+        # Optional CV/face-restoration extra (P3-10). These deps (gfpgan/realesrgan/
+        # basicsr/facexlib/controlnet-aux/mediapipe) lack reliable aarch64 wheels and
+        # used to abort the whole install on a Pi. Install them only when explicitly
+        # forced (GUAARDVARK_INSTALL_CV=1) OR auto-detected as a non-ARM GPU box.
+        # Failure here WARNS but never fails the core install — face-restore just stays
+        # disabled (its consumers import lazily inside try/except).
+        if [ -f "$BACKEND_DIR/requirements-cv.txt" ]; then
+            _cv_arch="$(uname -m 2>/dev/null || echo unknown)"
+            _cv_want=0
+            if [ "${GUAARDVARK_INSTALL_CV:-0}" = "1" ]; then
+                _cv_want=1
+            elif command_exists nvidia-smi && nvidia-smi >/dev/null 2>&1 \
+                 && [ "$_cv_arch" != "aarch64" ] && [ "$_cv_arch" != "arm64" ]; then
+                _cv_want=1
+            fi
+            if [ "$_cv_want" -eq 1 ]; then
+                vader_info "Installing optional CV/face-restoration deps (requirements-cv.txt)..."
+                pip install -r "$BACKEND_DIR/requirements-cv.txt" >> "$SETUP_LOG" 2>&1 \
+                    || vader_warn "Optional CV deps failed to install (face-restore stays disabled; non-fatal). Retry later: pip install -r backend/requirements-cv.txt"
+            else
+                vader_info "Skipping optional CV deps (no GPU or ARM arch). Force with GUAARDVARK_INSTALL_CV=1"
+            fi
+        fi
+
+        # The smart GPU/CUDA PyTorch installer (also called by dep_reconciler)
+        if [ -f "$SCRIPT_DIR/scripts/install_pytorch.sh" ]; then
+            bash "$SCRIPT_DIR/scripts/install_pytorch.sh" >> "$SETUP_LOG" 2>&1 || vader_warn "install_pytorch.sh exited non-zero (GPU mode may be limited)"
+            # install_pytorch.sh's `pip install --upgrade ... --index-url .../whl/<ver>` can
+            # drag numpy 2.x + an old setuptools back in, violating the ML-stack pins
+            # (numpy<2.0) and llama-index (setuptools>=80.9.0). Re-assert them without
+            # touching torch (--no-deps). Reconciled from PR #40 (anubissbe).
+            pip install --no-deps --force-reinstall 'numpy<2.0,>=1.26.4' 'setuptools>=80.9.0,<81' >> "$SETUP_LOG" 2>&1 \
+                || vader_warn "Could not re-pin numpy/setuptools after PyTorch — check 'pip check'."
+        fi
+
+        # Full reconciler pass for state tracking, CRITICAL_PACKAGES verification, cli_venv, etc.
+        if command -v python >/dev/null 2>&1; then
+            python -m scripts.dep_reconciler --force --only backend_venv,cli_venv --repo-root "$SCRIPT_DIR" >> "$SETUP_LOG" 2>&1 || \
+                vader_warn "dep_reconciler had issues (see setup.log); basic pip may still have succeeded"
+        fi
+
+        deactivate
+
+        if backend_venv_healthy; then
+            vader_success "Backend Python environment bootstrapped and healthy"
+            date +%s > "$VENV_DIR/.guaardvark_bootstrap_ts" 2>/dev/null || true
+        else
+            vader_error "Bootstrap did not produce a working Python environment."
+            vader_info "See $SETUP_LOG for details. Recommended manual steps:"
+            vader_info "  ./scripts/dep_reconciler.py --force"
+            vader_info "  or: ./scripts/system-manager/system-manager repair ."
+            return 1
+        fi
+    fi
+    return 0
+}
+
+ensure_frontend_deps() {
+    local nm="$FRONTEND_DIR/node_modules"
+    local lock="$FRONTEND_DIR/package-lock.json"
+    local stamp="$FRONTEND_DIR/.npm_stamp"
+
+    if [ "$FAST_START" -eq 1 ] && [ -d "$nm" ]; then
+        return 0
+    fi
+
+    # Run npm ci (lockfile-strict, same strategy as scripts/dep_reconciler/reconcilers/frontend.py)
+    # only when truly needed: missing node_modules, or lockfile newer than our stamp.
+    if [ ! -d "$nm" ] || [ ! -f "$stamp" ] || [ "$lock" -nt "$stamp" 2>/dev/null ]; then
+        vader_info "Ensuring frontend dependencies (using npm ci for lockfile safety)..."
+        if (cd "$FRONTEND_DIR" && npm ci >> "$SETUP_LOG" 2>&1); then
+            touch "$stamp" 2>/dev/null || true
+            vader_success "Frontend node_modules ready"
+        else
+            vader_warn "npm ci failed — trying npm install (may touch package-lock.json)"
+            if (cd "$FRONTEND_DIR" && npm install >> "$SETUP_LOG" 2>&1); then
+                touch "$stamp" 2>/dev/null || true
+            else
+                vader_error "Frontend dependency installation failed. See $SETUP_LOG"
+                return 1
+            fi
+        fi
+    fi
+    return 0
+}
+
 vader_header
-vader_title "  Guaardvark Startup Script v5.1 - Smart Install Mode"
+vader_title "  Guaardvark Startup Script v5.1 - Smart Install Mode (intelligent bootstrap restored)"
 vader_header
 
 ACTIVE_MODEL_FILE="$GUAARDVARK_STORAGE_DIR/active_model.txt"
@@ -870,6 +1028,22 @@ if ! command_exists ffmpeg; then
         VOICE_AVAILABLE=0
     fi
 fi
+
+# Early hardware profile (critical for cluster/Interconnector and operator visibility).
+# We do this with system python + explicit PYTHONPATH so it works *before* the venv
+# is populated and independent of any Python package state. The later call in step 8
+# will refresh it with the project venv when available.
+mkdir -p "$HOME/.guaardvark"
+if PYTHONPATH="$SCRIPT_DIR" python3 -m backend.services.hardware_detector \
+        --output "$HOME/.guaardvark/hardware.json" >> "$SETUP_LOG" 2>&1; then
+    # Only print on success the first time or when it actually wrote something useful
+    if [ -f "$HOME/.guaardvark/hardware.json" ]; then
+        vader_success "Hardware profile written (~/.guaardvark/hardware.json)"
+    fi
+else
+    vader_info "Hardware profile probe (non-fatal; will retry after venv bootstrap)"
+fi
+
 vader_separator
 
 vader_step 3 "Ensuring Redis service is running..."
@@ -893,49 +1067,30 @@ if [ ! -d "$VENV_DIR" ]; then
     $PYTHON_CMD -m venv "$VENV_DIR" || { vader_error "Failed to create venv"; exit 1; }
 fi
 
+if [ "$FIRST_SETUP_DONE" -eq 0 ]; then
+    vader_header
+    vader_title "  First-time / recovery setup — installing core dependencies"
+    vader_header
+    vader_info "This can take several minutes on first run (PyTorch, etc.). Progress is logged to $SETUP_LOG"
+fi
+
 source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv"; exit 1; }
 
-# Dependency reconciliation (drift repair) is intentionally disabled during
-# startup — it was blocking otherwise healthy boots when its drift check failed.
-# Run scripts/dep_reconciler.py manually when dependency repair is needed.
-#
-# Initial install is NOT optional, though: a freshly created venv has no
-# packages, so the backend dies on `import numpy`. Install the requirements
-# (and PyTorch via the smart installer) once, gated by a marker file so normal
-# boots stay fast. Delete the marker to force a reinstall.
-vader_info "Dependency reconciliation skipped"
-DEPS_MARKER="$VENV_DIR/.deps_installed"
-if [ ! -f "$DEPS_MARKER" ]; then
-    vader_info "Installing Python dependencies (first run; this takes a while)..."
-    "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip wheel
-    if "$VENV_DIR/bin/pip" install -r "$BACKEND_DIR/requirements.txt"; then
-        vader_success "Python dependencies installed"
-        # PyTorch is installed separately — the smart installer picks the right
-        # CUDA/CPU build for this machine. Non-fatal: generation features need
-        # it, but the API boots without it.
-        if [ -f "$SCRIPT_DIR/scripts/install_pytorch.sh" ]; then
-            vader_info "Installing PyTorch (GPU-aware)..."
-            bash "$SCRIPT_DIR/scripts/install_pytorch.sh" || vader_warn "PyTorch install failed (non-fatal; generation features unavailable)."
-            # install_pytorch.sh runs `pip install --upgrade ... --index-url .../whl/<ver>`,
-            # which drags numpy 2.x and an old setuptools in — both violate the pins in
-            # requirements.txt (the ML stack needs numpy<2.0; llama-index needs
-            # setuptools>=80.9.0). Re-assert the constrained versions without touching
-            # torch (--no-deps).
-            vader_info "Re-pinning numpy/setuptools after PyTorch install..."
-            "$VENV_DIR/bin/pip" install --no-deps --force-reinstall \
-                'numpy<2.0,>=1.26.4' 'setuptools>=80.9.0,<81' >/dev/null 2>&1 \
-                || vader_warn "Could not re-pin numpy/setuptools — check 'pip check'."
-        fi
-        touch "$DEPS_MARKER"
-    else
-        vader_error "Python dependency install failed. Fix the error above, then re-run. (Delete $DEPS_MARKER is not needed; it was not created.)"
-        deactivate
-        exit 1
-    fi
-else
-    vader_info "Python dependencies present (delete $DEPS_MARKER to force reinstall)"
+# The real bootstrap work (was previously skipped with "Dependency reconciliation skipped").
+# This is the key part of the strong fix: after creation (or if broken) we now ensure
+# the venv actually has the packages via ensure_backend_python_environment.
+if ! ensure_backend_python_environment; then
+    vader_error "Python bootstrap failed. Cannot continue."
+    # ensure_... already deactivated on its error path
+    cd "$SCRIPT_DIR"
+    exit 1
 fi
-deactivate
+
+# The ensure function manages its own activate/deactivate when it performs work.
+# We only need to ensure we are not left inside the venv here.
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    deactivate 2>/dev/null || true
+fi
 
 # --- CLI tool setup ---
 # This block only handles the symlink installation into ~/.local/bin.
@@ -1064,6 +1219,56 @@ if command_exists nvidia-smi && [ ! -f "$GPU_SUDOERS" ]; then
     fi
 fi
 
+# ── Ollama daemon tuning env (P1-6) ──
+# These MUST be exported BEFORE `ollama serve` is launched below, otherwise the
+# user-spawned fallback daemon (Step 4) never inherits them. (The previous block
+# at ~line 1465 ran AFTER the launch, so the knobs were dead for the fallback path
+# and irrelevant to the systemd path — see scripts/ollama-systemd-dropin.conf for
+# that side.) Guarded by GUAARDVARK_OLLAMA_TUNING (default on; set =0 to disable).
+# KV-cache q8_0 + flash-attention are GPU wins (harmless-but-pointless on CPU), so
+# they are gated on the same nvidia-smi GPU detection start.sh already uses.
+if [ "${GUAARDVARK_OLLAMA_TUNING:-1}" != "0" ]; then
+    export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-2}"
+    export OLLAMA_NUM_CTX="${OLLAMA_NUM_CTX:-8192}"
+    export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-15m}"
+    if command_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
+        export OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
+        export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}"
+        vader_info "Ollama tuning: KV-cache q8_0 + flash-attention enabled (GPU detected)"
+    else
+        vader_info "Ollama tuning: NUM_PARALLEL/NUM_CTX/KEEP_ALIVE set (no GPU — skipping KV-cache/flash-attn)"
+    fi
+else
+    vader_info "Ollama tuning disabled (GUAARDVARK_OLLAMA_TUNING=0)"
+fi
+
+# ── Ollama systemd drop-in installer (P1-6 fix-b) ──
+# The preferred launch path below is `sudo systemctl start ollama`, which inherits
+# systemd's environment — NOT this shell's. So the exports above don't reach a
+# systemd-managed daemon. This step installs a [Service] Environment= drop-in
+# (scripts/ollama-systemd-dropin.conf) carrying the same vars, IF: tuning is on,
+# the drop-in isn't already installed, a GPU is present (the knobs are GPU wins),
+# and non-interactive sudo is available. It does NOT restart a running ollama —
+# it applies on the next daemon restart (logged). If sudo is unavailable, it logs
+# a one-line manual instruction. Guarded by GUAARDVARK_OLLAMA_TUNING.
+OLLAMA_DROPIN_SRC="$SCRIPT_DIR/scripts/ollama-systemd-dropin.conf"
+OLLAMA_DROPIN_DST="/etc/systemd/system/ollama.service.d/guaardvark-tuning.conf"
+if [ "${GUAARDVARK_OLLAMA_TUNING:-1}" != "0" ] && command_exists systemctl \
+   && [ -f "$OLLAMA_DROPIN_SRC" ] && command_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
+    if [ -f "$OLLAMA_DROPIN_DST" ] && cmp -s "$OLLAMA_DROPIN_SRC" "$OLLAMA_DROPIN_DST"; then
+        : # already installed and current — nothing to do
+    elif sudo -n true 2>/dev/null; then
+        if sudo -n install -D -m 0644 "$OLLAMA_DROPIN_SRC" "$OLLAMA_DROPIN_DST" 2>/dev/null \
+           && sudo -n systemctl daemon-reload 2>/dev/null; then
+            vader_success "Ollama systemd tuning drop-in installed (applies on next ollama restart; not force-restarting)"
+        else
+            vader_info "Could not install Ollama systemd drop-in (non-critical); manual: sudo install -D -m 0644 '$OLLAMA_DROPIN_SRC' '$OLLAMA_DROPIN_DST' && sudo systemctl daemon-reload && sudo systemctl restart ollama"
+        fi
+    else
+        vader_info "Ollama systemd tuning available — to apply, run: sudo install -D -m 0644 '$OLLAMA_DROPIN_SRC' '$OLLAMA_DROPIN_DST' && sudo systemctl daemon-reload && sudo systemctl restart ollama"
+    fi
+fi
+
 # Check if Ollama plugin is enabled. Honors the user_enabled overlay in
 # data/plugin_state.json (UI toggle) and falls back to plugin.json default.
 OLLAMA_PLUGIN_JSON="$SCRIPT_DIR/plugins/ollama/plugin.json"
@@ -1126,6 +1331,75 @@ elif [ "$OLLAMA_ENABLED" = "False" ]; then
     vader_info "Ollama plugin is disabled — skipping startup"
 else
     vader_warn "Ollama CLI not available; skipping service check."
+fi
+
+# ── Fresh-install model bootstrap (P0-3) ──
+# A fresh box boots with ZERO models → first chat 404s and RAG's
+# get_active_embedding_model() throws. start.sh never pulled anything before.
+# This step: if Ollama is up and is missing a chat and/or embedding model, pull a
+# small hardware-appropriate default of each. Sizes are chosen by RAM + arch:
+#   ≤8GB RAM or aarch64  → chat llama3.2:1b   + embed nomic-embed-text
+#   otherwise            → chat llama3.1:8b   + embed nomic-embed-text
+# Models are per-machine (Ollama-local, under data/ for this box) — NOT synced via
+# the Interconnector, so every node bootstraps its own. Guarded by
+# GUAARDVARK_BOOTSTRAP_MODELS (default on; set =0 to skip pulls entirely).
+if [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ] \
+   && [ "${GUAARDVARK_BOOTSTRAP_MODELS:-1}" != "0" ] \
+   && curl -sf --max-time 3 http://localhost:11434/ >/dev/null 2>&1; then
+
+    # Detect RAM(GB) + arch. Prefer hardware_detector's hardware.json if present
+    # (authoritative, already arch/RAM-aware); else fall back to uname + meminfo.
+    BOOT_RAM_GB=0
+    BOOT_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+    HW_JSON="${HOME}/.guaardvark/hardware.json"
+    if [ -f "$HW_JSON" ] && command_exists python3; then
+        _hw=$(python3 -c "import json,sys
+try:
+    d=json.load(open('$HW_JSON'))
+    print(int(d.get('ram',{}).get('total_gb',0) or 0), d.get('arch','') or '')
+except Exception:
+    print('0','')" 2>/dev/null)
+        if [ -n "$_hw" ]; then
+            BOOT_RAM_GB=$(echo "$_hw" | awk '{print $1}')
+            [ -n "$(echo "$_hw" | awk '{print $2}')" ] && BOOT_ARCH="$(echo "$_hw" | awk '{print $2}')"
+        fi
+    fi
+    if [ "${BOOT_RAM_GB:-0}" -eq 0 ] && [ -r /proc/meminfo ]; then
+        _kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null)
+        [ -n "$_kb" ] && BOOT_RAM_GB=$(( _kb / 1024 / 1024 ))
+    fi
+
+    # Pick defaults by hardware. GUAARDVARK_DEFAULT_LLM / GUAARDVARK_EMBEDDING_MODEL
+    # override the chat / embed choice respectively (matches config.py overrides).
+    if [ "${BOOT_RAM_GB:-0}" -le 8 ] && [ "${BOOT_RAM_GB:-0}" -gt 0 ] || [ "$BOOT_ARCH" = "aarch64" ] || [ "$BOOT_ARCH" = "arm64" ]; then
+        BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.2:1b}"
+        vader_info "Model bootstrap: small-hardware tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
+    else
+        BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.1:8b}"
+        vader_info "Model bootstrap: standard tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
+    fi
+    BOOT_EMBED_MODEL="${GUAARDVARK_EMBEDDING_MODEL:-nomic-embed-text}"
+
+    BOOT_LIST="$(timeout 10 ollama list 2>/dev/null || true)"
+    # A "chat model" is any non-embed tag. Detect absence of either class.
+    if ! echo "$BOOT_LIST" | grep -viE 'embed|minilm' | grep -qE '[a-zA-Z0-9].*:'; then
+        vader_info "No chat model found — pulling $BOOT_CHAT_MODEL (one-time, ~minutes)..."
+        ollama pull "$BOOT_CHAT_MODEL" >> "$LOGS_DIR/ollama_bootstrap.log" 2>&1 \
+            && vader_success "Chat model ready: $BOOT_CHAT_MODEL" \
+            || vader_warn "Failed to pull $BOOT_CHAT_MODEL (non-critical; see logs/ollama_bootstrap.log). Pull manually: ollama pull $BOOT_CHAT_MODEL"
+    else
+        vader_success "Chat model already present"
+    fi
+    if ! echo "$BOOT_LIST" | grep -qiE 'embed|minilm'; then
+        vader_info "No embedding model found — pulling $BOOT_EMBED_MODEL (one-time)..."
+        ollama pull "$BOOT_EMBED_MODEL" >> "$LOGS_DIR/ollama_bootstrap.log" 2>&1 \
+            && vader_success "Embedding model ready: $BOOT_EMBED_MODEL" \
+            || vader_warn "Failed to pull $BOOT_EMBED_MODEL (non-critical; RAG stays disabled until present). Pull manually: ollama pull $BOOT_EMBED_MODEL"
+    else
+        vader_success "Embedding model already present"
+    fi
+elif [ "${GUAARDVARK_BOOTSTRAP_MODELS:-1}" = "0" ]; then
+    vader_info "Model bootstrap disabled (GUAARDVARK_BOOTSTRAP_MODELS=0)"
 fi
 vader_separator
 
@@ -1231,22 +1505,38 @@ cd "$SCRIPT_DIR"
 # Refresh ~/.guaardvark/hardware.json on every boot so the Interconnector has
 # a current picture of this box. Cluster routing is off by default; this
 # profile is harmless in solo mode (just a file on disk).
+#
+# We now always set PYTHONPATH explicitly and have a fallback so the detector
+# works reliably even if the venv python has limited packages.
 ensure_hardware_profile() {
     mkdir -p "$HOME/.guaardvark"
-    if [ -d "$SCRIPT_DIR/backend/venv" ]; then
-        # Pipe verbose detector output to the setup log; emit one consistently-
-        # styled line via vader_success/warn so it matches the rest of the boot
-        # output instead of arriving in the shell's default color.
-        if (cd "$SCRIPT_DIR" && "$SCRIPT_DIR/backend/venv/bin/python" -m backend.services.hardware_detector \
+    local wrote=0
+
+    # Prefer the project venv python (full context) if it exists and works
+    if [ -x "$VENV_DIR/bin/python" ]; then
+        if (cd "$SCRIPT_DIR" && PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/python" -m backend.services.hardware_detector \
                 --output "$HOME/.guaardvark/hardware.json") >> "$SETUP_LOG" 2>&1; then
-            vader_success "Hardware profile written to ~/.guaardvark/hardware.json"
-        else
-            vader_warn "hardware_detector failed (non-fatal)"
+            wrote=1
         fi
+    fi
+
+    # Fallback to system python3 + PYTHONPATH (the detector is mostly stdlib + subprocess)
+    if [ "$wrote" -eq 0 ]; then
+        if PYTHONPATH="$SCRIPT_DIR" python3 -m backend.services.hardware_detector \
+                --output "$HOME/.guaardvark/hardware.json" >> "$SETUP_LOG" 2>&1; then
+            wrote=1
+        fi
+    fi
+
+    if [ "$wrote" -eq 1 ] && [ -f "$HOME/.guaardvark/hardware.json" ]; then
+        vader_success "Hardware profile refreshed (~/.guaardvark/hardware.json)"
     else
-        vader_warn "Backend venv missing — skipping hardware profile"
+        vader_warn "Hardware profile refresh had issues (non-fatal)"
     fi
 }
+
+# Call the (now hardened) hardware profile refresh. We already did an early
+# best-effort version in step 2; this one runs after venv work and prefers the venv python.
 ensure_hardware_profile
 
 # Export the persistent node_id so the backend knows who it is without
@@ -1259,8 +1549,11 @@ fi
 vader_info "Setting up frontend..."
 cd "$FRONTEND_DIR" || { vader_error "Failed to cd to $FRONTEND_DIR"; exit 1; }
 
-# Frontend dependency installs are intentionally not part of startup. The old
-# sentinel block ran `npm install`, mutating package-lock.json during boot.
+# We now ensure frontend deps are present before any build (using the same
+# npm ci strategy as the dep_reconciler). This fixes the "vite not found"
+# and "no node_modules" class of failures on first run / after clean.
+# The small ensure_npm_package calls below are for specific dev deps only.
+ensure_frontend_deps
 
 ensure_npm_package rollup-plugin-polyfill-node
 
@@ -1290,6 +1583,32 @@ if [ ! -f "$VENV_DIR/bin/activate" ]; then
 fi
 
 source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv for Flask."; cd "$SCRIPT_DIR"; exit 1; }
+
+# Strong post-bootstrap validation (the heart of the fix).
+# If the ensure_ steps above did their job, this will pass quickly.
+# If something is still wrong we fail here with a clear message instead of
+# a confusing ModuleNotFoundError 30 lines later in the app.
+_POST_BOOTSTRAP_ERR=$("$VENV_DIR/bin/python" -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+import numpy, flask, celery
+import backend.config, backend.models, backend.app
+print('Post-bootstrap core imports: OK')
+" 2>&1)
+_POST_BOOTSTRAP_RC=$?
+if [ "$_POST_BOOTSTRAP_RC" -ne 0 ]; then
+    vader_error "Post-bootstrap validation failed:"
+    printf '%s\n' "$_POST_BOOTSTRAP_ERR"
+    vader_info "(Often a missing synced module — not necessarily numpy/flask.)"
+    vader_info "See $SETUP_LOG. Run one of:"
+    vader_info "  ./scripts/dep_reconciler.py --force"
+    vader_info "  ./scripts/system-manager/system-manager repair ."
+    vader_info "Then re-run ./start.sh"
+    deactivate
+    cd "$SCRIPT_DIR"
+    exit 1
+fi
+vader_success "Post-bootstrap validation passed (core Python environment is usable)"
 
 # Quick import validation (catches stale cache / missing symbols after sync)
 if [ "$FAST_START" -eq 0 ]; then
@@ -1445,7 +1764,10 @@ else
 
     ulimit -n 65535
 
-    nohup celery -A backend.celery_app.celery worker --loglevel=info --concurrency=2 >> "$LOGS_DIR/celery.log" 2>&1 &
+    # --concurrency=1 --pool=solo: prefork forks workers AFTER the parent may have initialized
+    # CUDA, which is the documented leaked-semaphore death class (PIDs 3047360/3065470). solo +
+    # single concurrency also upholds the single-GPU invariant (never two GPU tasks at once).
+    nohup celery -A backend.celery_app.celery worker --loglevel=info --concurrency=1 --pool=solo >> "$LOGS_DIR/celery.log" 2>&1 &
     CELERY_PID=$!
     echo "$CELERY_PID" > "$SCRIPT_DIR/pids/celery.pid"
     vader_success "Single Celery worker started (PID: $CELERY_PID)"
@@ -1485,6 +1807,31 @@ export VITE_PORT
 #     frontend on a local workstation) so the operator knows the code is stale;
 #   - if there is NO dist at all, there is nothing to serve — we abort the launch.
 FRONTEND_CAN_SERVE=1
+# Belt-and-suspenders: make sure node_modules are present before the guaranteed build
+ensure_frontend_deps
+
+# LAN awareness for the preview (static) frontend bundle.
+# `vite preview` now carries its own proxy + host allowlist (see the `preview:`
+# block in frontend/vite.config.js, reconciled from PR #40): relative /api and
+# /socket.io requests from a page loaded at a LAN IP are proxied server-side to
+# Flask, and WebSockets upgrade through it. So we do NOT bake an absolute
+# http://<lan-ip>:<FLASK> into the bundle anymore — that hardcoded a single
+# build-time IP and broke on multi-NIC / DHCP-change boxes. Relative URLs through
+# the preview proxy are robust to whichever host the client actually reaches.
+#
+# The one thing the preview server needs is permission to serve a non-localhost
+# Host header (otherwise Vite answers "Blocked request"). Opt the detected LAN IP
+# into VITE_ALLOWED_HOSTS so the normal start.sh path just works on the LAN, while
+# a bare `vite preview`/`vite` run stays localhost-only by default (PR #40 policy).
+PRIMARY_LAN_IP=$(get_lan_ips | awk '{print $1}')
+if [ -n "$PRIMARY_LAN_IP" ]; then
+    # Honor any pre-set VITE_ALLOWED_HOSTS (.env), else allow the detected LAN IP.
+    export VITE_ALLOWED_HOSTS="${VITE_ALLOWED_HOSTS:-$PRIMARY_LAN_IP}"
+    vader_info "LAN IP detected (${PRIMARY_LAN_IP}); allowing it in vite preview (VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS}). Frontend uses relative URLs proxied to Flask."
+else
+    vader_info "No private LAN IP detected; preview stays localhost-only (set VITE_ALLOWED_HOSTS to enable LAN access)."
+fi
+
 vader_info "Building frontend (production) before serving..."
 if (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$FRONTEND_LOG_FILE" 2>&1); then
     vader_success "Frontend build complete"
@@ -1544,7 +1891,7 @@ if [ "$LAUNCH_BROWSER" -eq 1 ] && [ "$TEST_MODE" -eq 0 ]; then
         launch_browser_app "http://localhost:$VITE_PORT"
     else
         vader_warn "Frontend not ready yet. Skipping browser launch."
-        vader_info "You can manually open: http://localhost:$VITE_PORT"
+        vader_info "You can manually open: http://localhost:$VITE_PORT (or the LAN IP printed below)"
     fi
 fi
 
@@ -1742,6 +2089,33 @@ if [ "$VOICE_CHECK" -eq 1 ]; then
 echo -e "  ${VADER_WHITE}Voice API Status:${VADER_RESET} ${VADER_RED}http://localhost:$FLASK_PORT/api/voice/status${VADER_RESET}"
 fi
 echo ""
+
+# LAN / phone / tablet access (the main addition for this feature).
+# Printed using the same PRIMARY_LAN_IP we baked into the frontend bundle (if any).
+# Users on the same Wi-Fi simply open the Frontend line in Android Chrome (or any browser)
+# and use regular chat or the /voice-chat interface to drive agentic tasks.
+LAN_IPS_PRINTED=""
+if [ -n "$PRIMARY_LAN_IP" ]; then
+    LAN_IPS_PRINTED="http://${PRIMARY_LAN_IP}:$VITE_PORT"
+    vader_title "LAN / Network Access (phone, tablet, other devices on same Wi-Fi/LAN):"
+    echo -e "  ${VADER_WHITE}Frontend (text chat + voice chat):${VADER_RESET} ${VADER_RED}http://${PRIMARY_LAN_IP}:$VITE_PORT${VADER_RESET}"
+    echo -e "  ${VADER_WHITE}Backend (direct):${VADER_RESET} ${VADER_RED}http://${PRIMARY_LAN_IP}:$FLASK_PORT${VADER_RESET}"
+    echo -e "  ${VADER_GRAY}Open the Frontend URL above from your Android device (same network).${VADER_RESET}"
+    echo -e "  ${VADER_GRAY}Grant microphone permission for voice chat. All traffic is local.${VADER_RESET}"
+    echo ""
+else
+    # Fallback: compute at print time in case the build-time one was empty
+    _late_lan=$(get_lan_ips | awk '{print $1}')
+    if [ -n "$_late_lan" ]; then
+        LAN_IPS_PRINTED="http://${_late_lan}:$VITE_PORT"
+        vader_title "LAN / Network Access (phone, tablet, other devices on same Wi-Fi/LAN):"
+        echo -e "  ${VADER_WHITE}Frontend (text chat + voice chat):${VADER_RESET} ${VADER_RED}http://${_late_lan}:$VITE_PORT${VADER_RESET}"
+        echo -e "  ${VADER_WHITE}Backend (direct):${VADER_RESET} ${VADER_RED}http://${_late_lan}:$FLASK_PORT${VADER_RESET}"
+        echo -e "  ${VADER_GRAY}Open the Frontend URL above from your Android device (same network).${VADER_RESET}"
+        echo -e "  ${VADER_GRAY}Grant microphone permission for voice chat. All traffic is local.${VADER_RESET}"
+        echo ""
+    fi
+fi
 
 vader_title "Log Files:"
 echo -e "  ${VADER_GRAY}Backend startup:${VADER_RESET} ${VADER_WHITE}$BACKEND_STARTUP_LOG_FILE${VADER_RESET}"

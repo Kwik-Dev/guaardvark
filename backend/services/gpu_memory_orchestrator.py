@@ -230,12 +230,19 @@ class GPUMemoryOrchestrator:
             if exclusive:
                 self._evict_all(exclude=[slot_id])
             else:
-                # Evict enough to fit this model
+                # Evict enough to fit this model — with a safety margin. Admitting when
+                # free == estimate plans to 100% of VRAM; reserved != allocated and
+                # fragmentation then OOMs the actual load. Reserve max(1GB, 10% of total)
+                # of headroom so eviction fires before the card is truly full. Scales
+                # across the install base (8/12/16/24GB cards keep proportional headroom).
                 vram = self._get_vram_info()
                 if vram.get("success"):
                     available = vram["available_mb"]
-                    if available < vram_estimate_mb:
-                        needed = vram_estimate_mb - available
+                    total_mb = vram.get("total_mb") or 0
+                    pct = float(os.environ.get("GUAARDVARK_GPU_SAFETY_MARGIN_PCT", "10")) / 100.0
+                    safety_margin_mb = max(1024, int(total_mb * pct)) if total_mb else 1024
+                    if available - safety_margin_mb < vram_estimate_mb:
+                        needed = vram_estimate_mb - (available - safety_margin_mb)
                         self._evict_until_free(needed, exclude=[slot_id])
 
             # Register the slot
@@ -337,8 +344,16 @@ class GPUMemoryOrchestrator:
                         "priority": need.priority,
                     })
 
-        logger.info(f"Route intent: {route} → {len(actions)} actions")
-        return {"route": route, "normalized": normalized, "actions": actions}
+        logger.info(f"Route intent: {route} → {len(actions)} model actions")
+
+        result = {"route": route, "normalized": normalized, "actions": actions}
+        try:
+            from backend.services.plugin_bridge import prepare_plugins_for_route
+            result["plugins"] = prepare_plugins_for_route(route)
+        except Exception as e:
+            logger.warning(f"Plugin auto-orchestration for {route} failed (non-fatal): {e}")
+            result["plugins"] = {"error": str(e)}
+        return result
 
     # ------------------------------------------------------------------
     # Public API: Quality Tiers

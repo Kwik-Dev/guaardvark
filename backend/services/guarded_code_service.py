@@ -127,13 +127,39 @@ def is_codebase_locked() -> bool:
 
 
 def protected_file_reason(relative_path: str) -> str | None:
-    """Return a block reason if the path is protected by config."""
+    """Return a block reason if the path is protected by config.
+
+    Matching is ANCHORED on path components, NOT a naive substring test. A loose
+    `protected_norm in normalized` both over-blocks (a future `quickstart.sh` would
+    match the protected `start.sh`) and under-anchors (it would match a substring
+    inside a directory or filename that merely contains the protected string). We
+    block when ANY of the following hold against the normalized POSIX path:
+
+      1. exact match: `normalized == protected_norm`
+         (covers full-path entries like `backend/config.py`)
+      2. path-suffix match: `normalized` ends with `/<protected_norm>`
+         (covers a protected full path reached via a deeper containing path)
+      3. basename match: the final path component equals the protected entry
+         (covers the bare-filename entries — `start.sh`, `stop.sh`,
+         `killswitch.sh` — which are intended to match by filename anywhere)
+
+    This preserves every TRUE positive currently in config.PROTECTED_FILES (the
+    real protected files still resolve via rule 1/2/3) while refusing the
+    accidental substring collisions (e.g. `quickstart.sh`, `scripts/foo_start.sh`).
+    """
     from backend.config import PROTECTED_FILES
 
     normalized = relative_path.replace("\\", "/").strip("/")
+    if not normalized:
+        return None
+    basename = normalized.rsplit("/", 1)[-1]
     for protected in PROTECTED_FILES:
         protected_norm = protected.replace("\\", "/").strip("/")
-        if normalized == protected_norm or normalized.endswith(f"/{protected_norm}") or protected_norm in normalized:
+        if (
+            normalized == protected_norm
+            or normalized.endswith(f"/{protected_norm}")
+            or basename == protected_norm
+        ):
             return (
                 f"'{protected}' is protected by the kill switch architecture "
                 "and cannot be modified by autonomous processes."

@@ -218,6 +218,21 @@ class ComfyUIVideoGenerator:
         "cogvideox-5b-i2v": "kijai/CogVideoX-5b-1.5-I2V",
     }
 
+    # Conservative best-effort floor for the TOTAL VRAM a model needs to run at
+    # all (not headroom-for-comfort). Used by the preflight in generate_video to
+    # turn a silent OOM into an honest "this model needs ~N GB" message on the
+    # install base. Keyed by the model id; family fallbacks below cover aliases.
+    #   cogvideox-2b ~8, cogvideox-5b ~16, wan22-14b ~16.
+    MODEL_MIN_VRAM_GB = {
+        "cogvideox-2b": 8,
+        "cogvideox-5b": 16,
+        "cogvideox-5b-i2v": 16,
+        "wan22-14b": 16,
+        "wan22-14b-i2v": 16,
+    }
+    # Family floors when an exact id isn't in the table (aliases like "wan22").
+    _FAMILY_MIN_VRAM_GB = {"wan": 16, "cogvideox": 16}
+
     # ── Wan 2.2 model mapping ────────────────────────────────────────────────
 
     WAN22_MODELS = {
@@ -271,6 +286,53 @@ class ComfyUIVideoGenerator:
                 model, width, height, new_w, new_h, align,
             )
         return new_w, new_h
+
+    @classmethod
+    def _min_vram_gb_for(cls, model: str) -> int:
+        """Conservative TOTAL-VRAM floor (GB) for `model`. Exact id wins; falls
+        back to the model family; 0 means 'no floor known' (don't block)."""
+        if model in cls.MODEL_MIN_VRAM_GB:
+            return cls.MODEL_MIN_VRAM_GB[model]
+        return cls._FAMILY_MIN_VRAM_GB.get(cls._model_family(model), 0)
+
+    def _vram_preflight(self, model: str) -> Optional[str]:
+        """Read-only VRAM gate run BEFORE queuing a ComfyUI job, so an
+        under-spec card gets an honest message instead of a silent OOM mid-render.
+
+        Returns an error string to surface (caller turns it into a failed
+        VideoGenerationResult), or None to proceed. Fail-OPEN: if the probe
+        itself errors we return None — never block a working render because the
+        probe threw. Reuses the coordinator's pynvml/nvidia-smi probe (READ
+        ONLY, allocates nothing).
+        """
+        try:
+            from backend.services.gpu_resource_coordinator import get_available_vram
+            info = get_available_vram()
+        except Exception as e:  # noqa: BLE001 — fail open on a broken probe
+            logger.warning("VRAM preflight probe errored (%s); proceeding without gate", e)
+            return None
+
+        # Probe didn't succeed. Distinguish "no NVIDIA hardware at all" (an
+        # honest hard error — video gen needs a GPU) from a transient/unknown
+        # probe failure (fail open — don't block a card we just can't read).
+        if not info.get("success"):
+            reason = info.get("reason") or info.get("error") or ""
+            if reason == "no_gpu_hardware" or "no NVIDIA" in str(reason):
+                return "GPU required for video generation: no NVIDIA GPU detected on this host."
+            logger.warning("VRAM preflight: probe unavailable (%s); proceeding", reason)
+            return None
+
+        total_mb = info.get("total_mb") or 0
+        if total_mb <= 0:
+            return None  # unknown total → fail open
+        total_gb = total_mb / 1024.0
+        need = self._min_vram_gb_for(model)
+        if need and total_gb < need:
+            return (
+                f"{model} needs ~{need}g GB VRAM; detected {total_gb:.0f}g GB. "
+                "Try a lighter model or preview resolution."
+            )
+        return None
 
     def _add_cogvideox_optional_nodes(
         self,
@@ -352,7 +414,10 @@ class ComfyUIVideoGenerator:
                     "clip": ["1", 0],
                     "prompt": prompt,
                     "strength": 1,
-                    "force_offload": False,
+                    # Offload the T5 encoder off-GPU after the positive encode too
+                    # (was False) so T5 isn't co-resident with the transformer+VAE
+                    # — cuts the CogVideoX OOM hotspot on a 16GB card.
+                    "force_offload": True,
                 }
             },
             "3": {
@@ -478,7 +543,10 @@ class ComfyUIVideoGenerator:
                     "clip": ["1", 0],
                     "prompt": prompt,
                     "strength": 1,
-                    "force_offload": False,
+                    # Offload the T5 encoder off-GPU after the positive encode too
+                    # (was False) so T5 isn't co-resident with the transformer+VAE
+                    # — cuts the CogVideoX OOM hotspot on a 16GB card.
+                    "force_offload": True,
                 }
             },
             "3": {
@@ -1355,6 +1423,14 @@ class ComfyUIVideoGenerator:
             model = request.model or "cogvideox-5b"
             seed = request.seed if request.seed is not None else int(time.time() * 1000) % (2**31)
 
+            # VRAM preflight: turn a known-under-spec card into an honest error
+            # instead of queuing into a silent mid-render OOM. Fail-open on a
+            # broken probe (see _vram_preflight); read-only, allocates nothing.
+            preflight_error = self._vram_preflight(model)
+            if preflight_error:
+                result.error = preflight_error
+                return result
+
             # Defense-in-depth: snap dims before they enter any workflow builder.
             # Off-by-one here is the "tensor a (51) must match tensor b (50)" crash.
             request.width, request.height = self._align_dimensions(
@@ -1518,7 +1594,12 @@ class ComfyUIVideoGenerator:
                             if node["inputs"].get("model", [None])[0] == model_node_id:
                                 node["inputs"]["model"] = [freeu_id, 0]
 
-            # Apply Lora if requested
+            # Apply Lora if requested. Only the CogVideoX backbone has a LoRA hook
+            # here (DownloadAndLoadCogVideoModel + CLIPLoader → LoraLoader chain).
+            # Wan 2.2's GGUF backbone (UnetLoaderGGUF) has NO matching hook and no
+            # base-matched Wan LoRAs exist, so wiring would be a no-op at best —
+            # be HONEST about the skip instead of silently dropping it. Identity on
+            # the Wan i2v path comes from the init (keyframe) image, not a LoRA.
             if request.lora_name:
                 model_node_id = None
                 clip_node_id = None
@@ -1536,6 +1617,12 @@ class ComfyUIVideoGenerator:
                         elif "TextEncode" in node.get("class_type", ""):
                             if node["inputs"].get("clip", [None])[0] == clip_node_id:
                                 node["inputs"]["clip"] = [new_clip, 0]
+                else:
+                    logger.warning(
+                        "LoRA '%s' not applied: backbone=%s has no LoRA hook; "
+                        "identity comes from the init frame.",
+                        request.lora_name, self._model_family(model),
+                    )
 
             logger.info("Sending workflow to ComfyUI...")
             # ── Layer 1: live progress bridge ────────────────────────────────

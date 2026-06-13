@@ -423,8 +423,8 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
 
         if i2v is None:
             # Animate each LoRA-consistent storyboard frame into a clip. Identity
-            # rides in the frame either way. Default = Wan 2.2 (Dean's pick — the
-            # CogVideoX output was rejected); GUAARDVARK_FILM_I2V=cogvideox reverts
+            # rides in the frame either way. Default = Wan 2.2 (chosen over the
+            # CogVideoX output); GUAARDVARK_FILM_I2V=cogvideox reverts
             # to the CogVideoX-backed adapter. Wan additionally re-applies the LoRA
             # + prompt to steady identity through motion.
             engine = os.environ.get("GUAARDVARK_FILM_I2V", "wan").strip().lower()
@@ -528,7 +528,11 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
         # so the storyboard stage's resident FLUX doesn't OOM the first shot's i2v.
         # (Per-shot i2v<->TTS interleave reclaim is a separate P0.3c refinement.)
         try:
-            with gpu_session(JobKind.VIDEO_RENDER, render_id, evict_ollama=True, free_comfyui=True):
+            # vram_estimate_mb debits the GPU orchestrator budget so this ~14GB render is
+            # VISIBLE to it (it can evict competing in-process models) — without it the
+            # render and a resident chat model both think they own the 16GB card.
+            with gpu_session(JobKind.VIDEO_RENDER, render_id, evict_ollama=True, free_comfyui=True,
+                             vram_estimate_mb=14000):
                 progress.update_process(job_id, 5, f"Rendering {len(shot_inputs)} shots")
                 res = editor.render(
                     production_id=prod_id,

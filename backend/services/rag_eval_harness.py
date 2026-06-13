@@ -208,21 +208,87 @@ class RAGEvalHarness:
                 pair["question"],
                 max_chunks=config.get("context_window_chunks", 3),
             )
-            retrieved_chunks = [r.get("text", "") for r in results] if results else []
+            results = results or []
+            retrieved_chunks = [r.get("text", "") for r in results]
 
             # Generate response using LLM with retrieved context
             context = "\n".join(retrieved_chunks)
             response_prompt = f"Based on the following context, answer the question.\n\nContext:\n{context}\n\nQuestion: {pair['question']}\n\nAnswer:"
             actual_response = self._call_llm(response_prompt, temperature=0.0)
 
-            return self.score_response(
+            score = self.score_response(
                 question=pair["question"],
                 expected_answer=pair["expected_answer"],
                 actual_response=actual_response,
                 retrieved_chunks=retrieved_chunks,
             )
+
+            # Additive retrieval scoring (P1-4b): measure hit-rate@k / MRR / nDCG@10
+            # against the known-relevant id the golden-pair generator recorded.
+            # Defensive: never let retrieval scoring break answer-quality scoring.
+            try:
+                retrieval = self._score_retrieval(pair, results)
+                if retrieval:
+                    score.update(retrieval)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug(f"Retrieval scoring skipped: {e}")
+
+            return score
         finally:
             clear_experiment_config()
+
+    def _score_retrieval(self, pair: dict, results: list) -> Optional[dict]:
+        """Score retrieval quality for one pair using RetrievalEvaluator.
+
+        Uses the golden-pair's recorded relevant id (chunk-precise
+        ``source_chunk_hash`` preferred, else ``source_doc_id``) and matches it
+        against the retrieved nodes. Returns hit-rate@k, MRR and nDCG@10, or
+        ``None`` when no relevant id is available (skip, don't crash).
+        """
+        from backend.utils.rag_evaluation_metrics import RetrievalEvaluator
+
+        k = len(results)
+        if k == 0:
+            # Nothing retrieved: only meaningful if we know a relevant id existed.
+            if not (pair.get("source_chunk_hash") or pair.get("source_doc_id")):
+                return None
+            return {"hit_rate_at_k": 0.0, "mrr": 0.0, "ndcg_at_10": 0.0}
+
+        # Build retrieved id list + relevant id, preferring chunk-hash precision.
+        retrieved_ids: list = []
+        relevant_id = None
+
+        chunk_hash = pair.get("source_chunk_hash")
+        if chunk_hash:
+            relevant_id = chunk_hash
+            for r in results:
+                text = r.get("text", "") or ""
+                retrieved_ids.append(hashlib.sha256(text.encode()).hexdigest())
+        else:
+            doc_id = pair.get("source_doc_id")
+            if doc_id is None:
+                return None  # no known-relevant id -> skip retrieval scoring
+            relevant_id = str(doc_id)
+            for r in results:
+                meta = r.get("metadata") or {}
+                rid = meta.get("document_id") or meta.get("source_doc_id") or r.get("node_id")
+                retrieved_ids.append(str(rid) if rid is not None else "")
+
+        evaluator = RetrievalEvaluator()
+        metrics = evaluator.evaluate_retrieval(
+            retrieved_docs=[],
+            relevant_docs=[],
+            retrieved_ids=retrieved_ids,
+            relevant_ids=[relevant_id],
+            k=10,
+        )
+        # hit-rate@k = did any of the k retrieved chunks contain a relevant id.
+        hit = 1.0 if relevant_id in set(retrieved_ids) else 0.0
+        return {
+            "hit_rate_at_k": hit,
+            "mrr": round(metrics.mrr, 4),
+            "ndcg_at_10": round(metrics.ndcg, 4),
+        }
 
     def run_full_eval(self, config: dict) -> dict:
         """Run all eval pairs through the RAG pipeline with given config.
@@ -235,18 +301,33 @@ class RAGEvalHarness:
 
         details = []
         total_composite = 0.0
+        # Accumulate retrieval metrics over pairs that had a known-relevant id.
+        retr_sums = {"hit_rate_at_k": 0.0, "mrr": 0.0, "ndcg_at_10": 0.0}
+        retr_count = 0
         for pair in pairs:
             score = self._eval_single_pair(pair, config)
             score["eval_pair_id"] = pair["id"]
             details.append(score)
             total_composite += score["composite"]
+            if "hit_rate_at_k" in score:
+                retr_count += 1
+                for key in retr_sums:
+                    retr_sums[key] += score.get(key, 0.0)
 
         avg_composite = total_composite / len(pairs) if pairs else 0.0
-        return {
+        result = {
             "composite_score": round(avg_composite, 4),
             "num_pairs": len(pairs),
             "details": details,
         }
+        if retr_count:
+            result["retrieval"] = {
+                "num_scored": retr_count,
+                "hit_rate_at_k": round(retr_sums["hit_rate_at_k"] / retr_count, 4),
+                "mrr": round(retr_sums["mrr"] / retr_count, 4),
+                "ndcg_at_10": round(retr_sums["ndcg_at_10"] / retr_count, 4),
+            }
+        return result
 
     def run_quality_assessment(self, config: dict) -> dict:
         """Entry point for quality scorecards; delegates to the full pair assessment."""

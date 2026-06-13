@@ -32,6 +32,16 @@ numpy<2.0,>=1.26.4  # Pin to <2.0 for PyTorch compatibility
 pandas==2.2.2
 pydantic==2.11.7
 psutil==5.9.8
+# nvidia-ml-py (imports as pynvml) is GPU-only — it powers VRAM queries in
+# gpu_resource_coordinator/ollama_resource_manager, but every importer does so
+# lazily inside try/except and falls back to nvidia-smi or "unknown". On
+# CPU/ARM/AMD/Mac it has no purpose; the CPU branch of install_pytorch.sh even
+# uninstalls pynvml to silence a FutureWarning. Installing it unconditionally
+# here re-adds it right after that uninstall. Install it only on NVIDIA hosts —
+# recommended start.sh wiring documented in requirements-cv.txt's header / the
+# P3-10b report. Left here (still imports cleanly everywhere) to avoid a
+# behavior change start.sh isn't yet wired for; flagged for GPU-only gating.
+nvidia-ml-py>=12.0.0  # GPU-only (pynvml); see note above — gate to NVIDIA hosts
 
 # Web Scraping & File Processing
 beautifulsoup4==4.12.3
@@ -81,23 +91,18 @@ av>=14.2.0
 pydantic-settings>=2.0
 gguf>=0.18.0
 
-# Face Restoration & Enhancement
-gfpgan==1.3.5  # Downgraded from 1.3.8 for torchvision compatibility
-realesrgan==0.3.0
-facexlib==0.3.0
-basicsr>=1.4.2  # Required by GFPGAN and RealESRGAN
-lmdb>=1.0.0  # Required by GFPGAN
-scipy>=1.10.0  # Required by GFPGAN
-tqdm>=4.65.0  # Required by GFPGAN and RealESRGAN
-PyYAML>=6.0  # Required by GFPGAN (note: package name is PyYAML, not pyyaml)
-tb-nightly  # Required by GFPGAN (optional for runtime, but recommended)
-
-# Anatomy & Pose Control
-controlnet-aux==0.0.9
-mediapipe==0.10.14
+# Face-restore / anatomy / ControlNet heavy CV deps moved to the OPTIONAL
+# extra backend/requirements-cv.txt (P3-10b): gfpgan, realesrgan, facexlib,
+# basicsr, lmdb, tb-nightly, controlnet-aux, mediapipe, opencv-python. They lack
+# aarch64/Pi wheels and aborted the whole install; only the (lazy, guarded)
+# face_restoration_service + anatomy_improvement_service use them.
+# scipy/tqdm/PyYAML stay here — they're shared transitive deps of the always-on
+# stack (transformers/huggingface_hub require tqdm+pyyaml), not CV-exclusive.
+scipy>=1.10.0  # used by image/audio paths; also a GFPGAN dep
+tqdm>=4.65.0   # transitive dep of transformers/huggingface_hub (always-on)
+PyYAML>=6.0    # transitive dep of transformers/huggingface_hub (always-on)
 
 # Video Processing Dependencies
-opencv-python==4.8.1.78
 imageio==2.34.0
 imageio-ffmpeg==0.5.1
 

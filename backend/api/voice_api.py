@@ -1089,10 +1089,30 @@ def text_to_speech():
             cleaned_text += '.'
         
         text_for_tts = cleaned_text if cleaned_text else text
-        
+
+        # Conversational TTS: try Audio Foundry (Kokoro — natural, fast) FIRST,
+        # then fall through to Piper (CPU-floor) on miss/timeout. Mirrors the
+        # /narrate expressive route so no-plugin installs still speak.
+        backend_path = get_backend_path()
+        guaardvark_root = os.environ.get("GUAARDVARK_ROOT", os.path.dirname(backend_path))
+        narrations_dir = os.path.join(guaardvark_root, "data", "outputs", "narrations")
+        os.makedirs(narrations_dir, exist_ok=True)
+
+        af_result = _try_audio_foundry_voice(text_for_tts, "wav", narrations_dir)
+        if af_result is not None:
+            # _try_audio_foundry_voice yields a /voice/audio/<file> path (the
+            # /narrate convention, consumed under BASE_URL=/api). The
+            # /text-to-speech consumer (VoiceContext.speak) prepends BACKEND_URL
+            # (origin, no /api), so rewrite to the fully-prefixed route.
+            af_result["audio_url"] = f"/api/voice/audio/{af_result['filename']}"
+            af_result["text"] = text
+            logger.info("Voice API: text-to-speech via audio_foundry (%s)", af_result["engine"])
+            return jsonify(af_result)
+        logger.info("Voice API: text-to-speech falling back to Piper (voice=%s)", voice)
+
         if voice not in PIPER_VOICES:
             return jsonify({"error": f"Invalid voice. Must be one of: {list(PIPER_VOICES.keys())}"}), 400
-            
+
         # Generate a unique stream ID
         stream_id = str(uuid.uuid4())
         tts_stream_queue[stream_id] = {

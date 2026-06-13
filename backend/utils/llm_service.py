@@ -413,7 +413,7 @@ def _default_chat_sampling():
 
 def get_default_llm() -> Ollama:
     """Instantiate and return the default Ollama LLM, preferring the saved active model."""
-    from backend.config import LLM_REQUEST_TIMEOUT
+    from backend.config import LLM_REQUEST_TIMEOUT, get_chat_keep_alive
     timeout_value = min(LLM_REQUEST_TIMEOUT, 180.0)
 
     model_name = DEFAULT_LLM
@@ -439,7 +439,7 @@ def get_default_llm() -> Ollama:
         request_timeout=timeout_value,
         temperature=temperature,
         context_window=num_ctx,
-        keep_alive="24h",
+        keep_alive=get_chat_keep_alive(),  # hardware-aware: ~15m on GPU (don't squat VRAM), resident on CPU
         additional_kwargs={"num_ctx": num_ctx, **sampling_kwargs},
     )
 
@@ -451,7 +451,7 @@ def get_llm_for_startup() -> Ollama:
     If the saved model is missing (common after machine migration / restore),
     fall through to the first installed model rather than warming up a ghost.
     """
-    from backend.config import LLM_REQUEST_TIMEOUT
+    from backend.config import LLM_REQUEST_TIMEOUT, get_chat_keep_alive
 
     # Probe what Ollama actually has pulled — ground truth beats stored config.
     installed = []
@@ -519,7 +519,7 @@ def get_llm_for_startup() -> Ollama:
         request_timeout=timeout_value,
         temperature=temperature,
         context_window=num_ctx,
-        keep_alive="24h",
+        keep_alive=get_chat_keep_alive(),  # hardware-aware: ~15m on GPU (don't squat VRAM), resident on CPU
         additional_kwargs={"num_ctx": num_ctx, **sampling_kwargs},
     )
     logger.info("Loaded LLM '%s' with num_ctx=%d in %.2fs", model_name, num_ctx, time.time() - start)
@@ -640,7 +640,7 @@ def get_saved_active_model_name() -> Optional[str]:
 
 def load_active_llm() -> Ollama:
     """Load the last active LLM if available, else fall back to default."""
-    from backend.config import LLM_REQUEST_TIMEOUT
+    from backend.config import LLM_REQUEST_TIMEOUT, get_chat_keep_alive
     
     saved_model = get_saved_active_model_name()
     if saved_model:
@@ -666,7 +666,7 @@ def load_active_llm() -> Ollama:
                         request_timeout=timeout_value,
                         temperature=temperature,
                         context_window=num_ctx,
-                        keep_alive="24h",
+                        keep_alive=get_chat_keep_alive(),  # hardware-aware: ~15m GPU / resident CPU (no 24h squat)
                         additional_kwargs={"num_ctx": num_ctx, **sampling_kwargs},
                     )
                     llm.complete("Test.")

@@ -408,6 +408,11 @@ const ChatInput = forwardRef(
     // Voice chat button ref for state access
     const _voiceChatButtonRef = useRef(null);
 
+    // Ref to the passive wake-word listener (mounted only when wakeWordEnabled).
+    // Used to stop its mic stream while push-to-talk is recording so the two
+    // independent MediaRecorders never hold the mic simultaneously.
+    const _continuousVoiceRef = useRef(null);
+
     // Propagate voice state changes to parent
     useEffect(() => {
       onVoiceStateChange(voiceState);
@@ -415,6 +420,19 @@ const ChatInput = forwardRef(
 
     // Handle voice state updates from VoiceChatButton
     const handleVoiceStateUpdate = useCallback((state) => {
+      // Dual-mic guard: when push-to-talk begins recording, stop the passive
+      // wake-word listener (if mounted + active) so we never have two live
+      // mic streams contending. The listener can be restarted by the user.
+      if (state.isRecording && _continuousVoiceRef.current) {
+        try {
+          const cvState = _continuousVoiceRef.current.getState?.();
+          if (cvState?.isListening) {
+            _continuousVoiceRef.current.stopListening?.();
+          }
+        } catch (err) {
+          debugLog("ChatInput: failed to pause wake-word listener for push-to-talk", err);
+        }
+      }
       setVoiceState(prev => ({
         ...prev,
         isListening: state.isRecording || false,
@@ -1380,9 +1398,15 @@ Total URLs: ${analysis.totalUrls}`;
             )}
           </Tooltip>
 
-          {/* Voice input: settings-driven (wakeWordEnabled → continuous listener, otherwise push-to-talk) */}
-          {wakeWordEnabled ? (
+          {/* Voice input: the push-to-talk button is ALWAYS present so the
+              talk affordance never disappears. When wakeWordEnabled is on, the
+              passive "Hey Guaardvark" listener mounts ALONGSIDE it (additive,
+              not a replacement). To avoid two live mic streams fighting, the
+              wake-word listener is stopped while push-to-talk is recording
+              (see handleVoiceStateUpdate). */}
+          {wakeWordEnabled && (
             <ContinuousVoiceChat
+              ref={_continuousVoiceRef}
               sessionId={sessionId}
               onMessageReceived={handleContinuousVoiceMessage}
               onError={handleVoiceError}
@@ -1392,16 +1416,15 @@ Total URLs: ${analysis.totalUrls}`;
               systemName={systemName || 'Guaardvark'}
               onWakeWordDetected={() => {}}
             />
-          ) : (
-            <VoiceChatButton
-              onTranscriptionReceived={handleTranscriptionReceived}
-              onError={handleVoiceError}
-              onStateChange={handleVoiceStateUpdate}
-              disabled={disabled}
-              sessionId={sessionId}
-              compact
-            />
           )}
+          <VoiceChatButton
+            onTranscriptionReceived={handleTranscriptionReceived}
+            onError={handleVoiceError}
+            onStateChange={handleVoiceStateUpdate}
+            disabled={disabled}
+            sessionId={sessionId}
+            compact
+          />
 
           {/* Slash command autocomplete popup */}
           <SlashCommandPopup

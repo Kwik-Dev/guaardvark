@@ -45,6 +45,70 @@ def _patch_chatmessage_content_setter():
 
 _local_config_applied = False
 
+
+# ---------------------------------------------------------------------------
+# Asymmetric query/passage embedding instructions (P1-4a)
+# ---------------------------------------------------------------------------
+# Many open-weight embedders are trained with *asymmetric* prefixes: queries and
+# passages are embedded with different instruction strings so they land in the
+# same subspace at retrieval time. Omitting them embeds queries and documents in
+# mismatched subspaces and silently halves recall.
+#
+# LlamaIndex's OllamaEmbedding (>=0.3) applies these via the `query_instruction`
+# and `text_instruction` fields: `_format_query`/`_format_text` produce
+# f"{instruction.strip()} {text.strip()}". So we supply the prefix *without* a
+# trailing space and the formatter joins it with a single space — matching each
+# model card's canonical convention (e.g. nomic's "search_query: <text>").
+#
+# Data-driven, fully offline. Unknown models get no prefix (safe no-op default).
+# NOTE: changing passage prefixes requires a REINDEX to take full effect, because
+# stored passage vectors must be re-embedded with the document instruction.
+def get_embedding_instructions(model_name: str):
+    """Return (query_instruction, text_instruction) for an embedding model.
+
+    Matching is substring-based and case-insensitive so tagged Ollama names
+    (e.g. "nomic-embed-text:latest", "snowflake-arctic-embed:l") resolve to the
+    right family. Returns (None, None) for unknown models — a safe default that
+    leaves embeddings unprefixed rather than guessing a wrong convention.
+    """
+    if not model_name:
+        return None, None
+    name = model_name.lower()
+
+    # nomic-embed-text (v1/v1.5): canonical task prefixes per model card.
+    if "nomic-embed-text" in name:
+        return "search_query:", "search_document:"
+
+    # Google embeddinggemma: pipe-delimited task prompts per model card.
+    if "embeddinggemma" in name:
+        return "task: search result | query:", "title: none | text:"
+
+    # BGE family (bge-m3, bge-large, ...): query instruction only; passages raw.
+    if "bge" in name:
+        return ("Represent this sentence for searching relevant passages:", None)
+
+    # E5 family (intfloat/e5, multilingual-e5): symmetric "query:"/"passage:".
+    if "e5" in name:
+        return "query:", "passage:"
+
+    # Snowflake Arctic-embed: query-side instruction; passages raw.
+    if "arctic-embed" in name or "snowflake" in name:
+        return (
+            "Represent this sentence for searching relevant passages:",
+            None,
+        )
+
+    # qwen3-embedding: instruction-aware query side; passages raw.
+    if "qwen3-embedding" in name:
+        return (
+            "Instruct: Given a search query, retrieve relevant passages\nQuery:",
+            None,
+        )
+
+    # mxbai-embed-large and anything unrecognized: no prefix (safe default).
+    return None, None
+
+
 def force_local_llama_index_config():
     """
     Forcibly configure LlamaIndex to use local models
@@ -108,6 +172,14 @@ def force_local_llama_index_config():
             from backend.config import get_active_embedding_model, get_embedding_keep_alive
 
             model_name = get_active_embedding_model()
+            query_instruction, text_instruction = get_embedding_instructions(model_name)
+            # Asymmetric query/passage prefixes (P1-4a). Only pass when defined so
+            # unknown models keep LlamaIndex's default (no prefix).
+            _instr_kwargs = {}
+            if query_instruction:
+                _instr_kwargs["query_instruction"] = query_instruction
+            if text_instruction:
+                _instr_kwargs["text_instruction"] = text_instruction
             local_embed_model = OllamaEmbedding(
                 model_name=model_name,
                 base_url="http://localhost:11434",
@@ -115,7 +187,14 @@ def force_local_llama_index_config():
                 # Hardware-aware: short TTL on GPU (frees VRAM after idle, no per-query churn),
                 # resident on CPU-only (no disk reload every cycle). See config.get_embedding_keep_alive.
                 keep_alive=get_embedding_keep_alive(),
+                **_instr_kwargs,
             )
+            if _instr_kwargs:
+                logger.info(
+                    f"Embedding instructions for {model_name}: "
+                    f"query={query_instruction!r} text={text_instruction!r} "
+                    f"(reindex required for passage prefix to take effect)"
+                )
             if not hasattr(local_embed_model, "model_name"):
                 local_embed_model.model_name = model_name
             logger.info(f"Using Ollama embedding: {model_name} (VRAM-aware selection)")
@@ -181,10 +260,21 @@ def get_local_embedding_model():
         model_name = get_active_embedding_model()
         logger.info(f"get_local_embedding_model: Using Ollama embedding: {model_name}")
 
+        # Asymmetric query/passage prefixes (P1-4a) — must match the primary
+        # client in force_local_llama_index_config() so queries and passages
+        # land in the same subspace. Reindex required for passage prefix.
+        query_instruction, text_instruction = get_embedding_instructions(model_name)
+        _instr_kwargs = {}
+        if query_instruction:
+            _instr_kwargs["query_instruction"] = query_instruction
+        if text_instruction:
+            _instr_kwargs["text_instruction"] = text_instruction
+
         return OllamaEmbedding(
             model_name=model_name,
             base_url="http://localhost:11434",
             keep_alive=get_embedding_keep_alive(),  # consistent with the primary client
+            **_instr_kwargs,
         )
     except Exception as e:
         logger.error(f"Failed to initialize Ollama embedding: {e}")
