@@ -106,6 +106,11 @@ class FactsRegistry:
             extracted.extend(self._extract_facts_from_web_search(result, iteration))
         elif tool_name == "analyze_website":
             extracted.extend(self._extract_facts_from_website_analysis(result, iteration))
+        elif tool_name == "edit_code":
+            # Per agentic audit (FactsRegistry pollution): skip code-edit diffs
+            # (hunks, paths, line numbers) to reduce noise in SI/agent loops.
+            # See code_manipulation_tools.py "Diff:" literal and rec R2.
+            pass
         else:
             # Generic extraction for other tools
             extracted.extend(self._extract_facts_generic(tool_name, result, iteration))
