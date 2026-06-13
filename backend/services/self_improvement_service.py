@@ -690,6 +690,10 @@ class SelfImprovementService:
             # human can always approve/reject from the Settings UI
             try:
                 from backend.models import db, PendingFix
+                if not getattr(self, '_current_run_id', None):
+                    logger = logging.getLogger(__name__)
+                    logger.info("PendingFix created without run_id (ad-hoc from _attempt_fix; per team audit)")
+
                 fix = PendingFix(
                     file_path=file_path,
                     proposed_diff=proposed_diff,

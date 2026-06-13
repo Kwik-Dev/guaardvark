@@ -8,11 +8,14 @@ lock-aware, protected-file-aware, and backed by a diff plus backup.
 from __future__ import annotations
 
 import difflib
+import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_EXCLUDED_SEGMENTS = {
@@ -666,6 +669,9 @@ def stage_pending_fix(
         raise GuardedCodeError("Exact text is not unique; fix was not staged.", "TEXT_NOT_UNIQUE", 409)
 
     from backend.models import PendingFix, db
+
+    if run_id is None:
+        logger.info("PendingFix staged without run_id (ad-hoc/manual from guarded; per team audit intentional for non-SI proposals)")
 
     pending = PendingFix(
         run_id=run_id,

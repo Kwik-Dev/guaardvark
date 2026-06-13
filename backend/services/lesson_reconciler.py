@@ -207,6 +207,10 @@ def scan_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> int:
             continue
 
         try:
+            if True:  # ad-hoc
+                import logging
+                logging.getLogger(__name__).info("PendingFix without run_id (ad-hoc lesson; per infra audit intentional)")
+
             fix = PendingFix(
                 file_path=abs_path,
                 original_content=original_line,

@@ -1795,7 +1795,14 @@ class SelfImprovementRun(db.Model):
 
 
 class PendingFix(db.Model):
-    """Staged code fixes awaiting review before application."""
+    """Staged code fixes awaiting review before application.
+
+    run_id nullable=True is *intentional* for ad-hoc/manual proposals
+    (e.g. direct guarded_code edits, lesson reconciler, or UI-triggered outside
+    a SelfImprovementRun). Per infra/security audit (data-integrity wart noted
+    in CLAUDE.md etc.). UI should group these under "manual/ad-hoc".
+    Prefer providing run_id when possible for audit trail.
+    """
     __tablename__ = "pending_fixes"
 
     id = db.Column(db.Integer, primary_key=True)
