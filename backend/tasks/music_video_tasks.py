@@ -507,7 +507,11 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             # (mirrors Film Crew's storyboard_artist). No-op unless LoRA
             # consistency is on AND a LoRA reference is reachable from settings.
             kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, clip_prompt)
-            img = ComfyUIImageGenerator().generate_image(
+            # Per media/vram team audit: allow per-clip keyframe LoRA strength (default 0.25
+            # matches ComfyUIImageGenerator; higher can "fry" identity, lower is safer for
+            # consistency). Source from settings if operator tuned it for this MV.
+            kf_lora_strength = float(s.get("keyframe_lora_strength", 0.25))
+            img = ComfyUIImageGenerator(lora_strength=kf_lora_strength).generate_image(
                 prompt=kf_prompt, loras=kf_loras, output_path=still_path,
                 width=s["still_width"], height=s["still_height"], seed=1000 + idx,
                 steps=kf_steps,
@@ -540,7 +544,13 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
         req = VideoGenerationRequest(**req_kwargs)
         result = get_video_generator().generate_video(req)
         if not result.success or not result.video_path:
-            raise RuntimeError(f"{i2v_model} i2v failed: {result.error or 'no video produced'}")
+            err = result.error or "no video produced"
+            if any(kw in (err or "").lower() for kw in ("oom", "out of memory", "cuda")):
+                raise RuntimeError(
+                    f"{i2v_model} i2v OOM ({err}). Reduce i2v_steps/resolution, ensure VRAM free "
+                    "(Comfy /free), or lower interpolation. See media team audit for preflight."
+                )
+            raise RuntimeError(f"{i2v_model} i2v failed: {err}")
         wan_abs = resolve_generated_video_path(result, out_dir)
         if not wan_abs.exists():
             raise RuntimeError(f"WAN output not found at resolved path: {wan_abs}")
