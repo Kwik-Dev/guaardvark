@@ -490,6 +490,25 @@ def build_unified_diff(relative_path: str, old_text: str, new_text: str) -> str:
     ))
 
 
+def _restore_from_backup(file_path: Path, original_content: str, context: str) -> None:
+    """Best-effort restore of original bytes after a post-backup failure in apply.
+
+    Surfaces a combined error if the restore itself fails (the .backup file next
+    to the target remains the operator's ultimate recovery mechanism). Never
+    silently leaves a half-written file when we can avoid it.
+    """
+    try:
+        file_path.write_text(original_content, encoding="utf-8")
+    except Exception as restore_err:
+        raise GuardedCodeError(
+            f"Failed to {context}; in-place rollback to the pre-edit content also failed. "
+            f"A sibling .backup file was created earlier and can be used for manual recovery. "
+            f"Rollback error: {restore_err}",
+            "ROLLBACK_FAILED",
+            500,
+        ) from restore_err
+
+
 def apply_exact_replacement(
     path: str,
     old_text: str,
@@ -577,34 +596,22 @@ def apply_exact_replacement(
     try:
         file_path.write_text(updated_content, encoding="utf-8")
     except Exception as e:
-        try:
-            file_path.write_text(current_content, encoding="utf-8")
-        except Exception:
-            pass
-        raise GuardedCodeError(f"Write failed: {e}", "WRITE_FAILED", 500)
+        _restore_from_backup(file_path, current_content, "write the edit")
+        raise GuardedCodeError(f"Write failed: {e}", "WRITE_FAILED", 500) from e
 
     # Validate syntax on the newly written file
     if not verify_syntax(file_path):
-        try:
-            file_path.write_text(current_content, encoding="utf-8")
-        except Exception:
-            pass
+        _restore_from_backup(file_path, current_content, "rollback after syntax verification failure")
         raise GuardedCodeError("Edit introduced syntax errors; edit was rolled back.", "SYNTAX_CHECK_FAILED", 400)
 
     try:
         verify_content = file_path.read_text(encoding="utf-8")
     except Exception as e:
-        try:
-            file_path.write_text(current_content, encoding="utf-8")
-        except Exception:
-            pass
-        raise GuardedCodeError(f"Post-write verify read failed: {e}", "VERIFY_READ_FAILED", 500)
+        _restore_from_backup(file_path, current_content, "rollback after post-write read verification failure")
+        raise GuardedCodeError(f"Post-write verify read failed: {e}", "VERIFY_READ_FAILED", 500) from e
 
     if verify_content != updated_content:
-        try:
-            file_path.write_text(current_content, encoding="utf-8")
-        except Exception:
-            pass
+        _restore_from_backup(file_path, current_content, "restore after post-write verification mismatch")
         raise GuardedCodeError("Post-write verification failed; edit was rolled back.", "VERIFY_FAILED", 500)
 
     return GuardedEditResult(
