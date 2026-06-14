@@ -86,5 +86,27 @@ class HardwareService:
                     
             except Exception as e:
                 logger.error(f"Error detecting GPU properties: {e}")
+        elif getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
+            caps["device_type"] = "mps"
+            caps["gpu_name"] = "Apple Metal (MPS)"
+            caps["vram_total_mb"] = None  # MPS VRAM not directly queryable like CUDA
+            config = caps["recommended_config"]
+            config.update({"use_4bit": False, "lora_rank": 8, "batch_size": 1, "cpu_offload": True})
+        elif getattr(torch.version, 'hip', None):
+            caps["device_type"] = "rocm"
+            caps["gpu_name"] = "AMD ROCm (HIP)"
+            try:
+                caps["vram_total_mb"] = int(torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)) if torch.cuda.is_available() else None
+            except:
+                caps["vram_total_mb"] = None
+            config = caps["recommended_config"]
+            config.update({"use_4bit": True, "lora_rank": 16, "batch_size": 2, "cpu_offload": False})
+        else:
+            caps["device_type"] = "cpu"
+            caps["gpu_name"] = "CPU-only"
+            caps["vram_total_mb"] = None
+            config = caps["recommended_config"]
+            config.update({"use_4bit": False, "lora_rank": 8, "batch_size": 1, "cpu_offload": True, "max_seq_length": 2048})
+            logger.info("Hardware: CPU-only / no accelerator detected")
         
         return caps

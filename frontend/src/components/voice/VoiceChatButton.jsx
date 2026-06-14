@@ -600,7 +600,7 @@ const VoiceChatButton = ({
     const idleHeights = [0.22, 0.38, 0.28, 0.45, 0.28, 0.38, 0.22];
 
     return (
-      <Tooltip title={isProcessing ? 'Processing...' : isRecording ? 'Stop recording' : 'Push to talk'}>
+      <Tooltip title={isProcessing ? 'Processing...' : isRecording ? 'Stop recording' : 'Hold to push-to-talk (or click toggle). Wake-word gates passive only; buttons always visible.'}>
         <IconButton
           onClick={handleClick}
           disabled={disabled || (isProcessing && !isRecording) || permission === 'denied' || !micEnabled}

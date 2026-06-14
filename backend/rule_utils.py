@@ -198,7 +198,7 @@ def get_formatted_rules(
         )
         return result
     except Exception as e:
-        logger.error("Database error fetching formatted rules: %s", e, exc_info=True)
+        logger.error("Database error fetching formatted rules: %s", e, exc_info=True)  # noqa: BLE001 - rule fetch failure returns safe fallback per infra
         return "[Error fetching rules]\n"
 
 

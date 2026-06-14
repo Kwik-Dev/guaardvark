@@ -262,10 +262,11 @@ class VoiceService {
   /**
    * Convert text to speech
    */
-  async textToSpeech(text, voice = 'libritts', engine = null) {
+  async textToSpeech(text, voice = 'libritts', engine = null, options = {}) {
     try {
       const body = { text, voice };
       if (engine) body.engine = engine;
+      if (options.stream) body.stream = true;
 
       const response = await fetch(`${BASE_URL}/voice/text-to-speech`, {
         method: 'POST',
@@ -275,6 +276,11 @@ class VoiceService {
         body: JSON.stringify(body),
       });
 
+      if (options.stream) {
+        // Return raw response for first-chunk streaming play (backend yields incremental WAVs).
+        // Caller (VoiceContext) can use reader or blob for incremental <audio>.
+        return { stream: true, response, audio_url: null };
+      }
       return await handleResponse(response);
     } catch (error) {
       console.error('Failed to convert text to speech:', error);

@@ -140,7 +140,7 @@ export const VoiceProvider = ({ children }) => {
       .replace(/([^.!?])\s*$/, '$1.'); // Add period if doesn't end with punctuation
   }, []);
 
-  const speak = useCallback(async (text) => {
+  const speak = useCallback(async (text, options = {}) => {
     if (!text || !ttsEnabled) return;
     try {
       incrementActiveTTS();
@@ -150,8 +150,16 @@ export const VoiceProvider = ({ children }) => {
         cleanedLength: cleanedText.length,
       });
       
-      const result = await textToSpeech(cleanedText, selectedVoice);
-      if (result.audio_url) {
+      const result = await textToSpeech(cleanedText, selectedVoice, null, options);
+      if (result.stream && result.response) {
+        // First-chunk streaming integration (per voice audit + backend /stream support).
+        // Convert incremental response to blob for play (or use reader for true chunked <audio>).
+        // Backend now yields first WAV chunk ASAP for lower perceived latency.
+        const blob = await result.response.blob();
+        const audioUrl = URL.createObjectURL(blob);
+        await playAudio(audioUrl);
+        // Note: for true multi-chunk without full wait, use MediaSource + appendBuffer on reader.
+      } else if (result.audio_url) {
         const audioUrl = `${BACKEND_URL}${result.audio_url}`;
         await playAudio(audioUrl);
       }

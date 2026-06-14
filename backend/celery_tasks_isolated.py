@@ -224,6 +224,7 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
             return True
 
         except Exception:
+            logger.warning("Rolling back session on error (non-fatal for audit)", exc_info=True)  # noqa: BLE001 - cleanup must not leave inconsistent state
             session.rollback()
             raise
         finally:
@@ -293,6 +294,7 @@ def simple_index_document(file_path, document_id):
                     logger.info(f"Enhanced code file indexing completed for document {document_id}: {metadata['line_count']} lines, {metadata['char_count']} characters")
 
                 except Exception:
+                    logger.warning("Rolling back on bulk import error (non-fatal)", exc_info=True)  # noqa: BLE001
                     session.rollback()
                     raise
                 finally:

@@ -108,7 +108,10 @@ if [ -f "$MANAGER_SCRIPT" ]; then
     fi
 fi
 
-PYTHON_CMD="python3"
+# Interpreter used for the version gate and venv creation. Override when the
+# system `python3` isn't 3.12 (e.g. deadsnakes installs `python3.12` side-by-side
+# without repointing the symlink): `PYTHON_CMD=python3.12 ./start.sh` (or set it in .env).
+PYTHON_CMD="${PYTHON_CMD:-python3}"
 NPM_CMD="npm"
 OLLAMA_SERVICE_NAME="ollama"
 BACKEND_DIR="$SCRIPT_DIR/backend"
@@ -263,12 +266,12 @@ check_with_cache() {
 }
 
 check_python_version() {
-    if ! command_exists python3; then
-        vader_error "python3 not found. Install via: apt-get install -y python3 python3-venv python3-dev python3-pip"
+    if ! command_exists "$PYTHON_CMD"; then
+        vader_error "$PYTHON_CMD not found. Install via: apt-get install -y python3 python3-venv python3-dev python3-pip"
         return 1
     fi
     local ver
-    ver=$(python3 --version 2>&1 | awk '{print $2}')
+    ver=$("$PYTHON_CMD" --version 2>&1 | awk '{print $2}')
     local major=${ver%%.*}
     local minor=${ver#*.}
     minor=${minor%%.*}
@@ -278,7 +281,7 @@ check_python_version() {
     # instead. NOTE: the old logic was inverted — it returned success for 3.13+
     # and fell through to a failure for 3.12, the one version that works.
     if [ "$major" -ne 3 ] || [ "$minor" -lt 12 ]; then
-        vader_error "Python 3.12 is required (found $ver). Install it: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev python3.12-distutils', then re-run."
+        vader_error "Python 3.12 is required (found $ver). Install it: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev' (on Ubuntu 22.04, add the deadsnakes PPA first; note 3.12 has no distutils package), then re-run with 'PYTHON_CMD=python3.12 ./start.sh'."
         return 1
     fi
     if [ "$minor" -ge 13 ]; then
@@ -549,6 +552,22 @@ check_frontend_build() {
     fi
 
     return 0
+}
+
+# get_lan_ips - return space-separated list of private LAN IPv4 addresses suitable
+# for "access from phone on the same network". Used for the prominent LAN Access
+# section and to opt the detected LAN IP into VITE_ALLOWED_HOSTS so `vite preview`
+# (which carries its own proxy + host allowlist) will serve the page over the LAN.
+get_lan_ips() {
+    local ips
+    # Prefer hostname -I (common on Debian/Ubuntu etc.); fall back to ip tool.
+    if command -v hostname >/dev/null 2>&1; then
+        ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | tr '\n' ' ' | sed 's/ $//')
+    fi
+    if [ -z "$ips" ] && command -v ip >/dev/null 2>&1; then
+        ips=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -E '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | tr '\n' ' ' | sed 's/ $//')
+    fi
+    echo "$ips"
 }
 
 
@@ -828,6 +847,16 @@ ensure_backend_python_environment() {
         # The smart GPU/CUDA PyTorch installer (also called by dep_reconciler)
         if [ -f "$SCRIPT_DIR/scripts/install_pytorch.sh" ]; then
             bash "$SCRIPT_DIR/scripts/install_pytorch.sh" >> "$SETUP_LOG" 2>&1 || vader_warn "install_pytorch.sh exited non-zero (GPU mode may be limited)"
+            # Gate nvidia-ml-py post-torch per edge audit (avoid FutureWarning/unneeded dep on CPU/ARM/ROCm/Metal).
+            if ! command -v nvidia-smi &> /dev/null; then
+                "$VENV_DIR/bin/pip" uninstall -y nvidia-ml-py pynvml 2>/dev/null | tail -1 || true
+            fi
+            # install_pytorch.sh's `pip install --upgrade ... --index-url .../whl/<ver>` can
+            # drag numpy 2.x + an old setuptools back in, violating the ML-stack pins
+            # (numpy<2.0) and llama-index (setuptools>=80.9.0). Re-assert them without
+            # touching torch (--no-deps). Reconciled from PR #40 (anubissbe).
+            pip install --no-deps --force-reinstall 'numpy<2.0,>=1.26.4' 'setuptools>=80.9.0,<81' >> "$SETUP_LOG" 2>&1 \
+                || vader_warn "Could not re-pin numpy/setuptools after PyTorch — check 'pip check'."
         fi
 
         # Full reconciler pass for state tracking, CRITICAL_PACKAGES verification, cli_venv, etc.
@@ -1702,8 +1731,8 @@ echo "$BACKEND_PID" > "$SCRIPT_DIR/pids/backend.pid"
 
 sleep 4
 
-if ! is_port_listening "$FLASK_PORT" 30 "Backend"; then
-    vader_error "Backend failed to start listening on port $FLASK_PORT after 30 seconds."
+if ! is_port_listening "$FLASK_PORT" 90 "Backend"; then
+    vader_error "Backend failed to start listening on port $FLASK_PORT after 90 seconds."
     if [ -f "$BACKEND_STARTUP_LOG_FILE" ]; then
         vader_error "Last 10 lines of startup log:"
         tail -n 10 "$BACKEND_STARTUP_LOG_FILE"
@@ -1784,6 +1813,29 @@ export VITE_PORT
 FRONTEND_CAN_SERVE=1
 # Belt-and-suspenders: make sure node_modules are present before the guaranteed build
 ensure_frontend_deps
+
+# LAN awareness for the preview (static) frontend bundle.
+# `vite preview` now carries its own proxy + host allowlist (see the `preview:`
+# block in frontend/vite.config.js, reconciled from PR #40): relative /api and
+# /socket.io requests from a page loaded at a LAN IP are proxied server-side to
+# Flask, and WebSockets upgrade through it. So we do NOT bake an absolute
+# http://<lan-ip>:<FLASK> into the bundle anymore — that hardcoded a single
+# build-time IP and broke on multi-NIC / DHCP-change boxes. Relative URLs through
+# the preview proxy are robust to whichever host the client actually reaches.
+#
+# The one thing the preview server needs is permission to serve a non-localhost
+# Host header (otherwise Vite answers "Blocked request"). Opt the detected LAN IP
+# into VITE_ALLOWED_HOSTS so the normal start.sh path just works on the LAN, while
+# a bare `vite preview`/`vite` run stays localhost-only by default (PR #40 policy).
+PRIMARY_LAN_IP=$(get_lan_ips | awk '{print $1}')
+if [ -n "$PRIMARY_LAN_IP" ]; then
+    # Honor any pre-set VITE_ALLOWED_HOSTS (.env), else allow the detected LAN IP.
+    export VITE_ALLOWED_HOSTS="${VITE_ALLOWED_HOSTS:-$PRIMARY_LAN_IP}"
+    vader_info "LAN IP detected (${PRIMARY_LAN_IP}); allowing it in vite preview (VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS}). Frontend uses relative URLs proxied to Flask."
+else
+    vader_info "No private LAN IP detected; preview stays localhost-only (set VITE_ALLOWED_HOSTS to enable LAN access)."
+fi
+
 vader_info "Building frontend (production) before serving..."
 if (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$FRONTEND_LOG_FILE" 2>&1); then
     vader_success "Frontend build complete"
@@ -1843,7 +1895,7 @@ if [ "$LAUNCH_BROWSER" -eq 1 ] && [ "$TEST_MODE" -eq 0 ]; then
         launch_browser_app "http://localhost:$VITE_PORT"
     else
         vader_warn "Frontend not ready yet. Skipping browser launch."
-        vader_info "You can manually open: http://localhost:$VITE_PORT"
+        vader_info "You can manually open: http://localhost:$VITE_PORT (or the LAN IP printed below)"
     fi
 fi
 
@@ -2041,6 +2093,33 @@ if [ "$VOICE_CHECK" -eq 1 ]; then
 echo -e "  ${VADER_WHITE}Voice API Status:${VADER_RESET} ${VADER_RED}http://localhost:$FLASK_PORT/api/voice/status${VADER_RESET}"
 fi
 echo ""
+
+# LAN / phone / tablet access (the main addition for this feature).
+# Printed using the same PRIMARY_LAN_IP we baked into the frontend bundle (if any).
+# Users on the same Wi-Fi simply open the Frontend line in Android Chrome (or any browser)
+# and use regular chat or the /voice-chat interface to drive agentic tasks.
+LAN_IPS_PRINTED=""
+if [ -n "$PRIMARY_LAN_IP" ]; then
+    LAN_IPS_PRINTED="http://${PRIMARY_LAN_IP}:$VITE_PORT"
+    vader_title "LAN / Network Access (phone, tablet, other devices on same Wi-Fi/LAN):"
+    echo -e "  ${VADER_WHITE}Frontend (text chat + voice chat):${VADER_RESET} ${VADER_RED}http://${PRIMARY_LAN_IP}:$VITE_PORT${VADER_RESET}"
+    echo -e "  ${VADER_WHITE}Backend (direct):${VADER_RESET} ${VADER_RED}http://${PRIMARY_LAN_IP}:$FLASK_PORT${VADER_RESET}"
+    echo -e "  ${VADER_GRAY}Open the Frontend URL above from your Android device (same network).${VADER_RESET}"
+    echo -e "  ${VADER_GRAY}Grant microphone permission for voice chat. All traffic is local.${VADER_RESET}"
+    echo ""
+else
+    # Fallback: compute at print time in case the build-time one was empty
+    _late_lan=$(get_lan_ips | awk '{print $1}')
+    if [ -n "$_late_lan" ]; then
+        LAN_IPS_PRINTED="http://${_late_lan}:$VITE_PORT"
+        vader_title "LAN / Network Access (phone, tablet, other devices on same Wi-Fi/LAN):"
+        echo -e "  ${VADER_WHITE}Frontend (text chat + voice chat):${VADER_RESET} ${VADER_RED}http://${_late_lan}:$VITE_PORT${VADER_RESET}"
+        echo -e "  ${VADER_WHITE}Backend (direct):${VADER_RESET} ${VADER_RED}http://${_late_lan}:$FLASK_PORT${VADER_RESET}"
+        echo -e "  ${VADER_GRAY}Open the Frontend URL above from your Android device (same network).${VADER_RESET}"
+        echo -e "  ${VADER_GRAY}Grant microphone permission for voice chat. All traffic is local.${VADER_RESET}"
+        echo ""
+    fi
+fi
 
 vader_title "Log Files:"
 echo -e "  ${VADER_GRAY}Backend startup:${VADER_RESET} ${VADER_WHITE}$BACKEND_STARTUP_LOG_FILE${VADER_RESET}"

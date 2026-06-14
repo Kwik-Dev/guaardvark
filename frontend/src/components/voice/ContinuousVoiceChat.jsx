@@ -1139,16 +1139,38 @@ const ContinuousVoiceChat = React.forwardRef(({
         !isModifierPressed
       ) {
         event.preventDefault();
-        handleToggle();
+        if (!isListening) {
+          handleStart(); // momentary down=start
+        }
+      }
+    };
+
+    const handleKeyUp = (event) => {
+      const isInputFocused =
+        document.activeElement?.tagName === 'INPUT' ||
+        document.activeElement?.tagName === 'TEXTAREA' ||
+        document.activeElement?.isContentEditable;
+      const isModifierPressed = event.ctrlKey || event.altKey || event.metaKey;
+      if (
+        event.code === 'Space' &&
+        !isInputFocused &&
+        !isModifierPressed
+      ) {
+        event.preventDefault();
+        if (isListening) {
+          handleStop(); // up=stop
+        }
       }
     };
 
     document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
 
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keyup', handleKeyUp);
     };
-  }, [keyboardShortcutEnabled, handleToggle]);
+  }, [keyboardShortcutEnabled, handleStart, handleStop, isListening]);
 
   useEffect(() => {
     isMountedRef.current = true;
