@@ -448,9 +448,12 @@ class AgentControlService:
         }
 
     def execute_task(self, task: str, screen, mouse_only: bool = False, training_mode: bool = False,
-                     emit_fn: Optional[Callable] = None, chat_context: str = "") -> AgentResult:
+                     emit_fn: Optional[Callable] = None, chat_context: str = "", max_steps: Optional[int] = None) -> AgentResult:
         """
         Execute a task using the see-think-act loop.
+
+        max_steps: optional cross-tier termination budget from AgentBrain (see TOTAL_STEP_CAP).
+                   Caps the vision agent loop iterations in addition to config/training limits.
 
         Args:
             task: Natural language description of the task
@@ -578,6 +581,8 @@ class AgentControlService:
 
         # Training mode: crank up limits so the agent keeps practicing
         max_iters = 1000 if training_mode else self.config.max_iterations
+        if max_steps is not None:
+            max_iters = min(max_iters, max(1, int(max_steps)))
         task_timeout = 3600 if training_mode else self.config.task_timeout_seconds  # 1 hour for training
 
         try:

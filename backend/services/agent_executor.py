@@ -333,7 +333,7 @@ class AgentExecutor:
         """Set extra kwargs that get forwarded to every tool execute() call."""
         self._tool_context.update(kwargs)
     
-    def execute(self, user_query: str, session_context: str = "", process_id: Optional[str] = None) -> AgentResult:
+    def execute(self, user_query: str, session_context: str = "", process_id: Optional[str] = None, max_steps: Optional[int] = None) -> AgentResult:
         """
         Execute agent loop with tool calls
         
@@ -341,6 +341,7 @@ class AgentExecutor:
             user_query: User's question or request
             session_context: Additional context from session
             process_id: Optional process ID from system coordinator
+            max_steps: optional cross-tier budget from brain to cap this ReACT executor.
             
         Returns:
             AgentResult with final answer and execution steps
@@ -352,6 +353,9 @@ class AgentExecutor:
             steps = []
             self.original_query = user_query  # Store for synthesis step
             self._tool_history = []  # Track tools called across iterations
+
+            if max_steps is not None:
+                self.max_iterations = min(self.max_iterations, max(1, int(max_steps)))
 
             if self.llm is None or not hasattr(self.llm, "chat"):
                 error = (

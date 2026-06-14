@@ -222,7 +222,13 @@ class ComfyUIVideoGenerator:
     # all (not headroom-for-comfort). Used by the preflight in generate_video to
     # turn a silent OOM into an honest "this model needs ~N GB" message on the
     # install base. Keyed by the model id; family fallbacks below cover aliases.
-    #   cogvideox-2b ~8, cogvideox-5b ~16, wan22-14b ~16.
+    #
+    # Note on real hardware (2026-06): "16 GB" consumer cards (e.g. 4070 Ti SUPER)
+    # commonly report 15900-16400 MB total via pynvml/nvidia-smi/ComfyUI because
+    # of driver/display reservation. The GGUF Q5 WAN 14B paths + music-video's
+    # 832x480 preview res were explicitly built for this class of card.
+    # Preflight therefore uses a small tolerance (see _vram_preflight) so it only
+    # hard-blocks on truly under-spec hardware while still giving clear guidance.
     MODEL_MIN_VRAM_GB = {
         "cogvideox-2b": 8,
         "cogvideox-5b": 16,
@@ -327,9 +333,17 @@ class ComfyUIVideoGenerator:
             return None  # unknown total → fail open
         total_gb = total_mb / 1024.0
         need = self._min_vram_gb_for(model)
-        if need and total_gb < need:
+        # Tolerance for real "16 GB" consumer cards (common 15.5-16.0 GB reported
+        # total after driver/display reservation). The quantized GGUF paths and
+        # music-video's 832x480 preview res target exactly this hardware class.
+        # We still hard-block true under-spec cards (e.g. 12 GB or less) and any
+        # probe failure is fail-open (existing behavior).
+        # Use MB math for the tolerance check to avoid float edge cases.
+        need_mb = need * 1024
+        if need and total_mb + 512 < need_mb:  # ~0.5 GB grace
             return (
-                f"{model} needs ~{need}g GB VRAM; detected {total_gb:.0f}g GB. "
+                f"{model} needs ~{need}g GB VRAM; detected {total_gb:.2f}g GB "
+                f"({total_mb} MB total). "
                 "Try a lighter model or preview resolution."
             )
         return None
@@ -1712,13 +1726,36 @@ class ComfyUIVideoGenerator:
                 except Exception as reg_err:
                     logger.warning(f"Video registration into Documents failed (non-critical): {reg_err}")
 
+            # Post-frame (incl. post-upscale) VRAM hygiene to prevent leaks across batches/frames.
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
             return result
 
         except Exception as e:
             logger.error(f"Error during video generation: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            result.error = str(e)
+            err_str = str(e)
+            is_oom = (
+                "out of memory" in err_str.lower()
+                or "OutOfMemory" in err_str
+                or "CUDA out of memory" in err_str
+                or "torch.cuda.OutOfMemoryError" in err_str
+                or ("RuntimeError" in str(type(e)) and "memory" in err_str.lower())
+            )
+            if is_oom:
+                result.error = "OOM during ComfyUI video generation (VRAM exhausted; reduce res/steps, disable upscale/LoRA, or free other models first)"
+                try:
+                    self.service_available = False
+                except Exception:
+                    pass
+            else:
+                result.error = err_str
             result.success = False
             return result
 

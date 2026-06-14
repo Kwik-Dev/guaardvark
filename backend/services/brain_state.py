@@ -95,6 +95,7 @@ class TierTelemetry:
     success: bool = True
     model: str = ""
     timestamp: str = ""
+    total_agent_steps: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -108,6 +109,7 @@ class TierTelemetry:
             "success": self.success,
             "model": self.model,
             "timestamp": self.timestamp,
+            "total_agent_steps": self.total_agent_steps,
         }
 
     @staticmethod

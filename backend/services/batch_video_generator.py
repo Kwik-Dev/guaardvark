@@ -351,15 +351,29 @@ class BatchVideoGenerator:
                     else:
                         status.failed_videos += 1
                 except Exception as e:  # pragma: no cover - runtime safety
+                    err_str = str(e)
                     logger.error(f"Error generating video for item {item.id}: {e}")
+                    is_oom = (
+                        isinstance(e, RuntimeError) and ("out of memory" in err_str.lower() or "cuda" in err_str.lower() and "memory" in err_str.lower())
+                        or "torch.cuda.OutOfMemoryError" in str(type(e)) or "OutOfMemory" in err_str
+                        or "CUDA out of memory" in err_str
+                    )
                     status.failed_videos += 1
+                    oom_note = " (OOM - VRAM exhausted; try smaller res/fewer steps or evict other models)" if is_oom else ""
+                    if is_oom and hasattr(self, "video_generator") and hasattr(self.video_generator, "service_available"):
+                        try:
+                            self.video_generator.service_available = False
+                        except Exception:
+                            pass
                     status.results.append(
                         BatchVideoResult(
                             item_id=item.id,
                             success=False,
-                            error=str(e),
+                            error=err_str + oom_note,
                         )
                     )
+                    if is_oom:
+                        status.error = (status.error or "") + "OOM in batch item; "
                 finally:
                     self._save_metadata(status)
 

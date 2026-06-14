@@ -2,6 +2,7 @@ import logging
 import time
 import io
 import numpy as np
+import threading
 
 from flask_socketio import emit, join_room
 
@@ -10,15 +11,59 @@ from backend.socketio_instance import socketio
 
 logger = logging.getLogger(__name__)
 
+_voice_stream_lock = threading.Lock()
+
+
+def _prune_voice_buffers():
+    """Enforce max streams, max per-buffer size, and TTL. Called on every voice event."""
+    global voice_stream_buffers, _voice_stream_meta
+    now = time.time()
+    with _voice_stream_lock:
+        # TTL first
+        expired = [sid for sid, meta in _voice_stream_meta.items()
+                   if now - meta.get("last", meta.get("created_at", 0)) > VOICE_STREAM_TTL_S]
+        for sid in expired:
+            voice_stream_buffers.pop(sid, None)
+            _voice_stream_meta.pop(sid, None)
+        # Enforce max streams (evict oldest)
+        if len(voice_stream_buffers) > MAX_VOICE_STREAMS:
+            # oldest by last activity
+            sorted_sids = sorted(_voice_stream_meta.items(), key=lambda kv: kv[1].get("last", 0))
+            for sid, _ in sorted_sids[:len(voice_stream_buffers) - MAX_VOICE_STREAMS]:
+                voice_stream_buffers.pop(sid, None)
+                _voice_stream_meta.pop(sid, None)
+        # Cap individual buffer sizes (drop oldest bytes if over)
+        for sid, buf in list(voice_stream_buffers.items()):
+            if len(buf) > MAX_BUFFER_BYTES:
+                # keep tail (recent)
+                voice_stream_buffers[sid] = buf[-MAX_BUFFER_BYTES:]
+                if sid in _voice_stream_meta:
+                    _voice_stream_meta[sid]["size"] = len(voice_stream_buffers[sid])
+
 # --- Voice Streaming Events ---
 # In-memory buffer for continuous voice streaming
+# Bounded + TTL to prevent unbounded growth on Redis loss or long-lived sessions (infra rec).
+MAX_VOICE_STREAMS = 64
+MAX_BUFFER_BYTES = 64 * 1024 * 1024  # 64 MiB per session cap
+VOICE_STREAM_TTL_S = 300  # 5 min idle TTL
+
 voice_stream_buffers = {}
+_voice_stream_meta = {}  # session_id -> {"created_at": ts, "last": ts, "size": int}
 
 @socketio.on("voice:stream_start")
 def handle_voice_stream_start(data):
     """Initialize a new voice stream session."""
+    _prune_voice_buffers()
     session_id = data.get("session_id", "default")
-    voice_stream_buffers[session_id] = bytearray()
+    with _voice_stream_lock:
+        if len(voice_stream_buffers) >= MAX_VOICE_STREAMS:
+            # evict one oldest before adding
+            if _voice_stream_meta:
+                oldest = min(_voice_stream_meta.items(), key=lambda kv: kv[1].get("last", 0))[0]
+                voice_stream_buffers.pop(oldest, None)
+                _voice_stream_meta.pop(oldest, None)
+        voice_stream_buffers[session_id] = bytearray()
+        _voice_stream_meta[session_id] = {"created_at": time.time(), "last": time.time(), "size": 0}
     join_room(f"voice_{session_id}")
     logger.info(f"Voice stream started for session: {session_id}")
     emit("voice:stream_ack", {"status": "started", "session_id": session_id})
@@ -26,17 +71,27 @@ def handle_voice_stream_start(data):
 @socketio.on("voice:stream_chunk")
 def handle_voice_stream_chunk(data):
     """Receive a chunk of audio data and perform partial STT."""
+    _prune_voice_buffers()
     session_id = data.get("session_id", "default")
     chunk = data.get("audio") # Expected to be bytes (WebM or PCM)
     
     if not chunk:
         return
         
-    if session_id not in voice_stream_buffers:
-        voice_stream_buffers[session_id] = bytearray()
+    with _voice_stream_lock:
+        if session_id not in voice_stream_buffers:
+            voice_stream_buffers[session_id] = bytearray()
+            _voice_stream_meta.setdefault(session_id, {"created_at": time.time(), "last": time.time(), "size": 0})
+        buf = voice_stream_buffers[session_id]
+        buf.extend(chunk)
+        meta = _voice_stream_meta[session_id]
+        meta["last"] = time.time()
+        meta["size"] = len(buf)
+        # Hard cap per buffer (drop head if needed to keep tail)
+        if len(buf) > MAX_BUFFER_BYTES:
+            voice_stream_buffers[session_id] = buf[-MAX_BUFFER_BYTES:]
+            meta["size"] = len(voice_stream_buffers[session_id])
         
-    voice_stream_buffers[session_id].extend(chunk)
-    
     # We can perform partial STT here if the buffer is large enough
     # For simplicity and performance, we'll wait for stream_end or process every N bytes
     # A full real-time sliding window would decode the accumulated WebM bytes to PCM
@@ -49,13 +104,17 @@ def handle_voice_stream_chunk(data):
 @socketio.on("voice:stream_end")
 def handle_voice_stream_end(data):
     """Process the complete audio buffer and return final transcript."""
+    _prune_voice_buffers()
     session_id = data.get("session_id", "default")
     
-    if session_id not in voice_stream_buffers or not voice_stream_buffers[session_id]:
-        emit("voice:final_transcript", {"text": "", "session_id": session_id})
-        return
-        
-    audio_bytes = voice_stream_buffers.pop(session_id)
+    with _voice_stream_lock:
+        if session_id not in voice_stream_buffers or not voice_stream_buffers[session_id]:
+            _voice_stream_meta.pop(session_id, None)
+            emit("voice:final_transcript", {"text": "", "session_id": session_id})
+            return
+            
+        audio_bytes = voice_stream_buffers.pop(session_id)
+        _voice_stream_meta.pop(session_id, None)
     logger.info(f"Voice stream ended for session: {session_id}, processing {len(audio_bytes)} bytes")
     
     try:

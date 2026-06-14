@@ -580,6 +580,7 @@ def _initialize_app_components(app):
             poll_count = 0
             TERMINAL_STATUSES = {'complete', 'error', 'cancelled', 'end'}
             STALE_THRESHOLD = 2700  # 45 minutes - indexing can take 15-25 min per doc
+            REDIS_LOSS_STALE = 300    # 5 min aggressive when Redis relay is down (loss detection)
             # Adaptive cadence: this loop is also the ONLY stale-job reaper, so
             # it must keep running forever. But on an idle, offline box the old
             # fixed 1s sleep was a per-second stat storm for nothing. So we poll
@@ -616,7 +617,9 @@ def _initialize_app_components(app):
                                     continue
 
                                 # Mark stale non-terminal files as error (zombie job cleanup)
-                                if time.time() - current_mtime > STALE_THRESHOLD:
+                                # Improve detection on Redis loss: use shorter threshold when relay not healthy.
+                                effective_stale = REDIS_LOSS_STALE if not getattr(app, '_redis_healthy', True) else STALE_THRESHOLD
+                                if time.time() - current_mtime > effective_stale:
                                     try:
                                         with open(metadata_file, 'r') as f:
                                             stale_meta = json.load(f)
@@ -698,27 +701,39 @@ def _initialize_app_components(app):
         # Redis pub/sub relay: Celery workers publish progress to Redis,
         # this thread subscribes and re-emits via SocketIO
         # Guard: only start one relay thread per process
+        app._redis_healthy = True
         if not getattr(app, '_redis_relay_started', False):
             app._redis_relay_started = True
 
             def relay_redis_progress():
-                try:
-                    r = redis.Redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379/0'))
-                    pubsub = r.pubsub()
-                    pubsub.subscribe('guaardvark:progress')
-                    app.logger.info("Redis progress relay subscribed to guaardvark:progress")
-                    for msg in pubsub.listen():
-                        if msg['type'] == 'message':
-                            try:
-                                event_data = json.loads(msg['data'])
-                                process_id = event_data.get('job_id', '')
-                                if process_id:
-                                    socketio.emit('job_progress', event_data, to=process_id, namespace='/')
-                                socketio.emit('job_progress', event_data, to='global_progress', namespace='/')
-                            except (json.JSONDecodeError, KeyError) as e:
-                                app.logger.warning(f"Bad progress message from Redis: {e}")
-                except Exception as e:
-                    app.logger.error(f"Redis progress relay error: {e}")
+                """Redis pub/sub relay with reconnect on loss (infra rec: detect loss faster than 45min FS stale)."""
+                redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+                reconnect_delay = 5
+                while True:
+                    try:
+                        r = redis.Redis.from_url(redis_url)
+                        # Probe connection
+                        r.ping()
+                        app._redis_healthy = True
+                        pubsub = r.pubsub()
+                        pubsub.subscribe('guaardvark:progress')
+                        app.logger.info("Redis progress relay subscribed to guaardvark:progress")
+                        reconnect_delay = 5
+                        for msg in pubsub.listen():
+                            if msg['type'] == 'message':
+                                try:
+                                    event_data = json.loads(msg['data'])
+                                    process_id = event_data.get('job_id', '')
+                                    if process_id:
+                                        socketio.emit('job_progress', event_data, to=process_id, namespace='/')
+                                    socketio.emit('job_progress', event_data, to='global_progress', namespace='/')
+                                except (json.JSONDecodeError, KeyError) as e:
+                                    app.logger.warning(f"Bad progress message from Redis: {e}")
+                    except Exception as e:
+                        app._redis_healthy = False
+                        app.logger.warning(f"Redis progress relay lost (will reconnect): {e}")
+                        time.sleep(reconnect_delay)
+                        reconnect_delay = min(30, reconnect_delay * 2)  # backoff
 
             relay_thread = threading.Thread(target=relay_redis_progress, daemon=True)
             relay_thread.start()

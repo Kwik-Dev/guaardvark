@@ -134,6 +134,8 @@ class AgentBrain:
     interactions.  Sits in front of existing code without modifying it.
     """
 
+    TOTAL_STEP_CAP = 20  # cross-tier inherited budget (per agentic-tooling R1) to cap total steps across tiers and prevent accumulation on escalation from Instinct->Deliberation or Gemma direct.
+
     def __init__(self, state: Optional[BrainState] = None):
         self.state = state or BrainState.get_instance()
 
@@ -176,6 +178,13 @@ class AgentBrain:
         escalation_reason = None
         success = True
 
+        # Cross-tier step budget (per agentic-tooling R1 + lead): inherited cap passed
+        # down to sub-tiers (UCE/Executor/ACS loops) + decremented on escalation to
+        # avoid step blowup (e.g. Tier2 max8 + Tier3 max10). Add telemetry total_agent_steps.
+        max_steps = kwargs.pop('max_steps', self.TOTAL_STEP_CAP)
+        remaining_steps = max(1, int(max_steps))
+        steps_used = 0  # for telemetry
+
         # Clear any abort flag from a previous request on this session
         # so we don't immediately abort ourselves.
         clear_abort_flag(session_id)
@@ -200,7 +209,7 @@ class AgentBrain:
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
-                    request_id=request_id, **kwargs,
+                    request_id=request_id, max_steps=remaining_steps, **kwargs,
                 )
                 if result is not None:
                     tier_used = result.get("tier", 2)
@@ -210,11 +219,13 @@ class AgentBrain:
             # Force tier if requested (e.g., agent_chat_api always uses Tier 3)
             if force_tier == 3:
                 tier_used = 3
+                remaining_steps = max(1, remaining_steps)
+                steps_used += 1
                 return self._deliberate(
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
-                    **kwargs,
+                    max_steps=remaining_steps,
                 )
 
             # -- Tier 1: Reflexes (<1ms check, <100ms execute) --
@@ -253,39 +264,44 @@ class AgentBrain:
             _screen_viewer_open = bool(options and options.get("screen_viewer_open", False))
             if self._is_vision_task(message, image_data) and (image_data or _screen_active or _screen_viewer_open):
                 tier_used = 2  # Vision goes through Tier 2 with vision prompt
+                remaining_steps = max(1, remaining_steps)
                 return self._instinct(
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
-                    prompt_key="vision", **kwargs,
+                    prompt_key="vision", max_steps=remaining_steps,
                 )
 
             # -- Conversational pass-through (Tier 2, no tools) --
             if CONVERSATIONAL_PASSTHROUGH.match(message.strip()):
                 tier_used = 2
+                remaining_steps = max(1, remaining_steps)
                 return self._instinct(
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, is_voice_message=is_voice_message,
-                    skip_tools=True, **kwargs,
+                    skip_tools=True, max_steps=remaining_steps,
                 )
 
             # -- Check if Tier 3 is needed --
             if self._needs_deliberation(message):
                 tier_used = 3
+                remaining_steps = max(1, remaining_steps)
+                steps_used += 1
                 return self._deliberate(
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
-                    **kwargs,
+                    max_steps=remaining_steps,
                 )
 
             # -- Default: Tier 2 (single-shot with tools) --
             tier_used = 2
+            remaining_steps = max(1, remaining_steps)
             result = self._instinct(
                 session_id, message, options, emit_fn, app,
                 project_id=project_id, image_data=image_data,
                 image_url=image_url, is_voice_message=is_voice_message,
-                **kwargs,
+                max_steps=remaining_steps,
             )
 
             # Check for escalation signals in the response
@@ -295,12 +311,14 @@ class AgentBrain:
                     "escalation_reason", "model signaled multi-step needed"
                 )
                 tier_used = 3
+                remaining_steps = max(1, remaining_steps - 2)  # Tier2 cost before escalate
+                steps_used += 2
                 result = self._deliberate(
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
                     initial_context=result,
-                    **kwargs,
+                    max_steps=remaining_steps,
                 )
 
             return result
@@ -330,6 +348,7 @@ class AgentBrain:
                 success=success,
                 model=self.state.active_model,
                 timestamp=datetime.now(timezone.utc).isoformat(),
+                total_agent_steps=steps_used,
             )
             _log_telemetry(telemetry)
 
@@ -437,12 +456,16 @@ class AgentBrain:
                         logger.exception("Failed to persist user message in gemma4_direct")
 
             # Delegate straight to the robust execute_task loop
+            # Pass remaining cross-tier cap (gemma direct counts as ~Tier 2/3 steps).
+            gemma_steps = min(remaining_steps, 12)
             agent_result = acs.execute_task(
                 task=message, 
                 screen=screen, 
                 emit_fn=emit_fn, 
-                chat_context=history_str
+                chat_context=history_str,
+                max_steps=gemma_steps,
             )
+            steps_used += 1  # gemma-direct/ACS vision loop counts toward cross-tier budget
 
             # Narrate the outcome in Guaardvark's voice
             response = self._narrate_agent_outcome(
@@ -887,6 +910,7 @@ class AgentBrain:
         image_data: str = None,
         image_url: str = None,
         is_voice_message: bool = False,
+        max_steps: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -912,10 +936,13 @@ class AgentBrain:
         # path that bypasses the engine's per-request ceremony.
         try:
             from backend.services.unified_chat_engine import UnifiedChatEngine
+            iters = 1 if skip_tools else 5
+            if max_steps:
+                iters = min(iters, max_steps)
             engine = UnifiedChatEngine(
                 tool_registry=self.state.tool_registry,
                 llm_instance=self.state.llm,
-                max_iterations=1 if skip_tools else 5,
+                max_iterations=iters,
             )
             result = engine.chat(
                 session_id=session_id,
@@ -985,6 +1012,7 @@ class AgentBrain:
         image_data: str = None,
         image_url: str = None,
         is_voice_message: bool = False,
+        max_steps: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -1003,20 +1031,24 @@ class AgentBrain:
         if not self.state.health.tools_available:
             # No tools → can't run agent loop, fall back to Tier 2
             logger.warning("Tier 3 unavailable (no tools), falling back to Tier 2")
+            fb_steps = max(1, (max_steps or remaining_steps or self.TOTAL_STEP_CAP))
             return self._instinct(
                 session_id, message, options, emit_fn, app,
                 project_id=project_id, image_data=image_data,
                 image_url=image_url, is_voice_message=is_voice_message,
-                **kwargs,
+                max_steps=fb_steps,
             )
 
         try:
             from backend.services.agent_executor import AgentExecutor
 
+            iters = self.state.max_agent_iterations
+            if max_steps:
+                iters = min(iters, max_steps)
             executor = AgentExecutor(
                 tool_registry=self.state.tool_registry,
                 llm=self.state.llm,
-                max_iterations=self.state.max_agent_iterations,
+                max_iterations=iters,
             )
 
             # Build session context from initial Tier 2 result if escalated
@@ -1032,6 +1064,7 @@ class AgentBrain:
             result = executor.execute(
                 user_query=message,
                 session_context=session_context,
+                max_steps=max_steps,
             )
 
             response_text = result.final_answer if result.success else (
