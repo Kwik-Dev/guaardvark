@@ -65,7 +65,9 @@ const SemanticSearchCard = React.forwardRef(
 
     // Initialize UnifiedChatService when socket is connected
     useEffect(() => {
-      if (connectionState !== 'connected' || !socketRef?.current) {
+      // Eager creation for the same race/latency reasons as main chat (service must exist
+      // to satisfy guards even while socket is still negotiating the connection).
+      if (!socketRef?.current) {
         return;
       }
 
@@ -77,7 +79,7 @@ const SemanticSearchCard = React.forwardRef(
         service.cleanup();
         setUnifiedChatService(null);
       };
-    }, [connectionState, sessionId]);
+    }, [sessionId]);
 
     const detectCSVGeneration = useCallback((message) => {
       const csvKeywords = [

@@ -72,7 +72,9 @@ const FloatingChatCard = () => {
 
   // Initialize UnifiedChatService when socket is connected
   useEffect(() => {
-    if (connectionState !== 'connected' || !socketRef?.current) {
+    // Eager creation (see ChatPage for rationale): avoid races and ensure listeners
+    // are registered before the first send even if connect handshake is still in flight.
+    if (!socketRef?.current) {
       return;
     }
 
@@ -84,7 +86,7 @@ const FloatingChatCard = () => {
       service.cleanup();
       setUnifiedChatService(null);
     };
-  }, [connectionState, sessionId]);
+  }, [sessionId]);
 
   // Hydrate session mode from backend on sessionId change so `/agent` state
   // survives reloads / re-mounts. Without this, the floating card's

@@ -85,7 +85,7 @@ class BeatSyncRequest(BaseModel):
     use_onsets: bool = Field(False)
     seed: Optional[int] = None
     render_mp4: bool = Field(False, description="If true, also encode final MP4 via melt.")
-    register: bool = Field(True, description="POST outputs to backend as Documents.")
+    register_result: bool = Field(True, alias="register", description="POST outputs to backend as Documents.")
 
 
 class SongAnalyzeRequest(BaseModel):
@@ -102,7 +102,7 @@ class AutoEditorRequest(BaseModel):
     threshold: float = Field(0.04, ge=0.0, le=1.0)
     margin: str = Field("0.2sec")
     mode: str = Field("mp4", pattern="^(mp4|kdenlive)$")
-    register: bool = Field(False)
+    register_result: bool = Field(False, alias="register")
 
 
 class PlanBinClip(BaseModel):
@@ -156,7 +156,7 @@ class ComposeArrangementBody(BaseModel):
     width: int = 1920
     height: int = 1080
     render_mp4: bool = True
-    register: bool = True
+    register_result: bool = Field(True, alias="register")
 
 
 class ShotcutComposeRequest(BaseModel):
@@ -184,7 +184,7 @@ class ShotcutComposeRequest(BaseModel):
         None, description="Hint: video source duration so trim_end=None falls back here."
     )
     render_mp4: bool = Field(False)
-    register: bool = Field(True)
+    register_result: bool = Field(True, alias="register")
 
 
 # ---------- read endpoints ---------------------------------------------------
@@ -286,7 +286,7 @@ def auto_editor_trim(req: AutoEditorRequest) -> dict[str, Any]:
         "clips": [{"start": c.start, "end": c.end} for c in result.clips],
         "documents": [],
     }
-    if req.register:
+    if req.register_result:
         doc = register_output(
             result.output_path,
             backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
@@ -311,7 +311,7 @@ def shotcut_compose(req: ShotcutComposeRequest) -> dict[str, Any]:
         height=req.height,
     )
 
-    timeline = timeline_from_payload(req.model_dump())
+    timeline = timeline_from_payload(req.model_dump(by_alias=True))
     mlt_dir = Path(_paths["mlt_projects"])
     mlt_dir.mkdir(parents=True, exist_ok=True)
     mlt_path = mlt_dir / f"timeline_{uuid.uuid4().hex[:12]}.mlt"
@@ -329,7 +329,7 @@ def shotcut_compose(req: ShotcutComposeRequest) -> dict[str, Any]:
         "documents": [],
     }
 
-    if req.register:
+    if req.register_result:
         doc = register_output(
             mlt_path,
             backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
@@ -355,7 +355,7 @@ def shotcut_compose(req: ShotcutComposeRequest) -> dict[str, Any]:
         except MeltNotFound as e:
             raise HTTPException(status_code=500, detail=f"melt unavailable: {e}") from e
         response["rendered_mp4"] = str(render.output_path)
-        if req.register:
+        if req.register_result:
             doc = register_output(
                 render.output_path,
                 backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
@@ -418,7 +418,7 @@ def _do_beat_sync_render(job: Job, req: BeatSyncRequest) -> dict[str, Any]:
         "documents": [],
     }
 
-    if req.register:
+    if req.register_result:
         doc = register_output(
             mlt_path,
             backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
@@ -447,7 +447,7 @@ def _do_beat_sync_render(job: Job, req: BeatSyncRequest) -> dict[str, Any]:
         result["rendered_mp4"] = str(render.output_path)
         job.progress = 0.9
 
-        if req.register:
+        if req.register_result:
             doc = register_output(
                 render.output_path,
                 backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
@@ -607,7 +607,7 @@ def shotcut_compose_arrangement(body: ComposeArrangementBody) -> dict[str, Any]:
         "documents": [],
     }
 
-    if body.register:
+    if body.register_result:
         doc = register_output(
             mlt_path,
             backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
@@ -636,7 +636,7 @@ def shotcut_compose_arrangement(body: ComposeArrangementBody) -> dict[str, Any]:
         except MeltNotFound as e:
             raise HTTPException(status_code=500, detail=f"melt unavailable: {e}") from e
         response["rendered_mp4"] = str(render.output_path)
-        if body.register:
+        if body.register_result:
             doc = register_output(
                 render.output_path,
                 backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),

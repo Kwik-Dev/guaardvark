@@ -24,12 +24,27 @@ def svc():
     "backend/services/metadata_service.py",                        # 'data/'
     "backend/handlers/database_handler.py",                        # 'data/'
     "frontend/src/api/backupService.js",                           # 'backups/'
-    "plugins/lora_trainer/scripts/setup_venv.sh",                  # 'env/'
-    "scripts/dep_reconciler/detectors/torch_venv.py",             # 'env/'
+    "plugins/lora_trainer/scripts/setup_venv.sh",                  # 'env/' + 'venv' substring
+    "scripts/dep_reconciler/detectors/torch_venv.py",             # 'env/' + 'venv' substring
     "cli/llx/commands/logs.py",                                    # 'logs/'
 ])
 def test_source_files_are_not_excluded(svc, path):
     assert svc.should_exclude_file(path) is False, f"{path} should sync but was excluded"
+
+
+# --- ALL virtualenv directories must be excluded, including suffixed sidecar
+#     venvs that the literal "venv/" segment pattern misses (2026-06-15) ---
+@pytest.mark.parametrize("path", [
+    "backend/venv/lib/python3.12/site.py",                  # plain venv
+    "plugins/video_editor/venv/lib/python3.12/os.py",       # plain venv (plugin)
+    "plugins/audio_foundry/venv/bin/activate",              # plain venv (plugin)
+    "plugins/lora_trainer/venv-torch/lib/torch/__init__.py",  # suffixed venv
+    "plugins/audio_foundry/venv-music/bin/python",          # suffixed venv
+    "some/path/.venv/lib/python3.12/site.py",               # dotted venv
+    "plugins/x/venv_py311/lib/foo.py",                      # underscore-suffixed venv
+])
+def test_all_venv_dirs_excluded(svc, path):
+    assert svc.should_exclude_file(path) is True, f"{path} is inside a venv and must be excluded"
 
 
 # --- real directories that MUST still be excluded (no regression) ---

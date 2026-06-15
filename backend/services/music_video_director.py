@@ -116,15 +116,27 @@ def _resolve_model(preferred: str) -> str:
         return preferred
 
 
-def _cut_brief(cut_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = None, fill_method: str | None = None) -> list[dict[str, Any]]:
+    """Build the compact CUTS list sent to the Director LLM.
+
+    P1 (story-arc plan): optionally include the per-video Clip Stretch settings so the
+    model can intelligently suggest `duration_seconds` (the *pre-stretch* source motion
+    length) that will produce the desired final pacing after `fill_clip_to_duration`
+    applies k = min(..., max_stretch).
+    """
     out = []
     for c in cut_plan:
-        out.append({
+        item = {
             "index": c["index"],
             "seconds": round(float(c["end_s"]) - float(c["start_s"]), 2),
             "section": c.get("section_label", ""),
             "energy": round(float(c.get("energy", 0.0)), 3),
-        })
+        }
+        if max_stretch is not None:
+            item["max_stretch"] = round(float(max_stretch), 2)
+        if fill_method:
+            item["fill_method"] = fill_method
+        out.append(item)
     return out
 
 
@@ -192,6 +204,8 @@ def _generate_storyline_and_prompts(
     planning_mode: str = "narrative",
     extra_guidance: str | None = None,
     user_treatment: str | None = None,
+    max_stretch: float | None = None,
+    fill_method: str | None = None,
 ) -> dict:
     """Internal: returns {'prompts': list[str], 'storyline': str | None}.
     The storyline is the actual narrative arc the model invented for this video.
@@ -243,7 +257,7 @@ def _generate_storyline_and_prompts(
         log.info("music video director using ollama model=%s for %d cuts (has_user_treatment=%s)", model, n, bool(user_treatment))
         user = (
             f"STYLE: {style_prompt}\n\n"
-            f"CUTS ({n} total):\n{json.dumps(_cut_brief(cut_plan))}\n\n"
+            f"CUTS ({n} total):\n{json.dumps(_cut_brief(cut_plan, max_stretch=max_stretch, fill_method=fill_method))}\n\n"
             f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
             "TASK:\n"
             "1. Produce (or lightly refine) the top-level 'treatment' field using the provided user treatment as the main source. This field can contain the full dreamlike story and artistic directives.\n"
@@ -288,16 +302,16 @@ def _generate_storyline_and_prompts(
         if not prompts_map:
             try:
                 simple_sys = (
-                    "You are a precise visual prompt generator. Output ONLY valid JSON. "
-                    "No prose, no fences, no extra keys."
+                    "You are a music-video director. Follow the mode, guidance, and treatment instructions exactly. "
+                    "Output ONLY valid JSON with a 'shots' array. No prose, no fences, no extra keys."
                 )
                 simple_user = (
                     f"STYLE: {style_prompt}\n\n"
-                    f"CUTS ({n} total):\n{json.dumps(_cut_brief(cut_plan))}\n\n"
-                    f"{treatment_block}\n\n"
-                    "TASK: Return ONLY this JSON shape (one entry per cut, indexes exact):\n"
-                    '{"shots": [{"index": 0, "prompt": "pure visual for cut 0 (subject, framing, camera, lighting, color, texture, atmosphere; no names, no plot)"}, ...]}\n'
-                    "Make every prompt DISTINCT. Vary framing, motion implication, lighting, or density by the cut's energy and section. Pure visual descriptors only."
+                    f"CUTS ({n} total):\n{json.dumps(_cut_brief(cut_plan, max_stretch=max_stretch, fill_method=fill_method))}\n\n"
+                    f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
+                    "TASK: Return ONLY this exact JSON shape (one entry per cut, indexes MUST match the CUTS list 0..N-1 exactly; return exactly N shots):\n"
+                    '{"shots": [{"index": 0, "prompt": "pure visual for cut 0 ..."}, ...]}\n'
+                    "CRITICAL: Every shots[].prompt MUST be visually DISTINCT from all others. Vary framing, angle, density, motion implication, lighting, and color according to the mode instruction, the cut's energy, and its position in the arc/treatment. Pure visual descriptors only (no names, no backstory, no plot). Follow the separation of concerns in the system prompt."
                 )
                 resp2 = ollama.chat(
                     model=model,
@@ -329,12 +343,40 @@ def _generate_storyline_and_prompts(
                 "raw_head=%s",
                 n, head
             )
-            return {"prompts": fallback_prompts, "treatment": treatment, "shots": []}
+            return {
+                "prompts": fallback_prompts,
+                "treatment": treatment,
+                "shots": [],
+                "director_diagnostics": {"reason": "empty_prompts_map", "raw_head": head},
+            }
 
         out: list[str] = []
         for c in cut_plan:
             scene = prompts_map.get(c["index"])
             out.append(f"{scene}, {style_prompt}" if scene else style_prompt)
+
+        # P0 guard (per approved story-arc plan): guarantee distinctness + energy responsiveness
+        # + consistent style suffix, even if the LLM produced near-duplicates or weak variation.
+        # This is a cheap deterministic post-process (no extra LLM calls). On any internal
+        # failure it is a safe no-op (preserves existing graceful fallback contract).
+        try:
+            out = _ensure_distinct_and_energy_aware(
+                out, cut_plan, style_prompt,
+                max_stretch=None  # caller can pass from settings if desired; injected descriptors only
+            )
+        except Exception:  # noqa: BLE001 — guard must never break the Director
+            log.warning("director post-distinctness guard failed (safe no-op); using raw LLM output")
+
+        # P2: lightly inject arc/motif context from the treatment so per-shot prompts (used
+        # for storyboards and as i2v text conditioning) visibly illustrate progression
+        # through the story/mood arc, not just distinct variations on the global style.
+        # Keeps prompts "pure visual" by prefixing descriptive position-in-arc language
+        # drawn from the treatment (first sentence as motif) + index/energy.
+        if treatment:
+            try:
+                out = _augment_prompts_with_arc(out, cut_plan, treatment)
+            except Exception:  # noqa: BLE001
+                log.warning("director arc injection failed (safe no-op)")
 
         if treatment:
             log.info("director produced visual treatment for music video (len=%d): %s", 
@@ -343,7 +385,11 @@ def _generate_storyline_and_prompts(
         return {"prompts": out, "treatment": treatment, "shots": data.get("shots", []) or []}
     except Exception as e:  # noqa: BLE001 — director is best-effort; never sink the analyze stage
         log.warning("director failed (%s); falling back to global style prompt", e)
-        return {"prompts": fallback_prompts, "storyline": None}
+        return {
+            "prompts": fallback_prompts,
+            "storyline": None,
+            "director_diagnostics": {"reason": "llm_exception", "error": str(e)[:200]},
+        }
 
 
 def _parse_full_director_output(content: str, n: int) -> dict:
@@ -438,4 +484,121 @@ def _parse_full_director_output(content: str, n: int) -> dict:
     if not result["prompts"]:
         result["prompts"] = _parse_prompts(content, n)
 
+    # P2 strengthening: cardinality/index enforcement. If the model (esp. in recovery)
+    # returned wrong number of shots, clear prompts so we fall back to guarded global
+    # (prevents partial or mismatched data from poisoning the arc).
+    if len(result["prompts"]) != n:
+        log.warning(
+            "director parse returned %d prompts for %d cuts (cardinality mismatch); "
+            "will use guarded fallback",
+            len(result["prompts"]), n
+        )
+        # keep shots for editing fields if any, but force prompts path to guard
+        result["prompts"] = {}
+
     return result
+
+
+def _ensure_distinct_and_energy_aware(
+    prompts: list[str], cut_plan: list[dict[str, Any]], style_prompt: str, *, max_stretch: float | None = None
+) -> list[str]:
+    """P0 post-processing guard (story-arc plan): ensure per-cut prompts are textually distinct,
+    carry an energy/section-appropriate visual cue, and consistently include the global style suffix.
+
+    This is a cheap, deterministic safety net that runs after the LLM (primary or recovery).
+    It never calls the model. On any internal error it returns the input unchanged (safe no-op).
+
+    - Distinctness: strip the common style suffix and compare prefixes. If too many are identical,
+      inject a light, style-preserving variation based on the cut's energy and section.
+    - Energy cue injection: for low-energy (intro/build) use calmer/wider/slower/atmospheric language;
+      for high-energy (drop) use tighter/dynamic/denser/contrasty language. Drawn from the Director
+      system prompt contract so it stays consistent with what the model was asked to do.
+    - Style suffix: every entry ends with ", {style_prompt}" (the UI and i2v expect the global look).
+    - max_stretch (optional): currently only for future-proofing / diagnostics; not required for the
+      core distinctness logic.
+
+    Returns the (possibly lightly rewritten) list of ready-to-use prompts, in cut order.
+    """
+    if not prompts or not cut_plan or len(prompts) != len(cut_plan):
+        return prompts
+
+    # 1. Strip style suffix for comparison (the suffix is what makes many "look the same" in logs/UI).
+    style_suffix = f", {style_prompt}" if not style_prompt.startswith(",") else style_prompt
+    stripped = []
+    for p in prompts:
+        if p.endswith(style_suffix):
+            stripped.append(p[: -len(style_suffix)].strip())
+        else:
+            stripped.append(p.strip())
+
+    # 2. Detect duplicates (by exact stripped text or very similar prefix).
+    from collections import Counter
+    counts = Counter(stripped)
+    num_unique = len(counts)
+    threshold = max(2, len(prompts) // 2)
+    needs_fix = num_unique < threshold
+
+    # 3. Energy-based injection vocabulary (kept tiny and style-agnostic so it composes cleanly).
+    low_energy_cues = ["wider calmer framing", "slow atmospheric drift", "soft diffuse light", "sparse open composition"]
+    high_energy_cues = ["tighter dynamic framing", "sharp pulsing motion", "high contrast strobing light", "dense layered composition"]
+
+    out: list[str] = []
+    for i, (orig, stripped_p, cut) in enumerate(zip(prompts, stripped, cut_plan)):
+        energy = float(cut.get("energy", 0.5))
+        section = str(cut.get("section", "")).lower()
+        is_low = energy < 0.4 or any(k in section for k in ("intro", "build", "outro", "verse"))
+        is_high = energy > 0.7 or any(k in section for k in ("drop", "chorus", "peak", "bridge"))
+
+        base = stripped_p
+        if needs_fix:
+            # Pick a cue that is unlikely to already be in the prompt (cheap string check).
+            cues = low_energy_cues if is_low else (high_energy_cues if is_high else [])
+            cue = None
+            for c in cues:
+                if c not in base.lower():
+                    cue = c
+                    break
+            if cue:
+                # Inject near the end, before any trailing style (we'll re-add the suffix).
+                base = f"{base.rstrip(', ')}, {cue}"
+
+        # Guarantee style suffix (some recovery paths or manual edits may have dropped it).
+        if not base.endswith(style_suffix.lstrip(", ")):
+            base = f"{base.rstrip(', ')}{style_suffix}"
+
+        out.append(base)
+
+    # 4. Lightweight diagnostic if we had to intervene.
+    if needs_fix:
+        log.info(
+            "director post-guard injected energy cues for %d/%d cuts (unique before=%d)",
+            len(out) - num_unique, len(out), num_unique
+        )
+
+    return out
+
+
+def _augment_prompts_with_arc(prompts: list[str], cut_plan: list[dict[str, Any]], treatment: str) -> list[str]:
+    """P2: lightly prefix each (pure visual) prompt with position-in-arc language drawn from
+    the treatment. This makes the storyboard stills and i2v clips visibly illustrate
+    progression through the single cohesive story/mood arc, rather than just being
+    distinct variations on the global style.
+
+    Example output prefix: "opening moment in the fractured silver moonlight arc: [visual prompt]"
+    Keeps prompts suitable for image generators (no plot/names in the visual part).
+    """
+    if not treatment or not prompts:
+        return prompts
+    # Derive a short motif from the treatment (first sentence or 60 chars).
+    motif = treatment.split(".")[0][:60].strip() or "the visual arc"
+    n = len(prompts)
+    positions = ["opening", "rising", "peak", "resolution", "closing"]
+    out = []
+    for i, p in enumerate(prompts):
+        pos = positions[min(i, len(positions)-1)]
+        frac = (i + 1) / max(1, n)
+        # Light augmentation only if not already present; keeps "pure visual".
+        if "arc:" not in p.lower() and "moment in" not in p.lower() and len(p) > 5:
+            p = f"{pos} moment in {motif} (energy {frac:.1f}): {p}"
+        out.append(p)
+    return out

@@ -103,16 +103,41 @@ class PipelineService:
     def find_non_terminal(self) -> list:
         # Exclude raw terminal statuses AND the per-stage failure pattern, else
         # failed rows get re-dispatched every boot.
+        # Also treat explicit "cancelled" (from user cancel on music-video etc.)
+        # as terminal so resume_all and dispatch loops don't keep poking them.
         return (
             self.s.query(self.model_cls)
             .filter(
                 ~self.model_cls.status.in_(list(TERMINAL_STATUSES)),
                 ~self.model_cls.status.like("failed_%"),
+                ~self.model_cls.status.like("cancelled%"),
+                self.model_cls.status != "cancelled",
             )
             .all()
         )
 
     def dispatch_agent(self, row_id: int, agent_name: str) -> None:
+        # P2: wire phase map – ensure plugins for the row's current stage before dispatching
+        # (idempotent; uses persist_user_pref=False for auto-orchestrated paths)
+        row = self.s.get(self.model_cls, row_id)
+        if row:
+            try:
+                from backend.services.plugin_bridge import ensure_plugins_for_stage
+                ensure_plugins_for_stage(self.task_namespace, row.current_stage)
+            except Exception:
+                log.warning(
+                    "Phase ensure failed for %s %s stage=%s (non-fatal)",
+                    self.task_namespace, row_id, row.current_stage,
+                )
+            try:
+                # P3: GPU model phase prep in dispatch path too
+                from backend.services.gpu_memory_orchestrator import get_orchestrator
+                get_orchestrator().prepare_for_stage(self.task_namespace, row.current_stage)
+            except Exception:
+                log.warning(
+                    "GPU stage prepare failed for %s %s stage=%s (non-fatal)",
+                    self.task_namespace, row_id, row.current_stage,
+                )
         from backend.celery_app import celery
         celery.send_task(f"{self.task_namespace}.run_{agent_name}", args=[row_id])
 
@@ -128,6 +153,24 @@ class PipelineService:
             if agent is None:
                 continue
             try:
+                # P2 phase hook: ensure before dispatch (dispatch also ensures, but resume path benefits from early)
+                try:
+                    from backend.services.plugin_bridge import ensure_plugins_for_stage
+                    ensure_plugins_for_stage(self.task_namespace, row.current_stage)
+                except Exception:
+                    log.warning(
+                        "Phase ensure failed for %s %s stage=%s (non-fatal)",
+                        self.task_namespace, row.id, row.current_stage,
+                    )
+                try:
+                    # P3: enhance GPU orch with stage/phase model prep (parallel to plugin phases)
+                    from backend.services.gpu_memory_orchestrator import get_orchestrator
+                    get_orchestrator().prepare_for_stage(self.task_namespace, row.current_stage)
+                except Exception:
+                    log.warning(
+                        "GPU stage prepare failed for %s %s stage=%s (non-fatal)",
+                        self.task_namespace, row.id, row.current_stage,
+                    )
                 self.dispatch_agent(row.id, agent)
                 count += 1
             except Exception as e:  # noqa: BLE001

@@ -14,13 +14,16 @@ class UnifiedChatService {
     this._listeners = [];
   }
 
-  /**
-   * Join a session room for streaming events.
-   */
   joinSession(sessionId) {
-    if (this.socket?.connected) {
+    if (!this.socket) return;
+    
+    // Emit immediately (will buffer if currently disconnected)
+    this.socket.emit("chat:join", { session_id: sessionId });
+    
+    // Re-join automatically if the socket drops and reconnects
+    this._on("connect", () => {
       this.socket.emit("chat:join", { session_id: sessionId });
-    }
+    });
   }
 
   /**

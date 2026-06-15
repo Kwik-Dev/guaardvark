@@ -32,6 +32,10 @@ VALID_TRANSITIONS: dict[str, str] = {
     "awaiting_approval": "generating",
     "generating": "assembling",
     "assembling": "complete",
+    # "cancelled" is a terminal state set directly by the cancel handler (not via
+    # normal advance). Listed here for completeness / introspection even though
+    # the state machine doesn't transition *into* it the normal way.
+    "cancelled": "cancelled",
 }
 
 
@@ -43,6 +47,7 @@ STAGE_TO_AGENT: dict[str, str | None] = {
     "awaiting_approval": None,      # USER GATE: cost approval before any GPU spend
     "generating": "clip_generator",  # self-re-dispatching per-clip generator
     "assembling": "assembler",
+    "cancelled": None,             # terminal via explicit user cancel; no agent
 }
 
 
@@ -350,6 +355,9 @@ class MusicVideoService(PipelineService):
     # State-machine plumbing (advance_if_predecessor / fail_stage /
     # find_non_terminal / dispatch_agent / resume_all / gpu_stage) is inherited
     # from PipelineService, driven by the class attributes set above.
+    # P2: dispatch_agent (and resume_all) now auto-calls ensure_plugins_for_stage
+    # using task_namespace + current_stage for proper sequencing (e.g. ollama for
+    # analyzing/Director, comfyui for storyboards/generating).
 
     # --- Plan / Director helpers (pre-approval editing & re-planning) --------
 
@@ -409,8 +417,8 @@ class MusicVideoService(PipelineService):
             # Director off — nothing to regenerate; leave prompts as global style copies.
             return mv
 
-        from backend.services.plugin_bridge import ensure_plugin_running
-        ensure_plugin_running("ollama")  # Director requires Ollama daemon for per-cut visual prompts from treatment
+        from backend.services.plugin_bridge import ensure_plugins_for_stage
+        ensure_plugins_for_stage("music-video", "analyzing")  # Director requires Ollama (and video_editor) for per-cut visual prompts from treatment
         from backend.services.music_video_director import _generate_storyline_and_prompts
 
         mode = planning_mode or s.get("planning_mode", "narrative")
@@ -423,7 +431,22 @@ class MusicVideoService(PipelineService):
                 planning_mode=mode,
                 extra_guidance=guidance,
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),
+                max_stretch=float(s.get("max_stretch", 2.0)),
+                fill_method=s.get("fill_method"),
             )
+            raw_prompts = res.get("prompts") or []
+            # P0 guard (story-arc plan): apply distinctness/energy injection here too so a
+            # replan immediately gives usable varied prompts for subsequent storyboard regen.
+            try:
+                from backend.services.music_video_director import _ensure_distinct_and_energy_aware
+                guarded = _ensure_distinct_and_energy_aware(
+                    raw_prompts, mv.cut_plan, mv.style_prompt,
+                    max_stretch=float(s.get("max_stretch", 2.0)),
+                )
+                if guarded:
+                    res["prompts"] = guarded
+            except Exception:  # noqa: BLE001
+                pass
             prompts = res["prompts"]
             treatment = res.get("treatment")
             if treatment:
@@ -445,11 +468,23 @@ class MusicVideoService(PipelineService):
             idx = c.get("index")
             if isinstance(idx, int) and idx < len(prompts):
                 c["prompt"] = prompts[idx]
+                # P0 stale-storyboard fix: when the Director prompt for a cut changes,
+                # clear any previously generated storyboard still so the next "Generate
+                # Storyboards" or per-cut regen will pick up the new unique prompt.
+                # (The "thumbnails first" design intentionally skips existing paths for
+                # cost reasons; a prompt change is the signal that they are now stale.)
+                if "storyboard_path" in c:
+                    c["storyboard_path"] = None
+                if "storyboard_variation" in c:
+                    c["storyboard_variation"] = None
 
         # Persist chosen mode/guidance for future (and for the actual generation later)
         s["planning_mode"] = mode
         if guidance:
             s["director_guidance"] = guidance
+        # Store diagnostics if the (guarded) Director run produced any (fallback etc.).
+        if isinstance(res, dict) and res.get("director_diagnostics"):
+            s["director_diagnostics"] = res.get("director_diagnostics")
         mv.settings_json = s
         mv.clips = clips
         self.s.commit()

@@ -1155,10 +1155,8 @@ class UnifiedChatEngine:
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} TOOL_CALLS: {tool_names}")
             else:
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
-
-            if not parsed.tool_calls:
                 final_text = parsed.final_answer or llm_response.strip()
-                final_text = re.sub(r'</?(?:tool_call|tool|observation)[^>]*>', '', final_text).strip()
+                final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
                 log_decision("unified_chat", "FINAL_ANSWER", {
                     "iteration": iteration, "session_id": session_id,
@@ -1173,6 +1171,10 @@ class UnifiedChatEngine:
                         "Note: I was unable to verify this through a web search. "
                         + final_text
                     )
+
+                # Ensure final_text is not empty
+                if not final_text:
+                    final_text = "I'm sorry, I couldn't generate a response."
 
                 accumulated_response = final_text
                 break

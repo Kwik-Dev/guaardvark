@@ -10,6 +10,14 @@ PluginManager primitives (`is_effectively_enabled` / `enable_plugin` /
 `start_plugin`). Celery stage tasks and `prepare_plugins_for_route` both call
 into the same helpers.
 
+**Full phase map (P1+ per approved design)**: STAGE_PLUGIN_REQUIREMENTS + plugins_for_stage /
+ensure_plugins_for_stage provide stage-aware sequencing for pipelines (music-video,
+film-crew). E.g. analyze (ollama+video_editor for Director unique per-cut prompts) before
+storyboard (comfyui for flux/SDXL keyframes) before generating (comfyui + gpu gate).
+Auto paths use persist_user_pref=False to avoid conflicting with manual UI toggles.
+Tied to PipelineService stages for resume_all/dispatch safety. ROUTE map kept for nav
+(with sub-path support).
+
 CUDA-FORK SAFETY (load-bearing — see plugin_runner.py docstring): this MUST be
 called from INSIDE a task/request body at runtime, never at import time. The
 underlying start_plugin runs the plugin's start script through the plugin_runner
@@ -44,11 +52,37 @@ ROUTE_PLUGIN_MAP: Dict[str, List[str]] = {
     "/training": ["lora_trainer"],
     "/film-crew": ["comfyui", "video_editor", "ollama"],
     "/music-video": ["comfyui", "video_editor", "ollama"],
+    "/music-video/storyboard": ["comfyui"],  # phase for pre-approval thumbnails (analyze needs ollama+video_editor earlier)
     "/swarm": ["swarm"],
     "/settings": [],
     "/plugins": [],
     "/tools": [],
     "/agents": [],
+}
+
+# Full phase map for stage-aware plugin auto-orchestration (per approved design).
+# Tied to PipelineService stages (current_stage / STAGE_TO_AGENT) for MV + Film Crew.
+# Phases ensure correct sequencing: e.g., analyze (ollama for Director unique prompts)
+# before storyboard (comfyui keyframes) before clip_gen (comfyui + i2v with gate).
+# Used by ensure_plugins_for_stage (auto paths use persist_user_pref=False).
+# ROUTE_PLUGIN_MAP remains for nav/prepare (with sub-path phasing support).
+STAGE_PLUGIN_REQUIREMENTS: dict[str, dict[str, list[str]]] = {
+    "music-video": {
+        "analyzing": ["video_editor", "ollama"],      # Director for per-cut unique prompts
+        "storyboard": ["comfyui"],                     # Pre-approval thumbnails (flux/SDXL + LoRA)
+        "generating": ["comfyui"],                     # Per-clip keyframe + i2v (with gpu_session)
+        "assembling": ["video_editor"],                # Final MLT/melt compose
+    },
+    "film-crew": {
+        "draft": [],  # no plugins needed
+        "screenwriting": ["ollama"],
+        "casting": ["ollama"],  # advisory, but ensure for consistency
+        "cinematography": ["ollama"],
+        "storyboard_gen": ["comfyui"],                 # Storyboard artist keyframes
+        "awaiting_approval": [],  # user gate
+        "rendering": ["comfyui", "video_editor"],      # Editor (i2v + optional compose)
+        "complete": [],
+    },
 }
 
 PLUGIN_START_MAX_RETRIES = 3
@@ -83,15 +117,49 @@ def _normalize_route(route: str) -> str:
 
 
 def plugins_for_route(route: str) -> List[str]:
-    """Return plugin ids needed for a frontend route (deduped, order preserved)."""
-    normalized = _normalize_route(route)
+    """Return plugin ids needed for a frontend route (deduped, order preserved).
+    Supports explicit sub-paths (e.g. /music-video/storyboard for phased comfy-only) before falling back to normalized.
+    """
+    # Try exact first for phased sub-intents (storyboard only etc.), then normalized.
     seen: Set[str] = set()
     out: List[str] = []
-    for pid in ROUTE_PLUGIN_MAP.get(normalized, []):
+    for key in (route, _normalize_route(route)):
+        for pid in ROUTE_PLUGIN_MAP.get(key, []):
+            if pid not in seen:
+                seen.add(pid)
+                out.append(pid)
+    return out
+
+
+def plugins_for_stage(context: str, stage: str) -> list[str]:
+    """Return plugin ids needed for a pipeline stage (deduped, order preserved).
+    Used for full phase map (stage-aware auto-orchestration for agent swarms).
+    Falls back to empty list for unknown context/stage (defensive).
+    """
+    seen: Set[str] = set()
+    out: list[str] = []
+    for pid in STAGE_PLUGIN_REQUIREMENTS.get(context, {}).get(stage, []):
         if pid not in seen:
             seen.add(pid)
             out.append(pid)
     return out
+
+
+def ensure_plugins_for_stage(context: str, stage: str, **kwargs) -> None:
+    """Ensure all plugins for a given pipeline stage/context are running.
+    Auto-orchestrated paths pass persist_user_pref=False (see ensure_plugin_running).
+    Called from PipelineService dispatch/resume and explicit task sites.
+
+    P3: also triggers GPU model preparation for the stage (enhances gpu_memory_orchestrator
+    with phase support; coordinates plugin + model loading for swarms).
+    """
+    for pid in plugins_for_stage(context, stage):
+        ensure_plugin_running(pid, persist_user_pref=False, **kwargs)
+    try:
+        from backend.services.gpu_memory_orchestrator import get_orchestrator
+        get_orchestrator().prepare_for_stage(context, stage)
+    except Exception:
+        logger.warning("GPU prepare_for_stage failed for %s/%s (non-fatal)", context, stage)
 
 
 def get_orchestrator_state() -> Dict[str, Any]:
@@ -215,9 +283,27 @@ def _resolve_gpu_conflict(needed: Set[str]) -> List[Dict[str, Any]]:
     return actions
 
 
-def ensure_plugin_running(plugin_id: str, *, enable_if_disabled: bool = True) -> None:
-    """Make sure ``plugin_id`` is enabled and running. Raises PluginUnavailable otherwise."""
-    ok, detail = _try_start_plugin(plugin_id, enable_if_disabled=enable_if_disabled)
+def ensure_plugin_running(plugin_id: str, *, enable_if_disabled: bool = True, persist_user_pref: bool = True) -> None:
+    """Make sure ``plugin_id`` is enabled and running. Raises PluginUnavailable otherwise.
+
+    DEPRECATED for stage-driven flows (P3): prefer `ensure_plugins_for_stage(context, stage)`
+    which uses the full STAGE_PLUGIN_REQUIREMENTS map for proper sequencing in MV/FilmCrew
+    pipelines. Direct calls are still supported for ad-hoc/one-off needs but will be
+    migrated away.
+
+    persist_user_pref=False (for auto-orchestrated paths like music-video / film-crew stages):
+      - Skips calling enable_plugin (which mutates the persisted user_enabled overlay).
+      - Allows transient auto-start without "sticking" a user preference or overriding a manual disable.
+      - Still honors existing user_enabled=True or manifest defaults for the start decision.
+    """
+    import warnings
+    warnings.warn(
+        "ensure_plugin_running is deprecated for pipeline stage contexts in favor of "
+        "ensure_plugins_for_stage (see STAGE_PLUGIN_REQUIREMENTS).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    ok, detail = _try_start_plugin(plugin_id, enable_if_disabled=enable_if_disabled, persist_user_pref=persist_user_pref)
     if not ok:
         raise PluginUnavailable(detail or f"could not start '{plugin_id}'")
     logger.info("plugin_bridge: '%s' running", plugin_id)
@@ -227,16 +313,25 @@ def _try_start_plugin(
     plugin_id: str,
     *,
     enable_if_disabled: bool = True,
+    persist_user_pref: bool = True,
 ) -> tuple[bool, Optional[str]]:
     pm = _plugin_manager()
 
     if not pm.is_effectively_enabled(plugin_id):
         if not enable_if_disabled:
             return False, f"plugin '{plugin_id}' is disabled"
-        res = pm.enable_plugin(plugin_id)
-        if not res.get("success"):
-            return False, f"could not enable '{plugin_id}': {res.get('error')}"
-        logger.info("plugin_bridge: enabled '%s' on demand", plugin_id)
+        if persist_user_pref:
+            res = pm.enable_plugin(plugin_id)
+            if not res.get("success"):
+                return False, f"could not enable '{plugin_id}': {res.get('error')}"
+            logger.info("plugin_bridge: enabled '%s' on demand", plugin_id)
+        else:
+            # Auto path (e.g. music-video/film-crew stages): do not mutate persistent user_enabled.
+            # Temporarily flip in-memory config so the start guard inside manager passes (if manifest allows start).
+            meta = pm.registry.get_plugin(plugin_id)
+            if meta and not getattr(meta.config, "enabled", False):
+                meta.config.enabled = True  # transient for this start attempt only
+            logger.info("plugin_bridge: auto-orchestrating start for '%s' (no persistent enable)", plugin_id)
 
     if _is_running(plugin_id):
         return True, "already running"
@@ -265,7 +360,10 @@ def _try_start_plugin(
 
 
 def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
-    """Start/stop sidecar plugins for a frontend navigation intent."""
+    """Start/stop sidecar plugins for a frontend navigation intent.
+    For music-video/film-crew sub-paths or known stages, uses persist_user_pref=False
+    for auto-orchestrated behavior (per full phase map design).
+    """
     if not auto_orchestrator_enabled():
         return {"route": route, "skipped": True, "reason": "auto_orchestrator_disabled"}
 
@@ -320,7 +418,10 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
         # Re-check GPU conflict before each start (stop may need cooldown settle).
         actions.extend(_resolve_gpu_conflict(needed))
 
-        ok, detail = _try_start_plugin(plugin_id)
+        # Auto paths (music-video/film-crew stages or subpaths) use non-persisting ensure
+        # so manual toggles in PluginsPage are not overridden.
+        persist = not (route.startswith("/music-video") or route.startswith("/film-crew"))
+        ok, detail = _try_start_plugin(plugin_id, persist_user_pref=persist)
         if ok:
             with _state_lock:
                 _orchestrator_claims.add(plugin_id)
@@ -340,5 +441,9 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
         "plugin_bridge: route %s → %d actions, claims=%s",
         route, len(actions), result.get("orchestrator_claims"),
     )
+    # P1 phase map integration: if route maps to a known context/stage (e.g. subpath),
+    # ensure phased plugins (non-persist for auto). Full wiring in PipelineService later.
+    if "/music-video/storyboard" in route or route == "/music-video/storyboard":
+        ensure_plugins_for_stage("music-video", "storyboard")
     _emit_plugins_status(f"route:{route}")
     return result

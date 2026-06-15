@@ -712,6 +712,14 @@ class SelfImprovementService:
 
 
     # ── Distillation: extract learned strategies from successful tasks ──
+    # This + lesson_reconciler is the foundation for SkillOpt-style automatic skill (recipe/knowledge) optimization
+    # without touching model weights. Trajectories from ACS/screen runs or general tool calls feed propose-edit-validate
+    # on external artifacts (recipes.json as structured skills, self_knowledge as heuristics/tool policies).
+    # Future: add mini-batch optimizer pass on recent Facts/memory trajectories, propose specific recipe edits
+    # (e.g. "add wait_until_visible after hotkey", "new recipe for pattern", "shorten target to <=6 words"),
+    # validate with success_proof/verification scorer + edit budget, use negative memory for rejections, epoch meta-reflection.
+    # See VentureBeat SkillOpt article for the deep-learning-style controls on text skills. Recipes have proven
+    # high-leverage for cross-model reliability (Gemma4+ and others).
 
     _DISTILL_PROMPT = (
         "You are analyzing an agent's task execution that succeeded after initial failures.\n"

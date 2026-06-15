@@ -77,6 +77,9 @@ def _agent_run(prod_id: int, *, agent_name: str, expected_stage: str, next_agent
 
 
 def _default_ollama_llm(*, system: str, user: str, model: str = "gemma4:e4b") -> str:
+    from backend.services.plugin_bridge import ensure_plugins_for_stage
+    ensure_plugins_for_stage("film-crew", "screenwriting")  # or cinematography etc.; uses phased non-persist
+    ensure_plugins_for_stage("film-crew", "cinematography")
     import ollama
     response = ollama.chat(
         model=model,
@@ -576,8 +579,10 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
         return
 
     if image_generator is None:
+        from backend.services.plugin_bridge import ensure_plugins_for_stage
         from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-        image_generator = ComfyUIImageGenerator()
+        ensure_plugins_for_stage("film-crew", "storyboard_gen")
+        image_generator = ComfyUIImageGenerator(model="sdxl")  # or from settings if added
 
     lora_paths, base_prompt = _shot_loras_and_prompt(shot)
     prompt = prompt_override if prompt_override else base_prompt

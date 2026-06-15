@@ -142,11 +142,38 @@ class InterconnectorFileSyncService:
             logger.error(f"Error calculating hash for {file_path}: {e}")
             return None
 
+    @staticmethod
+    def _is_venv_dir_segment(segment: str) -> bool:
+        """True if a path SEGMENT is a virtualenv directory name.
+
+        Covers the plain `venv`/`.venv` plus the suffixed plugin sidecar venvs
+        (`venv-torch`, `venv-music`, `venv_py311`, ...). Deliberately does NOT
+        match source files that merely contain "venv" in their name
+        (setup_venv.sh, torch_venv.py) — those don't START a segment with venv.
+        """
+        return (
+            segment == "venv"
+            or segment.startswith("venv-")
+            or segment.startswith("venv_")
+            or segment.startswith(".venv")
+        )
+
     def should_exclude_file(self, file_path: str, patterns: Optional[List[str]] = None) -> bool:
         file_path_lower = file_path.lower()
         file_name = Path(file_path).name.lower()
         active_patterns = patterns or self.exclude_patterns
-        
+
+        # Exclude anything living under a virtualenv directory regardless of the
+        # venv's exact name. The literal "venv/" dir pattern below only matches
+        # the "/venv/" segment, so suffixed plugin venvs (venv-torch, venv-music)
+        # leaked into sync. Match on NON-LEAF segments only so source files whose
+        # name contains "venv" (setup_venv.sh, torch_venv.py) still sync.
+        segments = file_path_lower.replace("\\", "/").strip("/").split("/")
+        for seg in segments[:-1]:
+            if self._is_venv_dir_segment(seg):
+                logger.debug(f"[FILE_SYNC] File excluded (under venv dir '{seg}'): {file_path}")
+                return True
+
         for pattern in active_patterns:
             pattern_lower = pattern.lower()
             

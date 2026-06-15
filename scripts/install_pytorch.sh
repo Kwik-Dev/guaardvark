@@ -33,23 +33,46 @@ vader_header "PyTorch Smart Installer"
 # invocation now works too.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-VENV_PIP="$PROJECT_ROOT/backend/venv/bin/pip"
-VENV_PYTHON="$PROJECT_ROOT/backend/venv/bin/python"
+
+# Use a dedicated tmp for large CUDA wheels (avoids ENOSPC on small /tmp tmpfs
+# such as 8 GB tmpfs on some boxes). Respect an explicit TMPDIR if the caller
+# already set one. See 2026-06-14 hardware provisioning notes.
+if [ -z "${TMPDIR:-}" ]; then
+    PIP_TMP="$PROJECT_ROOT/data/piptmp"
+    mkdir -p "$PIP_TMP" 2>/dev/null || true
+    if [ -d "$PIP_TMP" ] && [ -w "$PIP_TMP" ]; then
+        export TMPDIR="$PIP_TMP"
+        export PIP_CACHE_DIR="$PIP_TMP"
+    fi
+fi
+
+# --venv <path> (or TARGET_VENV env) selects which venv to install into.
+# Defaults to the backend venv, preserving all existing call sites.
+TARGET_VENV="${TARGET_VENV:-$PROJECT_ROOT/backend/venv}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --venv)
+            if [ -z "${2:-}" ]; then
+                vader_warn "--venv requires a path argument"; exit 1
+            fi
+            TARGET_VENV="$2"; shift 2 ;;
+        --venv=*) TARGET_VENV="${1#*=}"; shift ;;
+        *) shift ;;
+    esac
+done
+
+VENV_PIP="$TARGET_VENV/bin/pip"
+VENV_PYTHON="$TARGET_VENV/bin/python"
 
 if [ -x "$VENV_PIP" ] && [ -x "$VENV_PYTHON" ]; then
-    # Project venv exists — prefer its pip unconditionally so we never touch
-    # system Python regardless of what's on PATH.
-    vader_info "Using project venv: $PROJECT_ROOT/backend/venv"
+    vader_info "Using venv: $TARGET_VENV"
     pip() { "$VENV_PIP" "$@"; }
-    # Also route `python3` calls in the verification blocks through the venv.
     python3() { "$VENV_PYTHON" "$@"; }
 else
-    # No project venv found — require that something is activated, otherwise
-    # refuse to run rather than wreck system Python.
     if [ -z "${VIRTUAL_ENV:-}" ]; then
-        vader_warn "No project venv at $PROJECT_ROOT/backend/venv AND no active virtualenv."
+        vader_warn "No venv at $TARGET_VENV AND no active virtualenv."
         vader_warn "Refusing to install torch into system Python. Activate a venv first, or"
-        vader_warn "create the project venv with: python3 -m venv $PROJECT_ROOT/backend/venv"
+        vader_warn "create it with: python3 -m venv $TARGET_VENV"
         exit 1
     fi
     vader_info "Using active virtualenv: $VIRTUAL_ENV"
@@ -152,6 +175,10 @@ if command -v rocm-smi &> /dev/null || _hardware_json_says_amd; then
     # tag collides with +cpu/+cuXXX in pip's resolver, same as the CUDA path).
     pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
     pip freeze 2>/dev/null | grep -iE "^(nvidia-|cuda-bindings|cuda-pathfinder|cuda-toolkit|triton)" | awk -F'==' '{print $1}' | xargs -r pip uninstall -y 2>/dev/null | tail -3 || true
+    # Purge flash-attn/xformers/pynvml for the same reasons as CUDA/CPU paths (shared
+    # backend/venv contract; custom nodes and some plugin reqs inject incompatible
+    # versions leading to diffusers import crashes with aten schema errors).
+    pip uninstall -y flash-attn flash_attn xformers pynvml nvidia-ml-py 2>/dev/null | tail -3 || true
     pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/${ROCM_WHL}"
 
     vader_section "Verification:"
@@ -209,9 +236,19 @@ if command -v nvidia-smi &> /dev/null; then
         COMPUTE_MAJOR=$(echo "$COMPUTE_CAP" | cut -d. -f1)
         COMPUTE_MINOR=$(echo "$COMPUTE_CAP" | cut -d. -f2)
 
+        # If the caller resolved the channel from hardware_policy (single source
+        # of truth), honor it and skip the built-in table below.
+        if [ -n "${GUAARDVARK_TORCH_CHANNEL:-}" ]; then
+            CUDA_VERSION="$GUAARDVARK_TORCH_CHANNEL"
+            CUDA_NAME="$GUAARDVARK_TORCH_CHANNEL"
+            ARCH_NAME="policy(${GUAARDVARK_TORCH_CHANNEL})"
+            vader_info "Torch channel from hardware_policy: $CUDA_VERSION"
+        fi
+
         # Determine which CUDA version to use with detailed explanation
         vader_section "Architecture Detection:"
 
+        if [ -z "${GUAARDVARK_TORCH_CHANNEL:-}" ]; then
         if [ "$COMPUTE_MAJOR" -ge 12 ]; then
             CUDA_VERSION="cu128"
             CUDA_NAME="12.8"
@@ -249,6 +286,7 @@ if command -v nvidia-smi &> /dev/null; then
             vader_warn "GPU compute capability ${COMPUTE_CAP} is too old for CUDA support"
             vader_detail "Falling back to CPU-only mode"
         fi
+        fi  # end: [ -z "${GUAARDVARK_TORCH_CHANNEL:-}" ]
 
         vader_section "Installation Plan:"
 
@@ -259,8 +297,19 @@ if command -v nvidia-smi &> /dev/null; then
         # wrong variant. Also uninstall any lingering CUDA/triton deps that
         # were pulled in by a previous GPU build so we don't carry dead weight.
         vader_section "Cleaning prior torch variants and CUDA dependency bloat..."
+        # IMPORTANT: This uninstall step runs *before* the reinstall. If you
+        # Ctrl-C during this phase the target venv will be left without torch
+        # (and without the old one either). Let the script finish. The verify
+        # gate at the end of start.sh will surface the problem if it happens.
         pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
         pip freeze 2>/dev/null | grep -iE "^(nvidia-|cuda-bindings|cuda-pathfinder|cuda-toolkit|triton)" | awk -F'==' '{print $1}' | xargs -r pip uninstall -y 2>/dev/null | tail -3 || true
+        # Purge flash-attn / xformers (the #1 source of "Current Torch with Flash-Attention 2.5.7
+        # doesnt have a compatible aten::_flash_attention_forward schema (philox_seed vs rng_state)"
+        # errors on diffusers import in batch_image_generation_api / offline_image_generator).
+        # Also purge pynvml/nvidia-ml-py (FutureWarning on every torch.cuda touch; re-pulled by
+        # plugin reqs like upscaling/vision into the shared backend/venv). These are optional
+        # accelerators; core diffusers/Comfy paths degrade gracefully without them.
+        pip uninstall -y flash-attn flash_attn xformers pynvml nvidia-ml-py 2>/dev/null | tail -3 || true
 
         if [ "$CUDA_VERSION" != "cpu" ]; then
             vader_detail "PyTorch Index: https://download.pytorch.org/whl/${CUDA_VERSION}"
@@ -325,7 +374,7 @@ EOF
         echo ""
         pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
         pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        pip uninstall -y pynvml 2>/dev/null | tail -2 || true
+        pip uninstall -y pynvml flash-attn flash_attn xformers nvidia-ml-py 2>/dev/null | tail -2 || true
 
         vader_section "Verification:"
         python3 -c "import torch; print(f'    PyTorch Version: {torch.__version__}'); print(f'    Mode: CPU-only')"
@@ -340,8 +389,10 @@ else
     # Same variant-swap safety: uninstall first, force-reinstall, drop pynvml.
     pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
     pip freeze 2>/dev/null | grep -iE "^(nvidia-|cuda-bindings|cuda-pathfinder|cuda-toolkit|triton)" | awk -F'==' '{print $1}' | xargs -r pip uninstall -y 2>/dev/null | tail -3 || true
+    # Also purge flash/xformers/pynvml here (see main CUDA clean comment for rationale:
+    # prevents schema mismatch on diffusers import + repeated FutureWarnings from plugins).
+    pip uninstall -y flash-attn flash_attn xformers pynvml nvidia-ml-py 2>/dev/null | tail -3 || true
     pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-    pip uninstall -y pynvml 2>/dev/null | tail -2 || true
 
     vader_section "Verification:"
     python3 -c "import torch; print(f'    PyTorch Version: {torch.__version__}'); print(f'    Mode: CPU-only')"

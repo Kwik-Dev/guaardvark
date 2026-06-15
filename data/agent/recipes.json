@@ -12,30 +12,37 @@
     ],
     "steps": [
       {"action": "hotkey", "keys": ["ctrl", "l"]},
-      {"action": "wait", "seconds": 0.5},
+      {"action": "wait_until_settled", "timeout_s": 2.0},
       {"action": "type", "text": "https://www.youtube.com/results?search_query={1}"},
-      {"action": "wait", "seconds": 0.5},
+      {"action": "wait_until_settled", "timeout_s": 1.5},
       {"action": "hotkey", "keys": ["Return"]},
-      {"action": "wait", "seconds": 5.0}
+      {
+        "action": "wait_until_visible",
+        "target_description": "YouTube search results with video thumbnails visible",
+        "timeout_s": 12.0
+      }
     ],
-    "success_proof": "browser address bar showing a loaded page",
+    "success_proof": "YouTube search results page with at least one video thumbnail and the search query visible in the page",
     "success_proof_timeout_s": 12.0
   },
   "click_first_youtube_video": {
-    "description": "Click the first video thumbnail in YouTube search results using keyboard navigation.",
+    "description": "Click the first video thumbnail or title in YouTube search results using vision targeting.",
     "triggers": [
       "^click\\s+(?:the\\s+)?first\\s+(?:youtube\\s+)?(?:video|result|thumbnail)\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["Tab"]},
-      {"action": "wait", "seconds": 0.2},
-      {"action": "hotkey", "keys": ["Tab"]},
-      {"action": "wait", "seconds": 0.2},
-      {"action": "hotkey", "keys": ["Tab"]},
-      {"action": "wait", "seconds": 0.2},
-      {"action": "hotkey", "keys": ["Return"]},
-      {"action": "wait", "seconds": 5.0}
-    ]
+      {
+        "action": "click",
+        "target_description": "first video result"
+      },
+      {
+        "action": "wait_until_visible",
+        "target_description": "YouTube video player or watch page with video title and controls visible",
+        "timeout_s": 12.0
+      }
+    ],
+    "success_proof": "YouTube watch page loaded with video player visible (play button, title, or progress bar)",
+    "success_proof_timeout_s": 12.0
   },
   "open_firefox": {
     "description": "Open Firefox via its desktop icon",
@@ -70,10 +77,15 @@
     ],
     "steps": [
       {"action": "hotkey", "keys": ["ctrl", "l"]},
-      {"action": "wait", "seconds": 0.5},
+      {"action": "wait_until_settled", "timeout_s": 2.0},
       {"action": "type", "text": "http://{1}"},
-      {"action": "wait", "seconds": 0.5},
-      {"action": "hotkey", "keys": ["Return"]}
+      {"action": "wait_until_settled", "timeout_s": 1.5},
+      {"action": "hotkey", "keys": ["Return"]},
+      {
+        "action": "wait_until_visible",
+        "target_description": "page content or main site UI loaded (not blank or error)",
+        "timeout_s": 12.0
+      }
     ],
     "success_proof": "browser address bar showing a loaded page (not a blank tab or error)",
     "success_proof_timeout_s": 12.0
@@ -87,7 +99,7 @@
     ],
     "steps": [
       {"action": "hotkey", "keys": ["Escape"]},
-      {"action": "wait", "seconds": 0.3}
+      {"action": "wait_until_settled", "timeout_s": 1.5, "_comment": "short settle after escape to drop focus/modals"}
     ]
   },
   "find_on_page": {
@@ -98,12 +110,18 @@
     ],
     "steps": [
       {"action": "hotkey", "keys": ["ctrl", "f"]},
-      {"action": "wait", "seconds": 0.6},
+      {"action": "wait_until_settled", "timeout_s": 1.5},
       {"action": "type", "text": "{1}"},
-      {"action": "wait", "seconds": 0.4},
+      {"action": "wait_until_settled", "timeout_s": 1.0},
       {"action": "hotkey", "keys": ["Return"]},
-      {"action": "wait", "seconds": 0.8}
-    ]
+      {
+        "action": "wait_until_visible",
+        "target_description": "find bar or highlighted matches on the page",
+        "timeout_s": 4.0
+      }
+    ],
+    "success_proof": "find bar active or text matches highlighted on the current page",
+    "success_proof_timeout_s": 5.0
   },
   "scroll_to_youtube_comments": {
     "description": "Scroll a YouTube watch page down enough to bring the 'Add a comment...' composer into the viewport. Pure PageDown — no vision dependency, no find_on_page brittleness. Escape first to drop URL-bar focus so the page body receives the keystrokes.",

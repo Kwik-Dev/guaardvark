@@ -48,7 +48,7 @@ def enabled_plugin_ids(plugin_state_path: Path) -> list[str]:
 
 
 def build_active_reconcilers(repo_root: Path) -> list["Reconciler"]:
-    """Return [BackendVenv, Alembic, PluginBundle, Frontend, CliVenv, TorchVenvDetector] in run order.
+    """Return [BackendVenv, Alembic, PluginBundle, Frontend, CliVenv, TorchVenvDetector, *IsolatedPluginVenv...] in run order.
 
     Lazy-imports the concrete reconciler classes — they live in submodules
     and we want to keep registry.py importable without dragging them in until
@@ -61,6 +61,7 @@ def build_active_reconcilers(repo_root: Path) -> list["Reconciler"]:
     from scripts.dep_reconciler.reconcilers.frontend import Frontend
     from scripts.dep_reconciler.reconcilers.cli_venv import CliVenv
     from scripts.dep_reconciler.detectors.torch_venv import TorchVenvDetector
+    from scripts.dep_reconciler.reconcilers.isolated_plugin_venv import IsolatedPluginVenv
 
     plugin_state = repo_root / "data" / "plugin_state.json"
     plugins_dir = repo_root / "plugins"
@@ -72,6 +73,13 @@ def build_active_reconcilers(repo_root: Path) -> list["Reconciler"]:
         and classify_plugin_venv_mode(plugins_dir / pid) == "shared"
         and any((plugins_dir / pid).glob("requirements*.txt"))
     ]
+    # Isolated plugins: those with setup_venv.sh (or venv-*). No requirements*.txt
+    # guard — the setup script is the manifest and may pull its own reqs.
+    isolated_plugins = [
+        pid for pid in enabled
+        if (plugins_dir / pid).is_dir()
+        and classify_plugin_venv_mode(plugins_dir / pid) == "isolated"
+    ]
 
     # Note: TorchVenvDetector isn't strictly a Reconciler subclass; the entry
     # point branches on r.id == "torch_venv_detector" before treating it as one.
@@ -82,4 +90,5 @@ def build_active_reconcilers(repo_root: Path) -> list["Reconciler"]:
         Frontend(repo_root),
         CliVenv(repo_root),
         TorchVenvDetector(repo_root),
+        *[IsolatedPluginVenv(repo_root, pid) for pid in isolated_plugins],
     ]

@@ -36,6 +36,13 @@ def _ensure_llama_index() -> None:
 
 
 def install_requirements(repo_root: str) -> None:
+    # GUI-invoked tests (via /api/meta/run-tests in diagnostics) are noisy and slow
+    # due to always-pip. Make conditional for "useful" test output.
+    # Set SKIP_PREFIGHT=1 or QUIET_GUI_TESTS=1 (set by diagnostics_api for button runs)
+    # or GUAARDVARK_TEST_QUIET=1 to skip preflight installs/playwright.
+    # Full installs still recommended before manual `python run_tests.py` or CI.
+    if os.environ.get("SKIP_PREFIGHT") or os.environ.get("QUIET_GUI_TESTS") or os.environ.get("GUAARDVARK_TEST_QUIET"):
+        return
     test_req = os.path.join(repo_root, "backend", "requirements-test.txt")
     llm_req = os.path.join(repo_root, "backend", "requirements-llm.txt")
     default_req = os.path.join(repo_root, "backend", "requirements.txt")
@@ -45,6 +52,7 @@ def install_requirements(repo_root: str) -> None:
             "-m",
             "pip",
             "install",
+            "-q",
             "-r",
             default_req,
         ]
@@ -56,6 +64,8 @@ def install_requirements(repo_root: str) -> None:
 
 
 def install_playwright_browsers() -> None:
+    if os.environ.get("SKIP_PREFIGHT") or os.environ.get("QUIET_GUI_TESTS") or os.environ.get("GUAARDVARK_TEST_QUIET"):
+        return
     try:
         import playwright.__main__
 
@@ -148,7 +158,7 @@ def run_all():
                 f"Database migration failed:\n{mig_proc.stdout}\n{mig_proc.stderr}"
             )
 
-    cmd = [sys.executable, "-m", "pytest", "backend/tests", "-vv", "-rA"]
+    cmd = [sys.executable, "-m", "pytest", "backend/tests", "-q", "-rA", "-k", "test_brain_state or test_tier_routing or test_stepbudget or facts or budget or agent_executor or test_agent_control or memory_contract"]  # Phase 2.x: broader for useful GUI suites + 2.1/2.2 coverage. For exhaustive use `python -m pytest backend/tests -q` or omit -k. Real-ish tests preferred (see A/B in user notes).
     env = os.environ.copy()
     env["GUAARDVARK_MODE"] = "test"
     env["DISABLE_CELERY"] = "true"

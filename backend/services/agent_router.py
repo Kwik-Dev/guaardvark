@@ -806,13 +806,22 @@ def get_agent_router() -> AgentRouter:
 
 
 def route_message(message: str, context: Optional[Dict[str, Any]] = None) -> RouteDecision:
-    """Convenience function to route a message"""
+    """Convenience function to route a message.
+    DEPRECATED/BRIDGE: Prefer AgentBrain.process (via unified_chat_api or direct) + useAgentRouter hook.
+    Legacy patterns kept for /tools/route compat during unification (per PHASE2 plan).
+    """
+    import warnings
+    warnings.warn("agent_router.route_message is legacy/bridge; use AgentBrain + memory/STA contracts instead", DeprecationWarning, stacklevel=2)
     router = get_agent_router()
     return router.route(message, context)
 
 
 def execute_routed_message(message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Convenience function to route and execute a message"""
+    """Convenience function to route and execute a message.
+    DEPRECATED/BRIDGE: Prefer AgentBrain + unified paths (see PHASE2_TIGHTENED_PLAN).
+    """
+    import warnings
+    warnings.warn("agent_router.execute_routed_message is legacy/bridge; route through AgentBrain.process for memory/lessons/STA awareness", DeprecationWarning, stacklevel=2)
     router = get_agent_router()
     decision = router.route(message, context)
     return router.execute_route(decision, message, context)

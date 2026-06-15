@@ -144,8 +144,10 @@ class TestLearnStop:
 class TestLearnStatus:
     def test_status_idle(self, client):
         mock_service = MagicMock()
-        mock_service.is_learning = False
-        mock_service._current_demonstration_id = None
+        mock_service.get_status.return_value = {
+            "learning": False,
+            "current_demonstration_id": None,
+        }
         with patch(
             "backend.services.agent_control_service.get_agent_control_service",
             return_value=mock_service,
@@ -159,8 +161,11 @@ class TestLearnStatus:
 
     def test_status_active(self, client):
         mock_service = MagicMock()
-        mock_service.is_learning = True
-        mock_service._current_demonstration_id = 42
+        mock_service.get_status.return_value = {
+            "learning": True,
+            "current_demonstration_id": 42,
+        }
+        # recorder not present → steps_count stays 0 (current tests don't assert it)
         with patch(
             "backend.services.agent_control_service.get_agent_control_service",
             return_value=mock_service,

@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from backend.services.brain_state import StepBudget
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Chat emit-fn handoff: the unified chat engine and agent_task_execute tool
@@ -125,6 +127,10 @@ class AgentAction:
     # inside the comment text area", "comment now appears in thread"). Empty
     # or trivial values are rejected — see done-handling guard.
     success_proof: str = ""
+    # Support for action="tool": allow natural language or direct calls to the full agent toolbox (any registered tool) from within screen/ACS loop.
+    # This brings general tools (web, code, media, etc.) together with screen skills/recipes for true natural language control in /agent mode.
+    tool_name: str = ""
+    tool_params: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -448,12 +454,18 @@ class AgentControlService:
         }
 
     def execute_task(self, task: str, screen, mouse_only: bool = False, training_mode: bool = False,
-                     emit_fn: Optional[Callable] = None, chat_context: str = "", max_steps: Optional[int] = None) -> AgentResult:
+                     emit_fn: Optional[Callable] = None, chat_context: str = "", max_steps: Optional[int] = None,
+                     budget: Optional[StepBudget] = None) -> AgentResult:
         """
         Execute a task using the see-think-act loop.
 
-        max_steps: optional cross-tier termination budget from AgentBrain (see TOTAL_STEP_CAP).
-                   Caps the vision agent loop iterations in addition to config/training limits.
+        budget: preferred explicit StepBudget from AgentBrain (carries cross-tier history and
+                remaining count). If provided, takes precedence for capping.
+        max_steps: legacy int form of the cross-tier termination budget (still supported for
+                   callers that don't pass the full object).
+
+        The budget is the "solidification" mechanism: the agentic loop now has a consistent
+        inherited cap across Reflex/Instinct/Deliberation/GemmaDirect paths.
 
         Args:
             task: Natural language description of the task
@@ -581,12 +593,30 @@ class AgentControlService:
 
         # Training mode: crank up limits so the agent keeps practicing
         max_iters = 1000 if training_mode else self.config.max_iterations
-        if max_steps is not None:
-            max_iters = min(max_iters, max(1, int(max_steps)))
+        effective_budget = budget
+        if effective_budget is None and max_steps is not None:
+            # Back-compat: synthesize a minimal budget from the legacy int
+            effective_budget = StepBudget(total=max(1, int(max_steps)))
+
+        if effective_budget is not None:
+            max_iters = min(max_iters, max(1, effective_budget.remaining))
+            # Charge the entry into this ACS loop (counts against the inherited cross-tier budget)
+            effective_budget.charge(1, 3, "entered ACS execute_task")
+        self._current_budget = effective_budget  # for prompt injection so the agent LLM can see its budget status live
         task_timeout = 3600 if training_mode else self.config.task_timeout_seconds  # 1 hour for training
 
         try:
             for iteration in range(max_iters):
+                # Budget enforcement inside the ACS loop for true cross-tier capping.
+                if effective_budget is not None:
+                    if effective_budget.remaining <= 0:
+                        logger.warning("[AGENT] Cross-tier budget exhausted — aborting loop")
+                        return finish(AgentResult(
+                            success=False, reason="budget_exhausted",
+                            steps=self._action_history,
+                        ))
+                    effective_budget.charge(1, 3, f"acs iteration {iteration}")
+
                 self._tick_strategy_cooldowns()
                 if task_ctx.killed or self._active_task_id != task_id:
                     return finish(AgentResult(
@@ -879,6 +909,70 @@ class AgentControlService:
                         self._click_history.append(decision.action.coordinates)
                         result = dict(servo_result)
                         failed = not servo_result.get("success", False)
+
+                    # Special handling for desktop / launcher icon clicks (e.g. "Firefox icon").
+                    # The servo DPC at the click site may see a small "icon pressed" animation
+                    # and report success, but the actual app launch + window mapping on XFCE
+                    # can easily take 5-12s. Force the slow semantic verifier so the loop
+                    # actually waits for the window instead of immediately re-observing
+                    # the desktop and re-deciding "must click the icon again".
+                    # Hybrid: also check xdotool for "Mozilla Firefox" window (faster than vision sometimes).
+                    # If vision gate fails, attempt direct launch fallback using the agent wrapper/profile.
+                    if target and re.search(r'(firefox|browser|chrome|icon|launcher|desktop)\s*icon|icon\s*(firefox|browser|launcher|app)|desktop.*(icon|launcher)', target, re.IGNORECASE):
+                        if not failed and not getattr(self, "_training_mode", False):
+                            launch_target = "Firefox browser window with URL bar visible or any browser/application window opened from the desktop"
+                            # Hybrid fast check via xdotool (reliable for process/window existence)
+                            try:
+                                if self._is_firefox_running(screen):
+                                    launch_verify = {"success": True, "action": "xdotool_check", "polls": 0}
+                                else:
+                                    launch_verify = self._wait_until_visible(launch_target, screen, timeout_s=12.0)
+                            except Exception:
+                                launch_verify = self._wait_until_visible(launch_target, screen, timeout_s=12.0)
+
+                            result["expected_effect"] = "application window launched and visible from desktop icon click"
+                            result["post_action_effect"] = "verified" if launch_verify.get("success") else "not_observed"
+                            result["verified"] = bool(launch_verify.get("success"))
+                            result["verifier"] = "forced_desktop_launcher_semantic_12s_hybrid"
+                            result["launch_verify"] = launch_verify
+                            if not launch_verify.get("success"):
+                                logger.info(f"[AGENT][STEP {iteration+1}][VERIFY] launcher click on {target!r} did not produce visible window in 12s (xdotool/vision) — trying direct launch fallback + marking for re-grounding")
+                                # Direct launch fallback (lean on existing launch utils to ensure window)
+                                try:
+                                    import subprocess, time as _time
+                                    from pathlib import Path
+                                    from backend.utils.agent_display_utils import get_firefox_profile_path, get_agent_display_env
+                                    profile = get_firefox_profile_path()
+                                    env = get_agent_display_env()
+                                    launcher_script = os.environ.get("AGENT_FIREFOX_LAUNCHER") or str(Path(__file__).resolve().parents[2] / "scripts" / "agent_firefox_launch.sh")
+                                    if os.path.exists(launcher_script):
+                                        cmd = [launcher_script]
+                                    else:
+                                        cmd = ["firefox", "--no-remote", "--profile", profile]
+                                    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                                    _time.sleep(4)  # allow map + paint
+                                    # re-verify
+                                    launch_verify = self._wait_until_visible(launch_target, screen, timeout_s=8.0)
+                                    result["launch_fallback"] = "direct"
+                                    result["verified"] = bool(launch_verify.get("success"))
+                                    if launch_verify.get("success"):
+                                        logger.info(f"[AGENT][STEP {iteration+1}][VERIFY] direct launch fallback succeeded for {target!r}")
+                                        failed = False
+                                except Exception as fb_err:
+                                    logger.warning(f"direct firefox launch fallback failed: {fb_err}")
+                                failed = not launch_verify.get("success", False)
+                            # Lean on memory/lessons for recovery (per approved plan + STA awareness): query prior similar fails/lessons.
+                            try:
+                                from backend.api.memory_api import get_memories_for_context
+                                from backend.services.memory_contract import memory_match_score
+                                prior = get_memories_for_context(limit=3, query=f"launcher icon click failed for {target}", min_importance=0.3) or []
+                                if prior:
+                                    lesson_hints = [m.get('content','')[:120] for m in prior if memory_match_score(target, m.get('content','')) > 0.2]
+                                    if lesson_hints:
+                                        result["memory_lesson_hints"] = lesson_hints
+                                        logger.debug(f"[AGENT][STA] launcher memory hints for {target}: {lesson_hints}")
+                            except Exception:
+                                pass  # non-fatal; STA continues with budget/verify
 
                     # Verifier selection by action class (response_2026-05-19 §B).
                     # Two verifiers, picked by latency profile:
@@ -1236,7 +1330,14 @@ class AgentControlService:
                     # Training mode: never kill on consecutive failures — missing targets is learning
                     max_failures = 999 if training_mode else self.config.max_consecutive_failures
                     if consecutive_failures >= max_failures:
-                        logger.warning(f"Kill switch: {consecutive_failures} consecutive failures")
+                        recent = [
+                            f"{s.action.action_type}:{(s.action.target_description or s.action.text or '?')[:30]}"
+                            for s in self._action_history[-3:]
+                        ]
+                        logger.warning(
+                            f"Kill switch: {consecutive_failures} consecutive failures. "
+                            f"Recent actions: {recent}. Last reason(s) in history."
+                        )
                         self.kill()
                         return finish(AgentResult(
                             success=False, reason="max_failures",
@@ -1855,6 +1956,22 @@ class AgentControlService:
                 time.sleep(seconds)
                 return {"success": True, "waited": seconds}
 
+            elif action.action_type == "tool":
+                # Support natural language or direct invocation of any tool in the full agent toolbox from the screen loop.
+                # This unifies general tools (web, code, media, memory, etc.) with screen skills/recipes for true NL control in /agent mode.
+                # Execution goes through the central registry (same as deliberation path).
+                if not action.tool_name:
+                    return {"success": False, "error": "tool action requires tool_name"}
+                try:
+                    from backend.tools.tool_registry_init import initialize_all_tools
+                    registry = initialize_all_tools()
+                    if action.tool_name not in registry.list_tools():
+                        return {"success": False, "error": f"unknown tool {action.tool_name}"}
+                    res = registry.execute_tool(action.tool_name, **(action.tool_params or {}))
+                    return {"success": res.success, "tool_result": res.output if res.success else res.error, "tool": action.tool_name}
+                except Exception as e:
+                    return {"success": False, "error": f"tool execution failed: {e}"}
+
             else:
                 return {"success": False, "error": f"Unknown action: {action.action_type}"}
 
@@ -2145,7 +2262,11 @@ class AgentControlService:
             
         chat_context_block = f"Recent conversation context:\n{chat_context}\n\n" if chat_context else ""
 
-        return f"""{pivot_block}{chat_context_block}Task: {task}
+        budget_block = ""
+        if getattr(self, '_current_budget', None) is not None:
+            budget_block = self._current_budget.to_llm_summary() + " (cross-tier budget — be efficient with steps; this is visible to you for awareness.)\n\n"
+
+        return f"""{pivot_block}{budget_block}{chat_context_block}Task: {task}
 
 {desktop_state}
 {world_block}
@@ -2160,7 +2281,10 @@ For high-impact clicks (launch, submit, comment, modal dismiss), set expected_ef
 done rule: when action="done", success_proof MUST describe the visible state that proves the task is complete (e.g. "cursor inside text area", "comment now visible in thread"). Empty or generic ("n/a", "task done") is rejected. This rule applies to all models and paths.
 
 Reply ONLY with JSON:
-{{"status": "IN_PROGRESS|COMPLETE", "action": "click|right_click|type|hotkey|scroll|wait|done|navigate", "target_description": "...", "text": "literal value only", "keys": ["ctrl","t"], "url": "https://...", "reasoning": "why", "expected_effect": "visible result after this action", "success_proof": "visible state proving done (only when action=done)"}}"""
+{{"status": "IN_PROGRESS|COMPLETE", "action": "click|right_click|type|hotkey|scroll|wait|done|navigate|tool", "target_description": "...", "text": "literal value only", "keys": ["ctrl","t"], "url": "https://...", "reasoning": "why", "expected_effect": "visible result after this action", "success_proof": "visible state proving done (only when action=done)", "tool_name": "optional for action=tool", "tool_params": {{}}}}
+
+Full toolbox awareness (SkillOpt-style skills + tools): You have access to a large agent toolbox (code, web search/scrape, media/music, batch generation, memory/lessons, general tools, and screen control via these recipes/skills). In /agent mode with capable models (Gemma4+), use natural language to invoke any -- e.g. describe a general task to trigger tool calling, or screen task to use recipes + actions here. Recipes (skills) are optimized deterministic shortcuts for common screen patterns (triggers match natural language); the system auto-matches and executes them for reliability. For full list or self-introspection, call agent_status. Skills/recipes + self-knowledge are external (like SkillOpt .md artifacts) and can be auto-tuned from trajectories without changing model weights. Prioritize matching/using recipes for screen reliability; fall back to structured actions or general tools (use action="tool", tool_name=..., tool_params=...) as needed. Cross-model: these skills make even smaller models effective at complex multi-step work.
+"""
 
     @staticmethod
     def _get_unified_model() -> str:
@@ -2214,12 +2338,19 @@ Reply ONLY with JSON:
             try:
                 from backend.services.agent_knowledge_validator import validate_recipe_library
                 validation = validate_recipe_library(data)
-                if validation.issues:
+                errors = [i for i in validation.issues if i.severity == "error"]
+                if errors:
                     logger.warning(
-                        "[AGENT][RECIPE] validation: %s",
+                        "[AGENT][RECIPE] validation errors: %s",
+                        "; ".join(f"{i.path}:{i.message}" for i in errors[:8]),
+                    )
+                elif validation.issues:
+                    # Only debug-level for migration warnings (legacy waits, missing proof on old recipes)
+                    logger.debug(
+                        "[AGENT][RECIPE] validation warnings: %s",
                         "; ".join(
                             f"{i.severity}:{i.path}:{i.message}"
-                            for i in validation.issues[:12]
+                            for i in validation.issues[:8]
                         ),
                     )
             except Exception as ve:
@@ -2329,11 +2460,27 @@ Reply ONLY with JSON:
         task_stripped = task.strip()
         task_lower = task_stripped.lower()
 
-        # Skip recipes for multi-step or compound tasks
-        if re.search(r'step\s*\d|^\d+\.\s|\n\d+\.|then\s+(?:type|press|click|open|navigate)', task_lower):
-            return None
-        if re.search(r'(?:go to|navigate to)\s+\S+.*\b(?:and|then)\b.*\b(?:click|check|find|look|tell|scroll|type|search|read|describe|suggest)', task_lower):
-            return None
+        # Normalize common chat prefixes so natural language tasks like
+        # "The task is to open Firefox and navigate to YouTube" still match
+        # anchored recipe triggers such as "^(open|launch) firefox...".
+        task_for_match = re.sub(
+            r'^(the task is to |i (need|want|have) to |please |help me to |just |now )+',
+            '',
+            task_stripped,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        # Skip recipes for multi-step or compound tasks (still use the raw lower for detection),
+        # *except* launch-first compounds like "open firefox and navigate...".
+        # The open_firefox recipe includes its own wait_until_visible for the window effect.
+        # This lets the good recipe (vision click icon + 12s wait) run for the prerequisite, preventing
+        # the adaptive loop from repeatedly deciding "click Firefox icon" and failing the gate.
+        is_launcher_compound = bool(re.search(r'\b(open|launch|start)\s+(firefox|browser|chrome)\b', task_lower))
+        if not is_launcher_compound:
+            if re.search(r'step\s*\d|^\d+\.\s|\n\d+\.|then\s+(?:type|press|click|open|navigate)', task_lower):
+                return None
+            if re.search(r'(?:go to|navigate to)\s+\S+.*\b(?:and|then)\b.*\b(?:click|check|find|look|tell|scroll|type|search|read|describe|suggest)', task_lower):
+                return None
         if len(task_lower) > 200:
             return None
 
@@ -2341,7 +2488,7 @@ Reply ONLY with JSON:
         # by default so capture groups preserve case-sensitive things like
         # YouTube video IDs. Page-route shorthand below replaces it with a
         # synthetic navigation phrase when "go to <known page>" matches.
-        task_effective = task_stripped
+        task_effective = task_for_match or task_stripped
 
         # Also handle "go to X page" → localhost:5175/X
         page_match = re.search(
@@ -3849,6 +3996,13 @@ Screen: {scene}
                 decision.action.success_proof = (data.get("success_proof") or "").strip()
                 if status == "COMPLETE" and action_type != "done":
                     logger.warning(f"[AGENT][PARSER] Forced completion: status='COMPLETE' but action='{action_type}'")
+                return decision
+
+            if action_type == "tool":
+                decision.action.action_type = "tool"
+                decision.action.tool_name = data.get("tool_name", "") or data.get("name", "")
+                decision.action.tool_params = data.get("tool_params", {}) or data.get("parameters", {})
+                decision.action.reasoning = data.get("reasoning", "")
                 return decision
 
             # Sanitize text field — models sometimes parrot instruction text

@@ -265,6 +265,49 @@ class OfflineImageGenerator:
             return 'sdxl'
         return 'sd'
 
+    # Measured pipeline footprints per family (bf16 weights + denoise activations),
+    # not aspirations. The 2026-06-10 OOM postmortem: a flat 3500MB estimate let the
+    # admission check pass while Z-Image actually allocated 9.9GB — straight into a
+    # wall of resident Ollama models (gemma 4.95GB + qwen3-embedding 4.32GB). The
+    # zimage figure is WITH model-cpu-offload enabled.
+    _FAMILY_VRAM_MB = {"zimage": 11000, "sdxl": 8000, "sd": 4000}
+
+    def _vram_estimate_mb(self, model_id: str) -> int:
+        return self._FAMILY_VRAM_MB.get(self._model_family(model_id), 4000)
+
+    def _ensure_vram_for_pipeline(self, model_id: str) -> None:
+        """Make room on the card BEFORE the pipeline load, not after it OOMs.
+
+        Two layers, both best-effort (never raises — a wrong guess here should
+        degrade to the old behavior, not block generation):
+          1. If free VRAM minus a safety margin can't fit this family's real
+             footprint, evict resident Ollama models via the canonical
+             gpu_resource_policy reclaim. This is cross-process — it works even
+             though nothing registers ollama:* slots in the orchestrator registry,
+             which is why registry-based eviction alone couldn't save us.
+          2. Register the slot with the orchestrator using the real estimate so
+             its registry eviction + budget math operate on truth, not 3500.
+        """
+        if self._pipeline is not None and self._current_model == model_id:
+            return  # already resident — its VRAM is already spent
+        estimate_mb = self._vram_estimate_mb(model_id)
+        try:
+            if self._device == "cuda":
+                free_b, total_b = torch.cuda.mem_get_info()
+                free_mb, total_mb = free_b // (1024 * 1024), total_b // (1024 * 1024)
+                margin_mb = max(1024, int(total_mb * 0.10))
+                if free_mb - margin_mb < estimate_mb:
+                    from backend.services.gpu_resource_policy import evict_ollama_models
+                    logger.info(
+                        f"VRAM admission: {free_mb}MB free won't fit {estimate_mb}MB "
+                        f"(+{margin_mb}MB margin) for {model_id} — evicting Ollama models"
+                    )
+                    evict_ollama_models()
+            from backend.services.gpu_memory_orchestrator import get_orchestrator
+            get_orchestrator().request_model("sd:pipeline", vram_estimate_mb=estimate_mb, priority=85)
+        except Exception as e:
+            logger.warning(f"VRAM admission check failed (non-critical, proceeding): {e}")
+
     def _has_text_intent(self, prompt: str) -> bool:
         """True if the prompt asks for on-image text — bypass enhancement to keep
         spelling intact (HULK -> HUK otherwise). Shared detector lives in
@@ -840,14 +883,6 @@ Negative Prompt: {negative_prompt}""",
         with self._generation_lock:
             self._notify_vision_pipeline("start")
             try:
-                # Free GPU memory via orchestrator (evicts Ollama models if needed)
-                try:
-                    from backend.services.gpu_memory_orchestrator import get_orchestrator
-                    _orch = get_orchestrator()
-                    _orch.request_model("sd:pipeline", vram_estimate_mb=3500, priority=85)
-                except Exception as e:
-                    logger.debug(f"GPU orchestrator unavailable (non-critical): {e}")
-
                 # Auto-router: pick the best downloaded model for this prompt.
                 if request.model in (None, "", "auto"):
                     request.model = self._auto_select_model(request.prompt, request.style)
@@ -898,6 +933,11 @@ Negative Prompt: {negative_prompt}""",
                     logger.warning(f"Guidance scale {request.guidance_scale} is extremely high. Capping at 15.0")
                     request.guidance_scale = 15.0
 
+                # Make room BEFORE loading — family-aware estimate + Ollama eviction
+                # when the card is too full. Runs after ALL model rerouting so the
+                # estimate matches the model we actually load.
+                self._ensure_vram_for_pipeline(model_id)
+
                 if not self._load_pipeline(model_id):
                     # Requested model failed to load (gated/removed repo, missing
                     # download, OOM). Fall back to the default model instead of
@@ -909,6 +949,7 @@ Negative Prompt: {negative_prompt}""",
                         )
                         model_id = self.default_model
                         is_sdxl = 'xl' in model_id.lower() or 'sdxl' in model_id.lower()
+                        self._ensure_vram_for_pipeline(model_id)
                         if not self._load_pipeline(model_id):
                             result.error = f"Failed to load fallback model {self.default_model}"
                             return result

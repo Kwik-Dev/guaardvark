@@ -24,7 +24,7 @@ def test_gpu_probe_none_when_no_tools():
 
 
 def test_gpu_probe_nvidia_parses_smi_output():
-    smi_out = "NVIDIA GeForce RTX 4070 Ti SUPER, 16384, 565.57.01\n"
+    smi_out = "NVIDIA GeForce RTX 4070 Ti SUPER, 16384, 565.57.01, 8.9\n"
     mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout=smi_out, stderr=""))
     d = HardwareDetector()
     with patch("subprocess.run", mock_run):
@@ -84,3 +84,27 @@ def test_master_eligible_respects_env_var(monkeypatch):
     d2 = HardwareDetector()
     profile2 = d2.detect()
     assert profile2["master_eligible"] is True
+
+
+def test_nvidia_probe_includes_compute_cap(monkeypatch):
+    import subprocess
+    from backend.services import hardware_detector as hd
+
+    def fake_run(args, **kwargs):
+        # Route nvidia-smi calls; return a non-zero stub for everything else.
+        if "--query-gpu=name,memory.total,driver_version,compute_cap" in args:
+            class R:
+                returncode = 0
+                stdout = "NVIDIA GeForce RTX 5060 Ti, 16311, 595.71.05, 12.0\n"
+            return R()
+        class Empty:
+            returncode = 1
+            stdout = ""
+        return Empty()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    det = hd.HardwareDetector(node_id_path="/tmp/_gx_nodeid_test")
+    gpu = det._probe_gpu_nvidia()
+    assert gpu["vendor"] == "nvidia"
+    assert gpu["vram_mb"] == 16311
+    assert gpu["compute_cap"] == "12.0"

@@ -136,7 +136,7 @@ class HardwareDetector:
     def _probe_gpu_nvidia(self) -> dict | None:
         try:
             out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+                ["nvidia-smi", "--query-gpu=name,memory.total,driver_version,compute_cap",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=5, check=False,
             )
@@ -144,13 +144,14 @@ class HardwareDetector:
                 return None
             first = out.stdout.strip().splitlines()[0]
             parts = [p.strip() for p in first.split(",")]
-            if len(parts) < 3:
+            if len(parts) < 4:
                 return None
             return {
                 "vendor": "nvidia",
                 "model": parts[0],
                 "vram_mb": int(parts[1]),
                 "driver": parts[2],
+                "compute_cap": parts[3],
                 "cuda": self._detect_cuda_version(),
             }
         except (FileNotFoundError, subprocess.SubprocessError, ValueError):

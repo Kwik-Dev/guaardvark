@@ -246,14 +246,15 @@ export default function AgentScreenViewer({ open, onClose }) {
     if (!isTraining || !imgRef.current) return;
     const img = imgRef.current;
     const rect = img.getBoundingClientRect();
-    // Translate browser coords to 1024x1024 virtual display coords
-    const scaleX = 1024 / rect.width;
-    const scaleY = 1024 / rect.height;
+    // Translate browser coords to virtual display coords (1000 matches current
+    // agent display resolution + Gemma4 box_2d normalization grid).
+    const scaleX = 1000 / rect.width;
+    const scaleY = 1000 / rect.height;
     const x = Math.round((e.clientX - rect.left) * scaleX);
     const y = Math.round((e.clientY - rect.top) * scaleY);
     // Clamp to display bounds
-    const cx = Math.max(0, Math.min(1024, x));
-    const cy = Math.max(0, Math.min(1024, y));
+    const cx = Math.max(0, Math.min(1000, x));
+    const cy = Math.max(0, Math.min(1000, y));
     axios.post(`${API_BASE}/agent-control/learn/input`, {
       action: 'click', x: cx, y: cy,
     }).catch((err) => console.error('Training click failed:', err));

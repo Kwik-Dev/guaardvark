@@ -287,13 +287,32 @@ class AgentReadTextFromElementTool(BaseTool):
 
 class AgentStatusTool(BaseTool):
     name = "agent_status"
-    description = "Get the current status of the agent vision control system."
+    description = "Get the current status of the agent vision control system, including active recipes/skills, available tools/capabilities (full toolbox awareness), model, screen state, budget, memory/lessons summary. Use this to introspect what tools and skills you have access to in the current context."
     parameters = {}
 
     def execute(self, **kwargs) -> ToolResult:
         try:
             from backend.services.agent_control_service import get_agent_control_service
+            from backend.tools.tool_registry_init import initialize_all_tools
             service = get_agent_control_service()
-            return ToolResult(success=True, output=service.get_status())
+            status = service.get_status() or {}
+            # Enrich with full toolbox awareness (lean on registry + recipes + knowledge)
+            try:
+                registry = initialize_all_tools()
+                status["available_tools"] = registry.list_tools()
+                status["tool_count"] = len(status["available_tools"])
+                status["core_capabilities"] = ["screen_control (ACS/recipes/vision servo)", "general tool calling (registry)", "code view/edit", "web search/scrape", "media/play music", "batch gen", "memory/lessons/self-improvement", "and more via natural language in /agent mode"]
+            except Exception:
+                status["available_tools"] = ["(registry unavailable)"]
+            try:
+                from backend.services.agent_control_service import AgentControlService
+                recipes = AgentControlService._load_recipes() or {}
+                status["active_recipes"] = list(recipes.keys())[:10]  # top ones
+                status["recipe_count"] = len(recipes)
+            except Exception:
+                pass
+            # Add high-level capabilities note for the model
+            status["full_toolbox_awareness"] = "In /agent mode with capable model (e.g. Gemma4), you can use natural language to invoke any tool or skill/recipe. Screen tasks use optimized recipes + see-think-act for reliability. Query this tool anytime for current state."
+            return ToolResult(success=True, output=status)
         except Exception as e:
             return ToolResult(success=False, error=str(e))

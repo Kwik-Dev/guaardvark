@@ -92,26 +92,34 @@ def unified_chat():
         except (ValueError, TypeError):
             project_id = None
 
-    # Check if AgentBrain is available (pre-computed state, three-tier routing)
+    # Phase 2.2: AgentBrain is the sole canonical router (when AGENT_BRAIN_ENABLED, default true).
+    # Legacy unified_chat_engine is bridge ONLY for explicit disable (GUAARDVARK_AGENT_BRAIN=false)
+    # or when brain_state not ready. No silent fallback when enabled.
     use_agent_brain = False
     agent_brain = None
+    agent_brain_enabled = False
     try:
         from backend.config import AGENT_BRAIN_ENABLED
+        agent_brain_enabled = AGENT_BRAIN_ENABLED
         brain_state = getattr(current_app, 'brain_state', None)
         if AGENT_BRAIN_ENABLED and brain_state and brain_state.is_ready:
             from backend.services.agent_brain import AgentBrain
             agent_brain = AgentBrain(state=brain_state)
             use_agent_brain = True
-            logger.info(f"[UNIFIED_CHAT] Using AgentBrain (three-tier routing)")
+            logger.info(f"[UNIFIED_CHAT] Using AgentBrain (sole canonical router per Phase 2.2)")
     except Exception as e:
-        logger.debug(f"AgentBrain not available, using legacy path: {e}")
+        logger.debug(f"AgentBrain not available: {e}")
 
     engine = None
     if not use_agent_brain:
-        # Legacy path: create UnifiedChatEngine per-request
+        if agent_brain_enabled:
+            # Enforce sole: do not fall back when explicitly enabled. Surface clear error.
+            logger.error("[UNIFIED_CHAT] AGENT_BRAIN_ENABLED but brain_state not ready - no legacy fallback")
+            return jsonify({"success": False, "error": "AgentBrain enabled but not ready (brain_state missing or !is_ready)."}), 503
+        # Legacy bridge path only when disabled (deprecated during 2.2)
         llm = current_app.config.get("LLAMA_INDEX_LLM")
         if not llm:
-            logger.warning("LLAMA_INDEX_LLM not in app config, creating on demand")
+            logger.warning("LLAMA_INDEX_LLM not in app config, creating on demand (legacy)")
             try:
                 from backend.utils.llm_service import get_llm_for_startup
                 llm = get_llm_for_startup()
@@ -129,6 +137,7 @@ def unified_chat():
 
         from backend.services.unified_chat_engine import UnifiedChatEngine
         engine = UnifiedChatEngine(registry, llm)
+        logger.info("Using legacy UnifiedChatEngine bridge (AgentBrain disabled or not ready; Phase 2.2 unification)")
 
     # Build emit function
     from backend.socketio_instance import socketio
@@ -189,7 +198,7 @@ def unified_chat():
 
     def run_engine():
         try:
-            if use_agent_brain:
+            if use_agent_brain and agent_brain:
                 agent_brain.process(
                     session_id=session_id,
                     message=message,
@@ -201,10 +210,13 @@ def unified_chat():
                     image_url=image_url,
                     is_voice_message=is_voice_message,
                 )
-            else:
+            elif engine:
+                # legacy bridge only
                 engine.chat(session_id, message, options, emit_fn, app=app,
                            project_id=project_id, image_data=image_data, image_url=image_url,
                            is_voice_message=is_voice_message)
+            else:
+                raise RuntimeError("No routing engine available")
         except Exception as e:
             logger.error(f"Chat engine thread error: {e}", exc_info=True)
             emit_fn("chat:error", {"error": str(e)})

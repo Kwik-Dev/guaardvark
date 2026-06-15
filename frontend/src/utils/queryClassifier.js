@@ -91,7 +91,9 @@ const ENTITY_PATTERNS = [
 
   // Entity queries
   /\b(status of|details about|information on)\s+[A-Z]/,
-  /\b(client|project|website)\s+called\b/i
+  /\b(client|project|website)\s+called\b/i,
+  // Phase 2.1: budget/entity-rich for agent awareness (tighten budget context)
+  /\b(budget|steps remaining|agent steps|my limit|resource|cap)\b/i
 ];
 
 /**

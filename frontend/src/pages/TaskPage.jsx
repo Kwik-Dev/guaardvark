@@ -181,7 +181,7 @@ const TaskPage = () => {
       });
       setVideoGenJobs(data?.jobs || []);
     } catch (err) {
-      setVideoGenError(err.response?.data?.error || err.message || "Failed to load VideoGen jobs");
+      setVideoGenError(err.response?.data?.error || err.message || "Failed to load video batch jobs");
     } finally {
       setVideoGenLoading(false);
     }
@@ -193,7 +193,7 @@ const TaskPage = () => {
       if (res?.cancelled) {
         setFeedback({
           open: true,
-          message: "VideoGen job cancelled",
+          message: "Video batch job cancelled",
           severity: "success",
         });
         fetchVideoGenJobs();
@@ -681,18 +681,19 @@ const TaskPage = () => {
           onTaskDuplicated={handleTaskDuplicated}
         />
 
-        {/* VideoGen jobs — queued/running batches from /api/jobs */}
+        {/* Video batch jobs (VIDEO_GEN kind) surfaced from the unified /api/jobs system.
+            Separate from legacy Task scheduler below and from music-video pipeline (which has its own MusicVideoPage + stages). */}
         <Paper sx={{ p: 2, mb: 2, borderRadius: 2 }}>
           <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
             <Box>
               <Typography variant="subtitle1" fontWeight={600}>
-                Video Generation Jobs
+                Video Batch Jobs
               </Typography>
               <Typography variant="caption" color="text.secondary">
-                Queued and running batches from the VideoGen pipeline
+                Queued and running batches from the unified VIDEO_GEN pipeline (Batch Video / Video Generator). This page (Job Scheduler) also handles legacy scheduled jobs for code, content, CSV, analysis, and custom tasks via the New Job menu.
               </Typography>
             </Box>
-            <IconButton size="small" onClick={fetchVideoGenJobs} title="Refresh VideoGen jobs">
+            <IconButton size="small" onClick={fetchVideoGenJobs} title="Refresh Video Batch jobs">
               <RefreshIcon fontSize="small" />
             </IconButton>
           </Stack>
@@ -704,7 +705,7 @@ const TaskPage = () => {
 
           {videoGenJobs.length === 0 && !videoGenLoading ? (
             <Typography variant="body2" color="text.secondary">
-              No pending VideoGen jobs.
+              No pending video batch jobs.
             </Typography>
           ) : (
             <Table size="small">

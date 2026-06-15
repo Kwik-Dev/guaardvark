@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .memory_contract import query_tokens, memory_match_score
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,6 +98,9 @@ class TierTelemetry:
     model: str = ""
     timestamp: str = ""
     total_agent_steps: int = 0
+    budget_remaining: int = 0
+    budget_total: int = 20
+    budget_charges: int = 0  # number of charges this interaction
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -110,6 +115,9 @@ class TierTelemetry:
             "model": self.model,
             "timestamp": self.timestamp,
             "total_agent_steps": self.total_agent_steps,
+            "budget_remaining": self.budget_remaining,
+            "budget_total": self.budget_total,
+            "budget_charges": self.budget_charges,
         }
 
     @staticmethod
@@ -117,6 +125,126 @@ class TierTelemetry:
         """One-way hash so telemetry never stores raw user messages."""
         normalized = message.strip().lower()
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass
+class StepBudget:
+    """
+    First-class cross-tier termination budget.
+
+    This is the 'solidification' of agentic limits. Every tier, executor, and
+    control loop should respect the same inherited cap so the agent has a
+    consistent sense of "how much effort I have left".
+
+    The agent can be made *aware* of it (via context on escalation, or even
+    exposed as a tool / in system prompt) so it develops personality-level
+    caution and efficiency instead of blindly burning steps.
+    """
+    total: int = 20
+    used: int = 0
+    history: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.used)
+
+    def charge(self, amount: int, tier: int, reason: str = "") -> bool:
+        """
+        Charge steps against the budget.
+        Returns False if we are now out of budget (caller should stop escalating
+        or abort gracefully).
+        """
+        if amount <= 0:
+            return True
+        self.used += amount
+        self.history.append({
+            "tier": tier,
+            "amount": amount,
+            "reason": reason or "unspecified",
+            "remaining_after": self.remaining,
+        })
+        return self.remaining > 0
+
+    def on_escalation(self, from_tier: int, cost: int = 2, reason: str = "tier escalation"):
+        """Convenience: deduct a cost when moving from one tier to a heavier one."""
+        self.charge(cost, from_tier, reason)
+
+    def to_context(self) -> str:
+        """Human/agent-readable summary suitable for injecting into LLM context."""
+        if self.remaining <= 3:
+            urgency = " (BUDGET IS LOW — be extremely efficient and prefer short paths)"
+        elif self.remaining <= 8:
+            urgency = " (budget is getting tight)"
+        else:
+            urgency = ""
+        return (
+            f"Cross-tier agentic step budget: used {self.used}/{self.total}, "
+            f"{self.remaining} remaining{urgency}. "
+            "Do not waste steps on unnecessary exploration."
+        )
+
+    def to_llm_summary(self) -> str:
+        """Concise version for per-step LLM prompts (so the agent can 'see' its budget live)."""
+        pct = int((self.used / self.total) * 100) if self.total > 0 else 0
+        return f"[BUDGET: {self.remaining}/{self.total} steps left ({pct}% used)]"
+
+    def to_telemetry(self) -> Dict[str, Any]:
+        return {
+            "total": self.total,
+            "used": self.used,
+            "remaining": self.remaining,
+            "history": self.history[-10:],  # last 10 charges for debugging
+        }
+
+    @classmethod
+    def from_total(cls, total: int) -> "StepBudget":
+        return cls(total=total)
+
+    def query_active_facts(self, min_conf: float = 0.5) -> List[Dict[str, Any]]:
+        """Return high-confidence facts from history or integrated memory (stub for FactsRegistry integration)."""
+        facts = []
+        for entry in self.history:
+            if entry.get("confidence", 1.0) >= min_conf:
+                facts.append(entry)
+        return facts
+
+    def integrate_memory_context(self, memory_text: str):
+        """Score and integrate memory context, charging a small introspection cost if relevant."""
+        tokens = query_tokens(memory_text)
+        score = memory_match_score(memory_text, [], "budget efficiency low remaining prefer direct")
+        if score > 0.2:
+            self.charge(1, 99, f"introspected memory for efficiency: {memory_text[:80]}")
+            # in full impl, would feed to FactsRegistry or memory
+
+    def apply_lesson_efficiency(self, lessons: list):
+        """Apply efficiency lessons (e.g. from lesson_summary memories) to adjust behavior or charge."""
+        for lesson in lessons:
+            if "budget" in str(lesson).lower() or "efficient" in str(lesson).lower():
+                self.charge(0, 99, f"applied lesson: {str(lesson)[:50]}")
+
+    @classmethod
+    def from_hw_policy(cls, hardware: dict) -> "StepBudget":
+        """Derive dynamic budget from hardware (vram, model tier, ollama tuning)."""
+        try:
+            from .hardware_policy import model_tier, ollama_tuning
+            gpu = hardware.get("gpu", {}) or {}
+            ram = hardware.get("ram", {}) or {}
+            arch = hardware.get("arch", "")
+            tier = model_tier(ram.get("total_gb", 16), gpu, arch)
+            ollama = ollama_tuning(gpu)
+            vram = gpu.get("vram_mb", 16000)
+            base = 20
+            if vram < 16000:
+                base = 10  # tighter on low VRAM
+            elif vram > 24000:
+                base = 30
+            # lower for small models
+            if "1b" in tier.get("chat", ""):
+                base = max(5, base // 2)
+            total = base
+            return cls(total=total)
+        except Exception:
+            return cls(total=20)
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +952,25 @@ RULES:
         except Exception:
             desktop_block = ""
 
+        budget_block = ""
+        if getattr(self, '_current_budget', None):
+            budget_block = self._current_budget.to_llm_summary() + "\n\nUse budget status to plan efficient paths (e.g. prefer facts/synthesis on low budget; query memory/lessons for prior efficiency).\n\n"
+
+        # Use Facts + entity recall if available (cross layer) - lean on FactsRegistry (executor) + memory_contract.
+        facts_block = ""
+        try:
+            fr = getattr(self, '_facts_registry', None)
+            if fr and hasattr(fr, 'format_facts_for_prompt'):
+                fb = fr.format_facts_for_prompt()
+                if fb:
+                    facts_block = fb + "\n\nPrior extracted facts (use for synthesis; score via memory_contract).\n\n"
+        except Exception:
+            pass
+
         return (
             template
             .replace("{MEMORY_BLOCK}", memory_block)
             .replace("{DESKTOP_STATE}", desktop_block)
+            + budget_block  # live budget + awareness for agent personality
+            + facts_block
         )

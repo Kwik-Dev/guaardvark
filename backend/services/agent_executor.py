@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import re
 
 from backend.services.agent_tools import ToolRegistry, ToolResult
+from backend.services.brain_state import StepBudget
 from backend.utils.agent_output_parser import (
     parse_tool_calls_structured,
     format_tool_result_for_llm,
@@ -333,15 +334,16 @@ class AgentExecutor:
         """Set extra kwargs that get forwarded to every tool execute() call."""
         self._tool_context.update(kwargs)
     
-    def execute(self, user_query: str, session_context: str = "", process_id: Optional[str] = None, max_steps: Optional[int] = None) -> AgentResult:
+    def execute(self, user_query: str, session_context: str = "", process_id: Optional[str] = None, max_steps: Optional[int] = None, budget: Optional["StepBudget"] = None) -> AgentResult:
         """
         Execute agent loop with tool calls
         
         Args:
             user_query: User's question or request
-            session_context: Additional context from session
+            session_context: Additional context from session (now expected to contain budget.to_context() on escalation)
             process_id: Optional process ID from system coordinator
-            max_steps: optional cross-tier budget from brain to cap this ReACT executor.
+            max_steps: legacy int form (still supported)
+            budget: preferred explicit StepBudget from AgentBrain (carries history + awareness)
             
         Returns:
             AgentResult with final answer and execution steps
@@ -354,8 +356,17 @@ class AgentExecutor:
             self.original_query = user_query  # Store for synthesis step
             self._tool_history = []  # Track tools called across iterations
 
-            if max_steps is not None:
-                self.max_iterations = min(self.max_iterations, max(1, int(max_steps)))
+            effective_budget = budget
+            if effective_budget is None and max_steps is not None:
+                # Back-compat path
+                from backend.services.brain_state import StepBudget
+                effective_budget = StepBudget(total=max(1, int(max_steps)))
+
+            if effective_budget is not None:
+                self.max_iterations = min(self.max_iterations, max(1, effective_budget.remaining))
+                # Charge the entry into this executor
+                effective_budget.charge(1, 3, "entered AgentExecutor")
+            self._budget = effective_budget  # store for prompt injection so agent can "see" its limits
 
             if self.llm is None or not hasattr(self.llm, "chat"):
                 error = (
@@ -378,25 +389,40 @@ class AgentExecutor:
             from backend.services.tool_execution_guard import ToolExecutionGuard
             self._guard = ToolExecutionGuard(max_failures_per_tool=2)
 
-            # Inject cross-session memory if available
+            # Inject memory via the architecture (memory_contract + get_memories_for_context + FactsRegistry learnings).
+            # Lean on durable AgentMemory (fact/lesson/belief) scored by contract, not legacy in-mem manager.
+            # Reuse brain_state / memory_api patterns for consistency with AgentBrain/STA.
             memory_context = ""
             try:
-                from backend.utils.memory_manager import MemoryManager
-                memory_mgr = MemoryManager()
-                smart_context = memory_mgr.get_smart_context(
-                    session_id=process_id or "self_improvement",
-                    messages=[{"role": "user", "content": user_query}],
-                    max_messages=5,
-                )
-                if smart_context:
-                    memory_items = [m.get("content", "")[:200] for m in smart_context if m.get("importance", 0) > 0.5]
-                    if memory_items:
-                        memory_context = "\n\nPrevious relevant learnings:\n" + "\n".join(f"- {item}" for item in memory_items)
+                from backend.api.memory_api import get_memories_for_context
+                from backend.services.memory_contract import memory_match_score
+                mems = get_memories_for_context(
+                    session_id=process_id or "default",
+                    query=user_query,
+                    limit=8,
+                    min_importance=0.4
+                ) or []
+                # Score + filter using contract (prefer high trust + match to query)
+                scored = []
+                for m in mems:
+                    score = memory_match_score(user_query, m.get('content', ''), m.get('type'))
+                    if score > 0.3:
+                        scored.append((score, m))
+                scored.sort(reverse=True)
+                learnings = [m.get('content', '')[:200] for _, m in scored[:5]]
+                if learnings:
+                    memory_context = "\n\nRelevant memory (via contract + match_score; lean on lessons/facts):\n" + "\n".join(f"- {l}" for l in learnings)
             except Exception as e:
-                logger.debug(f"Memory context not available: {e}")
+                logger.debug(f"Contract memory context not available (falling back empty): {e}")
 
             if memory_context:
                 session_context = (session_context or "") + memory_context
+
+            # Make budget visible to the agent from the first prompt (for awareness/solidification).
+            # This lets the LLM "see" its cross-tier limits in every tier's reasoning context.
+            if getattr(self, '_budget', None):
+                budget_summary = "\n" + self._budget.to_llm_summary() + " (cross-tier inherited; track your spend.)"
+                session_context = budget_summary + "\n" + session_context
 
             # Detect vision/screen tasks and filter tools accordingly
             is_vision_task = self._is_vision_task(user_query, session_context)
@@ -682,6 +708,8 @@ What tool do you need to call next?"""
             )
             if extracted_facts:
                 logger.info(f"Extracted {len(extracted_facts)} facts from {tool_call.tool_name}")
+                if getattr(self, '_budget', None):
+                    self._budget.charge(1, 3, f"fact extracted from {tool_call.tool_name}")
         
         # Build next prompt with observations and facts
         observations_combined = "\n\n".join(observation_texts)
@@ -704,7 +732,11 @@ What tool do you need to call next?"""
             if guard_summary:
                 guard_block = f"\n{guard_summary}\n"
 
-        next_prompt = f"""Latest tool result:
+        budget_block = ""
+        if getattr(self, '_budget', None):
+            budget_block = self._budget.to_llm_summary() + "\n\n"
+
+        next_prompt = f"""{budget_block}Latest tool result:
 {observations_combined}
 
 Tools already called:
@@ -713,7 +745,8 @@ Tools already called:
 Original task: {self.original_query}
 
 If the task is complete (all requested steps done), you MUST set "final_answer" with a summary.
-Otherwise, call the next tool needed. Do NOT repeat a tool you already called with the same parameters."""
+Otherwise, call the next tool needed. Do NOT repeat a tool you already called with the same parameters.
+{budget_block}"""
         
         return {
             'is_final': False,
@@ -786,7 +819,11 @@ Otherwise, call the next tool needed. Do NOT repeat a tool you already called wi
 - NEVER fabricate information. Only state facts found in tool results.
 - If you cannot find the answer, say so honestly."""
 
-        base_prompt = f"""You are an AI assistant with access to tools. Help the user by using tools when needed.
+        budget_line = ""
+        if getattr(self, '_budget', None):
+            budget_line = "\n" + self._budget.to_llm_summary() + " Use this information to plan efficiently across steps."
+
+        base_prompt = f"""You are an AI assistant with access to tools. Help the user by using tools when needed.{budget_line}
 
 Available Tools:
 {tool_schemas}
@@ -981,6 +1018,8 @@ EXAMPLE - Final answer (no tools needed):
             extracted_facts = self.facts_registry.extract_facts_from_observation(sel.tool_name, result, iteration)
             if extracted_facts:
                 logger.info(f"Extracted {len(extracted_facts)} facts from {sel.tool_name}")
+                if getattr(self, '_budget', None):
+                    self._budget.charge(1, 3, f"fact extracted from {sel.tool_name}")
 
         # Build next prompt with observations
         observations_combined = "\n\n".join(observation_texts)

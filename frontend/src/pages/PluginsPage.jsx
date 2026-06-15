@@ -418,7 +418,7 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
           title={
             (plugin.cooldown_remaining || 0) > 0
               ? `Cooling down — wait ${Math.ceil(plugin.cooldown_remaining)}s before toggling again`
-              : plugin.status !== 'running' && plugin.user_enabled === false
+              : !plugin.enabled
                 ? 'Currently disabled. Toggling on will both start it AND re-enable it across restarts.'
                 : 'Preference saved across restarts'
           }
@@ -427,13 +427,13 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
           <FormControlLabel
             control={
               <Switch
-                checked={plugin.status === 'running'}
-                // 'disable' stops the service AND persists the off-state in
-                // data/plugin_state.json's user_enabled overlay (NOT plugin.json,
-                // which stays the canonical default in git). start.sh and the
-                // backend both consult that overlay before plugin.json defaults,
-                // so a plugin toggled off here stays off across reboots.
-                onChange={() => handleAction(plugin.status === 'running' ? 'disable' : 'start')}
+                checked={!!plugin.enabled}
+                // The switch reflects the persistent user preference (enabled flag from
+                // the user_enabled overlay in data/plugin_state.json). This ensures the
+                // toggle updates visually when enable/disable succeeds (via socket
+                // snapshot or optimistic update). Runtime 'status' (running/stopped/disabled)
+                // drives the Chip and card opacity instead.
+                onChange={() => handleAction(!!plugin.enabled ? 'disable' : 'start')}
                 disabled={
                   isLoading
                   || plugin.status === 'starting'
@@ -446,8 +446,8 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
             }
             label={
               (plugin.cooldown_remaining || 0) > 0
-                ? `${plugin.status === 'running' ? 'On' : 'Off'} (cooling ${Math.ceil(plugin.cooldown_remaining)}s)`
-                : (plugin.status === 'running' ? 'On' : 'Off')
+                ? `${plugin.enabled ? 'On' : 'Off'} (cooling ${Math.ceil(plugin.cooldown_remaining)}s)`
+                : (plugin.enabled ? 'On' : 'Off')
             }
           />
         </Tooltip>
@@ -767,6 +767,28 @@ const PluginsPage = () => {
           return;
         }
         showMessage(response.message || `Plugin ${action} successful`, 'success');
+
+        // Optimistic update: flip the enabled preference and status immediately so
+        // the toggle switch in the UI reflects the change without waiting for the
+        // 'plugins:status' socket round-trip. The authoritative snapshot from the
+        // backend (via socket or later fetch) will reconcile any details (e.g. real
+        // status after start completes, cooldowns, etc.).
+        if (action === 'enable' || action === 'disable') {
+          const newEnabled = action === 'enable';
+          setPlugins((prev) => prev.map((p) =>
+            p.id === pluginId
+              ? { ...p, enabled: newEnabled, status: newEnabled ? 'stopped' : 'disabled', running: false }
+              : p
+          ));
+        } else if (action === 'start') {
+          setPlugins((prev) => prev.map((p) =>
+            p.id === pluginId ? { ...p, status: 'starting', running: false } : p
+          ));
+        } else if (action === 'stop') {
+          setPlugins((prev) => prev.map((p) =>
+            p.id === pluginId ? { ...p, status: 'stopping', running: false } : p
+          ));
+        }
 
         // After stopping ComfyUI, offer to restart Ollama once socket/HTTP state settles.
         if (action === 'stop' && pluginId === 'comfyui') {

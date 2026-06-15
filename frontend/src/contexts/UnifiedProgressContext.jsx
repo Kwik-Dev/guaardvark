@@ -269,7 +269,7 @@ export const UnifiedProgressProvider = ({ children }) => {
       try {
         const socket = io(SOCKET_URL, {
           reconnection: true,
-          reconnectionAttempts: 5,
+          reconnectionAttempts: Infinity,
           reconnectionDelay: 1000,
           reconnectionDelayMax: 10000,
           timeout: 10000,
@@ -374,6 +374,15 @@ export const UnifiedProgressProvider = ({ children }) => {
 
         socket.on("error", (error) => {
           console.error("UnifiedProgressContext: SocketIO error:", error);
+          setConnectionState('error');
+        });
+
+        socket.on("connect_error", (error) => {
+          const msg = error?.message || String(error);
+          const transport = socket.io?.engine?.transport?.name;
+          console.warn("UnifiedProgressContext: Socket connect_error:", msg, transport ? `(transport: ${transport})` : "");
+          // Keep trying (reconnection: true + Infinity attempts); surface as error for UI.
+          // The caller (e.g. ChatPage in agent mode) will call forceReconnect() as needed.
           setConnectionState('error');
         });
 
@@ -741,6 +750,32 @@ export const UnifiedProgressProvider = ({ children }) => {
     [handleJobProgress]
   );
 
+  // Force a reconnect attempt on the shared progress/chat socket.
+  // Useful when agent mode can't send because the socket appears disconnected.
+  const forceReconnect = useCallback(() => {
+    if (socketRef.current) {
+      try {
+        // Calling connect() on an existing (possibly disconnected) socket
+        // will restart the reconnection process even after previous attempts exhausted.
+        // Also explicitly call reconnect() if the client thinks it's done trying.
+        if (socketRef.current.disconnected) {
+          socketRef.current.connect();
+        } else {
+          // Ensure the internal reconnection engine is awake.
+          socketRef.current.io.reconnect();
+        }
+        // Optimistically mark as attempting; the 'connect' or 'reconnect' event will flip to 'connected'.
+        if (connectionState !== 'connected') {
+          setConnectionState('disconnected');
+        }
+      } catch (e) {
+        console.error("UnifiedProgressContext: forceReconnect failed", e);
+      }
+    } else {
+      console.warn("UnifiedProgressContext: No socket to reconnect; a full reload may be required.");
+    }
+  }, [connectionState]);
+
   // Query functions
   const getProcessesByType = useCallback(
     (processType) => {
@@ -871,6 +906,7 @@ export const UnifiedProgressProvider = ({ children }) => {
     getProcessTypeIcon,
     getProcessTypeColor,
     detectProcessType,
+    forceReconnect,
   }), [
     activeProcesses,
     unifiedJobs,
@@ -890,6 +926,7 @@ export const UnifiedProgressProvider = ({ children }) => {
     getProcessTypeIcon,
     getProcessTypeColor,
     detectProcessType,
+    forceReconnect,
   ]);
 
   return (

@@ -1,8 +1,10 @@
 """
-Advanced Memory Manager for RAG Chat System
-Makes chat memory work like Claude Code's memory system
+Advanced Memory Manager for RAG Chat System (LEGACY/DEPRECATED)
+Migrate to memory_contract.py + AgentMemory (via memory_api/get_memories_for_context) + FactsRegistry + brain_state.
+This legacy (in-proc + SystemSetting) duplicates the durable contract-backed memory (facts/lessons/belief).
+See approved plan, PHASE2_TIGHTENED_PLAN.md (2.4 silo cleanup), memory_contract.py, agent_executor (now uses contract).
 
-Features:
+Features (kept for compat during migration):
 - Message importance scoring
 - Smart context summarization
 - Long-term memory persistence

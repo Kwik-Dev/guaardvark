@@ -39,18 +39,7 @@ echo "Installing torch + torchvision (CUDA wheels)…"
 echo "Installing remaining requirements…"
 "${VENV}/bin/pip" install -r "${REQS}"
 
-echo "Verifying torch in venv-torch…"
-"${VENV}/bin/python" -c "
-import torch
-print(f'OK: torch {torch.__version__}')
-if torch.cuda.is_available():
-    print(f'CUDA: {torch.cuda.get_device_name(0)}')
-elif getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
-    print('MPS (Apple Metal) available')
-elif getattr(torch.version, 'hip', None):
-    print('ROCm/HIP available')
-else:
-    print('CPU-only (ROCm/Metal/CPU branches supported in main installer; this venv is CUDA-optimized but will degrade)')
-" 2>&1 | cat || echo 'Torch verification warning (non-fatal for CPU/Metal/ROCm per edge audit)'
+echo "Verifying CUDA in venv-torch…"
+"${VENV}/bin/python" -c "import torch; assert torch.cuda.is_available(), 'CUDA not visible from venv-torch'; print(f'OK: torch {torch.__version__} on {torch.cuda.get_device_name(0)}')"
 
 echo "Done. The plugin will auto-pick the real backend on next train dispatch."

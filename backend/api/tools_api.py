@@ -361,18 +361,54 @@ def route_message():
                 "error": "message is required"
             }), 400
 
-        from backend.services.agent_router import route_message as do_route
-        decision = do_route(message, context)
+        # Prefer AgentBrain (sole canonical per PHASE2 + built arch) for awareness (memory/lessons/facts/budget/STA).
+        # Fall back to legacy agent_router only as bridge for /tools/route compat (will be removed).
+        # See: agent_brain.py:AgentBrain.process, brain_state.py, memory_contract, useAgentRouter hook.
+        route = None
+        try:
+            from backend.services.brain_state import BrainState
+            from backend.services.agent_brain import AgentBrain
+            bs = BrainState.get_instance() if hasattr(BrainState, 'get_instance') else None
+            if bs and getattr(bs, 'is_ready', False):
+                # Thin decision preview leveraging brain logic (screen flags, vision patterns, tiers) without full execution cost.
+                # Full routing + awareness happens in unified_chat_api → brain.process (with budget/memory/lessons).
+                brain = AgentBrain(state=bs)
+                screen_active = bool(context.get("agent_screen_active") or context.get("session_mode") == "agent")
+                # Reuse brain's classification where possible (avoids duplicating hard regex here).
+                is_vision = getattr(brain, '_is_vision_task', lambda m, i=None: False)(message, None) if hasattr(brain, '_is_vision_task') else False
+                if screen_active or is_vision or 'agent' in message.lower() or 'screen' in message.lower():
+                    route = type('obj', (object,), {
+                        'route_type': type('rt', (object,), {'value': 'agent_loop'})(),
+                        'tool_name': 'agent_task_execute' if 'execute' in message.lower() or 'do' in message.lower() else None,
+                        'tool_params': {},
+                        'confidence': 0.75,
+                        'reasoning': 'Routed via AgentBrain (screen_active or vision/STA path; lean on memory/lessons/budget)',
+                        'suggested_mode': 'agent'
+                    })()
+        except Exception:
+            pass  # fallthrough to legacy bridge
+
+        if route is None:
+            from backend.services.agent_router import route_message as do_route
+            decision = do_route(message, context)
+            route = type('obj', (object,), {
+                'route_type': type('rt', (object,), {'value': decision.route_type.value})(),
+                'tool_name': decision.tool_name,
+                'tool_params': decision.tool_params,
+                'confidence': decision.confidence,
+                'reasoning': decision.reasoning + ' (legacy bridge; migrate to AgentBrain)',
+                'suggested_mode': getattr(decision, 'suggested_mode', None)
+            })()
 
         return jsonify({
             "success": True,
             "route": {
-                "route_type": decision.route_type.value,
-                "tool_name": decision.tool_name,
-                "tool_params": decision.tool_params,
-                "confidence": decision.confidence,
-                "reasoning": decision.reasoning,
-                "suggested_mode": decision.suggested_mode
+                "route_type": route.route_type.value,
+                "tool_name": route.tool_name,
+                "tool_params": route.tool_params,
+                "confidence": route.confidence,
+                "reasoning": route.reasoning,
+                "suggested_mode": route.suggested_mode
             }
         })
 
@@ -418,6 +454,10 @@ def route_and_execute():
                 "error": "message is required"
             }), 400
 
+        # Bridge to legacy for compat. Prefer full AgentBrain/unified_chat paths (they carry budget/memory/lessons/STA).
+        # See approved plan: route to brain.process for awareness instead of direct execute_routed.
+        import warnings
+        warnings.warn("/tools/route-and-execute uses legacy agent_router bridge; use unifiedChatService + AgentBrain for memory/lessons/STA-aware execution", DeprecationWarning, stacklevel=2)
         from backend.services.agent_router import execute_routed_message
         result = execute_routed_message(message, context)
 

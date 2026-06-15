@@ -16,6 +16,7 @@ from backend.services.gpu_resource_policy import gpu_session, free_comfyui_vram
 from backend.services.job_types import JobKind
 from backend.services.job_operation_gate import GpuBusyError
 from backend.services.plugin_bridge import ensure_plugin_running
+from backend.services.comfyui_video_generator import get_video_generator
 
 bp = Blueprint("music_video_api", __name__, url_prefix="/api/music-video")
 log = logging.getLogger(__name__)
@@ -101,6 +102,11 @@ def _mv_dict(mv: MusicVideo) -> dict:
     treatment = s.get("director_treatment") or s.get("director_storyline")
     if treatment:
         out["director_treatment"] = treatment
+    # P0 diagnostics (story-arc plan): surface why we may have fallen back to global/identical
+    # prompts (LLM unavailable, parse failure, recovery used, low distinctness after guard, etc.).
+    # The UI (PlanViewer) can show a warning badge so the operator knows the arc is not fully active.
+    if isinstance(s, dict) and s.get("director_diagnostics"):
+        out["director_diagnostics"] = s.get("director_diagnostics")
     return out
 
 
@@ -213,6 +219,17 @@ def approve(mv_id):
         return jsonify({
             "error": f"music_video is at stage '{mv.current_stage}', not awaiting_approval"
         }), 409
+
+    # LoRA/Comfy preflight+clamp resumed (P1-5/P3-12 media items from team audit; was WIP
+    # after phase-map/flux wiring). Now consistent with clip path + generator helper.
+    try:
+        vg = get_video_generator()
+        if not getattr(vg, "service_available", True):
+            vg.service_available = vg._check_comfyui_connection() if hasattr(vg, "_check_comfyui_connection") else False
+        if not getattr(vg, "service_available", True):
+            return jsonify({"error": "ComfyUI not reachable; cannot release music-video generation. Start ComfyUI."}), 503
+    except Exception as _pf:
+        log.warning(f"Music-video preflight soft-failed (proceeding): {_pf}")
 
     svc = MusicVideoService(db.session)
     if svc.advance_if_predecessor(mv_id, expected_predecessor="awaiting_approval"):
@@ -375,7 +392,8 @@ def generate_storyboards(mv_id):
     if mv.current_stage != "awaiting_approval":
         return jsonify({"error": f"storyboard generation only from awaiting_approval (plan approved), current={mv.current_stage}"}), 409
 
-    ensure_plugin_running("comfyui")
+    from backend.services.plugin_bridge import ensure_plugins_for_stage
+    ensure_plugins_for_stage("music-video", "storyboard")
 
     # Signal the GPU/memory orchestrator that we need image-gen capacity
     # (SD/FLUX pipeline). This helps the coordinator/orchestrator track
@@ -383,48 +401,78 @@ def generate_storyboards(mv_id):
     # the hook for automatic plugin toggling once the full orchestrator logic
     # is wired for music-video storyboard paths.
     try:
-        from backend.services.gpu_memory_orchestrator import get_orchestrator
-        orch = get_orchestrator()
-        orch.on_route_intent("/music-video/storyboard")
+        from backend.services.plugin_bridge import prepare_plugins_for_route
+        # Use the working prepare path (with persist=False semantics inside ensure for auto).
+        # This wires the sub-intent for storyboard-only needs (comfyui phase) without dead method.
+        prepare_plugins_for_route("/music-video/storyboard")
     except Exception:
-        logger.warning("Failed to signal GPU orchestrator for music-video storyboard (non-fatal)", exc_info=True)  # noqa: BLE001 - audit must not break generation path per infra/security audit
+        logger.warning("Failed to prepare plugins for music-video storyboard (non-fatal)", exc_info=True)  # noqa: BLE001
 
     s = _settings_for_mv(mv)  # small helper below or inline
     from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+    from backend.tasks.music_video_tasks import _keyframe_loras_and_prompt, _clip_dir
     import copy
 
-    gen = ComfyUIImageGenerator()
     clips = copy.deepcopy(mv.clips or [])
     out_dir = None
     try:
-        from backend.tasks.music_video_tasks import _clip_dir
         out_dir = _clip_dir(mv.id)
     except Exception:
         from pathlib import Path
         out_dir = Path("data/outputs/videos") / f"music_video_{mv_id}" / "clips"  # fallback; non-fatal per bare-excepts audit (infra/security)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Media team audit (P1-5/P3-12): use the shared _keyframe helper (resolves explicit
+    # loras + subject cast + prepends trigger words) + clamp strength + basic preflight.
+    # This threads LoRA identity into storyboard keyframes (flux-schnell/SDXL path) the
+    # same way the clip i2v path does. Previously the approval path used a minimal
+    # []/prompt version (uncommitted WIP).
+    kf_lora_strength = max(0.0, min(1.0, float(s.get("keyframe_lora_strength", 0.25))))
     try:
-        # vram_estimate_mb (~SDXL still) makes storyboard gen visible to the GPU orchestrator budget.
+        vg = get_video_generator()
+        if not getattr(vg, "service_available", True):
+            vg.service_available = getattr(vg, "_check_comfyui_connection", lambda: False)()
+    except Exception:
+        pass
+
+    try:
+        # vram_estimate_mb makes storyboard gen visible to the GPU orchestrator budget.
         with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboards_{mv_id}", evict_ollama=True,
                          vram_estimate_mb=10000):
             for c in clips:
-                if c.get("storyboard_path") and os.path.exists(c.get("storyboard_path")):
-                    continue  # already have one
+                has_existing = bool(c.get("storyboard_path") and os.path.exists(c.get("storyboard_path")))
+                if has_existing and not force:
+                    continue  # already have one (classic "missing only" behavior)
                 prompt = c.get("prompt") or mv.style_prompt
                 idx = c["index"]
                 still_path = str(out_dir / f"storyboard_{idx}.png")
                 try:
+                    # Proper LoRA+trigger resolve for cast consistency in review thumbnails.
+                    kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
+                    # Comfy preflight for LoRAs (existence) — fail soft per cut so one bad
+                    # LoRA doesn't kill the whole storyboard batch.
+                    if kf_loras:
+                        from backend.services.comfyui_image_generator import ComfyUIImageGenerator as _CIG
+                        _CIG()._preflight_loras(kf_loras)  # best-effort; logs warnings
+                    gen = ComfyUIImageGenerator(
+                        lora_strength=kf_lora_strength,
+                        flux_unet=s.get("flux_unet"),
+                        flux_t5=s.get("flux_t5"),
+                        flux_clip=s.get("flux_clip"),
+                        flux_vae=s.get("flux_vae"),
+                    )
                     gen.generate_image(
-                        prompt=prompt,
-                        loras=[],
+                        prompt=kf_prompt,
+                        loras=kf_loras,
                         output_path=still_path,
                         width=s.get("still_width", 1024),
                         height=s.get("still_height", 576),
                         seed=2000 + idx,
                         steps=s.get("keyframe_steps") or 20,
+                        model=s.get("keyframe_model"),
                     )
                     c["storyboard_path"] = still_path
+                    c["storyboard_variation"] = None
                 except RuntimeError as e:
                     # Workflow produced no image (or other Comfy runtime failure).
                     # Log with prompt_id if present in the message so operator can
@@ -452,21 +500,22 @@ def regen_mv_storyboard(mv_id, idx):
     if mv is None or mv.current_stage != "awaiting_approval":
         return jsonify({"error": "only allowed during plan/storyboard review"}), 409
 
-    ensure_plugin_running("comfyui")
+    from backend.services.plugin_bridge import ensure_plugins_for_stage
+    ensure_plugins_for_stage("music-video", "storyboard")
 
     # Signal the GPU/memory orchestrator (see comment in generate_storyboards).
     try:
-        from backend.services.gpu_memory_orchestrator import get_orchestrator
-        orch = get_orchestrator()
-        orch.on_route_intent("/music-video/storyboard")
+        from backend.services.plugin_bridge import prepare_plugins_for_route
+        prepare_plugins_for_route("/music-video/storyboard")
     except Exception:
-        logger.warning("Failed to signal GPU orchestrator for music-video (non-fatal)", exc_info=True)  # noqa: BLE001 - audit must not break path per infra/security audit
+        logger.warning("Failed to prepare plugins for music-video storyboard regen (non-fatal)", exc_info=True)  # noqa: BLE001
 
     body = request.get_json(silent=True) or {}
     prompt_override = body.get("prompt")
 
     s = _settings_for_mv(mv)
     from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+    from backend.tasks.music_video_tasks import _keyframe_loras_and_prompt, _clip_dir
     import copy
 
     clips = copy.deepcopy(mv.clips or [])
@@ -480,7 +529,6 @@ def regen_mv_storyboard(mv_id, idx):
 
     prompt = prompt_override or target.get("prompt") or mv.style_prompt
     try:
-        from backend.tasks.music_video_tasks import _clip_dir
         out_dir = _clip_dir(mv.id)
     except Exception:
         from pathlib import Path
@@ -496,19 +544,34 @@ def regen_mv_storyboard(mv_id, idx):
     except (TypeError, ValueError):
         variation = 0
 
+    # Media team audit resume (P1-5/P3-12): shared helper for LoRA+triggers + clamp + preflight
+    # on the regen path (was minimal [] version; now consistent with clip gen and the
+    # generate-storyboards path we just updated).
+    kf_lora_strength = max(0.0, min(1.0, float(s.get("keyframe_lora_strength", 0.25))))
+    kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
+    if kf_loras:
+        ComfyUIImageGenerator()._preflight_loras(kf_loras)
+
     still_path = str(out_dir / f"storyboard_{idx}.png")
     try:
         # vram_estimate_mb (~SDXL still) makes single-storyboard regen visible to the orchestrator budget.
         with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboard_{mv_id}_{idx}", evict_ollama=True,
                          vram_estimate_mb=10000):
-            ComfyUIImageGenerator().generate_image(
-                prompt=prompt,
-                loras=[],
+            ComfyUIImageGenerator(
+                lora_strength=kf_lora_strength,
+                flux_unet=s.get("flux_unet"),
+                flux_t5=s.get("flux_t5"),
+                flux_clip=s.get("flux_clip"),
+                flux_vae=s.get("flux_vae"),
+            ).generate_image(
+                prompt=kf_prompt,
+                loras=kf_loras,
                 output_path=still_path,
                 width=s.get("still_width", 1024),
                 height=s.get("still_height", 576),
                 seed=3000 + int(idx) + variation,
                 steps=s.get("keyframe_steps") or 20,
+                model=s.get("keyframe_model"),
             )
             # Free ComfyUI VRAM after the still so any follow-up video work
             # (or other users) gets a clean card.
@@ -547,6 +610,10 @@ def _settings_for_mv(mv):
     s.setdefault("still_height", 576)
     s.setdefault("keyframe_steps", 20)
     s.setdefault("keyframe_model", "flux-schnell")
+    # Flux asset overrides (for storyboard/keyframe flux workflows). None = use
+    # GUAARDVARK_FLUX_* env defaults (which match the documented infographic assets).
+    for k in ("flux_unet", "flux_t5", "flux_clip", "flux_vae"):
+        s.setdefault(k, None)
     return s
 
 

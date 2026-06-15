@@ -912,7 +912,14 @@ def run_tests_endpoint():
             [sys.executable, script_path],
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300,
+            env={
+                **os.environ,
+                "GUAARDVARK_MODE": "test",
+                "DISABLE_CELERY": "true",
+                "SKIP_PREFIGHT": "1",  # suppress noisy pip "already satisfied" + starlette conflict spam in GUI runs; makes test suites from GUI useful
+                "GUAARDVARK_TEST_QUIET": "1",
+            },
         )
         stdout = proc.stdout.strip()
         stderr = proc.stderr.strip()

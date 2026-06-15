@@ -194,25 +194,49 @@ def learn_stop():
 
 @agent_control_bp.route("/learn/status", methods=["GET"])
 def learn_status():
-    """Get current learning mode state."""
+    """Get current learning mode state.
+
+    Always returns a 200 with safe defaults on any internal error so that
+    the AgentScreenViewer (and any training UI) polling does not spam the
+    browser console with 500s. The viewer starts this poll as soon as it
+    opens (to react to backend learning mode being toggled externally).
+    """
     try:
         from backend.services.agent_control_service import get_agent_control_service
         service = get_agent_control_service()
+
+        # Prefer the public get_status() for the common fields (uses internal
+        # _learning / _current_demonstration_id which are always set in __init__).
+        # This is more robust than reaching for the @property + private attrs
+        # and survives partial init or stale .pyc scenarios.
+        base = service.get_status() or {}
+        learning = bool(base.get("learning", False))
+        demo_id = base.get("current_demonstration_id")
+
         steps_count = 0
-        if service.is_learning and service._demo_recorder:
+        recorder = getattr(service, "_demo_recorder", None)
+        if learning and recorder:
             try:
-                steps_count = len(service._demo_recorder.get_steps())
+                steps_count = len(recorder.get_steps())
             except Exception:
                 pass
+
         return jsonify({
             "success": True,
-            "learning": service.is_learning,
-            "demonstration_id": service._current_demonstration_id,
+            "learning": learning,
+            "demonstration_id": demo_id,
             "steps_count": steps_count,
         })
     except Exception as e:
-        logger.error(f"Error getting learning status: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error(f"Error getting learning status: {e}", exc_info=True)
+        # Safe idle response — prevents console spam from the viewer's 2s poll.
+        # The frontend already treats any failure as "not training".
+        return jsonify({
+            "success": True,
+            "learning": False,
+            "demonstration_id": None,
+            "steps_count": 0,
+        })
 
 
 @agent_control_bp.route("/learn/demonstrations", methods=["GET"])

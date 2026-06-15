@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   Box,
   Typography,
@@ -37,6 +37,7 @@ import {
   regenMusicVideoStoryboard,
   cancelMusicVideo,
 } from "../api/musicVideoService";
+import { getAllPluginStatus } from "../api/pluginsService";
 
 const POLL_MS = 5000;
 const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
@@ -44,7 +45,7 @@ const TERMINAL = (s) => s === "complete" || (s || "").startsWith("failed");
 
 // Local presentational + interactive component for the cut plan + Director prompts.
 // Keeps the main page component from exploding in size.
-function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard }) {
+function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, comfyReady = true, comfyDisabled = false, comfyInfo = null }) {
   const cutPlan = detail.cut_plan || [];
   const clips = detail.clips || [];
   const isEditable = detail.current_stage === "awaiting_approval";
@@ -90,9 +91,11 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
     // This gives the user a "variations" effect without having to manually edit
     // the prompt text for the cut.
     const variation = Math.floor(Math.random() * 100000);
+    const currentRow = rows.find(r => r.index === index) || {};
+    const currentPrompt = currentRow.prompt || "";
 
     try {
-      await onRegenStoryboard(index, { variation });
+      await onRegenStoryboard(index, { variation, prompt: currentPrompt });
       // clear error for this cut on success
       setRegenErrors(prev => {
         const next = { ...prev };
@@ -162,13 +165,24 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
             ~{totalDuration.toFixed(1)}s
           </Typography>
         )}
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, fontSize: "0.65rem" }}>
+          Clip stretch (max_stretch / fill_method from settings) scales Director-suggested source motion into exact timeline slots — higher stretch = longer atmospheric holds or slower peaks for the visual arc.
+        </Typography>
         {detail.planning_mode && (
           <Chip size="small" variant="outlined" label={`dir: ${detail.planning_mode}`} />
         )}
         {detail.director_enabled === false && (
           <Chip size="small" color="warning" label="Director disabled" />
         )}
+        {detail.director_diagnostics && (
+          <Chip size="small" color="warning" label="Director fallback (prompts may not be unique)" />
+        )}
       </Stack>
+      {hasLocalEdits && (
+        <Typography variant="caption" color="info.main" sx={{ display: 'block', mb: 1 }}>
+          Treatment/arc edited — Generate Storyboards or per-cut Regen will use the updated visuals. (Bulk force-refresh available via API for existing stills.)
+        </Typography>
+      )}
 
       {/* Pipeline / Model summary (the new controls) */}
       <Stack direction="row" spacing={1} sx={{ mb: 1, flexWrap: "wrap" }}>
@@ -217,6 +231,7 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
         <Box sx={{ mb: 1.5, p: 1, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
           <Typography variant="caption" sx={{ fontWeight: 600, display: "block", mb: 0.5 }}>
             Reviewed Storyboards / Thumbnails (click Regen per cut if needed)
+            {hasLocalEdits && " — arc updated; per-cut Regen applies new prompts"}
           </Typography>
           <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
             {rows.filter(r => r.storyboard_path).map(r => (
@@ -228,8 +243,11 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
                   onError={(e) => { e.target.style.display = "none"; }}
                 />
                 <Typography variant="caption" display="block">#{r.index} {r.section}</Typography>
+                <Typography variant="caption" sx={{ fontSize: "0.55rem", opacity: 0.65, display: "block" }}>
+                  advances {r.section} (energy {r.energy.toFixed(1)}) of the visual treatment arc
+                </Typography>
                 {isEditable && onRegenStoryboard && (
-                  <Button size="small" onClick={() => handleRegenStoryboard(r.index)} disabled={busy} sx={{ fontSize: "0.65rem", py: 0 }}>
+                  <Button size="small" onClick={() => handleRegenStoryboard(r.index)} disabled={busy || !comfyReady} sx={{ fontSize: "0.65rem", py: 0 }}>
                     Regen
                   </Button>
                 )}
@@ -336,6 +354,9 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
                       {displayed || "(no prompt — global style used)"}
                     </Typography>
                   )}
+                  <Typography variant="caption" sx={{ fontSize: "0.55rem", opacity: 0.65, mt: 0.25, display: "block" }}>
+                    advances {row.section} (energy {row.energy.toFixed(1)}) of the visual treatment arc above
+                  </Typography>
 
                   {/* Storyboard thumbnail (generated in the "thumbnails first" review step) */}
                   {row.storyboard_path && (
@@ -351,7 +372,7 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
                           size="small"
                           variant="outlined"
                           onClick={() => handleRegenStoryboard(row.index)}
-                          disabled={busy}
+                          disabled={busy || !comfyReady}
                           sx={{ mt: 0.5 }}
                         >
                           Regen this storyboard
@@ -393,11 +414,21 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
                 size="small"
                 variant="contained"
                 color="secondary"
-                disabled={busy}
+                disabled={busy || comfyDisabled}
                 onClick={onGenerateStoryboards}
               >
                 Generate Storyboards (thumbnails first)
               </Button>
+            )}
+            {comfyDisabled && onGenerateStoryboards && (
+              <Typography variant="caption" color="warning.main" sx={{ ml: 1 }}>
+                ComfyUI plugin must be enabled for storyboards (keyframe_model: {detail?.keyframe_model || 'flux-schnell'})
+              </Typography>
+            )}
+            {!comfyDisabled && comfyInfo && comfyInfo.status !== 'running' && onGenerateStoryboards && (
+              <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                ComfyUI will start on demand for storyboards (keyframe_model: {detail?.keyframe_model || 'flux-schnell'})
+              </Typography>
             )}
           </Stack>
 
@@ -453,10 +484,12 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
 
 
 const stageColor = (stage, status) => {
+  if ((status || "").startsWith("cancelled") || stage === "cancelled") return "default";
   if ((status || "").startsWith("failed")) return "error";
   if (stage === "complete") return "success";
   if (stage === "awaiting_approval") return "warning";
-  return "info";
+  if (stage === "generating" || stage === "assembling") return "info";
+  return "default";
 };
 
 const MusicVideoPage = () => {
@@ -470,7 +503,57 @@ const MusicVideoPage = () => {
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [pluginStatus, setPluginStatus] = useState(null); // {comfyui_reachable, ...} or {status:{comfyui:'stopped',...}} or {plugins:[...]} for storyboard guards
   const fileInputRef = useRef(null);
+
+  // Lightweight plugin status poll (for storyboard guards; no full WS subscribe here to keep quiet)
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const s = await getAllPluginStatus();
+        if (mounted && s?.success) setPluginStatus(s.data || s);
+      } catch {}
+    };
+    load();
+    const t = setInterval(load, 15000);
+    return () => { mounted = false; clearInterval(t); };
+  }, []);
+
+  // Normalize comfy status from different backend shapes:
+  // - getAllPluginStatus /status often returns {status: {comfyui: 'running'|'stopped', ...}}
+  // - some paths or list return {plugins: [{id, status, running, ...}] }
+  // - legacy had comfyui_reachable top level.
+  const comfyInfo = useMemo(() => {
+    if (!pluginStatus) return null;
+    // Array form (e.g. from list_plugins or augmented)
+    const arr = pluginStatus.plugins || [];
+    if (Array.isArray(arr) && arr.length) {
+      const found = arr.find(p => p && p.id === 'comfyui');
+      if (found) return found;
+    }
+    // Map under .status or flat (from get_all_status data)
+    const st = pluginStatus.status || pluginStatus;
+    if (st && typeof st === 'object' && !Array.isArray(st)) {
+      const val = st.comfyui ?? st['comfyui'];
+      if (val != null) {
+        const s = typeof val === 'string' ? val : (val.status || 'unknown');
+        return { id: 'comfyui', status: s, running: s === 'running' || !!val.running, reachable: !!pluginStatus.comfyui_reachable };
+      }
+    }
+    if (pluginStatus.comfyui_reachable) {
+      return { id: 'comfyui', status: 'running', running: true, reachable: true };
+    }
+    return null;
+  }, [pluginStatus]);
+
+  // For MV storyboards we only hard-block when the plugin is *disabled* (user pref off).
+  // If it is merely 'stopped' (but enabled) we allow the Generate button click — the handler
+  // already calls ensure_plugins_for_stage("music-video", "storyboard") which will auto-start
+  // (persist_user_pref=false for the phase path). This removes the chicken-egg where the
+  // guard prevented ever reaching the code that brings ComfyUI up for flux-schnell keyframes.
+  const comfyDisabled = !!(comfyInfo && (comfyInfo.status === 'disabled' || comfyInfo.status === 'error'));
+  const comfyReady = !comfyDisabled; // allow click-to-start when pref is on (even if currently stopped)
 
   // Advanced render tuning (per video) — collapsed by default; defaults match the
   // backend _settings so leaving this untouched is a no-op.
@@ -639,7 +722,11 @@ const MusicVideoPage = () => {
 
   const handleClearFinished = async () => {
     const finished = videos.filter(
-      (v) => v.current_stage === "complete" || (v.status || "").startsWith("failed"),
+      (v) =>
+        v.current_stage === "complete" ||
+        (v.status || "").startsWith("failed") ||
+        (v.status || "").startsWith("cancelled") ||
+        v.current_stage === "cancelled",
     );
     if (finished.length === 0) return;
     if (!window.confirm(`Clear ${finished.length} finished generation(s) from the log?`)) {
@@ -659,11 +746,17 @@ const MusicVideoPage = () => {
   };
 
   const finishedCount = videos.filter(
-    (v) => v.current_stage === "complete" || (v.status || "").startsWith("failed"),
+    (v) =>
+      v.current_stage === "complete" ||
+      (v.status || "").startsWith("failed") ||
+      (v.status || "").startsWith("cancelled") ||
+      v.current_stage === "cancelled",
   ).length;
 
   const hasActiveGeneration = videos.some(
-    (v) => v.current_stage === "generating" || v.current_stage === "assembling"
+    (v) =>
+      (v.current_stage === "generating" || v.current_stage === "assembling") &&
+      !((v.status || "").startsWith("cancelled") || v.current_stage === "cancelled")
   );
 
   return (
@@ -952,6 +1045,9 @@ const MusicVideoPage = () => {
                 <PlanViewer
                   detail={detail}
                   busy={busy}
+                  comfyReady={comfyReady}
+                  comfyDisabled={comfyDisabled}
+                  comfyInfo={comfyInfo}
                   onSavePlan={async (arg1, arg2) => {
                     try {
                       setBusy(true);

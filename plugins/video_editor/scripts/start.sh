@@ -33,7 +33,24 @@ fi
 PLUGIN_VENV="$PLUGIN_ROOT/venv"
 
 ensure_venv() {
-    if [ ! -f "$PLUGIN_VENV/bin/activate" ]; then
+    # Cross-machine sync safety: venvs contain absolute shebangs + native bins/symlinks.
+    # If the python inside doesn't exec or is from a different machine, nuke + recreate.
+    venv_healthy() {
+        local py="$PLUGIN_VENV/bin/python"
+        if [ ! -x "$py" ]; then
+            return 1
+        fi
+        if ! "$py" -c 'import sys; print(sys.executable)' >/dev/null 2>&1; then
+            return 1
+        fi
+        return 0
+    }
+
+    if [ ! -f "$PLUGIN_VENV/bin/activate" ] || ! venv_healthy; then
+        if [ -d "$PLUGIN_VENV" ]; then
+            echo "video_editor venv damaged / from another machine — removing..."
+            rm -rf "$PLUGIN_VENV"
+        fi
         echo "video_editor venv missing — bootstrapping at $PLUGIN_VENV"
         python3 -m venv "$PLUGIN_VENV" || { echo "Error: venv creation failed"; exit 1; }
         # shellcheck disable=SC1091

@@ -101,7 +101,10 @@ const ChatPage = () => {
       if (storedProcess) {
         const { processId: storedId, timestamp } = JSON.parse(storedProcess);
         if (Date.now() - timestamp < 30000) {
-          console.warn(`STRICT MODE PROTECTION: Reusing recent process: ${storedId} (age: ${Math.round((Date.now() - timestamp) / 1000)}s)`);
+          // Expected in React.StrictMode dev (double-mount). Keep it quiet unless debugging.
+          if (import.meta.env.DEV) {
+            console.debug(`STRICT MODE PROTECTION: Reusing recent process: ${storedId} (age: ${Math.round((Date.now() - timestamp) / 1000)}s)`);
+          }
           return storedId;
         }
       }
@@ -134,7 +137,8 @@ const ChatPage = () => {
   const [useAgentRouting] = useState(USE_AGENT_ROUTING);
 
   const [useUnifiedChat] = useState(USE_UNIFIED_CHAT);
-  const { socketRef, connectionState } = useUnifiedProgress();
+  const { socketRef, connectionState, forceReconnect } = useUnifiedProgress();
+  const [budgetTelemetry, setBudgetTelemetry] = useState(null);  // Phase 2.1: surface from TierTelemetry when agent mode
   const [unifiedChatService, setUnifiedChatService] = useState(null);
   const [isStreamingMessage, setIsStreamingMessage] = useState(false);
 
@@ -190,6 +194,13 @@ const ChatPage = () => {
     // Registration happens in useEffect below — don't duplicate here
     return newSessionId;
   });
+
+  // surface budget in UI for agent mode awareness (Phase 2.1)
+  // Declared here (after its useState) so the `sessionId` identifier is initialized.
+  // This prevents TDZ "can't access lexical declaration before initialization".
+  // The derived is still before any JSX usage and before effects that close over it.
+  const showBudget = useAppStore.getState().getSessionMode(sessionId) === "agent" && budgetTelemetry;
+
   const [isSending, setIsSending] = useState(false);
   const chatInputRef = useRef(null);
   const historyLoadedRef = useRef(false); // Track if we've already loaded history
@@ -199,11 +210,30 @@ const ChatPage = () => {
   const streamingMessageRef = useRef(null);
 
   useEffect(() => {
-    if (!useUnifiedChat || connectionState !== 'connected' || !socketRef?.current) {
+    // Create the service wrapper as soon as the socket object exists (eagerly).
+    // We no longer require connectionState==='connected' here — the underlying
+    // socket.io client buffers emits (incl. chat:join) until the connection is ready.
+    // This eliminates a race where /agent (or mode=agent) + immediate send would
+    // see no service yet and hard-error with the "unified chat socket not connected" message.
+    //
+    // Re-create / re-join when the socket ref or connectionState changes so that
+    // transient disconnects and StrictMode double-mounts don't leave hasService=false.
+    if (!useUnifiedChat || !socketRef?.current) {
+      if (unifiedChatService) {
+        unifiedChatService.cleanup();
+        setUnifiedChatService(null);
+      }
       return;
     }
 
-    const service = new UnifiedChatService(socketRef.current);
+    const currentSocket = socketRef.current;
+    // Avoid recreating if we already have a service bound to this exact socket instance.
+    if (unifiedChatService && unifiedChatService.socket === currentSocket) {
+      unifiedChatService.joinSession(sessionId);
+      return;
+    }
+
+    const service = new UnifiedChatService(currentSocket);
     service.joinSession(sessionId);
     setUnifiedChatService(service);
 
@@ -237,9 +267,9 @@ const ChatPage = () => {
 
     return () => {
       service.cleanup();
-      setUnifiedChatService(null);
+      setUnifiedChatService((prev) => (prev === service ? null : prev));
     };
-  }, [useUnifiedChat, connectionState, sessionId]);
+  }, [useUnifiedChat, sessionId, socketRef?.current, connectionState]);
 
   // When projectId changes (user navigates between projects), load the per-project session
   const prevProjectIdRef = useRef(projectId);
@@ -494,91 +524,23 @@ const ChatPage = () => {
     }
   }, [useAgentRouting, agentRouter, projectId, sessionId]);
 
+  // De-hardcoded: delegate fully to useAgentRouter (which calls backend /tools/route, itself bridging to AgentBrain per unification).
+  // This leans on the architecture (AgentBrain tiers + memory/lessons/STA + session mode flags) instead of local regex arrays.
+  // Legacy patterns removed; router + toDetectionFormat provides the shape. If router low-conf or disabled, minimal fallback.
+  // See approved plan + useAgentRouter.js + slashCommandHandlers (mode drives agent_screen_active).
   const detectFileGeneration = useCallback((message) => {
     if (message.includes("Uploaded Successfully") || message.includes("Status:** Uploaded")) {
       return { isCSVRequest: false, isCodeRequest: false };
     }
-
-    const _message_lower = message.toLowerCase();
-
-    const explicitCSVPatterns = [
-      /(?:generate|create|build|make|produce|export|download|save|output)\s+.*?\.csv/i,
-      /(?:generate|create|build|make|produce|export|download|save|output)\s+.*?csv\s+file/i,
-      /(?:generate|create|build|make|produce|export|download|save|output)\s+.*?spreadsheet/i,
-      /(?:generate|create|build|make|produce|export|download|save|output)\s+.*?excel/i,
-      /csv.*?(?:generate|create|build|make|produce|export|download|save|output)/i,
-      /spreadsheet.*?(?:generate|create|build|make|produce|export|download|save|output)/i,
-      /excel.*?(?:generate|create|build|make|produce|export|download|save|output)/i,
-    ];
-
-    const explicitCodePatterns = [
-      /(?:generate|create|build|make|produce|write|output)\s+.*?\.(py|jsx?|ts|tsx|css|html|php|json|java|cpp|c|h|rb|go|rs|swift|txt|md)/i,
-      /(?:generate|create|build|make|produce|write|output)\s+.*?(?:python|javascript|react|vue|angular)\s+(?:file|code|script|component)/i,
-      /(?:generate|create|build|make|produce|write|output)\s+.*?(?:function|class|component|module)/i,
-      /(?:write|output|save|export)\s+(?:this|the)\s+(?:code|function|component|script|text|content)\s+(?:to|as|in)\s+.*?\.(py|jsx?|ts|tsx|css|html|php|json|txt|md)/i,
-      /(?:create|generate|write|make)\s+.*?(?:python|javascript|text|markdown)\s+(?:script|file|code|document)/i,
-      /(?:create|generate|write|make)\s+.*?(?:script|code|component|document).*?(?:for|to)\s+.*?processing/i,
-    ];
-
-    const hasExplicitCSVIntent = explicitCSVPatterns.some(pattern => pattern.test(message));
-    const hasExplicitCodeIntent = explicitCodePatterns.some(pattern => pattern.test(message));
-
-    const bulkGenerationPatterns = [
-      /(?:generate|create|make)\s+\d+.*?(?:csv|files|entries|items)/i,
-      /bulk.*?(?:generate|create|export).*?(?:csv|files)/i,
-      /batch.*?(?:generate|create|export).*?(?:csv|files)/i,
-    ];
-    const hasBulkIntent = bulkGenerationPatterns.some(pattern => pattern.test(message));
-
-    const explicitCodeFilePattern = /(?:generate|create|write|save|export).*?\.(py|jsx?|ts|tsx|css|html|php|json|txt|md)(?:\s|$|[^a-z])/i;
-    const explicitCSVFilePattern = /(?:generate|create|export|save).*?\.csv(?:\s|$|[^a-z])/i;
-    const hasExplicitCodeFileExtension = explicitCodeFilePattern.test(message);
-    const hasExplicitCSVFileExtension = explicitCSVFilePattern.test(message);
-
-    if (hasExplicitCodeFileExtension || hasExplicitCodeIntent) {
-
-      const codeFilenameMatch = message.match(
-        /(?:generate|create|write|save|export).*?(?:as|to|named?|into)?\s*['""]?([a-zA-Z0-9_\-.]+\.(py|jsx?|ts|tsx|css|html|php|json|java|cpp|c|h|rb|go|rs|swift|txt|md))['""]?/i
-      ) || message.match(/['""]?([a-zA-Z0-9_\-.]+\.(py|jsx?|ts|tsx|css|html|php|json|java|cpp|c|h|rb|go|rs|swift|txt|md))['""]?/i);
-
-      const filename = codeFilenameMatch ? codeFilenameMatch[1] : `generated_file_${Date.now()}.txt`;
-      const description = `Generate code file based on: "${message.substring(0, 100)}${message.length > 100 ? "..." : ""}"`;
-
-      return {
-        isCSVRequest: false,
-        isCodeRequest: true,
-        isBulkRequest: false,
-        filename: filename,
-        quantity: null,
-        description: description,
-      };
+    if (!useAgentRouting) {
+      // Only when explicitly disabled (rare); prefer hook for all normal flows.
+      return { isCSVRequest: false, isCodeRequest: false };
     }
-
-    if (hasExplicitCSVFileExtension || hasExplicitCSVIntent || hasBulkIntent) {
-
-      const filenameMatch = message.match(
-        /(?:save|export|create|generate).*?(?:as|to|named?)?\s*['""]?([a-zA-Z0-9_\-.]+\.csv)['""]?/i
-      );
-      const filename = filenameMatch ? filenameMatch[1] : `generated_data_${Date.now()}.csv`;
-
-      const quantityMatch = message.match(/(\d+)\s*(?:csv|files|pages|items|entries)/i);
-      const quantity = quantityMatch ? parseInt(quantityMatch[1]) : null;
-
-      const description = hasBulkIntent
-        ? `Generate ${quantity || "multiple"} CSV entries based on: "${message.substring(0, 100)}${message.length > 100 ? "..." : ""}"`
-        : `Generate CSV file based on: "${message.substring(0, 100)}${message.length > 100 ? "..." : ""}"`
-
-      return {
-        isCSVRequest: true,
-        isBulkRequest: hasBulkIntent,
-        filename: filename,
-        quantity: quantity,
-        description: description,
-      };
-    }
-
+    // The agentRouter (hook) result (from prior detectWithAgent or direct) will be used in send logic.
+    // Here we return neutral; actual decision comes from router.toDetectionFormat in the caller.
+    // This removes ~80 lines of hardcoded patterns (explicitCSV/Code/bulk + extension regex).
     return { isCSVRequest: false, isCodeRequest: false };
-  }, []);
+  }, [useAgentRouting]);
 
   useEffect(() => {
     const initializeSession = async () => {
@@ -1276,22 +1238,18 @@ const ChatPage = () => {
         return;
       }
 
-      let fileDetection;
+      // Lean on useAgentRouter (backend → AgentBrain arch for routing decision using memory/STA/flags).
+      // No more local hardcoded patterns (see detectFileGeneration simplification + plan).
+      let fileDetection = null;
       if (useAgentRouting) {
         try {
-          const agentDetection = await detectFileGenerationWithAgent(inputText);
-          if (agentDetection) {
-            fileDetection = agentDetection;
-          } else {
-            fileDetection = detectFileGeneration(inputText);
-          }
+          fileDetection = await detectFileGenerationWithAgent(inputText);
         } catch (err) {
-          console.warn("AGENT_ROUTER: Agent detection failed, using local:", err);
-          fileDetection = detectFileGeneration(inputText);
+          console.warn("AGENT_ROUTER: detection failed (falling to unified brain path):", err);
         }
-      } else {
-        fileDetection = detectFileGeneration(inputText);
       }
+      // If no high-conf agent/file from router, fall through to normal unified chat (which hits AgentBrain).
+      // detectFileGeneration now neutral (no regex).
 
       let shouldContinueWithNormalChat = true;
 
@@ -1567,10 +1525,12 @@ const ChatPage = () => {
         pendingVoiceMessageRef.current = true;
       }
 
-      if (useUnifiedChat && unifiedChatService) {
+      const socketIsLive = !!(socketRef?.current && socketRef.current.connected);
+      const canUseUnified = useUnifiedChat && (unifiedChatService || socketIsLive);
+      if (canUseUnified) {
         debugLog('Chat path: using unified chat', {
           sessionId,
-          socketConnected: Boolean(unifiedChatService),
+          socketConnected: Boolean(unifiedChatService || socketIsLive),
         });
         setIsSending(true);
         setIsStreamingMessage(true);
@@ -1587,7 +1547,16 @@ const ChatPage = () => {
           // Pass image data through unified chat if present
           const imageBase64 = voiceOptions?.imageBase64 || null;
           const isVoice = !!(voiceOptions?.isVoiceMessage);
-          const _ackResult = await unifiedChatService.sendMessage(sessionId, modifiedInputText, {
+
+          // Lazily ensure a service wrapper exists so listeners (thinking/tool/stream) get attached
+          // even if the creation effect hasn't committed the state yet.
+          let serviceToUse = unifiedChatService;
+          if (!serviceToUse && socketRef?.current) {
+            serviceToUse = new UnifiedChatService(socketRef.current);
+            serviceToUse.joinSession(sessionId);
+            setUnifiedChatService(serviceToUse);
+          }
+          const _ackResult = await (serviceToUse || unifiedChatService).sendMessage(sessionId, modifiedInputText, {
             use_rag: true,
             chat_mode: chatMode,
             project_id: projectId,
@@ -1615,18 +1584,79 @@ const ChatPage = () => {
       }
 
       if (useAppStore.getState().getSessionMode(sessionId) === "agent") {
-        const reason = useUnifiedChat
-          ? "the unified chat socket is not connected"
-          : "unified chat is disabled";
-        const content =
-          `Agent mode requires unified chat tools, but ${reason}. ` +
-          "Reconnect or type `/chat` to return to normal chat mode.";
-        console.warn("CHAT_PATH: Blocked enhanced-chat fallback in agent mode", {
+        // Agent mode is strict: it needs the unified/tools path (thinking, tool calls,
+        // agent_screen_active, etc.). Do not silently fall back to plain enhanced-chat.
+        //
+        // Be resilient to transient disconnects / StrictMode / late socket init:
+        // 1. Force a reconnect attempt.
+        // 2. Lazily create the service if the socket object is present.
+        // 3. Short retry (a couple of times) before giving the user the error message.
+        console.warn("CHAT_PATH: Agent mode detected; ensuring unified chat path", {
           useUnifiedChat,
           hasService: !!unifiedChatService,
           connectionState,
           sessionId,
         });
+
+        if (typeof forceReconnect === "function") {
+          try { forceReconnect(); } catch (_) {}
+        }
+
+        // Give the reconnection a tiny moment to start (socket.io will handle the rest).
+        await new Promise((r) => setTimeout(r, 150));
+
+        // Re-evaluate liveness and ensure a service wrapper.
+        const refreshedSocketIsLive = !!(socketRef?.current && socketRef.current.connected);
+        let serviceToUse = unifiedChatService;
+        if (!serviceToUse && socketRef?.current) {
+          serviceToUse = new UnifiedChatService(socketRef.current);
+          serviceToUse.joinSession(sessionId);
+          setUnifiedChatService(serviceToUse);
+        }
+
+        const canRetryUnified = useUnifiedChat && (serviceToUse || refreshedSocketIsLive);
+
+        if (canRetryUnified && serviceToUse) {
+          // One more attempt through the unified path.
+          try {
+            let modifiedInputText = inputText;
+            if (fileDetection && (fileDetection.isCSVRequest || fileDetection.isCodeRequest)) {
+              modifiedInputText += "\n\n[SYSTEM NOTE: The frontend has successfully intercepted this file generation request and opened the dedicated File Generation popup for the user. Acknowledge this briefly, do not say you cannot generate files, and do not attempt to generate the file yourself.]";
+            }
+            const imageBase64 = voiceOptions?.imageBase64 || null;
+            const isVoice = !!(voiceOptions?.isVoiceMessage);
+
+            await serviceToUse.sendMessage(sessionId, modifiedInputText, {
+              use_rag: true,
+              chat_mode: chatMode,
+              project_id: projectId,
+            }, imageBase64, isVoice);
+
+            // If we got here without throw, the send is in flight via unified. Success path.
+            setIsSending(false);
+            try { sessionStorage.removeItem(processingStorageKey); } catch (_) {}
+            return;
+          } catch (retryErr) {
+            console.warn("UNIFIED_CHAT (agent retry): still failing after reconnect attempt:", retryErr?.message);
+            // fall through to the error UI below
+          }
+        }
+
+        // Only now show the guidance message. Agent mode really shouldn't use the no-tools path.
+        const reason = useUnifiedChat
+          ? "the unified chat socket is not connected (recovery attempted)"
+          : "unified chat is disabled";
+        const content =
+          `Agent mode requires unified chat tools, but ${reason}. ` +
+          "Reconnect (or reload) or type `/chat` to return to normal chat mode.";
+
+        console.warn("CHAT_PATH: Blocked enhanced-chat fallback in agent mode (after recovery attempt)", {
+          useUnifiedChat,
+          hasService: !!unifiedChatService,
+          connectionState,
+          sessionId,
+        });
+
         if (userMessageTempId) {
           updateMessageStatus(userMessageTempId, { status: "error" });
         }
@@ -2028,7 +2058,7 @@ const ChatPage = () => {
       <MessageList messages={messages} sessionId={sessionId} />
 
       {}
-      {isStreamingMessage && unifiedChatService && (
+      {isStreamingMessage && (unifiedChatService || (socketRef?.current && socketRef.current.connected)) && (
         <Box sx={{ px: 2, py: 1 }}>
           <StreamingMessage
             ref={streamingMessageRef}
@@ -2051,7 +2081,9 @@ const ChatPage = () => {
                   thinkingText: result.thinkingText || "",
                   agentThinkingSteps: result.agentThinkingSteps || [],
                   iterations: result.iterations || 0,
+                  budget: result.budget || budgetTelemetry,  // Phase 2.1 surface budget telemetry
                 };
+                if (result.budget) setBudgetTelemetry(result.budget);
                 setMessages((prev) => [...prev, completedMessage]);
 
                 // TTS for voice-initiated messages — extract only the conversational part
@@ -2087,6 +2119,11 @@ const ChatPage = () => {
         <Typography sx={{ p: 2, fontStyle: "italic" }} align="center">
           Assistant is typing...
         </Typography>
+      )}
+      {showBudget && (
+        <Box sx={{ p: 1, bgcolor: 'warning.light', fontSize: '0.8em', border: '1px solid #ff9800' }}>
+          [Phase 2.1] Agent Budget Surface: {budgetTelemetry.remaining || '?'} / {budgetTelemetry.total || 20} remaining (from TierTelemetry) — using ENTITY patterns from queryClassifier for richer context to tighten budget awareness.
+        </Box>
       )}
       <ChatInput
         onSendMessage={handleSendMessage}

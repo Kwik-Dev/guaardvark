@@ -102,6 +102,34 @@ ROUTE_MODEL_MAP: Dict[str, List[ModelNeed]] = {
 }
 
 # ---------------------------------------------------------------------------
+# Stage → Model Intent Map (P3: full phase support for pipelines)
+# Mirrors STAGE_PLUGIN_REQUIREMENTS in plugin_bridge for coordinated
+# plugin + model auto-orchestration in MV / Film Crew agent swarms.
+# ---------------------------------------------------------------------------
+
+STAGE_MODEL_REQUIREMENTS: Dict[str, Dict[str, List[ModelNeed]]] = {
+    "music-video": {
+        "analyzing": [
+            ModelNeed("ollama:llm", priority=90),
+            ModelNeed("ollama:embedding", priority=60, required=False),
+        ],
+        "storyboard": [
+            ModelNeed("sd:pipeline", priority=85),
+        ],
+        "generating": [
+            ModelNeed("video:pipeline", priority=95, exclusive=True),
+        ],
+        "assembling": [],
+    },
+    "film-crew": {
+        "screenwriting": [ModelNeed("ollama:llm", priority=90)],
+        "cinematography": [ModelNeed("ollama:llm", priority=90)],
+        "storyboard_gen": [ModelNeed("sd:pipeline", priority=85)],
+        "rendering": [ModelNeed("video:pipeline", priority=90, exclusive=True)],
+    },
+}
+
+# ---------------------------------------------------------------------------
 # Quality Tiers
 # ---------------------------------------------------------------------------
 
@@ -320,6 +348,10 @@ class GPUMemoryOrchestrator:
     # Public API: Route Intent
     # ------------------------------------------------------------------
 
+    def on_route_intent(self, route: str) -> Dict[str, Any]:
+        """Compatibility shim / alias for older call sites (music-video storyboard paths etc.)."""
+        return self.prepare_for_route(route)
+
     def prepare_for_route(self, route: str) -> Dict[str, Any]:
         """
         Prepare GPU resources for a frontend route. Evicts unneeded
@@ -371,6 +403,42 @@ class GPUMemoryOrchestrator:
             logger.warning(f"Plugin auto-orchestration for {route} failed (non-fatal): {e}")
             result["plugins"] = {"error": str(e)}
         return result
+
+    def prepare_for_stage(self, context: str, stage: str) -> Dict[str, Any]:
+        """P3: Prepare GPU models for a specific pipeline stage (phase-aware).
+        Uses STAGE_MODEL_REQUIREMENTS for coordinated loading with plugins.
+        Called from pipeline hooks and bridge stage ensures for MV/FilmCrew.
+        """
+        needs = STAGE_MODEL_REQUIREMENTS.get(context, {}).get(stage, [])
+        if not needs:
+            return {"context": context, "stage": stage, "skipped": True, "reason": "no model needs for stage"}
+
+        actions = []
+        with self._lock:
+            needed_prefixes = {n.slot_prefix for n in needs}
+            # Evict non-needed if any exclusive
+            exclusive_need = next((n for n in needs if n.exclusive), None)
+            if exclusive_need:
+                for sid, slot in list(self._registry.items()):
+                    if slot.state in (SlotState.LOADED, SlotState.LOADING):
+                        if not any(sid.startswith(p.replace(":pipeline", ":").replace(":llm", ":").replace(":stt", ":").replace(":embedding", ":")) or sid.startswith(p) for p in needed_prefixes):
+                            if self._unload_model(slot):
+                                actions.append({"action": "evict", "slot_id": sid, "reason": f"exclusive stage {context}/{stage}"})
+
+            for need in needs:
+                matching = self._find_matching_slot(need.slot_prefix)
+                if matching and matching.state == SlotState.LOADED:
+                    matching.priority = max(matching.priority, need.priority)
+                    actions.append({"action": "already_loaded", "slot_id": matching.slot_id})
+                elif need.required:
+                    actions.append({
+                        "action": "preload_needed",
+                        "slot_prefix": need.slot_prefix,
+                        "priority": need.priority,
+                    })
+
+        logger.info(f"Stage intent: {context}/{stage} → {len(actions)} model actions")
+        return {"context": context, "stage": stage, "actions": actions}
 
     # ------------------------------------------------------------------
     # Public API: Quality Tiers

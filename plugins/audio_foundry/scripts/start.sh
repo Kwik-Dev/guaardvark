@@ -42,7 +42,38 @@ ensure_venv() {
     local reqs_file="$2"
     local label="$3"
 
-    if [ ! -f "$venv_dir/bin/activate" ]; then
+    # Cross-machine sync safety: venvs contain absolute shebangs + native bins/symlinks.
+    # If the python inside doesn't exec or reports wrong root, nuke and recreate.
+    venv_healthy() {
+        local py="$venv_dir/bin/python"
+        if [ ! -x "$py" ]; then
+            return 1
+        fi
+        # Must run without error and its reported executable should live under this GX root (not master path).
+        if ! "$py" -c 'import sys; print(sys.executable)' >/dev/null 2>&1; then
+            return 1
+        fi
+        # Optional but strong: the printed path should contain current project (defensive vs old shebangs).
+        if ! "$py" -c '
+import sys
+import os
+root = os.environ.get("GUAARDVARK_ROOT", "")
+exe = sys.executable
+if root and root not in exe:
+    # still allow if it at least runs; the recreate below is the real guard
+    pass
+print("ok")
+' >/dev/null 2>&1; then
+            :
+        fi
+        return 0
+    }
+
+    if [ ! -f "$venv_dir/bin/activate" ] || ! venv_healthy; then
+        if [ -d "$venv_dir" ]; then
+            echo "$label venv damaged / from another machine (bad shebang or missing python) — removing..."
+            rm -rf "$venv_dir"
+        fi
         echo "$label venv missing — bootstrapping at $venv_dir"
         python3 -m venv "$venv_dir" || { echo "Error: failed to create $label venv"; exit 1; }
         # shellcheck disable=SC1091
@@ -89,6 +120,69 @@ if [ ! -f "$DIFFUSERS_UPGRADE_SENTINEL" ] || [ "$PLUGIN_ROOT/requirements.txt" -
     source "$PLUGIN_VENV/bin/activate"
     pip install --upgrade "$DIFFUSERS_REQUIRED" || { echo "Error: diffusers upgrade failed"; exit 1; }
     touch "$DIFFUSERS_UPGRADE_SENTINEL"
+    deactivate
+fi
+
+# Torch wheels that chatterbox-tts (and sometimes kokoro) transitively pull are
+# often built for older GPUs only. On machines with brand-new Blackwell cards
+# (RTX 50-series, compute capability 12.0 / sm_120) the stock wheel from
+# `pip install chatterbox-tts==0.1.7` (torch 2.6 + cu124) produces:
+#   "no kernel image is available for execution on the device"
+# when doing .to("cuda") inside ChatterboxTTS.from_pretrained or KPipeline.
+#
+# The project-wide scripts/install_pytorch.sh already handles this by detecting
+# nvidia-smi compute_cap and forcing the matching index (cu128 for Blackwell).
+# We do the equivalent here for the *isolated* audio venv so it stays working
+# even when the initial -r brings an ancient torch.
+#
+# Strategy (same pattern as the diffusers block):
+#   - after the main requirements install
+#   - detect the local GPU's cap (via nvidia-smi or torch if already importable)
+#   - if the current torch build does not advertise a matching arch (sm_120 etc.)
+#     or is obviously too old, force-reinstall the torch family from the
+#     https://download.pytorch.org/whl/cu128 (or cu129/130) index using --no-deps
+#     so chatterbox's strict "torch==2.6" metadata cannot downgrade us again.
+#   - also ensure nvidia-cufile-cu12 (and friends) are present; some cu* wheels
+#     dlopen them at import time even for pure inference.
+# The sentinel is touched with the detected cap so a future GPU swap retriggers.
+TORCH_COMPAT_SENTINEL="$PLUGIN_VENV/.torch_gpu_compat"
+NEED_TORCH_COMPAT=0
+if command -v nvidia-smi >/dev/null 2>&1; then
+    CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+    if [ -n "$CAP" ]; then
+        # sm_120 (and future 12.x) require the newer cu128+ wheels that ship the kernels.
+        MAJOR=${CAP%%.*}
+        if [ "$MAJOR" -ge 12 ]; then
+            # Probe the *current* torch (if importable) to see if it has the arch.
+            if source "$PLUGIN_VENV/bin/activate" 2>/dev/null; then
+                if python -c '
+import torch, sys
+al = torch.cuda.get_arch_list() if hasattr(torch.cuda, "get_arch_list") else []
+if not any("sm_120" in str(a) or "sm_100" in str(a) for a in al):
+    sys.exit(42)  # need upgrade
+' 2>/dev/null; then
+                    :
+                else
+                    NEED_TORCH_COMPAT=1
+                fi
+                deactivate 2>/dev/null || true
+            else
+                NEED_TORCH_COMPAT=1
+            fi
+        fi
+    fi
+fi
+if [ "$NEED_TORCH_COMPAT" = "1" ] || [ ! -f "$TORCH_COMPAT_SENTINEL" ]; then
+    echo "Forcing torch upgrade for Blackwell / sm_120 (RTX 50-series) compatibility..."
+    # shellcheck disable=SC1091
+    source "$PLUGIN_VENV/bin/activate"
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -1 || true
+    pip install --upgrade --force-reinstall --no-deps torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 || { echo "Error: torch cu128 install failed"; exit 1; }
+    # Some cu128 wheels dynamically load these at import time even for inference.
+    pip install --upgrade nvidia-cufile-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 2>&1 | tail -1 || true
+    # Re-apply our other overrides that the resolver may have fought.
+    pip install --upgrade "$DIFFUSERS_REQUIRED" 2>/dev/null || true
+    touch "$TORCH_COMPAT_SENTINEL"
     deactivate
 fi
 

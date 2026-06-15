@@ -308,16 +308,22 @@ class PluginManager:
                         self._kill_by_port(metadata.port)
                 self._plugin_status[plugin_id] = PluginStatus.DISABLED
 
-        # Second pass: start plugins that were running last time
-        for plugin_id in self.state_store.get_running():
+        # Second pass: start plugins that were running last time.
+        # Always dedup the persisted list (defensive; prior races or old bugs could
+        # leave duplicates, causing the quarantine warning to spam on every boot).
+        running_list = self.state_store.get_running()
+        if len(running_list) != len(set(running_list)):
+            logger.warning("plugin_state 'running' list contained duplicates — auto-repaired on boot")
+        for plugin_id in running_list:
             # Quarantine's real job: don't auto-restore a plugin that failed to
             # start repeatedly — that's the retry storm the failure counter is
             # meant to damp. The operator re-enabling it (which lifts quarantine)
-            # is the intentional path back.
+            # is the intentional path back. Use INFO (not WARNING) so a healthy
+            # quarantined ollama (common) doesn't flood logs on every restart.
             if self.state_store.is_quarantined(plugin_id):
-                logger.warning(
+                logger.info(
                     f"Skipping auto-restore of quarantined plugin '{plugin_id}' — "
-                    "enable it manually to retry (that lifts the quarantine)"
+                    "enable it manually (via Plugins UI) to retry (that lifts the quarantine)"
                 )
                 continue
             if self._plugin_status.get(plugin_id) == PluginStatus.STOPPED:

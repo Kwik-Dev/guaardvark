@@ -95,6 +95,10 @@ def _settings(mv: MusicVideo) -> dict:
     # Optional free-text guidance that was provided at regen time (or at create) and fed
     # to the Director as extra instructions for the mood arc / specific direction.
     s.setdefault("director_guidance", None)
+    # Flux asset overrides for keyframe/storyboard still generation (flux-schnell path).
+    # Passed to ComfyUIImageGenerator so per-MV choice of GGUF/clip/vae files is possible.
+    for k in ("flux_unet", "flux_t5", "flux_clip", "flux_vae"):
+        s.setdefault(k, None)
     return s
 
 
@@ -258,8 +262,8 @@ def run_analyzer(mv_id: int):
     with _mv_run(mv_id, expected_stage="analyzing", next_agent=None) as mv:
         if mv is None:
             return
-        ensure_plugin_running("video_editor")
-        ensure_plugin_running("ollama")  # Director planning requires the Ollama service/daemon for per-cut prompts
+        from backend.services.plugin_bridge import ensure_plugins_for_stage
+        ensure_plugins_for_stage("music-video", "analyzing")
         song = _resolve_song_path(mv)
         if not song:
             raise RuntimeError("song file not found on disk")
@@ -315,7 +319,25 @@ def run_analyzer(mv_id: int):
                 planning_mode=s.get("planning_mode", "narrative"),
                 extra_guidance=s.get("director_guidance"),
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),
+                max_stretch=float(s.get("max_stretch", 2.0)),
+                fill_method=s.get("fill_method"),
             )
+            # P0 guard application (story-arc plan): ensure the prompts we store for
+            # storyboards + i2v are distinct + energy-aware even on marginal LLM output.
+            # Also the natural place to (in future) pass stretch context for duration suggestions.
+            raw_prompts = result.get("prompts") or []
+            guarded = raw_prompts
+            try:
+                from backend.services.music_video_director import _ensure_distinct_and_energy_aware
+                guarded = _ensure_distinct_and_energy_aware(
+                    raw_prompts, plan, mv.style_prompt,
+                    max_stretch=float(s.get("max_stretch", 2.0)),
+                )
+            except Exception:  # noqa: BLE001 — guard is best-effort
+                pass
+            if guarded:
+                result["prompts"] = guarded  # feed the guarded list downstream
+
             # If a rich user-provided treatment was supplied, we can also store the
             # raw treatment the Director produced/refined so the UI can show the
             # final version the agent settled on.
@@ -330,6 +352,12 @@ def run_analyzer(mv_id: int):
                 s = dict(mv.settings_json or {})
                 s["director_treatment"] = treatment
                 mv.settings_json = s
+            # Store any director diagnostics (fallback reason, raw head, etc.) so _mv_dict
+            # can surface them in the UI for the "why are my prompts not unique?" case.
+            if result.get("director_diagnostics"):
+                ss = dict(mv.settings_json or {})
+                ss["director_diagnostics"] = result.get("director_diagnostics")
+                mv.settings_json = ss
         else:
             prompts = [mv.style_prompt] * len(plan)
 
@@ -399,7 +427,8 @@ def run_clip_generator(mv_id: int):
     from backend.celery_app import celery
     from backend.services.job_operation_gate import GpuBusyError
     try:
-        ensure_plugin_running("comfyui")
+        from backend.services.plugin_bridge import ensure_plugins_for_stage
+        ensure_plugins_for_stage("music-video", "generating")
         _generate_one_clip(mv, target)
     except (GpuBusyError, PluginUnavailable) as e:
         # TRANSIENT — the GPU gate is cooling down / busy, or the plugin is still
@@ -459,7 +488,14 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     # the MLT assembly (source_out + timeline slots) matches the actual media duration on disk. This
     # contract is required for audio sync and to prevent timing drift or underruns in the .mlt.
     suggested = clip.get("duration_seconds")
-    motion_len_s = float(suggested) if suggested and 0.5 < float(suggested) <= base_slot_s * 2.5 else base_slot_s
+    max_src = base_slot_s * float(s.get("max_stretch", 2.0))
+    if suggested and 0.5 < float(suggested) <= max_src:
+        motion_len_s = float(suggested)
+    else:
+        # P1: default to a mild stretch target (1.3x) so the final motion after fill
+        # feels intentional rather than 1:1 or fully clamped by the i2v engine max.
+        ideal = base_slot_s / 1.3
+        motion_len_s = max(0.5, min(ideal, max_src, base_slot_s))
     fill_target_s = base_slot_s   # always the full cut slot for the final clip_*.mp4
     out_fps = s["fps"]   # final clip fps (the fill step re-times to this)
 
@@ -507,14 +543,30 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             # (mirrors Film Crew's storyboard_artist). No-op unless LoRA
             # consistency is on AND a LoRA reference is reachable from settings.
             kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, clip_prompt)
-            # Per media/vram team audit: allow per-clip keyframe LoRA strength (default 0.25
+            # Per media/vram team audit (resumed): allow per-clip keyframe LoRA strength (default 0.25
             # matches ComfyUIImageGenerator; higher can "fry" identity, lower is safer for
             # consistency). Source from settings if operator tuned it for this MV.
-            kf_lora_strength = float(s.get("keyframe_lora_strength", 0.25))
-            img = ComfyUIImageGenerator(lora_strength=kf_lora_strength).generate_image(
+            # Preflight + clamp now wired in api paths + generator too (was the noted WIP).
+            kf_lora_strength = max(0.0, min(1.5, float(s.get("keyframe_lora_strength", 0.25))))
+            vg = get_video_generator()
+            if not getattr(vg, "service_available", True):
+                try:
+                    vg.service_available = vg._check_comfyui_connection()
+                except Exception:
+                    vg.service_available = False
+            if not getattr(vg, "service_available", True):
+                raise RuntimeError("ComfyUI unavailable for music-video keyframe/i2v (start it or free VRAM).")
+            img = ComfyUIImageGenerator(
+                lora_strength=kf_lora_strength,
+                flux_unet=s.get("flux_unet"),
+                flux_t5=s.get("flux_t5"),
+                flux_clip=s.get("flux_clip"),
+                flux_vae=s.get("flux_vae"),
+            ).generate_image(
                 prompt=kf_prompt, loras=kf_loras, output_path=still_path,
                 width=s["still_width"], height=s["still_height"], seed=1000 + idx,
                 steps=kf_steps,
+                model=s.get("keyframe_model"),
             )
             # Evict FLUX before the animator loads — the i2v nodes don't ask ComfyUI to
             # make room, so without this the animator OOMs on a FLUX-full card.
@@ -542,7 +594,15 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
         if s.get("i2v_steps"):
             req_kwargs["num_inference_steps"] = int(s["i2v_steps"])
         req = VideoGenerationRequest(**req_kwargs)
-        result = get_video_generator().generate_video(req)
+        vg = get_video_generator()
+        if not getattr(vg, "service_available", True):
+            try:
+                vg.service_available = vg._check_comfyui_connection()
+            except Exception:
+                vg.service_available = False
+        if not getattr(vg, "service_available", True):
+            raise RuntimeError("ComfyUI unavailable for music-video i2v clip render.")
+        result = vg.generate_video(req)
         if not result.success or not result.video_path:
             err = result.error or "no video produced"
             if any(kw in (err or "").lower() for kw in ("oom", "out of memory", "cuda")):
@@ -595,7 +655,8 @@ def run_assembler(mv_id: int):
     with _mv_run(mv_id, expected_stage="assembling", next_agent=None) as mv:
         if mv is None:
             return
-        ensure_plugin_running("video_editor")
+        from backend.services.plugin_bridge import ensure_plugins_for_stage
+        ensure_plugins_for_stage("music-video", "assembling")
 
         clips = [
             c for c in (mv.clips or [])

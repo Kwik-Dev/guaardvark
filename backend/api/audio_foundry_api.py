@@ -348,7 +348,20 @@ def download_voice_clip(clip_id):
     f = matches[0]
     if not _is_safe_ref_path(f):
         return {"error": "Path traversal blocked"}, 403
-    return send_file(f, as_attachment=False, download_name=f.name)
+    # Explicit mimetype so <audio> elements don't get application/octet-stream
+    # (which produces "No decoders for requested formats" in browser).
+    ext = f.suffix.lower()
+    if ext == ".mp3":
+        mime = "audio/mpeg"
+    elif ext == ".wav":
+        mime = "audio/wav"
+    elif ext == ".flac":
+        mime = "audio/flac"
+    elif ext == ".ogg":
+        mime = "audio/ogg"
+    else:
+        mime = None  # let send_file / werkzeug guess
+    return send_file(f, as_attachment=False, download_name=f.name, mimetype=mime)
 
 
 @audio_foundry_bp.route("/voice-clips/<clip_id>", methods=["DELETE"])

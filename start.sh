@@ -844,9 +844,13 @@ ensure_backend_python_environment() {
             fi
         fi
 
-        # The smart GPU/CUDA PyTorch installer (also called by dep_reconciler)
+        # The smart GPU/CUDA PyTorch installer (also called by dep_reconciler).
+        # Use hardware_policy as single source of truth for the torch channel
+        # (same as the isolated plugin setup_venv.sh scripts use). Falls back
+        # gracefully if the policy module or backend venv is not ready yet.
         if [ -f "$SCRIPT_DIR/scripts/install_pytorch.sh" ]; then
-            bash "$SCRIPT_DIR/scripts/install_pytorch.sh" >> "$SETUP_LOG" 2>&1 || vader_warn "install_pytorch.sh exited non-zero (GPU mode may be limited)"
+            GUAARDVARK_TORCH_CHANNEL="$("$VENV_DIR/bin/python" -m backend.services.hardware_policy torch_channel 2>/dev/null || true)" \
+                bash "$SCRIPT_DIR/scripts/install_pytorch.sh" >> "$SETUP_LOG" 2>&1 || vader_warn "install_pytorch.sh exited non-zero (GPU mode may be limited)"
             # Gate nvidia-ml-py post-torch per edge audit (avoid FutureWarning/unneeded dep on CPU/ARM/ROCm/Metal).
             if ! command -v nvidia-smi &> /dev/null; then
                 "$VENV_DIR/bin/pip" uninstall -y nvidia-ml-py pynvml 2>/dev/null | tail -1 || true
@@ -857,6 +861,11 @@ ensure_backend_python_environment() {
             # touching torch (--no-deps). Reconciled from PR #40 (anubissbe).
             pip install --no-deps --force-reinstall 'numpy<2.0,>=1.26.4' 'setuptools>=80.9.0,<81' >> "$SETUP_LOG" 2>&1 \
                 || vader_warn "Could not re-pin numpy/setuptools after PyTorch — check 'pip check'."
+            # Extra safety: always purge flash-attn/xformers after torch (even on GPU). These
+            # are the direct cause of the aten::_flash schema mismatch (flash 2.5.7 vs torch
+            # 2.5.1+cu124 philox vs rng_state) logged in backend.log/preflight on diffusers
+            # import for batch_image_generation_api. Custom nodes + plugin reqs re-introduce them.
+            "$VENV_DIR/bin/pip" uninstall -y flash-attn flash_attn xformers 2>/dev/null | tail -1 || true
         fi
 
         # Full reconciler pass for state tracking, CRITICAL_PACKAGES verification, cli_venv, etc.
@@ -1232,16 +1241,25 @@ fi
 # KV-cache q8_0 + flash-attention are GPU wins (harmless-but-pointless on CPU), so
 # they are gated on the same nvidia-smi GPU detection start.sh already uses.
 if [ "${GUAARDVARK_OLLAMA_TUNING:-1}" != "0" ]; then
-    export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-2}"
+    # Derive Ollama server env (NUM_PARALLEL etc.) from the single hardware policy.
+    # This centralizes the VRAM-based decision (1 on 16 GB cards to avoid the
+    # original 4-parallel CPU-offload bug) and also emits VULKAN/MAX_LOADED etc.
+    # Fall back to conservative defaults if policy/venv not ready yet.
+    if [ -x "$VENV_DIR/bin/python" ]; then
+        _POLICY_OLLAMA="$("$VENV_DIR/bin/python" -m backend.services.hardware_policy ollama_env 2>/dev/null || true)"
+        if [ -n "$_POLICY_OLLAMA" ]; then
+            # Parse the Environment="OLLAMA_FOO=bar" lines emitted by the policy.
+            eval "$(echo "$_POLICY_OLLAMA" | sed -n 's/^Environment="\([^"]*\)"/\1/p' | sed 's/^/export /')"
+            vader_info "Ollama tuning: derived from hardware_policy (NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-?})"
+        fi
+    fi
+    # Safe fallbacks (policy may have already set these).
+    export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
     export OLLAMA_NUM_CTX="${OLLAMA_NUM_CTX:-8192}"
     export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-15m}"
-    if command_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
-        export OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
-        export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}"
-        vader_info "Ollama tuning: KV-cache q8_0 + flash-attention enabled (GPU detected)"
-    else
-        vader_info "Ollama tuning: NUM_PARALLEL/NUM_CTX/KEEP_ALIVE set (no GPU — skipping KV-cache/flash-attn)"
-    fi
+    export OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
+    export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}"
+    vader_info "Ollama tuning: NUM_PARALLEL=${OLLAMA_NUM_PARALLEL} (policy or fallback)"
 else
     vader_info "Ollama tuning disabled (GUAARDVARK_OLLAMA_TUNING=0)"
 fi
@@ -1249,27 +1267,45 @@ fi
 # ── Ollama systemd drop-in installer (P1-6 fix-b) ──
 # The preferred launch path below is `sudo systemctl start ollama`, which inherits
 # systemd's environment — NOT this shell's. So the exports above don't reach a
-# systemd-managed daemon. This step installs a [Service] Environment= drop-in
-# (scripts/ollama-systemd-dropin.conf) carrying the same vars, IF: tuning is on,
-# the drop-in isn't already installed, a GPU is present (the knobs are GPU wins),
-# and non-interactive sudo is available. It does NOT restart a running ollama —
-# it applies on the next daemon restart (logged). If sudo is unavailable, it logs
-# a one-line manual instruction. Guarded by GUAARDVARK_OLLAMA_TUNING.
-OLLAMA_DROPIN_SRC="$SCRIPT_DIR/scripts/ollama-systemd-dropin.conf"
+# systemd-managed daemon. This step installs (or renders) a [Service] Environment=
+# drop-in carrying the policy-derived vars.
+#
+# Preferred: render from hardware_policy.ollama_env (single source of truth,
+# includes VULKAN/MAX_LOADED etc.). Falls back to the static template in
+# scripts/ollama-systemd-dropin.conf. The rendered file lives in data/ so the
+# committed template remains a safe fallback. Guarded by GUAARDVARK_OLLAMA_TUNING.
+OLLAMA_DROPIN_TEMPLATE="$SCRIPT_DIR/scripts/ollama-systemd-dropin.conf"
+OLLAMA_DROPIN_RENDERED="$SCRIPT_DIR/data/ollama-dropin.rendered.conf"
 OLLAMA_DROPIN_DST="/etc/systemd/system/ollama.service.d/guaardvark-tuning.conf"
-if [ "${GUAARDVARK_OLLAMA_TUNING:-1}" != "0" ] && command_exists systemctl \
-   && [ -f "$OLLAMA_DROPIN_SRC" ] && command_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
-    if [ -f "$OLLAMA_DROPIN_DST" ] && cmp -s "$OLLAMA_DROPIN_SRC" "$OLLAMA_DROPIN_DST"; then
-        : # already installed and current — nothing to do
-    elif sudo -n true 2>/dev/null; then
-        if sudo -n install -D -m 0644 "$OLLAMA_DROPIN_SRC" "$OLLAMA_DROPIN_DST" 2>/dev/null \
-           && sudo -n systemctl daemon-reload 2>/dev/null; then
-            vader_success "Ollama systemd tuning drop-in installed (applies on next ollama restart; not force-restarting)"
-        else
-            vader_info "Could not install Ollama systemd drop-in (non-critical); manual: sudo install -D -m 0644 '$OLLAMA_DROPIN_SRC' '$OLLAMA_DROPIN_DST' && sudo systemctl daemon-reload && sudo systemctl restart ollama"
+
+if [ "${GUAARDVARK_OLLAMA_TUNING:-1}" != "0" ] && command_exists systemctl; then
+    DROPIN_SRC="$OLLAMA_DROPIN_TEMPLATE"
+    if [ -x "$VENV_DIR/bin/python" ]; then
+        # Try to render from policy (best: includes current NUM_PARALLEL + VULKAN etc.)
+        if "$VENV_DIR/bin/python" -m backend.services.hardware_policy ollama_env > "$OLLAMA_DROPIN_RENDERED" 2>/dev/null; then
+            # Prepend a header so humans know it came from the policy
+            {
+                echo "# RENDERED by start.sh from backend.services.hardware_policy — do not edit by hand."
+                echo "# Regenerate by re-running start.sh or: python -m backend.services.hardware_policy ollama_env"
+                cat "$OLLAMA_DROPIN_RENDERED"
+            } > "$OLLAMA_DROPIN_RENDERED.tmp" && mv "$OLLAMA_DROPIN_RENDERED.tmp" "$OLLAMA_DROPIN_RENDERED"
+            DROPIN_SRC="$OLLAMA_DROPIN_RENDERED"
         fi
-    else
-        vader_info "Ollama systemd tuning available — to apply, run: sudo install -D -m 0644 '$OLLAMA_DROPIN_SRC' '$OLLAMA_DROPIN_DST' && sudo systemctl daemon-reload && sudo systemctl restart ollama"
+    fi
+
+    if [ -f "$DROPIN_SRC" ]; then
+        if [ -f "$OLLAMA_DROPIN_DST" ] && cmp -s "$DROPIN_SRC" "$OLLAMA_DROPIN_DST"; then
+            : # already installed and current
+        elif sudo -n true 2>/dev/null; then
+            if sudo -n install -D -m 0644 "$DROPIN_SRC" "$OLLAMA_DROPIN_DST" 2>/dev/null \
+               && sudo -n systemctl daemon-reload 2>/dev/null; then
+                vader_success "Ollama systemd tuning drop-in installed (applies on next ollama restart; not force-restarting)"
+            else
+                vader_info "Could not install Ollama systemd drop-in (non-critical); manual: sudo install -D -m 0644 '$DROPIN_SRC' '$OLLAMA_DROPIN_DST' && sudo systemctl daemon-reload && sudo systemctl restart ollama"
+            fi
+        else
+            vader_info "Ollama systemd tuning available — to apply, run: sudo install -D -m 0644 '$DROPIN_SRC' '$OLLAMA_DROPIN_DST' && sudo systemctl daemon-reload && sudo systemctl restart ollama"
+        fi
     fi
 fi
 
@@ -1373,16 +1409,24 @@ except Exception:
         [ -n "$_kb" ] && BOOT_RAM_GB=$(( _kb / 1024 / 1024 ))
     fi
 
-    # Pick defaults by hardware. GUAARDVARK_DEFAULT_LLM / GUAARDVARK_EMBEDDING_MODEL
-    # override the chat / embed choice respectively (matches config.py overrides).
-    if [ "${BOOT_RAM_GB:-0}" -le 8 ] && [ "${BOOT_RAM_GB:-0}" -gt 0 ] || [ "$BOOT_ARCH" = "aarch64" ] || [ "$BOOT_ARCH" = "arm64" ]; then
-        BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.2:1b}"
-        vader_info "Model bootstrap: small-hardware tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
+    # Pick defaults by hardware. Try hardware_policy first (single source of truth).
+    # Falls back to inline RAM/arch math if the policy module isn't importable yet.
+    _MODEL_TIER="$("$VENV_DIR/bin/python" -m backend.services.hardware_policy model_tier 2>/dev/null || true)"
+    if [ -n "$_MODEL_TIER" ]; then
+        BOOT_CHAT_MODEL=$(echo "$_MODEL_TIER" | cut -f1)
+        BOOT_EMBED_MODEL=$(echo "$_MODEL_TIER" | cut -f2)
+        vader_info "Model tier from hardware_policy: chat=$BOOT_CHAT_MODEL embed=$BOOT_EMBED_MODEL"
     else
-        BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.1:8b}"
-        vader_info "Model bootstrap: standard tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
+        # Fallback: inline RAM/arch math (runs only when policy module not yet importable).
+        if [ "${BOOT_RAM_GB:-0}" -le 8 ] && [ "${BOOT_RAM_GB:-0}" -gt 0 ] || [ "$BOOT_ARCH" = "aarch64" ] || [ "$BOOT_ARCH" = "arm64" ]; then
+            BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.2:1b}"
+            vader_info "Model bootstrap: small-hardware tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
+        else
+            BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.1:8b}"
+            vader_info "Model bootstrap: standard tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
+        fi
+        BOOT_EMBED_MODEL="${GUAARDVARK_EMBEDDING_MODEL:-nomic-embed-text}"
     fi
-    BOOT_EMBED_MODEL="${GUAARDVARK_EMBEDDING_MODEL:-nomic-embed-text}"
 
     BOOT_LIST="$(timeout 10 ollama list 2>/dev/null || true)"
     # A "chat model" is any non-embed tag. Detect absence of either class.
@@ -2147,5 +2191,13 @@ else
     vader_info "Run './start.sh --test' for comprehensive health diagnostics."
 fi
 echo ""
+
+# Advisory GPU-stack verification — never blocks boot.
+# Checks that each venv (backend + isolated audio/video) can run a real CUDA
+# kernel and that Ollama is not forced into CPU-offload. Writes
+# data/gpu_stack_status.json for the health layer / UI. See verify_gpu_stack.sh.
+if [ -f "$SCRIPT_DIR/scripts/verify_gpu_stack.sh" ]; then
+    bash "$SCRIPT_DIR/scripts/verify_gpu_stack.sh" || true
+fi
 
 exit 0

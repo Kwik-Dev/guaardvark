@@ -527,11 +527,15 @@ def _handle_chat_send_local(payload):
 
     app = current_app._get_current_object()
 
+    # Phase 2.2 tighten: AgentBrain sole canonical router here too (socket local bridge).
+    # Legacy only if AGENT_BRAIN_ENABLED=false or brain not ready. No silent dual path when enabled.
     use_agent_brain = False
     agent_brain = None
+    agent_brain_enabled = False
     engine = None
     try:
         from backend.config import AGENT_BRAIN_ENABLED
+        agent_brain_enabled = AGENT_BRAIN_ENABLED
         brain_state = getattr(app, "brain_state", None)
         if AGENT_BRAIN_ENABLED and brain_state and brain_state.is_ready:
             from backend.services.agent_brain import AgentBrain
@@ -541,6 +545,10 @@ def _handle_chat_send_local(payload):
         pass
 
     if not use_agent_brain:
+        if agent_brain_enabled:
+            logger.error("[BRIDGE-LOCAL] AGENT_BRAIN_ENABLED=true but not ready; sole router enforced, no legacy")
+            emit_fn("chat:error", {"error": "AgentBrain enabled but not ready"})
+            return
         try:
             llm = app.config.get("LLAMA_INDEX_LLM")
             if not llm:

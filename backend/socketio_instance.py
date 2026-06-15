@@ -20,6 +20,21 @@ else:
         "http://127.0.0.1:3000",  # Alternative localhost
     ]
 
+# Always allow LAN private-IP origins for local workstation use (phone/tablet/browser
+# on the same network accessing the printed LAN IP + VITE_PORT). This enables
+# SocketIO (real-time chat, progress, voice streaming) when the client Origin is
+# http://192.168.x.x:port etc. Patterns are the same set used (under interconnector
+# master) for Flask CORS. Ungated here because this is a personal offline machine.
+lan_patterns = [
+    r"http://192\.168\.\d+\.\d+:\d+",
+    r"http://10\.\d+\.\d+\.\d+:\d+",
+    r"http://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
+    r"https://192\.168\.\d+\.\d+:\d+",
+    r"https://10\.\d+\.\d+\.\d+:\d+",
+    r"https://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
+]
+allowed_origins = lan_patterns + allowed_origins
+
 # Configure SocketIO with memory leak prevention
 socketio = SocketIO(
     cors_allowed_origins=allowed_origins,

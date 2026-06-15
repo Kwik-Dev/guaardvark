@@ -52,13 +52,28 @@ class PluginStateStore:
         self._write(state)
 
     def get_running(self) -> List[str]:
-        """Return a copy of the last-known running set."""
-        return list(self._read().get("running", []))
+        """Return a copy of the last-known running set (always deduplicated, order preserved)."""
+        raw = self._read().get("running", []) or []
+        # Dedup while preserving first-seen order (defensive against prior races / bad writes).
+        seen = set()
+        deduped = []
+        for pid in raw:
+            if pid not in seen:
+                seen.add(pid)
+                deduped.append(pid)
+        return deduped
 
     def set_running(self, plugin_ids: List[str]) -> None:
-        """Atomically set the running list; preserves user_enabled overlay."""
+        """Atomically set the running list (deduplicated); preserves user_enabled overlay."""
         state = self._read()
-        state["running"] = list(plugin_ids)
+        # Always store a clean unique list.
+        seen = set()
+        clean = []
+        for pid in (plugin_ids or []):
+            if pid not in seen:
+                seen.add(pid)
+                clean.append(pid)
+        state["running"] = clean
         self._write(state)
 
     def _read(self) -> dict:
@@ -97,6 +112,15 @@ class PluginStateStore:
         raw.setdefault("running", [])
         raw.setdefault("quarantined", {})
         raw.setdefault("start_failure_counts", {})
+        # Defensive dedup of running list (can accumulate from races across restarts / concurrent toggles / LAN clients).
+        if raw.get("running"):
+            seen = set()
+            dedup = []
+            for p in raw["running"]:
+                if p not in seen:
+                    seen.add(p)
+                    dedup.append(p)
+            raw["running"] = dedup
         return raw
 
     def _write(self, state: dict) -> None:
