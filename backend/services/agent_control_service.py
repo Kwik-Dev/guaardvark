@@ -825,6 +825,62 @@ class AgentControlService:
                         consecutive_failures += 1
                         continue
 
+                    # Guard: screen-verify the success_proof before trusting "done".
+                    # A non-trivial proof STRING is not enough — the model can echo
+                    # a plausible-but-false state (e.g. declaring the page loaded
+                    # right after navigate returned [OK], when navigate [OK] only
+                    # means the URL keystrokes were sent, not that the page
+                    # rendered). Mirror the recipe-path final verify
+                    # (_wait_until_visible) so adaptive completion cannot report
+                    # intent as reality. If the proof can't be confirmed on screen,
+                    # reject the done as a failed step and keep observing; a
+                    # genuinely-impossible task (e.g. unreachable site) then trips
+                    # the loop breaker / max_failures and reports failure honestly.
+                    # Only enforced for vision-capable models (same gate as above).
+                    if enforce_proof:
+                        done_verify = self._wait_until_visible(
+                            proof, screen, timeout_s=10.0,
+                        )
+                        if not bool(done_verify.get("success", False)):
+                            logger.warning(
+                                f"[AGENT][DONE] Rejected — success_proof not visible on "
+                                f"screen within 10s (proof: {proof!r}). Treating as failed "
+                                f"step (no reporting intent as reality)."
+                            )
+                            decision.task_complete = False
+                            self._action_history.append(ActionStep(
+                                iteration=iteration,
+                                scene_description=scene_desc or "no scene",
+                                action=AgentAction(
+                                    action_type="wait_until_visible",
+                                    target_description=proof,
+                                ),
+                                result=done_verify,
+                                verification="done proof not visible on screen",
+                                failed=True,
+                            ))
+                            self._last_progress_signal = self._semantic_progress_signal(
+                                decision.action,
+                                {"success": False, "reason": "done_proof_unverified"},
+                                failed=True,
+                                pixel_diff=None,
+                            )
+                            self._record_failure_label(self._last_progress_signal.label)
+                            consecutive_failures += 1
+                            try:
+                                self._emit_thinking(
+                                    iteration=iteration + 1,
+                                    label="done rejected — proof not visible",
+                                    reasoning=(
+                                        f"Model claimed complete ('{proof}') but the vision "
+                                        f"verifier could not confirm it on screen. Continuing "
+                                        f"to observe actual state rather than report success."
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                            continue
+
                     logger.info(f"[AGENT][DONE] Task complete after {iteration+1} steps, "
                                 f"{time.time() - start_time:.1f}s "
                                 f"(proof_len={len(proof)})")
