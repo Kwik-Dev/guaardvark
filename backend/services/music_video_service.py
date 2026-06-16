@@ -421,11 +421,15 @@ class MusicVideoService(PipelineService):
 
         from backend.services.plugin_bridge import ensure_plugins_for_stage
         ensure_plugins_for_stage("music-video", "analyzing")  # Director requires Ollama (and video_editor) for per-cut visual prompts from treatment
-        from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL
+        from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL, _is_embedding_model
 
         mode = planning_mode or s.get("planning_mode", "narrative")
         guidance = feedback or s.get("director_guidance")
         dmodel = (director_model or s.get("director_model") or DIRECTOR_MODEL).strip() or DIRECTOR_MODEL
+        if _is_embedding_model(dmodel):
+            logger = __import__("logging").getLogger(__name__)
+            logger.warning("overriding bad director_model=%s (embedding model cannot chat) -> %s", dmodel, DIRECTOR_MODEL)
+            dmodel = DIRECTOR_MODEL
 
         try:
             res = _generate_storyline_and_prompts(

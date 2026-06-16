@@ -74,7 +74,17 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
   const [regenErrors, setRegenErrors] = useState({}); // per-cut last error for regen feedback
   const [guidance, setGuidance] = useState("");
   const [regenMode, setRegenMode] = useState(detail.planning_mode || "narrative");
-  const [directorModel, setDirectorModel] = useState(detail.director_model || "gemma4:e4b");
+
+  const isLikelyEmbeddingModel = (m) => {
+    if (!m) return false;
+    const n = String(m).toLowerCase();
+    return ["embed", "embedding", "bge", "nomic", "snowflake", "minilm"].some((k) => n.includes(k));
+  };
+
+  const [directorModel, setDirectorModel] = useState(() => {
+    const m = detail.director_model || "gemma4:e4b";
+    return isLikelyEmbeddingModel(m) ? "gemma4:e4b" : m;
+  });
 
   const handleRegenStoryboard = async (index) => {
     // Bump version immediately to change the <img> src (adds ?v=N).
@@ -114,7 +124,8 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
   useEffect(() => {
     setEdits({});
     setTreatmentEdit(detail.director_treatment || detail.director_storyline || "");
-    setDirectorModel(detail.director_model || "gemma4:e4b");
+    const m = detail.director_model || "gemma4:e4b";
+    setDirectorModel(isLikelyEmbeddingModel(m) ? "gemma4:e4b" : m);
     setRegenMode(detail.planning_mode || "narrative");
   }, [detail.id, detail.current_stage, JSON.stringify(detail.clips?.map((c) => c.prompt)), detail.director_treatment, detail.director_storyline, detail.director_model, detail.planning_mode]);
 
@@ -175,7 +186,12 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
           <Chip size="small" variant="outlined" label={`dir: ${detail.planning_mode}`} />
         )}
         {detail.director_model && (
-          <Chip size="small" variant="outlined" label={`model: ${detail.director_model}`} />
+          <Chip
+            size="small"
+            variant="outlined"
+            color={isLikelyEmbeddingModel(detail.director_model) ? "warning" : "default"}
+            label={`model: ${isLikelyEmbeddingModel(detail.director_model) ? "gemma4:e4b (was bad)" : detail.director_model}`}
+          />
         )}
         {detail.director_enabled === false && (
           <Chip size="small" color="warning" label="Director disabled" />
@@ -509,7 +525,7 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
               select
               size="small"
               sx={{ minWidth: 170 }}
-              value={directorModel}
+              value={isLikelyEmbeddingModel(directorModel) ? "gemma4:e4b" : directorModel}
               onChange={(e) => setDirectorModel(e.target.value)}
               label="director model"
             >

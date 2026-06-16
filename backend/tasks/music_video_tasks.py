@@ -312,8 +312,11 @@ def run_analyzer(mv_id: int):
         # problem. Still degrades gracefully to the old behavior on any LLM failure.
         shot_plans = {}
         if s.get("director_enabled", True):
-            from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL
+            from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL, _is_embedding_model
             director_model = s.get("director_model") or DIRECTOR_MODEL
+            if _is_embedding_model(director_model):
+                logging.getLogger(__name__).warning("overriding bad director_model=%s (embedding model cannot chat) -> %s", director_model, DIRECTOR_MODEL)
+                director_model = DIRECTOR_MODEL
             result = _generate_storyline_and_prompts(
                 mv.style_prompt,
                 plan,

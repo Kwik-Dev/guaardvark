@@ -36,6 +36,16 @@ log = logging.getLogger(__name__)
 DIRECTOR_MODEL = "gemma4:e4b"
 DEFAULT_MODEL = DIRECTOR_MODEL  # legacy alias for any direct callers of generate_scene_prompts
 
+
+def _is_embedding_model(name: str | None) -> bool:
+    """Embedding models (used for RAG/vector search) do not support the chat API
+    (or JSON mode) that the Director requires. Filter them aggressively."""
+    if not name:
+        return False
+    n = name.lower()
+    bad_substrings = ("embed", "embedding", "bge", "nomic", "snowflake", "e5", "gte", "minilm", "all-minilm")
+    return any(b in n for b in bad_substrings)
+
 _SYSTEM = """You are a music-video director and visual screenwriter. You are given a global visual STYLE and an
 ordered list of timed CUTS for one song (each cut has: index, duration seconds, section
 label like intro/build/drop/outro, and a normalized energy 0..1).
@@ -114,17 +124,31 @@ def _resolve_model(preferred: str) -> str:
     For the Director we default to a small dedicated model (DIRECTOR_MODEL) optimized
     for fast, reliable structured JSON + strict visual-prompt-only output. This is
     intentionally separate from whatever large model is loaded for general chat/brain.
+
+    Critically: never return an embedding model (they don't support /api/chat or
+    the JSON format mode the Director needs). If the requested/preferred model is an
+    embedding model, we force the safe DIRECTOR_MODEL.
     """
     try:
-        tags = _installed_model_tags()
-        if not tags or preferred in tags:
+        raw_tags = _installed_model_tags() or set()
+        # Aggressively exclude embedding models — they are pulled for RAG but will 400
+        # on ollama.chat with format=json.
+        tags = {t for t in raw_tags if not _is_embedding_model(t)}
+
+        if not tags:
+            return DIRECTOR_MODEL
+
+        if preferred and not _is_embedding_model(preferred) and preferred in tags:
             return preferred
+
+        # Prefer any gemma (they tend to be reliable for the strict prompt contract).
         for t in sorted(tags):
             if "gemma" in t:
                 return t
-        return next(iter(sorted(tags)), preferred)
+
+        return next(iter(sorted(tags)), DIRECTOR_MODEL)
     except Exception:  # noqa: BLE001
-        return preferred
+        return DIRECTOR_MODEL if _is_embedding_model(preferred) else (preferred or DIRECTOR_MODEL)
 
 
 def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = None, fill_method: str | None = None) -> list[dict[str, Any]]:

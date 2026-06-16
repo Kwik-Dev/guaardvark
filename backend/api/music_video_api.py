@@ -17,6 +17,7 @@ from backend.services.job_types import JobKind
 from backend.services.job_operation_gate import GpuBusyError
 from backend.services.plugin_bridge import ensure_plugin_running
 from backend.services.comfyui_video_generator import get_video_generator
+from backend.services.music_video_director import _is_embedding_model
 
 bp = Blueprint("music_video_api", __name__, url_prefix="/api/music-video")
 log = logging.getLogger(__name__)
@@ -95,7 +96,10 @@ def _mv_dict(mv: MusicVideo) -> dict:
         out["planning_mode"] = s.get("planning_mode")
     # Dedicated (usually small/fast) model used for the Director when generating per-cut prompts + treatment.
     # Defaults to a lightweight gemma suitable for structured JSON + visual storytelling (not necessarily the user's main chat/brain model).
-    out["director_model"] = s.get("director_model") or "gemma4:e4b"
+    dm = s.get("director_model") or "gemma4:e4b"
+    if _is_embedding_model(dm):  # avoid showing bad persisted values in UI
+        dm = "gemma4:e4b"
+    out["director_model"] = dm
     out["use_lora_consistency"] = s.get("use_lora_consistency", False)
     out["keyframe_model"] = s.get("keyframe_model", "flux-schnell")
     out["i2v_model"] = s.get("i2v_model") or ("wan22-14b-i2v" if s.get("i2v_engine", "wan") == "wan" else "cogvideox-5b-i2v")
