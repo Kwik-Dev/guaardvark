@@ -187,6 +187,46 @@ def set_rules_enabled():
     return success_response({"rules_enabled": enabled})
 
 
+@settings_bp.route("/chat_thinking_default", methods=["GET"])
+def get_chat_thinking_default():
+    """Global default for whether thinking-capable models (gemma4:12b, qwen3, ...)
+    use chain-of-thought in chat. Off = faster replies. Per-chat /thinking on|off
+    overrides this. Default: off."""
+    enabled = False
+    try:
+        setting = db.session.get(Setting, "chat_thinking_default")
+        if setting and (setting.value or "").lower() in ("true", "1", "yes"):
+            enabled = True
+    except Exception as e:
+        current_app.logger.error(f"Failed to read chat_thinking_default setting: {e}")
+    return success_response({"chat_thinking_default": enabled})
+
+
+@settings_bp.route("/chat_thinking_default", methods=["POST"])
+def set_chat_thinking_default():
+    if not request.is_json:
+        return error_response("Request must be JSON")
+    data = request.get_json()
+    enabled = bool(data.get("chat_thinking_default"))
+    try:
+        setting = db.session.get(Setting, "chat_thinking_default")
+        if setting:
+            setting.value = "true" if enabled else "false"
+        else:
+            setting = Setting(
+                key="chat_thinking_default", value="true" if enabled else "false"
+            )
+            db.session.add(setting)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(
+            f"Failed to update chat_thinking_default setting: {e}", exc_info=True
+        )
+        return error_response("Failed to update setting", status_code=500)
+    return success_response({"chat_thinking_default": enabled})
+
+
 @settings_bp.route("/behavior_learning", methods=["GET"])
 def get_behavior_learning():
     enabled = False

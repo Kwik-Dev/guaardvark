@@ -26,6 +26,7 @@ export async function executeBuiltinCommand(name, args, context) {
     "/agent": handleAgent,
     "/chat": handleChatMode,
     "/exit": handleChatMode,  // alias
+    "/thinking": handleThinking,
   };
 
   const handler = handlers[name];
@@ -546,6 +547,70 @@ async function handleAgent(args, { addMessage, onSendMessage, chatState }) {
       type: "command",
     });
   }
+  return { handled: true };
+}
+
+// ============================================================
+// /thinking [on|off]
+// ============================================================
+
+// Toggle chain-of-thought for thinking-capable models (gemma4:12b, qwen3, ...)
+// for the CURRENT chat. Off by default (faster). Bare `/thinking` reports state.
+// Stored per-session in the app store; threaded into chat options by
+// unifiedChatService. When unset, the backend uses the global default Setting.
+async function handleThinking(args, { addMessage, chatState }) {
+  const sessionId = chatState?.sessionId;
+  if (!sessionId) {
+    addMessage({
+      role: "system",
+      content: "/thinking needs a session — open a chat first.",
+      tempId: `thinking-no-session-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+
+  const arg = (args || "").trim().toLowerCase();
+  const store = useAppStore.getState();
+
+  if (!arg) {
+    const cur = store.getSessionThinking(sessionId);
+    const state =
+      cur === undefined
+        ? "using the global default (Settings → Chat)"
+        : cur
+        ? "ON"
+        : "OFF";
+    addMessage({
+      role: "system",
+      content: `🧠 Thinking for this chat is **${state}**.\nUse \`/thinking on\` to enable step-by-step reasoning (slower) or \`/thinking off\` for faster replies.`,
+      tempId: `thinking-status-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+
+  const on = ["on", "true", "1", "yes", "enable"].includes(arg);
+  const off = ["off", "false", "0", "no", "disable"].includes(arg);
+  if (!on && !off) {
+    addMessage({
+      role: "system",
+      content: "Usage: `/thinking on` or `/thinking off` (or `/thinking` to show the current state).",
+      tempId: `thinking-usage-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+
+  store.setSessionThinking(sessionId, on);
+  addMessage({
+    role: "system",
+    content: on
+      ? "🧠 Thinking **enabled** for this chat — the model will reason step-by-step before answering (slower, better for complex prompts)."
+      : "⚡ Thinking **disabled** for this chat — faster replies.",
+    tempId: `thinking-set-${Date.now()}`,
+    type: "command",
+  });
   return { handled: true };
 }
 

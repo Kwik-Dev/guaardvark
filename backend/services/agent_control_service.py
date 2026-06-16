@@ -2479,6 +2479,10 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         from backend.utils.vision_analyzer import VisionAnalyzer
 
         analyzer = VisionAnalyzer()
+        # Use a dedicated verification model (prefers qwen3-vl instruct — a far more
+        # reliable UI/text reader than the gemma4 brain) so screen gates stop
+        # false-negativing visible results. Resolved once per call (not per poll).
+        verify_model = analyzer.get_verify_model()
         deadline = _time.monotonic() + timeout_s
         polls = 0
         last_err = None
@@ -2497,6 +2501,7 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
                     ),
                     num_predict=8,
                     temperature=0.0,
+                    model=verify_model,
                 )
                 if result.success:
                     answer = (result.description or "").strip().lower()

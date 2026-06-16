@@ -849,6 +849,22 @@ class UnifiedChatEngine:
         if media_result is not None:
             return media_result
 
+        # Resolve the per-request "thinking" preference for thinking-capable models
+        # (gemma4:12b, qwen3, deepseek-r1, ...). Precedence: explicit per-chat override
+        # from the /thinking command (options["think"]) > global default Setting
+        # ("chat_thinking_default") > False. Thinking is OFF by default because the
+        # chain-of-thought adds large latency to every reply. Applied in
+        # _call_llm_streaming (local Ollama path), gated on is_thinking_model.
+        try:
+            if "think" in options:
+                self._think = bool(options.get("think"))
+            else:
+                from backend.models import Setting, db as _db
+                _s = _db.session.get(Setting, "chat_thinking_default")
+                self._think = bool(_s and (_s.value or "").strip().lower() in ("true", "1", "yes"))
+        except Exception:
+            self._think = bool(options.get("think", False))
+
         # 1. Load conversation history
         from backend.config import AGENTIC_HISTORY_LIMIT
         history = self._load_history(session_id, limit=AGENTIC_HISTORY_LIMIT)
@@ -1990,6 +2006,11 @@ class UnifiedChatEngine:
                 )
                 if _native_active and _native_schema:
                     _chat_kwargs["tools"] = _native_schema
+                # Honor the per-chat/global thinking toggle (resolved in _run_chat).
+                # Only thinking-capable models accept `think`; passing it to others can
+                # error, so gate on is_thinking_model. Default-off keeps chat snappy.
+                if is_thinking_model and getattr(self, "_think", None) is not None:
+                    _chat_kwargs["think"] = bool(self._think)
                 stream = ollama.chat(**_chat_kwargs)
 
             # XML filter: stream tokens to client until <tool_call is detected,

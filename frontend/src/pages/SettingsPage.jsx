@@ -153,6 +153,9 @@ const SettingsPage = () => {
     getInitialBehaviorLearning,
   );
   const [rulesEnabled, setRulesEnabledState] = useState(getInitialRulesEnabled);
+  // Global default for chain-of-thought on thinking models (gemma4:12b, qwen3).
+  // Off = faster chat; per-chat /thinking on|off overrides. Backend authoritative.
+  const [chatThinkingDefault, setChatThinkingDefaultState] = useState(false);
   const [appVersion, setAppVersion] = useState("");
 
   function getInitialWebSearch() {
@@ -972,6 +975,20 @@ const SettingsPage = () => {
       }
     };
     fetchRulesEnabled();
+  }, []);
+
+  useEffect(() => {
+    const fetchChatThinkingDefault = async () => {
+      try {
+        const result = await apiService.getChatThinkingDefault();
+        const enabled =
+          result?.data?.chat_thinking_default ?? result?.chat_thinking_default;
+        if (typeof enabled === "boolean") setChatThinkingDefaultState(enabled);
+      } catch (err) {
+        console.warn("Failed to fetch chat_thinking_default setting:", err);
+      }
+    };
+    fetchChatThinkingDefault();
   }, []);
 
   useEffect(() => {
@@ -3004,6 +3021,37 @@ const SettingsPage = () => {
                     sx={{ background: "none", border: "none", cursor: "pointer", color: "primary.main", textDecoration: "underline" }}
                   >
                     Manage
+                  </Typography>
+                </Box>
+              </SettingsRow>
+              <SettingsRow label="Chat thinking">
+                <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                  <Chip
+                    label={chatThinkingDefault ? "On" : "Off"}
+                    onClick={async () => {
+                      const next = !chatThinkingDefault;
+                      setChatThinkingDefaultState(next);  // optimistic
+                      try {
+                        const result = await apiService.setChatThinkingDefault(next);
+                        if (result?.error) throw new Error(result.error);
+                        showMessage(
+                          next
+                            ? "Thinking on by default — thinking models reason step-by-step (slower). Use /thinking off per chat."
+                            : "Thinking off by default — faster replies. Use /thinking on per chat.",
+                          "info",
+                        );
+                      } catch (err) {
+                        console.error("Failed to update chat_thinking_default:", err);
+                        setChatThinkingDefaultState(!next);  // roll back
+                        showMessage("Failed to update Chat thinking setting", "error");
+                      }
+                    }}
+                    size="small"
+                    color={chatThinkingDefault ? "primary" : "default"}
+                    variant={chatThinkingDefault ? "filled" : "outlined"}
+                  />
+                  <Typography variant="caption" color="text.secondary">
+                    Default for thinking models (gemma4:12b, qwen3). Per-chat: <code>/thinking on|off</code>
                   </Typography>
                 </Box>
               </SettingsRow>

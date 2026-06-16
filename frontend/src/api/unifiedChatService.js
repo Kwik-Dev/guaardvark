@@ -53,10 +53,19 @@ class UnifiedChatService {
     const screenOpen = store.agentScreenOpen === true;
     const inAgentMode = store.getSessionMode?.(sessionId) === "agent";
     const agentScreenActive = screenOpen || inAgentMode;
+    // Per-chat thinking override (set via /thinking on|off). Only sent when the
+    // user explicitly toggled it; otherwise omitted so the backend applies the
+    // global `chat_thinking_default` Setting.
+    const thinkPref = store.getSessionThinking?.(sessionId);
     const body = {
       session_id: sessionId,
       message,
-      options: { ...options, agent_screen_active: agentScreenActive, screen_viewer_open: screenOpen },
+      options: {
+        ...options,
+        agent_screen_active: agentScreenActive,
+        screen_viewer_open: screenOpen,
+        ...(thinkPref !== undefined ? { think: thinkPref } : {}),
+      },
       project_id: options.project_id,
       is_voice_message: isVoiceMessage,
     };

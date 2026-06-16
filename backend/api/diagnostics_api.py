@@ -226,13 +226,30 @@ def test_llm_endpoint():
 
     if not llm:
         return jsonify({"error": "LLM not configured"}), 503
+    model_name = getattr(llm, "model", None) or "unknown"
+    # Fast connectivity test: cap output and disable chain-of-thought so thinking
+    # models (gemma4:12b, qwen3, ...) don't spend the whole test reasoning before
+    # answering (an uncapped "ping" was ~6.5s on gemma4:12b; this is ~0.3s).
+    _thinking = any(
+        p in model_name.lower()
+        for p in ("deepseek-r1", "thinking", "gemma4", "gemma-4", "qwen3")
+    )
     start = time.monotonic()
-    from backend.utils.llm_service import run_llm_chat_prompt
-
     try:
-        resp = run_llm_chat_prompt("ping", llm_instance=llm)
+        import ollama as _ollama
+
+        _kwargs = dict(
+            model=model_name,
+            messages=[{"role": "user", "content": "Reply with the single word: pong"}],
+            stream=False,
+            options={"num_predict": 32},
+        )
+        if _thinking:
+            _kwargs["think"] = False  # only thinking-capable models accept `think`
+        r = _ollama.chat(**_kwargs)
+        msg = r.get("message", {}) if isinstance(r, dict) else getattr(r, "message", {})
+        resp = (msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")) or ""
         duration = time.monotonic() - start
-        model_name = getattr(llm, "model", "unknown")
         return (
             jsonify(
                 {

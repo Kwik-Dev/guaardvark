@@ -58,6 +58,18 @@ const createUISlice = (set, get) => ({
     })),
   getSessionMode: (sessionId) => (get().sessionModes[sessionId] || "chat"),
 
+  // Per-session "thinking" override for thinking-capable models (gemma4:12b,
+  // qwen3, ...), toggled via the /thinking command. Value is true/false when the
+  // user has explicitly set it, or undefined when unset (→ backend falls back to
+  // the global `chat_thinking_default` Setting). unifiedChatService only sends
+  // `think` in the chat options when this is defined.
+  sessionThinking: {},
+  setSessionThinking: (sessionId, on) =>
+    set((state) => ({
+      sessionThinking: { ...state.sessionThinking, [sessionId]: on },
+    })),
+  getSessionThinking: (sessionId) => get().sessionThinking[sessionId],
+
   isLoading: false,
   setIsLoading: (loading) => set({ isLoading: loading }),
   

@@ -291,6 +291,36 @@ export const setBehaviorLearning = async (enabled) => {
   }
 };
 
+export const getChatThinkingDefault = async () => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/chat_thinking_default`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error(
+      "settingsService: Error getting chat thinking default:",
+      err.message,
+    );
+    return { error: err.message };
+  }
+};
+
+export const setChatThinkingDefault = async (enabled) => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/chat_thinking_default`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_thinking_default: !!enabled }),
+    });
+    return await handleResponse(response);
+  } catch (err) {
+    console.error(
+      "settingsService: Error setting chat thinking default:",
+      err.message,
+    );
+    return { error: err.message };
+  }
+};
+
 export const getRulesEnabled = async () => {
   try {
     const response = await fetch(`${BASE_URL}/settings/rules_enabled`);

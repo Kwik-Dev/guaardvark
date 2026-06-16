@@ -88,6 +88,15 @@ const BUILT_IN_COMMANDS = [
     ruleId: null,
   },
   {
+    name: "/thinking",
+    description: "Toggle step-by-step reasoning for thinking models (gemma4:12b, qwen3) in this chat. Off = faster. Bare /thinking shows current state.",
+    usage: "/thinking [on|off]",
+    category: "model",
+    args: "optional",
+    handler: "builtin",
+    ruleId: null,
+  },
+  {
     name: "/exit",
     description: "Exit agent mode (alias for /chat)",
     usage: "/exit",
