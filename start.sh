@@ -1891,8 +1891,15 @@ else
 fi
 
 if [ "$FRONTEND_CAN_SERVE" -eq 1 ]; then
-    vader_info "Launching frontend (production build) in background..."
-    nohup $NPM_CMD run preview -- --host --port=$VITE_PORT >> "$FRONTEND_LOG_FILE" 2>&1 &
+    # Serve via the Vite DEV server (not `vite preview`). The dev server's
+    # `/socket.io` ws:true proxy reliably handles the WebSocket upgrade, which
+    # `vite preview` does not — that broke realtime chat (Socket.IO connect_error
+    # transport: websocket → no live thinking steps / stuck stop icon). This
+    # matches the long-standing serving model (see good_phase backup, whose
+    # vite.config had only the dev `server:` block). The build above is kept as a
+    # belt-and-suspenders correctness check, but the dev server serves src/ directly.
+    vader_info "Launching frontend (Vite dev server, reliable WS proxy) in background..."
+    nohup $NPM_CMD run dev -- --host --port=$VITE_PORT >> "$FRONTEND_LOG_FILE" 2>&1 &
     FRONTEND_PID=$!
     echo "$FRONTEND_PID" > "$SCRIPT_DIR/pids/frontend.pid"
     sleep 3

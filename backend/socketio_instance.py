@@ -42,6 +42,15 @@ socketio = SocketIO(
     ping_interval=25,  # 25 second ping interval
     max_http_buffer_size=1024 * 1024,  # 1MB max buffer size
     async_mode='threading',  # Use threading for better memory management
+    # manage_session=False is REQUIRED with Werkzeug >= 3.1: Flask-SocketIO 5.3.6's
+    # managed-session path does `ctx.session = session_obj`, but Werkzeug 3.1 made
+    # RequestContext.session a read-only property → every Socket.IO event (incl.
+    # `connect`) raised AttributeError("property 'session' ... has no setter"), so NO
+    # client could connect (chat:thinking/chat:complete never delivered → thinking
+    # trail only appeared after a refresh). With manage_session=False, Flask-SocketIO
+    # lets Flask own the session (this app is sessionless anyway), skipping the broken
+    # assignment. No dependency change required.
+    manage_session=False,
     logger=False,  # Disabled to prevent log flooding
     engineio_logger=False  # Disabled to prevent log flooding
 )
