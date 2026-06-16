@@ -74,6 +74,7 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
   const [regenErrors, setRegenErrors] = useState({}); // per-cut last error for regen feedback
   const [guidance, setGuidance] = useState("");
   const [regenMode, setRegenMode] = useState(detail.planning_mode || "narrative");
+  const [directorModel, setDirectorModel] = useState(detail.director_model || "gemma4:e4b");
 
   const handleRegenStoryboard = async (index) => {
     // Bump version immediately to change the <img> src (adds ?v=N).
@@ -113,7 +114,9 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
   useEffect(() => {
     setEdits({});
     setTreatmentEdit(detail.director_treatment || detail.director_storyline || "");
-  }, [detail.id, detail.current_stage, JSON.stringify(detail.clips?.map((c) => c.prompt)), detail.director_treatment, detail.director_storyline]);
+    setDirectorModel(detail.director_model || "gemma4:e4b");
+    setRegenMode(detail.planning_mode || "narrative");
+  }, [detail.id, detail.current_stage, JSON.stringify(detail.clips?.map((c) => c.prompt)), detail.director_treatment, detail.director_storyline, detail.director_model, detail.planning_mode]);
 
   const getDisplayedPrompt = (row) => (edits.hasOwnProperty(row.index) ? edits[row.index] : row.prompt);
 
@@ -136,7 +139,7 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
   };
 
   const handleRegen = async () => {
-    await onRegeneratePlan(guidance, regenMode);
+    await onRegeneratePlan(guidance, regenMode, directorModel);
     setGuidance("");
   };
 
@@ -171,6 +174,9 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
         {detail.planning_mode && (
           <Chip size="small" variant="outlined" label={`dir: ${detail.planning_mode}`} />
         )}
+        {detail.director_model && (
+          <Chip size="small" variant="outlined" label={`model: ${detail.director_model}`} />
+        )}
         {detail.director_enabled === false && (
           <Chip size="small" color="warning" label="Director disabled" />
         )}
@@ -182,11 +188,16 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
             : (r.includes('llm') || r.includes('exception'))
               ? 'Director: LLM error (cued fallback)'
               : 'Director fallback (prompts may not be unique)';
+          const rh = (d.raw_head || '').trim();
+          const looksPolluted = /INFO |WARNING |backend\.|PID:|Restoring plugin|health check/.test(rh);
+          const rhDisplay = !rh || looksPolluted
+            ? '(no clean model reply captured — Ollama connection failed or plugin unavailable before reply)'
+            : rh.slice(0, 400) + (rh.length > 400 ? '...' : '');
           const tipLines = [
             `reason: ${d.reason || 'fallback'}`,
             d.note ? `note: ${d.note}` : null,
             d.error ? `error: ${d.error}` : null,
-            `raw_head (first ~400 chars of model reply):\n${(d.raw_head || '').slice(0, 400)}...`,
+            `raw_head (model reply or error context):\n${rhDisplay}`,
           ].filter(Boolean).join('\n\n');
           return (
             <Tooltip
@@ -494,6 +505,21 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
               <MenuItem value="narrative">narrative</MenuItem>
               <MenuItem value="visual">visual / mood arc</MenuItem>
             </TextField>
+            <TextField
+              select
+              size="small"
+              sx={{ minWidth: 170 }}
+              value={directorModel}
+              onChange={(e) => setDirectorModel(e.target.value)}
+              label="director model"
+            >
+              <MenuItem value="gemma4:e4b">gemma4:e4b (default small)</MenuItem>
+              <MenuItem value="gemma4:2b">gemma4:2b</MenuItem>
+              <MenuItem value="gemma:2b">gemma:2b</MenuItem>
+              <MenuItem value="qwen2.5:1.5b">qwen2.5:1.5b</MenuItem>
+              <MenuItem value="phi3:mini">phi3:mini</MenuItem>
+              <MenuItem value="llama3.2:1b">llama3.2:1b</MenuItem>
+            </TextField>
             <Button
               size="small"
               variant="contained"
@@ -505,6 +531,7 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
           </Stack>
           <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
             Tip: Guidance shapes the VISUAL TREATMENT first (the creative story arc in your exact style), then the per-cut prompts are derived from it. Example: “a lone vampire gunslinger seeks revenge; the town awakens with undead in the drop; tragic quiet beauty in the outro”.
+            The Director uses a dedicated small/fast model (gemma4:e4b by default, overridable via director_model in settings) — separate from your main chat/brain model — for reliable structured JSON output.
             Manual "Regen this storyboard" now adds a random variation to the seed so the same prompt usually produces a visibly different image.
           </Typography>
         </Box>
@@ -1128,12 +1155,13 @@ const MusicVideoPage = () => {
                       setBusy(false);
                     }
                   }}
-                  onRegeneratePlan={async (feedback, mode) => {
+                  onRegeneratePlan={async (feedback, mode, dmodel) => {
                     try {
                       setBusy(true);
                       const payload = {};
                       if (feedback && feedback.trim()) payload.feedback = feedback.trim();
                       if (mode) payload.planning_mode = mode;
+                      if (dmodel) payload.director_model = dmodel;
                       await regenerateMusicVideoPlan(detail.id, payload);
                       await refreshDetail(detail.id);
                     } catch (e) {

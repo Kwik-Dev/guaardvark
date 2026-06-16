@@ -395,13 +395,15 @@ class MusicVideoService(PipelineService):
         *,
         feedback: str | None = None,
         planning_mode: str | None = None,
+        director_model: str | None = None,
     ) -> MusicVideo | None:
         """Re-run the Director over the *existing* cut_plan to produce fresh per-cut prompts.
 
         Safe only before generation has started (primarily 'awaiting_approval').
         Respects the stored director_enabled flag. If disabled, this is a no-op (keeps global style).
-        The planning_mode and feedback (extra_guidance) are applied for this regeneration and
-        also persisted into settings_json so the chosen approach travels with the MV.
+        The planning_mode, feedback (extra_guidance), and director_model (dedicated small model for
+        the Director agent) are applied for this regeneration and also persisted into settings_json
+        so the chosen approach travels with the MV.
         Returns the refreshed MV or None.
         """
         mv = self.s.get(self.model_cls, mv_id)
@@ -419,15 +421,17 @@ class MusicVideoService(PipelineService):
 
         from backend.services.plugin_bridge import ensure_plugins_for_stage
         ensure_plugins_for_stage("music-video", "analyzing")  # Director requires Ollama (and video_editor) for per-cut visual prompts from treatment
-        from backend.services.music_video_director import _generate_storyline_and_prompts
+        from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL
 
         mode = planning_mode or s.get("planning_mode", "narrative")
         guidance = feedback or s.get("director_guidance")
+        dmodel = (director_model or s.get("director_model") or DIRECTOR_MODEL).strip() or DIRECTOR_MODEL
 
         try:
             res = _generate_storyline_and_prompts(
                 mv.style_prompt,
                 mv.cut_plan,
+                model=dmodel,
                 planning_mode=mode,
                 extra_guidance=guidance,
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),
@@ -478,10 +482,12 @@ class MusicVideoService(PipelineService):
                 if "storyboard_variation" in c:
                     c["storyboard_variation"] = None
 
-        # Persist chosen mode/guidance for future (and for the actual generation later)
+        # Persist chosen mode/guidance/director_model for future (and for the actual generation later)
         s["planning_mode"] = mode
         if guidance:
             s["director_guidance"] = guidance
+        if dmodel:
+            s["director_model"] = dmodel
         # Store diagnostics if the (guarded) Director run produced any (fallback etc.).
         if isinstance(res, dict) and res.get("director_diagnostics"):
             s["director_diagnostics"] = res.get("director_diagnostics")

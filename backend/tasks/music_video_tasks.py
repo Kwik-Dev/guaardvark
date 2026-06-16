@@ -312,10 +312,12 @@ def run_analyzer(mv_id: int):
         # problem. Still degrades gracefully to the old behavior on any LLM failure.
         shot_plans = {}
         if s.get("director_enabled", True):
-            from backend.services.music_video_director import _generate_storyline_and_prompts
+            from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL
+            director_model = s.get("director_model") or DIRECTOR_MODEL
             result = _generate_storyline_and_prompts(
                 mv.style_prompt,
                 plan,
+                model=director_model,
                 planning_mode=s.get("planning_mode", "narrative"),
                 extra_guidance=s.get("director_guidance"),
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),

@@ -28,7 +28,13 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemma4:e4b"
+# Dedicated lightweight model for the Music Video Director.
+# The Director is a narrow structured-JSON + visual-storytelling task (treatment + N shot prompts).
+# We prefer a small, fast model (good at following the strict "pure visual prompt only", "one entry per cut" contract)
+# rather than whatever large model the user has loaded for general chat/brain (e.g. gemma4:12b).
+# Users can override per-video with settings_json["director_model"].
+DIRECTOR_MODEL = "gemma4:e4b"
+DEFAULT_MODEL = DIRECTOR_MODEL  # legacy alias for any direct callers of generate_scene_prompts
 
 _SYSTEM = """You are a music-video director and visual screenwriter. You are given a global visual STYLE and an
 ordered list of timed CUTS for one song (each cut has: index, duration seconds, section
@@ -103,9 +109,12 @@ def _installed_model_tags() -> set[str]:
 def _resolve_model(preferred: str) -> str:
     """Pick a model that's actually pulled. Prefer ``preferred``; else any gemma (the
     project's brain/vision family); else the first installed model; else ``preferred``
-    unchanged (the chat call then fails → graceful fallback). Avoids the silent
-    no-storyboard trap where the hardcoded tag (gemma4:e4b) isn't the pulled one
-    (gemma4:latest) on a given box."""
+    unchanged (the chat call then fails → graceful fallback).
+
+    For the Director we default to a small dedicated model (DIRECTOR_MODEL) optimized
+    for fast, reliable structured JSON + strict visual-prompt-only output. This is
+    intentionally separate from whatever large model is loaded for general chat/brain.
+    """
     try:
         tags = _installed_model_tags()
         if not tags or preferred in tags:
@@ -445,10 +454,16 @@ def _generate_storyline_and_prompts(
             )
         except Exception:  # noqa: BLE001
             pass
+        err = str(e)[:300]
         return {
             "prompts": cued,
             "storyline": None,
-            "director_diagnostics": {"reason": "llm_exception", "error": str(e)[:200], "note": "energy-cued variations applied"},
+            "director_diagnostics": {
+                "reason": "llm_exception",
+                "error": err,
+                "note": "energy-cued variations applied",
+                "raw_head": f"(no model reply — {err})",
+            },
         }
 
 

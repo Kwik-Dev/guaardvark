@@ -55,7 +55,11 @@ export const updateMusicVideoPlan = async (id, data) => {
 };
 
 /** Re-run the Director over the existing cut plan (pre-approval only).
- *  Optional: { feedback: "more abstract, focus on textures and slow camera...", planning_mode: "visual" }
+ *  Optional: {
+ *    feedback: "...",
+ *    planning_mode: "narrative" | "visual",
+ *    director_model: "gemma4:e4b"   // dedicated small model for the Director agent
+ *  }
  */
 export const regenerateMusicVideoPlan = async (id, data = {}) => {
   const response = await axios.post(`${API_BASE}/music-video/${id}/regenerate-plan`, data);

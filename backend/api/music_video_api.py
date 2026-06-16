@@ -93,6 +93,9 @@ def _mv_dict(mv: MusicVideo) -> dict:
     out["director_enabled"] = s.get("director_enabled", True)
     if s.get("planning_mode"):
         out["planning_mode"] = s.get("planning_mode")
+    # Dedicated (usually small/fast) model used for the Director when generating per-cut prompts + treatment.
+    # Defaults to a lightweight gemma suitable for structured JSON + visual storytelling (not necessarily the user's main chat/brain model).
+    out["director_model"] = s.get("director_model") or "gemma4:e4b"
     out["use_lora_consistency"] = s.get("use_lora_consistency", False)
     out["keyframe_model"] = s.get("keyframe_model", "flux-schnell")
     out["i2v_model"] = s.get("i2v_model") or ("wan22-14b-i2v" if s.get("i2v_engine", "wan") == "wan" else "cogvideox-5b-i2v")
@@ -643,9 +646,12 @@ def regenerate_plan(mv_id):
     mode = body.get("planning_mode")
     if not isinstance(mode, str):
         mode = None
+    director_model = body.get("director_model")
+    if not isinstance(director_model, str) or not director_model.strip():
+        director_model = None
 
     svc = MusicVideoService(db.session)
-    updated = svc.regenerate_director_prompts(mv_id, feedback=feedback, planning_mode=mode)
+    updated = svc.regenerate_director_prompts(mv_id, feedback=feedback, planning_mode=mode, director_model=director_model)
     if updated is None:
         updated = mv
     db.session.refresh(updated)
