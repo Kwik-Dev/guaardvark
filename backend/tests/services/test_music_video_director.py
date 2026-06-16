@@ -1,8 +1,10 @@
 """P1 — the music-video Director (the storyboard layer).
 
 Locks: distinct per-cut prompts when the LLM behaves, the global style appended as a
-suffix, and a GRACEFUL fallback to the global style on any failure (no regression to
-the old "one prompt for every clip" behavior).
+suffix, and (when director_enabled) *energy-cued variations of the style* on LLM failure
+instead of N verbatim repeats of the global style. The verbatim "all global style"
+fallback is disabled for the music video feature (per user request); diagnostics are
+surfaced so the UI can warn the user.
 """
 import json
 
@@ -62,14 +64,25 @@ def test_fallback_when_llm_raises(monkeypatch):
         raise RuntimeError("ollama down")
     monkeypatch.setattr(ollama, "chat", boom)
     out = generate_scene_prompts("STYLE", _plan(4))
-    assert out == ["STYLE"] * 4                              # exactly today's behavior
+    # Fallback now disabled for music-video: we still get energy-cued variations instead of
+    # N identical repeats of the global style. Guard ensures distinctness + suffix.
+    assert len(out) == 4
+    assert all(p.endswith("STYLE") for p in out)
+    assert len(set(out)) > 1  # cued variations make them non-identical
+    # At least some should carry an injected cue (from the low/high energy cues)
+    assert any(any(kw in p.lower() for kw in ("tighter", "dynamic", "framing", "slow", "atmospheric", "diffuse")) for p in out)
 
 
 def test_fallback_when_garbage(monkeypatch):
     import ollama
     monkeypatch.setattr(ollama, "chat", lambda **kw: {"message": {"content": "not json at all"}})
     out = generate_scene_prompts("STYLE", _plan(2))
-    assert out == ["STYLE"] * 2
+    # Plain identical global fallback disabled: garbage -> energy cued variations (n=2 threshold
+    # means needs_fix triggers for 1 unique).
+    assert len(out) == 2
+    assert all(p.endswith("STYLE") for p in out)
+    # They should be distinct via cue injection (or at minimum not both exactly "STYLE").
+    assert out[0] != out[1] or "STYLE" not in out[0]  # relaxed for tiny n edge
 
 
 def test_missing_cut_falls_back_per_index(monkeypatch):

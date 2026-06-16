@@ -9,9 +9,11 @@ instead of N reseeds of the same image.
 
 It runs in the ANALYZE stage (before the cost-approval gate, no GPU) using the local
 LLM with ``format="json"`` and tolerant parsing — the same shape as the video_editor
-plugin's art_director. It DEGRADES GRACEFULLY: if the LLM is unavailable or returns
-garbage, it falls back to the global style prompt for every cut — i.e. exactly today's
-behavior, never a regression.
+plugin's art_director. The plain "repeat global style verbatim for every cut" fallback
+is DISABLED for music video (user requirement): on LLM failure / empty / cardinality
+problems we still emit energy-aware cue variations of the style (via the deterministic
+guard) and surface director_diagnostics so the UI can warn the operator. Only when
+director_enabled=False in settings do you get pure repeated global style.
 
 Supports planning_mode ("narrative" vs "visual"/"mood_arc") and extra_guidance so the
 same engine can serve both character-driven videos and abstract/soundtrack "visual tone
@@ -167,6 +169,31 @@ def _parse_prompts(content: str, n: int) -> dict[int, str]:
     return out
 
 
+def _is_mostly_style(text: str, style: str) -> bool:
+    """Heuristic: does this text appear to be (mostly) a copy of the global style prompt?
+    Used to sanitize LLM outputs that echo the STYLE into a per-shot 'prompt' field,
+    and to make the energy guard produce clean "cue, style" (no full style duplicated)
+    when the director LLM fails to invent distinct scenes."""
+    if not text or not style:
+        return False
+    t = text.strip()
+    s = style.strip()
+    if not t or not s:
+        return False
+    tl = t.lower()
+    sl = s.lower()
+    if tl == sl:
+        return True
+    if len(t) > 30 and sl in tl:
+        return True
+    # High token overlap (handles minor punctuation/added commas)
+    twords = set(w for w in tl.split() if len(w) > 2)
+    swords = set(w for w in sl.split() if len(w) > 2)
+    if swords and len(twords & swords) / max(1, len(swords)) > 0.65:
+        return True
+    return False
+
+
 def generate_scene_prompts(
     style_prompt: str,
     cut_plan: list[dict[str, Any]],
@@ -178,8 +205,10 @@ def generate_scene_prompts(
     """One visual prompt per cut, in cut order. Never raises.
 
     Each returned prompt is the Director's per-cut scene with the global ``style_prompt``
-    appended as a suffix (so the look stays consistent while the scene varies). On any
-    failure every entry is just ``style_prompt`` — today's behavior, no regression.
+    appended as a suffix (so the look stays consistent while the scene varies). When the
+    LLM produces no usable distinct shots we still emit energy-cued variations of the
+    style (e.g. "tighter dynamic framing, {style}") — the old "all identical global style
+    repeated verbatim" fallback is disabled for the music-video feature.
 
     planning_mode:
       - "narrative" (default): strong continuity of world/subjects + energy-responsive variation.
@@ -263,9 +292,11 @@ def _generate_storyline_and_prompts(
             "1. Produce (or lightly refine) the top-level 'treatment' field using the provided user treatment as the main source. This field can contain the full dreamlike story and artistic directives.\n"
             "2. For the 'shots' array: Create **one completely unique visual prompt for each individual cut** in the CUTS list above.\n"
             "   - The prompts MUST be different from each other.\n"
+            "   - **NEVER copy or echo the STYLE text (or large parts of it) into any shots[].prompt** — the STYLE is the global aesthetic and will be appended automatically by the caller after your prompt. Your shots[].prompt must be the *varying part only* (subject appearance, specific framing/composition, camera move, lighting for this exact moment, texture, atmosphere).\n"
             "   - Vary them according to each cut's 'section' label and 'energy' value.\n"
             "   - Low energy cuts (intro/build): calmer, more atmospheric, wider framing, slower implied motion, using the 'loss' and 'searching' visual language from the treatment.\n"
             "   - High energy cuts (drop): more intense, dynamic compositions, tighter framing, stronger contrast, using the 'convergence' and 'intensity' language.\n"
+            "   - For large numbers of cuts, keep every prompt short and tight (aim <25 words / one comma phrase) so the full JSON fits in the model output window.\n"
             "   - Every shots[].prompt must be a PURE VISUAL PROMPT ONLY — no character names, no backstory, no plot points. Use only visual descriptors for consistency (e.g. recurring visual motifs like 'fractured silver moonlight on still water').\n"
             "   - Focus exclusively on: subject visuals, setting, framing, camera angle/motion, lighting, color palette, texture, atmosphere, mood as pure image, style elements from the treatment.\n"
             "Return ONLY the JSON with 'treatment' and 'shots' (one shot per cut, in the exact order of the CUTS list). Indexes must match the CUTS exactly."
@@ -311,7 +342,10 @@ def _generate_storyline_and_prompts(
                     f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
                     "TASK: Return ONLY this exact JSON shape (one entry per cut, indexes MUST match the CUTS list 0..N-1 exactly; return exactly N shots):\n"
                     '{"shots": [{"index": 0, "prompt": "pure visual for cut 0 ..."}, ...]}\n'
-                    "CRITICAL: Every shots[].prompt MUST be visually DISTINCT from all others. Vary framing, angle, density, motion implication, lighting, and color according to the mode instruction, the cut's energy, and its position in the arc/treatment. Pure visual descriptors only (no names, no backstory, no plot). Follow the separation of concerns in the system prompt."
+                    "CRITICAL: Every shots[].prompt MUST be visually DISTINCT from all others AND MUST NOT BE A COPY (or near-copy) OF THE STYLE TEXT. "
+                    "The STYLE is the global look and will be appended by the system; your shots[].prompt is ONLY the varying subject/framing/lighting/motion/atmosphere specific to THIS cut's energy and place in the arc. "
+                    "Vary framing, angle, density, motion implication, lighting, and color according to the mode instruction, the cut's energy, and its position in the arc/treatment. "
+                    "Keep prompts concise (under ~25 words ideal for large N). Pure visual descriptors only (no names, no backstory, no plot). Follow the separation of concerns in the system prompt."
                 )
                 resp2 = ollama.chat(
                     model=model,
@@ -339,26 +373,45 @@ def _generate_storyline_and_prompts(
             # potentially long user treatment or full PII.
             head = (content or "")[:1200].replace("\n", "\\n")
             log.warning(
-                "director returned no usable prompts; using global style for all %d cuts. "
-                "raw_head=%s",
+                "director returned no usable prompts; using energy-cued variations of global style for all %d cuts "
+                "(plain identical global fallback is disabled for music video). raw_head=%s",
                 n, head
             )
+            # Disable the old "all identical global style" fallback: always produce at least
+            # energy/section differentiated cue variations. The ensure will yield clean
+            # "cue, style" (not "style, cue, style") thanks to _is_mostly_style guard inside it.
+            cued = fallback_prompts
+            try:
+                cued = _ensure_distinct_and_energy_aware(
+                    fallback_prompts, cut_plan, style_prompt,
+                    max_stretch=max_stretch
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return {
-                "prompts": fallback_prompts,
+                "prompts": cued,
                 "treatment": treatment,
                 "shots": [],
-                "director_diagnostics": {"reason": "empty_prompts_map", "raw_head": head},
+                "director_diagnostics": {
+                    "reason": "empty_prompts_map",
+                    "raw_head": head,
+                    "note": "LLM produced no usable shots array; energy cues applied for variation (no narrative treatment per-cut)",
+                },
             }
 
         out: list[str] = []
         for c in cut_plan:
             scene = prompts_map.get(c["index"])
+            # Sanitize: if the model echoed the global STYLE (or mostly the style) into the
+            # per-shot prompt, treat it as empty variation so we don't do "style, style" on combine.
+            if scene and _is_mostly_style(scene, style_prompt):
+                scene = None
             out.append(f"{scene}, {style_prompt}" if scene else style_prompt)
 
         # P0 guard (per approved story-arc plan): guarantee distinctness + energy responsiveness
         # + consistent style suffix, even if the LLM produced near-duplicates or weak variation.
         # This is a cheap deterministic post-process (no extra LLM calls). On any internal
-        # failure it is a safe no-op (preserves existing graceful fallback contract).
+        # failure it is a safe no-op (never produces worse/less distinct output than input).
         try:
             out = _ensure_distinct_and_energy_aware(
                 out, cut_plan, style_prompt,
@@ -384,11 +437,18 @@ def _generate_storyline_and_prompts(
 
         return {"prompts": out, "treatment": treatment, "shots": data.get("shots", []) or []}
     except Exception as e:  # noqa: BLE001 — director is best-effort; never sink the analyze stage
-        log.warning("director failed (%s); falling back to global style prompt", e)
+        log.warning("director failed (%s); producing energy-cued style variations (plain identical global fallback disabled)", e)
+        cued = fallback_prompts
+        try:
+            cued = _ensure_distinct_and_energy_aware(
+                fallback_prompts, cut_plan, style_prompt, max_stretch=max_stretch
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return {
-            "prompts": fallback_prompts,
+            "prompts": cued,
             "storyline": None,
-            "director_diagnostics": {"reason": "llm_exception", "error": str(e)[:200]},
+            "director_diagnostics": {"reason": "llm_exception", "error": str(e)[:200], "note": "energy-cued variations applied"},
         }
 
 
@@ -485,16 +545,17 @@ def _parse_full_director_output(content: str, n: int) -> dict:
         result["prompts"] = _parse_prompts(content, n)
 
     # P2 strengthening: cardinality/index enforcement. If the model (esp. in recovery)
-    # returned wrong number of shots, clear prompts so we fall back to guarded global
-    # (prevents partial or mismatched data from poisoning the arc).
+    # returned wrong number of shots, *keep the partial* (for large N the model often
+    # only emits some). Missing indices will receive a style+energy-cue from the builder/guard.
+    # We no longer zero the map (that forced full identical global fallback, now disabled).
     if len(result["prompts"]) != n:
         log.warning(
             "director parse returned %d prompts for %d cuts (cardinality mismatch); "
-            "will use guarded fallback",
+            "keeping partial — missing cuts get style + energy cue (plain global identical fallback disabled)",
             len(result["prompts"]), n
         )
-        # keep shots for editing fields if any, but force prompts path to guard
-        result["prompts"] = {}
+        # keep partial prompts; caller/ensure will differentiate the missing ones.
+        # Do NOT clear result["prompts"]
 
     return result
 
@@ -552,18 +613,35 @@ def _ensure_distinct_and_energy_aware(
         base = stripped_p
         if needs_fix:
             # Pick a cue that is unlikely to already be in the prompt (cheap string check).
+            # Use index rotation so that many consecutive same-energy cuts (common) still
+            # get *different* cue phrases instead of all receiving the first one.
             cues = low_energy_cues if is_low else (high_energy_cues if is_high else [])
             cue = None
-            for c in cues:
-                if c not in base.lower():
-                    cue = c
-                    break
+            if cues:
+                # rotate by cut index for variety even within same energy band
+                for off in range(len(cues)):
+                    c = cues[(i + off) % len(cues)]
+                    if c not in (base or "").lower():
+                        cue = c
+                        break
+                if cue is None:
+                    cue = cues[i % len(cues)]
             if cue:
-                # Inject near the end, before any trailing style (we'll re-add the suffix).
-                base = f"{base.rstrip(', ')}, {cue}"
+                # If the stripped base is (or was) the global style itself (LLM echoed it, or
+                # this is the plain-style list from the no-usable director path), do NOT
+                # append cue to the long style text (that produces dups like "style, cue, style").
+                # Instead use *just* the cue as the varying part; the suffix adder below will
+                # produce the clean "cue, style" form. This disables duplicating fallback.
+                if not base or _is_mostly_style(base, style_prompt):
+                    base = cue
+                else:
+                    # Inject near the end, before any trailing style (we'll re-add the suffix).
+                    base = f"{base.rstrip(', ')}, {cue}"
 
         # Guarantee style suffix (some recovery paths or manual edits may have dropped it).
-        if not base.endswith(style_suffix.lstrip(", ")):
+        # Use the style text itself for endswith (handles inputs that were plain style).
+        style_core = style_suffix.lstrip(", ")
+        if not base.endswith(style_core):
             base = f"{base.rstrip(', ')}{style_suffix}"
 
         out.append(base)

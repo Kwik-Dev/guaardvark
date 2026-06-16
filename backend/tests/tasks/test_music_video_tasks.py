@@ -97,7 +97,11 @@ def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
     assert mv.cut_plan and len(mv.cut_plan) >= 1
     assert mv.clips and all(c["status"] == "pending" for c in mv.clips)
     # Director prompts are seeded per cut (distinct, not the global style).
-    assert [c["prompt"] for c in mv.clips] == [f"scene {c['index']}" for c in mv.clips]
+    # The post-analyzer _ensure_distinct_and_energy_aware (always applied) guarantees the
+    # global style suffix on the director-provided scenes (and would cue if they were dups).
+    # Fake returns bare "scene N"; pipeline produces "scene N, {style}".
+    style = mv.style_prompt or "deep blue, loss"
+    assert [c["prompt"] for c in mv.clips] == [f"scene {c['index']}, {style}" for c in mv.clips]
     # advances to the USER GATE, dispatches nothing.
     assert mv.current_stage == "awaiting_approval"
     assert sent.calls == []

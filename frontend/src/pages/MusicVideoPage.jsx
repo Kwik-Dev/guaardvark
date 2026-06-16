@@ -174,10 +174,42 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
         {detail.director_enabled === false && (
           <Chip size="small" color="warning" label="Director disabled" />
         )}
-        {detail.director_diagnostics && (
-          <Chip size="small" color="warning" label="Director fallback (prompts may not be unique)" />
-        )}
+        {detail.director_diagnostics && (() => {
+          const d = detail.director_diagnostics || {};
+          const r = (d.reason || '').toLowerCase();
+          const label = (r.includes('empty') || r.includes('no usable') || r.includes('cardinality'))
+            ? 'Director: LLM no shots (energy cues used)'
+            : (r.includes('llm') || r.includes('exception'))
+              ? 'Director: LLM error (cued fallback)'
+              : 'Director fallback (prompts may not be unique)';
+          const tipLines = [
+            `reason: ${d.reason || 'fallback'}`,
+            d.note ? `note: ${d.note}` : null,
+            d.error ? `error: ${d.error}` : null,
+            `raw_head (first ~400 chars of model reply):\n${(d.raw_head || '').slice(0, 400)}...`,
+          ].filter(Boolean).join('\n\n');
+          return (
+            <Tooltip
+              title={
+                <Box sx={{ maxWidth: 420, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '11px', lineHeight: 1.3 }}>
+                  {tipLines}
+                </Box>
+              }
+              arrow
+              placement="bottom-start"
+            >
+              <Chip size="small" color="warning" label={label} />
+            </Tooltip>
+          );
+        })()}
       </Stack>
+      {detail.director_diagnostics && isEditable && (
+        <Alert severity="info" sx={{ mb: 1, py: 0.25, '& .MuiAlert-message': { fontSize: '0.75rem' } }}>
+          Director LLM did not produce distinct per-cut visual prompts (hover the chip for the raw model output head + reason, e.g. ``` or echoed style).
+          Automatic energy cue variations were injected instead of pure repeats. Edit the boxes above or use the <b>Regenerate</b> form below with more specific guidance.
+          For very long songs (75+ cuts) the small local model often struggles — shorter guidance or a stronger pulled gemma helps.
+        </Alert>
+      )}
       {hasLocalEdits && (
         <Typography variant="caption" color="info.main" sx={{ display: 'block', mb: 1 }}>
           Treatment/arc edited — Generate Storyboards or per-cut Regen will use the updated visuals. (Bulk force-refresh available via API for existing stills.)
@@ -357,6 +389,11 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
                   <Typography variant="caption" sx={{ fontSize: "0.55rem", opacity: 0.65, mt: 0.25, display: "block" }}>
                     advances {row.section} (energy {row.energy.toFixed(1)}) of the visual treatment arc above
                   </Typography>
+                  {detail.director_diagnostics && displayed && (displayed.length < ((detail.style_prompt || '').length + 80)) && (
+                    <Typography variant="caption" color="warning.main" sx={{ fontSize: '0.6rem', display: 'block', mt: 0.25 }}>
+                      ⚡ energy-cued only (LLM supplied no unique scene description for this cut — edit or regenerate for richer shots)
+                    </Typography>
+                  )}
 
                   {/* Storyboard thumbnail (generated in the "thumbnails first" review step) */}
                   {row.storyboard_path && (
