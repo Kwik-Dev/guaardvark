@@ -217,6 +217,10 @@ class AgentBrain:
                     and "gemma4" in self.state.active_model.lower()
                     and not force_tier
                     and _screen_active):
+                logger.debug(
+                    f"[EMIT-HANDOFF][BRAIN] entering _gemma4_direct session={session_id} "
+                    f"emit_fn_id={id(emit_fn)} threadlocal_get? (will log inside ACS if used)"
+                )
                 result = self._gemma4_direct(
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
@@ -496,6 +500,10 @@ class AgentBrain:
                 pass
             # Include budget summary in chat_context so the ACS/Gemma loop (and its LLM) "sees" the budget status for awareness.
             budget_aware_context = (history_str or "") + "\n" + budget.to_llm_summary() + " (cross-tier budget visible to you — be mindful of remaining steps in this agentic task.)"
+            logger.debug(
+                f"[EMIT-HANDOFF][BRAIN_GEMMA] calling acs.execute_task DIRECT (bypasses agent_task_execute tool) "
+                f"with explicit emit_fn_id={id(emit_fn)} session={session_id}"
+            )
             agent_result = acs.execute_task(
                 task=message, 
                 screen=screen, 
@@ -537,6 +545,9 @@ class AgentBrain:
                             extra["generatedImages"] = generated_images
                         try:
                             agent_thinking_steps = acs.drain_thinking_steps()
+                            logger.debug(
+                                f"[EMIT-HANDOFF][BRAIN_DRAIN] gemma4_direct drain returned {len(agent_thinking_steps)} steps"
+                            )
                             if agent_thinking_steps:
                                 extra["agentThinkingSteps"] = agent_thinking_steps
                         except Exception:
@@ -1093,6 +1104,11 @@ class AgentBrain:
                 llm=self.state.llm,
                 max_iterations=iters,
             )
+            # Give the executor the session id so it can live-stream per-iteration
+            # reasoning as chat:thinking (source=agent_loop). Without this, Tier-3
+            # ReACT runs that don't drive the desktop produced NO live steps — the
+            # trail only appeared from the DB drain on refresh.
+            executor.set_tool_context(session_id=session_id)
 
             # Build session context from initial Tier 2 result if escalated.
             # Include explicit budget status so Tier 3 "knows" how much effort has already been spent.
@@ -1107,6 +1123,10 @@ class AgentBrain:
                 if prev_tools:
                     session_context += f"\nTools already tried: {', '.join(prev_tools)}"
 
+            logger.debug(
+                f"[EMIT-HANDOFF][BRAIN_TIER3] Tier3 _deliberate calling AgentExecutor (will use threadlocal for agent_* tools) "
+                f"session={session_id} emit_fn_id={id(emit_fn)} (outer set in api must be live)"
+            )
             result = executor.execute(
                 user_query=message,
                 session_context=session_context,
@@ -1118,13 +1138,52 @@ class AgentBrain:
                 result.error or "I wasn't able to complete that task."
             )
 
+            # Drain agent thinking steps (from any agent_task_execute that ran
+            # inside the executor). Live streaming of steps relies on the
+            # thread-local emit_fn (now wired in unified_chat_api); this drain
+            # ensures the trail is persisted to DB so it survives refresh.
+            agent_thinking_steps = []
+            try:
+                from backend.services.agent_control_service import get_agent_control_service
+                agent_thinking_steps = get_agent_control_service().drain_thinking_steps()
+                logger.debug(
+                    f"[EMIT-HANDOFF][BRAIN_DRAIN] Tier3 drain returned {len(agent_thinking_steps)} steps for session={session_id}"
+                )
+            except Exception:
+                pass
+
             self._emit_response(emit_fn, session_id, response_text, "")
+
+            # Persist the assistant turn (Tier 3 direct path bypasses legacy
+            # UnifiedChatEngine which normally does the save + drain). Mirrors
+            # the save block in gemma4 direct and the legacy engine.
+            if app and response_text:
+                with app.app_context():
+                    try:
+                        from backend.models import LLMMessage, db
+                        from datetime import datetime as _dt
+                        clean = re.sub(r'<[^>]*>', '', response_text).strip()
+                        extra = {}
+                        if agent_thinking_steps:
+                            extra["agentThinkingSteps"] = agent_thinking_steps
+                        msg = LLMMessage(
+                            session_id=session_id,
+                            role="assistant",
+                            content=clean or response_text,
+                            extra_data=extra or None,
+                            timestamp=_dt.now(),
+                        )
+                        db.session.add(msg)
+                        db.session.commit()
+                    except Exception:
+                        pass
 
             return {
                 "success": result.success,
                 "response": response_text,
                 "iterations": result.iterations,
                 "tier": 3,
+                "agentThinkingSteps": agent_thinking_steps,
             }
 
         except Exception as e:

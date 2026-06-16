@@ -455,6 +455,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
             so a long see-think-act run doesn't stack N accordions. */}
         {message.agentThinkingSteps && message.agentThinkingSteps.length > 0 && (
           <Box sx={{ mb: 1, mt: 0.5 }}>
+            {import.meta.env.DEV && console.debug('[MessageItem] RENDERING PERSISTED agentThinkingSteps (from history/extra_data or post-stream append), length=', message.agentThinkingSteps.length, ' — this is post-complete persisted, not live StreamingMessage state')}
             <AgentThinkingTrail steps={message.agentThinkingSteps} />
           </Box>
         )}

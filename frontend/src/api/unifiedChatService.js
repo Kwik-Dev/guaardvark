@@ -8,20 +8,34 @@ import { useAppStore } from "../stores/useAppStore";
 
 const API_BASE = BASE_URL.replace(/\/api$/, "");
 
+const debugLog = (...args) => {
+  if (import.meta.env.DEV) {
+    console.debug(...args);
+  }
+};
+
 class UnifiedChatService {
   constructor(socket) {
     this.socket = socket;
     this._listeners = [];
+    debugLog('[UnifiedChatService] CONSTRUCTED for socket', !!socket, 'connected=', socket?.connected);
   }
 
   joinSession(sessionId) {
-    if (!this.socket) return;
+    if (!this.socket) {
+      debugLog('[UnifiedChatService] joinSession SKIPPED: no socket', sessionId);
+      return;
+    }
     
+    debugLog('[UnifiedChatService] joinSession: emitting chat:join for', sessionId, 'socket.connected=', this.socket.connected);
+    console.debug(`[SOCKET-CHAT] EMIT chat:join session=${sessionId} connected=${this.socket.connected} id=${this.socket.id}`);
     // Emit immediately (will buffer if currently disconnected)
     this.socket.emit("chat:join", { session_id: sessionId });
     
     // Re-join automatically if the socket drops and reconnects
     this._on("connect", () => {
+      debugLog('[UnifiedChatService] reconnect: re-emitting chat:join for', sessionId);
+      console.debug(`[SOCKET-CHAT] RECONNECT re-EMIT chat:join session=${sessionId}`);
       this.socket.emit("chat:join", { session_id: sessionId });
     });
   }
@@ -30,6 +44,7 @@ class UnifiedChatService {
    * Send a message via HTTP. Response arrives via Socket.IO events.
    */
   async sendMessage(sessionId, message, options = {}, imageBase64 = null, isVoiceMessage = false) {
+    debugLog('[UnifiedChatService] sendMessage START for session', sessionId, 'options=', options);
     // The backend gates Gemma4 direct path and screen tools on this flag.
     // Trigger when EITHER the screen viewer is open (user is watching live)
     // OR the session is in agent mode (sticky /agent toggle) — both cases
@@ -48,6 +63,7 @@ class UnifiedChatService {
     if (imageBase64) {
       body.image = imageBase64;
     }
+    debugLog('[UnifiedChatService] sendMessage POST /unified (agent_screen_active=', agentScreenActive, ', inAgentMode=', inAgentMode, ')');
     const response = await fetch(`${API_BASE}/api/chat/unified`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -56,10 +72,13 @@ class UnifiedChatService {
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
+      debugLog('[UnifiedChatService] sendMessage HTTP ERROR', response.status);
       throw new Error(err.error || `HTTP ${response.status}`);
     }
 
-    return response.json();
+    const json = await response.json();
+    debugLog('[UnifiedChatService] sendMessage ACK received, response=', json);
+    return json;
   }
 
   /**
@@ -67,7 +86,10 @@ class UnifiedChatService {
    * Tracks listeners for cleanup.
    */
   _on(event, callback) {
-    if (!this.socket) return;
+    if (!this.socket) {
+      debugLog('[UnifiedChatService] _on SKIPPED (no socket):', event);
+      return;
+    }
     // Remove any existing listener for this event from THIS service instance
     // to prevent accumulation when service is reused or recreated on the same socket.
     const existing = this._listeners.filter((l) => l.event === event);
@@ -75,11 +97,13 @@ class UnifiedChatService {
       this.socket.off(l.event, l.callback);
     }
     this._listeners = this._listeners.filter((l) => l.event !== event);
+    debugLog('[UnifiedChatService] _on: attaching', event, ' (had', existing.length, 'prior for event; total listeners now', this._listeners.length + 1, ')');
     this.socket.on(event, callback);
     this._listeners.push({ event, callback });
   }
 
   onThinking(callback) {
+    debugLog('[UnifiedChatService] onThinking registration requested');
     this._on("chat:thinking", callback);
   }
   onToolCall(callback) {
@@ -148,11 +172,17 @@ class UnifiedChatService {
    * Remove all registered listeners.
    */
   cleanup() {
-    if (!this.socket) return;
+    if (!this.socket) {
+      debugLog('[UnifiedChatService] cleanup: no socket');
+      return;
+    }
+    const count = this._listeners.length;
+    debugLog('[UnifiedChatService] cleanup: removing', count, 'listeners for events:', this._listeners.map(l => l.event));
     for (const { event, callback } of this._listeners) {
       this.socket.off(event, callback);
     }
     this._listeners = [];
+    debugLog('[UnifiedChatService] cleanup COMPLETE');
   }
 }
 

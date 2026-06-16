@@ -32,47 +32,7 @@ fi
 # the backend's pins. Same reason audio_foundry runs its own venv.
 PLUGIN_VENV="$PLUGIN_ROOT/venv"
 
-ensure_venv() {
-    # Cross-machine sync safety: venvs contain absolute shebangs + native bins/symlinks.
-    # If the python inside doesn't exec or is from a different machine, nuke + recreate.
-    venv_healthy() {
-        local py="$PLUGIN_VENV/bin/python"
-        if [ ! -x "$py" ]; then
-            return 1
-        fi
-        if ! "$py" -c 'import sys; print(sys.executable)' >/dev/null 2>&1; then
-            return 1
-        fi
-        return 0
-    }
-
-    if [ ! -f "$PLUGIN_VENV/bin/activate" ] || ! venv_healthy; then
-        if [ -d "$PLUGIN_VENV" ]; then
-            echo "video_editor venv damaged / from another machine — removing..."
-            rm -rf "$PLUGIN_VENV"
-        fi
-        echo "video_editor venv missing — bootstrapping at $PLUGIN_VENV"
-        python3 -m venv "$PLUGIN_VENV" || { echo "Error: venv creation failed"; exit 1; }
-        # shellcheck disable=SC1091
-        source "$PLUGIN_VENV/bin/activate"
-        pip install --upgrade pip setuptools wheel
-        pip install -r "$PLUGIN_ROOT/requirements.txt" || { echo "Error: pip install failed"; exit 1; }
-        touch "$PLUGIN_VENV/.deps_installed"
-        deactivate
-    else
-        # shellcheck disable=SC1091
-        source "$PLUGIN_VENV/bin/activate"
-        local sentinel="$PLUGIN_VENV/.deps_installed"
-        if [ ! -f "$sentinel" ] || [ "$PLUGIN_ROOT/requirements.txt" -nt "$sentinel" ]; then
-            echo "video_editor requirements changed — updating..."
-            pip install -r "$PLUGIN_ROOT/requirements.txt" || { echo "Error: pip update failed"; exit 1; }
-            touch "$sentinel"
-        fi
-        deactivate
-    fi
-}
-
-ensure_venv
+bash "$SCRIPT_DIR/setup_venv.sh" || { echo "Error: setup_venv.sh failed"; exit 1; }
 
 # Cache the resolved melt path. The snap binary at /snap/shotcut/current/bin/melt
 # is the UNWRAPPED binary that fails to load libmlt; we want the WRAPPER script

@@ -25,6 +25,12 @@ import ImageLightbox from "../images/ImageLightbox";
 
 const UPLOAD_BASE_URL = BASE_URL + "/uploads";
 
+const debugLog = (...args) => {
+  if (import.meta.env.DEV) {
+    console.debug(...args);
+  }
+};
+
 const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref) => {
   const [status, setStatus] = useState("idle"); // idle | thinking | streaming | complete | error
   const [thinkingText, setThinkingText] = useState("");
@@ -33,6 +39,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
   // {iteration, label, reasoning}. Distinct from `thinkingText` which is the
   // single-line live status (e.g. "Calling LLM...").
   const [agentThinkingSteps, setAgentThinkingSteps] = useState([]);
+  debugLog('[StreamingMessage] RENDER: chatService=', !!chatService, 'status=', status, 'agentSteps.length=', agentThinkingSteps.length, 'sessionProp=', sessionId);
   const [toolCalls, setToolCalls] = useState([]); // [{tool, params, result, durationMs, isPending, outputChunks, requiresApproval}]
   const [content, setContent] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
@@ -59,6 +66,17 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
   useEffect(() => { toolCallsRef.current = toolCalls; }, [toolCalls]);
   useEffect(() => { agentStepsRef.current = agentThinkingSteps; }, [agentThinkingSteps]);
 
+  useEffect(() => {
+    if (agentThinkingSteps.length > 0) {
+      debugLog('[StreamingMessage] agentThinkingSteps STATE UPDATED: now length=', agentThinkingSteps.length, 'last=', agentThinkingSteps[agentThinkingSteps.length-1]);
+    }
+  }, [agentThinkingSteps]);
+
+  // Explicit trace for chatService prop identity changes (a common source of mount/unmount or listener races)
+  useEffect(() => {
+    debugLog('[StreamingMessage] chatService PROP CHANGED (identity or ref):', !!chatService, '; this will cause listener useEffect re-run if in deps');
+  }, [chatService]);
+
   useImperativeHandle(ref, () => ({
     getPartialState: () => ({
       content: contentRef.current,
@@ -73,11 +91,21 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
   // Callbacks read from refs so they always have current values
   // without causing the useEffect to re-run.
   useEffect(() => {
-    if (!chatService) return;
+    debugLog('[StreamingMessage] useEffect RUN (listener attachment); chatService=', !!chatService, 'chatService===unified?', /*identity opaque*/ 'propSession=', sessionId, 'refSession=', sessionIdRef.current);
+    if (!chatService) {
+      debugLog('[StreamingMessage] useEffect EARLY RETURN: no chatService (render guard may have passed socket-only truthy)');
+      return;
+    }
     mountedRef.current = true;
+    debugLog('[StreamingMessage] MOUNTED + listeners attaching for this chatService instance; mountedRef=true');
 
     chatService.onThinking((data) => {
-      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      console.debug(`[SOCKET-CHAT] RECV chat:thinking (StreamingMessage cb) session=${data.session_id} iter=${data.iteration} status=${data.status} source=${data.source} (check vs join time)`);
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) {
+        debugLog('[StreamingMessage] onThinking IGNORED (not mounted or session mismatch): got session=', data.session_id, 'expected=', sessionIdRef.current, 'mounted=', mountedRef.current, 'source=', data.source);
+        return;
+      }
+      debugLog('[StreamingMessage] RECEIVED chat:thinking event: source=', data.source, 'iteration=', data.iteration, 'status=', data.status, 'has_reasoning=', !!data.reasoning, 'session=', data.session_id);
       setStatus("thinking");
       const text = data.status || `Iteration ${data.iteration}...`;
       setThinkingText(text);
@@ -86,6 +114,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
       // full chain ("step 8: clear address bar... step 9: previous attempt
       // failed... step 10: try Backspace") instead of just the latest line.
       if (data.source === "agent_loop" && data.reasoning) {
+        debugLog('[StreamingMessage] APPENDING agent_loop step: iteration=', data.iteration, 'label=', data.status || '', 'reasoningLen=', (data.reasoning||'').length, 'currentStepsBefore=', agentStepsRef.current.length);
         setAgentThinkingSteps((prev) => [
           ...prev,
           {
@@ -174,7 +203,12 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
     });
 
     chatService.onComplete((data) => {
-      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      console.debug(`[SOCKET-CHAT] RECV chat:complete (StreamingMessage cb) session=${data.session_id} hasResponse=${!!data.response}`);
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) {
+        debugLog('[StreamingMessage] onComplete IGNORED (not mounted or session mismatch): got=', data.session_id, 'expected=', sessionIdRef.current);
+        return;
+      }
+      debugLog('[StreamingMessage] RECEIVED chat:complete: responseLen=', (data.response||'').length, 'steps=', (data.steps||[]).length, 'agentStepsRefAtComplete=', agentStepsRef.current.length, 'session=', data.session_id);
       setStatus("complete");
       if (data.response) {
         setContent(data.response);
@@ -212,6 +246,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
               })),
             }]
           : [];
+        debugLog('[StreamingMessage] CALLING onComplete prop with agentThinkingSteps.length=', agentStepsRef.current.length);
         onCompleteRef.current({
           content: data.response || "",
           toolCalls: backendSteps || streamingSteps,
@@ -268,8 +303,10 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
     });
 
     return () => {
+      debugLog('[StreamingMessage] useEffect CLEANUP running: set mountedRef=false; calling chatService.cleanup()');
       mountedRef.current = false;
       chatService.cleanup();
+      debugLog('[StreamingMessage] useEffect CLEANUP done');
     };
   }, [chatService]); // Only re-run when chatService instance changes
 

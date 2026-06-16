@@ -208,6 +208,11 @@ const ChatPage = () => {
   const lastMessageRef = useRef(null);
   const processMessageRef = useRef(null);
   const streamingMessageRef = useRef(null);
+  // Holds the service instance that should be passed to StreamingMessage for
+  // the current in-flight turn. Used to paper over async setState timing so
+  // that the conditional render of StreamingMessage always gets a live service
+  // with listeners (prevents missed chat:thinking / chat:complete for agent steps).
+  const streamingServiceRef = useRef(null);
 
   useEffect(() => {
     // Create the service wrapper as soon as the socket object exists (eagerly).
@@ -229,12 +234,15 @@ const ChatPage = () => {
     const currentSocket = socketRef.current;
     // Avoid recreating if we already have a service bound to this exact socket instance.
     if (unifiedChatService && unifiedChatService.socket === currentSocket) {
+      debugLog('[ChatPage] SERVICE_EFFECT: reusing existing service for same socket; calling joinSession (idempotent + connect rebind)');
       unifiedChatService.joinSession(sessionId);
       return;
     }
 
     const service = new UnifiedChatService(currentSocket);
+    debugLog('[ChatPage] SERVICE_EFFECT: creating UnifiedChatService + join for session=', sessionId, 'connState=', connectionState, 'socketConnected=', !!currentSocket?.connected);
     service.joinSession(sessionId);
+    debugLog('[ChatPage] SERVICE_EFFECT: AFTER joinSession; attaching page-level guards (onImage, onComplete). chat:thinking for agent_loop ONLY attached later in StreamingMessage useEffect when isStreamingMessage renders it.');
     setUnifiedChatService(service);
 
     // Listen for image events at the page level — catches images that arrive
@@ -265,11 +273,51 @@ const ChatPage = () => {
       });
     });
 
+    // NOTE: the page-level chat:complete safety guard is intentionally NOT
+    // registered here. Registering it on `service` collided with
+    // StreamingMessage's own chat:complete listener (UnifiedChatService._on
+    // removes any prior listener for the same event on the same instance), so
+    // the two overwrote each other and the "spinner + stop forever" guard never
+    // actually coexisted with the streaming listener. It now lives in its own
+    // effect below, attached directly to the raw socket (see the
+    // "chat:complete safety net" effect), so it survives service recreation and
+    // does not contend for the service's single per-event slot.
+
     return () => {
       service.cleanup();
       setUnifiedChatService((prev) => (prev === service ? null : prev));
     };
-  }, [useUnifiedChat, sessionId, socketRef?.current, connectionState]);
+    // IMPORTANT: connectionState is deliberately NOT a dependency. The shared
+    // socket instance is stable (created once in UnifiedProgressContext), and
+    // including connectionState caused this effect's cleanup -> service.cleanup()
+    // to strip ALL live chat listeners (chat:thinking / chat:complete) off the
+    // socket on every transient connect/disconnect/error/forceReconnect during
+    // a run — killing live agent steps and the completion signal until refresh.
+    // Reconnect re-join is already handled inside joinSession's internal
+    // "connect" listener, so we don't need to recreate on connectionState.
+  }, [useUnifiedChat, sessionId, socketRef?.current]);
+
+  // chat:complete safety net — attached directly to the raw socket, independent
+  // of the recreatable UnifiedChatService. Guarantees the stop/send button
+  // (driven solely by isSending) always reverts when a run finishes, even if the
+  // per-turn StreamingMessage listener was torn down or never attached. Uses
+  // socket.on/off directly (NOT UnifiedChatService._on) so it does not contend
+  // for the service's single-listener-per-event slot used by StreamingMessage.
+  useEffect(() => {
+    const socket = socketRef?.current;
+    if (!socket || !sessionId) return;
+    const handleComplete = (data) => {
+      if (!data || data.session_id !== sessionId) return;
+      debugLog('[ChatPage] RAW-SOCKET chat:complete safety net: clearing isSending/isStreamingMessage for session=', data.session_id);
+      setIsStreamingMessage(false);
+      setIsSending(false);
+      streamingServiceRef.current = null;
+    };
+    socket.on("chat:complete", handleComplete);
+    return () => {
+      socket.off("chat:complete", handleComplete);
+    };
+  }, [socketRef?.current, sessionId]);
 
   // When projectId changes (user navigates between projects), load the per-project session
   const prevProjectIdRef = useRef(projectId);
@@ -391,6 +439,7 @@ const ChatPage = () => {
     setMessages([]);
 
     setError('');
+    streamingServiceRef.current = null;
 
     const storageKey = `llamax_chat_session_id_${projectId || 'global'}`;
     localStorage.setItem(storageKey, newSessionId);
@@ -636,6 +685,8 @@ const ChatPage = () => {
                 toolCalls: msg.toolCalls ?? msg.extra_data?.steps,
                 agentThinkingSteps: msg.agentThinkingSteps ?? msg.extra_data?.agentThinkingSteps,
                 generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
+                // Note: these hydrated agentThinkingSteps come from persisted DB extra_data (backend drain on agent complete).
+                // They render via MessageItem + AgentThinkingTrail but are *not* live-streamed steps.
               }));
 
             const allMessages = [...currentMessages, ...historyMessages];
@@ -689,6 +740,7 @@ const ChatPage = () => {
       const hasTools = (partial.toolCalls?.length || 0) > 0;
       const hasSteps = (partial.agentThinkingSteps?.length || 0) > 0;
       const hasImages = (partial.images?.length || 0) > 0;
+      debugLog('[ChatPage] handleStop salvage: hasSteps=', hasSteps, 'count=', partial.agentThinkingSteps?.length);
       if (hasContent || hasTools || hasSteps || hasImages) {
         const completedMessage = {
           id: `asst_unified_${Date.now()}_partial`,
@@ -712,6 +764,7 @@ const ChatPage = () => {
 
     setIsSending(false);
     setIsStreamingMessage(false);
+    streamingServiceRef.current = null;
     // Abort the backend chat + kill any running agent task
     fetch(`/api/chat/unified/${sessionId}/abort`, { method: 'POST' }).catch(() => {});
     fetch('/api/agent-control/kill', { method: 'POST' }).catch(() => {});
@@ -1532,6 +1585,7 @@ const ChatPage = () => {
           sessionId,
           socketConnected: Boolean(unifiedChatService || socketIsLive),
         });
+        debugLog('[ChatPage] SET isStreamingMessage(true) + will ensure service before send (normal path)');
         setIsSending(true);
         setIsStreamingMessage(true);
 
@@ -1552,18 +1606,47 @@ const ChatPage = () => {
           // even if the creation effect hasn't committed the state yet.
           let serviceToUse = unifiedChatService;
           if (!serviceToUse && socketRef?.current) {
+            debugLog('[ChatPage] LAZY ensure service (normal path): creating fresh + joinSession for', sessionId);
             serviceToUse = new UnifiedChatService(socketRef.current);
             serviceToUse.joinSession(sessionId);
             setUnifiedChatService(serviceToUse);
           }
+          // Stash in the streaming ref so the {isStreamingMessage && <StreamingMessage chatService=... />}
+          // render below always receives a valid service instance for this turn (even on the same
+          // render frame where the setState above hasn't flushed yet). This is required for live
+          // agent thinking steps to be received and for onComplete to fire and clear the spinner/stop.
+          streamingServiceRef.current = serviceToUse || unifiedChatService || null;
+          debugLog('[ChatPage] normal unified path PRE-SEND: setIsStreamingMessage(true) already done; serviceToRender=', !!(unifiedChatService || streamingServiceRef.current), 'about to await sendMessage (backend may emit thinking before mount completes)');
+          console.debug(`[SOCKET-CHAT] PRE-SEND (normal) session=${sessionId} -- HTTP returns fast; agent thread can emit chat:* before this client's room join is processed on server`);
+
+          // Mitigate the core race: give the 'chat:join' (emitted in joinSession above) a brief window to be
+          // processed into join_room on the server before we fire the HTTP that starts the background thread
+          // (which can immediately begin emitting chat:thinking / agent_loop steps to the room).
+          // We still have the page-level guard + streamer onThinking, but this reduces lost early steps.
+          await new Promise((resolve) => {
+            const t = setTimeout(resolve, 200);
+            try {
+              (serviceToUse || unifiedChatService).onJoined((d) => {
+                if (d && d.session_id === sessionId) {
+                  clearTimeout(t);
+                  debugLog('[SOCKET-CHAT] chat:joined ack before send (race reduced for this turn)');
+                  resolve();
+                }
+              });
+            } catch { resolve(); }
+          });
+
           const _ackResult = await (serviceToUse || unifiedChatService).sendMessage(sessionId, modifiedInputText, {
             use_rag: true,
             chat_mode: chatMode,
             project_id: projectId,
           }, imageBase64, isVoice);
+          console.debug(`[SOCKET-CHAT] POST-SEND ack (normal) session=${sessionId}`);
         } catch (unifiedError) {
           console.error("UNIFIED_CHAT: Failed to send:", unifiedError);
           setIsStreamingMessage(false);
+          setIsSending(false);
+          streamingServiceRef.current = null;
           setMessages((prev) => [
             ...prev,
             {
@@ -1572,7 +1655,6 @@ const ChatPage = () => {
               content: `Error: ${unifiedError.message}`,
             },
           ]);
-          setIsSending(false);
         } finally {
           try {
             sessionStorage.removeItem(processingStorageKey);
@@ -1609,10 +1691,12 @@ const ChatPage = () => {
         const refreshedSocketIsLive = !!(socketRef?.current && socketRef.current.connected);
         let serviceToUse = unifiedChatService;
         if (!serviceToUse && socketRef?.current) {
+          debugLog('[ChatPage] AGENT RECOVERY ensure service: creating fresh UnifiedChatService + join for', sessionId);
           serviceToUse = new UnifiedChatService(socketRef.current);
           serviceToUse.joinSession(sessionId);
           setUnifiedChatService(serviceToUse);
         }
+        streamingServiceRef.current = serviceToUse || unifiedChatService || null;
 
         const canRetryUnified = useUnifiedChat && (serviceToUse || refreshedSocketIsLive);
 
@@ -1626,14 +1710,46 @@ const ChatPage = () => {
             const imageBase64 = voiceOptions?.imageBase64 || null;
             const isVoice = !!(voiceOptions?.isVoiceMessage);
 
+            debugLog('[ChatPage] AGENT RECOVERY PRE-SEND (CRITICAL): await sendMessage *before* setIsStreamingMessage(true). Agent backend may start emitting chat:thinking (source=agent_loop) immediately after HTTP ack.');
+            console.debug(`[SOCKET-CHAT] PRE-SEND (agent retry after forceReconnect) session=${sessionId}`);
+
+            // Same small joined window for the recovery path (very common after transient disconnects/StrictMode).
+            await new Promise((resolve) => {
+              const t = setTimeout(resolve, 200);
+              try {
+                serviceToUse.onJoined((d) => {
+                  if (d && d.session_id === sessionId) {
+                    clearTimeout(t);
+                    debugLog('[SOCKET-CHAT] chat:joined ack (agent retry path)');
+                    resolve();
+                  }
+                });
+              } catch { resolve(); }
+            });
+
+            // Set streaming flags BEFORE the send (symmetric to the normal unified
+            // path). This ensures isStreamingMessage becomes true (and the
+            // <StreamingMessage chatService=...> render + its useEffect that registers
+            // chatService.onThinking for agent_loop steps) happens as early as possible,
+            // shrinking the window where the backend can emit the first source=agent_loop
+            // chat:thinking before the live listener is attached. The joined-wait above +
+            // streamingServiceRef + the raw-socket chat:complete guard provide additional
+            // safety. NOTE: there is exactly ONE sendMessage call here — a previous edit
+            // left a duplicate send above this block, which caused the agent-recovery path
+            // to submit the same message twice (two backend runs). Removed.
+            debugLog('[ChatPage] AGENT RECOVERY: setting isStreamingMessage(true) + ref BEFORE the single send (earlier attach of onThinking for agent steps)');
+            setIsStreamingMessage(true);
+            streamingServiceRef.current = serviceToUse;
+            setIsSending(true);
+
+            debugLog('[ChatPage] AGENT RECOVERY PRE-SEND (after flags): awaiting sendMessage. Early events should now have a listener if the service is live.');
             await serviceToUse.sendMessage(sessionId, modifiedInputText, {
               use_rag: true,
               chat_mode: chatMode,
               project_id: projectId,
             }, imageBase64, isVoice);
+            console.debug(`[SOCKET-CHAT] POST-SEND ack (agent retry) session=${sessionId}`);
 
-            // If we got here without throw, the send is in flight via unified. Success path.
-            setIsSending(false);
             try { sessionStorage.removeItem(processingStorageKey); } catch (_) {}
             return;
           } catch (retryErr) {
@@ -2058,18 +2174,31 @@ const ChatPage = () => {
       <MessageList messages={messages} sessionId={sessionId} />
 
       {}
-      {isStreamingMessage && (unifiedChatService || (socketRef?.current && socketRef.current.connected)) && (
+      {(() => {
+        const renderGuard = isStreamingMessage && (unifiedChatService || streamingServiceRef.current || (socketRef?.current && socketRef.current.connected));
+        const chatSvcForChild = unifiedChatService || streamingServiceRef.current;
+        if (isStreamingMessage) {
+          debugLog('[ChatPage] RENDER DECISION: isStreamingMessage=', isStreamingMessage, 'guard=', renderGuard, 'chatSvcForChild=', !!chatSvcForChild, 'unifiedState=', !!unifiedChatService, 'ref=', !!streamingServiceRef.current, 'socketLive=', !!(socketRef?.current && socketRef.current.connected));
+          if (!chatSvcForChild && renderGuard) {
+            debugLog('[ChatPage] WARNING: render guard true from socket-only, but passing falsy chatService to StreamingMessage -> its useEffect will skip listener attach entirely (no onThinking for agent_loop steps)!');
+          }
+        }
+        return renderGuard;
+      })() && (
         <Box sx={{ px: 2, py: 1 }}>
           <StreamingMessage
             ref={streamingMessageRef}
-            chatService={unifiedChatService}
+            chatService={unifiedChatService || streamingServiceRef.current}
             sessionId={sessionId}
             onComplete={(result) => {
+              debugLog('[ChatPage] Streaming onComplete handler (from child): agentSteps in result=', (result.agentThinkingSteps||[]).length, 'will append to messages and clear isStreaming');
               setIsStreamingMessage(false);
               setIsSending(false);
+              streamingServiceRef.current = null;
 
               const hasAgentTrail = (result.agentThinkingSteps?.length || 0) > 0;
               if (result.content || result.generatedImages?.length > 0 || result.toolCalls?.length > 0 || hasAgentTrail) {
+                debugLog('[ChatPage] APPENDING completed unified message with live agentThinkingSteps.length=', (result.agentThinkingSteps||[]).length, ' (these came from StreamingMessage onThinking appends + ref read on complete)');
                 const completedMessage = {
                   id: `asst_unified_${Date.now()}`,
                   role: "assistant",
@@ -2103,11 +2232,40 @@ const ChatPage = () => {
               // Without this, old listeners stay registered on the shared socket,
               // causing duplicate responses on the next message.
               if (unifiedChatService) {
+                debugLog('[ChatPage] POST-STREAM-COMPLETE: cleanup old unified, creating new service + re-attach onComplete guard for next turn');
                 unifiedChatService.cleanup();
               }
               if (socketRef?.current) {
                 const newService = new UnifiedChatService(socketRef.current);
                 newService.joinSession(sessionId);
+                // Re-attach the page-level complete guard (and keep behavior for late images
+                // if we also re-wired onImage here). The creation useEffect only triggers on
+                // socketRef/connectionState changes, not our post-complete manual recreate.
+                newService.onComplete((data) => {
+                  debugLog('[ChatPage] MANUAL post-complete newService onComplete guard attached');
+                  if (data.session_id !== sessionId) return;
+                  setIsStreamingMessage(false);
+                  setIsSending(false);
+                  streamingServiceRef.current = null;
+                  if (data.response) {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last && last.role === "assistant" && (last.content || "").trim() === (data.response || "").trim()) {
+                        return prev;
+                      }
+                      return [
+                        ...prev,
+                        {
+                          id: `asst_guard_${Date.now()}`,
+                          role: "assistant",
+                          content: data.response || "",
+                          isUnifiedChat: true,
+                          timestamp: new Date().toISOString(),
+                        },
+                      ];
+                    });
+                  }
+                });
                 setUnifiedChatService(newService);
               }
             }}

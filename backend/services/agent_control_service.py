@@ -39,10 +39,19 @@ def set_chat_emit_fn(fn: Optional[Callable]) -> None:
     """Stash the current chat session's emit_fn for tools that want to stream
     back. Always called paired with a clear in finally — see chat engine."""
     _chat_emit_local.emit_fn = fn
+    logger.debug(
+        f"[EMIT-HANDOFF][ACS_THREADLOCAL] set_chat_emit_fn fn_id={id(fn) if fn else None} "
+        f"thread={threading.get_ident()}"
+    )
 
 
 def get_chat_emit_fn() -> Optional[Callable]:
-    return getattr(_chat_emit_local, "emit_fn", None)
+    fn = getattr(_chat_emit_local, "emit_fn", None)
+    logger.debug(
+        f"[EMIT-HANDOFF][ACS_THREADLOCAL] get_chat_emit_fn -> fn_id={id(fn) if fn else None} "
+        f"thread={threading.get_ident()} present={fn is not None}"
+    )
+    return fn
 
 from PIL import Image
 
@@ -354,15 +363,23 @@ class AgentControlService:
             f"buffer_len={len(self._thinking_steps_buffer)} id(self)={id(self)}"
         )
         emit = self._emit_fn
+        logger.debug(
+            f"[EMIT-HANDOFF][ACS_EMIT] _emit_thinking iter={iteration} label={label!r} "
+            f"emit_fn_id={id(emit) if emit else None} will_emit_live={emit is not None} "
+            f"self_id={id(self)} source=agent_loop"
+        )
         if not emit:
+            logger.info(f"[SOCKET-CHAT] _emit_thinking SKIPPED (no emit_fn) iter={iteration} label={label!r} -- live chat:thinking will be lost until join or refresh (buffered for drain)")
             return
         try:
+            logger.info(f"[SOCKET-CHAT] EMIT via ACS chat:thinking iter={iteration} status={label!r} source=agent_loop")
             emit("chat:thinking", {
                 "iteration": int(iteration),
                 "status": label,
                 "reasoning": reasoning or "",
                 "source": "agent_loop",
             })
+            logger.debug(f"[EMIT-HANDOFF][ACS_EMIT] chat:thinking(source=agent_loop) emitted for iter={iteration}")
         except Exception as e:
             logger.debug(f"_emit_thinking failed (non-fatal): {e}")
 
@@ -375,7 +392,8 @@ class AgentControlService:
         steps = list(self._thinking_steps_buffer)
         self._thinking_steps_buffer.clear()
         logger.debug(
-            f"[THINKING-PERSIST] drain returning {len(steps)} steps id(self)={id(self)}"
+            f"[THINKING-PERSIST][EMIT-HANDOFF] drain returning {len(steps)} steps id(self)={id(self)} "
+            f"thread={threading.get_ident()}"
         )
         return steps
 
@@ -484,6 +502,10 @@ class AgentControlService:
         self._mouse_only = mouse_only
         self._emit_fn = emit_fn
         self._training_mode = training_mode
+        logger.debug(
+            f"[EMIT-HANDOFF][ACS_EXECUTE] execute_task received emit_fn_id={id(emit_fn) if emit_fn else None} "
+            f"for task={task[:60]!r} thread={threading.get_ident()} self_id={id(self)}"
+        )
         from backend.services.servo_controller import ServoController
         from backend.services.training_data_collector import TrainingDataCollector
         from backend.utils.vision_analyzer import VisionAnalyzer

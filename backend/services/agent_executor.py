@@ -486,7 +486,31 @@ class AgentExecutor:
                     step_result = _iter_fn(
                         current_prompt, system_prompt, iteration, process_id
                     )
-                
+
+                # Live-stream this iteration's reasoning so Tier-3 ReACT runs
+                # show steps in realtime, not just persisted-for-refresh. Uses
+                # the thread-local emit_fn (set on this run thread in
+                # unified_chat_api) and mirrors the source="agent_loop" payload
+                # shape that StreamingMessage consumes. Best-effort: never let an
+                # emit failure abort the agent loop.
+                try:
+                    from backend.services.agent_control_service import get_chat_emit_fn
+                    _live_emit = get_chat_emit_fn()
+                    if _live_emit:
+                        _sid = self._tool_context.get("session_id")
+                        _step = step_result.get('step')
+                        _reasoning = getattr(_step, 'thoughts', None) if _step else None
+                        if _sid and _reasoning:
+                            _live_emit("chat:thinking", {
+                                "session_id": _sid,
+                                "iteration": iteration,
+                                "status": f"Step {iteration}",
+                                "source": "agent_loop",
+                                "reasoning": _reasoning,
+                            })
+                except Exception:
+                    pass
+
                 # Check result
                 if step_result['is_final']:
                     logger.info("Agent reached final answer")
@@ -673,6 +697,16 @@ What tool do you need to call next?"""
                     continue
 
             # Execute tool with normalized parameters
+            if tool_call.tool_name in ("agent_task_execute", "agent_screen_capture"):
+                try:
+                    from backend.services.agent_control_service import get_chat_emit_fn
+                    _emit_ctx = get_chat_emit_fn()
+                    logger.debug(
+                        f"[EMIT-HANDOFF][AGENT_EXECUTOR] about to exec {tool_call.tool_name} via registry; "
+                        f"threadlocal emit available? { _emit_ctx is not None } (ACS will use for live chat:thinking source=agent_loop)"
+                    )
+                except Exception:
+                    pass
             result = self.tool_registry.execute_tool(tool_call.tool_name, agent_context=self._tool_context, **normalized_params)
             
             # Register result as resource if coordinator available

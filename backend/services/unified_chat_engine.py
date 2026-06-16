@@ -1464,6 +1464,10 @@ class UnifiedChatEngine:
                 # see-think-act loop runs).
                 from backend.services.agent_control_service import set_chat_emit_fn
                 set_chat_emit_fn(emit_fn)
+                logger.debug(
+                    f"[EMIT-HANDOFF][LEGACY_ENGINE] set_chat_emit_fn inside _exec_one for tool={t_name} "
+                    f"emit_fn_id={id(emit_fn)} iter={iteration}"
+                )
                 t0 = time.time()
                 try:
                     res = self.registry.execute_tool(t_name, on_output=on_output, **t_params)
@@ -1476,6 +1480,7 @@ class UnifiedChatEngine:
                     res = ToolResult(success=False, output=None, error=str(exc))
                 finally:
                     set_chat_emit_fn(None)
+                    logger.debug(f"[EMIT-HANDOFF][LEGACY_ENGINE] cleared emit_fn after tool={t_name}")
                 return job_index, res, int((time.time() - t0) * 1000)
 
             results_by_index: dict = {}   # job_index -> (result, duration_ms)
@@ -1684,6 +1689,9 @@ class UnifiedChatEngine:
                     f"[THINKING-PERSIST] drain returned {len(agent_thinking_steps)} steps "
                     f"for session={session_id}; will{'' if agent_thinking_steps else ' NOT'} "
                     f"attach agentThinkingSteps to extra_data"
+                )
+                logger.debug(
+                    f"[EMIT-HANDOFF][LEGACY_ENGINE_DRAIN] drain returned {len(agent_thinking_steps)} steps session={session_id}"
                 )
                 if agent_thinking_steps:
                     extra_data["agentThinkingSteps"] = agent_thinking_steps

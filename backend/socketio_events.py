@@ -209,13 +209,23 @@ def emit_health_status_change(service, status, details=None):
 @socketio.on("chat:join")
 def handle_chat_join(data):
     """Client joins their session room for streaming chat events."""
+    from flask import request as _flask_req
     session_id = data.get("session_id")
+    sid = getattr(_flask_req, 'sid', None)
     if not session_id:
         emit("error", {"message": "session_id required"})
         return
+    logger.info(f"[SOCKET-CHAT] RECV chat:join session={session_id} from_sid={sid}")
     join_room(session_id)
+    # Debug: note current rooms for this sid if accessible
+    try:
+        rooms = list(_flask_req.namespace.rooms.get(sid, set())) if hasattr(_flask_req, 'namespace') else []
+        logger.info(f"[SOCKET-CHAT] AFTER join_room: session={session_id} sid={sid} rooms={rooms}")
+    except Exception:
+        pass
     logger.info(f"Client joined chat room: {session_id}")
     emit("chat:joined", {"session_id": session_id, "status": "ok"})
+    logger.info(f"[SOCKET-CHAT] SENT chat:joined for session={session_id}")
 
 
 @socketio.on("chat:abort")
@@ -521,6 +531,7 @@ def _handle_chat_send_local(payload):
     def emit_fn(event, data_payload):
         data_payload["session_id"] = session_id
         try:
+            logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] EMIT {event} -> room={session_id}")
             _sio.emit(event, data_payload, room=session_id)
         except Exception as _e:
             logger.warning("[BRIDGE-LOCAL] emit %s failed: %s", event, _e)
@@ -566,6 +577,7 @@ def _handle_chat_send_local(payload):
 
     def _run():
         try:
+            logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] BACKEND THREAD START session={session_id}")
             if use_agent_brain:
                 agent_brain.process(
                     session_id=session_id, message=message,

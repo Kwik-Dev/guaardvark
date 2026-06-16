@@ -61,6 +61,7 @@ class SocketIOChatBridge:
     def _relay(self, event: str, data) -> None:
         try:
             from backend.socketio_instance import socketio
+            log.info(f"[SOCKET-CHAT][BRIDGE-RELAY] RELAY {event} to_sid={self._sid} (will deliver to browser socket)")
             socketio.emit(event, data, to=self._sid)
         except Exception as e:
             log.warning("[BRIDGE] relay failed: %s", e)

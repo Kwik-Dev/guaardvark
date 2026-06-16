@@ -148,6 +148,16 @@ def unified_chat():
             logger.warning(f"SocketIO server not initialized, dropping event {event} for session {session_id}")
             return
         try:
+            is_think = (event == "chat:thinking")
+            is_agent_think = is_think and data_payload.get("source") == "agent_loop"
+            log_payload = {
+                "iter": data_payload.get("iteration"),
+                "status": data_payload.get("status"),
+                "has_reasoning": bool(data_payload.get("reasoning")) if is_think else None,
+                "reasoning_preview": (str(data_payload.get("reasoning", ""))[:80] + "...") if is_agent_think else None,
+                "response_preview": (str(data_payload.get("response", ""))[:60] + "...") if event == "chat:complete" else None,
+            }
+            logger.info(f"[UNIFIED-EMIT] {event} room={session_id} agent_think={is_agent_think} keys={list(data_payload.keys()) if isinstance(data_payload,dict) else type(data_payload)} payload={log_payload}")
             socketio.emit(event, data_payload, room=session_id)
         except Exception as emit_err:
             logger.warning(f"Failed to emit {event}: {emit_err}")
@@ -198,7 +208,22 @@ def unified_chat():
 
     def run_engine():
         try:
+            logger.info(f"[SOCKET-CHAT] BACKEND THREAD START for session={session_id}; first chat:thinking may emit BEFORE client join_room completes (race window open)")
+            # Wire the emit_fn into the thread-local so that agent_control tools
+            # (agent_task_execute etc) can stream live "chat:thinking" events with
+            # source=agent_loop for the see-think-act steps. This was only done
+            # inside legacy engine before; AgentBrain/Tier3 paths bypassed it.
+            from backend.services.agent_control_service import set_chat_emit_fn
+            set_chat_emit_fn(emit_fn)
+            logger.debug(
+                f"[EMIT-HANDOFF][UNIFIED_API] set_chat_emit_fn called for session={session_id} "
+                f"thread={threading.get_ident()} emit_fn_id={id(emit_fn)} use_agent_brain={use_agent_brain}"
+            )
             if use_agent_brain and agent_brain:
+                logger.debug(
+                    f"[EMIT-HANDOFF][UNIFIED_API] dispatching to AgentBrain.process session={session_id} "
+                    f"emit_fn_id={id(emit_fn)}"
+                )
                 agent_brain.process(
                     session_id=session_id,
                     message=message,
@@ -212,6 +237,10 @@ def unified_chat():
                 )
             elif engine:
                 # legacy bridge only
+                logger.debug(
+                    f"[EMIT-HANDOFF][UNIFIED_API] dispatching to legacy UnifiedChatEngine.chat session={session_id} "
+                    f"emit_fn_id={id(emit_fn)}"
+                )
                 engine.chat(session_id, message, options, emit_fn, app=app,
                            project_id=project_id, image_data=image_data, image_url=image_url,
                            is_voice_message=is_voice_message)
@@ -221,6 +250,17 @@ def unified_chat():
             logger.error(f"Chat engine thread error: {e}", exc_info=True)
             emit_fn("chat:error", {"error": str(e)})
         finally:
+            # Always clear the thread-local emitter when this chat turn ends
+            # (success, error, or abort) so the next turn on this thread gets a fresh one.
+            try:
+                from backend.services.agent_control_service import set_chat_emit_fn
+                set_chat_emit_fn(None)
+                logger.debug(
+                    f"[EMIT-HANDOFF][UNIFIED_API] cleared chat_emit_fn in finally for session={session_id} "
+                    f"thread={threading.get_ident()}"
+                )
+            except Exception:
+                pass
             # Drop ourselves from the in-flight map so the next request can
             # take this slot. Guarded by identity check so a (defensive) race
             # with a replacement entry doesn't clobber it.

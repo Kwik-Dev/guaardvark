@@ -280,6 +280,7 @@ export const UnifiedProgressProvider = ({ children }) => {
         socketRef.current = socket;
 
         socket.on("connect", async () => {
+          console.debug(`[SOCKET-CHAT] UnifiedProgressContext CONNECTED id=${socket.id} transport=${socket.io?.engine?.transport?.name || 'unknown'}`);
           // console.log("UnifiedProgressContext: Connected to SocketIO");
           setConnectionState('connected');
 
@@ -354,6 +355,7 @@ export const UnifiedProgressProvider = ({ children }) => {
 
         // BUG FIX: Handle reconnection to re-subscribe and sync state
         socket.on("reconnect", async () => {
+          console.debug(`[SOCKET-CHAT] UnifiedProgressContext RECONNECTED id=${socket.id}`);
           // console.log("UnifiedProgressContext: Reconnected to SocketIO");
           setConnectionState('connected');
 
@@ -380,6 +382,7 @@ export const UnifiedProgressProvider = ({ children }) => {
         socket.on("connect_error", (error) => {
           const msg = error?.message || String(error);
           const transport = socket.io?.engine?.transport?.name;
+          console.warn("[SOCKET-CHAT] UnifiedProgressContext connect_error:", msg, transport ? `(transport: ${transport})` : "", " -- may delay chat:join delivery");
           console.warn("UnifiedProgressContext: Socket connect_error:", msg, transport ? `(transport: ${transport})` : "");
           // Keep trying (reconnection: true + Infinity attempts); surface as error for UI.
           // The caller (e.g. ChatPage in agent mode) will call forceReconnect() as needed.
@@ -753,6 +756,7 @@ export const UnifiedProgressProvider = ({ children }) => {
   // Force a reconnect attempt on the shared progress/chat socket.
   // Useful when agent mode can't send because the socket appears disconnected.
   const forceReconnect = useCallback(() => {
+    console.debug(`[SOCKET-CHAT] forceReconnect called; current connected=${socketRef.current?.connected}`);
     if (socketRef.current) {
       try {
         // Calling connect() on an existing (possibly disconnected) socket

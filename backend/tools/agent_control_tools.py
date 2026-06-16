@@ -124,6 +124,11 @@ class AgentTaskExecuteTool(BaseTool):
             # the entire 30+ second loop.
             from backend.services.agent_control_service import get_chat_emit_fn
             chat_emit = get_chat_emit_fn()
+            logger.debug(
+                f"[EMIT-HANDOFF][AGENT_TOOL] agent_task_execute got chat_emit from threadlocal: "
+                f"fn_id={id(chat_emit) if chat_emit else None} present={chat_emit is not None} "
+                f"task={task[:50]!r}"
+            )
             result = service.execute_task(
                 task, screen,
                 training_mode=training_mode,
