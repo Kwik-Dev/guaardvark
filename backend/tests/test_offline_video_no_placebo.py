@@ -41,7 +41,7 @@ def test_no_ai_model_fails_loudly_instead_of_blank_video():
             height=64,
             output_dir=Path(tmp),
         )
-        result = gen._generate_video_impl(req)
+        result = gen.generate_video(req)
 
     assert result.success is False, "must not report success when no model produced frames"
     assert result.error, "must surface an actionable error"
@@ -66,7 +66,7 @@ def test_placeholder_still_available_on_explicit_optin():
             output_dir=Path(tmp),
             metadata={"allow_placeholder": True},
         )
-        result = gen._generate_video_impl(req)
+        result = gen.generate_video(req)
 
     # With the opt-in, the guard does NOT short-circuit with the "no frames" error.
     # (Whether muxing fully succeeds depends on imageio availability in the env;

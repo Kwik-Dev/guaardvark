@@ -874,42 +874,34 @@ class OfflineVideoGenerator:
             logger.error(f"Failed to combine frames into video: {e}")
             return None
 
-    def generate_video(
-        prompt: str = "",
-        model: str = "cogvideox-5b",
-        duration_s: float = 5.0,
-        fps: int = 8,
-        width: int = 720,
-        height: int = 480,
-        num_inference_steps: int = 30,
-        guidance_scale: float = 7.5,
-        negative_prompt: str = "",
-        seed: Optional[int] = None,
-        enhance_prompt: bool = True,
-        output_dir: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> "GenerationResult":
+    def generate_video(self, request: VideoGenerationRequest) -> VideoGenerationResult:
         """Generate video using offline diffusers (CogVideoX / SVD).
 
-        Per edge-portability + vram/media team audit: on CPU-only or no-GPU, return
-        clear unavailable error with reason (graceful degradation) instead of
-        attempting CUDA-only models. See gpu_available flag and offline_video_generator.
+        Per edge-portability + vram/media team audit: on CPU-only / non-NVIDIA
+        hosts the heavy CUDA-only models (CogVideoX 8-16GB+, SVD) are unavailable,
+        so return a clear, honest error (graceful degradation) instead of a runtime
+        OOM or a silent blank clip. See the module-level gpu_available /
+        video_generator_available flags.
         """
+        # Edge-graceful guard: no usable CUDA GPU backend on this host.
         if not video_generator_available:
-            return GenerationResult(
+            return VideoGenerationResult(
                 success=False,
+                prompt_used=request.prompt,
                 error=(
                     "Offline video generation requires a CUDA NVIDIA GPU (typically 8-16GB+ VRAM for "
                     "CogVideoX-5B or SVD). On CPU-only, ARM, or non-NVIDIA systems this feature is "
                     "unavailable — use the ComfyUI plugin, reduce expectations, or disable. "
                     "Detected: torch_available=%s, gpu_available=%s" % (torch_available, gpu_available)
                 ),
-                ai_available=False,
             )
-
-        # Success path (GPU): original body for Cog/SVD generation + OOM handling is the code in _generate_video_impl etc. below.
-        # (Cleaned mangled/st ray from edit; graceful guard is the team addition.)
-        pass  # the full logic follows in the file's subsequent methods/impls for the GPU case.
+        # Dependency guard: muxing / frame libs missing (same honest-failure contract).
+        if not self.service_available:
+            return VideoGenerationResult(
+                success=False,
+                prompt_used=request.prompt,
+                error="Video generation service not available - missing dependencies",
+            )
 
         # Date-stamped names beat raw uuid hex for anything the user might
         # see in DocumentsPage / CodeEditorPage. The Bates path picks a
