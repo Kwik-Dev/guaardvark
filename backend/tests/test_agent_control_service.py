@@ -30,7 +30,7 @@ class TestAgentControlConfig(unittest.TestCase):
     def test_default_config(self):
         from backend.services.agent_control_service import AgentControlConfig
         config = AgentControlConfig()
-        self.assertEqual(config.max_iterations, 50)
+        self.assertEqual(config.max_iterations, 15)
         self.assertEqual(config.verify_actions, True)
         self.assertEqual(config.grid_cols, 8)
         self.assertEqual(config.grid_rows, 8)
@@ -71,7 +71,7 @@ class TestBuildVisionPrompt(unittest.TestCase):
         from backend.services.agent_control_service import AgentControlService
         service = AgentControlService()
         prompt = service._build_vision_prompt("Post hello to Twitter", [])
-        self.assertIn("grid cell", prompt.lower())
+        self.assertIn("describe the screen", prompt.lower())
         self.assertIn("interactive element", prompt.lower())
 
     def test_includes_task_context(self):
