@@ -1909,6 +1909,13 @@ class UnifiedChatEngine:
                 emit_fn("chat:token", {"content": text, "session_id": session_id})
             return text, 0, 0
 
+        # Provider dispatch: route generation to Mistral's API when the user has
+        # selected it (runtime toggle), else stay on local Ollama. The streaming
+        # loop below is provider-agnostic because mistral_provider.chat() yields
+        # chunks in the same shape ollama.chat() does.
+        from backend.services import llm_provider as _llm_provider
+        _use_mistral = _llm_provider.is_mistral_active()
+
         model_name = getattr(self.llm, "model", "gemma4:e4b")
         # Provider dispatch: when the master cloud toggle is on AND a cloud
         # provider is selected, route generation to its API. The streaming loop

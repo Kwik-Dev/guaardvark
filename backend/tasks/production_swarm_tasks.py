@@ -426,8 +426,8 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
 
         if i2v is None:
             # Animate each LoRA-consistent storyboard frame into a clip. Identity
-            # rides in the frame either way. Default = Wan 2.2 (Dean's pick — the
-            # CogVideoX output was rejected); GUAARDVARK_FILM_I2V=cogvideox reverts
+            # rides in the frame either way. Default = Wan 2.2 (chosen over the
+            # CogVideoX output); GUAARDVARK_FILM_I2V=cogvideox reverts
             # to the CogVideoX-backed adapter. Wan additionally re-applies the LoRA
             # + prompt to steady identity through motion.
             engine = os.environ.get("GUAARDVARK_FILM_I2V", "wan").strip().lower()

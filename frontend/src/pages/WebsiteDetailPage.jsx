@@ -16,7 +16,6 @@ import {
   Stack,
   Tab,
   Tabs,
-  Tooltip,
   Typography,
 } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
