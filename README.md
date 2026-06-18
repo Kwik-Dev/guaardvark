@@ -14,7 +14,7 @@ The self-hosted, offline-first AI workstation. Autonomous agents that see a real
 
 <p align="center">
   <a href="https://www.youtube.com/shorts/rh0LJRK_jAM">
-    <img src="https://img.youtube.com/vi/rh0LJRK_jAM/maxresdefault.jpg" alt="Watch: Guaardvark generates a beat-synced music video end-to-end" width="480">
+    <img src="docs/screenshots/music-video-hero.jpg" alt="Watch: Guaardvark generates a beat-synced music video end-to-end (real frame from the demo)" width="440">
   </a>
 </p>
 
