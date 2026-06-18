@@ -10,6 +10,22 @@ The self-hosted, offline-first AI workstation. Autonomous agents that see a real
 
 > **For the exhaustive feature list, models, surfaces, and plugin details, see [CAPABILITIES.md](CAPABILITIES.md).** This README focuses on the marquee experience, quick start, and what makes Guaardvark different.
 
+## ▶ Watch Guaardvark build a music video — end to end, on one local GPU
+
+<p align="center">
+  <a href="https://www.youtube.com/shorts/rh0LJRK_jAM">
+    <img src="https://img.youtube.com/vi/rh0LJRK_jAM/maxresdefault.jpg" alt="Watch: Guaardvark generates a beat-synced music video end-to-end" width="480">
+  </a>
+</p>
+
+<p align="center"><em>Real screen recordings of the system working — click to watch on YouTube.</em></p>
+
+One style prompt and a short narrative, then **go**. Guaardvark wrote every shot prompt, generated the storyboards, rendered the clips, and assembled the cuts — **timing them to the beat after analyzing the song's audio** (`.mp3` / `.wav`). Every frame was generated locally on a single desktop GPU.
+
+> **Full disclosure (every claim here is real):** the glitch effect was the one manual touch, added in Shotcut — Guaardvark did the prompting, generation, beat detection, and assembly. Native filters, transitions, and effects are coming in a future release. The song was made in Suno; Guaardvark's own music + neural-voice generation (including consent-gated voice cloning) is being wired into this pipeline next.
+
+**And media generation is one of the _smaller_ parts of what Guaardvark does** — agent swarms, a coding agent, voice chat, RAG, system mapping, a project manager, a backup system, and a 70+ tool engine are all below.
+
 ## Highlights (as of latest release)
 
 - **Video & Audio Production** — Wan 2.2 (T2V + I2V), CogVideoX, SVD; ACE-Step full-song generation with LLM tag polish; Chatterbox/Kokoro neural voice + Piper; explicit consent-gated voice cloning; frame-by-frame 4K/8K upscaling.
@@ -98,9 +114,9 @@ git clone https://github.com/guaardvark/guaardvark.git && cd guaardvark && ./sta
 
 One command. Installs everything. Starts all services. Done.
 
-### AI-Generated Film — Made Entirely with Guaardvark
+### More demos — *Gotham Rising*, an AI-generated short film
 
-Every frame generated on a single desktop GPU. No cloud. No stock footage. No API keys.
+Another piece made entirely with Guaardvark. Every frame generated on a single desktop GPU. No cloud. No stock footage. No API keys.
 
 [![Gotham Rising — AI-Generated Short Film](https://img.youtube.com/vi/8MdtM3HurJo/maxresdefault.jpg)](https://www.youtube.com/watch?v=8MdtM3HurJo)
 
@@ -181,6 +197,16 @@ Five specialized agents collaborate to turn a one-line idea into a finished vide
 | **Editor** | Assembles the generated clips into a finished video via the Video Editor |
 
 The **LoRA Trainer plugin** ships alongside — train character/environment/prop LoRAs from reference images on your local GPU (bf16, ~46 MB per LoRA) and route them automatically to the Casting agent.
+
+### Music Video — Beat-Synced, Automatic (the hero clip above)
+
+Give it a song (`.mp3` / `.wav`), a style prompt, and a short narrative — Guaardvark does the rest:
+
+- **Audio analysis & beat detection** — the track is analyzed for tempo/beats so cut timing follows the music instead of an arbitrary clock.
+- **Director** — an LLM writes a distinct prompt for every cut (no mechanical repetition across a long song), keyed to your style + narrative.
+- **Storyboards → video** — a keyframe still is generated per cut (SDXL/FLUX, optional character LoRAs for identity), then animated with the chosen image-to-video model (Wan 2.2 I2V, etc.).
+- **Beat-timed assembly** — clips are stretched/filled to land on the beat (`clip stretch`, fill methods) and assembled into the final cut, with RIFE frame interpolation for smoothness.
+- **Honest about the edges** — native filters/transitions/effects aren't in yet (the demo's glitch effect was added manually in Shotcut); that's on the near-term roadmap.
 
 ### Model Context Protocol (MCP)
 
