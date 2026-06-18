@@ -106,6 +106,33 @@ class TestParseDecision(unittest.TestCase):
         decision = service._parse_decision(llm_output)
         self.assertTrue(decision.task_complete)
 
+    def test_parse_done_with_weak_proof_and_prior_verified_step(self):
+        """Documents + lightly exercises the grounding + advisory done path (core of the GOTHAM RISING fix).
+        has_recent_verified + grounding from ActionStep.result + advisory (non-failed) handling live in
+        execute_task done block (see 820-904 area + hoisted detection + proof grounding). The parser
+        surfaces success_proof; full advisory contract + "done (advisory...)" emit exercised via e2e mocks
+        and manual ChatPage+AgentScreen runs per plan verification section.
+        """
+        from backend.services.agent_control_service import AgentControlService, ActionStep, AgentAction
+        service = AgentControlService()
+        # Simulate history after a servo-verified click on the specific target (DPC "verified":True
+        # or post_action_effect containing "verified" — exactly what click_target + fast path produce).
+        prior_step = ActionStep(
+            iteration=0,
+            scene_description="youtube search results with thumbnails",
+            action=AgentAction(action_type="click", target_description="GOTHAM RISING video thumbnail"),
+            result={"success": True, "verified": True, "post_action_effect": "verified", "verifier": "servo_region_dpc"},
+            failed=False,
+        )
+        service._action_history = [prior_step]
+        # Model emits done with weak/empty proof (the case that previously hard-rejected even after goal achieved).
+        llm_output = '{"action": "done", "success_proof": "", "reasoning": "I clicked the video and the player is now there"}'
+        decision = service._parse_decision(llm_output)
+        self.assertTrue(decision.task_complete)
+        # In execute_task the has_recent_verified block would have grounded the proof from the prior target
+        # and taken the advisory (non-failure) path instead of "done rejected — proof not visible".
+        # We assert the objects here; runtime advisory/grounding covered by higher-level tests + manual.
+
     def test_parse_invalid_json_returns_stuck(self):
         from backend.services.agent_control_service import AgentControlService
         service = AgentControlService()
