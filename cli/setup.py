@@ -10,7 +10,7 @@ _repo_root = Path(__file__).resolve().parent.parent
 
 # Single source of truth for the version: the repo-root VERSION file.
 _version_path = _repo_root / "VERSION"
-_version = _version_path.read_text(encoding="utf-8").strip() if _version_path.exists() else "2.5.4"
+_version = _version_path.read_text(encoding="utf-8").strip() if _version_path.exists() else "2.6.0"
 
 _readme_path = _repo_root / "README.md"
 _long_description = ""
