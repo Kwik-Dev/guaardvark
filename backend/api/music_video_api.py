@@ -330,7 +330,10 @@ def replan(mv_id):
     mv.output_document_id = None
     mv.error_blob = None
 
-    clips = mv.clips or []
+    # deepcopy: clips is a plain db.JSON column (not MutableList); mutating the
+    # same list object in place is not seen as dirty and won't persist on commit.
+    import copy
+    clips = copy.deepcopy(mv.clips or [])
     for c in clips:
         c["clip_path"] = None
         c["status"] = "pending"
@@ -362,7 +365,11 @@ def cancel_music_video(mv_id):
     # on status.startswith("cancelled"), but making the stage explicit prevents
     # "still shows as generating" after cancel and stops resume dispatches.
     mv.current_stage = "cancelled"
-    clips = mv.clips or []
+    # deepcopy so the reassignment is a new object SQLAlchemy detects as dirty —
+    # clips is a plain db.JSON column (not MutableList), so an in-place mutation
+    # of the same list is NOT persisted and would silently revert on commit.
+    import copy
+    clips = copy.deepcopy(mv.clips or [])
     for c in clips:
         if c.get("status") == "pending":
             c["status"] = "cancelled"

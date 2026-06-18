@@ -265,6 +265,10 @@ def test_generate_one_clip_threads_steps_interp_and_fill_method(app, monkeypatch
     db.session.commit()
 
     class _Img:
+        def __init__(self, **kw):
+            # Production now constructs ComfyUIImageGenerator with lora_strength/
+            # flux_unet/flux_t5/flux_clip/flux_vae kwargs; tolerate any of them.
+            pass
         def generate_image(self, **kw):
             captured["still_prompt"] = kw.get("prompt")
             p = tmp_path / "still.png"; p.write_bytes(b"x"); return str(p)
