@@ -155,7 +155,9 @@ const CodeEditorPage = () => {
     const loadModels = async () => {
       try {
         const models = await apiService.getAvailableModels();
-        setAvailableModels(models || []);
+        // getAvailableModels returns { error } (a non-array) on failure, so guard
+        // explicitly — `models || []` would store that object and crash .map().
+        setAvailableModels(Array.isArray(models) ? models : []);
       } catch (err) {
         console.error('Failed to load available models:', err);
         setAvailableModels([]);

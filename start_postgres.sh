@@ -305,6 +305,24 @@ vader_success "DATABASE_URL written to .env."
 vader_info "Verifying PostgreSQL connection..."
 if PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "SELECT 1;" >/dev/null 2>&1; then
   vader_success "PostgreSQL connection verified. Database is ready."
+
+  # ─── Step 9: Re-sync the Claude Code 'postgres' MCP server (best-effort) ─────
+  # The MCP server config caches the DB password in its connection string. When
+  # we rotate the password above (Step 4), that cached copy goes stale and shows
+  # up as "postgres: failed — Connection closed" in /doctor. Re-point it at the
+  # freshly-written DATABASE_URL. Guarded so it's a no-op on machines without the
+  # claude CLI or without a 'postgres' MCP server already registered.
+  if command -v claude >/dev/null 2>&1 && (cd "$SCRIPT_DIR" && claude mcp get postgres >/dev/null 2>&1); then
+    vader_info "Re-syncing Claude Code 'postgres' MCP server with new credentials..."
+    if (cd "$SCRIPT_DIR" \
+          && claude mcp remove postgres >/dev/null 2>&1 \
+          && claude mcp add postgres -- npx -y @ahmetkca/mcp-server-postgres "$DATABASE_URL" >/dev/null 2>&1); then
+      vader_success "Claude Code 'postgres' MCP server updated."
+    else
+      vader_warn "Could not auto-update the 'postgres' MCP server; run /doctor in Claude Code if it reports a failure."
+    fi
+  fi
+
   exit 0
 else
   vader_error "PostgreSQL connection verification failed."

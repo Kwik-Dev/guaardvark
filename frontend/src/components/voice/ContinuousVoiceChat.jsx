@@ -1140,7 +1140,7 @@ const ContinuousVoiceChat = React.forwardRef(({
       ) {
         event.preventDefault();
         if (!isListening) {
-          handleStart(); // momentary down=start
+          startListening(); // momentary down=start
         }
       }
     };
@@ -1158,7 +1158,7 @@ const ContinuousVoiceChat = React.forwardRef(({
       ) {
         event.preventDefault();
         if (isListening) {
-          handleStop(); // up=stop
+          stopListening(); // up=stop
         }
       }
     };
@@ -1170,7 +1170,7 @@ const ContinuousVoiceChat = React.forwardRef(({
       document.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('keyup', handleKeyUp);
     };
-  }, [keyboardShortcutEnabled, handleStart, handleStop, isListening]);
+  }, [keyboardShortcutEnabled, startListening, stopListening, isListening]);
 
   useEffect(() => {
     isMountedRef.current = true;

@@ -95,6 +95,34 @@ if [ -d "$CN_DIR" ]; then
     fi
 fi
 
+# --- torch-family CUDA-tag consistency guard (added 2026-06-17) ---
+# The requirements installs above run `pip install` with NO --index-url, so any
+# ComfyUI core / custom-node dep that lists torchaudio or torchvision drags the
+# DEFAULT-PyPI CUDA build (e.g. cu121) over the build that matches torch (cu124).
+# torchaudio then aborts at import with a "PyTorch and TorchAudio were compiled
+# with different CUDA versions" error, which surfaces in this log as
+# "IMPORT FAILED: nodes_audio.py / torchaudio.lib circular import" and disables the
+# ACE / MMAudio / audio-encoder nodes. Re-pin audio+vision to torch's channel if
+# they've drifted. Idempotent: no-op once torchaudio imports cleanly. Versions are
+# read from the installed packages (the clobber keeps the base version and only
+# changes the +cuXXX tag), so this survives a future torch bump. CPU/ROCm/Mac
+# boxes (torch.version.cuda is None) are skipped with a non-fatal warning.
+if ! "$VENV_PYTHON" -c 'import torchaudio' >/dev/null 2>&1; then
+    TORCH_CUDA=$("$VENV_PYTHON" -c 'import torch; print((torch.version.cuda or "").replace(".",""))' 2>/dev/null || true)
+    TA_VER=$("$VENV_PYTHON" -c 'import importlib.metadata as m,re; print(re.sub(r"\+.*","",m.version("torchaudio")))' 2>/dev/null || true)
+    if [ -n "$TORCH_CUDA" ] && [ -n "$TA_VER" ]; then
+        CH="cu${TORCH_CUDA}"
+        TV_VER=$("$VENV_PYTHON" -c 'import importlib.metadata as m,re; print(re.sub(r"\+.*","",m.version("torchvision")))' 2>/dev/null || true)
+        REPIN="torchaudio==${TA_VER}+${CH}"
+        [ -n "$TV_VER" ] && REPIN="$REPIN torchvision==${TV_VER}+${CH}"
+        echo "torch-family CUDA mismatch detected — re-pinning ($REPIN) to /whl/${CH}..."
+        "$VENV_PYTHON" -m pip install --no-deps --force-reinstall $REPIN \
+            --index-url "https://download.pytorch.org/whl/${CH}" 2>&1 | tail -3
+    else
+        echo "WARNING: torchaudio import fails (cuda tag='$TORCH_CUDA', ver='$TA_VER') — audio nodes stay disabled (non-fatal)."
+    fi
+fi
+
 # Log file
 LOG_DIR="$PROJECT_ROOT/logs"
 mkdir -p "$LOG_DIR"

@@ -15,7 +15,7 @@
     "default_auto_start": false,
     "service_url": "http://localhost:11434",
     "timeout": 30,
-    "fallback_enabled": false
+    "fallback_enabled": true
   },
   "requirements": {
     "gpu": true,
