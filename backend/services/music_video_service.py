@@ -145,6 +145,7 @@ def compute_cut_plan(
     duration: float,
     max_cut_s: float | None = None,
     slow_pace: bool = False,
+    min_cut_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Build an energy-aware, beat-snapped cut plan covering [0, duration].
 
@@ -156,6 +157,13 @@ def compute_cut_plan(
     - When ``max_cut_s`` is given, no cut exceeds it (long holds are split into
       forward sub-cuts) so a forward clip can always fill its slot without a
       reverse. ``None`` (default) leaves cut lengths untouched.
+    - When BOTH ``min_cut_s`` and ``max_cut_s`` are given, each cut is sized toward
+      an energy-mapped TARGET length in ``[min_cut_s, max_cut_s]`` (high energy →
+      min, calm → max), beat-snapped. This is how the Clip Stretch setting actually
+      lengthens clips: the caller passes ``min/max = wan_motion_s × stretch-derived``
+      bounds, and ``fill_clip_to_duration`` later time-stretches the ~2s WAN motion
+      up to fill the longer slot. When either is ``None`` the legacy energy-only
+      ``_beats_per_cut`` mapping is used (keeps the pure planner unit tests intact).
     """
     if not sections:
         sections = [{"label": "unlabeled", "start": 0.0, "end": duration, "mean_energy": 0.0}]
@@ -180,9 +188,29 @@ def compute_cut_plan(
     bi = 0          # index of the next beat to consume
     cut_start = 0.0
 
+    # When a [min_cut_s, max_cut_s] band is supplied we size cuts toward an energy-mapped
+    # target length (scaled by Clip Stretch upstream) instead of the legacy energy→beats map.
+    # Needs a representative beat spacing to convert a target length into a whole-beat count.
+    use_target = (
+        min_cut_s is not None and max_cut_s is not None
+        and max_cut_s >= min_cut_s > 0
+    )
+    if use_target and n >= 2:
+        _diffs = sorted(beat_times[i + 1] - beat_times[i] for i in range(n - 1))
+        beat_period = _diffs[len(_diffs) // 2]  # median beat interval (tempo-robust)
+    else:
+        beat_period = 0.0
+
     while bi < n:
         sec = _section_for(cut_start, sections)
-        k = _beats_per_cut(sec.get("mean_energy", 0.0), emin, emax)
+        if use_target and beat_period > 0:
+            # high energy (t→1) → shorter target (min_cut_s); calm (t→0) → longer (max_cut_s)
+            t = (sec.get("mean_energy", 0.0) - emin) / (emax - emin) if emax > emin else 0.5
+            t = min(1.0, max(0.0, t))
+            target_s = max_cut_s - t * (max_cut_s - min_cut_s)
+            k = max(1, round(target_s / beat_period))
+        else:
+            k = _beats_per_cut(sec.get("mean_energy", 0.0), emin, emax)
         if slow_pace:
             # For slow/dreamlike treatments, force longer cuts even on high detected energy.
             # Stronger bias + post-merge below so a 29s dreamy song doesn't become 20+ micro-cuts.

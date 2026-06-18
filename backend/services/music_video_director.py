@@ -36,6 +36,14 @@ log = logging.getLogger(__name__)
 DIRECTOR_MODEL = "gemma4:e4b"
 DEFAULT_MODEL = DIRECTOR_MODEL  # legacy alias for any direct callers of generate_scene_prompts
 
+# Cuts are generated one LLM call at a time in batches of this size. A small model asked to
+# emit ALL N shots in one JSON response overflows its output window once N gets large (~150
+# cuts truncated mid-array → unparseable → empty prompts → mechanical energy-cue fallback).
+# Batching keeps each JSON response small enough that even the small dedicated model produces
+# valid, distinct shots. 20 sits between the largest known good single call (22) and the
+# known-failing one (158).
+DIRECTOR_BATCH_SIZE = 20
+
 
 def _is_embedding_model(name: str | None) -> bool:
     """Embedding models (used for RAG/vector search) do not support the chat API
@@ -95,6 +103,14 @@ Return ONLY valid JSON, no extra prose:
   ]
 }
 Exactly one shot per input cut. Indexes must match exactly. Use the EDITING fields to turn this into a real edited music video, not just a slideshow of similar shots."""
+
+# Lightweight system prompt for shots-only batches (every batch after the first, plus any
+# recovery call). Small models choke on the full treatment + strict separation + editing
+# fields all at once; this tiny contract focuses purely on distinct visual prompts.
+_SHOTS_ONLY_SYSTEM = (
+    "You are a music-video director. Follow the mode, guidance, and treatment instructions exactly. "
+    "Output ONLY valid JSON with a 'shots' array. No prose, no fences, no extra keys."
+)
 
 
 def _installed_model_tags() -> set[str]:
@@ -173,6 +189,21 @@ def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = No
             item["fill_method"] = fill_method
         out.append(item)
     return out
+
+
+def _director_options(batch_len: int, *, rich: bool) -> dict:
+    """Single source of truth for the Ollama sampling/window options per Director call.
+
+    The original code set only ``temperature`` (no ``num_predict``), so large responses
+    truncated against the model's default output budget — the core of the empty-prompts bug.
+    We now size ``num_predict`` to the batch and give a modest ``num_ctx`` (kept small to
+    respect tight VRAM — the small model runs partly on CPU). The first/rich batch also
+    writes the whole-video treatment, so it gets more room.
+    """
+    bl = max(1, batch_len)
+    if rich:
+        return {"temperature": 0.7, "num_ctx": 8192, "num_predict": min(4096, 200 * bl + 2048)}
+    return {"temperature": 0.65, "num_ctx": 4096, "num_predict": min(3072, 200 * bl + 512)}
 
 
 def _parse_prompts(content: str, n: int) -> dict[int, str]:
@@ -258,6 +289,147 @@ def generate_scene_prompts(
     return result["prompts"]
 
 
+def _build_rich_user(
+    style_prompt: str, cuts_json: str, b: int, n_total: int,
+    mode_instruction: str, guidance_block: str, treatment_block: str,
+) -> str:
+    """The full TASK prompt: treatment + distinct per-cut shots for the first batch."""
+    return (
+        f"STYLE: {style_prompt}\n\n"
+        f"CUTS ({b} of {n_total} total):\n{cuts_json}\n\n"
+        f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
+        "TASK:\n"
+        "1. Produce (or lightly refine) the top-level 'treatment' field using the provided user treatment as the main source. This field can contain the full dreamlike story and artistic directives. The treatment covers the WHOLE video, not just these cuts.\n"
+        "2. For the 'shots' array: Create **one completely unique visual prompt for each individual cut** in the CUTS list above.\n"
+        "   - The prompts MUST be different from each other.\n"
+        "   - **NEVER copy or echo the STYLE text (or large parts of it) into any shots[].prompt** — the STYLE is the global aesthetic and will be appended automatically by the caller after your prompt. Your shots[].prompt must be the *varying part only* (subject appearance, specific framing/composition, camera move, lighting for this exact moment, texture, atmosphere).\n"
+        "   - Vary them according to each cut's 'section' label and 'energy' value.\n"
+        "   - Low energy cuts (intro/build): calmer, more atmospheric, wider framing, slower implied motion, using the 'loss' and 'searching' visual language from the treatment.\n"
+        "   - High energy cuts (drop): more intense, dynamic compositions, tighter framing, stronger contrast, using the 'convergence' and 'intensity' language.\n"
+        "   - Keep every prompt short and tight (aim <25 words / one comma phrase) so the full JSON fits in the model output window.\n"
+        "   - Every shots[].prompt must be a PURE VISUAL PROMPT ONLY — no character names, no backstory, no plot points. Use only visual descriptors for consistency (e.g. recurring visual motifs like 'fractured silver moonlight on still water').\n"
+        "   - Focus exclusively on: subject visuals, setting, framing, camera angle/motion, lighting, color palette, texture, atmosphere, mood as pure image, style elements from the treatment.\n"
+        "Use the EXACT 'index' value from each entry in the CUTS list above for the matching shots[].index — DO NOT renumber from zero. Return ONLY the JSON with 'treatment' and 'shots' (one shot per cut, in the exact order of the CUTS list)."
+    )
+
+
+def _build_shots_only_user(
+    style_prompt: str, cuts_json: str, b: int, n_total: int,
+    mode_instruction: str, guidance_block: str, treatment_block: str,
+    treatment_context: str | None,
+) -> str:
+    """The lean TASK prompt: distinct per-cut shots only, fed the already-written treatment
+    as read-only continuity context. Used for every batch after the first and for recovery."""
+    tctx = ""
+    if treatment_context and treatment_context.strip():
+        tctx = (
+            "\n\nSTORY TREATMENT (for continuity only — DO NOT output it, DO NOT copy it into the prompts; "
+            "use it to keep these shots on the same arc/world as the rest of the video):\n"
+            f"{treatment_context.strip()[:1500]}\n"
+        )
+    return (
+        f"STYLE: {style_prompt}\n\n"
+        f"CUTS ({b} of {n_total} total):\n{cuts_json}\n\n"
+        f"{mode_instruction}{guidance_block}{treatment_block}{tctx}\n\n"
+        "TASK: Return ONLY this exact JSON shape (one entry per cut). Use the EXACT 'index' value from each CUTS entry above — DO NOT renumber from zero:\n"
+        '{"shots": [{"index": <the cut index from the CUTS list>, "prompt": "pure visual for that cut ..."}, ...]}\n'
+        "CRITICAL: Every shots[].prompt MUST be visually DISTINCT from all others AND MUST NOT BE A COPY (or near-copy) OF THE STYLE TEXT. "
+        "The STYLE is the global look and will be appended by the system; your shots[].prompt is ONLY the varying subject/framing/lighting/motion/atmosphere specific to THIS cut's energy and place in the arc. "
+        "Vary framing, angle, density, motion implication, lighting, and color according to the mode instruction, the cut's energy, and its position in the arc/treatment. "
+        "Keep prompts concise (under ~25 words). Pure visual descriptors only (no names, no backstory, no plot)."
+    )
+
+
+def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int, rich: bool):
+    """One ``ollama.chat(format='json')`` with a small transient-error retry loop (connection
+    refused / server just came up). Returns ``(parsed_dict, raw_content)``. Raises only if all
+    transient retries are exhausted; an unparseable-but-returned response yields empty prompts."""
+    import time
+    opts = _director_options(batch_len, rich=rich)
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = ollama.chat(
+                model=model,
+                format="json",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                options=opts,
+            )
+            break
+        except Exception as e:  # connection, server busy, etc.
+            if attempt == 2:
+                raise
+            log.info("director ollama.chat attempt %d failed (%s), retrying after short delay", attempt + 1, e)
+            time.sleep(1.5 * (attempt + 1))
+    content = resp["message"]["content"]
+    return _parse_full_director_output(content, batch_len), content
+
+
+def _generate_shots_for_batch(
+    *,
+    ollama,
+    model: str,
+    style_prompt: str,
+    cut_subset: list[dict[str, Any]],
+    n_total: int,
+    mode_instruction: str,
+    guidance_block: str,
+    treatment_block: str,
+    treatment_context: str | None,
+    max_stretch: float | None,
+    fill_method: str | None,
+    rich: bool,
+) -> dict:
+    """Generate per-shot prompts for ONE batch of cuts.
+
+    Returns ``{"prompts": {global_index: prompt}, "shots": [...], "treatment": str|None,
+    "raw_head": str|None}``. Never raises — on any failure returns empty maps so the caller's
+    loop continues. Those cuts then degrade to energy-cued style variations while the rest of
+    the video keeps its unique LLM prompts (per-batch failure isolation).
+
+    ``rich=True`` runs the full treatment+shots contract (first batch only). ``rich=False`` runs
+    the lean shots-only contract, fed the already-produced treatment as continuity context. If a
+    batch parses empty, one shots-only recovery call is attempted for the same cuts."""
+    b = len(cut_subset)
+    if b == 0:
+        return {"prompts": {}, "shots": [], "treatment": None, "raw_head": None}
+    cuts_json = json.dumps(_cut_brief(cut_subset, max_stretch=max_stretch, fill_method=fill_method))
+    try:
+        if rich:
+            system = _SYSTEM
+            user = _build_rich_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block)
+        else:
+            system = _SHOTS_ONLY_SYSTEM
+            user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context)
+        data, content = _director_chat(ollama=ollama, model=model, system=system, user=user, batch_len=b, rich=rich)
+        prompts_map = data.get("prompts", {}) or {}
+        treatment = data.get("treatment")
+        shots = data.get("shots", []) or []
+
+        # Recovery: nothing parsed — try once more with the lean shots-only contract.
+        if not prompts_map:
+            try:
+                rec_user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context)
+                data2, _ = _director_chat(ollama=ollama, model=model, system=_SHOTS_ONLY_SYSTEM, user=rec_user, batch_len=b, rich=False)
+                if data2.get("prompts"):
+                    prompts_map = data2.get("prompts", {})
+                    treatment = treatment or data2.get("treatment")
+                    if data2.get("shots"):
+                        shots = data2.get("shots")
+            except Exception:  # noqa: BLE001 — recovery is best-effort
+                pass
+
+        if not prompts_map:
+            return {"prompts": {}, "shots": [], "treatment": treatment, "raw_head": (content or "")[:600].replace("\n", "\\n")}
+        return {"prompts": prompts_map, "shots": shots, "treatment": treatment, "raw_head": None}
+    except Exception as e:  # noqa: BLE001 — one batch must never sink the whole director
+        log.info("director batch (%d cuts, rich=%s) failed (%s); those cuts will use energy cues", b, rich, e)
+        return {"prompts": {}, "shots": [], "treatment": None, "raw_head": f"(batch error: {str(e)[:200]})"}
+
+
 def _generate_storyline_and_prompts(
     style_prompt: str,
     cut_plan: list[dict[str, Any]],
@@ -316,108 +488,61 @@ def _generate_storyline_and_prompts(
     try:
         import ollama
         model = _resolve_model(model)
-        log.info("music video director using ollama model=%s for %d cuts (has_user_treatment=%s)", model, n, bool(user_treatment))
-        user = (
-            f"STYLE: {style_prompt}\n\n"
-            f"CUTS ({n} total):\n{json.dumps(_cut_brief(cut_plan, max_stretch=max_stretch, fill_method=fill_method))}\n\n"
-            f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
-            "TASK:\n"
-            "1. Produce (or lightly refine) the top-level 'treatment' field using the provided user treatment as the main source. This field can contain the full dreamlike story and artistic directives.\n"
-            "2. For the 'shots' array: Create **one completely unique visual prompt for each individual cut** in the CUTS list above.\n"
-            "   - The prompts MUST be different from each other.\n"
-            "   - **NEVER copy or echo the STYLE text (or large parts of it) into any shots[].prompt** — the STYLE is the global aesthetic and will be appended automatically by the caller after your prompt. Your shots[].prompt must be the *varying part only* (subject appearance, specific framing/composition, camera move, lighting for this exact moment, texture, atmosphere).\n"
-            "   - Vary them according to each cut's 'section' label and 'energy' value.\n"
-            "   - Low energy cuts (intro/build): calmer, more atmospheric, wider framing, slower implied motion, using the 'loss' and 'searching' visual language from the treatment.\n"
-            "   - High energy cuts (drop): more intense, dynamic compositions, tighter framing, stronger contrast, using the 'convergence' and 'intensity' language.\n"
-            "   - For large numbers of cuts, keep every prompt short and tight (aim <25 words / one comma phrase) so the full JSON fits in the model output window.\n"
-            "   - Every shots[].prompt must be a PURE VISUAL PROMPT ONLY — no character names, no backstory, no plot points. Use only visual descriptors for consistency (e.g. recurring visual motifs like 'fractured silver moonlight on still water').\n"
-            "   - Focus exclusively on: subject visuals, setting, framing, camera angle/motion, lighting, color palette, texture, atmosphere, mood as pure image, style elements from the treatment.\n"
-            "Return ONLY the JSON with 'treatment' and 'shots' (one shot per cut, in the exact order of the CUTS list). Indexes must match the CUTS exactly."
+        # Batch the cuts: a small model can't emit all N shots as one valid JSON object once N
+        # gets large (it truncates → empty prompts → mechanical fallback). Each batch is a
+        # separate, small-enough ollama.chat. The first (rich) batch writes the whole-video
+        # treatment; later (shots-only) batches reuse it as continuity context.
+        batches = [cut_plan[i:i + DIRECTOR_BATCH_SIZE] for i in range(0, n, DIRECTOR_BATCH_SIZE)]
+        log.info(
+            "music video director using ollama model=%s for %d cuts in %d batch(es) of <=%d (has_user_treatment=%s)",
+            model, n, len(batches), DIRECTOR_BATCH_SIZE, bool(user_treatment),
         )
-        # Small retry for transient "ollama not ready" after plugin ensure/start (e.g. daemon just came up)
-        resp = None
-        for attempt in range(3):
-            try:
-                resp = ollama.chat(
-                    model=model,
-                    format="json",
-                    messages=[
-                        {"role": "system", "content": _SYSTEM},
-                        {"role": "user", "content": user},
-                    ],
-                    options={"temperature": 0.7},
-                )
-                break
-            except Exception as e:  # connection, server busy, etc.
-                if attempt == 2:
-                    raise
-                log.info("director ollama.chat attempt %d failed (%s), retrying after short delay", attempt+1, e)
-                import time
-                time.sleep(1.5 * (attempt + 1))
-        content = resp["message"]["content"]
-        data = _parse_full_director_output(content, n)
-        prompts_map = data.get("prompts", {}) or {}
-        treatment = data.get("treatment")
 
-        # If the (possibly rich) first response gave us nothing usable, try a second,
-        # much simpler "shots only" call. Small models often choke on the full treatment +
-        # CUTS + editing fields + strict separation all in one go. The recovery prompt
-        # has a tiny contract focused purely on distinct visual prompts.
-        if not prompts_map:
-            try:
-                simple_sys = (
-                    "You are a music-video director. Follow the mode, guidance, and treatment instructions exactly. "
-                    "Output ONLY valid JSON with a 'shots' array. No prose, no fences, no extra keys."
-                )
-                simple_user = (
-                    f"STYLE: {style_prompt}\n\n"
-                    f"CUTS ({n} total):\n{json.dumps(_cut_brief(cut_plan, max_stretch=max_stretch, fill_method=fill_method))}\n\n"
-                    f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
-                    "TASK: Return ONLY this exact JSON shape (one entry per cut, indexes MUST match the CUTS list 0..N-1 exactly; return exactly N shots):\n"
-                    '{"shots": [{"index": 0, "prompt": "pure visual for cut 0 ..."}, ...]}\n'
-                    "CRITICAL: Every shots[].prompt MUST be visually DISTINCT from all others AND MUST NOT BE A COPY (or near-copy) OF THE STYLE TEXT. "
-                    "The STYLE is the global look and will be appended by the system; your shots[].prompt is ONLY the varying subject/framing/lighting/motion/atmosphere specific to THIS cut's energy and place in the arc. "
-                    "Vary framing, angle, density, motion implication, lighting, and color according to the mode instruction, the cut's energy, and its position in the arc/treatment. "
-                    "Keep prompts concise (under ~25 words ideal for large N). Pure visual descriptors only (no names, no backstory, no plot). Follow the separation of concerns in the system prompt."
-                )
-                resp2 = ollama.chat(
-                    model=model,
-                    format="json",
-                    messages=[
-                        {"role": "system", "content": simple_sys},
-                        {"role": "user", "content": simple_user},
-                    ],
-                    options={"temperature": 0.65},
-                )
-                content2 = resp2["message"]["content"]
-                data2 = _parse_full_director_output(content2, n)
-                if data2.get("prompts"):
-                    prompts_map = data2.get("prompts", {})
-                    treatment = treatment or data2.get("treatment")
-                    # Prefer recovery shots (they carry duration/transition/filter if the simple call produced them)
-                    if data2.get("shots"):
-                        data["shots"] = data2.get("shots")
-            except Exception:  # noqa: BLE001
-                pass  # recovery failed; we will fallback below
+        prompts_map: dict[int, str] = {}
+        merged_shots: list = []
+        treatment: str | None = None
+        last_head: str | None = None
+        failed_batches = 0
 
-        if not prompts_map:
-            # Diagnostic: show a safe prefix of what the model actually emitted so we can see
-            # structure mistakes (fences, wrong keys, empty prompts, prose, etc.) without dumping
-            # potentially long user treatment or full PII.
-            head = (content or "")[:1200].replace("\n", "\\n")
-            log.warning(
-                "director returned no usable prompts; using energy-cued variations of global style for all %d cuts "
-                "(plain identical global fallback is disabled for music video). raw_head=%s",
-                n, head
+        for bi, batch in enumerate(batches):
+            res = _generate_shots_for_batch(
+                ollama=ollama,
+                model=model,
+                style_prompt=style_prompt,
+                cut_subset=batch,
+                n_total=n,
+                mode_instruction=mode_instruction,
+                guidance_block=guidance_block,
+                treatment_block=treatment_block,
+                treatment_context=treatment,
+                max_stretch=max_stretch,
+                fill_method=fill_method,
+                rich=(bi == 0),
             )
-            # Disable the old "all identical global style" fallback: always produce at least
-            # energy/section differentiated cue variations. The ensure will yield clean
-            # "cue, style" (not "style, cue, style") thanks to _is_mostly_style guard inside it.
+            if bi == 0 and res.get("treatment"):
+                treatment = res.get("treatment")
+            batch_prompts = res.get("prompts") or {}
+            if batch_prompts:
+                prompts_map.update(batch_prompts)
+                merged_shots.extend(res.get("shots") or [])
+            else:
+                failed_batches += 1
+                if res.get("raw_head"):
+                    last_head = res.get("raw_head")
+
+        # Total failure: not a single usable prompt across all batches → energy-cued variations
+        # for the whole video (the old "all identical global style" fallback stays disabled).
+        if not prompts_map:
+            head = last_head or "(no usable model output across all batches)"
+            log.warning(
+                "director returned no usable prompts across %d batch(es); using energy-cued variations "
+                "of global style for all %d cuts. raw_head=%s",
+                len(batches), n, head,
+            )
             cued = fallback_prompts
             try:
                 cued = _ensure_distinct_and_energy_aware(
-                    fallback_prompts, cut_plan, style_prompt,
-                    max_stretch=max_stretch
+                    fallback_prompts, cut_plan, style_prompt, max_stretch=max_stretch
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -428,7 +553,7 @@ def _generate_storyline_and_prompts(
                 "director_diagnostics": {
                     "reason": "empty_prompts_map",
                     "raw_head": head,
-                    "note": "LLM produced no usable shots array; energy cues applied for variation (no narrative treatment per-cut)",
+                    "note": "LLM produced no usable shots across all batches; energy cues applied for variation",
                 },
             }
 
@@ -443,8 +568,8 @@ def _generate_storyline_and_prompts(
 
         # P0 guard (per approved story-arc plan): guarantee distinctness + energy responsiveness
         # + consistent style suffix, even if the LLM produced near-duplicates or weak variation.
-        # This is a cheap deterministic post-process (no extra LLM calls). On any internal
-        # failure it is a safe no-op (never produces worse/less distinct output than input).
+        # This also differentiates any cuts whose batch failed (they came in as bare style above).
+        # On any internal failure it is a safe no-op (never produces worse/less distinct output).
         try:
             out = _ensure_distinct_and_energy_aware(
                 out, cut_plan, style_prompt,
@@ -465,10 +590,22 @@ def _generate_storyline_and_prompts(
                 log.warning("director arc injection failed (safe no-op)")
 
         if treatment:
-            log.info("director produced visual treatment for music video (len=%d): %s", 
+            log.info("director produced visual treatment for music video (len=%d): %s",
                      len(treatment), treatment[:300])
 
-        return {"prompts": out, "treatment": treatment, "shots": data.get("shots", []) or []}
+        result = {"prompts": out, "treatment": treatment, "shots": merged_shots}
+        # Partial failure: some batches degraded to energy cues; surface it for the UI/diagnostics
+        # so a half-mechanical result is visible rather than silently passing as a clean run.
+        if failed_batches:
+            result["director_diagnostics"] = {
+                "reason": "partial_batches",
+                "raw_head": last_head or "",
+                "note": (
+                    f"{len(prompts_map)}/{n} cuts got unique LLM prompts; "
+                    f"{failed_batches} of {len(batches)} batch(es) fell back to energy cues"
+                ),
+            }
+        return result
     except Exception as e:  # noqa: BLE001 — director is best-effort; never sink the analyze stage
         log.warning("director failed (%s); producing energy-cued style variations (plain identical global fallback disabled)", e)
         cued = fallback_prompts

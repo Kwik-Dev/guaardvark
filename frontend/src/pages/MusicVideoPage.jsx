@@ -38,6 +38,7 @@ import {
   cancelMusicVideo,
 } from "../api/musicVideoService";
 import { getAllPluginStatus } from "../api/pluginsService";
+import { getAvailableModels } from "../api/modelService";
 
 const POLL_MS = 5000;
 const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
@@ -45,7 +46,7 @@ const TERMINAL = (s) => s === "complete" || (s || "").startsWith("failed");
 
 // Local presentational + interactive component for the cut plan + Director prompts.
 // Keeps the main page component from exploding in size.
-function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, comfyReady = true, comfyDisabled = false, comfyInfo = null }) {
+function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, comfyReady = true, comfyDisabled = false, comfyInfo = null }) {
   const cutPlan = detail.cut_plan || [];
   const clips = detail.clips || [];
   const isEditable = detail.current_stage === "awaiting_approval";
@@ -85,6 +86,21 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
     const m = detail.director_model || "gemma4:e4b";
     return isLikelyEmbeddingModel(m) ? "gemma4:e4b" : m;
   });
+
+  // Director-model options come from the installed models (embedding models filtered out).
+  // Fall back to a small static list if the model API is unavailable. Always keep the default
+  // and the currently-selected value selectable so the MUI Select value never goes orphaned.
+  const directorModelOptions = useMemo(() => {
+    const fromApi = (Array.isArray(models) ? models : [])
+      .map((m) => (typeof m === "string" ? m : m?.name || m?.model))
+      .filter(Boolean)
+      .filter((m) => !isLikelyEmbeddingModel(m));
+    const base = fromApi.length ? fromApi : ["gemma4:e4b", "gemma4:e2b", "gemma3:latest"];
+    const ensured = new Set(base);
+    ensured.add("gemma4:e4b");
+    if (directorModel && !isLikelyEmbeddingModel(directorModel)) ensured.add(directorModel);
+    return Array.from(ensured);
+  }, [models, directorModel]);
 
   const handleRegenStoryboard = async (index) => {
     // Bump version immediately to change the <img> src (adds ?v=N).
@@ -529,12 +545,11 @@ function PlanViewer({ detail, busy, onSavePlan, onRegeneratePlan, onGenerateStor
               onChange={(e) => setDirectorModel(e.target.value)}
               label="director model"
             >
-              <MenuItem value="gemma4:e4b">gemma4:e4b (default small)</MenuItem>
-              <MenuItem value="gemma4:2b">gemma4:2b</MenuItem>
-              <MenuItem value="gemma:2b">gemma:2b</MenuItem>
-              <MenuItem value="qwen2.5:1.5b">qwen2.5:1.5b</MenuItem>
-              <MenuItem value="phi3:mini">phi3:mini</MenuItem>
-              <MenuItem value="llama3.2:1b">llama3.2:1b</MenuItem>
+              {directorModelOptions.map((m) => (
+                <MenuItem key={m} value={m}>
+                  {m === "gemma4:e4b" ? "gemma4:e4b (default small)" : m}
+                </MenuItem>
+              ))}
             </TextField>
             <Button
               size="small"
@@ -584,7 +599,22 @@ const MusicVideoPage = () => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [pluginStatus, setPluginStatus] = useState(null); // {comfyui_reachable, ...} or {status:{comfyui:'stopped',...}} or {plugins:[...]} for storyboard guards
+  const [models, setModels] = useState([]); // installed Ollama models for the director-model dropdown (embedding models filtered backend-side)
   const fileInputRef = useRef(null);
+
+  // Load installed chat models once so the director-model dropdown only offers models that
+  // actually exist (the list is small and rarely changes; /api/model/list already filters
+  // out embedding models, which can't do chat/JSON).
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await getAvailableModels();
+        if (mounted && Array.isArray(res)) setModels(res);
+      } catch { /* fall back to the static option list in PlanViewer */ }
+    })();
+    return () => { mounted = false; };
+  }, []);
 
   // Lightweight plugin status poll (for storyboard guards; no full WS subscribe here to keep quiet)
   useEffect(() => {
@@ -1125,6 +1155,7 @@ const MusicVideoPage = () => {
                 <PlanViewer
                   detail={detail}
                   busy={busy}
+                  models={models}
                   comfyReady={comfyReady}
                   comfyDisabled={comfyDisabled}
                   comfyInfo={comfyInfo}

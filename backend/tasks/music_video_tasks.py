@@ -111,6 +111,24 @@ def _max_clip_s(s: dict) -> float:
     return (49 / 24) if s.get("i2v_engine", "wan") == "wan" else (25 / 7)
 
 
+# Fraction of the full Clip Stretch budget applied to the *shortest* (highest-energy) cuts.
+# The planner targets cut length in [native_clip × stretch × MIN_STRETCH_FRACTION,
+# native_clip × stretch] (loud → short end, calm → long end). At fraction 0.5 and stretch 4,
+# loud cuts ≈ 2.04×2 = 4.1s and calm cuts ≈ 8.2s; at stretch 1 the whole band collapses to the
+# native ~2s clip (no slow-mo). Tunable: raise toward 1.0 for more uniform (longer) loud cuts.
+MIN_STRETCH_FRACTION = 0.5
+
+
+def _cut_length_bounds(s: dict) -> tuple[float, float]:
+    """(min_cut_s, max_cut_s) the planner targets, both scaled by the Clip Stretch budget so
+    the setting actually controls clip length. See MIN_STRETCH_FRACTION."""
+    native = _max_clip_s(s)
+    stretch = float(s["max_stretch"])
+    max_cut_s = native * stretch
+    min_cut_s = native * max(1.0, stretch * MIN_STRETCH_FRACTION)
+    return min_cut_s, max_cut_s
+
+
 COMFYUI_URL = "http://127.0.0.1:8188"
 
 
@@ -279,10 +297,12 @@ def run_analyzer(mv_id: int):
         # Cap cut length at what a forward clip can fill (clip native length ×
         # the per-video stretch budget) so no slot needs a reverse to cover it.
         s = _settings(mv)
-        max_cut_s = _max_clip_s(s) * float(s["max_stretch"])
+        # Both bounds scale with Clip Stretch so the setting lengthens clips (energy still varies
+        # pacing within the band). max_cut_s also remains the forward-clip ceiling for _split_long_cuts.
+        min_cut_s, max_cut_s = _cut_length_bounds(s)
         plan = compute_cut_plan(
             structure["beat_times"], structure["sections"], structure["duration_seconds"],
-            max_cut_s=max_cut_s,
+            max_cut_s=max_cut_s, min_cut_s=min_cut_s,
         )
         if not plan:
             raise RuntimeError("cut planner produced no cuts")
@@ -302,7 +322,7 @@ def run_analyzer(mv_id: int):
             # instead of many short frantic ones.
             plan = compute_cut_plan(
                 structure["beat_times"], structure["sections"], structure["duration_seconds"],
-                max_cut_s=max_cut_s,
+                max_cut_s=max_cut_s, min_cut_s=min_cut_s,
                 slow_pace=True,
             )
 

@@ -45,6 +45,7 @@ class VideoGenerationRequest:
     interpolation_multiplier: int = 2  # 1 = no interpolation, 2 = double fps, 4 = quad fps
     prompt_style: str = "cinematic"   # Enhancement style: cinematic, realistic, artistic, anime, none
     enhance_prompt: bool = True       # Whether to run prompt through the enhancer
+    fidelity_mode: bool = False       # Light enhancement only (Exact text / preserve fidelity mode)
     freeu: bool = False
     face_restore: bool = False
     lora_name: Optional[str] = None
@@ -1376,15 +1377,19 @@ class ComfyUIVideoGenerator:
         if request.enhance_prompt and request.prompt:
             try:
                 from backend.utils.prompt_enhancer import enhance_video_prompt, get_default_negative_prompt
+                # Pass model_family for motion-aware hints (wan vs cogvideox)
+                mf = self._model_family(request.model)
                 request.prompt = enhance_video_prompt(
                     request.prompt,
                     style=request.prompt_style,
                     width=request.width,
                     height=request.height,
+                    model_family=mf,
+                    fidelity_mode=getattr(request, "fidelity_mode", False),
                 )
                 if not request.negative_prompt:
                     request.negative_prompt = get_default_negative_prompt(style=request.prompt_style)
-                logger.info(f"Prompt enhanced (style={request.prompt_style}): {request.prompt[:120]}...")
+                logger.info(f"Prompt enhanced (style={request.prompt_style}, family={mf}): {request.prompt[:120]}...")
             except Exception as e:
                 logger.warning(f"Prompt enhancement failed, using original prompt: {e}")
 
@@ -1602,11 +1607,25 @@ class ComfyUIVideoGenerator:
                         model_node_id = nid
                         break
                 if model_node_id:
-                    freeu_id = self._add_freeu_node(workflow, model_node_id, is_cogvideo=True)
-                    for nid, node in workflow.items():
-                        if node.get("class_type") == "CogVideoSampler":
-                            if node["inputs"].get("model", [None])[0] == model_node_id:
-                                node["inputs"]["model"] = [freeu_id, 0]
+                    # CogVideoX uses a custom typed model (COGVIDEOMODEL) from the wrapper.
+                    # Generic FreeU_V2 outputs plain MODEL, which causes ComfyUI prompt
+                    # validation to fail with "Return type mismatch ... MODEL vs COGVIDEOMODEL"
+                    # on the CogVideoSampler input. Skip for Cog (Wan never reaches here).
+                    family = self._model_family(model)
+                    if family == "cogvideox":
+                        logger.warning(
+                            "FreeU Enhance requested for CogVideoX model but skipped: "
+                            "incompatible with custom COGVIDEOMODEL typing (would produce "
+                            "invalid prompt for CogVideoSampler). General options like "
+                            "interpolation, upscale, and prompt enhancement still apply. "
+                            "FreeU works on supported Wan paths."
+                        )
+                    else:
+                        freeu_id = self._add_freeu_node(workflow, model_node_id, is_cogvideo=True)
+                        for nid, node in workflow.items():
+                            if node.get("class_type") == "CogVideoSampler":
+                                if node["inputs"].get("model", [None])[0] == model_node_id:
+                                    node["inputs"]["model"] = [freeu_id, 0]
 
             # Apply Lora if requested. Only the CogVideoX backbone has a LoRA hook
             # here (DownloadAndLoadCogVideoModel + CLIPLoader → LoraLoader chain).
@@ -1622,7 +1641,22 @@ class ComfyUIVideoGenerator:
                         model_node_id = nid
                     elif node.get("class_type") == "CLIPLoader":
                         clip_node_id = nid
-                if model_node_id and clip_node_id:
+                family = self._model_family(model)
+                if family == "cogvideox":
+                    # Same type incompatibility as FreeU: LoraLoader produces generic
+                    # MODEL; CogVideoSampler expects COGVIDEOMODEL from the custom loader.
+                    # This produces the exact "Return type mismatch MODEL vs COGVIDEOMODEL"
+                    # validation error seen in logs. Skip with explanation.
+                    logger.warning(
+                        "LoRA '%s' requested for CogVideoX but not applied: "
+                        "incompatible with custom COGVIDEOMODEL typing used by "
+                        "DownloadAndLoadCogVideoModel + CogVideoSampler (causes prompt "
+                        "validation failure). The option is ignored for Cog models. "
+                        "Use Wan models if LoRA character consistency is needed, or "
+                        "rely on the I2V starting image for identity.",
+                        request.lora_name,
+                    )
+                elif model_node_id and clip_node_id:
                     new_model, new_clip = self._add_lora_loader(workflow, model_node_id, clip_node_id, request.lora_name, request.lora_strength)
                     for nid, node in workflow.items():
                         if node.get("class_type") == "CogVideoSampler":
@@ -1635,7 +1669,7 @@ class ComfyUIVideoGenerator:
                     logger.warning(
                         "LoRA '%s' not applied: backbone=%s has no LoRA hook; "
                         "identity comes from the init frame.",
-                        request.lora_name, self._model_family(model),
+                        request.lora_name, family,
                     )
 
             logger.info("Sending workflow to ComfyUI...")
@@ -1671,15 +1705,23 @@ class ComfyUIVideoGenerator:
             steps = request.num_inference_steps or 30
             has_upscale = request.metadata.get("upscale", False) if request.metadata else False
             is_high_res = max(request.width or 0, request.height or 0) >= 1280
-            if is_wan and is_high_res:
-                gen_timeout = 7200  # 2 hours — HD/1080p with CPU offloading takes a while
-            elif is_wan and (steps >= 50 or has_upscale):
-                gen_timeout = 2400  # 40 min — max quality + cinema upscale
+            fpb = getattr(request, "frames_per_batch", 1) or 1
+            interp = getattr(request, "interpolation_multiplier", 1) or 1
+            # Rough estimator: base * (frames/81) * (steps/25) * (1 + 0.6*(has_upscale)) * (1 + 0.3*(fpb>1)) etc.
+            base = 1200 if is_wan else 600
+            scale = (max(1, request.duration_frames or 49) / 81.0) * (max(10, steps) / 25.0)
+            scale *= (1.7 if has_upscale else 1.0)
+            scale *= (1.2 if fpb > 1 else 1.0)
+            scale *= (1.15 if interp > 1 else 1.0)
+            if is_high_res:
+                gen_timeout = max(3600, int(base * scale * 2.2))  # HD path
+            elif is_wan and (steps >= 40 or has_upscale):
+                gen_timeout = max(1800, int(base * scale * 1.8))
             elif is_wan:
-                gen_timeout = 1200  # 20 min — standard Wan generations
+                gen_timeout = max(900, int(base * scale))
             else:
-                gen_timeout = 600   # 10 min — lighter models
-            logger.info(f"Waiting for ComfyUI to complete generation (prompt_id: {prompt_id}, timeout: {gen_timeout}s, steps: {steps}, upscale: {has_upscale}, high_res: {is_high_res})...")
+                gen_timeout = max(400, int(base * scale * 0.7))
+            logger.info(f"Waiting for ComfyUI to complete generation (prompt_id: {prompt_id}, timeout: {gen_timeout}s, steps: {steps}, upscale: {has_upscale}, high_res: {is_high_res}, fpb={fpb})...")
             outputs = self._wait_for_completion(prompt_id, timeout=gen_timeout)
             progress_bridge.stop()  # /history poll owns completion; bridge is done
 

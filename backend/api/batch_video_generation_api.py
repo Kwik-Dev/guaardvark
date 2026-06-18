@@ -14,7 +14,7 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from flask import Blueprint, request, send_file
 from werkzeug.utils import secure_filename
@@ -135,8 +135,10 @@ def generate_text_to_video_batch():
             "frames_per_batch": int(data.get("frames_per_batch", 1)),
             "combine_frames": str(data.get("combine_frames", "false")).lower() == "true",
             "interpolation_multiplier": int(data.get("interpolation_multiplier", 2)),
+            "frames_per_batch": int(data.get("frames_per_batch", 1)),
             "prompt_style": data.get("prompt_style", "cinematic"),
             "enhance_prompt": str(data.get("enhance_prompt", "true")).lower() != "false",
+            "fidelity_mode": str(data.get("fidelity_mode", data.get("preserve_text_fidelity", "false"))).lower() == "true",
             "negative_prompt": data.get("negative_prompt", "") or "",
             "freeu": str(data.get("freeu", "false")).lower() == "true",
             "face_restore": str(data.get("face_restore", "false")).lower() == "true",
@@ -190,8 +192,10 @@ def generate_image_to_video_batch():
             "frames_per_batch": int(data.get("frames_per_batch", 1)),
             "combine_frames": str(data.get("combine_frames", "false")).lower() == "true",
             "interpolation_multiplier": int(data.get("interpolation_multiplier", 2)),
+            "frames_per_batch": int(data.get("frames_per_batch", 1)),
             "prompt_style": data.get("prompt_style", "cinematic"),
             "enhance_prompt": str(data.get("enhance_prompt", "true")).lower() != "false",
+            "fidelity_mode": str(data.get("fidelity_mode", data.get("preserve_text_fidelity", "false"))).lower() == "true",
             "negative_prompt": data.get("negative_prompt", "") or "",
             "freeu": str(data.get("freeu", "false")).lower() == "true",
             "face_restore": str(data.get("face_restore", "false")).lower() == "true",
@@ -213,6 +217,75 @@ def generate_image_to_video_batch():
         return success_response({"batch_id": status.batch_id, "status": status.status})
     except Exception as e:
         logger.error(f"Failed to start image-to-video batch: {e}")
+        return error_response(str(e), 500)
+
+
+@batch_video_bp.route("/enhance-preview", methods=["POST"])
+def enhance_prompt_preview():
+    """
+    Lightweight preview of what the prompt enhancer will produce.
+
+    Frontend calls this (or can call client-side in future) to show the user
+    the final enhanced prompt + the default negative that will be used.
+
+    Accepts the same fields used at generation time:
+      prompt (or prompts[0] for batch), style, width, height, fidelity_mode, model, etc.
+    Returns the strings that would actually be sent to the model.
+    """
+    try:
+        data = request.get_json(silent=True) or request.form.to_dict() or {}
+        # Support both single prompt and the batch "prompts" list (take first for preview)
+        prompt = data.get("prompt") or ""
+        if not prompt:
+            prompts = _parse_list(data.get("prompts"))
+            prompt = prompts[0] if prompts else ""
+        if not prompt:
+            return error_response("No prompt provided for preview", 400)
+
+        style = data.get("prompt_style", "cinematic")
+        width = _parse_int(data.get("width")) or 0
+        height = _parse_int(data.get("height")) or 0
+
+        # fidelity_mode: UI "Exact text mode" / preserve fidelity toggle
+        fidelity = str(data.get("fidelity_mode", data.get("preserve_text_fidelity", "false"))).lower() == "true"
+
+        # model_family hint (frontend can send model or we infer)
+        model = data.get("model", "")
+        model_family = None
+        if "wan" in (model or "").lower():
+            model_family = "wan"
+        elif "cog" in (model or "").lower():
+            model_family = "cogvideox"
+
+        from backend.utils.prompt_enhancer import (
+            enhance_video_prompt,
+            get_default_negative_prompt,
+            has_text_intent,
+        )
+
+        enhanced = enhance_video_prompt(
+            prompt,
+            style=style,
+            width=width,
+            height=height,
+            fidelity_mode=fidelity,
+            model_family=model_family,
+        )
+
+        # Default negative that the backend would inject if user left it blank
+        default_neg = get_default_negative_prompt(style=style)
+
+        return success_response({
+            "original_prompt": prompt,
+            "enhanced_prompt": enhanced,
+            "default_negative_prompt": default_neg,
+            "fidelity_mode": fidelity,
+            "has_text_intent": has_text_intent(prompt),
+            "model_family": model_family,
+            "style": style,
+        })
+    except Exception as e:
+        logger.error(f"Failed to generate prompt preview: {e}")
         return error_response(str(e), 500)
 
 
@@ -248,6 +321,7 @@ def get_batch_status(batch_id: str):
                 "results": results,
                 "metadata": status.metadata,
                 "output_dir": status.output_dir,
+                "retry_data": getattr(status, "retry_data", None),
             }
         )
     except Exception as e:
@@ -425,6 +499,55 @@ def cancel_batch(batch_id: str):
         return error_response("Batch not found or not in a cancellable state", 404)
     except Exception as e:
         logger.error(f"Failed to cancel batch: {e}")
+        return error_response(str(e), 500)
+
+
+@batch_video_bp.route("/retry/<batch_id>", methods=["POST"])
+def retry_batch(batch_id: str):
+    """
+    Retry a failed (or cancelled) batch using the exact original parameters
+    that were persisted at submission time. This lets the UI offer a one-click
+    "Retry" without the user having to re-type prompts, re-select images,
+    re-choose model, steps, fidelity_mode, FreeU, LoRA, quality tier, etc.
+
+    Returns the new batch_id (a fresh VideoBatch_... entry is created and queued).
+    The original failed batch is left as-is in history.
+    """
+    try:
+        generator = get_batch_video_generator()
+        orig = generator.get_batch_status(batch_id)
+        if not orig:
+            return error_response("Batch not found", 404)
+        rd = getattr(orig, "retry_data", None)
+        if not rd:
+            return error_response("This batch has no retry data (too old, or created before retry support)", 400)
+
+        params = dict(rd.get("params") or {})
+        mode = rd.get("mode")
+        if mode == "text":
+            prompts = rd.get("prompts") or []
+            if not prompts:
+                return error_response("Retry data is missing prompts", 400)
+            # start_batch_from_prompts will rebuild items + enqueue
+            new_status = generator.start_batch_from_prompts(prompts=prompts, **params)
+        elif mode == "image":
+            image_paths = rd.get("image_paths") or []
+            if not image_paths:
+                return error_response("Retry data is missing image_paths", 400)
+            prompt = rd.get("prompt", "") or params.pop("prompt", "")
+            if prompt:
+                params["prompt"] = prompt
+            new_status = generator.start_batch_from_images(image_paths=image_paths, **params)
+        else:
+            return error_response(f"Unknown retry mode: {mode}", 400)
+
+        return success_response({
+            "batch_id": new_status.batch_id,
+            "status": new_status.status,
+            "retried_from": batch_id,
+        })
+    except Exception as e:
+        logger.error(f"Failed to retry batch {batch_id}: {e}")
         return error_response(str(e), 500)
 
 

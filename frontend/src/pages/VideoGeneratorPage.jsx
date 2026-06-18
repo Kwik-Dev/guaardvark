@@ -178,11 +178,11 @@ const MOTION_PRESETS = {
   },
 };
 
-// Post-processing quality tiers (interpolation + upscaling)
+// Post-processing quality tiers (interpolation + upscaling + power features guidance)
 const OUTPUT_QUALITY_TIERS = {
   draft: {
     label: "Draft",
-    description: "Raw output, fastest",
+    description: "Raw output, fastest (no extra post)",
     interpolation: 1,
     upscale: false,
   },
@@ -194,7 +194,7 @@ const OUTPUT_QUALITY_TIERS = {
   },
   cinema: {
     label: "Cinema",
-    description: "2x FPS + 2x upscale",
+    description: "2x FPS + 2x upscale + recommended power features",
     interpolation: 2,
     upscale: true,
   },
@@ -376,6 +376,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [qualityTier, setQualityTier] = useState("standard");
   const [promptStyle, setPromptStyle] = useState("cinematic");
   const [enhancePrompt, setEnhancePrompt] = useState(true);
+  const [fidelityMode, setFidelityMode] = useState(false); // "Exact text mode" / preserve fidelity — light enhancement only
+
+  // Prompt preview state (calls /enhance-preview)
+  const [previewEnhanced, setPreviewEnhanced] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
 
   // Batch-wide prompt modifiers (mirror BatchImageGen's "Look & Feel" pattern)
   const [lookAndFeel, setLookAndFeel] = useState("");
@@ -647,6 +653,45 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       feta_weight: fetaEnabled && isCogVideoXModel(effectiveModel) ? fetaWeight : null,
     };
   }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, teaCacheEnabled, teaCacheThreshold, fetaEnabled, fetaWeight]);
+
+  // Fetch enhanced prompt preview from backend (re-uses the same enhance_video_prompt logic + fidelity_mode)
+  const fetchPromptPreview = async () => {
+    // Compute first prompt locally to avoid forward-reference issues with parsedPrompts const
+    const firstLine = (promptsText || "").split("\n").map((p) => p.trim()).filter(Boolean)[0] || "";
+    const basePrompt = inputMode === "text" ? (firstLine || promptsText.trim()) : promptsText.trim();
+    if (!basePrompt) {
+      setPreviewEnhanced("");
+      return;
+    }
+    setPreviewLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/batch-video/enhance-preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: basePrompt,
+          prompt_style: promptStyle,
+          enhance_prompt: enhancePrompt,
+          fidelity_mode: fidelityMode,
+          model,
+          width: (computedParams && computedParams.width) || videoDimensions.width,
+          height: (computedParams && computedParams.height) || videoDimensions.height,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        setPreviewEnhanced(data.data.enhanced_prompt || "");
+        setShowPreview(true);
+      } else {
+        setPreviewEnhanced("");
+      }
+    } catch (e) {
+      console.error("Prompt preview failed", e);
+      setPreviewEnhanced("");
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
 
   const parsedPrompts = useMemo(() => {
     return promptsText
@@ -966,11 +1011,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
       const body =
         inputMode === "text"
-          ? { prompts: finalPrompts, ...computedParams, ...negativePayload }
+          ? { prompts: finalPrompts, ...computedParams, fidelity_mode: fidelityMode, ...negativePayload }
           : {
               image_paths: imagePaths,
               prompt: lf && motionPrompt ? `${motionPrompt}, ${lf}` : motionPrompt,
               ...computedParams,
+              fidelity_mode: fidelityMode,
               ...negativePayload,
             };
 
@@ -1067,6 +1113,32 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       }
     } catch (e) {
       // ignore
+    }
+  };
+
+  const handleRetryBatch = async (batchId) => {
+    try {
+      setError("");
+      const res = await fetch(`${API_BASE}/batch-video/retry/${batchId}`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setError(errData.error || `Retry failed: HTTP ${res.status}`);
+        return;
+      }
+      const data = await res.json();
+      if (data.success && data.data?.batch_id) {
+        const newBatchId = data.data.batch_id;
+        setActiveBatchId(newBatchId);
+        setBatchStatus(null);
+        startPollingStatus(newBatchId);
+        await fetchBatches();
+        await fetchQueue();
+        setSuccess(`Retried as new batch ${newBatchId}. Original failed batch is preserved in history.`);
+      }
+    } catch (e) {
+      setError(`Retry failed: ${e.message}`);
     }
   };
 
@@ -1461,6 +1533,70 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 </Box>
               </Tooltip>
             )}
+
+            {/* Fidelity / Exact text mode + live preview of enhancement */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={fidelityMode}
+                    onChange={(e) => {
+                      const v = e.target.checked;
+                      setFidelityMode(v);
+                      // Reset preview when toggling so user sees the difference
+                      setPreviewEnhanced("");
+                      setShowPreview(false);
+                    }}
+                    size="small"
+                  />
+                }
+                label={
+                  <Tooltip title="Exact text / preserve fidelity mode: uses light enhancement only (orientation + motion hints, no heavy style boilerplate). Prevents garbling of on-screen text/logos.">
+                    <Typography variant="body2">Exact text mode (light enhance)</Typography>
+                  </Tooltip>
+                }
+                sx={{ mr: 1 }}
+              />
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={fetchPromptPreview}
+                disabled={previewLoading || !((inputMode === "text" ? parsedPrompts.length : promptsText.trim()) > 0)}
+                startIcon={previewLoading ? <CircularProgress size={14} /> : null}
+              >
+                {previewLoading ? "Previewing..." : "Preview enhanced prompt"}
+              </Button>
+            </Box>
+
+            {showPreview && previewEnhanced && (
+              <TextField
+                label="Enhanced prompt (what will be sent to the model)"
+                value={previewEnhanced}
+                multiline
+                minRows={2}
+                fullWidth
+                variant="filled"
+                size="small"
+                InputProps={{ readOnly: true }}
+                helperText="Result of backend prompt enhancer (style + motion hints + fidelity handling). Regenerate batch to apply changes."
+                sx={{ mt: 0.5 }}
+              />
+            )}
+
+            {/* frames_per_batch exposed (P0) — hidden behind lowVram force in computedParams */}
+            <TextField
+              label="Frames / batch (advanced)"
+              type="number"
+              size="small"
+              inputProps={{ min: 1, max: 8 }}
+              value={advancedParams.frames_per_batch}
+              onChange={(e) => {
+                const v = Math.max(1, parseInt(e.target.value || "1", 10));
+                setAdvancedParams((prev) => ({ ...prev, frames_per_batch: v }));
+              }}
+              helperText=">1 can speed up when VRAM allows (model dependent). Low VRAM mode forces 1."
+              sx={{ maxWidth: 180 }}
+            />
           </Stack>
 
           <Divider sx={{ my: 3 }} />
@@ -1766,7 +1902,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       lora_name: e.target.value,
                     })
                   }
-                  helperText="Optional (e.g. character.safetensors)"
+                  disabled={isCogVideoXModel(model)}
+                  helperText={isCogVideoXModel(model) ? "Not supported for Cog (see backend logs)" : "Optional (e.g. character.safetensors)"}
                   sx={{ width: { xs: '100%', sm: '280px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
                 />
                 {advancedParams.lora_name && (
@@ -1782,6 +1919,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         lora_strength: Number(e.target.value),
                       })
                     }
+                    disabled={isCogVideoXModel(model)}
                     helperText="Default 1.0"
                     sx={{ width: { xs: '100%', sm: '140px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
                   />
@@ -1793,13 +1931,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       onChange={(e) => setAdvancedParams({...advancedParams, freeu: e.target.checked})}
                       color="primary"
                       size="small"
+                      disabled={isCogVideoXModel(model)}
                     />
                   }
                   label={
                     <Box>
                       <Typography variant="body2">FreeU Enhance</Typography>
                       <Typography variant="caption" color="text.secondary">
-                        Improve fine details
+                        {isCogVideoXModel(model) ? "Not supported for CogVideoX (type incompatibility)" : "Improve fine details"}
                       </Typography>
                     </Box>
                   }
@@ -2373,10 +2512,35 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     );
                   })}
                 </Grid>
+
+                {(batchStatus.status === 'error' || batchStatus.status === 'cancelled') && (
+                  <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
+                    {batchStatus.retry_data ? (
+                      <Button
+                        startIcon={<RefreshIcon />}
+                        variant="contained"
+                        color="primary"
+                        onClick={() => handleRetryBatch(batchStatus.batch_id)}
+                      >
+                        Retry Batch
+                      </Button>
+                    ) : (
+                      // No saved config (legacy batch) — honest disabled state, not placebo.
+                      // Disabled buttons swallow hover events, so wrap in a span for the Tooltip.
+                      <Tooltip title="Original prompts & settings weren't saved for this batch (created before retry support), so it can't be auto-retried. Recreate it from the settings above.">
+                        <span>
+                          <Button startIcon={<RefreshIcon />} variant="outlined" color="primary" disabled>
+                            Retry Batch
+                          </Button>
+                        </span>
+                      </Tooltip>
+                    )}
+                  </Box>
+                )}
               </CardContent>
             </Card>
           ) : (
-            <Card sx={{ 
+            <Card sx={{
               mb: 3,
               boxShadow: 2,
               borderRadius: 2
@@ -2541,6 +2705,20 @@ const VideoGeneratorPage = ({ embedded = false }) => {
             <Box key={`ctrl-${b.batch_id}`} sx={{ mt: 1 }}>
               <Button size="small" color="warning" variant="outlined" onClick={() => handleCancelBatch(b.batch_id)}>
                 Cancel {b.display_name || b.batch_id.slice(0, 8)}
+              </Button>
+            </Box>
+          ))}
+          {/* Retry for failed batches that have persisted original config */}
+          {batches.filter(b => b.status === "error" && b.can_retry).map((b) => (
+            <Box key={`retry-${b.batch_id}`} sx={{ mt: 1 }}>
+              <Button
+                size="small"
+                color="primary"
+                variant="contained"
+                startIcon={<RefreshIcon />}
+                onClick={() => handleRetryBatch(b.batch_id)}
+              >
+                Retry {b.display_name || b.batch_id.slice(0, 8)}
               </Button>
             </Box>
           ))}

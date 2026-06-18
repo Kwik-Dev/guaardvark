@@ -969,9 +969,13 @@ class OfflineVideoGenerator:
                         if getattr(request, "enhance_prompt", True):
                             from backend.utils.prompt_enhancer import enhance_video_prompt
                             style = getattr(request, "prompt_style", "cinematic")
+                            # model_family for better motion hints (reuse same helper as comfy path)
+                            mf = self._model_family(request.model) if hasattr(self, "_model_family") else "default"
                             request.prompt = enhance_video_prompt(
                                 request.prompt, style=style,
                                 width=request.width, height=request.height,
+                                model_family=mf,
+                                fidelity_mode=getattr(request, "fidelity_mode", False),
                             )
 
                         initial_image = None

@@ -14,6 +14,7 @@ import subprocess
 import threading
 import uuid
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -52,9 +53,21 @@ def _get_video_logger():
             log_path.parent.mkdir(parents=True, exist_ok=True)
             _video_log_handler = logging.FileHandler(str(log_path))
             _video_log_handler.setFormatter(logging.Formatter(
-                "%(asctime)s %(levelname)s %(message)s"
+                "%(asctime)s %(levelname)s [%(name)s] %(message)s"
             ))
+            # Attach to this module (high-level batch orchestration)
             logger.addHandler(_video_log_handler)
+            logger.setLevel(logging.INFO)
+
+            # Also attach to the detailed generator so "Using Wan/Cog...", "Added TeaCache",
+            # "Prompt enhanced", VAE/RIFE/ post-proc logs, etc. end up in the dedicated file
+            # instead of only backend.log or being lost to stdout/Comfy capture.
+            try:
+                comfy_log = logging.getLogger("backend.services.comfyui_video_generator")
+                comfy_log.addHandler(_video_log_handler)
+                comfy_log.setLevel(logging.INFO)
+            except Exception:
+                pass
         except Exception:
             pass
     return logger
@@ -88,6 +101,7 @@ class BatchVideoRequest:
     interpolation_multiplier: int = 2
     prompt_style: str = "cinematic"
     enhance_prompt: bool = True
+    fidelity_mode: bool = False,  # "Exact text / preserve fidelity" — light enhancement only
     negative_prompt: str = ""
     freeu: bool = False
     face_restore: bool = False
@@ -120,6 +134,7 @@ class BatchVideoStatus:
     error: Optional[str] = None
     output_dir: Optional[str] = None
     metadata: Dict = field(default_factory=dict)
+    retry_data: Optional[Dict] = None  # persisted original prompts/image_paths + params for one-click retry on failed batches
 
 
 class BatchVideoGenerator:
@@ -294,88 +309,104 @@ class BatchVideoGenerator:
             batch_dir = Path(batch_request.output_dir)
             batch_dir.mkdir(parents=True, exist_ok=True)
 
-            for item in batch_request.items:
-                if cancel_event and cancel_event.is_set():
-                    status.status = "cancelled"
-                    break
-                if status.status == "cancelled":
-                    break
+            # Parallel processing of items within the batch (major P0 perf win).
+            # The batch-level GPU locks are still held for the whole batch (safety),
+            # but we overlap python work, status updates, and allow the Comfy queue
+            # to see multiple jobs. Per-item cancel is checked.
+            items = list(batch_request.items)
+            if items:
+                def _process_item(item):
+                    """Inner worker: returns (batch_result, completed_delta, failed_delta, oom_flag)"""
+                    if cancel_event and cancel_event.is_set():
+                        return (BatchVideoResult(item_id=item.id, success=False, error="cancelled before start"), 0, 0, False)
 
-                try:
-                    meta = dict(item.metadata or {})
-                    meta.setdefault("item_id", item.id)
-                    # Mark as batch-controlled so individual generate_video doesn't acquire its own lock
-                    meta["batch_controlled"] = True
-                    if item.image_path:
-                        meta.setdefault("image_path", item.image_path)
+                    try:
+                        meta = dict(item.metadata or {})
+                        meta.setdefault("item_id", item.id)
+                        meta["batch_controlled"] = True
+                        if item.image_path:
+                            meta.setdefault("image_path", item.image_path)
 
-                    gen_request = VideoGenerationRequest(
-                        prompt=item.prompt or "",
-                        negative_prompt=batch_request.negative_prompt,
-                        model=batch_request.model,
-                        duration_frames=batch_request.duration_frames,
-                        fps=batch_request.fps,
-                        width=batch_request.width,
-                        height=batch_request.height,
-                        motion_strength=batch_request.motion_strength,
-                        num_inference_steps=batch_request.num_inference_steps,
-                        guidance_scale=batch_request.guidance_scale,
-                        seed=batch_request.seed,
-                        generate_frames_only=batch_request.generate_frames_only,
-                        frames_per_batch=batch_request.frames_per_batch,
-                        combine_frames=batch_request.combine_frames,
-                        output_dir=batch_dir,
-                        metadata=meta,
-                        interpolation_multiplier=batch_request.interpolation_multiplier,
-                        prompt_style=batch_request.prompt_style,
-                        enhance_prompt=batch_request.enhance_prompt,
-                        freeu=batch_request.freeu,
-                        face_restore=batch_request.face_restore,
-                        lora_name=batch_request.lora_name,
-                        lora_strength=batch_request.lora_strength,
-                    )
+                        gen_request = VideoGenerationRequest(
+                            prompt=item.prompt or "",
+                            negative_prompt=batch_request.negative_prompt,
+                            model=batch_request.model,
+                            duration_frames=batch_request.duration_frames,
+                            fps=batch_request.fps,
+                            width=batch_request.width,
+                            height=batch_request.height,
+                            motion_strength=batch_request.motion_strength,
+                            num_inference_steps=batch_request.num_inference_steps,
+                            guidance_scale=batch_request.guidance_scale,
+                            seed=batch_request.seed,
+                            generate_frames_only=batch_request.generate_frames_only,
+                            frames_per_batch=batch_request.frames_per_batch,
+                            combine_frames=batch_request.combine_frames,
+                            output_dir=batch_dir,
+                            metadata=meta,
+                            interpolation_multiplier=batch_request.interpolation_multiplier,
+                            prompt_style=batch_request.prompt_style,
+                            enhance_prompt=batch_request.enhance_prompt,
+                            fidelity_mode=batch_request.fidelity_mode,
+                            freeu=batch_request.freeu,
+                            face_restore=batch_request.face_restore,
+                            lora_name=batch_request.lora_name,
+                            lora_strength=batch_request.lora_strength,
+                        )
 
-                    result: VideoGenerationResult = self.video_generator.generate_video(gen_request)
-                    batch_result = BatchVideoResult(
-                        item_id=item.id,
-                        success=result.success,
-                        video_path=result.video_path,
-                        frame_paths=result.frame_paths,
-                        thumbnail_path=result.thumbnail_path,
-                        error=result.error,
-                        metadata=result.metadata,
-                    )
-                    status.results.append(batch_result)
-                    if result.success:
-                        status.completed_videos += 1
-                    else:
-                        status.failed_videos += 1
-                except Exception as e:  # pragma: no cover - runtime safety
-                    err_str = str(e)
-                    logger.error(f"Error generating video for item {item.id}: {e}")
-                    is_oom = (
-                        isinstance(e, RuntimeError) and ("out of memory" in err_str.lower() or "cuda" in err_str.lower() and "memory" in err_str.lower())
-                        or "torch.cuda.OutOfMemoryError" in str(type(e)) or "OutOfMemory" in err_str
-                        or "CUDA out of memory" in err_str
-                    )
-                    status.failed_videos += 1
-                    oom_note = " (OOM - VRAM exhausted; try smaller res/fewer steps or evict other models)" if is_oom else ""
-                    if is_oom and hasattr(self, "video_generator") and hasattr(self.video_generator, "service_available"):
-                        try:
-                            self.video_generator.service_available = False
-                        except Exception:
-                            pass
-                    status.results.append(
-                        BatchVideoResult(
+                        result: VideoGenerationResult = self.video_generator.generate_video(gen_request)
+                        br = BatchVideoResult(
+                            item_id=item.id,
+                            success=result.success,
+                            video_path=result.video_path,
+                            frame_paths=result.frame_paths,
+                            thumbnail_path=result.thumbnail_path,
+                            error=result.error,
+                            metadata=result.metadata,
+                        )
+                        return (br, 1 if result.success else 0, 0 if result.success else 1, False)
+                    except Exception as e:  # pragma: no cover
+                        err_str = str(e)
+                        logger.error(f"Error generating video for item {item.id}: {e}")
+                        is_oom = (
+                            isinstance(e, RuntimeError) and ("out of memory" in err_str.lower() or "cuda" in err_str.lower() and "memory" in err_str.lower())
+                            or "torch.cuda.OutOfMemoryError" in str(type(e)) or "OutOfMemory" in err_str
+                            or "CUDA out of memory" in err_str
+                        )
+                        oom_note = " (OOM - VRAM exhausted; try smaller res/fewer steps or evict other models)" if is_oom else ""
+                        if is_oom and hasattr(self, "video_generator") and hasattr(self.video_generator, "service_available"):
+                            try:
+                                self.video_generator.service_available = False
+                            except Exception:
+                                pass
+                        br = BatchVideoResult(
                             item_id=item.id,
                             success=False,
                             error=err_str + oom_note,
                         )
-                    )
-                    if is_oom:
-                        status.error = (status.error or "") + "OOM in batch item; "
-                finally:
-                    self._save_metadata(status)
+                        return (br, 0, 1, is_oom)
+
+                max_workers = max(1, min(4, len(items)))
+                with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="video-item") as ex:
+                    future_map = {ex.submit(_process_item, it): it for it in items}
+                    for fut in as_completed(future_map):
+                        if cancel_event and cancel_event.is_set():
+                            status.status = "cancelled"
+                            break
+                        try:
+                            br, dc, df, oom = fut.result()
+                            status.results.append(br)
+                            status.completed_videos += dc
+                            status.failed_videos += df
+                            if oom:
+                                status.error = (status.error or "") + "OOM in batch item; "
+                        except Exception as e:
+                            it = future_map[fut]
+                            logger.error(f"Item worker {it.id} failed: {e}")
+                            status.failed_videos += 1
+                            status.results.append(BatchVideoResult(item_id=it.id, success=False, error=str(e)))
+                        finally:
+                            self._save_metadata(status)
 
             if status.status != "cancelled":
                 status.status = "completed" if status.failed_videos == 0 else "error"
@@ -495,6 +526,7 @@ class BatchVideoGenerator:
             interpolation_multiplier=int(params.get("interpolation_multiplier", 2)),
             prompt_style=params.get("prompt_style", "cinematic"),
             enhance_prompt=bool(params.get("enhance_prompt", True)),
+            fidelity_mode=bool(params.get("fidelity_mode", False)),
             negative_prompt=params.get("negative_prompt", "") or "",
             freeu=bool(params.get("freeu", False)),
             face_restore=bool(params.get("face_restore", False)),
@@ -510,6 +542,53 @@ class BatchVideoGenerator:
             output_dir=str(batch_dir),
             metadata=params.get("metadata", {}),
         )
+
+        # Persist enough info to allow one-click retry for failed batches without
+        # user re-entering all prompts, images, model, steps, fidelity, lora, freeu, tiers etc.
+        try:
+            is_image_mode = any(getattr(i, "image_path", None) for i in items)
+            prompts_list = [i.prompt for i in items]
+            image_paths_list = [i.image_path for i in items if getattr(i, "image_path", None)]
+            retry_params = {
+                "model": batch_request.model,
+                "duration_frames": batch_request.duration_frames,
+                "fps": batch_request.fps,
+                "width": batch_request.width,
+                "height": batch_request.height,
+                "motion_strength": batch_request.motion_strength,
+                "num_inference_steps": batch_request.num_inference_steps,
+                "guidance_scale": batch_request.guidance_scale,
+                "seed": batch_request.seed,
+                "generate_frames_only": batch_request.generate_frames_only,
+                "frames_per_batch": batch_request.frames_per_batch,
+                "combine_frames": batch_request.combine_frames,
+                "interpolation_multiplier": batch_request.interpolation_multiplier,
+                "prompt_style": batch_request.prompt_style,
+                "enhance_prompt": batch_request.enhance_prompt,
+                "fidelity_mode": batch_request.fidelity_mode,
+                "negative_prompt": batch_request.negative_prompt,
+                "freeu": batch_request.freeu,
+                "face_restore": batch_request.face_restore,
+                "lora_name": batch_request.lora_name,
+                "lora_strength": batch_request.lora_strength,
+                "metadata": dict(batch_request.metadata or {}),
+            }
+            if is_image_mode:
+                status.retry_data = {
+                    "mode": "image",
+                    "image_paths": image_paths_list,
+                    "prompt": prompts_list[0] if prompts_list else "",
+                    "params": retry_params,
+                }
+            else:
+                status.retry_data = {
+                    "mode": "text",
+                    "prompts": prompts_list,
+                    "params": retry_params,
+                }
+        except Exception:
+            # best effort; old batches without it are still loadable
+            pass
 
         with self.batch_lock:
             self.active_batches[batch_id] = status
@@ -584,6 +663,7 @@ class BatchVideoGenerator:
                     error=data.get("error"),
                     output_dir=data.get("output_dir"),
                     metadata=data.get("metadata", {}),
+                    retry_data=data.get("retry_data"),
                 )
             except Exception as e:  # pragma: no cover
                 logger.error(f"Failed to load batch status for {batch_id}: {e}")
@@ -905,6 +985,7 @@ class BatchVideoGenerator:
                                 "start_time": data.get("start_time"),
                                 "end_time": data.get("end_time"),
                                 "display_name": data.get("metadata", {}).get("display_name"),
+                                "can_retry": bool(data.get("retry_data")),
                             }
                         )
                     except Exception as e:
