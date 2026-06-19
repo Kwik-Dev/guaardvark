@@ -29,6 +29,24 @@ config.set_main_option("sqlalchemy.url", database_url)
 
 target_metadata = db.metadata
 
+# Tables that live in the database but are intentionally NOT ORM-modelled — they
+# are created and owned at runtime by feature code (raw CREATE TABLE IF NOT EXISTS),
+# not by models.py. Without this, --autogenerate would see them as "extra" and
+# propose dropping them on every run. Keep this list in sync with the runtime
+# table creators it names.
+RUNTIME_MANAGED_TABLES = {
+    "batch_job_columns",   # backend/utils/batch_job_db.py
+    "batch_job_rows",      # backend/utils/batch_job_db.py
+}
+
+
+def include_object(object_, name, type_, reflected, compare_to):
+    """Exclude runtime-managed tables from autogenerate so they aren't
+    proposed for removal (they have no ORM model by design)."""
+    if type_ == "table" and name in RUNTIME_MANAGED_TABLES:
+        return False
+    return True
+
 
 def run_migrations_offline():
     url = config.get_main_option("sqlalchemy.url")
@@ -37,6 +55,7 @@ def run_migrations_offline():
         target_metadata=target_metadata,
         literal_binds=True,
         render_as_batch=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -54,6 +73,7 @@ def run_migrations_online():
             connection=connection,
             target_metadata=target_metadata,
             render_as_batch=True,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()

@@ -840,6 +840,10 @@ class Document(db.Model):
     is_code_file = db.Column(db.Boolean, default=False)  # Flag for code files that should be stored for discussion
     size = db.Column(db.Integer, nullable=True)  # File size in bytes
     file_metadata = db.Column(db.Text, nullable=True)  # JSON metadata (renamed from 'metadata' due to SQLAlchemy reservation)
+    # Originating document for derived/converted files. Added live by a production
+    # migration but never back-ported to the model; reconciled here at the v2.6.1
+    # squash. Plain nullable integer to match live exactly (no FK constraint there).
+    source_document_id = db.Column(db.Integer, nullable=True)
 
     # RAG Enhancement fields for intelligent document categorization
     content_category = db.Column(db.String(100), nullable=True)  # Style Guide, Brand Assets, Training Data, etc.
