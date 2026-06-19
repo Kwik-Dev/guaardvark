@@ -107,6 +107,11 @@ class BatchVideoRequest:
     face_restore: bool = False
     lora_name: Optional[str] = None
     lora_strength: float = 1.0
+    # Quality pipeline (v2.6.2 — ported from the music-video generator). All opt-in;
+    # defaults preserve the existing fast single-pass text-to-video behavior.
+    director_mode: bool = False           # rewrite each prompt via the Video Director (cinematic)
+    cinematic_keyframe: bool = False      # FLUX still -> Wan2.2 I2V per clip (forces serial render)
+    director_guidance: Optional[str] = None  # optional free-text steer for the director
     metadata: Dict = field(default_factory=dict)
 
 
@@ -258,6 +263,85 @@ class BatchVideoGenerator:
         except Exception as e:  # pragma: no cover - best effort
             logger.warning(f"Failed to save batch metadata: {e}")
 
+    def _apply_director(self, batch_request: BatchVideoRequest) -> None:
+        """Rewrite each text item's prompt via the Video Director (cinematic enrichment).
+
+        Mutates ``batch_request.items[*].prompt`` in place and disables the lighter
+        downstream enhancer (the director already produced a full shot prompt, so the
+        generic boilerplate would just dilute it). Never raises — on any failure the
+        original prompts stand and generation proceeds unchanged."""
+        try:
+            from backend.services.video_director import direct_prompts
+            text_items = [it for it in batch_request.items if (it.prompt or "").strip()]
+            if not text_items:
+                return
+            style = (batch_request.metadata or {}).get("look_and_feel") or batch_request.prompt_style
+            directed = direct_prompts(
+                [it.prompt for it in text_items],
+                style=style,
+                extra_guidance=getattr(batch_request, "director_guidance", None),
+            )
+            changed = 0
+            for it, new_prompt in zip(text_items, directed):
+                if new_prompt and new_prompt.strip() and new_prompt.strip() != (it.prompt or "").strip():
+                    it.prompt = new_prompt.strip()
+                    changed += 1
+            # Director output is already a complete cinematic prompt; don't double-enhance.
+            batch_request.enhance_prompt = False
+            logger.info(
+                f"Video Director enhanced {changed}/{len(text_items)} prompt(s) for batch "
+                f"{batch_request.batch_id}"
+            )
+        except Exception as e:  # noqa: BLE001 — director must never fail a render
+            logger.warning(f"Director pass skipped for batch {batch_request.batch_id} (non-fatal): {e}")
+
+    @staticmethod
+    def _to_i2v_model(model: Optional[str]) -> str:
+        """Map a text-to-video model to its image-to-video sibling for cinematic mode.
+        Defaults to the music-video quality animator (Wan 2.2 I2V)."""
+        m = (model or "").lower()
+        if "i2v" in m:
+            return model  # already an I2V model
+        if m.startswith("cogvideox"):
+            return "cogvideox-5b-i2v"
+        return "wan22-14b-i2v"
+
+    def _generate_keyframe_still(self, *, prompt: str, width: int, height: int,
+                                 out_path: str, seed: int,
+                                 keyframe_model: Optional[str] = None) -> Optional[str]:
+        """Cinematic mode: render a keyframe still for ``prompt``, then evict it from VRAM
+        so the I2V animator can load (the music-video FLUX->i2v handoff — the i2v nodes
+        don't ask ComfyUI to make room, so without this they OOM on a still-full card).
+
+        Returns the still path on success, or None to fall back to plain text-to-video.
+        Never raises."""
+        try:
+            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+            from backend.services.gpu_resource_policy import free_comfyui_vram
+            # Snap to /16 (Wan/diffusion alignment); keep the still at the clip's aspect.
+            w = max(256, (int(width) // 16) * 16)
+            h = max(256, (int(height) // 16) * 16)
+            still = ComfyUIImageGenerator().generate_image(
+                prompt=prompt,
+                output_path=out_path,
+                width=w,
+                height=h,
+                seed=int(seed),
+                steps=30,
+                model=keyframe_model,  # None -> generator default; operator can pass "flux-schnell"
+            )
+            # Evict the still model BEFORE the animator loads.
+            try:
+                free_comfyui_vram()
+            except Exception:
+                pass
+            return still if still and Path(still).exists() else None
+        except Exception as e:  # noqa: BLE001 — fall back to T2V, never fail the item here
+            logger.warning(
+                f"Cinematic keyframe generation failed ({e}); falling back to text-to-video"
+            )
+            return None
+
     def _run_batch(self, batch_request: BatchVideoRequest, status: BatchVideoStatus) -> None:
         # TWO GPU arbiters guard this batch:
         #   1. JobOperationGate.gpu_exclusive (in-memory) — serializes against
@@ -309,6 +393,12 @@ class BatchVideoGenerator:
             batch_dir = Path(batch_request.output_dir)
             batch_dir.mkdir(parents=True, exist_ok=True)
 
+            # Director pass: rewrite each prompt into a cinematic shot prompt before
+            # generation. Runs here (background worker, not the HTTP handler) and never
+            # raises — a director hiccup falls back to the original prompts.
+            if getattr(batch_request, "director_mode", False):
+                self._apply_director(batch_request)
+
             # Parallel processing of items within the batch (major P0 perf win).
             # The batch-level GPU locks are still held for the whole batch (safety),
             # but we overlap python work, status updates, and allow the Comfy queue
@@ -327,10 +417,31 @@ class BatchVideoGenerator:
                         if item.image_path:
                             meta.setdefault("image_path", item.image_path)
 
+                        # Cinematic mode: for a TEXT item, synthesize a keyframe still and
+                        # animate it with Wan 2.2 I2V (the music-video quality path). An item
+                        # that already brought its own image just uses that image as-is.
+                        item_model = batch_request.model
+                        if (getattr(batch_request, "cinematic_keyframe", False)
+                                and not item.image_path and (item.prompt or "").strip()):
+                            still_path = str(Path(batch_dir) / f"keyframe_{item.id}.png")
+                            kf = self._generate_keyframe_still(
+                                prompt=item.prompt,
+                                width=batch_request.width,
+                                height=batch_request.height,
+                                out_path=still_path,
+                                seed=(batch_request.seed if batch_request.seed is not None else 1000),
+                                keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
+                            )
+                            if kf:
+                                meta["image_path"] = kf
+                                meta["cinematic_keyframe"] = True
+                                item_model = self._to_i2v_model(batch_request.model)
+                            # else: keyframe failed -> fall through to plain text-to-video
+
                         gen_request = VideoGenerationRequest(
                             prompt=item.prompt or "",
                             negative_prompt=batch_request.negative_prompt,
-                            model=batch_request.model,
+                            model=item_model,
                             duration_frames=batch_request.duration_frames,
                             fps=batch_request.fps,
                             width=batch_request.width,
@@ -386,7 +497,13 @@ class BatchVideoGenerator:
                         )
                         return (br, 0, 1, is_oom)
 
-                max_workers = max(1, min(4, len(items)))
+                # Cinematic mode does a stateful FLUX-still -> evict -> I2V handoff per item
+                # on the shared GPU; concurrent items would evict each other's loaded model,
+                # so it must run strictly serially.
+                if getattr(batch_request, "cinematic_keyframe", False):
+                    max_workers = 1
+                else:
+                    max_workers = max(1, min(4, len(items)))
                 with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="video-item") as ex:
                     future_map = {ex.submit(_process_item, it): it for it in items}
                     for fut in as_completed(future_map):
@@ -532,6 +649,9 @@ class BatchVideoGenerator:
             face_restore=bool(params.get("face_restore", False)),
             lora_name=params.get("lora_name"),
             lora_strength=float(params.get("lora_strength", 1.0)),
+            director_mode=bool(params.get("director_mode", False)),
+            cinematic_keyframe=bool(params.get("cinematic_keyframe", False)),
+            director_guidance=params.get("director_guidance") or None,
             metadata=params.get("metadata", {}),
         )
 

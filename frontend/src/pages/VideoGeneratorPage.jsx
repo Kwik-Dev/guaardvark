@@ -377,6 +377,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [promptStyle, setPromptStyle] = useState("cinematic");
   const [enhancePrompt, setEnhancePrompt] = useState(true);
   const [fidelityMode, setFidelityMode] = useState(false); // "Exact text mode" / preserve fidelity — light enhancement only
+  // Quality pipeline (v2.6.2 — ported from the music-video generator). Opt-in.
+  const [directorMode, setDirectorMode] = useState(false);          // rewrite each prompt via the cinematic Director
+  const [cinematicKeyframe, setCinematicKeyframe] = useState(false); // FLUX still -> Wan2.2 I2V per clip (slower, sharper)
+  const [directorGuidance, setDirectorGuidance] = useState("");      // optional free-text steer for the Director
 
   // Prompt preview state (calls /enhance-preview)
   const [previewEnhanced, setPreviewEnhanced] = useState("");
@@ -648,11 +652,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       // Prompt enhancement
       prompt_style: promptStyle,
       enhance_prompt: enhancePrompt,
+      // Quality pipeline (v2.6.2): cinematic Director + FLUX-keyframe -> I2V
+      director_mode: directorMode,
+      cinematic_keyframe: cinematicKeyframe,
+      director_guidance: directorGuidance.trim() || null,
       // CogVideoX power features
       teacache_threshold: teaCacheEnabled && isCogVideoXModel(effectiveModel) ? teaCacheThreshold : null,
       feta_weight: fetaEnabled && isCogVideoXModel(effectiveModel) ? fetaWeight : null,
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, teaCacheEnabled, teaCacheThreshold, fetaEnabled, fetaWeight]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, teaCacheEnabled, teaCacheThreshold, fetaEnabled, fetaWeight]);
 
   // Fetch enhanced prompt preview from backend (re-uses the same enhance_video_prompt logic + fidelity_mode)
   const fetchPromptPreview = async () => {
@@ -1567,6 +1575,51 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 {previewLoading ? "Previewing..." : "Preview enhanced prompt"}
               </Button>
             </Box>
+
+            {/* Cinematic quality pipeline (v2.6.2): Director + FLUX-keyframe -> I2V.
+                Ported from the Music Video generator; both opt-in, default off. */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', mt: 1 }}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={directorMode}
+                    onChange={(e) => setDirectorMode(e.target.checked)}
+                    size="small"
+                  />
+                }
+                label={
+                  <Tooltip title="Cinematic Director: a local LLM rewrites each prompt into a rich, shot-ready cinematic prompt (camera, lens, lighting, mood, motion) before generation — the same director the Music Video generator uses.">
+                    <Typography variant="body2">🎬 Cinematic Director</Typography>
+                  </Tooltip>
+                }
+                sx={{ mr: 1 }}
+              />
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={cinematicKeyframe}
+                    onChange={(e) => setCinematicKeyframe(e.target.checked)}
+                    size="small"
+                  />
+                }
+                label={
+                  <Tooltip title="Keyframe pathway: render a high-quality still per clip, then animate it with Wan 2.2 image-to-video instead of pure text-to-video. Much sharper (especially faces/detail). Slower — renders clips one at a time.">
+                    <Typography variant="body2">✨ Cinematic keyframe (still → I2V)</Typography>
+                  </Tooltip>
+                }
+                sx={{ mr: 1 }}
+              />
+            </Box>
+            {directorMode && (
+              <TextField
+                value={directorGuidance}
+                onChange={(e) => setDirectorGuidance(e.target.value)}
+                placeholder="Optional director guidance (e.g. 'handheld, 35mm, moody teal grade, slow push-ins')"
+                size="small"
+                fullWidth
+                sx={{ mt: 1 }}
+              />
+            )}
 
             {showPreview && previewEnhanced && (
               <TextField
