@@ -61,6 +61,37 @@ def test_apply_director_skips_image_only_items(monkeypatch):
     assert items[1].prompt is None
 
 
+def test_apply_storyboard_expands_concept_into_items(monkeypatch):
+    import backend.services.video_director as vd
+    seen = {}
+
+    def fake_storyboard(concept, n, **k):
+        seen["concept"] = concept
+        seen["n"] = n
+        return [f"shot{i}" for i in range(n)]
+
+    monkeypatch.setattr(vd, "storyboard_from_concept", fake_storyboard)
+    # 3 placeholder items (the API creates N=shots placeholders carrying the concept)
+    items = [BatchVideoItem(id=str(i), prompt="a lighthouse at dawn") for i in range(3)]
+    req = _req(items, storyboard_concept="a lighthouse at dawn", enhance_prompt=True)
+
+    BatchVideoGenerator._apply_storyboard(SimpleNamespace(), req)
+
+    assert seen == {"concept": "a lighthouse at dawn", "n": 3}
+    assert [it.prompt for it in items] == ["shot0", "shot1", "shot2"]
+    assert req.enhance_prompt is False
+
+
+def test_apply_storyboard_noop_without_concept(monkeypatch):
+    import backend.services.video_director as vd
+    monkeypatch.setattr(vd, "storyboard_from_concept",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+    items = [BatchVideoItem(id="1", prompt="keep me")]
+    req = _req(items, storyboard_concept=None)
+    BatchVideoGenerator._apply_storyboard(SimpleNamespace(), req)
+    assert items[0].prompt == "keep me"  # untouched
+
+
 def test_apply_director_never_raises_on_director_failure(monkeypatch):
     import backend.services.video_director as vd
 

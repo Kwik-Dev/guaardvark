@@ -381,6 +381,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [directorMode, setDirectorMode] = useState(false);          // rewrite each prompt via the cinematic Director
   const [cinematicKeyframe, setCinematicKeyframe] = useState(false); // FLUX still -> Wan2.2 I2V per clip (slower, sharper)
   const [directorGuidance, setDirectorGuidance] = useState("");      // optional free-text steer for the Director
+  const [storyboardMode, setStoryboardMode] = useState(false);       // one concept -> N director-written shots
+  const [storyboardShots, setStoryboardShots] = useState(6);
 
   // Prompt preview state (calls /enhance-preview)
   const [previewEnhanced, setPreviewEnhanced] = useState("");
@@ -1017,9 +1019,16 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       const trimmedNeg = negativePrompt.trim();
       const negativePayload = !isSvd && trimmedNeg ? { negative_prompt: trimmedNeg } : {};
 
+      // Storyboard mode (text only): the whole prompt box is ONE concept the Director
+      // expands into N shots. The backend creates N items and writes the shots.
+      const storyboardPayload =
+        storyboardMode && inputMode === "text"
+          ? { storyboard_concept: (promptsText || "").trim(), storyboard_shots: storyboardShots }
+          : {};
+
       const body =
         inputMode === "text"
-          ? { prompts: finalPrompts, ...computedParams, fidelity_mode: fidelityMode, ...negativePayload }
+          ? { prompts: finalPrompts, ...computedParams, fidelity_mode: fidelityMode, ...storyboardPayload, ...negativePayload }
           : {
               image_paths: imagePaths,
               prompt: lf && motionPrompt ? `${motionPrompt}, ${lf}` : motionPrompt,
@@ -1610,7 +1619,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 sx={{ mr: 1 }}
               />
             </Box>
-            {directorMode && (
+            {(directorMode || storyboardMode) && (
               <TextField
                 value={directorGuidance}
                 onChange={(e) => setDirectorGuidance(e.target.value)}
@@ -1619,6 +1628,41 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 fullWidth
                 sx={{ mt: 1 }}
               />
+            )}
+
+            {/* Storyboard from one concept: the Director writes N connected shots. */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', mt: 1 }}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={storyboardMode}
+                    onChange={(e) => setStoryboardMode(e.target.checked)}
+                    size="small"
+                  />
+                }
+                label={
+                  <Tooltip title="Storyboard mode: treat the prompt box as ONE concept and let the Director write N distinct, connected shots from it (a sequence — not N reseeds of the same image). Each shot becomes a clip.">
+                    <Typography variant="body2">🎞️ Storyboard from one concept</Typography>
+                  </Tooltip>
+                }
+                sx={{ mr: 1 }}
+              />
+              {storyboardMode && (
+                <TextField
+                  type="number"
+                  label="Shots"
+                  value={storyboardShots}
+                  onChange={(e) => setStoryboardShots(Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 1)))}
+                  size="small"
+                  sx={{ width: 110 }}
+                  inputProps={{ min: 1, max: 50 }}
+                />
+              )}
+            </Box>
+            {storyboardMode && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                The whole prompt box is read as one concept. It becomes {storyboardShots} connected clip{storyboardShots === 1 ? "" : "s"}.
+              </Typography>
             )}
 
             {showPreview && previewEnhanced && (

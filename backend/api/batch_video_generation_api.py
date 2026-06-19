@@ -118,6 +118,14 @@ def generate_text_to_video_batch():
     try:
         data = request.get_json(silent=True) or request.form.to_dict()
         prompts = _parse_list(data.get("prompts"))
+        # Storyboard mode: expand ONE concept into N shot clips. Create N placeholder
+        # items here (the raw concept); the orchestrator rewrites them into connected
+        # shots via the Storyboard agent in the background worker. Capped to keep a typo
+        # from queuing hundreds of renders.
+        storyboard_concept = (data.get("storyboard_concept") or "").strip()
+        storyboard_shots = int(data.get("storyboard_shots") or 0)
+        if storyboard_concept and storyboard_shots > 0:
+            prompts = [storyboard_concept] * max(1, min(storyboard_shots, 50))
         if not prompts:
             return error_response("No prompts provided", 400)
 
@@ -148,6 +156,7 @@ def generate_text_to_video_batch():
             "director_mode": str(data.get("director_mode", "false")).lower() == "true",
             "cinematic_keyframe": str(data.get("cinematic_keyframe", "false")).lower() == "true",
             "director_guidance": data.get("director_guidance") or None,
+            "storyboard_concept": storyboard_concept or None,
             "metadata": {
                 **(data.get("metadata") or {}),
                 "upscale": str(data.get("upscale", "false")).lower() == "true",

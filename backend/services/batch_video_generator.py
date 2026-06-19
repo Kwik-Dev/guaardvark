@@ -112,6 +112,7 @@ class BatchVideoRequest:
     director_mode: bool = False           # rewrite each prompt via the Video Director (cinematic)
     cinematic_keyframe: bool = False      # FLUX still -> Wan2.2 I2V per clip (forces serial render)
     director_guidance: Optional[str] = None  # optional free-text steer for the director
+    storyboard_concept: Optional[str] = None  # expand ONE concept into len(items) connected shots
     metadata: Dict = field(default_factory=dict)
 
 
@@ -295,6 +296,34 @@ class BatchVideoGenerator:
         except Exception as e:  # noqa: BLE001 — director must never fail a render
             logger.warning(f"Director pass skipped for batch {batch_request.batch_id} (non-fatal): {e}")
 
+    def _apply_storyboard(self, batch_request: BatchVideoRequest) -> None:
+        """Expand a single concept into one connected shot per item.
+
+        Mutates each item's prompt in place with the Storyboard agent's output and turns
+        off the lighter downstream enhancer (the shots are already full cinematic prompts).
+        Never raises — on failure the placeholder prompts (the raw concept) stand."""
+        try:
+            from backend.services.video_director import storyboard_from_concept
+            concept = (batch_request.storyboard_concept or "").strip()
+            n = len(batch_request.items)
+            if not concept or n == 0:
+                return
+            style = (batch_request.metadata or {}).get("look_and_feel") or batch_request.prompt_style
+            shots = storyboard_from_concept(
+                concept, n, style=style,
+                extra_guidance=getattr(batch_request, "director_guidance", None),
+            )
+            for it, shot in zip(batch_request.items, shots):
+                if shot and shot.strip():
+                    it.prompt = shot.strip()
+            batch_request.enhance_prompt = False
+            logger.info(
+                f"Storyboard expanded one concept into {len(shots)} shot(s) for batch "
+                f"{batch_request.batch_id}"
+            )
+        except Exception as e:  # noqa: BLE001 — storyboard must never fail a render
+            logger.warning(f"Storyboard expansion skipped for batch {batch_request.batch_id} (non-fatal): {e}")
+
     @staticmethod
     def _to_i2v_model(model: Optional[str]) -> str:
         """Map a text-to-video model to its image-to-video sibling for cinematic mode.
@@ -321,14 +350,21 @@ class BatchVideoGenerator:
             # Snap to /16 (Wan/diffusion alignment); keep the still at the clip's aspect.
             w = max(256, (int(width) // 16) * 16)
             h = max(256, (int(height) // 16) * 16)
+            # FLUX-schnell is the keyframe model (high aesthetic, low steps) — it uses the
+            # same env-baked FLUX_* defaults the music-video keyframe path relies on, so no
+            # settings need threading here. Operator can override via metadata.keyframe_model
+            # (e.g. "sdxl"). If FLUX models aren't present, generate_image fails and we fall
+            # back to plain text-to-video below.
+            model = keyframe_model or "flux-schnell"
+            steps = 8 if "flux" in model.lower() else 30  # flux-schnell is an 8-step model
             still = ComfyUIImageGenerator().generate_image(
                 prompt=prompt,
                 output_path=out_path,
                 width=w,
                 height=h,
                 seed=int(seed),
-                steps=30,
-                model=keyframe_model,  # None -> generator default; operator can pass "flux-schnell"
+                steps=steps,
+                model=model,
             )
             # Evict the still model BEFORE the animator loads.
             try:
@@ -393,10 +429,14 @@ class BatchVideoGenerator:
             batch_dir = Path(batch_request.output_dir)
             batch_dir.mkdir(parents=True, exist_ok=True)
 
-            # Director pass: rewrite each prompt into a cinematic shot prompt before
+            # Storyboard / Director pass: rewrite prompts into cinematic shot prompts before
             # generation. Runs here (background worker, not the HTTP handler) and never
-            # raises — a director hiccup falls back to the original prompts.
-            if getattr(batch_request, "director_mode", False):
+            # raises. Storyboard expands ONE concept into N connected shots; it already
+            # produces directed prompts, so it's mutually exclusive with the per-prompt
+            # director (running both would just re-direct already-directed shots).
+            if getattr(batch_request, "storyboard_concept", None):
+                self._apply_storyboard(batch_request)
+            elif getattr(batch_request, "director_mode", False):
                 self._apply_director(batch_request)
 
             # Parallel processing of items within the batch (major P0 perf win).
@@ -652,6 +692,7 @@ class BatchVideoGenerator:
             director_mode=bool(params.get("director_mode", False)),
             cinematic_keyframe=bool(params.get("cinematic_keyframe", False)),
             director_guidance=params.get("director_guidance") or None,
+            storyboard_concept=params.get("storyboard_concept") or None,
             metadata=params.get("metadata", {}),
         )
 
