@@ -19,7 +19,7 @@ def test_read_missing_file_returns_empty_normalized(tmp_path):
         "version": SCHEMA_VERSION,
         "user_enabled": {},
         "running": [],
-        "quarantined": {},
+        "breaker_tripped": {},
         "start_failure_counts": {},
     }
 
@@ -88,7 +88,7 @@ def test_corrupt_file_returns_fresh_state(tmp_path):
         "version": SCHEMA_VERSION,
         "user_enabled": {},
         "running": [],
-        "quarantined": {},
+        "breaker_tripped": {},
         "start_failure_counts": {},
     }
 
@@ -130,42 +130,66 @@ def test_get_user_enabled_returns_a_copy(tmp_path):
     assert "mutated" not in store.get_user_enabled()
 
 
-def test_quarantine_roundtrip(tmp_path):
-    """set_quarantined/is_quarantined reflect each other, including the un-set."""
+def test_breaker_roundtrip(tmp_path):
+    """set_breaker_tripped/is_breaker_tripped reflect each other, including reset."""
     store = PluginStateStore(tmp_path / "plugin_state.json")
-    assert store.is_quarantined("comfyui") is False
+    assert store.is_breaker_tripped("comfyui") is False
 
-    store.set_quarantined("comfyui", True)
-    assert store.is_quarantined("comfyui") is True
+    store.set_breaker_tripped("comfyui", True)
+    assert store.is_breaker_tripped("comfyui") is True
 
-    store.set_quarantined("comfyui", False)
-    assert store.is_quarantined("comfyui") is False
+    store.set_breaker_tripped("comfyui", False)
+    assert store.is_breaker_tripped("comfyui") is False
 
 
-def test_record_start_failure_quarantines_at_threshold(tmp_path):
+def test_record_start_failure_trips_breaker_at_threshold(tmp_path):
     """Below the threshold the plugin stays runnable; at the threshold it trips."""
     store = PluginStateStore(tmp_path / "plugin_state.json")
     for _ in range(3):
         store.record_start_failure("comfyui", threshold=4)
-    assert store.is_quarantined("comfyui") is False  # negative case: 3 < 4
+    assert store.is_breaker_tripped("comfyui") is False  # negative case: 3 < 4
 
     store.record_start_failure("comfyui", threshold=4)
-    assert store.is_quarantined("comfyui") is True  # 4 >= 4 trips it
+    assert store.is_breaker_tripped("comfyui") is True  # 4 >= 4 trips it
 
 
-def test_reset_health_counters_lifts_quarantine(tmp_path):
-    """Regression: reset must clear the quarantine flag too, not just the count.
+def test_reset_health_counters_resets_breaker(tmp_path):
+    """Regression: reset must clear the tripped breaker too, not just the count.
     Previously it popped the counter and left the sticky flag set, locking the
     plugin out forever (the bug that stranded comfyui)."""
     store = PluginStateStore(tmp_path / "plugin_state.json")
     for _ in range(4):
         store.record_start_failure("comfyui", threshold=4)
-    assert store.is_quarantined("comfyui") is True
+    assert store.is_breaker_tripped("comfyui") is True
 
     store.reset_plugin_health_counters("comfyui")
 
-    assert store.is_quarantined("comfyui") is False
+    assert store.is_breaker_tripped("comfyui") is False
     assert store.snapshot()["start_failure_counts"] == {}
+
+
+def test_v1_quarantined_key_migrates_to_breaker_tripped(tmp_path):
+    """A pre-existing v1 file using the old 'quarantined' key is read as
+    'breaker_tripped', and the next write drops the legacy key."""
+    path = tmp_path / "plugin_state.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "user_enabled": {"comfyui": True},
+        "running": [],
+        "quarantined": {"lora_trainer": True},
+        "start_failure_counts": {"lora_trainer": 5},
+    }))
+    store = PluginStateStore(path)
+
+    # Read sees the legacy flag under the new name.
+    assert store.is_breaker_tripped("lora_trainer") is True
+
+    # After any write, the file is v2 and the old key is gone.
+    store.set_user_enabled("comfyui", True)
+    on_disk = json.loads(path.read_text())
+    assert on_disk["version"] == SCHEMA_VERSION
+    assert "quarantined" not in on_disk
+    assert on_disk["breaker_tripped"] == {"lora_trainer": True}
 
 
 def test_creates_parent_directory_on_write(tmp_path):

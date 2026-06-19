@@ -310,22 +310,34 @@ class PluginManager:
 
         # Second pass: start plugins that were running last time.
         # Always dedup the persisted list (defensive; prior races or old bugs could
-        # leave duplicates, causing the quarantine warning to spam on every boot).
+        # leave duplicates, causing the breaker-tripped warning to spam on every boot).
         running_list = self.state_store.get_running()
         if len(running_list) != len(set(running_list)):
             logger.warning("plugin_state 'running' list contained duplicates — auto-repaired on boot")
         for plugin_id in running_list:
-            # Quarantine's real job: don't auto-restore a plugin that failed to
-            # start repeatedly — that's the retry storm the failure counter is
-            # meant to damp. The operator re-enabling it (which lifts quarantine)
-            # is the intentional path back. Use INFO (not WARNING) so a healthy
-            # quarantined ollama (common) doesn't flood logs on every restart.
-            if self.state_store.is_quarantined(plugin_id):
-                logger.info(
-                    f"Skipping auto-restore of quarantined plugin '{plugin_id}' — "
-                    "enable it manually (via Plugins UI) to retry (that lifts the quarantine)"
-                )
-                continue
+            # The circuit breaker's real job: don't auto-restore a plugin that
+            # failed to start repeatedly — that's the retry storm the failure
+            # counter is meant to damp. The operator re-enabling it (which resets
+            # the breaker) is the intentional path back. Use INFO (not WARNING) so
+            # a tripped breaker doesn't flood logs on every restart.
+            if self.state_store.is_breaker_tripped(plugin_id):
+                # A core pillar must never stay locked out. If a tripped breaker
+                # survived from before core-exemption existed, reset it here and
+                # fall through to the normal restore path.
+                metadata = self.registry.get_plugin(plugin_id)
+                if metadata is not None and metadata.core:
+                    logger.info(
+                        f"Core plugin '{plugin_id}' had a tripped circuit breaker — "
+                        "resetting it (core services are exempt) and restoring normally"
+                    )
+                    self.state_store.reset_plugin_health_counters(plugin_id)
+                else:
+                    logger.info(
+                        f"Skipping auto-restore — breaker tripped for '{plugin_id}' "
+                        "(repeated start failures); enable it manually (via Plugins UI) "
+                        "to reset the breaker and retry"
+                    )
+                    continue
             if self._plugin_status.get(plugin_id) == PluginStatus.STOPPED:
                 logger.info(f"Restoring plugin: {plugin_id} (was running before shutdown)")
                 try:
@@ -515,6 +527,20 @@ class PluginManager:
                     self._plugin_status[plugin_id] = PluginStatus.STOPPED
     
     def _fail_plugin_start(self, plugin_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        # Core pillars (e.g. ollama — the inference backbone) are exempt from the
+        # failure-counter → circuit-breaker mechanism. The breaker exists to damp a
+        # retry storm from a disposable plugin that won't start; tripping it on a
+        # service the whole workstation depends on is self-defeating. We still
+        # return the failure to the caller and log it loudly — we just never let
+        # it accrue toward the breaker threshold.
+        metadata = self.registry.get_plugin(plugin_id)
+        if metadata is not None and metadata.core:
+            logger.warning(
+                f"Core plugin '{plugin_id}' failed to start — NOT counted toward the "
+                f"circuit breaker (core services are exempt). It will be retried on the "
+                f"next restore. Check the plugin's own log for the real cause."
+            )
+            return payload
         try:
             self.state_store.record_start_failure(plugin_id)
         except Exception:
@@ -795,15 +821,15 @@ class PluginManager:
             return {'success': False, 'error': f'Plugin not found: {plugin_id}'}
 
         # An explicit user enable is the operator's "try this again" signal, so it
-        # lifts any prior quarantine and resets the start-failure counter rather
-        # than refusing. Quarantine exists to damp *automatic* retry storms (see
+        # resets any tripped circuit breaker and the start-failure counter rather
+        # than refusing. The breaker exists to damp *automatic* retry storms (see
         # the boot-restore skip in _init_plugin_status); it was only ever enforced
         # here on the user-facing toggle, so clearing it on an intentional enable
         # loses no auto-path protection and ends the dead-end where the sole escape
         # was hand-editing plugin_state.json.
-        if self.state_store.is_quarantined(plugin_id):
-            logger.info(f"Lifting quarantine for '{plugin_id}' on explicit user enable")
-            self.state_store.set_quarantined(plugin_id, False)
+        if self.state_store.is_breaker_tripped(plugin_id):
+            logger.info(f"Resetting tripped circuit breaker for '{plugin_id}' on explicit user enable")
+            self.state_store.set_breaker_tripped(plugin_id, False)
             self.state_store.reset_plugin_health_counters(plugin_id)
 
         ok_adm, adm_msg = self._run_plugin_admission_checks(plugin_id)

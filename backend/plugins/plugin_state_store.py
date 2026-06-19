@@ -7,15 +7,26 @@ access patterns. PluginManager talks to a PluginStateStore instance;
 tests inject their own pointed at a tmp_path and never touch the real
 file.
 
-Schema v1:
+Schema v2:
   {
-    "version": 1,
-    "user_enabled": { "<plugin_id>": bool, ... },  # explicit user toggles
-    "running":      [ "<plugin_id>", ... ],         # last-known running set
-    "updated_at":   "<iso8601>"
+    "version": 2,
+    "user_enabled":        { "<plugin_id>": bool, ... },  # explicit user toggles
+    "running":             [ "<plugin_id>", ... ],         # last-known running set
+    "breaker_tripped":     { "<plugin_id>": bool, ... },   # circuit breaker — see below
+    "start_failure_counts":{ "<plugin_id>": int, ... },    # consecutive start failures
+    "updated_at":          "<iso8601>"
   }
 
-Legacy {"running": [...]} files (pre-v1) are auto-upgraded on read.
+The circuit breaker ("breaker_tripped") damps a retry storm: a disposable
+plugin that fails to start `threshold` times in a row has its breaker tripped,
+which stops auto-restore until the operator explicitly re-enables it (that
+resets the breaker). Core pillars are exempt from this upstream in
+PluginManager (they never reach record_start_failure).
+
+Migrations on read:
+  * pre-v1 {"running": [...]} files are upgraded.
+  * v1 used the key "quarantined" for the same concept; it is renamed to
+    "breaker_tripped" on read and the old key is dropped on next write.
 """
 
 import json
@@ -27,7 +38,7 @@ from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class PluginStateStore:
@@ -76,27 +87,32 @@ class PluginStateStore:
         state["running"] = clean
         self._write(state)
 
+    def _empty(self) -> dict:
+        return {
+            "version": SCHEMA_VERSION,
+            "user_enabled": {},
+            "running": [],
+            "breaker_tripped": {},
+            "start_failure_counts": {},
+        }
+
     def _read(self) -> dict:
         try:
             if not self.path.exists():
-                return {
-                    "version": SCHEMA_VERSION,
-                    "user_enabled": {},
-                    "running": [],
-                    "quarantined": {},
-                    "start_failure_counts": {},
-                }
+                return self._empty()
             with open(self.path) as f:
                 raw = json.load(f) or {}
         except Exception as e:
             logger.warning(f"Could not read plugin state file ({e}); starting fresh")
-            return {
-                "version": SCHEMA_VERSION,
-                "user_enabled": {},
-                "running": [],
-                "quarantined": {},
-                "start_failure_counts": {},
-            }
+            return self._empty()
+
+        # v1→v2 migration: "quarantined" was renamed to "breaker_tripped".
+        # Merge any legacy entries in (breaker_tripped wins on conflict) and drop
+        # the old key so the next write persists the v2 shape.
+        if "quarantined" in raw:
+            legacy = dict(raw.pop("quarantined") or {})
+            merged = {**legacy, **dict(raw.get("breaker_tripped") or {})}
+            raw["breaker_tripped"] = merged
 
         # Legacy upgrade: pre-v1 file had only {"running": [...]}.
         if "version" not in raw:
@@ -104,13 +120,13 @@ class PluginStateStore:
                 "version": SCHEMA_VERSION,
                 "user_enabled": {},
                 "running": list(raw.get("running", [])),
-                "quarantined": dict(raw.get("quarantined", {})),
+                "breaker_tripped": dict(raw.get("breaker_tripped", {})),
                 "start_failure_counts": dict(raw.get("start_failure_counts", {})),
             }
 
         raw.setdefault("user_enabled", {})
         raw.setdefault("running", [])
-        raw.setdefault("quarantined", {})
+        raw.setdefault("breaker_tripped", {})
         raw.setdefault("start_failure_counts", {})
         # Defensive dedup of running list (can accumulate from races across restarts / concurrent toggles / LAN clients).
         if raw.get("running"):
@@ -136,31 +152,34 @@ class PluginStateStore:
         except Exception as e:
             logger.warning(f"Could not save plugin state: {e}")
 
-    def is_quarantined(self, plugin_id: str) -> bool:
-        return bool(self._read().get("quarantined", {}).get(plugin_id))
+    def is_breaker_tripped(self, plugin_id: str) -> bool:
+        """True if the plugin's circuit breaker is tripped (auto-restore suspended
+        after repeated start failures)."""
+        return bool(self._read().get("breaker_tripped", {}).get(plugin_id))
 
-    def set_quarantined(self, plugin_id: str, value: bool) -> None:
+    def set_breaker_tripped(self, plugin_id: str, value: bool) -> None:
         state = self._read()
-        state.setdefault("quarantined", {})[plugin_id] = bool(value)
+        state.setdefault("breaker_tripped", {})[plugin_id] = bool(value)
         self._write(state)
 
     def record_start_failure(self, plugin_id: str, threshold: int = 4) -> None:
+        """Count one consecutive start failure; trip the breaker at the threshold."""
         state = self._read()
         counts = state.setdefault("start_failure_counts", {})
         c = int(counts.get(plugin_id, 0)) + 1
         counts[plugin_id] = c
         if c >= threshold:
-            state.setdefault("quarantined", {})[plugin_id] = True
+            state.setdefault("breaker_tripped", {})[plugin_id] = True
         self._write(state)
 
     def reset_plugin_health_counters(self, plugin_id: str) -> None:
-        """Reset a plugin's health state: drop its start-failure count AND lift any
-        quarantine. A plugin that recovers must leave quarantine too — this used to
-        pop only the counter and leave the sticky flag set, locking the plugin out
-        forever (the bug that stranded comfyui)."""
+        """Reset a plugin's health state: drop its start-failure count AND reset the
+        circuit breaker. A plugin that recovers must clear its breaker too — this
+        used to pop only the counter and leave the sticky flag set, locking the
+        plugin out forever (the bug that stranded comfyui)."""
         state = self._read()
         if "start_failure_counts" in state:
             state["start_failure_counts"].pop(plugin_id, None)
-        if "quarantined" in state:
-            state["quarantined"].pop(plugin_id, None)
+        if "breaker_tripped" in state:
+            state["breaker_tripped"].pop(plugin_id, None)
         self._write(state)
