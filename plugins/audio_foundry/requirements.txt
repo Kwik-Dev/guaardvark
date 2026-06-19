@@ -29,6 +29,29 @@ soundfile>=0.12
 # diffusers 0.29 / safetensors / numpy / librosa as transitive deps.
 chatterbox-tts==0.1.7
 
+# ── CUDA libs MUST match the torch that actually runs (2.11+cu128) ──────────
+# chatterbox (above) pulls torch==2.6.0 and its CUDA-12.4 transitive libs. This
+# venv then runs torch 2.11+cu128, but pip's resolver — held back by chatterbox's
+# torch==2.6 pin — leaves the OLD libs in place. The mismatch breaks `import torch`
+# with a moving target of symbol errors (missing libnvshmem_host.so.3 →
+# cuptiActivityEnableDriverApi → ncclCommShrink), which verify_gpu_stack.sh used
+# to report vaguely as "torch cannot run a GPU kernel".
+#
+# These are deliberately NOT pinned here: a hard nvidia-* pin next to
+# chatterbox==0.1.7 makes pip's resolver fail outright (same reason diffusers>=0.30
+# isn't pinned — see below). Fix it as a POST-install step, after this file installs:
+#
+#   scripts/install_pytorch.sh --venv plugins/audio_foundry/venv
+#       # force-reinstalls torch 2.11+cu128 with a self-consistent CUDA set
+#
+# To repair an existing venv WITHOUT re-downloading torch, install just the libs
+# at the versions `torch` declares (verified 2026-06-19 on this box):
+#   plugins/audio_foundry/venv/bin/pip install \
+#     nvidia-nvshmem-cu12==3.4.5 nvidia-cudnn-cu12==9.19.0.56 \
+#     nvidia-cusparselt-cu12==0.7.1 nvidia-nccl-cu12==2.28.9 \
+#     nvidia-cuda-cupti-cu12==12.9.79 nvidia-cuda-nvrtc-cu12==12.9.86 \
+#     nvidia-nvjitlink-cu12==12.9.86 nvidia-nvtx-cu12==12.9.79
+
 # audio_fx (Stable Audio Open) needs StableAudioPipeline, which was first
 # added in diffusers 0.30.0. Chatterbox-tts pins diffusers==0.29.0, but its
 # actual usage is limited to stable scheduler classes — verified to work
