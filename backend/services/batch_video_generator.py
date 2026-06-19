@@ -101,7 +101,7 @@ class BatchVideoRequest:
     interpolation_multiplier: int = 2
     prompt_style: str = "cinematic"
     enhance_prompt: bool = True
-    fidelity_mode: bool = False,  # "Exact text / preserve fidelity" — light enhancement only
+    fidelity_mode: bool = False  # "Exact text / preserve fidelity" — light enhancement only
     negative_prompt: str = ""
     freeu: bool = False
     face_restore: bool = False
