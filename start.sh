@@ -86,6 +86,18 @@ fi
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
+# ── Platform detection (detect → route to a per-OS backend) ──────────────────
+# Sets GUAARDVARK_OS/_ARCH/_ACCEL/_IS_WSL and sources the matching backend
+# (scripts/platform/{linux,macos}.sh), which DEFINES platform_install_system_deps /
+# platform_ensure_python / platform_gpu_setup / platform_service_start. On Linux this
+# only defines functions — no behavior change; the Darwin path calls them below.
+# Guarded so an older checkout without scripts/platform/ still boots unchanged.
+if [ -f "$SCRIPT_DIR/scripts/platform/detect.sh" ]; then
+    source "$SCRIPT_DIR/scripts/platform/detect.sh"
+    detect_platform
+    [ -f "$GUAARDVARK_PLATFORM_BACKEND" ] && source "$GUAARDVARK_PLATFORM_BACKEND"
+fi
+
 MANAGER_SCRIPT="$SCRIPT_DIR/scripts/system-manager/system-manager"
 if [ -f "$MANAGER_SCRIPT" ]; then
     # Ensure ./manager symlink exists (may be missing after Code Release restore)
@@ -280,12 +292,22 @@ check_python_version() {
     # a marathon of build failures (issue #35). Fail fast with the real reason
     # instead. NOTE: the old logic was inverted — it returned success for 3.13+
     # and fell through to a failure for 3.12, the one version that works.
+    # Platform-aware install hint. The REQUIREMENT stays 3.12 everywhere (the
+    # numpy<2.0 / pandas==2.2.2 base pins have no 3.13+ wheels; CV deps are
+    # arch-skipped) — only the "how to get 3.12" guidance differs per OS/arch.
+    # Defaults to the apt hint if detect_platform didn't run (older checkout).
+    local py_hint
+    case "${GUAARDVARK_OS:-linux}/${GUAARDVARK_ARCH:-x86_64}" in
+        macos/*) py_hint="macOS: 'brew install python@3.12', then re-run with 'PYTHON_CMD=python3.12 ./start.sh'." ;;
+        */arm64) py_hint="Raspberry Pi / ARM (no apt python3.12): 'uv python install 3.12' (or pyenv), then 'PYTHON_CMD=\$(uv python find 3.12) ./start.sh'." ;;
+        *)       py_hint="'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev' (Ubuntu 22.04: add the deadsnakes PPA first; note 3.12 has no distutils), then re-run with 'PYTHON_CMD=python3.12 ./start.sh'." ;;
+    esac
     if [ "$major" -ne 3 ] || [ "$minor" -lt 12 ]; then
-        vader_error "Python 3.12 is required (found $ver). Install it: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev' (on Ubuntu 22.04, add the deadsnakes PPA first; note 3.12 has no distutils package), then re-run with 'PYTHON_CMD=python3.12 ./start.sh'."
+        vader_error "Python 3.12 is required (found $ver). $py_hint"
         return 1
     fi
     if [ "$minor" -ge 13 ]; then
-        vader_error "Python $ver is not supported yet — the ML dependencies (numpy<2.0, mediapipe, basicsr/gfpgan) have no wheels for 3.13+. Please use Python 3.12: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev', create the venv with python3.12, then re-run."
+        vader_error "Python $ver is not supported yet — the ML deps (numpy<2.0, pandas) have no wheels for 3.13+. Use Python 3.12. $py_hint"
         return 1
     fi
     return 0
@@ -992,6 +1014,18 @@ if [ -n "$celery_pids" ]; then
     done
 fi
 vader_separator
+
+# ── macOS bootstrap (Darwin only — NO-OP on Linux / Pi / WSL) ────────────────
+# Can't use apt/systemd on a Mac. Ensure Python 3.12 (Homebrew) BEFORE the gate
+# below, install system deps via brew + start pg/redis as brew services, and skip
+# NVIDIA/systemd tuning. Everything after this is platform-agnostic or already
+# guarded (nvidia-smi / apt-get presence). On Linux this whole block is skipped.
+if [ "${GUAARDVARK_OS:-linux}" = macos ]; then
+    vader_info "macOS detected — bootstrapping via Homebrew + Python 3.12..."
+    platform_ensure_python        || { vader_error "macOS: could not ensure Python 3.12 (see hint above)."; exit 1; }
+    platform_install_system_deps  || vader_warn "macOS: some Homebrew deps failed; continuing (check brew output)."
+    platform_gpu_setup
+fi
 
 vader_step 2 "Checking environment dependencies..."
 if ! check_with_cache "python_check" check_python_version; then
