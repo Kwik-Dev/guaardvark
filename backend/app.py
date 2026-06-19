@@ -168,7 +168,7 @@ try:
     ) as _vf:
         __version__ = _vf.read().strip()
 except OSError:
-    __version__ = "2.6.0"
+    __version__ = "2.6.1"
 
 backend_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = str(config.GUAARDVARK_ROOT)
