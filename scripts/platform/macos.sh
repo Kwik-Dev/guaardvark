@@ -14,13 +14,16 @@
 
 # brew lives at /opt/homebrew (Apple Silicon) or /usr/local (Intel). Never hardcode —
 # resolve via `brew --prefix`.
+_have_brew() { command -v brew >/dev/null 2>&1; }
 _brew() {
-    command -v brew >/dev/null 2>&1 || { vader_error "Homebrew is required on macOS — install from https://brew.sh, then re-run."; return 1; }
+    _have_brew || { vader_error "Homebrew is required on macOS — install from https://brew.sh, then re-run."; return 1; }
     brew "$@"
 }
 
 platform_install_system_deps() {
-    _brew >/dev/null || return 1
+    # Presence check ONLY — never run bare `brew` (no args), which prints usage to
+    # stderr and exits 1, making this function bail before installing anything.
+    _have_brew || { vader_error "Homebrew is required on macOS — install from https://brew.sh, then re-run."; return 1; }
     vader_info "Installing system deps via Homebrew (postgresql@16, redis, ffmpeg, node, cmake, zstd)..."
     _brew install postgresql@16 redis ffmpeg node cmake zstd || return 1
     # Postgres/Redis run under launchd via brew services (the macOS analog of systemd).

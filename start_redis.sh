@@ -44,6 +44,57 @@ redis_ping() {
   fi
 }
 
+# ─── macOS (Homebrew) branch ─────────────────────────────────────────────────
+# No apt / systemd / /etc/redis on macOS. Use Homebrew + brew services, which run
+# Redis on 127.0.0.1:6379 passwordless — fine for local broker/cache use. This
+# block fully handles macOS and exits; the Linux flow below never runs there.
+if [ "$(uname -s)" = "Darwin" ]; then
+  if ! redis_ping ""; then
+    if ! command_exists redis-server; then
+      if command_exists brew; then
+        vader_info "Installing Redis via Homebrew..."
+        brew install redis >/dev/null 2>&1 || { vader_error "brew install redis failed. Run: brew install redis"; exit 1; }
+      else
+        vader_error "Homebrew not found. Install from https://brew.sh, then: brew install redis"
+        exit 1
+      fi
+    fi
+    vader_info "Starting Redis via brew services..."
+    brew services start redis >/dev/null 2>&1
+    sleep 2
+    if ! redis_ping ""; then
+      # brew services can lag or be unavailable — fall back to a direct daemon.
+      redis-server --daemonize yes --port "$PORT" --bind 127.0.0.1 --save "" >/dev/null 2>&1
+      sleep 2
+    fi
+  fi
+
+  if redis_ping ""; then
+    vader_success "Redis running on port $PORT."
+  else
+    vader_error "Redis failed to start. Run: brew services start redis"
+    exit 1
+  fi
+
+  # Point Celery/Redis at the local passwordless broker (idempotent rewrite).
+  if [ -f "$ENV_FILE" ]; then
+    NEW_URL="redis://localhost:${PORT}/0"
+    if ! grep -q "^REDIS_URL=${NEW_URL}$" "$ENV_FILE"; then
+      _tmp="${ENV_FILE}.tmp.$$"
+      grep -vE '^(REDIS_URL|CELERY_BROKER_URL|CELERY_RESULT_BACKEND)=' "$ENV_FILE" > "$_tmp"
+      {
+        echo "REDIS_URL=${NEW_URL}"
+        echo "CELERY_BROKER_URL=${NEW_URL}"
+        echo "CELERY_RESULT_BACKEND=${NEW_URL}"
+      } >> "$_tmp"
+      mv "$_tmp" "$ENV_FILE"
+      chmod 600 "$ENV_FILE"
+      vader_success "Redis broker URL set to local passwordless (.env updated)."
+    fi
+  fi
+  exit 0
+fi
+
 # ─── Step 1: Check if Redis is already running and reachable ─────────────────
 
 REDIS_PASS=$(get_redis_password)

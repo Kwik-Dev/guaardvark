@@ -125,6 +125,96 @@ if pg_is_running && [ -f "$ENV_FILE" ]; then
   fi
 fi
 
+# ─── macOS (Homebrew) branch ─────────────────────────────────────────────────
+# Homebrew Postgres has no `postgres` OS role and no systemd: the install user IS
+# the DB superuser and connects over the local socket without a password. So we do
+# NOT use apt-get / systemctl / `sudo -u postgres` here. Fully handles macOS + exits.
+if [ "$(uname -s)" = "Darwin" ]; then
+  echo ""
+  echo -e "  ${VADER_WHITE}${VADER_BOLD}PostgreSQL Setup (macOS / Homebrew)${VADER_RESET}"
+  echo -e "  ${VADER_GRAY}─────────────────────────────────────────${VADER_RESET}"
+
+  if ! command_exists brew; then
+    vader_error "Homebrew not found. Install from https://brew.sh, then re-run."
+    exit 1
+  fi
+
+  # Use an already-installed postgresql formula (any version); else install @16.
+  PG_FORMULA=$(brew list --formula 2>/dev/null | grep -E '^postgresql(@[0-9.]+)?$' | head -1)
+  if [ -z "$PG_FORMULA" ]; then
+    vader_info "Installing PostgreSQL via Homebrew (postgresql@16)..."
+    if brew install postgresql@16 >/dev/null 2>&1; then
+      PG_FORMULA="postgresql@16"
+      vader_success "PostgreSQL installed."
+    else
+      vader_error "brew install postgresql@16 failed. Run it manually, then re-run."
+      exit 1
+    fi
+  fi
+
+  # Start via brew services (launchd) and wait for the socket. Idempotent.
+  if ! pg_isready -h "$PG_HOST" -p "$PG_PORT" >/dev/null 2>&1; then
+    vader_info "Starting PostgreSQL via brew services ($PG_FORMULA)..."
+    brew services start "$PG_FORMULA" >/dev/null 2>&1
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      pg_isready -h "$PG_HOST" -p "$PG_PORT" >/dev/null 2>&1 && break
+      sleep 1
+    done
+  fi
+  if ! pg_isready -h "$PG_HOST" -p "$PG_PORT" >/dev/null 2>&1; then
+    vader_error "PostgreSQL did not come up. Run: brew services start $PG_FORMULA"
+    exit 1
+  fi
+  vader_success "PostgreSQL is running."
+
+  # On Homebrew the current login user is the bootstrap superuser (socket/trust auth).
+  PG_PASS=$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)
+  vader_info "Creating/updating PostgreSQL role '${PG_USER}'..."
+  if ! psql -d postgres -v ON_ERROR_STOP=1 -c "DO \$\$
+BEGIN
+  IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${PG_USER}') THEN
+    ALTER ROLE ${PG_USER} WITH LOGIN PASSWORD '${PG_PASS}';
+  ELSE
+    CREATE ROLE ${PG_USER} WITH LOGIN PASSWORD '${PG_PASS}';
+  END IF;
+END
+\$\$;" >/dev/null 2>&1; then
+    vader_error "Failed to create/update role '${PG_USER}'. Try connecting with: psql -d postgres"
+    exit 1
+  fi
+  vader_success "PostgreSQL role '${PG_USER}' ready."
+
+  # CREATE DATABASE can't run inside the DO block above — do it separately.
+  DB_EXISTS=$(psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${PG_DB}';" 2>/dev/null)
+  if [ "$DB_EXISTS" = "1" ]; then
+    psql -d postgres -c "ALTER DATABASE ${PG_DB} OWNER TO ${PG_USER};" >/dev/null 2>&1
+    vader_success "Database '${PG_DB}' already exists (ownership verified)."
+  else
+    if psql -d postgres -c "CREATE DATABASE ${PG_DB} OWNER ${PG_USER};" >/dev/null 2>&1; then
+      vader_success "Database '${PG_DB}' created."
+    else
+      vader_error "Failed to create database '${PG_DB}'."
+      exit 1
+    fi
+  fi
+
+  # Write DATABASE_URL and verify a TCP connection as the app role.
+  DATABASE_URL="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${PG_DB}"
+  if [ -f "$ENV_FILE" ]; then
+    grep -v '^DATABASE_URL=' "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
+  fi
+  echo "DATABASE_URL=${DATABASE_URL}" >> "$ENV_FILE"
+  chmod 600 "$ENV_FILE" 2>/dev/null
+
+  if PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -c "SELECT 1;" >/dev/null 2>&1; then
+    vader_success "PostgreSQL connection verified. Database is ready."
+    exit 0
+  else
+    vader_error "Could not connect as '${PG_USER}' over TCP. Check Homebrew pg_hba.conf allows local connections."
+    exit 1
+  fi
+fi
+
 # ─── If we reach here, first-time setup or recovery is needed ─────────────────
 # This requires sudo. Explain clearly why.
 

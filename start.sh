@@ -144,7 +144,7 @@ export GUAARDVARK_ROOT="$SCRIPT_DIR"
 # Harden .env permissions — secrets should not be group/world-readable
 for _envfile in "$SCRIPT_DIR/.env" "$SCRIPT_DIR/OLD.env"; do
   if [ -f "$_envfile" ]; then
-    _perms=$(stat -c '%a' "$_envfile")
+    _perms=$(stat -c '%a' "$_envfile" 2>/dev/null || stat -f '%Lp' "$_envfile" 2>/dev/null)
     if [ "$_perms" != "600" ]; then
       vader_warn "$(basename $_envfile) has insecure permissions ($_perms), fixing to 600..."
       chmod 600 "$_envfile"
@@ -564,7 +564,7 @@ check_frontend_build() {
     local src_mtime
     local dist_mtime
     src_mtime=$(find "$FRONTEND_DIR/src" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
-    dist_mtime=$(stat -c %Y "$dist_index" 2>/dev/null)
+    dist_mtime=$(stat -c %Y "$dist_index" 2>/dev/null || stat -f %m "$dist_index" 2>/dev/null)
 
     if [ -n "$src_mtime" ] && [ -n "$dist_mtime" ]; then
         src_mtime=${src_mtime%.*}
