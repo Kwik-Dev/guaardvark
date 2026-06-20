@@ -13,4 +13,4 @@ try:
     with open(_version_file, encoding="utf-8") as _f:
         __version__ = _f.read().strip()
 except OSError:
-    __version__ = "2.6.1"
+    __version__ = "2.6.2"
