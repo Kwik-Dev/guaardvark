@@ -785,18 +785,87 @@ VIDEO_MODEL_REGISTRY = {
     },
 }
 
-# Download status tracking
+# ─── Download status tracking (hardened for issue #36) ───────────────────────
+# The UI polls this dict to render the model-download modal, so it MUST always
+# resolve to a terminal state (completed/failed) the UI can act on. A daemon
+# download thread that dies, or a backend restart mid-download, used to leave it
+# pinned at "downloading" forever — a spinner that never resolves and a 409 lock
+# that never clears. Hardening:
+#   - persisted to disk so a restart reconciles a stale "downloading" -> "failed"
+#   - epoch-stamped so an orphaned thread can't clobber a newer download
+#   - stall-detected by the monitor so a frozen HF pull fails instead of hanging
+#   - a wedged lock is auto-taken-over once it goes stale (no restart needed)
 _video_model_download_lock = threading.Lock()
-_video_model_download_status = {
-    "is_downloading": False,
-    "current_model": None,
-    "progress": 0,
-    "status": "idle",
-    "error": None,
-    "speed_mbps": 0,
-    "downloaded_gb": 0,
-    "total_gb": 0,
-}
+_DOWNLOAD_STALL_SECONDS = 180  # no new bytes for this long => the pull is wedged
+_DOWNLOAD_EPOCH = 0
+
+
+def _download_status_path() -> Path:
+    return Path(os.environ.get("GUAARDVARK_ROOT", ".")) / "data" / "video_model_download_status.json"
+
+
+def _idle_status() -> dict:
+    return {
+        "is_downloading": False,
+        "current_model": None,
+        "progress": 0,
+        "status": "idle",
+        "error": None,
+        "speed_mbps": 0,
+        "downloaded_gb": 0,
+        "total_gb": 0,
+        "updated_at": time.time(),
+        "epoch": _DOWNLOAD_EPOCH,
+    }
+
+
+def _persist_download_status() -> None:
+    """Best-effort write of the current status to disk. Caller holds the lock."""
+    try:
+        p = _download_status_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(_video_model_download_status, f)
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _reconcile_download_status_on_load() -> None:
+    """Heal a status the previous process left mid-flight (issue #36).
+
+    A daemon download thread cannot survive a backend restart, so any persisted
+    'downloading'/'starting' state is necessarily dead. Turn it into an honest
+    terminal 'failed' so the UI shows an error + retry instead of a spinner that
+    never resolves and a 409 lock that never releases.
+    """
+    global _video_model_download_status, _DOWNLOAD_EPOCH
+    try:
+        p = _download_status_path()
+        persisted = json.loads(p.read_text()) if p.exists() else None
+    except Exception:
+        persisted = None
+    if not persisted:
+        _video_model_download_status = _idle_status()
+        return
+    _DOWNLOAD_EPOCH = int(persisted.get("epoch", 0))
+    if persisted.get("is_downloading") or persisted.get("status") in ("starting", "downloading"):
+        persisted.update({
+            "is_downloading": False,
+            "status": "failed",
+            "error": "Download was interrupted by a backend restart. Click Install to retry.",
+            "progress": 0,
+            "updated_at": time.time(),
+        })
+        _video_model_download_status = persisted
+        _persist_download_status()
+    else:
+        _video_model_download_status = persisted
+
+
+_video_model_download_status = _idle_status()
+_reconcile_download_status_on_load()
 
 
 def _check_model_downloaded(model_id: str) -> bool:
@@ -869,7 +938,7 @@ def list_video_models():
 @batch_video_bp.route("/models/download", methods=["POST"])
 def download_video_model():
     """Start downloading a video model from HuggingFace."""
-    global _video_model_download_status
+    global _video_model_download_status, _DOWNLOAD_EPOCH
     try:
         data = request.get_json()
         if not data or "model_id" not in data:
@@ -888,10 +957,18 @@ def download_video_model():
             return success_response({"message": f"{model_id} is already installed"})
 
         with _video_model_download_lock:
-            if _video_model_download_status["is_downloading"]:
+            now = time.time()
+            st = _video_model_download_status
+            # Self-heal a wedged lock: a prior download that claims to be running
+            # but hasn't progressed within the stall window has a dead/stuck thread
+            # behind it — take it over instead of returning 409 forever (issue #36).
+            is_stale = (now - st.get("updated_at", 0)) > _DOWNLOAD_STALL_SECONDS
+            if st.get("is_downloading") and not is_stale:
                 return error_response(
-                    f"Already downloading: {_video_model_download_status['current_model']}", 409
+                    f"Already downloading: {st.get('current_model')}", 409
                 )
+            _DOWNLOAD_EPOCH += 1
+            my_epoch = _DOWNLOAD_EPOCH
             plan_total_gb = round(sum(VIDEO_MODEL_REGISTRY[e]["size_gb"] for e in pending), 2)
             _video_model_download_status = {
                 "is_downloading": True,
@@ -902,12 +979,30 @@ def download_video_model():
                 "speed_mbps": 0,
                 "downloaded_gb": 0,
                 "total_gb": plan_total_gb,
+                "updated_at": now,
+                "epoch": my_epoch,
             }
+            _persist_download_status()
 
-        def _download_task(plan_ids):
+        def _download_task(plan_ids, my_epoch):
             global _video_model_download_status
             import shutil
             _start_time = time.time()
+            stalled = threading.Event()
+
+            def _is_current() -> bool:
+                return _video_model_download_status.get("epoch") == my_epoch
+
+            def _update_status(**kw) -> bool:
+                # Only the owning epoch may write — a stale orphaned thread must
+                # never clobber a newer download's status (issue #36).
+                with _video_model_download_lock:
+                    if not _is_current():
+                        return False
+                    _video_model_download_status.update(kw)
+                    _video_model_download_status["updated_at"] = time.time()
+                    _persist_download_status()
+                    return True
 
             def _dir_bytes(d: Path) -> int:
                 total = 0
@@ -973,8 +1068,7 @@ def download_video_model():
                 total_bytes = int(sum(e[1]["size_gb"] for e in entries) * 1024**3)
                 baselines = {str(d): _dir_bytes(d) for d in uniq_dirs}
 
-                with _video_model_download_lock:
-                    _video_model_download_status["status"] = "downloading"
+                _update_status(status="downloading")
 
                 # Progress = (current bytes across target dirs) − baseline. This
                 # tracks the real .incomplete staging that hf_hub_download writes
@@ -983,20 +1077,41 @@ def download_video_model():
                 stop_monitor = threading.Event()
 
                 def _monitor_progress():
+                    last_bytes = -1
+                    last_change = time.time()
                     while not stop_monitor.is_set():
                         try:
                             downloaded = sum(
                                 max(0, _dir_bytes(d) - baselines[str(d)]) for d in uniq_dirs
                             )
-                            elapsed = time.time() - _start_time
+                            now = time.time()
+                            if downloaded != last_bytes:
+                                last_bytes = downloaded
+                                last_change = now
+                            elif (now - last_change) > _DOWNLOAD_STALL_SECONDS:
+                                # No new bytes for the whole stall window: the HF
+                                # pull is wedged (dead socket, throttled to zero).
+                                # Fail honestly so the UI can retry instead of
+                                # spinning forever at a frozen % (issue #36).
+                                stalled.set()
+                                _update_status(
+                                    status="failed",
+                                    is_downloading=False,
+                                    progress=0,
+                                    error=(f"Download stalled — no progress for "
+                                           f"{_DOWNLOAD_STALL_SECONDS}s. Check your "
+                                           f"network and click Install to retry."),
+                                )
+                                stop_monitor.set()
+                                break
+                            elapsed = now - _start_time
                             speed = (downloaded / (1024 * 1024)) / max(elapsed, 0.1)
                             pct = min(int((downloaded / max(total_bytes, 1)) * 100), 99)
-                            with _video_model_download_lock:
-                                _video_model_download_status.update({
-                                    "progress": pct,
-                                    "speed_mbps": round(speed, 1),
-                                    "downloaded_gb": round(downloaded / 1024**3, 2),
-                                })
+                            _update_status(
+                                progress=pct,
+                                speed_mbps=round(speed, 1),
+                                downloaded_gb=round(downloaded / 1024**3, 2),
+                            )
                         except Exception:
                             pass
                         stop_monitor.wait(1.0)
@@ -1006,8 +1121,9 @@ def download_video_model():
 
                 try:
                     for eid, einfo, ldir in entries:
-                        with _video_model_download_lock:
-                            _video_model_download_status["current_model"] = eid
+                        if stalled.is_set():
+                            break
+                        _update_status(current_model=eid)
                         _pull_one(einfo, ldir)
                         # Verify each entry's files actually landed — no placebo
                         # "completed" when the check paths are still empty.
@@ -1020,27 +1136,34 @@ def download_video_model():
                     stop_monitor.set()
                     monitor_thread.join(timeout=2)
 
-                with _video_model_download_lock:
-                    _video_model_download_status.update({
-                        "progress": 100,
-                        "downloaded_gb": _video_model_download_status["total_gb"],
-                        "status": "completed",
-                    })
+                if stalled.is_set():
+                    return  # monitor already wrote the terminal failed state
+
+                _update_status(
+                    progress=100,
+                    downloaded_gb=_video_model_download_status.get("total_gb", 0),
+                    status="completed",
+                    is_downloading=False,
+                )
                 logger.info(f"Video model(s) downloaded: {', '.join(plan_ids)}")
 
             except Exception as e:
                 logger.error(f"Video model download failed: {e}", exc_info=True)
-                with _video_model_download_lock:
-                    _video_model_download_status.update({
-                        "status": "failed",
-                        "error": str(e),
-                        "progress": 0,
-                    })
+                if not stalled.is_set():
+                    _update_status(
+                        status="failed", error=str(e), progress=0, is_downloading=False
+                    )
             finally:
+                # Belt-and-suspenders: release the lock for THIS epoch even if an
+                # early return skipped the terminal write.
                 with _video_model_download_lock:
-                    _video_model_download_status["is_downloading"] = False
+                    if (_video_model_download_status.get("epoch") == my_epoch
+                            and _video_model_download_status.get("is_downloading")):
+                        _video_model_download_status["is_downloading"] = False
+                        _video_model_download_status["updated_at"] = time.time()
+                        _persist_download_status()
 
-        thread = threading.Thread(target=_download_task, args=(pending,))
+        thread = threading.Thread(target=_download_task, args=(pending, my_epoch))
         thread.daemon = True
         thread.start()
 

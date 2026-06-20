@@ -72,7 +72,11 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
           fetchModels();
           setDownloadStatus((prev) => ({ ...prev, status: "idle", current_model: null }));
         } else if (!status.is_downloading && status.status === "failed") {
-          showMessageRef.current?.(`Download failed: ${status.error}`, "error");
+          // A stall, a backend restart, or a real error all land here now (issue
+          // #36) — surface the reason and refresh so the model's true install
+          // state shows and the Install button is live again for a retry.
+          showMessageRef.current?.(`Download failed: ${status.error || "unknown error"}`, "error");
+          fetchModels();
           setDownloadStatus((prev) => ({ ...prev, status: "idle", current_model: null }));
         }
       }
