@@ -23,6 +23,16 @@ except ImportError:
     config_available = False
     CACHE_DIR = "/tmp/guaardvark_cache"
 
+# Wan loader filenames are DERIVED from the shared registry (issue #36) so the
+# generator always loads exactly what the downloader wrote — no third hand-edited
+# copy to drift. Falls back to {} if the registry can't be imported; the loaders
+# already tolerate a missing entry, so import never hard-fails over this.
+try:
+    from backend.services.video_model_registry import wan_comfyui_map as _wan_comfyui_map
+except Exception:  # pragma: no cover - defensive
+    def _wan_comfyui_map():
+        return {}
+
 
 @dataclass
 class VideoGenerationRequest:
@@ -241,23 +251,10 @@ class ComfyUIVideoGenerator:
     _FAMILY_MIN_VRAM_GB = {"wan": 16, "cogvideox": 16}
 
     # ── Wan 2.2 model mapping ────────────────────────────────────────────────
-
-    WAN22_MODELS = {
-        "wan22-14b": {
-            "type": "t2v",
-            "unet_high": "Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf",
-            "unet_low": "Wan2.2-T2V-A14B-LowNoise-Q5_K_M.gguf",
-            "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-            "vae": "wan_2.1_vae.safetensors",
-        },
-        "wan22-14b-i2v": {
-            "type": "i2v",
-            "unet_high": "Wan2.2-I2V/HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf",
-            "unet_low": "Wan2.2-I2V/LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf",
-            "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-            "vae": "wan_2.1_vae.safetensors",
-        },
-    }
+    # DERIVED from the shared registry (backend/services/video_model_registry.py)
+    # so these loader paths can never drift from what the downloader writes
+    # (issue #36). To change a Wan filename, edit the registry's `files` — not here.
+    WAN22_MODELS = _wan_comfyui_map()
 
     # CogVideoX/Wan are 8x VAE × 2x patch → /16. SVD is U-Net only → /8.
     # Mirror of MODEL_OPTIONS[*].dimensionAlignment in VideoGeneratorPage.jsx —

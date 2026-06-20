@@ -21,6 +21,9 @@ from werkzeug.utils import secure_filename
 
 from backend.utils.response_utils import success_response, error_response
 from backend.services.batch_video_generator import get_batch_video_generator
+# Single source of truth for video-model file layout (download dst == install
+# check == ComfyUI loader paths). See backend/services/video_model_registry.py.
+from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
 
 # GPU Resource Coordinator for pre-flight availability check
 try:
@@ -665,125 +668,9 @@ def _get_comfyui_models_dir():
     return Path(COMFYUI_DIR) / "models"
 
 
-VIDEO_MODEL_REGISTRY = {
-    "cogvideox-5b": {
-        "name": "CogVideoX 5B",
-        "description": "Text-to-video, 6s clips. Best quality, needs ~16GB VRAM.",
-        "hf_repo": "THUDM/CogVideoX-5b",
-        "local_subdir": "CogVideo/CogVideoX-5b",
-        "check_files": ["transformer/diffusion_pytorch_model-00001-of-00002.safetensors", "vae/diffusion_pytorch_model.safetensors"],
-        "size_gb": 11.3,
-        "vram_mb": 16000,
-        "type": "cogvideox",
-    },
-    "cogvideox-5b-i2v": {
-        "name": "CogVideoX 1.5 5B I2V (BF16)",
-        "description": "Image-to-video, 6s clips. Full precision, best quality. Needs ~16GB VRAM.",
-        "hf_repo": "Kijai/CogVideoX-comfy",
-        "hf_filename": "CogVideoX_1_5_5b_I2V_bf16.safetensors",
-        "local_subdir": "checkpoints",
-        "check_files": ["CogVideoX_1_5_5b_I2V_bf16.safetensors"],
-        # ComfyUI's CogVideoX workflow loads the T5 encoder via CLIPLoader.
-        "requires": ["t5-encoder"],
-        "size_gb": 10.4,
-        "vram_mb": 16000,
-        "type": "cogvideox",
-    },
-    # Wan GGUFs live in HighNoise/ and LowNoise/ subfolders in the repo, but
-    # ComfyUI's UnetLoaderGGUF loads them flat from models/unet/. The `files`
-    # spec below maps each repo path (`src`) to the exact on-disk name ComfyUI
-    # expects (`dst`), so we pull ONLY the two Q5_K_M experts — not all 13
-    # quants — and they land where both the loader and the install-check look.
-    "wan22-14b": {
-        "name": "Wan 2.2 14B MoE (GGUF Q5_K)",
-        "description": "State-of-the-art video gen. Two-expert MoE architecture, best quality on 16GB GPU. Requires both HighNoise + LowNoise experts.",
-        "hf_repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
-        "local_subdir": "unet",
-        "files": [
-            {"src": "HighNoise/Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf", "dst": "Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf"},
-            {"src": "LowNoise/Wan2.2-T2V-A14B-LowNoise-Q5_K_M.gguf", "dst": "Wan2.2-T2V-A14B-LowNoise-Q5_K_M.gguf"},
-        ],
-        "check_files": ["Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf", "Wan2.2-T2V-A14B-LowNoise-Q5_K_M.gguf"],
-        # A WAN unet is useless without its VAE + text encoder — installing this
-        # model pulls them too, so one click yields a render-ready setup.
-        "requires": ["wan-vae", "wan-umt5"],
-        "size_gb": 21.0,
-        "vram_mb": 11000,
-        "type": "wan",
-    },
-    "wan22-14b-i2v": {
-        "name": "Wan 2.2 14B I2V MoE (GGUF Q5_K)",
-        "description": "Top-tier image-to-video. Same MoE architecture as Wan 2.2 T2V — start frame conditions an 81-frame clip. Beats CogVideoX I2V on motion + cinematic feel.",
-        "hf_repo": "QuantStack/Wan2.2-I2V-A14B-GGUF",
-        "local_subdir": "unet",
-        # I2V experts are loaded from a nested unet/Wan2.2-I2V/<HighNoise|LowNoise>/
-        # path (see comfyui_video_generator WAN22_MODELS), so dst keeps that nesting.
-        "files": [
-            {"src": "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf", "dst": "Wan2.2-I2V/HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf"},
-            {"src": "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf", "dst": "Wan2.2-I2V/LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf"},
-        ],
-        "check_files": ["Wan2.2-I2V/HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf", "Wan2.2-I2V/LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf"],
-        "requires": ["wan-vae", "wan-umt5"],
-        "size_gb": 21.0,
-        "vram_mb": 11000,
-        "type": "wan",
-    },
-    "wan-vae": {
-        "name": "Wan 2.1/2.2 VAE",
-        "description": "Required by all Wan video models. Shared between versions.",
-        "hf_repo": "QuantStack/Wan2.2-T2V-A14B-GGUF",
-        "local_subdir": "vae",
-        # Repo name is Wan2.1_VAE.safetensors; ComfyUI's VAELoader expects the
-        # lowercase wan_2.1_vae.safetensors — download maps one to the other.
-        "files": [
-            {"src": "VAE/Wan2.1_VAE.safetensors", "dst": "wan_2.1_vae.safetensors"},
-        ],
-        "check_files": ["wan_2.1_vae.safetensors"],
-        "size_gb": 0.25,
-        "vram_mb": 0,
-        "type": "vae",
-    },
-    "wan-umt5": {
-        "name": "UMT5-XXL Text Encoder (FP8)",
-        "description": "Required by Wan 2.1/2.2 models for text encoding.",
-        "hf_repo": "Osrivers/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-        "local_subdir": "text_encoders",
-        "files": [
-            {"src": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "dst": "umt5_xxl_fp8_e4m3fn_scaled.safetensors"},
-        ],
-        "check_files": ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"],
-        "size_gb": 6.3,
-        "vram_mb": 0,
-        "type": "encoder",
-    },
-    "t5-encoder": {
-        "name": "T5-XXL Text Encoder (FP8)",
-        "description": "Required by CogVideoX models for text encoding.",
-        "hf_repo": "comfyanonymous/flux_text_encoders",
-        "local_subdir": "clip",
-        # CogVideoX workflow's CLIPLoader loads clip/t5/google_t5-v1_1-xxl_
-        # encoderonly-fp8_e4m3fn.safetensors — the flux t5xxl fp8 IS that
-        # encoder, just under a different name, so we rename on download.
-        "files": [
-            {"src": "t5xxl_fp8_e4m3fn.safetensors", "dst": "t5/google_t5-v1_1-xxl_encoderonly-fp8_e4m3fn.safetensors"},
-        ],
-        "check_files": ["t5/google_t5-v1_1-xxl_encoderonly-fp8_e4m3fn.safetensors"],
-        "size_gb": 4.6,
-        "vram_mb": 0,
-        "type": "encoder",
-    },
-    "realesrgan-x2": {
-        "name": "Real-ESRGAN 2x Upscaler",
-        "description": "Upscales video frames 2x. Applied as post-processing after generation.",
-        "hf_repo": "ai-forever/Real-ESRGAN",
-        "hf_filename": "RealESRGAN_x2.pth",
-        "local_subdir": "upscale_models",
-        "check_files": ["RealESRGAN_x2.pth"],
-        "size_gb": 0.07,
-        "vram_mb": 0,
-        "type": "upscaler",
-    },
-}
+# VIDEO_MODEL_REGISTRY is imported from backend.services.video_model_registry
+# (the single source of truth). Don't redefine it here — that's exactly the
+# three-copies-that-drift problem issue #36 fixed.
 
 # ─── Download status tracking (hardened for issue #36) ───────────────────────
 # The UI polls this dict to render the model-download modal, so it MUST always
@@ -882,6 +769,24 @@ def _check_model_downloaded(model_id: str) -> bool:
     return True
 
 
+def _missing_check_files(model_id: str) -> List[str]:
+    """Return the check_files (model + companions) that are absent on disk — the
+    precise reason a model isn't 'ready'. Surfaces the issue #36 case where a dir
+    holds GBs of the wrong quant but the one required file is missing, instead of
+    leaving the UI with an unexplained is_ready=False.
+    """
+    models_dir = _get_comfyui_models_dir()
+    missing: List[str] = []
+    for eid in _resolve_download_plan(model_id):
+        info = VIDEO_MODEL_REGISTRY.get(eid, {})
+        base = models_dir / info.get("local_subdir", "")
+        for cf in info.get("check_files", []):
+            fp = base / cf
+            if not fp.exists() or fp.stat().st_size == 0:
+                missing.append(f"{eid}:{cf}")
+    return missing
+
+
 def _resolve_download_plan(model_id: str) -> List[str]:
     """Expand a model id into [model + required companions], order-preserving.
 
@@ -921,6 +826,9 @@ def list_video_models():
                 # is_ready = model + every required companion present (truly usable).
                 "is_downloaded": _check_model_downloaded(model_id),
                 "is_ready": all(_check_model_downloaded(e) for e in plan),
+                # The exact files still missing (model + companions) — empty when
+                # ready. Makes a partial/wrong-quant install diagnosable (issue #36).
+                "missing_files": _missing_check_files(model_id),
                 "requires": requires,
                 # Total bytes an Install click will fetch (model + missing deps).
                 "install_size_gb": round(
