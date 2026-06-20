@@ -433,7 +433,7 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
                 // toggle updates visually when enable/disable succeeds (via socket
                 // snapshot or optimistic update). Runtime 'status' (running/stopped/disabled)
                 // drives the Chip and card opacity instead.
-                onChange={() => handleAction(!!plugin.enabled ? 'disable' : 'start')}
+                onChange={() => handleAction(plugin.enabled ? 'disable' : 'start')}
                 disabled={
                   isLoading
                   || plugin.status === 'starting'

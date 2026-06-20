@@ -577,19 +577,8 @@ const ChatPage = () => {
   // This leans on the architecture (AgentBrain tiers + memory/lessons/STA + session mode flags) instead of local regex arrays.
   // Legacy patterns removed; router + toDetectionFormat provides the shape. If router low-conf or disabled, minimal fallback.
   // See approved plan + useAgentRouter.js + slashCommandHandlers (mode drives agent_screen_active).
-  const detectFileGeneration = useCallback((message) => {
-    if (message.includes("Uploaded Successfully") || message.includes("Status:** Uploaded")) {
-      return { isCSVRequest: false, isCodeRequest: false };
-    }
-    if (!useAgentRouting) {
-      // Only when explicitly disabled (rare); prefer hook for all normal flows.
-      return { isCSVRequest: false, isCodeRequest: false };
-    }
-    // The agentRouter (hook) result (from prior detectWithAgent or direct) will be used in send logic.
-    // Here we return neutral; actual decision comes from router.toDetectionFormat in the caller.
-    // This removes ~80 lines of hardcoded patterns (explicitCSV/Code/bulk + extension regex).
-    return { isCSVRequest: false, isCodeRequest: false };
-  }, [useAgentRouting]);
+  // detectFileGeneration (legacy neutral stub) removed — file-gen detection is fully
+  // delegated to detectFileGenerationWithAgent / the agentRouter. See send logic below.
 
   useEffect(() => {
     const initializeSession = async () => {
@@ -1681,7 +1670,7 @@ const ChatPage = () => {
         });
 
         if (typeof forceReconnect === "function") {
-          try { forceReconnect(); } catch (_) {}
+          try { forceReconnect(); } catch (_) { /* best-effort reconnect */ }
         }
 
         // Give the reconnection a tiny moment to start (socket.io will handle the rest).
@@ -1750,7 +1739,7 @@ const ChatPage = () => {
             }, imageBase64, isVoice);
             console.debug(`[SOCKET-CHAT] POST-SEND ack (agent retry) session=${sessionId}`);
 
-            try { sessionStorage.removeItem(processingStorageKey); } catch (_) {}
+            try { sessionStorage.removeItem(processingStorageKey); } catch (_) { /* storage may be unavailable */ }
             return;
           } catch (retryErr) {
             console.warn("UNIFIED_CHAT (agent retry): still failing after reconnect attempt:", retryErr?.message);

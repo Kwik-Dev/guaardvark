@@ -42,7 +42,6 @@ import { getAvailableModels } from "../api/modelService";
 
 const POLL_MS = 5000;
 const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
-const TERMINAL = (s) => s === "complete" || (s || "").startsWith("failed");
 
 // Local presentational + interactive component for the cut plan + Director prompts.
 // Keeps the main page component from exploding in size.
@@ -145,7 +144,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
     setRegenMode(detail.planning_mode || "narrative");
   }, [detail.id, detail.current_stage, JSON.stringify(detail.clips?.map((c) => c.prompt)), detail.director_treatment, detail.director_storyline, detail.director_model, detail.planning_mode]);
 
-  const getDisplayedPrompt = (row) => (edits.hasOwnProperty(row.index) ? edits[row.index] : row.prompt);
+  const getDisplayedPrompt = (row) => (Object.prototype.hasOwnProperty.call(edits, row.index) ? edits[row.index] : row.prompt);
 
   const handlePromptChange = (idx, val) => {
     setEdits((prev) => ({ ...prev, [idx]: val }));
@@ -623,7 +622,7 @@ const MusicVideoPage = () => {
       try {
         const s = await getAllPluginStatus();
         if (mounted && s?.success) setPluginStatus(s.data || s);
-      } catch {}
+      } catch { /* plugin status poll is best-effort */ }
     };
     load();
     const t = setInterval(load, 15000);

@@ -286,7 +286,7 @@ const AudioFoundryPage = () => {
 
   const handleCancelJob = async () => {
     if (!jobId) return;
-    try { await axios.post(`${API_BASE}/audio-foundry/jobs/${jobId}/cancel`); } catch (_) {}
+    try { await axios.post(`${API_BASE}/audio-foundry/jobs/${jobId}/cancel`); } catch (_) { /* best-effort cancel */ }
     // The poll loop will observe status === "cancelled" and reset.
   };
 

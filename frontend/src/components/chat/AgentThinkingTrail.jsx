@@ -13,7 +13,6 @@ import PsychologyIcon from "@mui/icons-material/Psychology";
 const AgentThinkingTrail = ({ steps }) => {
   const [expanded, setExpanded] = useState(false);
   if (import.meta.env.DEV) {
-    // eslint-disable-next-line no-console
     console.debug('[AgentThinkingTrail] RENDER steps.length=', (steps||[]).length, ' (live from Streaming or persisted from MessageItem)');
   }
 

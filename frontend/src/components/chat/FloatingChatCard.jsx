@@ -66,7 +66,7 @@ const FloatingChatCard = () => {
   const wakeWordEnabled = voiceSettings.wakeWordEnabled !== false;  // Default ON
 
   // Unified Chat Service (Socket.IO streaming)
-  const { socketRef, connectionState } = useUnifiedProgress();
+  const { socketRef } = useUnifiedProgress();
   const [unifiedChatService, setUnifiedChatService] = useState(null);
   const [isStreamingMessage, setIsStreamingMessage] = useState(false);
 
