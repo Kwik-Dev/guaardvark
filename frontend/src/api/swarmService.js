@@ -186,7 +186,7 @@ class SwarmService {
 
     this.socket = io(SOCKET_URL, {
       path: "/socket.io",
-      transports: ["websocket", "polling"],
+      transports: ["polling", "websocket"],
       reconnectionAttempts: 5,
     });
 

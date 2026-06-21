@@ -669,7 +669,7 @@ const SettingsPage = () => {
   // Socket listener for async model switching events
   useEffect(() => {
     socketRef.current = io(SOCKET_URL, {
-      transports: ["websocket", "polling"],
+      transports: ["polling", "websocket"],
       reconnection: true,
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,

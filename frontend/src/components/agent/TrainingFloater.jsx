@@ -180,7 +180,7 @@ export default function TrainingFloater({ open, onClose, _onNavigateAway }) {
   useEffect(() => {
     if (!open) return;
 
-    const socket = io({ path: '/socket.io', transports: ['websocket', 'polling'] });
+    const socket = io({ path: '/socket.io', transports: ['polling', 'websocket'] });
     socketRef.current = socket;
 
     socket.on('agent:learning_mode_started', () => {

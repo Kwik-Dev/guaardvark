@@ -76,7 +76,7 @@ const GpuStatusCard = React.forwardRef(
         const socket = io(SOCKET_URL, {
           reconnection: true,
           reconnectionAttempts: 3,
-          transports: ["websocket", "polling"],
+          transports: ["polling", "websocket"],
         });
         socketRef.current = socket;
 

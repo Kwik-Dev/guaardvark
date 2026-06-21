@@ -685,10 +685,18 @@ const DashboardPage = () => {
   );
 
   // What RGL actually renders: the packed view when narrow, the raw layout otherwise.
-  const renderedLayout = useMemo(
-    () => (isNarrow ? repackLayout(layout) : layout),
-    [isNarrow, repackLayout, layout],
-  );
+  // Clamp minW/minH so they never exceed the item's w/h — the compact/layered/modex
+  // generators set minW=cardMinGridW (30) on bars/cards narrower than that, and RGL
+  // warns "minWidth larger than item width" whenever minW > w. This single chokepoint
+  // fixes every source (repackLayout already sets minW:1, so it's unaffected).
+  const renderedLayout = useMemo(() => {
+    const base = isNarrow ? repackLayout(layout) : layout;
+    return base.map((it) => ({
+      ...it,
+      minW: Math.min(it.minW ?? 1, it.w),
+      minH: Math.min(it.minH ?? 1, it.h),
+    }));
+  }, [isNarrow, repackLayout, layout]);
 
   const LayoutModeIcon = LAYOUT_MODE_ICONS[layoutMode];
 

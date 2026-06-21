@@ -650,7 +650,7 @@ const PluginsPage = () => {
     const socket = io(SOCKET_URL, {
       reconnection: true,
       reconnectionAttempts: 5,
-      transports: ['websocket', 'polling'],
+      transports: ['polling', 'websocket'],
     });
     socketRef.current = socket;
 

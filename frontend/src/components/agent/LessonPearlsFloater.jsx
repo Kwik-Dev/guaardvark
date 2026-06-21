@@ -163,7 +163,7 @@ export default function LessonPearlsFloater({ onClose }) {
   useEffect(() => {
     if (!activeLessonId) return;
 
-    const socket = io({ path: '/socket.io', transports: ['websocket', 'polling'] });
+    const socket = io({ path: '/socket.io', transports: ['polling', 'websocket'] });
     socketRef.current = socket;
 
     socket.on('lesson:pearl_added', (data) => {

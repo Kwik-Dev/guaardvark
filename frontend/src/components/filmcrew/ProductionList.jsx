@@ -30,17 +30,18 @@ const ProductionList = ({ productions, selectedId, onSelect }) => {
               selected={selectedId === p.id}
               onClick={() => onSelect(p.id)}
             >
-              <ListItemText 
+              <ListItemText
                 primary={p.name}
+                secondaryTypographyProps={{ component: 'div' }}
                 secondary={
-                  <Box component="span" sx={{ display: 'flex', alignItems: 'center', mt: 0.5 }}>
-                    <Chip 
-                      label={p.current_stage?.replace('_', ' ') || p.status} 
-                      size="small" 
+                  <Box component="div" sx={{ display: 'flex', alignItems: 'center', mt: 0.5 }}>
+                    <Chip
+                      label={p.current_stage?.replace('_', ' ') || p.status}
+                      size="small"
                       color={getStatusColor(p.current_stage || p.status)}
                       sx={{ height: 20, fontSize: '0.65rem' }}
                     />
-                    <Typography variant="caption" sx={{ ml: 1 }}>
+                    <Typography component="span" variant="caption" sx={{ ml: 1 }}>
                       {new Date(p.created_at).toLocaleDateString()}
                     </Typography>
                   </Box>

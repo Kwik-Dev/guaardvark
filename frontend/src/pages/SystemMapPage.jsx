@@ -283,7 +283,7 @@ export default function SystemMapPage() {
       reconnection: true,
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
-      transports: ["websocket", "polling"],
+      transports: ["polling", "websocket"],
     });
 
     function pushEvent(kind, data) {

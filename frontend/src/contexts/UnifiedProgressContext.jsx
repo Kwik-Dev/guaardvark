@@ -270,7 +270,7 @@ export const UnifiedProgressProvider = ({ children }) => {
       try {
         const socket = io(SOCKET_URL, {
           path: "/socket.io",
-          transports: ["websocket", "polling"],
+          transports: ["polling", "websocket"],
           reconnection: true,
           reconnectionAttempts: Infinity,
           reconnectionDelay: 1000,

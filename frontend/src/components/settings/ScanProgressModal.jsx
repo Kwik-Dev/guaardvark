@@ -159,7 +159,7 @@ export default function ScanProgressModal({ open, onClose, onComplete }) {
     setDispatched(false);
 
     // Stand up the socket FIRST so we don't miss the earliest events.
-    const socket = io({ path: "/socket.io", transports: ["websocket", "polling"] });
+    const socket = io({ path: "/socket.io", transports: ["polling", "websocket"] });
     socketRef.current = socket;
     socket.on("connect", () => setSocketConnected(true));
     socket.on("disconnect", () => setSocketConnected(false));
