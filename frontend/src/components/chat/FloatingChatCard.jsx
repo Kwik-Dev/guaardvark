@@ -29,6 +29,7 @@ import { useAppStore } from "../../stores/useAppStore";
 import { useVoiceSettings } from "../../hooks/useVoiceSettings";
 import useSlashCommands from "../../hooks/useSlashCommands";
 import SlashCommandPopup from "./SlashCommandPopup";
+import { debugLog } from "../../utils/debugLog";
 
 const MIN_WIDTH = 280;
 const MIN_HEIGHT = 300;
@@ -68,25 +69,41 @@ const FloatingChatCard = () => {
   // Unified Chat Service (Socket.IO streaming)
   const { socketRef } = useUnifiedProgress();
   const [unifiedChatService, setUnifiedChatService] = useState(null);
+
+  // Safety: if socket becomes available while floating is open but we have no service yet
+  // (e.g. mount timing), create it. The main effect should cover this, but this is a belt.
+  useEffect(() => {
+    if (isOpen && !unifiedChatService && socketRef?.current) {
+      const svc = new UnifiedChatService(socketRef.current);
+      svc.joinSession(sessionId);
+      setUnifiedChatService(svc);
+    }
+  }, [isOpen, unifiedChatService, sessionId, socketRef?.current]);
   const [isStreamingMessage, setIsStreamingMessage] = useState(false);
 
-  // Initialize UnifiedChatService when socket is connected
+  // Initialize UnifiedChatService when socket is connected.
+  // Depend on socketRef?.current (the actual socket instance) so the effect re-runs
+  // as soon as the shared socket from UnifiedProgressContext is ready.
+  // Previously only [sessionId] meant: if socketRef.current was null on mount, we
+  // bailed forever and floating chat never called joinSession → no streaming.
   useEffect(() => {
-    // Eager creation (see ChatPage for rationale): avoid races and ensure listeners
-    // are registered before the first send even if connect handshake is still in flight.
-    if (!socketRef?.current) {
+    const socket = socketRef?.current;
+    if (!socket) {
       return;
     }
 
-    const service = new UnifiedChatService(socketRef.current);
+    // Eager creation: avoid races and ensure listeners registered before first send.
+    const service = new UnifiedChatService(socket);
     service.joinSession(sessionId);
     setUnifiedChatService(service);
+
+    debugLog('[FloatingChat] service created + joined for', sessionId);
 
     return () => {
       service.cleanup();
       setUnifiedChatService(null);
     };
-  }, [sessionId]);
+  }, [sessionId, socketRef?.current]);
 
   // Hydrate session mode from backend on sessionId change so `/agent` state
   // survives reloads / re-mounts. Without this, the floating card's

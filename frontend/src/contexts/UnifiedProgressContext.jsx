@@ -16,6 +16,7 @@ import { io } from "socket.io-client";
 
 import { useTheme } from "@mui/material/styles";
 import { BASE_URL as API_BASE, SOCKET_URL } from "../api/apiClient";
+import { debugLog } from "../utils/debugLog";
 
 const UnifiedProgressContext = createContext();
 
@@ -268,6 +269,8 @@ export const UnifiedProgressProvider = ({ children }) => {
     const initializeSocket = () => {
       try {
         const socket = io(SOCKET_URL, {
+          path: "/socket.io",
+          transports: ["websocket", "polling"],
           reconnection: true,
           reconnectionAttempts: Infinity,
           reconnectionDelay: 1000,
@@ -375,15 +378,17 @@ export const UnifiedProgressProvider = ({ children }) => {
         });
 
         socket.on("error", (error) => {
-          console.error("UnifiedProgressContext: SocketIO error:", error);
+          debugLog("UnifiedProgressContext: SocketIO error:", error);
           setConnectionState('error');
         });
 
         socket.on("connect_error", (error) => {
           const msg = error?.message || String(error);
           const transport = socket.io?.engine?.transport?.name;
-          console.warn("[SOCKET-CHAT] UnifiedProgressContext connect_error:", msg, transport ? `(transport: ${transport})` : "", " -- may delay chat:join delivery");
-          console.warn("UnifiedProgressContext: Socket connect_error:", msg, transport ? `(transport: ${transport})` : "");
+          // Only one visible warning; the raw transport failure is noisy during startup/reconnect
+          // (browser also emits "can't establish connection" for each WS attempt).
+          console.warn("[SOCKET-CHAT] UnifiedProgressContext connect_error:", msg, transport ? `(transport: ${transport})` : "", " -- may delay chat:join delivery (retrying)");
+          debugLog("UnifiedProgressContext: Socket connect_error (full):", msg, transport);
           // Keep trying (reconnection: true + Infinity attempts); surface as error for UI.
           // The caller (e.g. ChatPage in agent mode) will call forceReconnect() as needed.
           setConnectionState('error');

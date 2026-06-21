@@ -22,14 +22,9 @@ import { BASE_URL } from "../../api/apiClient";
 import ToolCallCard from "./ToolCallCard";
 import AgentThinkingTrail from "./AgentThinkingTrail";
 import ImageLightbox from "../images/ImageLightbox";
+import { debugLog } from "../../utils/debugLog";
 
 const UPLOAD_BASE_URL = BASE_URL + "/uploads";
-
-const debugLog = (...args) => {
-  if (import.meta.env.DEV) {
-    console.debug(...args);
-  }
-};
 
 const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref) => {
   const [status, setStatus] = useState("idle"); // idle | thinking | streaming | complete | error

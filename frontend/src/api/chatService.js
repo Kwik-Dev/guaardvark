@@ -3,12 +3,7 @@
 import { BASE_URL, handleResponse } from "./apiClient";
 import { validateChatInput, checkRateLimit, ValidationError } from "../utils/inputValidation";
 import { RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS } from "../config/constants";
-
-const debugLog = (...args) => {
-  if (import.meta.env.DEV) {
-    console.debug(...args);
-  }
-};
+import { debugLog } from "../utils/debugLog";
 
 export const sendQuery = async (
   inputText,

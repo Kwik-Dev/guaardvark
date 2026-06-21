@@ -3,12 +3,7 @@
 
 import { BASE_URL, SOCKET_URL, handleResponse } from './apiClient';
 import { io } from 'socket.io-client';
-
-const debugLog = (...args) => {
-  if (import.meta.env.DEV) {
-    console.debug(...args);
-  }
-};
+import { debugLog } from "../utils/debugLog";
 
 /**
  * Voice API Service - Handles all voice-related API interactions

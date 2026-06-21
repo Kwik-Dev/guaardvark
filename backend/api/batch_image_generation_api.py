@@ -241,6 +241,14 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     params['enhance_faces'] = data.get('enhance_faces', True)
     params['enhance_hands'] = data.get('enhance_hands', True)
 
+    # Director intelligence (opt-in; mirrors batch-video exactly). Safe defaults = disabled.
+    params['director_mode'] = bool(data.get('director_mode', False))
+    params['director_guidance'] = data.get('director_guidance') or data.get('extra_guidance')
+    params['storyboard_concept'] = data.get('storyboard_concept')
+    params['planning_mode'] = data.get('planning_mode', 'narrative')
+    params['director_model'] = data.get('director_model')
+    params['user_treatment'] = data.get('user_treatment') or data.get('treatment')
+
     # Face restoration parameters
     params['restore_faces'] = data.get('restore_faces', False)
     params['face_restoration_weight'] = float(data.get('face_restoration_weight', 0.5))
@@ -760,6 +768,41 @@ def enhance_prompt():
         logger.error(f"Error enhancing prompt: {e}")
         return error_response(str(e), 500)
 
+
+@batch_image_bp.route("/expand-concept", methods=["POST"])
+def expand_concept():
+    """Director-powered: turn high-level idea + N into a reviewable plan (treatment + per-shot prompts).
+    Non-GPU, cheap Ollama call. Returns plan for UI editing + later launch.
+    """
+    try:
+        if not service_available:
+            return error_response("Batch image service not available", 503)
+        data = request.get_json() or {}
+        idea = (data.get("idea") or data.get("concept") or "").strip()
+        if not idea:
+            return error_response("idea or concept required", 400)
+        n = max(1, min(int(data.get("n") or data.get("quantity") or 4), 24))
+        look = data.get("look_and_feel") or data.get("style") or ""
+        treatment = data.get("user_treatment") or data.get("treatment")
+        mode = data.get("planning_mode", "narrative")
+        guidance = data.get("director_guidance") or data.get("extra_guidance")
+        dmodel = data.get("director_model")
+
+        from backend.services.media_director import expand_image_plan
+        plan = expand_image_plan(
+            idea, n,
+            look_and_feel=look,
+            user_treatment=treatment,
+            planning_mode=mode,
+            extra_guidance=guidance,
+            model=dmodel,
+            cast_descriptors=data.get("cast_descriptors"),
+        )
+        return success_response({"plan": plan, "n": n})
+    except Exception as e:
+        logger.error(f"expand-concept error: {e}")
+        return error_response(str(e), 500)
+
 @batch_image_bp.route("/generate/csv", methods=["POST"])
 def generate_from_csv():
     """Start batch generation from uploaded CSV file."""
@@ -1176,8 +1219,19 @@ def get_batch_image(batch_id: str, image_name: str):
                 image_path = Path(status.output_dir) / "images" / decoded_image_name
 
         if not image_path.exists():
-            # If thumbnail was requested but not found, fall back to serving the full image
+            # If thumbnail was requested but not found, fall back to serving the full image.
+            # Use stem matching because thumbnails are always .jpg while images keep their original ext.
             if request.args.get('thumbnail') == 'true':
+                stem = Path(safe_image_name).stem
+                images_dir = Path(status.output_dir) / "images"
+                # Try common extensions for the matching full image
+                for ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif'):
+                    for candidate_name in (f"{stem}{ext}", f"{safe_image_name}"):
+                        candidate = images_dir / candidate_name
+                        if candidate.exists():
+                            logger.info(f"Thumbnail not found, serving full image as fallback by stem: {candidate}")
+                            return send_file(str(candidate))
+                # Last resort: try original decoded name variants in images/
                 fallback_path = Path(status.output_dir) / "images" / safe_image_name
                 if not fallback_path.exists() and safe_image_name != decoded_image_name:
                     fallback_path = Path(status.output_dir) / "images" / decoded_image_name

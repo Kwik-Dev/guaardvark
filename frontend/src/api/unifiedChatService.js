@@ -5,14 +5,9 @@
 
 import { BASE_URL } from "./apiClient";
 import { useAppStore } from "../stores/useAppStore";
+import { debugLog } from "../utils/debugLog";
 
 const API_BASE = BASE_URL.replace(/\/api$/, "");
-
-const debugLog = (...args) => {
-  if (import.meta.env.DEV) {
-    console.debug(...args);
-  }
-};
 
 class UnifiedChatService {
   constructor(socket) {

@@ -99,6 +99,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [success, setSuccess] = useState('');
   const [showPromptPreview, setShowPromptPreview] = useState(false);
 
+  // Director intelligence (new) — expand high-level concept via media_director (same as MV)
+  const [directorEnabled, setDirectorEnabled] = useState(false);
+  // eslint-disable-next-line no-unused-vars -- setter reserved for the guidance input (WIP)
+  const [directorGuidance, setDirectorGuidance] = useState("");
+  const [isExpanding, setIsExpanding] = useState(false);
+
   // New: Content presets and quality enhancement state
   const [contentPresets, setContentPresets] = useState({});
   const [selectedPreset, setSelectedPreset] = useState('auto'); // 'auto' = auto-detect
@@ -266,6 +272,45 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     return () => clearTimeout(timeoutId);
   }, [batchItems, autoEnhance, analyzeCurrentPrompt]);
 
+  // NEW: Director expand (uses /batch-image/expand-concept; populates batchItems with plan shots for review/launch)
+  const handleDirectorExpand = async () => {
+    const idea = (batchItems || lookAndFeel || '').split('\n').find(l => l.trim()) || lookAndFeel;
+    if (!idea) {
+      setError('Enter a high-level concept or look & feel first');
+      return;
+    }
+    setIsExpanding(true);
+    setError('');
+    try {
+      const resp = await fetch(`${API_BASE}/batch-image/expand-concept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idea,
+          n: Math.max(1, Math.min(quantity || 4, 12)),
+          look_and_feel: lookAndFeel,
+          user_treatment: '',
+          director_guidance: directorGuidance || undefined,
+        })
+      });
+      if (!resp.ok) throw new Error('expand failed');
+      const j = await resp.json();
+      const plan = j?.data?.plan || j?.plan;
+      const shots = (plan && plan.shots) || [];
+      if (shots.length) {
+        const lines = shots.map(s => (s.prompt || '').trim()).filter(Boolean);
+        setBatchItems(lines.join('\n'));
+        setSuccess(`Director expanded to ${lines.length} coherent shots (review & launch)`);
+      } else {
+        setError('Director returned no shots');
+      }
+    } catch (e) {
+      setError('Director expand failed (ollama may be busy)');
+    } finally {
+      setIsExpanding(false);
+    }
+  };
+
   const checkServiceStatus = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/status`);
@@ -390,7 +435,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 imageFilename: getFilename(r.image_path),
                 thumbnailFilename: getFilename(r.thumbnail_path),
                 prompt: r.metadata?.original_prompt || '',
-                metadata: r.metadata
+                metadata: r.metadata,
+                batchId: batchStatus.batch_id, // embed for robust URL construction
               };
             });
           setGeneratedImages(images);
@@ -457,7 +503,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   imageFilename: getFilename(r.image_path),
                   thumbnailFilename: getFilename(r.thumbnail_path),
                   prompt: r.metadata?.original_prompt || '',
-                  metadata: r.metadata
+                  metadata: r.metadata,
+                  batchId: batchStatus.batch_id, // embed for robust URL construction during live updates
                 };
               });
             setGeneratedImages(images);
@@ -504,6 +551,34 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       // Cleanup function to prevent race conditions
       stopPolling();
     };
+  }, [activeBatch]);
+
+  // Keep generatedImages in sync with activeBatch.results (single source of truth for live batch).
+  // This prevents stale/mismatched state during rapid polling updates.
+  useEffect(() => {
+    if (activeBatch && activeBatch.results && activeBatch.results.length > 0) {
+      const getFilename = (path) => {
+        if (!path) return null;
+        const parts = path.replace(/\\/g, '/').split('/');
+        return parts[parts.length - 1];
+      };
+      const synced = activeBatch.results
+        .filter(r => r.success && r.image_path)
+        .map(r => ({
+          id: r.prompt_id,
+          path: r.image_path,
+          thumbnail: r.thumbnail_path,
+          imageFilename: getFilename(r.image_path),
+          thumbnailFilename: getFilename(r.thumbnail_path),
+          prompt: r.metadata?.original_prompt || '',
+          metadata: r.metadata,
+          batchId: activeBatch.batch_id,
+        }));
+      // Only update if the count changed (avoids unnecessary re-renders)
+      if (synced.length !== generatedImages.length) {
+        setGeneratedImages(synced);
+      }
+    }
   }, [activeBatch]);
 
   // Monitor progress system for batch updates
@@ -720,7 +795,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             auto_enhance: autoEnhance,
             enhance_anatomy: enhanceAnatomy,
             enhance_faces: enhanceFaces,
-            enhance_hands: enhanceHands
+            enhance_hands: enhanceHands,
+            // Director (shared intelligent pipeline with MusicVideo / chat)
+            director_mode: !!directorEnabled,
+            director_guidance: directorGuidance || undefined
           })
         });
       }
@@ -1366,7 +1444,19 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             value={quantity}
                             onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value) || 1))}
                             inputProps={{ min: 1, max: 100 }}
-                            helperText="Generates X versions for each prompt"
+                          />
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={handleDirectorExpand}
+                            disabled={isExpanding || !(batchItems || lookAndFeel).trim()}
+                            title="Media Director (shared with MusicVideo): expand concept into N distinct coherent prompts"
+                          >
+                            {isExpanding ? '…' : 'Director expand'}
+                          </Button>
+                          <FormControlLabel
+                            control={<Switch size="small" checked={directorEnabled} onChange={(e) => setDirectorEnabled(e.target.checked)} />}
+                            label="use director"
                           />
                         </Grid>
 
@@ -1550,7 +1640,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
           {/* Generated Images Gallery */}
           {
-            generatedImages.length > 0 && (
+            (generatedImages.length > 0 || (activeBatch && activeBatch.results && activeBatch.results.some(r => r.success && r.image_path))) && (
               <Card sx={{
                 boxShadow: 2,
                 borderRadius: 2
@@ -1564,7 +1654,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       color: 'text.primary'
                     }}
                   >
-                    Generated Images ({generatedImages.length})
+                    Generated Images ({generatedImages.length || (activeBatch?.results?.filter(r => r.success && r.image_path).length || 0)})
                   </Typography>
 
                   <ImageList
@@ -1578,12 +1668,20 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     }}
                   >
                     {generatedImages.map((image) => {
-                      // Use thumbnail filename if available, otherwise fallback to image filename
-                      const thumbnailUrl = activeBatch && image.thumbnailFilename
-                        ? `${API_BASE}/batch-image/image/${activeBatch.batch_id}/${image.thumbnailFilename}?thumbnail=true`
-                        : activeBatch && image.imageFilename
-                          ? `${API_BASE}/batch-image/image/${activeBatch.batch_id}/${image.imageFilename}?thumbnail=true`
-                          : '';
+                      // Prefer embedded batchId (from the result that created this image) to avoid
+                      // race conditions between setActiveBatch and setGeneratedImages during live polling.
+                      // Falls back to activeBatch for older data.
+                      const batchIdForUrl = image.batchId || (activeBatch && activeBatch.batch_id);
+                      // Always try thumbnail first if we have a filename for it.
+                      // Otherwise use the main image name (serving logic will fallback if needed).
+                      let thumbnailUrl = '';
+                      if (batchIdForUrl) {
+                        if (image.thumbnailFilename) {
+                          thumbnailUrl = `${API_BASE}/batch-image/image/${batchIdForUrl}/${image.thumbnailFilename}?thumbnail=true`;
+                        } else if (image.imageFilename) {
+                          thumbnailUrl = `${API_BASE}/batch-image/image/${batchIdForUrl}/${image.imageFilename}?thumbnail=true`;
+                        }
+                      }
 
                       return (
                         <ImageListItem key={image.id}>
@@ -1595,12 +1693,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             onClick={() => openImageViewer(image)}
                             onError={(e) => {
                               console.error('Failed to load image thumbnail:', image.id, thumbnailUrl);
-                              // Fallback to full image if thumbnail fails
-                              if (image.imageFilename && !e.target.dataset.fallbackAttempted) {
-                                e.target.src = activeBatch ? `${API_BASE}/batch-image/image/${activeBatch.batch_id}/${image.imageFilename}` : '';
+                              const batchIdForUrl = image.batchId || (activeBatch && activeBatch.batch_id);
+                              // Robust fallback: always try the full original image (no ?thumbnail) before hiding.
+                              // This ensures we show *something* even if dedicated thumbnail is missing or 404s.
+                              if (image.imageFilename && batchIdForUrl && !e.target.dataset.fallbackAttempted) {
+                                e.target.src = `${API_BASE}/batch-image/image/${batchIdForUrl}/${image.imageFilename}`;
                                 e.target.dataset.fallbackAttempted = 'true';
-                              } else {
+                              } else if (!e.target.dataset.hidden) {
+                                // Only hide as last resort
                                 e.target.style.display = 'none';
+                                e.target.dataset.hidden = 'true';
                               }
                             }}
                             role="button"
@@ -1768,20 +1870,25 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           {selectedImage && (
             <Box sx={{ textAlign: 'center' }}>
               <img
-                src={activeBatch && selectedImage.imageFilename
-                  ? `${API_BASE}/batch-image/image/${activeBatch.batch_id}/${selectedImage.imageFilename}`
-                  : ''}
+                src={(() => {
+                  const bId = selectedImage.batchId || (activeBatch && activeBatch.batch_id);
+                  return (bId && selectedImage.imageFilename)
+                    ? `${API_BASE}/batch-image/image/${bId}/${selectedImage.imageFilename}`
+                    : '';
+                })()}
                 alt={selectedImage.prompt}
                 style={{ maxWidth: '100%', height: 'auto' }}
                 onError={(e) => {
                   console.error('Failed to load full-size image:', selectedImage.id);
-                  // Fallback to thumbnail if full image fails
-                  if (selectedImage.thumbnailFilename && !e.target.dataset.fallbackAttempted) {
-                    e.target.src = activeBatch ? `${API_BASE}/batch-image/image/${activeBatch.batch_id}/${selectedImage.thumbnailFilename}?thumbnail=true` : '';
+                  const batchIdForUrl = selectedImage.batchId || (activeBatch && activeBatch.batch_id);
+                  // Try thumbnail as fallback, then give up (but don't hide immediately if we have a good full src)
+                  if (selectedImage.thumbnailFilename && batchIdForUrl && !e.target.dataset.fallbackAttempted) {
+                    e.target.src = `${API_BASE}/batch-image/image/${batchIdForUrl}/${selectedImage.thumbnailFilename}?thumbnail=true`;
                     e.target.dataset.fallbackAttempted = 'true';
-                  } else {
+                  } else if (!e.target.dataset.hidden) {
                     e.target.style.display = 'none';
                     setError('Failed to load image');
+                    e.target.dataset.hidden = 'true';
                   }
                 }}
               />

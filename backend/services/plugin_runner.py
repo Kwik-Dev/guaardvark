@@ -243,6 +243,25 @@ class PluginRunnerClient:
                 self._proc.wait(timeout=2)
             except Exception:
                 pass
+        finally:
+            # Close pipes explicitly so the OS doesn't think resources are leaked.
+            # This helps avoid resource_tracker warnings for the controlling process.
+            try:
+                if self._proc.stdin:
+                    self._proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                if self._proc.stdout:
+                    self._proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                if self._proc.stderr:
+                    self._proc.stderr.close()
+            except Exception:
+                pass
+            self._proc = None
 
     def _send(self, req: dict) -> dict:
         with self._lock:

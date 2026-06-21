@@ -49,12 +49,7 @@ import extractSpeakableText from "../utils/extractSpeakableText";
 
 import OrchestratorPlanView from "../components/orchestrator/OrchestratorPlanView";
 import { createPlan } from "../api/orchestratorService";
-
-const debugLog = (...args) => {
-  if (import.meta.env.DEV) {
-    console.debug(...args);
-  }
-};
+import { debugLog } from "../utils/debugLog";
 
 const USE_AGENT_ROUTING = () => {
   try {
