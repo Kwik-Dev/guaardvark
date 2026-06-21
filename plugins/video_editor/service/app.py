@@ -196,11 +196,25 @@ def health() -> dict[str, str]:
 
 @app.get("/status")
 def status() -> dict[str, Any]:
+    import shutil
+
+    melt_path = _runtime.get("melt", {}).get("resolved_path", "")
+    prereqs = {
+        "melt": {
+            "found": bool(melt_path and Path(melt_path).exists()),
+            "path": melt_path,
+            "suggestion": "macOS: brew install --cask shotcut | Linux: apt/flatpak/snap shotcut or melt",
+        },
+        "ffmpeg": {"found": bool(shutil.which("ffmpeg"))},
+        "ffprobe": {"found": bool(shutil.which("ffprobe"))},
+        "shotcut": {"found": bool(shutil.which("shotcut"))},
+    }
     return {
         "service": "video_editor",
         "version": _config["manifest"].get("version", "0.0.0"),
         "port": _config["manifest"].get("port"),
-        "melt_resolved_path": _runtime.get("melt", {}).get("resolved_path", ""),
+        "melt_resolved_path": melt_path,
+        "prereqs": prereqs,
         "paths": _paths,
         "jobs": {
             "total": len(_jobs.list(limit=10000)),
@@ -529,9 +543,12 @@ def vision_scan_clips(body: VisionScanBody) -> dict[str, Any]:
 
 @app.post("/open-in-shotcut")
 def open_in_shotcut(body: OpenInShotcutBody) -> dict[str, Any]:
-    """Spawn Shotcut on a .mlt file. Path must live under the configured mlt_projects dir."""
+    """Spawn Shotcut on a .mlt file. Path must live under the configured mlt_projects dir.
+    Cross-platform: tries PATH, macOS .app, flatpak, and explicit override.
+    """
     import shutil
     import subprocess
+    import platform
 
     mlt_path = Path(body.mlt_path).resolve()
     if not mlt_path.exists():
@@ -546,13 +563,51 @@ def open_in_shotcut(body: OpenInShotcutBody) -> dict[str, Any]:
             detail=f"mlt path must be under {allowed_root}",
         )
 
-    shotcut_bin = shutil.which("shotcut")
-    if not shotcut_bin:
-        raise HTTPException(status_code=500, detail="shotcut binary not on PATH")
+    # 1. Explicit override from body (if client sends shotcut_path)
+    extra = getattr(body, "model_dump", lambda **k: {})() or {}
+    shotcut_bin = extra.get("shotcut_path") or getattr(body, "shotcut_path", None) or None
+    if shotcut_bin and not Path(shotcut_bin).exists():
+        shotcut_bin = None
 
-    # Detached spawn — we don't track it.
-    subprocess.Popen([shotcut_bin, str(mlt_path)], start_new_session=True)
-    return {"launched": str(mlt_path)}
+    # 2. which("shotcut")
+    if not shotcut_bin:
+        shotcut_bin = shutil.which("shotcut")
+
+    # 3. macOS .app bundle
+    if not shotcut_bin and platform.system().lower() == "darwin":
+        for candidate in (
+            "/Applications/Shotcut.app/Contents/MacOS/Shotcut",
+            "/Applications/Shotcut.app/Contents/MacOS/shotcut",
+        ):
+            if Path(candidate).exists():
+                shotcut_bin = candidate
+                break
+
+    # 4. flatpak fallback (Linux)
+    if not shotcut_bin and shutil.which("flatpak"):
+        # We still exec the flatpak run below if we choose this path
+        shotcut_bin = "flatpak"
+
+    if not shotcut_bin:
+        raise HTTPException(
+            status_code=500,
+            detail="shotcut not found (tried PATH, macOS .app, flatpak). "
+                   "Install Shotcut or pass explicit shotcut_path.",
+        )
+
+    # Launch
+    try:
+        if shotcut_bin == "flatpak":
+            subprocess.Popen(
+                ["flatpak", "run", "org.shotcut.Shotcut", str(mlt_path)],
+                start_new_session=True,
+            )
+        else:
+            subprocess.Popen([shotcut_bin, str(mlt_path)], start_new_session=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to launch Shotcut: {e}") from e
+
+    return {"launched": str(mlt_path), "binary": shotcut_bin}
 
 
 # ---------- A2: multi-clip arrangement render --------------------------------

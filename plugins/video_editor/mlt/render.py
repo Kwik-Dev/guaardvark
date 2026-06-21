@@ -3,6 +3,9 @@
 Snap-confinement note: do NOT call /snap/shotcut/current/bin/melt directly —
 that's the unwrapped binary that fails to load libmlt because LD_LIBRARY_PATH
 isn't set. Use the top-level /snap/shotcut/current/melt wrapper script.
+
+Cross-platform: resolution now prefers env, PATH, then Mac (Homebrew/Applications)
+and Linux (snap/apt/flatpak) candidates. See service/config_loader.resolve_melt_path.
 """
 
 from __future__ import annotations
@@ -17,6 +20,12 @@ from typing import Optional
 from .proc import run_logged
 
 logger = logging.getLogger(__name__)
+
+# Import the shared resolver (added for Linux/macOS portability)
+try:
+    from ..service.config_loader import resolve_melt_path as _shared_resolve_melt
+except Exception:
+    _shared_resolve_melt = None  # fallback handled below
 
 
 class MeltNotFound(RuntimeError):
@@ -79,17 +88,34 @@ def render_mlt(
 
 
 def _resolve_melt(configured: str) -> Path:
-    """Find an executable melt — honor the configured path, fall back to PATH."""
+    """Find an executable melt — cross-platform with shared resolver.
+
+    Delegates to the improved resolve_melt_path when available (env + platform candidates).
+    Falls back to legacy PATH + snap handling for compatibility.
+    """
+    # Prefer the shared cross-platform resolver (Linux/macOS candidates + env)
+    if _shared_resolve_melt is not None:
+        try:
+            found = _shared_resolve_melt(configured)
+            if found:
+                return found
+        except Exception:
+            pass  # fall through to legacy
+
     p = Path(configured)
     if p.is_file():
         # Resolve snap "current" symlink so we don't break mid-render on a snap refresh.
         return p.resolve()
+
     found = shutil.which(configured) or shutil.which("melt")
     if found:
         return Path(found).resolve()
+
     raise MeltNotFound(
         f"melt binary not found (tried '{configured}' and $PATH). "
-        "Install Shotcut or `apt install melt`."
+        "macOS: `brew install --cask shotcut` or `brew install mlt`. "
+        "Linux: `apt install melt` / `flatpak install ...shotcut` / snap. "
+        "Override with VIDEO_EDITOR_MELT_PATH env or melt.path in config.yaml."
     )
 
 

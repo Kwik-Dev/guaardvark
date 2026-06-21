@@ -192,6 +192,57 @@ First boot creates `plugins/video_editor/venv/` and installs ~250 MB of deps
 
 ---
 
+## Linux & macOS Setup (melt / Shotcut for Video Editor + Music Video)
+
+The editor and music-video assembly require `melt` (MLT renderer from Shotcut) + `ffmpeg`/`ffprobe` (already installed by the core platform scripts on both OSes). `auto-editor` is bundled in the plugin venv.
+
+**macOS (Homebrew recommended)**
+```bash
+# Shotcut cask includes melt + GUI (preferred for "Open in Shotcut")
+brew install --cask shotcut
+
+# Or just the melt binary
+brew install mlt
+```
+- `melt` will be in PATH (or `/opt/homebrew/bin/melt`).
+- ffmpeg is installed automatically by Guaardvark's macOS bootstrap (see `scripts/platform/macos.sh` and recent Homebrew fixes).
+- Override if needed: edit `plugins/video_editor/config.yaml` → `melt.path`.
+
+**Linux**
+```bash
+# Ubuntu/Debian (apt)
+sudo apt-get install -y melt ffmpeg shotcut
+
+# Flatpak (works on most distros, including Fedora/Arch)
+flatpak install flathub org.shotcut.Shotcut
+
+# Snap (original default)
+sudo snap install shotcut
+```
+- After install: `which melt` should succeed.
+- For non-standard locations set `melt.path` in `config.yaml` or `VIDEO_EDITOR_MELT_PATH` env before starting the plugin.
+- WSL/other: use apt or the distro's equivalent + ensure ffmpeg is present.
+
+**Verification**
+```bash
+which melt
+which ffmpeg
+which ffprobe
+# Test inside the plugin (after it starts):
+curl http://localhost:8207/status   # will show "melt_resolved_path"
+```
+
+**"Open in Shotcut"**
+- Best-effort cross-platform launcher.
+- On macOS it tries the .app bundle if the binary isn't in PATH.
+- You can always open the generated `.mlt` file manually from `data/outputs/videos/mlt-projects/`.
+
+**Notes**
+- The plugin itself is CPU-only (no VRAM). Heavy video *generation* (batch / music video clips) still benefits from NVIDIA CUDA or Apple Silicon MPS (see offline video generator notes).
+- Generated `.mlt` files are standard Shotcut format and open on any OS that has Shotcut.
+
+---
+
 ## Testing
 
 ```bash

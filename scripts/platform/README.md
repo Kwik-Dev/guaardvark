@@ -25,6 +25,7 @@ Pi = `linux.sh` with `ARCH=arm64`. WSL = `linux.sh` with `IS_WSL=1`. Only two ba
 ## The interface (every backend implements these identically)
 ```
 platform_install_system_deps    # postgres/redis/ffmpeg/node/build-tools (apt | brew)
+# Note: full Video Editor + music video also needs `melt` (MLT) + Shotcut. See plugins/video_editor/README.md "Linux & macOS Setup".
 platform_ensure_python           # guarantee Python 3.12; sets PYTHON_CMD (apt | deadsnakes | uv/pyenv | brew)
 platform_gpu_setup               # nvidia tuning on Linux+CUDA; no-op on mac/cpu
 platform_service_start <svc>     # systemctl | brew services | (WSL/no-systemd fallback)

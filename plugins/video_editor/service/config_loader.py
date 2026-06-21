@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import shutil
 from pathlib import Path
 from typing import Any
@@ -64,11 +65,64 @@ def _abs(p: str) -> Path:
     return (project_root() / pp).resolve()
 
 
-def _resolve_melt_path(configured: str) -> Path | None:
-    """Find an executable melt — accept the configured path or fall back to PATH."""
+def resolve_melt_path(configured: str) -> Path | None:
+    """Find an executable melt with cross-platform support (Linux/macOS).
+
+    Order of precedence:
+    1. VIDEO_EDITOR_MELT_PATH (or MELT_PATH) env var (set by start.sh or user)
+    2. Explicit value from config.yaml
+    3. shutil.which("melt")
+    4. Common platform-specific locations (snap, Homebrew, /Applications, apt paths, etc.)
+
+    Returns the first executable file found (resolved for symlinks) or None.
+    """
+    candidates: list[str] = []
+
+    # 1. Env var (highest priority for overrides)
+    for env_key in ("VIDEO_EDITOR_MELT_PATH", "MELT_PATH"):
+        if val := os.environ.get(env_key):
+            candidates.append(val)
+
+    # 2. Configured path
     if configured:
-        p = Path(configured)
-        if p.is_file():
-            return p.resolve()
-    found = shutil.which("melt")
-    return Path(found).resolve() if found else None
+        candidates.append(configured)
+
+    # 3. PATH
+    if found := shutil.which("melt"):
+        candidates.append(found)
+
+    # 4. Platform-specific common locations
+    sysname = platform.system().lower()
+    if sysname == "darwin":
+        candidates.extend([
+            "/Applications/Shotcut.app/Contents/MacOS/melt",
+            "/Applications/Shotcut.app/Contents/Resources/melt",
+            "/opt/homebrew/bin/melt",
+            "/usr/local/bin/melt",
+        ])
+    elif sysname == "linux":
+        candidates.extend([
+            "/snap/shotcut/current/melt",
+            "/var/lib/snapd/snap/shotcut/current/melt",
+            "/usr/bin/melt",
+            "/usr/local/bin/melt",
+            "/opt/shotcut/melt",
+            "/opt/shotcut/bin/melt",
+        ])
+
+    for cand in candidates:
+        if not cand:
+            continue
+        p = Path(cand)
+        try:
+            if p.is_file() and os.access(p, os.X_OK):
+                return p.resolve()
+        except Exception:
+            continue
+
+    return None
+
+
+def _resolve_melt_path(configured: str) -> Path | None:
+    """Backward-compatible wrapper (delegates to the public resolver)."""
+    return resolve_melt_path(configured)

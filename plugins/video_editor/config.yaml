@@ -1,11 +1,12 @@
 # Video Editor — runtime configuration
-# Resolves the snap-versioned melt path at start time; the wrapper script under
-# /snap/shotcut/<rev>/melt sets LD_LIBRARY_PATH correctly. Don't use
-# /snap/shotcut/current/bin/melt — that one is unwrapped and fails to load libmlt.
+# melt is auto-resolved at runtime with cross-platform support (env, PATH,
+# Mac Homebrew/Applications, Linux snap/apt/flatpak, etc.). See start.sh and
+# service/config_loader.py:resolve_melt_path.
+# Snap wrapper note (Linux): use the top-level /snap/shotcut/current/melt (not bin/melt).
 
 melt:
-  # Wrapper script that sets up snap's lib path. Resolved via `readlink -f` in
-  # scripts/start.sh and cached here at install time. Override per-machine.
+  # Default is snap-centric for backward compat. Will be overridden by detection.
+  # Set to empty or a full path to force a specific binary.
   path: /snap/shotcut/current/melt
   default_vcodec: libx264
   default_acodec: aac

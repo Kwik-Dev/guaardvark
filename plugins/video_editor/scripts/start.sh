@@ -34,18 +34,48 @@ PLUGIN_VENV="$PLUGIN_ROOT/venv"
 
 bash "$SCRIPT_DIR/setup_venv.sh" || { echo "Error: setup_venv.sh failed"; exit 1; }
 
-# Cache the resolved melt path. The snap binary at /snap/shotcut/current/bin/melt
-# is the UNWRAPPED binary that fails to load libmlt; we want the WRAPPER script
-# at /snap/shotcut/current/melt, which sets LD_LIBRARY_PATH.
-MELT_CANDIDATE=$(readlink -f /snap/shotcut/current/melt 2>/dev/null || true)
-if [ -z "$MELT_CANDIDATE" ] || [ ! -x "$MELT_CANDIDATE" ]; then
-    MELT_CANDIDATE=$(command -v melt 2>/dev/null || true)
-fi
-if [ -n "$MELT_CANDIDATE" ]; then
-    echo "Resolved melt: $MELT_CANDIDATE"
-    export VIDEO_EDITOR_MELT_PATH="$MELT_CANDIDATE"
+# Cache the resolved melt path with cross-platform support.
+# Priority: explicit env > snap wrapper (Linux) > PATH > platform candidates.
+# The snap /snap/shotcut/current/melt (not /.../bin/melt) is required for LD_LIBRARY_PATH.
+if [ -z "${VIDEO_EDITOR_MELT_PATH:-}" ]; then
+    MELT_CANDIDATE=""
+    # 1. Snap (original default on Ubuntu)
+    if [ -z "$MELT_CANDIDATE" ]; then
+        MELT_CANDIDATE=$(readlink -f /snap/shotcut/current/melt 2>/dev/null || true)
+    fi
+    # 2. PATH
+    if [ -z "$MELT_CANDIDATE" ] || [ ! -x "$MELT_CANDIDATE" ]; then
+        MELT_CANDIDATE=$(command -v melt 2>/dev/null || true)
+    fi
+    # 3. macOS common locations (Homebrew / Applications)
+    if [ -z "$MELT_CANDIDATE" ] || [ ! -x "$MELT_CANDIDATE" ]; then
+        for p in \
+            /opt/homebrew/bin/melt \
+            /usr/local/bin/melt \
+            "/Applications/Shotcut.app/Contents/MacOS/melt"; do
+            if [ -x "$p" ]; then MELT_CANDIDATE="$p"; break; fi
+        done
+    fi
+    # 4. Other Linux locations (flatpak, apt, etc.)
+    if [ -z "$MELT_CANDIDATE" ] || [ ! -x "$MELT_CANDIDATE" ]; then
+        for p in \
+            /usr/bin/melt \
+            /opt/shotcut/melt; do
+            if [ -x "$p" ]; then MELT_CANDIDATE="$p"; break; fi
+        done
+    fi
+
+    if [ -n "$MELT_CANDIDATE" ] && [ -x "$MELT_CANDIDATE" ]; then
+        echo "Resolved melt: $MELT_CANDIDATE"
+        export VIDEO_EDITOR_MELT_PATH="$MELT_CANDIDATE"
+    else
+        echo "Warning: melt not found — render-to-MP4 endpoint will return error until installed."
+        echo "  macOS: brew install --cask shotcut   (or brew install mlt)"
+        echo "  Linux: apt install melt | flatpak install ...shotcut | snap install shotcut"
+        echo "  Override: VIDEO_EDITOR_MELT_PATH=/path/to/melt or config.yaml melt.path"
+    fi
 else
-    echo "Warning: melt not found — render-to-MP4 endpoint will return error until installed."
+    echo "Using VIDEO_EDITOR_MELT_PATH from environment: $VIDEO_EDITOR_MELT_PATH"
 fi
 
 # shellcheck disable=SC1091

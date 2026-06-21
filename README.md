@@ -208,6 +208,8 @@ Give it a song (`.mp3` / `.wav`), a style prompt, and a short narrative — Guaa
 - **Beat-timed assembly** — clips are stretched/filled to land on the beat (`clip stretch`, fill methods) and assembled into the final cut, with RIFE frame interpolation for smoothness.
 - **Honest about the edges** — native filters/transitions/effects aren't in yet (the demo's glitch effect was added manually in Shotcut); that's on the near-term roadmap.
 
+**Linux & macOS:** The final assembly step needs `melt` (MLT) from Shotcut. ffmpeg is pre-installed by the platform bootstrap. Full commands (brew/apt/flatpak/snap) are in `plugins/video_editor/README.md`.
+
 ### Model Context Protocol (MCP)
 
 Guaardvark speaks MCP both ways — exposes its tools to any MCP client (Claude Desktop, Cursor, IDE plugins, etc.) and can call tools from connected external MCP servers.
@@ -263,6 +265,8 @@ A built-in non-linear editor for stitching generated clips, layering text, and r
 - **Keyboard shortcuts** — space to play/pause, arrow keys to scrub, `t` to add text, `del` to remove selected, `cmd+z` for one-step undo.
 - **JobOperationGate** — render path checks the gate before grabbing the GPU, so a render won't trample an active video generation or upscaling job.
 - **Standalone Video Text Overlay tool** — for the simple one-off case where you don't need a timeline.
+
+**Linux & macOS prerequisites:** See `plugins/video_editor/README.md` ("Linux & macOS Setup") for `melt` + Shotcut install (ffmpeg is already handled by core platform scripts on brew/apt).
 
 ### GPU Image Upscaling — 4K and 8K Output
 

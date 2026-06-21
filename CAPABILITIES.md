@@ -394,6 +394,8 @@ A non-linear video editor built into Guaardvark for assembling generated clips i
 ### Orchestrator Integration
 - The video editor can be driven by the Production Pipeline (Film Crew) — agents drop generated clips into the timeline automatically
 
+**Linux & macOS:** `melt` (from Shotcut) is required for renders and is detected at runtime (supports Homebrew on macOS, apt/flatpak/snap on Linux). ffmpeg is installed by the platform bootstrap. See the plugin README for setup commands.
+
 ---
 
 ## Outreach System
