@@ -143,6 +143,18 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
           </Box>
         )}
 
+        {/* First-run discoverability (issue #36): if nothing is installed yet,
+            say so up front — video generation can't run without a model, and
+            there's no auto-download. */}
+        {!loading && models.length > 0 && !models.some((m) => m.is_ready ?? m.is_downloaded) && (
+          <Box sx={{ mb: 2, p: 1.5, border: 1, borderColor: "warning.main", borderRadius: 1 }}>
+            <Typography variant="body2" color="warning.main">
+              No video model is installed yet. Install one below to enable video generation — each
+              model's download size and VRAM requirement is shown so you can pick what fits your machine.
+            </Typography>
+          </Box>
+        )}
+
         {loading ? (
           <Box display="flex" justifyContent="center" p={3}>
             <CircularProgress />
@@ -220,6 +232,19 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
                         {model.is_downloaded && !(model.is_ready ?? true) && (
                           <Typography variant="caption" color="warning.main" noWrap>
                             model present — missing dependencies
+                          </Typography>
+                        )}
+                        {/* Which exact files are still missing (issue #36) — the
+                            full list is in the tooltip so a partial/wrong-quant
+                            install is diagnosable instead of a silent "not ready". */}
+                        {!(model.is_ready ?? model.is_downloaded) && model.missing_files?.length > 0 && (
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            noWrap
+                            title={model.missing_files.join("\n")}
+                          >
+                            {model.missing_files.length} file{model.missing_files.length > 1 ? "s" : ""} missing
                           </Typography>
                         )}
                       </Box>

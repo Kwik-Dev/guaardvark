@@ -433,6 +433,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // from the backend cull — remove a model from VIDEO_MODEL_REGISTRY and it
   // disappears here automatically. Rich per-model metadata stays in MODEL_OPTIONS.
   const [apiModelIds, setApiModelIds] = useState(null);
+  // null = not yet known; true/false once the model list loads. Drives the
+  // first-run "no model installed" nudge below (issue #36 discoverability).
+  const [anyModelReady, setAnyModelReady] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -440,12 +443,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         const res = await fetch(`${API_BASE}/batch-video/models`);
         const data = await res.json();
         if (data.success && data.data?.models) {
-          const ids = new Set(
-            data.data.models
-              .filter(m => m.type === "cogvideox" || m.type === "wan")
-              .map(m => m.id)
-          );
+          const vids = data.data.models.filter(m => m.type === "cogvideox" || m.type === "wan");
+          const ids = new Set(vids.map(m => m.id));
           if (ids.size > 0) setApiModelIds(ids);
+          setAnyModelReady(vids.some(m => m.is_ready));
         }
       } catch (e) {
         // Offline / API down — fall back to the (already-culled) MODEL_OPTIONS.
@@ -1736,6 +1737,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     ))}
                   </Select>
                 </FormControl>
+                {anyModelReady === false && (
+                  <Box sx={{ mt: 1, p: 1, border: 1, borderColor: "warning.main", borderRadius: 1 }}>
+                    <Typography variant="caption" color="warning.main">
+                      ⚠ No video model is installed yet — open “Manage Video Models” to install one before generating.
+                    </Typography>
+                  </Box>
+                )}
                 <Button
                   variant="outlined"
                   size="small"
