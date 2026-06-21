@@ -72,3 +72,27 @@ def test_mps_availability_is_false_on_this_box():
     # Sanity: this CI/dev box is not a Mac, so the real probe is False (or at
     # worst safely False on any torch without the mps backend).
     assert ovg._mps_available() in (True, False)  # never raises
+
+
+def test_force_clear_gpu_memory_uses_mps_branch(monkeypatch, fake_torch):
+    # No CUDA + MPS present -> force_clear should flush MPS and succeed, not bail
+    # with "CUDA not available".
+    _set(monkeypatch, fake_torch, cuda=False, mps=True)
+    monkeypatch.setattr(ovg, "_mps_available", lambda: True)
+    flushed = {"called": False}
+
+    class _FakeMPS:
+        @staticmethod
+        def empty_cache():
+            flushed["called"] = True
+
+        @staticmethod
+        def current_allocated_memory():
+            return 2 * 1024**3  # 2 GB
+
+    monkeypatch.setattr(fake_torch, "mps", _FakeMPS, raising=False)
+    res = ovg.force_clear_gpu_memory()
+    assert flushed["called"] is True
+    assert res["success"] is True
+    assert res["after"]["allocated_gb"] == 2.0
+    assert "error" not in res

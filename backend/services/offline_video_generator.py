@@ -131,6 +131,22 @@ def force_clear_gpu_memory() -> dict:
     result = {"success": False, "before": {}, "after": {}, "freed_gb": 0}
 
     if not torch_available or not torch.cuda.is_available():
+        # MPS (Apple Silicon) uses unified memory and a different API than CUDA —
+        # do a best-effort cache flush and report honestly instead of bailing with
+        # "CUDA not available" (Mac/MPS support). CUDA path below is unchanged.
+        if _mps_available():
+            try:
+                torch.mps.empty_cache()
+                result["success"] = True
+                if hasattr(torch.mps, "current_allocated_memory"):
+                    result["after"] = {
+                        "allocated_gb": round(torch.mps.current_allocated_memory() / (1024**3), 3)
+                    }
+                else:
+                    result["note"] = "MPS cache flushed (no per-process allocation API on this torch)"
+            except Exception as e:
+                result["error"] = f"MPS cleanup error: {e}"
+            return result
         result["error"] = "CUDA not available"
         return result
 

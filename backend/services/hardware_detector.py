@@ -114,6 +114,15 @@ class HardwareDetector:
                         return {"total_gb": round(kb / 1024 / 1024, 1)}
         except OSError:
             pass
+        # macOS has no /proc/meminfo — read total (unified) memory via sysctl.
+        if platform.system() == "Darwin":
+            try:
+                out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                                     capture_output=True, text=True, timeout=5, check=False)
+                if out.returncode == 0 and out.stdout.strip().isdigit():
+                    return {"total_gb": round(int(out.stdout.strip()) / 1024**3, 1)}
+            except (FileNotFoundError, subprocess.SubprocessError):
+                pass
         return {"total_gb": 0}
 
     def _probe_disk(self) -> dict:
@@ -127,11 +136,33 @@ class HardwareDetector:
     # ---- gpu ---------------------------------------------------------
 
     def _probe_gpu(self) -> dict:
-        for probe in (self._probe_gpu_nvidia, self._probe_gpu_amd, self._probe_gpu_intel):
+        for probe in (self._probe_gpu_nvidia, self._probe_gpu_amd,
+                      self._probe_gpu_apple, self._probe_gpu_intel):
             result = probe()
             if result is not None:
                 return result
         return {"vendor": "none"}
+
+    def _probe_gpu_apple(self) -> dict | None:
+        """Apple Silicon (Metal/MPS). No discrete VRAM — reports the unified-memory
+        size and accel=mps so downstream can route to the MPS video path and pick a
+        memory-appropriate profile. Intel Macs return None here (no MPS)."""
+        if platform.system() != "Darwin" or platform.machine() != "arm64":
+            return None
+        info = {"vendor": "apple", "accel": "mps", "vram_mb": None}
+        for key, sysctl in (("model", "machdep.cpu.brand_string"),
+                            ("_memsize", "hw.memsize")):
+            try:
+                out = subprocess.run(["sysctl", "-n", sysctl],
+                                     capture_output=True, text=True, timeout=5, check=False)
+                val = out.stdout.strip() if out.returncode == 0 else ""
+            except (FileNotFoundError, subprocess.SubprocessError):
+                val = ""
+            if key == "model" and val:
+                info["model"] = val
+            elif key == "_memsize" and val.isdigit():
+                info["unified_memory_gb"] = round(int(val) / 1024**3, 1)
+        return info
 
     def _probe_gpu_nvidia(self) -> dict | None:
         try:
