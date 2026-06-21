@@ -290,7 +290,14 @@ class OfflineVideoGenerator:
         elif self.device == "mps":
             logger.info("Video generator using Apple MPS with bfloat16 (L/M support; unified memory)")
         else:
-            logger.info("Video generator using CPU with float32")
+            # On an Intel Mac there's no MPS (Apple-Silicon only) — say so clearly
+            # instead of a generic "CPU" line, since the user may expect Metal.
+            import platform as _plat
+            if _plat.system() == "Darwin":
+                logger.info("Video generator using CPU with float32 — MPS needs Apple Silicon "
+                            "(this looks like an Intel Mac); video generation will be slow.")
+            else:
+                logger.info("Video generator using CPU with float32")
 
         self.service_available = diffusers_available or pillow_available or imageio_available
         self.svd_available = svd_available and torch_available and image_generator_available

@@ -436,6 +436,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // null = not yet known; true/false once the model list loads. Drives the
   // first-run "no model installed" nudge below (issue #36 discoverability).
   const [anyModelReady, setAnyModelReady] = useState(null);
+  // Active accelerator label (e.g. "Apple Silicon · MPS · 64GB unified") for an
+  // honest "where will this run" chip — issue #43 Tier 1. null until known.
+  const [accelLabel, setAccelLabel] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -450,6 +453,32 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         }
       } catch (e) {
         // Offline / API down — fall back to the (already-culled) MODEL_OPTIONS.
+      }
+    })();
+  }, []);
+
+  // Surface the accelerator the backend actually detected (NVIDIA/CUDA, Apple
+  // Silicon/MPS, or CPU) so Mac users can see Metal is in play. Best-effort.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/node/hardware-profile`);
+        if (!res.ok) return;
+        const hw = await res.json();
+        const gpu = hw?.gpu || {};
+        if (gpu.vendor === "apple") {
+          const mem = gpu.unified_memory_gb ? ` · ${gpu.unified_memory_gb}GB unified` : "";
+          setAccelLabel(`Apple Silicon · MPS${mem}`);
+        } else if (gpu.vendor === "nvidia") {
+          const vram = gpu.vram_mb ? ` · ${(gpu.vram_mb / 1024).toFixed(0)}GB VRAM` : "";
+          setAccelLabel(`NVIDIA · CUDA${vram}`);
+        } else if (gpu.vendor === "amd") {
+          setAccelLabel("AMD GPU");
+        } else {
+          setAccelLabel("CPU only");
+        }
+      } catch (e) {
+        // hardware.json not written yet / API down — just don't show the chip.
       }
     })();
   }, []);
@@ -1737,6 +1766,16 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     ))}
                   </Select>
                 </FormControl>
+                {accelLabel && (
+                  <Box sx={{ mt: 1 }}>
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={`Runs on: ${accelLabel}`}
+                      title="The accelerator the backend detected for video generation"
+                    />
+                  </Box>
+                )}
                 {anyModelReady === false && (
                   <Box sx={{ mt: 1, p: 1, border: 1, borderColor: "warning.main", borderRadius: 1 }}>
                     <Typography variant="caption" color="warning.main">
