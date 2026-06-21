@@ -100,6 +100,39 @@ def _select_accelerator():
     return "cpu", torch.float32
 
 
+def _accel_cleanup() -> None:
+    """Flush the active accelerator's cache (CUDA or MPS). No-op on CPU, never
+    raises. Used at model-unload points so a Mac frees unified memory on a model
+    swap (the realistic OOM moment). Per-frame diagnostic flushes elsewhere stay
+    CUDA-only on purpose — they're harmless no-ops on MPS."""
+    try:
+        if torch_available and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif _mps_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
+# Adaptive low-spec profile (issue #43 Tier 1 scaffold). The STRUCTURE is here;
+# the exact thresholds are TENTATIVE and need tuning on real Apple hardware
+# (Tier 2 — a Mac tester picks the numbers that actually fit each memory class).
+# Not yet wired into request clamping — it currently advises, it doesn't enforce.
+def recommended_video_caps(device: str, mem_gb: float | None) -> dict:
+    """Suggested upper bounds for a memory class. CUDA/none → no extra caps
+    (existing 16GB presets handle NVIDIA). MPS → conservative caps scaled by
+    unified memory. Returns {} when no caps apply."""
+    if device != "mps":
+        return {}
+    m = mem_gb or 0
+    # TENTATIVE — confirm/adjust on hardware (#43 Tier 2).
+    if m and m < 24:        # 8–16 GB Macs: keep it small or it swaps to death
+        return {"max_dim": 384, "max_frames": 25, "max_steps": 30, "tier": "mps-low"}
+    if m and m < 48:        # 24–32 GB
+        return {"max_dim": 512, "max_frames": 49, "max_steps": 40, "tier": "mps-mid"}
+    return {"max_dim": 720, "max_frames": 81, "max_steps": 50, "tier": "mps-high"}  # 48GB+
+
+
 try:
     from backend.config import CACHE_DIR
     config_available = True
@@ -345,8 +378,7 @@ class OfflineVideoGenerator:
             del self._svd_pipeline
             self._svd_pipeline = None
             gc.collect()
-            if torch_available and torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _accel_cleanup()
 
         gc.collect()
         if torch_available and torch.cuda.is_available():
@@ -567,8 +599,7 @@ class OfflineVideoGenerator:
                     self._current_model = None
                     self._current_model_type = None
                 gc.collect()
-                if torch_available and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                _accel_cleanup()
                 logger.info("CogVideoX pipeline unloaded to free GPU memory")
             except Exception as e:
                 logger.warning(f"Failed to unload CogVideoX pipeline: {e}")

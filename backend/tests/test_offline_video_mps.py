@@ -96,3 +96,38 @@ def test_force_clear_gpu_memory_uses_mps_branch(monkeypatch, fake_torch):
     assert res["success"] is True
     assert res["after"]["allocated_gb"] == 2.0
     assert "error" not in res
+
+
+def test_accel_cleanup_flushes_mps(monkeypatch, fake_torch):
+    _set(monkeypatch, fake_torch, cuda=False, mps=True)
+    monkeypatch.setattr(ovg, "_mps_available", lambda: True)
+    called = {"mps": False}
+    monkeypatch.setattr(fake_torch, "mps",
+                        type("M", (), {"empty_cache": staticmethod(lambda: called.__setitem__("mps", True))}),
+                        raising=False)
+    ovg._accel_cleanup()
+    assert called["mps"] is True
+
+
+def test_accel_cleanup_noop_on_cpu(monkeypatch, fake_torch):
+    # No accelerator -> must not raise.
+    _set(monkeypatch, fake_torch, cuda=False, mps=False)
+    monkeypatch.setattr(ovg, "_mps_available", lambda: False)
+    ovg._accel_cleanup()  # no exception = pass
+
+
+@pytest.mark.parametrize("device,mem,expect_tier", [
+    ("cuda", 24, None),     # NVIDIA: no extra caps
+    ("cpu", 16, None),
+    ("mps", 16, "mps-low"),
+    ("mps", 32, "mps-mid"),
+    ("mps", 64, "mps-high"),
+    ("mps", None, "mps-high"),  # unknown memory -> don't over-restrict
+])
+def test_recommended_video_caps(device, mem, expect_tier):
+    caps = ovg.recommended_video_caps(device, mem)
+    if expect_tier is None:
+        assert caps == {}
+    else:
+        assert caps["tier"] == expect_tier
+        assert caps["max_dim"] > 0 and caps["max_frames"] > 0 and caps["max_steps"] > 0

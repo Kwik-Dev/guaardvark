@@ -1850,6 +1850,7 @@ class ComfyUIVideoGenerator:
                 or "OutOfMemory" in err_str
                 or "CUDA out of memory" in err_str
                 or "torch.cuda.OutOfMemoryError" in err_str
+                or "MPS backend out of memory" in err_str  # Apple Silicon (#43)
                 or ("RuntimeError" in str(type(e)) and "memory" in err_str.lower())
             )
             if is_oom:
