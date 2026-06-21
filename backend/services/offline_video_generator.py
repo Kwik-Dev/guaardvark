@@ -56,19 +56,48 @@ except Exception as e:
     cogvideox_available = False
 
 # Edge audit (P3 + lead): graceful degradation on CPU-only / non-NVIDIA.
-# Heavy video gens (CogVideoX 8-16GB+, SVD) require CUDA GPU; advertise unavailable
-# with clear reason instead of runtime OOM or silent fail.
+# Heavy video gens (CogVideoX 8-16GB+, SVD) require an accelerator (CUDA or MPS).
+# Advertise unavailable with a clear reason instead of runtime OOM or silent fail.
+# MPS support added for macOS / Apple Silicon users (L/M focus).
 try:
     from backend.services.gpu_resource_coordinator import get_gpu_coordinator
     _gpu_coord = get_gpu_coordinator()
-    gpu_available = bool(_gpu_coord.has_gpu()) if hasattr(_gpu_coord, "has_gpu") else (torch_available and torch.cuda.is_available() if 'torch' in dir() else False)
+    _nvidia_gpu = bool(_gpu_coord.has_gpu()) if hasattr(_gpu_coord, "has_gpu") else (torch_available and torch.cuda.is_available())
 except Exception:
-    gpu_available = torch_available and torch.cuda.is_available() if 'torch' in dir() else False
+    _nvidia_gpu = bool(torch_available and torch.cuda.is_available())
+gpu_available = bool(_nvidia_gpu) or _mps_available()
 
 cogvideox_available = cogvideox_available and gpu_available
 svd_available = svd_available and gpu_available
 diffusers_available = diffusers_available and gpu_available
 video_generator_available = cogvideox_available or svd_available or diffusers_available
+
+
+# --- MPS (Apple Silicon) support for offline video (ported/adapted for L/M users) ---
+def _mps_available() -> bool:
+    """Apple Silicon Metal (MPS) backend present?
+    Mirrors the pattern from feat/mac-mps-video preview (kept minimal & testable).
+    """
+    try:
+        return bool(torch_available and torch.backends.mps.is_available())
+    except Exception:
+        return False
+
+
+def _select_accelerator():
+    """Pick (device, dtype) for offline video gen. CUDA > MPS > CPU.
+
+    On MPS: bfloat16 (Cog recommended, Metal supported) + MPS fallback env.
+    CUDA paths and dtypes left byte-identical to original.
+    """
+    if not torch_available:
+        return "cpu", None
+    if torch.cuda.is_available():
+        return "cuda", torch.float16
+    if _mps_available():
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        return "mps", torch.bfloat16
+    return "cpu", torch.float32
 
 
 try:
@@ -234,22 +263,18 @@ class OfflineVideoGenerator:
         self._current_model = None
         self._current_model_type = None  # "svd" or "cogvideox"
 
-        self.device = "cpu"
-        self.dtype = None
+        self.device, self.dtype = _select_accelerator()
         self.gpu_vram_gb = 0
-        if torch_available:
-            if torch.cuda.is_available():
-                self.device = "cuda"
-                self.dtype = torch.float16
-                try:
-                    self.gpu_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                except Exception:
-                    self.gpu_vram_gb = 8
-                logger.info(f"Video generator using CUDA with float16 (VRAM: {self.gpu_vram_gb:.1f}GB)")
-            else:
-                self.device = "cpu"
-                self.dtype = torch.float32
-                logger.info("Video generator using CPU with float32")
+        if self.device == "cuda":
+            try:
+                self.gpu_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            except Exception:
+                self.gpu_vram_gb = 8
+            logger.info(f"Video generator using CUDA with float16 (VRAM: {self.gpu_vram_gb:.1f}GB)")
+        elif self.device == "mps":
+            logger.info("Video generator using Apple MPS with bfloat16 (L/M support; unified memory)")
+        else:
+            logger.info("Video generator using CPU with float32")
 
         self.service_available = diffusers_available or pillow_available or imageio_available
         self.svd_available = svd_available and torch_available and image_generator_available
@@ -889,7 +914,7 @@ class OfflineVideoGenerator:
                 success=False,
                 prompt_used=request.prompt,
                 error=(
-                    "Offline video generation requires a CUDA NVIDIA GPU (typically 8-16GB+ VRAM for "
+                    "Offline video generation requires an accelerator (NVIDIA CUDA or Apple Silicon MPS; typically 8-16GB+). "
                     "CogVideoX-5B or SVD). On CPU-only, ARM, or non-NVIDIA systems this feature is "
                     "unavailable — use the ComfyUI plugin, reduce expectations, or disable. "
                     "Detected: torch_available=%s, gpu_available=%s" % (torch_available, gpu_available)
