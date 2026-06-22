@@ -6,12 +6,48 @@ from pathlib import Path
 from flask import Blueprint, current_app, request, jsonify, send_file
 from werkzeug.utils import secure_filename
 
-from backend.models import db, Subject
+from backend.models import db, Subject, SubjectSample
 
 bp = Blueprint("cast_library_api", __name__, url_prefix="/api/cast-library")
 log = logging.getLogger(__name__)
 
 VALID_KINDS = {"character", "environment", "prop"}
+
+# Repo root (…/backend/api/cast_library_api.py → parents[2]). Ref paths are stored
+# relative to the project root; resolving against this instead of the process cwd
+# makes preview serving robust no matter where/how the backend was launched.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_ref_path(p: str) -> str | None:
+    """Return an on-disk absolute path for a stored ref image, or None.
+    Tries the value as-is (abs or cwd-relative), then relative to the repo root,
+    then relative to the data/STORAGE_DIR — covers training-dir refs and cast_refs
+    uploads. The resolved path MUST live under one of those roots: ref_image_paths
+    can be set via the create-API body, so this is the guard against a crafted
+    '../../etc/passwd' reaching send_file."""
+    if not p:
+        return None
+    roots = [_PROJECT_ROOT]
+    try:
+        storage = current_app.config.get("STORAGE_DIR")  # registered key (NOT "DATA_DIR")
+        if storage:
+            roots.append(Path(storage).resolve())
+    except RuntimeError:
+        pass  # outside app context (shouldn't happen on a request, but be safe)
+    candidates = [p] + [str(r / p) for r in roots]
+    for c in candidates:
+        try:
+            if not os.path.isfile(c):
+                continue
+            # Always hand send_file an ABSOLUTE path — Flask raises on a relative one.
+            ap = os.path.abspath(c)
+            # Containment: the file must sit inside an allowed root, else skip it.
+            if any(os.path.commonpath([ap, str(r)]) == str(r) for r in roots):
+                return ap
+        except (OSError, ValueError):
+            continue
+    return None
 
 # Standard image formats — anything else is rejected at upload time.
 _ALLOWED_REF_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
@@ -20,7 +56,7 @@ _MAX_REF_BYTES = 25 * 1024 * 1024  # 25 MB per image — generous, but caps runa
 
 def _cast_ref_dir(subject_id: int) -> Path:
     """Where reference images for a Subject live on disk. Created lazily."""
-    base = Path(current_app.config.get("DATA_DIR") or "data")
+    base = Path(current_app.config.get("STORAGE_DIR") or "data")  # registered key (NOT "DATA_DIR")
     target = base / "cast_refs" / str(subject_id)
     target.mkdir(parents=True, exist_ok=True)
     return target
@@ -36,6 +72,7 @@ def _serialize(s: Subject) -> dict:
         "lora_path": s.lora_path,
         "lora_version": s.lora_version,
         "training_status": s.training_status,
+        "bible": s.bible,  # the appearance-lock injected per cut; surfaced for UI preview
     }
 
 
@@ -95,11 +132,9 @@ def subject_preview(subject_id):
     if s is None:
         return jsonify({"error": "not_found"}), 404
     for p in (s.ref_image_paths or []):
-        try:
-            if p and os.path.isfile(p):
-                return send_file(p, max_age=3600)
-        except (OSError, ValueError):
-            continue
+        resolved = _resolve_ref_path(p)
+        if resolved:
+            return send_file(resolved, max_age=3600)
     return jsonify({"error": "no_preview"}), 404
 
 

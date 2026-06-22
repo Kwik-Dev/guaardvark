@@ -107,6 +107,9 @@ class ComfyUIImageGenerator:
             # Model-only LoRA chain: these character LoRAs don't train the text
             # encoder (SimpleTuner "text encoder was not trained"), so clip is left
             # untouched and the trigger word in the prompt does the identity work.
+            # Dev UNET/T5 come from the FLUX_DEV_* module constants (override via
+            # GUAARDVARK_FLUX_DEV_UNET / _T5) — NOT the per-instance flux_unet/flux_t5,
+            # which default to the schnell GGUF and would break this graph.
             model_src = ["unet", 0]
             wf: dict = {
                 "unet": {

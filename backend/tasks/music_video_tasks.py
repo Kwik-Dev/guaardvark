@@ -185,15 +185,13 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
     when the token it was trained on is actually present at inference, so the
     trigger words go INTO the prompt, not just the LoraLoader chain.
 
-    Honest source-of-truth note: the MusicVideo model has NO cast/subject join
-    table (unlike Production → ProductionSubject), and the create form sends only
-    a `use_lora_consistency` boolean — no subject picker. So the ONLY place a
-    trained-LoRA reference can come from today is settings_json. We honor, in
-    priority order, whatever the settings actually carry:
+    Source-of-truth note: the MusicVideo model has NO cast/subject join table
+    (unlike Production → ProductionSubject); the reference lives in settings_json.
+    The MusicVideoPage cast picker writes `subject_ids` there (alongside the
+    `use_lora_consistency` toggle). We honor, in priority order:
       1. explicit on-disk paths in settings `loras` / `lora_paths` (list[str]);
-      2. `subject_ids` (list[int]) → Subject.lora_path + trigger_word — this is
-         the seam a future MV cast picker would write into, and resolving it now
-         means that picker works with zero further changes here.
+      2. `subject_ids` (list[int]) → Subject.lora_path + trigger_word + bible —
+         what the cast picker writes.
     Returns ([], base_prompt) — i.e. a NO-OP — when LoRA consistency is off or no
     reference is reachable, so non-cast videos behave exactly as before.
     """
