@@ -47,6 +47,16 @@ FLUX_T5 = os.environ.get("GUAARDVARK_FLUX_T5", "t5/t5xxl_fp8_e4m3fn.safetensors"
 FLUX_CLIP = os.environ.get("GUAARDVARK_FLUX_CLIP", "clip_l.safetensors")
 FLUX_VAE = os.environ.get("GUAARDVARK_FLUX_VAE", "ae.safetensors")
 
+# FLUX-dev (full transformer) keyframe path — the identity-lock route for trained
+# character LoRAs. Unlike the schnell GGUF branch, this one ACTUALLY chains LoRAs
+# (LoraLoaderModelOnly), uses FluxGuidance, and renders at dev step counts. An fp8
+# unet keeps the 12B transformer inside a 16 GB card (ComfyUI smart-offloads T5/clip).
+# Verified end-to-end on sage_harlow 2026-06-22 (strength 0.9, 28 steps, guidance 3.5).
+FLUX_DEV_UNET = os.environ.get("GUAARDVARK_FLUX_DEV_UNET", "flux1-dev.safetensors")
+FLUX_DEV_T5 = os.environ.get("GUAARDVARK_FLUX_DEV_T5", "t5xxl_fp16.safetensors")
+FLUX_DEV_WEIGHT_DTYPE = os.environ.get("GUAARDVARK_FLUX_DEV_DTYPE", "fp8_e4m3fn")
+FLUX_DEV_GUIDANCE = float(os.environ.get("GUAARDVARK_FLUX_DEV_GUIDANCE", "3.5"))
+
 # A neutral SDXL negative — keeps anatomy/quality sane without fighting the LoRA.
 DEFAULT_NEGATIVE = (
     "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
@@ -89,6 +99,61 @@ class ComfyUIImageGenerator:
         model: str | None = None,
     ) -> dict:
         effective_model = model or self.model
+        ml = (effective_model or "").lower()
+        if "flux" in ml and "dev" in ml:
+            # FLUX-dev + LoRA identity-lock branch. This is the route trained
+            # character LoRAs (e.g. sage_harlow) MUST take — the schnell branch
+            # below silently ignores LoRAs, and SDXL can't load a FLUX LoRA at all.
+            # Model-only LoRA chain: these character LoRAs don't train the text
+            # encoder (SimpleTuner "text encoder was not trained"), so clip is left
+            # untouched and the trigger word in the prompt does the identity work.
+            model_src = ["unet", 0]
+            wf: dict = {
+                "unet": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": FLUX_DEV_UNET, "weight_dtype": FLUX_DEV_WEIGHT_DTYPE},
+                },
+                "clip": {
+                    "class_type": "DualCLIPLoader",
+                    "inputs": {"clip_name1": FLUX_DEV_T5, "clip_name2": self.flux_clip, "type": "flux"},
+                },
+                "vae_loader": {
+                    "class_type": "VAELoader",
+                    "inputs": {"vae_name": self.flux_vae},
+                },
+            }
+            for i, name in enumerate(lora_names):
+                nid = f"lora_{i}"
+                wf[nid] = {
+                    "class_type": "LoraLoaderModelOnly",
+                    "inputs": {"model": model_src, "lora_name": name, "strength_model": self.lora_strength},
+                }
+                model_src = [nid, 0]
+            wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}}
+            wf["guid"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["pos", 0], "guidance": FLUX_DEV_GUIDANCE}}
+            # FLUX-dev is CFG-distilled (cfg=1.0) so the negative is inert; an empty
+            # encode keeps the KSampler contract valid without fighting the LoRA.
+            wf["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["clip", 0]}}
+            wf["latent"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}}
+            wf["sampler"] = {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": seed,
+                    "steps": max(steps, 20) if steps else 28,  # dev needs real step counts, not schnell's 8
+                    "cfg": 1.0,
+                    "sampler_name": "euler",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                    "model": model_src,
+                    "positive": ["guid", 0],
+                    "negative": ["neg", 0],
+                    "latent_image": ["latent", 0],
+                },
+            }
+            wf["vae"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]}}
+            wf["save"] = {"class_type": "SaveImage", "inputs": {"filename_prefix": "storyboard-flux-dev", "images": ["vae", 0]}}
+            return wf
+
         if effective_model and "flux" in effective_model.lower():
             # Basic flux branch for storyboard keyframes (P1 wiring per approved plan).
             # Reuses patterns from the working infographic flux workflow.

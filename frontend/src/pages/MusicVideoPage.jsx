@@ -683,6 +683,24 @@ const MusicVideoPage = () => {
   const [keyframeModel, setKeyframeModel] = useState(DEFAULT_KEYFRAME_MODEL);
   const [i2vModel, setI2vModel] = useState("wan22-14b-i2v");
 
+  // Cast picker: trained character Subjects whose LoRA + bible lock identity per cut.
+  const [castSubjects, setCastSubjects] = useState([]);
+  const [selectedSubjectIds, setSelectedSubjectIds] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/cast-library")
+      .then((r) => (r.ok ? r.json() : { subjects: [] }))
+      .then((d) => {
+        if (!alive) return;
+        const trained = (d.subjects || []).filter(
+          (s) => s.kind === "character" && s.lora_path
+        );
+        setCastSubjects(trained);
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
   // I2V-capable models (subset from VideoGeneratorPage MODEL_OPTIONS for consistency)
   const I2V_MODEL_OPTIONS = {
     "wan22-14b-i2v": {
@@ -752,6 +770,9 @@ const MusicVideoPage = () => {
         keyframe_model: keyframeModel,
         i2v_model: i2vModel,
       };
+      if (useLoraConsistency && selectedSubjectIds.length > 0) {
+        settings.subject_ids = selectedSubjectIds;
+      }
       const stepsNum = Number(i2vSteps);
       if (i2vSteps !== "" && stepsNum > 0) settings.i2v_steps = stepsNum;
       const mv = await createMusicVideo({
@@ -768,6 +789,7 @@ const MusicVideoPage = () => {
       setDirectorEnabled(true);
       setPlanningMode("narrative");
       setUseLoraConsistency(false);
+      setSelectedSubjectIds([]);
       setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
       setI2vModel("wan22-14b-i2v");
       // Reset any future advanced model params here too
@@ -996,8 +1018,10 @@ const MusicVideoPage = () => {
                         const checked = e.target.checked;
                         setUseLoraConsistency(checked);
                         if (checked) {
-                          setKeyframeModel("sdxl-lora");
-                        } else if (keyframeModel === "sdxl-lora") {
+                          // FLUX-dev + LoRA is the strongest identity lock (verified on
+                          // trained FLUX character LoRAs). SDXL+LoRA remains selectable.
+                          setKeyframeModel("flux-dev-lora");
+                        } else if (keyframeModel === "sdxl-lora" || keyframeModel === "flux-dev-lora") {
                           setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
                         }
                       }}
@@ -1008,8 +1032,43 @@ const MusicVideoPage = () => {
                     </label>
                   </Stack>
                   <Typography variant="caption" color="text.secondary" sx={{ pl: 2.5, display: "block" }}>
-                    Checked = route through SDXL + LoRAs for the storyboard still (current identity path). Unchecked = more beautiful options (FLUX keyframes + best Wan2.2 I2V etc.).
+                    Checked = lock a trained character into every cut (LoRA + appearance bible). Pick the cast member(s) below. Unchecked = no identity lock, more beautiful free stills.
                   </Typography>
+
+                  {useLoraConsistency && (
+                    <TextField
+                      select
+                      size="small"
+                      fullWidth
+                      label="Cast (trained characters to lock)"
+                      value={selectedSubjectIds}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setSelectedSubjectIds(typeof v === "string" ? v.split(",").map(Number) : v);
+                      }}
+                      SelectProps={{
+                        multiple: true,
+                        renderValue: (sel) =>
+                          castSubjects
+                            .filter((s) => sel.includes(s.id))
+                            .map((s) => s.name)
+                            .join(", ") || "Select cast…",
+                      }}
+                      helperText={
+                        castSubjects.length === 0
+                          ? "No trained characters found. Train one in the Cast Library first."
+                          : "Their trigger word + appearance bible are injected into every keyframe."
+                      }
+                      sx={{ mt: 1 }}
+                    >
+                      {castSubjects.map((s) => (
+                        <MenuItem key={s.id} value={s.id}>
+                          {s.name}
+                          {s.trigger_word ? ` (${s.trigger_word})` : ""}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  )}
 
                   <TextField
                     select
@@ -1035,14 +1094,13 @@ const MusicVideoPage = () => {
                     label="Keyframe / Storyboard Image Model"
                     value={keyframeModel}
                     onChange={(e) => setKeyframeModel(e.target.value)}
-                    helperText="SDXL (with/without LoRA) for consistency; FLUX for higher aesthetic quality when LoRA not needed"
-                    disabled={useLoraConsistency}
+                    helperText="FLUX-dev + LoRA = strongest identity lock for trained characters; SDXL+LoRA is the legacy lock; FLUX-schnell for beautiful no-LoRA stills"
                     sx={{ mt: 1 }}
                   >
+                    <MenuItem value="flux-dev-lora">FLUX-dev + LoRA (best identity lock for trained characters)</MenuItem>
                     <MenuItem value="flux-schnell">FLUX.1-schnell (fast, beautiful stills) — default</MenuItem>
                     <MenuItem value="sdxl">SDXL (no LoRA)</MenuItem>
-                    <MenuItem value="sdxl-lora">SDXL + LoRAs (identity lock)</MenuItem>
-                    {/* Future: flux-dev, sdxl-turbo, etc. */}
+                    <MenuItem value="sdxl-lora">SDXL + LoRAs (legacy identity lock)</MenuItem>
                   </TextField>
                 </Stack>
               </Collapse>

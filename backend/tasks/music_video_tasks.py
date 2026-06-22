@@ -202,6 +202,7 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
 
     lora_paths: list[str] = []
     triggers: list[str] = []
+    bibles: list[str] = []   # canonical appearance-lock per subject (hair length etc.)
 
     # (1) explicit paths in settings (accept either key name).
     explicit = s.get("loras") or s.get("lora_paths") or []
@@ -219,11 +220,19 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
             if subj and subj.lora_path:
                 lora_paths.append(subj.lora_path)
                 triggers.append((subj.trigger_word or subj.name or "").strip())
+                # The bible pins constant attributes the LoRA under-constrains
+                # (hair length is the classic drifter). Injecting it verbatim per
+                # cut — and telling the Director NOT to describe appearance — is
+                # what keeps the character on-model across every scene.
+                if subj.bible:
+                    bibles.append(subj.bible.strip())
 
     # De-dupe paths while preserving order.
     seen: set[str] = set()
     lora_paths = [p for p in lora_paths if not (p in seen or seen.add(p))]
     triggers = [t for t in triggers if t]
+    bseen: set[str] = set()
+    bibles = [b for b in bibles if b and not (b in bseen or bseen.add(b))]
 
     if not lora_paths:
         log.info(
@@ -234,12 +243,25 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
         )
         return [], base_prompt
 
-    prompt = base_prompt
-    if triggers:
-        prompt = f"{', '.join(triggers)}, {base_prompt}"
-    log.info("music_video %s keyframe: applying %d LoRA(s) %s",
-             mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths])
+    # Identity lock goes at the FRONT of the prompt: trigger(s) first (binds the
+    # LoRA), then the verbatim bible(s) (pins hair length / constant features),
+    # then the per-cut scene. e.g. "sage_harlow, chin-length wavy black bob, ...,
+    # <scene for this cut>".
+    lock = ", ".join([*triggers, *bibles])
+    prompt = f"{lock}, {base_prompt}" if lock else base_prompt
+    log.info("music_video %s keyframe: applying %d LoRA(s) %s (bible-lock=%s)",
+             mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths], bool(bibles))
     return lora_paths, prompt
+
+
+def _keyframe_lora_strength(s: dict) -> float:
+    """Model-aware default keyframe LoRA strength, shared by the clip path AND both
+    storyboard endpoints so review thumbnails match the final render. SDXL rank-16
+    character LoRAs sit at ~0.25 (higher fries them); the FLUX-dev route holds identity
+    at ~0.9 (verified on sage_harlow 2026-06-22). Operator override in settings wins."""
+    kfm = (s.get("keyframe_model") or "").lower()
+    default = 0.9 if ("flux" in kfm and "dev" in kfm) else 0.25
+    return max(0.0, min(1.5, float(s.get("keyframe_lora_strength", default))))
 
 
 @contextmanager
@@ -337,12 +359,23 @@ def run_analyzer(mv_id: int):
             if _is_embedding_model(director_model):
                 logging.getLogger(__name__).warning("overriding bad director_model=%s (embedding model cannot chat) -> %s", director_model, DIRECTOR_MODEL)
                 director_model = DIRECTOR_MODEL
+            # When a trained character is cast, identity (trigger + bible) is injected
+            # into every keyframe by _keyframe_loras_and_prompt. Tell the Director NOT to
+            # describe the hero's appearance — otherwise it free-styles hair/face per cut
+            # and fights the lock (the "hair length drifts every scene" failure).
+            _dir_guidance = s.get("director_guidance")
+            if s.get("use_lora_consistency") and (s.get("subject_ids") or s.get("loras") or s.get("lora_paths")):
+                _lock_note = ("A trained character is locked into every shot by a separate identity "
+                              "system. Do NOT describe the main character's face, hair, skin, eyes, or "
+                              "build — only their pose, action, wardrobe, framing, camera, lighting, and "
+                              "setting. Refer to them only as 'the figure' or 'she/he' if needed.")
+                _dir_guidance = f"{_dir_guidance}\n{_lock_note}" if _dir_guidance else _lock_note
             result = _generate_storyline_and_prompts(
                 mv.style_prompt,
                 plan,
                 model=director_model,
                 planning_mode=s.get("planning_mode", "narrative"),
-                extra_guidance=s.get("director_guidance"),
+                extra_guidance=_dir_guidance,
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),
                 max_stretch=float(s.get("max_stretch", 2.0)),
                 fill_method=s.get("fill_method"),
@@ -572,7 +605,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             # matches ComfyUIImageGenerator; higher can "fry" identity, lower is safer for
             # consistency). Source from settings if operator tuned it for this MV.
             # Preflight + clamp now wired in api paths + generator too (was the noted WIP).
-            kf_lora_strength = max(0.0, min(1.5, float(s.get("keyframe_lora_strength", 0.25))))
+            kf_lora_strength = _keyframe_lora_strength(s)  # model-aware: 0.9 flux-dev / 0.25 sdxl
             vg = get_video_generator()
             if not getattr(vg, "service_available", True):
                 try:
