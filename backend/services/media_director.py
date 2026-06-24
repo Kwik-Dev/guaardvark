@@ -137,22 +137,25 @@ def enhance_prompts(
         "TASK: Return ONLY JSON with 'prompts' array of exactly N enriched pure-visual prompts. Preserve order and core intent."
     )
     try:
-        parsed, _raw = _base_director_chat(
-            ollama=__import__("ollama"),
+        # NOTE: do NOT use the music-director's _director_chat here — its parser hunts for a
+        # "shots" array, but this enrich contract returns {"prompts": [...]}. Mismatched parsing
+        # silently returned [] → originals (the batch-director no-op bug, fixed 2026-06-23).
+        # Mirror storyboard_from_concept: own chat call + _parse_image_prompts (list-aware).
+        import ollama
+        opts = _options(n, sampling)
+        resp = ollama.chat(
             model=resolved,
-            system=_SYSTEM_ENHANCE_IMAGE,
-            user=user,
-            batch_len=n,
-            rich=False,
-            sampling=sampling,
+            format="json",
+            messages=[
+                {"role": "system", "content": _SYSTEM_ENHANCE_IMAGE},
+                {"role": "user", "content": user},
+            ],
+            options=opts,
         )
-        # _base returns dict? adapt
-        if isinstance(parsed, dict) and parsed.get("prompts"):
-            out = parsed["prompts"]
-        else:
-            out = _parse_image_prompts(str(parsed), n) or []
+        out = _parse_image_prompts(resp["message"]["content"], n)
         if len(out) == n:
             return [p.strip() for p in out]
+        log.warning("media_director.enhance_prompts parsed %d/%d prompts; falling back", len(out), n)
     except Exception as e:  # noqa: BLE001
         log.warning("media_director.enhance_prompts failed (%s); falling back", e)
     # Fallback: return originals (caller may still do keyword enhance)

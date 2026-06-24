@@ -136,7 +136,10 @@ def caption_image(
     has at least the trigger + identity marks — never an empty/identity-less caption)."""
     analyzer = analyzer or _analyzer()
     try:
-        res = analyzer.analyze(str(image_path), _VLM_CAPTION_PROMPT, think=False)
+        # VisionAnalyzer.analyze expects a PIL Image (it base64-encodes internally), not a path.
+        from PIL import Image
+        img = Image.open(str(image_path)).convert("RGB")
+        res = analyzer.analyze(img, _VLM_CAPTION_PROMPT, think=False)
         if getattr(res, "success", False) and getattr(res, "description", "").strip():
             return compose_caption(trigger, res.description, identity_marks)
         log.warning("captioner: VLM failed for %s (%s); using trigger+marks fallback",
