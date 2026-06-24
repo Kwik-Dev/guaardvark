@@ -967,11 +967,21 @@ def _initialize_app_components(app):
         app.logger.warning(f"AgentBrain initialization failed (non-critical, falling back to legacy): {e}")
         app.brain_state = None
 
+    # The Flask app-factory boot stack (torch + llama_index + brain_state +
+    # blueprint discovery, all nested under create_app) runs deep — close to
+    # CPython's default recursion limit of 1000. Plugin boot-restore then does
+    # synchronous requests.get() health probes on top of that stack, which could
+    # tip a healthy call over into RecursionError. That false failure masked a
+    # serving Ollama as "down" and surfaced as the 500-on-relaunch. Give the
+    # boot path real headroom before plugin init.
+    if sys.getrecursionlimit() < 3000:
+        sys.setrecursionlimit(3000)
+
     try:
         from backend.plugins import get_plugin_manager, get_plugin_registry
         registry = get_plugin_registry()
         app.logger.info(f"Plugin Registry initialized, discovered {len(registry.get_all_plugins())} plugins")
-        
+
         manager = get_plugin_manager()
         app.plugin_manager = manager
         app.logger.info("Plugin Manager initialized successfully")

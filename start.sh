@@ -221,7 +221,11 @@ FLASK_APP_TARGET="backend.app"
 FLASK_PORT="${FLASK_PORT:-5000}"
 VITE_PORT="${VITE_PORT:-5173}"
 VITE_PROCESS_PATTERN="node.*vite"
-FLASK_PROCESS_PATTERN="(python.*backend[./]app|flask run).*$FLASK_PORT"
+# NOTE: the port is passed to the backend via the FLASK_PORT *env var*, not argv, so
+# it never appears in /proc/PID/cmdline — a pattern with ".*$FLASK_PORT" can never match
+# `pgrep -f`. Match on the module target only; port-ownership is resolved authoritatively
+# by lsof/ss in kill_process() and repo_listener_pids().
+FLASK_PROCESS_PATTERN="python.*backend[./]app|flask run"
 
 FLASK_DEBUG_FLAG=""
 if [[ " $* " == *" --debug "* ]]; then
@@ -687,6 +691,66 @@ check_backend_health() {
         sleep $check_interval
     done
     return 1
+}
+
+# Print the PID(s) of LISTEN sockets on $1 that belong to THIS repo (process cwd under
+# $SCRIPT_DIR). Empty output = no repo-owned listener on that port. This is the
+# authoritative "is our backend running / what is its real PID" check — it does not rely
+# on the launcher's $! (which can point at a parent that forked) or on a brittle argv
+# pattern. On platforms without /proc (e.g. macOS) the cwd containment can't be verified,
+# so we fall back to returning the raw listener PIDs rather than nothing.
+repo_listener_pids() {
+    local port=$1
+    local pids=""
+    if command_exists lsof; then
+        pids=$(lsof -i TCP:"$port" -sTCP:LISTEN -t 2>/dev/null)
+    elif command_exists ss; then
+        pids=$(ss -tlpn 2>/dev/null | grep ":$port\b" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+    fi
+    [ -z "$pids" ] && return 0
+    local out="" matched=0
+    for pid in $pids; do
+        local proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+        if [ -n "$proc_cwd" ]; then
+            if [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
+                out="$out $pid"; matched=1
+            fi
+        fi
+    done
+    # No /proc available anywhere (couldn't verify any cwd) -> trust the raw listeners.
+    if [ "$matched" -eq 0 ] && [ ! -e "/proc/self/cwd" ]; then
+        out="$pids"
+    fi
+    echo "$out" | xargs 2>/dev/null
+}
+
+# Opt-in, bounded self-heal: if the backend is not answering /api/health AND nothing owns
+# the port, relaunch it exactly ONCE via the same path as the main launch. Returns 0 if the
+# backend is healthy (already, or after a successful relaunch), 1 otherwise. Never loops,
+# never kills a foreign listener — the caller decides whether to retry.
+relaunch_backend_if_dead() {
+    local port=$1
+    if check_backend_health "$port" 1; then
+        return 0
+    fi
+    if command_exists ss && ss -tlpn 2>/dev/null | grep -q ":$port\b"; then
+        # Port held by something not answering health — do NOT touch it (could be foreign).
+        vader_warn "Port $port is occupied but not answering /api/health — not auto-relaunching."
+        return 1
+    fi
+    vader_warn "Backend not responding and port $port is free — attempting a one-shot relaunch..."
+    rm -f "$SCRIPT_DIR/pids/backend.pid" 2>/dev/null
+    nohup env GUAARDVARK_ROOT="$SCRIPT_DIR" FLASK_PORT="$port" GUAARDVARK_MIGRATIONS_VERIFIED="${GUAARDVARK_MIGRATIONS_VERIFIED:-}" "$VENV_DIR/bin/python" -m backend.app >> "$BACKEND_STARTUP_LOG_FILE" 2>&1 &
+    local spawned=$!
+    if ! is_port_listening "$port" 90 "Backend (self-heal)"; then
+        if [ -n "$spawned" ] && kill -0 "$spawned" 2>/dev/null; then
+            kill -9 "$spawned" > /dev/null 2>&1
+        fi
+        return 1
+    fi
+    local real_pid=$(repo_listener_pids "$port" | awk '{print $1}')
+    [ -n "$real_pid" ] && echo "$real_pid" > "$SCRIPT_DIR/pids/backend.pid"
+    check_backend_health "$port" 8
 }
 
 check_frontend_health() {
@@ -1855,38 +1919,70 @@ fi
 
 # Schema verification is handled unconditionally by backend application on startup.
 
-if pgrep -f "(python.*backend[./]app|flask run).*$FLASK_PORT" > /dev/null; then
-    vader_error "Flask backend already running on port $FLASK_PORT. Use ./stop.sh first."
-    deactivate
-    cd "$SCRIPT_DIR"
-    exit 1
-fi
-
-vader_info "Launching Flask backend in background..."
-export GUAARDVARK_ROOT="$SCRIPT_DIR"
-
-ulimit -n 65535
-vader_info "File descriptor limit set to: $(ulimit -n)"
-
-nohup env GUAARDVARK_ROOT="$SCRIPT_DIR" FLASK_PORT="$FLASK_PORT" GUAARDVARK_MIGRATIONS_VERIFIED="${GUAARDVARK_MIGRATIONS_VERIFIED:-}" "$VENV_DIR/bin/python" -m backend.app >> "$BACKEND_STARTUP_LOG_FILE" 2>&1 &
-BACKEND_PID=$!
-echo "$BACKEND_PID" > "$SCRIPT_DIR/pids/backend.pid"
-
-sleep 4
-
-if ! is_port_listening "$FLASK_PORT" 90 "Backend"; then
-    vader_error "Backend failed to start listening on port $FLASK_PORT after 90 seconds."
-    if [ -f "$BACKEND_STARTUP_LOG_FILE" ]; then
-        vader_error "Last 10 lines of startup log:"
-        tail -n 10 "$BACKEND_STARTUP_LOG_FILE"
+# Belt-and-suspenders: step 1 already stopped prior servers, but if a healthy backend is
+# somehow still serving this port (started outside start.sh, or a kill that failed), ADOPT
+# it instead of stacking a duplicate. A duplicate would die on EADDRINUSE and overwrite
+# pids/backend.pid with its own dead PID — the historical "500-on-relaunch" bug.
+BACKEND_ADOPTED=0
+if check_backend_health "$FLASK_PORT" 1; then
+    existing_pid=$(repo_listener_pids "$FLASK_PORT" | awk '{print $1}')
+    if [ -n "$existing_pid" ]; then
+        echo "$existing_pid" > "$SCRIPT_DIR/pids/backend.pid"
+        vader_success "Backend already healthy on port $FLASK_PORT (adopted PID $existing_pid, skipping launch)"
+    else
+        vader_success "Backend already healthy on port $FLASK_PORT (adopted, skipping launch)"
     fi
-    kill -9 $BACKEND_PID > /dev/null 2>&1
+    BACKEND_ADOPTED=1
+elif command_exists ss && ss -tlpn 2>/dev/null | grep -q ":$FLASK_PORT\b"; then
+    # Port is occupied but NOT answering /api/health — a foreign (non-Guaardvark) process.
+    vader_error "Port $FLASK_PORT is in use by a non-Guaardvark process that does not respond to /api/health. Free it or set FLASK_PORT, then retry."
     deactivate
     cd "$SCRIPT_DIR"
     exit 1
 fi
 
-vader_success "Backend is running"
+if [ "$BACKEND_ADOPTED" -eq 0 ]; then
+    vader_info "Launching Flask backend in background..."
+    export GUAARDVARK_ROOT="$SCRIPT_DIR"
+
+    ulimit -n 65535
+    vader_info "File descriptor limit set to: $(ulimit -n)"
+
+    nohup env GUAARDVARK_ROOT="$SCRIPT_DIR" FLASK_PORT="$FLASK_PORT" GUAARDVARK_MIGRATIONS_VERIFIED="${GUAARDVARK_MIGRATIONS_VERIFIED:-}" "$VENV_DIR/bin/python" -m backend.app >> "$BACKEND_STARTUP_LOG_FILE" 2>&1 &
+    BACKEND_PID=$!
+    echo "$BACKEND_PID" > "$SCRIPT_DIR/pids/backend.pid"
+
+    sleep 4
+
+    if ! is_port_listening "$FLASK_PORT" 90 "Backend"; then
+        vader_error "Backend failed to start listening on port $FLASK_PORT after 90 seconds."
+        if [ -f "$BACKEND_STARTUP_LOG_FILE" ]; then
+            vader_error "Last 10 lines of startup log:"
+            tail -n 10 "$BACKEND_STARTUP_LOG_FILE"
+        fi
+        # Only kill the process WE spawned, and only if it's still alive — never a healthy
+        # adopted/older backend.
+        if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
+            kill -9 "$BACKEND_PID" > /dev/null 2>&1
+        fi
+        deactivate
+        cd "$SCRIPT_DIR"
+        exit 1
+    fi
+
+    # Reconcile pids/backend.pid against the REAL listener. socketio.run()/werkzeug runs
+    # in-process today (no fork), but a future wrapper (setsid, gunicorn) could fork and
+    # leave $! pointing at a parent that exited. The authoritative PID is whatever owns the
+    # listening socket under this repo.
+    real_pid=$(repo_listener_pids "$FLASK_PORT" | awk '{print $1}')
+    if [ -n "$real_pid" ]; then
+        echo "$real_pid" > "$SCRIPT_DIR/pids/backend.pid"
+        BACKEND_PID="$real_pid"
+    fi
+
+    vader_success "Backend is running (PID $(cat "$SCRIPT_DIR/pids/backend.pid" 2>/dev/null))"
+fi
+
 deactivate
 cd "$SCRIPT_DIR"
 vader_separator
@@ -2028,6 +2124,11 @@ if [ "$TEST_MODE" -eq 1 ]; then
     run_health_checks
 else
     vader_info "Running basic health checks..."
+    # If the backend isn't answering by now, try a single bounded self-heal before reporting
+    # failure (covers a backend that died right after launch, e.g. a transient init crash).
+    if ! check_backend_health "$FLASK_PORT" 1; then
+        relaunch_backend_if_dead "$FLASK_PORT" || true
+    fi
     if check_backend_health "$FLASK_PORT" && check_frontend_health "$VITE_PORT" && check_celery_health "$FLASK_PORT"; then
         vader_success "Basic health checks passed!"
         if [ "$VOICE_CHECK" -eq 1 ]; then

@@ -317,6 +317,19 @@ def _try_start_plugin(
 ) -> tuple[bool, Optional[str]]:
     pm = _plugin_manager()
 
+    # Explicit-disable veto: if the operator has *explicitly* turned this plugin
+    # off (a persisted user_enabled=False, as opposed to merely "never toggled"),
+    # the auto-orchestrator must never enable or start it — not on the persist
+    # path and not on the transient stage path. This survives a backend restart
+    # (the in-memory _user_controlled set does not) and closes the loop where a
+    # route navigation re-enabled an Ollama the user had deliberately disabled.
+    try:
+        _user_prefs = pm.state_store.get_user_enabled()
+        if _user_prefs.get(plugin_id) is False:
+            return False, f"plugin '{plugin_id}' is user-disabled"
+    except Exception:
+        pass
+
     if not pm.is_effectively_enabled(plugin_id):
         if not enable_if_disabled:
             return False, f"plugin '{plugin_id}' is disabled"

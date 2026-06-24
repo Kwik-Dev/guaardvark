@@ -245,8 +245,15 @@ def disable_plugin(plugin_id):
         
         if result.get('success'):
             try:
-                from backend.services.plugin_bridge import mark_user_released
-                mark_user_released(plugin_id)
+                # A manual disable is an explicit operator decision to keep this
+                # plugin OFF — mark it user-controlled so the GPU/route auto-
+                # orchestrator does NOT revive it on the next navigation. Using
+                # mark_user_released here (the old behavior) handed the plugin
+                # straight back to the orchestrator, which re-enabled + re-started
+                # Ollama the instant the user opened /chat (the "I turn it off and
+                # it relaunches itself" report).
+                from backend.services.plugin_bridge import mark_user_controlled
+                mark_user_controlled(plugin_id)
             except Exception:
                 pass
             return success_response(

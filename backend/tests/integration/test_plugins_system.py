@@ -271,14 +271,30 @@ class TestPluginManager:
         assert "status" in plugins[0]
         assert "running" in plugins[0]
     
+    # Patch the status emitter: PluginManager.__init__ -> _broadcast_plugins_status
+    # -> build_plugins_snapshot -> get_plugin_manager() would otherwise construct
+    # the *global* singleton (with the real registry/state) and boot-restore real
+    # plugins, hanging this isolated test on real start scripts. No-op the emit.
+    @patch('backend.services.plugin_status_emitter.emit_plugins_snapshot')
     @patch('backend.plugins.plugin_manager.requests.get')
-    def test_health_check_service_unavailable(self, mock_get, plugins_dir):
+    def test_health_check_service_unavailable(self, mock_get, mock_emit, plugins_dir, monkeypatch):
         """Test health check when service is not running."""
-        mock_get.side_effect = Exception("Connection refused")
-        
+        # requests.get raises a RequestException subclass (ConnectionError) on a
+        # refused connection — never a bare Exception. _check_service_running now
+        # narrows its except to requests.RequestException precisely so that a
+        # truly unexpected error (e.g. RecursionError) is NOT silently swallowed
+        # as "service down"; use the realistic exception here.
+        import requests
+        mock_get.side_effect = requests.exceptions.ConnectionError("Connection refused")
+
+        # enable_plugin dispatches reconcile_plugin_deps.delay() to Celery; in a
+        # test with no/blocking broker that publish call hangs. Skip it — this
+        # test is about the health check, not dep reconciliation.
+        monkeypatch.setenv("GUAARDVARK_SKIP_DEP_RECONCILER", "1")
+
         registry = PluginRegistry(plugins_dir=plugins_dir)
         manager = PluginManager(registry=registry)
-        
+
         # Enable plugin first
         manager.enable_plugin("test-plugin")
         

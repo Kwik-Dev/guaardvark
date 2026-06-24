@@ -23,11 +23,15 @@ fi
 
 echo "Starting Ollama..."
 
-# Kill any zombie process holding the port but not responding
+# Kill any zombie process LISTENING on the port but not responding.
+# NOTE: must restrict to LISTEN sockets (-sTCP:LISTEN). Plain `lsof -ti :11434` also
+# matches *client* connections to 11434 — e.g. a Celery worker or the backend with a
+# lingering socket to Ollama — and we would kill THOSE instead of the real zombie server
+# (this killed the celery_main worker, PID 15512, on 2026-06-24).
 if command -v lsof >/dev/null 2>&1; then
-    zombie_pid=$(lsof -ti :11434 2>/dev/null | head -1)
+    zombie_pid=$(lsof -ti :11434 -sTCP:LISTEN 2>/dev/null | head -1)
     if [ -n "$zombie_pid" ]; then
-        echo "Killing unresponsive process on port 11434 (PID: $zombie_pid)..."
+        echo "Killing unresponsive process LISTENING on port 11434 (PID: $zombie_pid)..."
         kill -9 "$zombie_pid" 2>/dev/null || true
         sleep 2
     fi

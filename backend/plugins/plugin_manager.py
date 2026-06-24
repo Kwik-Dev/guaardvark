@@ -406,7 +406,13 @@ class PluginManager:
             url = f"{service_url.rstrip('/')}{health_endpoint}"
             response = requests.get(url, timeout=2)
             return response.status_code == 200
-        except Exception:
+        except requests.RequestException:
+            # Only a genuine network/HTTP failure means "not running". A bare
+            # `except Exception` here used to swallow RecursionError (raised deep
+            # in requests when the boot stack is near the recursion limit) and
+            # report a healthy, HTTP-200 service as DOWN — producing a false
+            # "health check failed (timeout)" and, when the error escaped
+            # start_plugin, the 500-on-relaunch. Let non-network errors propagate.
             return False
     
     def _kill_by_port(self, port: int):
@@ -889,18 +895,20 @@ class PluginManager:
             except Exception as e:
                 logger.warning(f"Failed to cancel video batches while disabling ComfyUI: {e}")
 
+        # Ollama is a core systemd service. Per operator decision (2026-06-24),
+        # disabling it FULLY stops the daemon below (stop.sh -> `sudo systemctl
+        # stop ollama`), which frees BOTH port 11434 and all VRAM. We unload
+        # loaded models *first*, while the daemon is still up, so VRAM is
+        # released promptly even if the systemctl stop is slow; if the daemon is
+        # already down this is a harmless no-op. (Earlier this block claimed the
+        # daemon "stays running" — that was never true once stop_plugin ran, and
+        # the unload below it was dead code against an already-killed daemon.)
+        if plugin_id == "ollama":
+            self._unload_all_ollama_models()
+
         # Stop if running — same behavior as before; intuitive UX.
         if self._plugin_status.get(plugin_id) == PluginStatus.RUNNING:
             self.stop_plugin(plugin_id)
-
-        # Special case: Ollama is a system-level service that the plugin
-        # manager doesn't physically start/stop, but it can hold gigabytes of
-        # VRAM via loaded models. When the user disables the Ollama plugin we
-        # unload everything from Ollama's memory so the toggle actually frees
-        # GPU. The Ollama daemon itself stays running (system service) — only
-        # the loaded models go.
-        if plugin_id == "ollama":
-            self._unload_all_ollama_models()
 
         try:
             self.state_store.set_user_enabled(plugin_id, False)
@@ -1059,8 +1067,27 @@ _manager: Optional[PluginManager] = None
 
 
 def get_plugin_manager() -> PluginManager:
-    """Get the global plugin manager instance"""
+    """Get the global plugin manager instance.
+
+    Re-entrancy-safe construction. PluginManager.__init__ runs _init_plugin_status,
+    which broadcasts a status snapshot (_broadcast_plugins_status -> emit_plugins_snapshot
+    -> build_plugins_snapshot -> get_plugin_manager). If we only assigned `_manager`
+    AFTER `PluginManager()` returned, that re-entrant call would see `_manager is None`
+    and construct ANOTHER manager — recursively, each level redoing a full boot-restore
+    until it blew the recursion limit ("maximum recursion depth exceeded" during boot /
+    plugin start). Fix: allocate, publish the instance to the global, THEN run __init__ —
+    so any re-entrant call during construction returns this same (in-progress) instance.
+    The attributes the broadcast path reads (registry, state_store, _plugin_status, _gate)
+    are all set at the very top of __init__ before _init_plugin_status runs.
+    """
     global _manager
     if _manager is None:
-        _manager = PluginManager()
+        mgr = PluginManager.__new__(PluginManager)
+        _manager = mgr  # publish BEFORE heavy init so re-entrancy is a no-op
+        try:
+            mgr.__init__()
+        except BaseException:
+            # A failed construction must not leave a broken singleton behind.
+            _manager = None
+            raise
     return _manager
