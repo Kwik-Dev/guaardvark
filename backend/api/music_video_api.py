@@ -424,7 +424,7 @@ def generate_storyboards(mv_id):
 
     s = _settings_for_mv(mv)  # small helper below or inline
     from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-    from backend.tasks.music_video_tasks import _keyframe_loras_and_prompt, _clip_dir
+    from backend.tasks.music_video_tasks import _keyframe_loras_and_prompt, _keyframe_lora_strength, _clip_dir
     import copy
 
     clips = copy.deepcopy(mv.clips or [])
@@ -438,10 +438,10 @@ def generate_storyboards(mv_id):
 
     # Media team audit (P1-5/P3-12): use the shared _keyframe helper (resolves explicit
     # loras + subject cast + prepends trigger words) + clamp strength + basic preflight.
-    # This threads LoRA identity into storyboard keyframes (flux-schnell/SDXL path) the
-    # same way the clip i2v path does. Previously the approval path used a minimal
-    # []/prompt version (uncommitted WIP).
-    kf_lora_strength = max(0.0, min(1.0, float(s.get("keyframe_lora_strength", 0.25))))
+    # This threads LoRA identity into storyboard keyframes (flux-dev/schnell/SDXL path)
+    # the same way the clip i2v path does, so review thumbnails match the final render.
+    # Strength is model-aware via the shared helper (0.9 flux-dev / 0.25 sdxl).
+    kf_lora_strength = _keyframe_lora_strength(s)
     try:
         vg = get_video_generator()
         if not getattr(vg, "service_available", True):
@@ -529,7 +529,7 @@ def regen_mv_storyboard(mv_id, idx):
 
     s = _settings_for_mv(mv)
     from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-    from backend.tasks.music_video_tasks import _keyframe_loras_and_prompt, _clip_dir
+    from backend.tasks.music_video_tasks import _keyframe_loras_and_prompt, _keyframe_lora_strength, _clip_dir
     import copy
 
     clips = copy.deepcopy(mv.clips or [])
@@ -560,8 +560,8 @@ def regen_mv_storyboard(mv_id, idx):
 
     # Media team audit resume (P1-5/P3-12): shared helper for LoRA+triggers + clamp + preflight
     # on the regen path (was minimal [] version; now consistent with clip gen and the
-    # generate-storyboards path we just updated).
-    kf_lora_strength = max(0.0, min(1.0, float(s.get("keyframe_lora_strength", 0.25))))
+    # generate-storyboards path). Model-aware strength so a regen matches the batch.
+    kf_lora_strength = _keyframe_lora_strength(s)
     kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
     if kf_loras:
         ComfyUIImageGenerator()._preflight_loras(kf_loras)

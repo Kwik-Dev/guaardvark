@@ -272,16 +272,20 @@ class BatchVideoGenerator:
         generic boilerplate would just dilute it). Never raises — on any failure the
         original prompts stand and generation proceeds unchanged."""
         try:
-            from backend.services.video_director import direct_prompts
+            from backend.services.director_service import plan, DirectorBrief, DirectorMode
             text_items = [it for it in batch_request.items if (it.prompt or "").strip()]
             if not text_items:
                 return
             style = (batch_request.metadata or {}).get("look_and_feel") or batch_request.prompt_style
-            directed = direct_prompts(
-                [it.prompt for it in text_items],
+            result = plan(DirectorBrief(
+                mode=DirectorMode.PROMPT_LIST,
+                prompts=[it.prompt for it in text_items],
                 style=style,
                 extra_guidance=getattr(batch_request, "director_guidance", None),
-            )
+            ))
+            # Map shots back to the per-item string list (count-preserving on success; empty
+            # on a hard director failure → originals stand via the zip below).
+            directed = [s.prompt for s in result.shots]
             changed = 0
             for it, new_prompt in zip(text_items, directed):
                 if new_prompt and new_prompt.strip() and new_prompt.strip() != (it.prompt or "").strip():
@@ -303,16 +307,18 @@ class BatchVideoGenerator:
         off the lighter downstream enhancer (the shots are already full cinematic prompts).
         Never raises — on failure the placeholder prompts (the raw concept) stand."""
         try:
-            from backend.services.video_director import storyboard_from_concept
+            from backend.services.director_service import plan, DirectorBrief, DirectorMode
             concept = (batch_request.storyboard_concept or "").strip()
             n = len(batch_request.items)
             if not concept or n == 0:
                 return
             style = (batch_request.metadata or {}).get("look_and_feel") or batch_request.prompt_style
-            shots = storyboard_from_concept(
-                concept, n, style=style,
+            result = plan(DirectorBrief(
+                mode=DirectorMode.CONCEPT_EXPANSION,
+                concept=concept, num_shots=n, style=style,
                 extra_guidance=getattr(batch_request, "director_guidance", None),
-            )
+            ))
+            shots = [s.prompt for s in result.shots]
             for it, shot in zip(batch_request.items, shots):
                 if shot and shot.strip():
                     it.prompt = shot.strip()

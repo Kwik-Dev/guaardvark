@@ -185,23 +185,22 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
     when the token it was trained on is actually present at inference, so the
     trigger words go INTO the prompt, not just the LoraLoader chain.
 
-    Honest source-of-truth note: the MusicVideo model has NO cast/subject join
-    table (unlike Production → ProductionSubject), and the create form sends only
-    a `use_lora_consistency` boolean — no subject picker. So the ONLY place a
-    trained-LoRA reference can come from today is settings_json. We honor, in
-    priority order, whatever the settings actually carry:
+    Source-of-truth note: the MusicVideo model has NO cast/subject join table
+    (unlike Production → ProductionSubject); the reference lives in settings_json.
+    The MusicVideoPage cast picker writes `subject_ids` there (alongside the
+    `use_lora_consistency` toggle). We honor, in priority order:
       1. explicit on-disk paths in settings `loras` / `lora_paths` (list[str]);
-      2. `subject_ids` (list[int]) → Subject.lora_path + trigger_word — this is
-         the seam a future MV cast picker would write into, and resolving it now
-         means that picker works with zero further changes here.
+      2. `subject_ids` (list[int]) → Subject.lora_path + trigger_word + bible —
+         what the cast picker writes.
     Returns ([], base_prompt) — i.e. a NO-OP — when LoRA consistency is off or no
     reference is reachable, so non-cast videos behave exactly as before.
     """
     if not s.get("use_lora_consistency"):
         return [], base_prompt
 
+    from backend.services.cast_lock import subjects_to_lock, apply_lock
+
     lora_paths: list[str] = []
-    triggers: list[str] = []
 
     # (1) explicit paths in settings (accept either key name).
     explicit = s.get("loras") or s.get("lora_paths") or []
@@ -210,20 +209,20 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
             if isinstance(p, str) and p.strip():
                 lora_paths.append(p.strip())
 
-    # (2) subject_ids → trained Subject LoRAs (the cast seam, mirrors Film Crew).
+    # (2) subject_ids → trained Subject LoRAs (the cast seam, shared with Film Crew via
+    # cast_lock.subjects_to_lock — trigger(s) bind the LoRA, verbatim bible(s) pin constant
+    # features like hair length the LoRA under-constrains).
+    lock = ""
     subject_ids = s.get("subject_ids") or []
     if isinstance(subject_ids, (list, tuple)) and subject_ids:
         from backend.models import Subject
-        for sid in subject_ids:
-            subj = db.session.get(Subject, sid)
-            if subj and subj.lora_path:
-                lora_paths.append(subj.lora_path)
-                triggers.append((subj.trigger_word or subj.name or "").strip())
+        subjects = [db.session.get(Subject, sid) for sid in subject_ids]
+        subj_paths, lock = subjects_to_lock([x for x in subjects if x], include_bible=True)
+        lora_paths.extend(subj_paths)
 
     # De-dupe paths while preserving order.
     seen: set[str] = set()
     lora_paths = [p for p in lora_paths if not (p in seen or seen.add(p))]
-    triggers = [t for t in triggers if t]
 
     if not lora_paths:
         log.info(
@@ -234,12 +233,21 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
         )
         return [], base_prompt
 
-    prompt = base_prompt
-    if triggers:
-        prompt = f"{', '.join(triggers)}, {base_prompt}"
-    log.info("music_video %s keyframe: applying %d LoRA(s) %s",
-             mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths])
+    # Identity lock goes at the FRONT of the prompt (trigger(s) → bible(s) → per-cut scene),
+    # e.g. "sage_harlow, chin-length wavy black bob, ..., <scene for this cut>".
+    prompt = apply_lock(base_prompt, lock)
+    log.info("music_video %s keyframe: applying %d LoRA(s) %s (bible-lock=%s)",
+             mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths], bool(lock))
     return lora_paths, prompt
+
+
+def _keyframe_lora_strength(s: dict) -> float:
+    """Model-aware default keyframe LoRA strength, shared by the clip path AND both
+    storyboard endpoints so review thumbnails match the final render. Delegates to the shared
+    cast_lock.resolve_lora_strength (one source of truth across all video features); operator
+    override in settings wins."""
+    from backend.services.cast_lock import resolve_lora_strength
+    return resolve_lora_strength(s.get("keyframe_model"), s.get("keyframe_lora_strength"))
 
 
 @contextmanager
@@ -332,21 +340,41 @@ def run_analyzer(mv_id: int):
         # problem. Still degrades gracefully to the old behavior on any LLM failure.
         shot_plans = {}
         if s.get("director_enabled", True):
-            from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL, _is_embedding_model
+            from backend.services.music_video_director import DIRECTOR_MODEL, _is_embedding_model
             director_model = s.get("director_model") or DIRECTOR_MODEL
             if _is_embedding_model(director_model):
                 logging.getLogger(__name__).warning("overriding bad director_model=%s (embedding model cannot chat) -> %s", director_model, DIRECTOR_MODEL)
                 director_model = DIRECTOR_MODEL
-            result = _generate_storyline_and_prompts(
-                mv.style_prompt,
-                plan,
+            # When a trained character is cast, identity (trigger + bible) is injected
+            # into every keyframe by _keyframe_loras_and_prompt. Tell the Director NOT to
+            # describe the hero's appearance — otherwise it free-styles hair/face per cut
+            # and fights the lock (the "hair length drifts every scene" failure).
+            _dir_guidance = s.get("director_guidance")
+            if s.get("use_lora_consistency") and (s.get("subject_ids") or s.get("loras") or s.get("lora_paths")):
+                _lock_note = ("A trained character is locked into every shot by a separate identity "
+                              "system. Do NOT describe the main character's face, hair, skin, eyes, or "
+                              "build — only their pose, action, wardrobe, framing, camera, lighting, and "
+                              "setting. Refer to them only as 'the figure' or 'she/he' if needed.")
+                _dir_guidance = f"{_dir_guidance}\n{_lock_note}" if _dir_guidance else _lock_note
+            # Unified Director (SONG_CUTPLAN). `plan` (the cut plan) shadows the imported
+            # function name, so alias it. creativity=None ⇒ engine-default sampling: this is a
+            # BYTE-IDENTICAL migration of the fragile MV path (still temp 0.7/0.65). We can flip
+            # MV to the CREATIVE profile later as a separate, tested change.
+            from backend.services.director_service import plan as director_plan, DirectorBrief, DirectorMode
+            _res = director_plan(DirectorBrief(
+                mode=DirectorMode.SONG_CUTPLAN,
+                style=mv.style_prompt,
+                cut_plan=plan,
+                creativity=None,
                 model=director_model,
                 planning_mode=s.get("planning_mode", "narrative"),
-                extra_guidance=s.get("director_guidance"),
+                extra_guidance=_dir_guidance,
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),
                 max_stretch=float(s.get("max_stretch", 2.0)),
                 fill_method=s.get("fill_method"),
-            )
+            ))
+            # Use the engine's native dict so every downstream read below is unchanged.
+            result = _res.raw if _res.raw is not None else {"prompts": [], "treatment": _res.treatment}
             # P0 guard application (story-arc plan): ensure the prompts we store for
             # storyboards + i2v are distinct + energy-aware even on marginal LLM output.
             # Also the natural place to (in future) pass stretch context for duration suggestions.
@@ -572,7 +600,7 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             # matches ComfyUIImageGenerator; higher can "fry" identity, lower is safer for
             # consistency). Source from settings if operator tuned it for this MV.
             # Preflight + clamp now wired in api paths + generator too (was the noted WIP).
-            kf_lora_strength = max(0.0, min(1.5, float(s.get("keyframe_lora_strength", 0.25))))
+            kf_lora_strength = _keyframe_lora_strength(s)  # model-aware: 0.9 flux-dev / 0.25 sdxl
             vg = get_video_generator()
             if not getattr(vg, "service_available", True):
                 try:

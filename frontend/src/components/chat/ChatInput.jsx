@@ -32,13 +32,9 @@ import { useAppStore } from "../../stores/useAppStore";
 import { useVoiceSettings } from "../../hooks/useVoiceSettings";
 import useSlashCommands from "../../hooks/useSlashCommands";
 import SlashCommandPopup from "./SlashCommandPopup";
+import { debugLog } from "../../utils/debugLog";
 
 const WEB_SEARCH_ENABLED_KEY = "guaardvark_webSearchEnabled";
-const debugLog = (...args) => {
-  if (import.meta.env.DEV) {
-    console.debug(...args);
-  }
-};
 
 const fetchDuckDuckGoSnippet = async (query) => {
   try {

@@ -106,6 +106,17 @@ class ImageGeneratorTool(BaseTool):
                     error="Image generation service not available. Stable Diffusion dependencies (torch, diffusers) may not be installed or GPU not available.",
                 )
 
+            # Shared intelligent pipeline: best-effort Media Director rewrite for richer visual prompts
+            # (uses the same ollama director as MusicVideo / batch-video; falls back silently).
+            try:
+                from backend.services.media_director import enhance_prompts
+                refined_list = enhance_prompts([prompt], style=style)
+                if refined_list and refined_list[0] and refined_list[0].strip() != prompt.strip():
+                    prompt = refined_list[0].strip()
+                    logger.info("ImageGeneratorTool: applied media_director enhance (chat NL pipeline)")
+            except Exception:
+                pass  # never break chat gen
+
             # Build proper request object
             request = ImageGenerationRequest(
                 prompt=prompt,

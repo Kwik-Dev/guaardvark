@@ -449,7 +449,7 @@ class MusicVideoService(PipelineService):
 
         from backend.services.plugin_bridge import ensure_plugins_for_stage
         ensure_plugins_for_stage("music-video", "analyzing")  # Director requires Ollama (and video_editor) for per-cut visual prompts from treatment
-        from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL, _is_embedding_model
+        from backend.services.music_video_director import DIRECTOR_MODEL, _is_embedding_model
 
         mode = planning_mode or s.get("planning_mode", "narrative")
         guidance = feedback or s.get("director_guidance")
@@ -460,16 +460,22 @@ class MusicVideoService(PipelineService):
             dmodel = DIRECTOR_MODEL
 
         try:
-            res = _generate_storyline_and_prompts(
-                mv.style_prompt,
-                mv.cut_plan,
+            # Unified Director (SONG_CUTPLAN). creativity=None ⇒ engine-default sampling, a
+            # BYTE-IDENTICAL migration of this fragile replan path.
+            from backend.services.director_service import plan as director_plan, DirectorBrief, DirectorMode
+            _res = director_plan(DirectorBrief(
+                mode=DirectorMode.SONG_CUTPLAN,
+                style=mv.style_prompt,
+                cut_plan=mv.cut_plan,
+                creativity=None,
                 model=dmodel,
                 planning_mode=mode,
                 extra_guidance=guidance,
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),
                 max_stretch=float(s.get("max_stretch", 2.0)),
                 fill_method=s.get("fill_method"),
-            )
+            ))
+            res = _res.raw if _res.raw is not None else {"prompts": [], "treatment": _res.treatment}
             raw_prompts = res.get("prompts") or []
             # P0 guard (story-arc plan): apply distinctness/energy injection here too so a
             # replan immediately gives usable varied prompts for subsequent storyboard regen.

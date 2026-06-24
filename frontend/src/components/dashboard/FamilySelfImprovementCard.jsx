@@ -82,7 +82,7 @@ const FamilySelfImprovementCard = React.forwardRef(
 
     // Listen for real-time progress events
     useEffect(() => {
-      const socket = io({ path: "/socket.io", transports: ["websocket", "polling"] });
+      const socket = io({ path: "/socket.io", transports: ["polling", "websocket"] });
       socket.on("self_improvement_progress", (data) => {
         setProgress(data);
         // When complete or error, refresh data after a short delay and clear progress

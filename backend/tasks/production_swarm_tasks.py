@@ -9,7 +9,7 @@ from flask import current_app
 from backend.models import db, Production, Subject, ProductionShot, ProductionShotSubject, ProductionSubject, SwarmMessage, Document
 from backend.services.production_service import ProductionService
 from backend.services.swarm.agents.screenwriter import Screenwriter
-from backend.services.swarm.agents.cinematographer import Cinematographer
+from backend.services.swarm.agents.cinematographer import Cinematographer, ShotPlan, ShotPlanList
 from backend.services.swarm.agents.casting_director import CastingDirector
 from backend.services.swarm.agents.editor import Editor
 from backend.services.swarm.script_markup import parse_markup, apply_intents
@@ -294,6 +294,74 @@ def _subjects_for_production(prod_id: int) -> list[Subject]:
     return subjects or Subject.query.all()
 
 
+class _DirectorInvocation:
+    """A tiny AgentInvocation look-alike so ``ctx.persist`` and the existing write-back loop
+    work unchanged when the unified Director produces the shot plan (instead of the swarm
+    Cinematographer). Mirrors the attributes ``_AgentRunContext.persist`` reads."""
+    def __init__(self, output, *, model: str):
+        self.output = output            # ShotPlanList (has .model_dump() + .plans)
+        self.model = model
+        self.status = "ok"
+        self.error_text = None
+        self.latency_ms = 0
+
+
+def _cinematographer_via_director(input_data: dict):
+    """PRIMARY cinematographer path: route the script breakdown through the unified Director
+    (``director_service.plan(SCRIPT_SCENES)``) — batched, treatment-driven, CREATIVE-sampled,
+    a clear upgrade over the single-call swarm agent.
+
+    Returns a ``_DirectorInvocation`` (status='ok') wrapping a ``ShotPlanList`` whose plans map
+    1:1, BY INPUT ORDER, back to the input shots — so scene/shot numbers come from the DB rows
+    (robust) and the existing persistence loop + FK filter run unchanged. Returns ``None`` on
+    any failure / thin result so the caller falls back to the swarm Cinematographer. NEVER
+    raises (preserves the never-raise stage contract)."""
+    try:
+        from backend.services.director_service import plan, DirectorBrief, DirectorMode, DIRECTOR_MODEL
+        in_shots = input_data.get("shots", []) or []
+        if not in_shots:
+            return None
+        # Flatten the production shots into the single-scene shape the SCRIPT_SCENES planner
+        # expects; order is preserved so we can zip results back by index.
+        scenes = [{
+            "location": "", "mood": "",
+            "shots": [{"description": s.get("description", ""), "subjects_in_shot": []} for s in in_shots],
+        }]
+        result = plan(DirectorBrief(
+            mode=DirectorMode.SCRIPT_SCENES,
+            scenes=scenes,
+            subjects=input_data.get("subjects", []) or [],
+            # cast is intentionally NOT passed: identity is injected at RENDER time in
+            # _shot_loras_and_prompt (via shared cast_lock) — that survives prompt edits and
+            # stays per-shot scoped, which plan-time global injection would lose. Leaving
+            # brief.cast empty here is what keeps the lock applied exactly once (no double-lock).
+        ))
+        directed = result.shots or []
+        # Require a usable, full-coverage result; otherwise fall back to the agent.
+        if len(directed) < len(in_shots) or any(not (d.prompt or "").strip() for d in directed[:len(in_shots)]):
+            return None
+        plans = []
+        for i, s in enumerate(in_shots):
+            d = directed[i]
+            plans.append(ShotPlan(
+                scene_number=int(s.get("scene_number", 0)),
+                shot_number=int(s.get("shot_number", i)),
+                camera_angle=(d.camera or "medium"),
+                framing=(d.framing or ""),
+                duration_seconds=float(d.duration) if isinstance(d.duration, (int, float)) else 4.0,
+                mood=(d.mood or ""),
+                image_prompt=d.prompt.strip(),
+                subjects_in_shot=[int(x) for x in (d.subjects or [])],
+            ))
+        return _DirectorInvocation(ShotPlanList(plans=plans), model=f"director:{DIRECTOR_MODEL}")
+    except Exception as e:  # noqa: BLE001 — director must never fail the stage; fall back
+        import logging
+        logging.getLogger(__name__).warning(
+            "cinematographer via director failed (%s); falling back to swarm agent", e
+        )
+        return None
+
+
 def run_cinematographer(prod_id: int, llm=None):
     if llm is None:
         llm = _default_ollama_llm
@@ -320,7 +388,10 @@ def run_cinematographer(prod_id: int, llm=None):
             "subjects": [{"id": s.id, "name": s.name, "description": s.description} for s in subjects]
         }
 
-        inv = agent.invoke(input_data)
+        # PRIMARY: unified Director (batched, treatment-driven). FALLBACK: swarm Cinematographer.
+        inv = _cinematographer_via_director(input_data)
+        if inv is None:
+            inv = agent.invoke(input_data)
         ctx.persist(inv, input_json=input_data)
 
         out = inv.output
@@ -347,21 +418,18 @@ def run_cinematographer(prod_id: int, llm=None):
 
 
 def _shot_loras_and_prompt(shot) -> tuple[list[str], str]:
-    """Collect a shot's character LoRA paths and build the generation prompt
-    with each Subject's trigger word prepended — the LoRA only locks identity
-    when the token it was trained on is actually present at inference."""
-    lora_paths: list[str] = []
-    triggers: list[str] = []
-    for pss in shot.shot_subjects:
-        subj = pss.subject
-        if subj.lora_path:
-            lora_paths.append(subj.lora_path)
-            triggers.append((subj.trigger_word or subj.name or "").strip())
-    triggers = [t for t in triggers if t]
-    prompt = shot.description
-    if triggers:
-        prompt = f"{', '.join(triggers)}, {prompt}"
-    return lora_paths, prompt
+    """Collect a shot's character LoRA paths and build the generation prompt with each
+    Subject's identity lock prepended — the LoRA only locks identity when the trigger token
+    it was trained on is present at inference.
+
+    Uses the shared cast_lock.subjects_to_lock (one source of truth with music-video). As of
+    the 2026-06-23 cast convergence this now also injects each subject's BIBLE (was trigger-only),
+    giving Film Crew the same trigger+bible lock music-video already had — and it stays correctly
+    PER-SHOT scoped (only the subjects actually in this shot)."""
+    from backend.services.cast_lock import subjects_to_lock, apply_lock
+    subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+    lora_paths, lock = subjects_to_lock(subjects, include_bible=True)
+    return lora_paths, apply_lock(shot.description, lock)
 
 
 def _storyboard_path(prod_id: int, shot_number: int) -> str:

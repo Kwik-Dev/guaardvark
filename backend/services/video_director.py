@@ -159,25 +159,29 @@ def direct_prompts(
     model: str = DEFAULT_DIRECTOR_MODEL,
     extra_guidance: Optional[str] = None,
 ) -> list[str]:
-    """Turn each plain user prompt into a rich cinematic shot prompt.
+    """DEPRECATED SHIM → :func:`director_service.plan` (PROMPT_LIST mode).
 
-    Never raises and never changes the count: returns exactly ``len(prompts)`` strings.
-    Any prompt the director couldn't produce falls back to the lightweight enhancer / the
-    original prompt, so a partial/failed LLM response degrades gracefully per-item.
+    Kept so any stray importer keeps working after the unification (2026-06-23). The real
+    enrichment now lives in ``director_service`` (which routes through ``media_director`` +
+    the CREATIVE sampling profile). Still never raises and never changes the count: on a hard
+    director failure the per-item ``_light_fallback`` / original prompt stands.
     """
     prompts = [p for p in (prompts or [])]
     if not prompts:
         return []
-    user = (
-        f"{_style_clause(style)}"
-        + (f"\nDirector guidance: {extra_guidance.strip()}." if extra_guidance and extra_guidance.strip() else "")
-        + "\n\nIdeas (rewrite each, one per entry, same order):\n"
-        + json.dumps([str(p) for p in prompts], ensure_ascii=False)
-    )
-    directed = _parse_prompts(_chat_json(_SYSTEM_DIRECT, user, model=model, n=len(prompts)), len(prompts))
+    try:
+        from backend.services.director_service import plan, DirectorBrief, DirectorMode
+        result = plan(DirectorBrief(
+            mode=DirectorMode.PROMPT_LIST, prompts=[str(p) for p in prompts],
+            style=style or "", extra_guidance=extra_guidance,
+        ))
+        directed = [s.prompt for s in result.shots]
+    except Exception as e:  # noqa: BLE001 — director must never fail a render
+        log.warning("video_director shim -> director_service failed (%s); light fallback", e)
+        directed = []
     out: list[str] = []
     for i, original in enumerate(prompts):
-        cand = directed[i].strip() if i < len(directed) and directed[i].strip() else ""
+        cand = directed[i].strip() if i < len(directed) and directed[i] and directed[i].strip() else ""
         out.append(cand or _light_fallback(original, style))
     return out
 
@@ -202,24 +206,28 @@ def storyboard_from_concept(
     model: str = DEFAULT_DIRECTOR_MODEL,
     extra_guidance: Optional[str] = None,
 ) -> list[str]:
-    """Expand ONE concept into ``num_shots`` distinct-but-connected shot prompts.
+    """DEPRECATED SHIM → :func:`director_service.plan` (CONCEPT_EXPANSION mode).
 
-    Never raises. On LLM/parse failure (or a short response) the missing shots are filled
-    with a lightweight-enhanced variant of the concept so the caller always gets exactly
-    ``num_shots`` usable prompts.
+    Kept for backward-compat after the unification (2026-06-23). Never raises and always
+    returns exactly ``num_shots`` usable prompts (pads with a light-enhanced concept variant
+    if the director under-delivers).
     """
     n = max(1, int(num_shots or 1))
     concept = (concept or "").strip()
     if not concept:
         return []
-    user = (
-        f"Concept: {concept}\nNumber of shots N: {n}."
-        + _style_clause(style)
-        + (f"\nDirector guidance: {extra_guidance.strip()}." if extra_guidance and extra_guidance.strip() else "")
-    )
-    shots = _parse_prompts(_chat_json(_SYSTEM_STORYBOARD, user, model=model, n=n), n)
-    out = [s for s in shots[:n] if s]
-    # Pad if the model under-delivered, so the count is exactly N.
+    try:
+        from backend.services.director_service import plan, DirectorBrief, DirectorMode
+        result = plan(DirectorBrief(
+            mode=DirectorMode.CONCEPT_EXPANSION, concept=concept, num_shots=n,
+            style=style or "", extra_guidance=extra_guidance,
+        ))
+        shots = [s.prompt for s in result.shots]
+    except Exception as e:  # noqa: BLE001
+        log.warning("video_director shim -> director_service failed (%s); light fallback", e)
+        shots = []
+    out = [s for s in shots[:n] if s and s.strip()]
+    # Pad if the director under-delivered, so the count is exactly N.
     while len(out) < n:
         idx = len(out) + 1
         out.append(_light_fallback(f"{concept} (shot {idx} of {n})", style))

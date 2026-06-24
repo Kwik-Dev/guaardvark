@@ -148,6 +148,19 @@ NEGATIVE_PROMPTS = {
     ),
 }
 
+# Identity / anatomy-bleed guard for character-LoRA clips. Targets the specific failure mode
+# we saw on the first sage_harlow runs — the character's head turning into a horse, or animal
+# ears/fur fusing onto a human face — i.e. the LoRA-overfit face bleeding onto wrong anatomy
+# under motion. It is deliberately scoped to HYBRID/ANATOMY artifacts (not "horse" wholesale),
+# so a character legitimately *riding* a horse still renders the horse; only the person growing
+# animal features is pushed away. The real fix is full-body training data (see DATASET_SPEC.md);
+# this is the cheap, zero-GPU stopgap. Appended to the default negative for every video clip.
+IDENTITY_BLEED_NEGATIVE = (
+    "animal head, horse head, animal ears, animal face, fur on face, snout, muzzle, whiskers, "
+    "human-animal hybrid, anthropomorphic, creature hybrid, deformed face, fused features, "
+    "extra head, two heads, extra limbs, mutated anatomy, malformed body"
+)
+
 
 def enhance_video_prompt(
     prompt: str,
@@ -268,4 +281,7 @@ def get_default_negative_prompt(style: str = "cinematic") -> str:
         A negative prompt string focused on quality issues.
     """
     style = (style or "cinematic").lower().strip()
-    return NEGATIVE_PROMPTS.get(style, NEGATIVE_PROMPTS["none"])
+    base = NEGATIVE_PROMPTS.get(style, NEGATIVE_PROMPTS["none"])
+    # Always include the identity/anatomy-bleed guard — it's the cheap stopgap for the
+    # character-LoRA "horse-head" failure mode and is harmless on non-character clips.
+    return f"{base}, {IDENTITY_BLEED_NEGATIVE}"

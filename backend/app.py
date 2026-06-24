@@ -111,6 +111,18 @@ try:
     logging.getLogger(__name__).info(
         "Plugin-runner sidecar started (clean fork environment, no torch)"
     )
+
+    # Ensure the sidecar (and any mp resources it manages) are cleaned on exit.
+    # This prevents "leaked semaphore" warnings from the resource_tracker at
+    # interpreter shutdown (the exact class of bug that motivated the sidecar).
+    import atexit
+    def _shutdown_plugin_runner():
+        try:
+            _PluginRunnerClient.get().shutdown()
+            logging.getLogger(__name__).debug("Plugin-runner sidecar shutdown complete")
+        except Exception as _e:
+            logging.getLogger(__name__).debug(f"Plugin-runner shutdown (non-fatal): {_e}")
+    atexit.register(_shutdown_plugin_runner)
 except Exception as _e:
     logging.getLogger(__name__).warning(f"Plugin-runner sidecar failed to start: {_e}")
     # Non-fatal — plugin_manager will fall back to direct subprocess.run
@@ -1000,6 +1012,27 @@ def _initialize_app_components(app):
         register_browser_shutdown(app)
     except Exception as e:
         app.logger.debug(f"Browser shutdown registration skipped: {e}")
+
+    # Unload heavy generators (torch/diffusers pipelines) on exit to release
+    # any associated IPC semaphores / CUDA graphs tracked by the mp resource_tracker.
+    # Prevents "leaked semaphore" warnings at shutdown.
+    import atexit
+    def _unload_heavy_generators():
+        try:
+            from backend.services.offline_image_generator import get_image_generator
+            gen = get_image_generator()
+            if hasattr(gen, "_unload_pipeline"):
+                gen._unload_pipeline()
+            if hasattr(gen, "clear_cache"):
+                gen.clear_cache()
+        except Exception:
+            pass  # best effort; generator may not be initialized
+        try:
+            from backend.utils.thread_pool_manager import shutdown_all_pools
+            shutdown_all_pools(wait=False)
+        except Exception:
+            pass
+    atexit.register(_unload_heavy_generators)
 
     return app
 

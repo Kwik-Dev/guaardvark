@@ -1,46 +1,92 @@
-import { defineConfig } from "vite";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createLogger, defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import { NodeGlobalsPolyfillPlugin } from "@esbuild-plugins/node-globals-polyfill";
 import { NodeModulesPolyfillPlugin } from "@esbuild-plugins/node-modules-polyfill";
 import rollupNodePolyFill from "rollup-plugin-polyfill-node";
 
-const FLASK_PORT = process.env.FLASK_PORT || process.env.FLASK_RUN_PORT || 5000;
-const VITE_PORT = process.env.VITE_PORT || 5173;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, "..");
 
-// Extra hostnames/IPs allowed to reach the dev server (comma-separated).
-// Set VITE_ALLOWED_HOSTS to your LAN IP (e.g. "192.168.1.108") to reach the UI
-// from another device, or "all" to skip the host check entirely (trusted nets only).
-const EXTRA_ALLOWED_HOSTS = (process.env.VITE_ALLOWED_HOSTS || "")
-  .split(",")
-  .map((h) => h.trim())
-  .filter(Boolean);
-const ALLOWED_HOSTS = EXTRA_ALLOWED_HOSTS.includes("all")
-  ? "all"
-  : ["localhost", "127.0.0.1", ".local", ...EXTRA_ALLOWED_HOSTS];
-
-// Shared by both the dev (`server`) and production-preview (`preview`) servers.
-// The frontend calls a relative "/api" and connects the socket to the page
-// origin, so whichever server serves the page must proxy these to Flask.
-// `xfwd: true` forwards the originating client IP as X-Forwarded-For — the backend
-// auth_guard relies on it to still recognize a LAN device (proxied via loopback)
-// as remote, so proxying the UI does not silently bypass the host check.
-const PROXY = {
-  "/api": {
-    target: `http://127.0.0.1:${FLASK_PORT}`,
-    changeOrigin: true,
-    secure: false,
-    xfwd: true,
-  },
-  "/socket.io": {
-    target: `http://127.0.0.1:${FLASK_PORT}`,
-    changeOrigin: true,
-    secure: false,
-    ws: true,
-    xfwd: true,
-  },
+// Socket.IO disconnects (page refresh, backend restart, transport retry) reset the
+// proxied TCP socket; Vite logs that as "ws proxy error: ECONNRESET" even though
+// the client reconnects fine via polling/websocket. Filter the benign noise only.
+const BENIGN_PROXY_RESET = /ECONN(RESET|ABORTED)|EPIPE|socket hang up/i;
+const viteLogger = createLogger();
+const logError = viteLogger.error.bind(viteLogger);
+viteLogger.error = (msg, options) => {
+  const text = typeof msg === "string" ? msg : String(msg);
+  if (text.includes("ws proxy") && BENIGN_PROXY_RESET.test(text)) return;
+  logError(msg, options);
 };
 
-export default defineConfig({
+function resolvePorts(mode) {
+  // Repo .env lives at LLAMAX8/.env (not frontend/.env). start.sh exports these,
+  // but `npm run dev` from frontend/ must still pick up FLASK_PORT=5002 / VITE_PORT=5175.
+  const rootEnv = loadEnv(mode, REPO_ROOT, "");
+  const flaskPort =
+    process.env.FLASK_PORT ||
+    process.env.FLASK_RUN_PORT ||
+    rootEnv.FLASK_PORT ||
+    "5000";
+  const vitePort = process.env.VITE_PORT || rootEnv.VITE_PORT || "5173";
+  return { flaskPort, vitePort };
+}
+
+function buildProxy(flaskPort) {
+  const target = `http://127.0.0.1:${flaskPort}`;
+  const shared = {
+    target,
+    changeOrigin: true,
+    secure: false,
+    xfwd: true,
+    configure: (proxy) => {
+      proxy.on("error", (err) => {
+        if (BENIGN_PROXY_RESET.test(err?.message || "")) return;
+        logError(`[vite] http proxy error: ${err?.message || err}`);
+      });
+      proxy.on("proxyReqWs", (_proxyReq, _req, socket) => {
+        socket.on("error", (err) => {
+          if (BENIGN_PROXY_RESET.test(err?.message || "")) return;
+          logError(`[vite] ws proxy socket error: ${err?.message || err}`);
+        });
+      });
+    },
+  };
+  return {
+    "/api": shared,
+    "/socket.io": { ...shared, ws: true },
+  };
+}
+
+function resolveAllowedHosts(rootEnv) {
+  // Extra hostnames/IPs allowed to reach the dev server (comma-separated).
+  // Set VITE_ALLOWED_HOSTS to your LAN IP (e.g. "192.168.1.108") to reach the UI
+  // from another device, or "all" to skip the host check entirely (trusted nets only).
+  const extraAllowedHosts = (process.env.VITE_ALLOWED_HOSTS || rootEnv.VITE_ALLOWED_HOSTS || "")
+    .split(",")
+    .map((h) => h.trim())
+    .filter(Boolean);
+  return extraAllowedHosts.includes("all")
+    ? "all"
+    : ["localhost", "127.0.0.1", ".local", ...extraAllowedHosts];
+}
+
+export default defineConfig(({ mode }) => {
+  const rootEnv = loadEnv(mode, REPO_ROOT, "");
+  const { flaskPort, vitePort } = resolvePorts(mode);
+  const allowedHosts = resolveAllowedHosts(rootEnv);
+  // Shared by both the dev (`server`) and production-preview (`preview`) servers.
+  // The frontend calls a relative "/api" and connects the socket to the page
+  // origin, so whichever server serves the page must proxy these to Flask.
+  // `xfwd: true` forwards the originating client IP as X-Forwarded-For — the backend
+  // auth_guard relies on it to still recognize a LAN device (proxied via loopback)
+  // as remote, so proxying the UI does not silently bypass the host check.
+  const proxy = buildProxy(flaskPort);
+
+  return {
+  customLogger: viteLogger,
   plugins: [react()],
   test: {
     globals: true,
@@ -101,19 +147,20 @@ export default defineConfig({
   },
   server: {
     host: '0.0.0.0',
-    port: parseInt(VITE_PORT),
+    port: parseInt(vitePort, 10),
     strictPort: true,
-    allowedHosts: ALLOWED_HOSTS,
-    proxy: PROXY,
+    allowedHosts,
+    proxy,
   },
   // `start.sh` serves the production build via `vite preview`, which does NOT
   // share the `server:` block above — so host allowlist + API/WS proxy must be
   // repeated here, or LAN clients get "Blocked request" and /api + sockets 404.
   preview: {
     host: '0.0.0.0',
-    port: parseInt(VITE_PORT),
+    port: parseInt(vitePort, 10),
     strictPort: true,
-    allowedHosts: ALLOWED_HOSTS,
-    proxy: PROXY,
+    allowedHosts,
+    proxy,
   },
+};
 });

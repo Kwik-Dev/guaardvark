@@ -28,6 +28,13 @@ except ImportError as e:
     offline_gen_available = False
 
 try:
+    from backend.services.media_director import expand_image_plan, direct_prompts as media_direct_enhance
+    MEDIA_DIRECTOR_AVAILABLE = True
+except Exception as e:  # noqa: BLE001
+    logger.warning(f"media_director not available for batch image (will skip): {e}")
+    MEDIA_DIRECTOR_AVAILABLE = False
+
+try:
     from backend.config import CACHE_DIR, UPLOAD_DIR
     config_available = True
 except ImportError:
@@ -78,6 +85,13 @@ class BatchImageRequest:
     restore_faces: bool = False
     face_restoration_weight: float = 0.5
     remove_background: bool = False
+    # Director / storyboard intelligence (opt-in, defaults preserve old behavior)
+    director_mode: bool = False
+    director_guidance: Optional[str] = None
+    storyboard_concept: Optional[str] = None
+    planning_mode: str = "narrative"
+    director_model: Optional[str] = None
+    user_treatment: Optional[str] = None
 
 @dataclass
 class BatchImageResult:
@@ -234,6 +248,10 @@ class BatchImageGenerator:
                 thumb_size = (256, 256)
                 image.thumbnail(thumb_size, Image.Resampling.LANCZOS)
 
+                # Ensure RGB for JPEG compatibility (handles RGBA/P modes from generators)
+                if image.mode in ('RGBA', 'P'):
+                    image = image.convert('RGB')
+
                 thumb_filename = Path(image_path).stem + ".jpg"
                 thumb_path = thumbnail_dir / thumb_filename
                 image.save(thumb_path, "JPEG", quality=85)
@@ -242,6 +260,7 @@ class BatchImageGenerator:
 
         except Exception as e:
             logger.warning(f"Failed to create thumbnail for {image_path}: {e}")
+            # As last resort, do not block the result; serving has fallbacks
             return None
 
     def _cleanup_gpu_memory(self):
@@ -487,6 +506,49 @@ class BatchImageGenerator:
             except Exception as e:
                 logger.warning(f"GPU gate release failed: {e}")
 
+    def _apply_director(self, request: BatchImageRequest) -> None:
+        """If director_mode or storyboard_concept, rewrite prompts via Media Director (LLM visual storyteller).
+        Mutates in place and disables downstream generic enhance (director already produces full visual prompts).
+        Never raises — falls back silently (original prompts stand).
+        Mirrors batch_video_generator exactly.
+        """
+        if not MEDIA_DIRECTOR_AVAILABLE:
+            return
+        try:
+            if getattr(request, "storyboard_concept", None):
+                concept = (request.storyboard_concept or "").strip()
+                n = len(request.prompts)
+                if concept and n > 0:
+                    from backend.services.media_director import storyboard_from_concept
+                    res = storyboard_from_concept(concept, n, style=(getattr(request, "look_and_feel", None) or ""), extra_guidance=getattr(request, "director_guidance", None))
+                    shots = res.get("prompts") or []
+                    for i, p in enumerate(request.prompts):
+                        if i < len(shots) and shots[i]:
+                            p.prompt = shots[i]
+                    request.auto_enhance = False
+                    logger.info(f"Media Director storyboard expanded {len(shots)} prompts for batch {request.batch_id}")
+                    return
+            if getattr(request, "director_mode", False):
+                raw = [bp.prompt for bp in request.prompts if (bp.prompt or "").strip()]
+                if not raw:
+                    return
+                style = getattr(request, "style", "") or ""
+                guidance = getattr(request, "director_guidance", None)
+                directed = media_direct_enhance(raw, style=style, extra_guidance=guidance)
+                idx = 0
+                changed = 0
+                for bp in request.prompts:
+                    if (bp.prompt or "").strip() and idx < len(directed) and directed[idx]:
+                        newp = directed[idx].strip()
+                        if newp and newp != (bp.prompt or "").strip():
+                            bp.prompt = newp
+                            changed += 1
+                        idx += 1
+                request.auto_enhance = False
+                logger.info(f"Media Director enhanced {changed} prompts for batch {request.batch_id}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Director pass skipped for batch image {getattr(request, 'batch_id', '?')} (non-fatal): {e}")
+
     def start_batch_generation(self, request: BatchImageRequest) -> str:
         if not self.service_available:
             raise RuntimeError("Batch image generation service not available")
@@ -544,6 +606,12 @@ class BatchImageGenerator:
 
                 batch_status.status = "running"
                 batch_status.start_time = datetime.now()
+
+                # Director / storyboard pass (if requested). Does NOT raise. Disables auto_enhance on success.
+                try:
+                    self._apply_director(request)
+                except Exception:
+                    pass
 
                 if self.progress_system:
                     self._progress_process_id = self.progress_system.create_process(

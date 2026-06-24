@@ -122,10 +122,10 @@ BACKEND_COLOR="${GREEN}"
 [ "$BACKEND_UP" = "OFFLINE" ] && BACKEND_COLOR="${RED}"
 echo -e "  ${WHITE}Backend:${NC} ${BACKEND_COLOR}${BACKEND_UP}${NC} (port ${FLASK_PORT:-5002})"
 
-FRONTEND_UP=$(curl -sf http://localhost:${VITE_PORT:-5175} >/dev/null 2>&1 && echo "ONLINE" || echo "OFFLINE")
+FRONTEND_UP=$(curl -sf http://localhost:${VITE_PORT:-5173} >/dev/null 2>&1 && echo "ONLINE" || echo "OFFLINE")
 FRONTEND_COLOR="${GREEN}"
 [ "$FRONTEND_UP" = "OFFLINE" ] && FRONTEND_COLOR="${RED}"
-echo -e "  ${WHITE}Frontend:${NC} ${FRONTEND_COLOR}${FRONTEND_UP}${NC} (port ${VITE_PORT:-5175})"
+echo -e "  ${WHITE}Frontend:${NC} ${FRONTEND_COLOR}${FRONTEND_UP}${NC} (port ${VITE_PORT:-5173})"
 
 OLLAMA_UP=$(curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "ONLINE" || echo "OFFLINE")
 OLLAMA_COLOR="${GREEN}"

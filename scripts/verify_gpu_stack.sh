@@ -23,6 +23,17 @@ try:
     import torch
 except Exception as e:
     print(f"IMPORT_FAIL: {type(e).__name__}: {e}"); sys.exit(3)
+# Apple Silicon has no CUDA — the correct accelerator is Metal/MPS. Testing
+# .cuda() there always raises "Torch not compiled with CUDA enabled", which is
+# expected, NOT degraded. Probe MPS instead so a healthy Mac reads as healthy.
+if sys.platform == "darwin":
+    try:
+        if not torch.backends.mps.is_available():
+            print("MPS_UNAVAIL: torch.backends.mps.is_available() is False"); sys.exit(5)
+        torch.zeros(1).to("mps")
+    except Exception as e:
+        print(f"KERNEL_FAIL: {type(e).__name__}: {e}"); sys.exit(4)
+    print("OK_MPS"); sys.exit(0)
 try:
     torch.zeros(1).cuda()
 except Exception as e:
@@ -30,11 +41,15 @@ except Exception as e:
 print("OK")
 PY
 )"; then
-        echo "  ✔ $label: GPU kernel OK"
+        case "$err" in
+            OK_MPS*) echo "  ✔ $label: Metal/MPS active" ;;
+            *)       echo "  ✔ $label: GPU kernel OK" ;;
+        esac
     else
         local short="${err:0:140}"
         case "$err" in
             IMPORT_FAIL:*) echo "  ⚠ $label: torch failed to IMPORT — ${short#IMPORT_FAIL: }" ;;
+            MPS_UNAVAIL:*) echo "  ⚠ $label: Metal/MPS unavailable — ${short#MPS_UNAVAIL: }" ;;
             KERNEL_FAIL:*) echo "  ⚠ $label: torch imports but GPU kernel failed — ${short#KERNEL_FAIL: }" ;;
             *)             echo "  ⚠ $label: torch GPU check failed — ${short}" ;;
         esac
