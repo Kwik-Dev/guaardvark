@@ -60,7 +60,12 @@ FLUX_DEV_GUIDANCE = float(os.environ.get("GUAARDVARK_FLUX_DEV_GUIDANCE", "3.5"))
 # A neutral SDXL negative — keeps anatomy/quality sane without fighting the LoRA.
 DEFAULT_NEGATIVE = (
     "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
-    "jpeg artifacts, watermark, signature, deformed, extra limbs, blurry"
+    "jpeg artifacts, watermark, signature, deformed, extra limbs, blurry, "
+    # Identity/anatomy-bleed guard (character-LoRA "horse-head" failure mode). Scoped to
+    # human-animal HYBRID artifacts so a legitimately-present animal still renders. Kept in
+    # sync with backend/utils/prompt_enhancer.IDENTITY_BLEED_NEGATIVE.
+    "animal head, horse head, animal ears, animal face, fur on face, snout, muzzle, "
+    "human-animal hybrid, anthropomorphic, extra head, two heads, mutated anatomy"
 )
 
 

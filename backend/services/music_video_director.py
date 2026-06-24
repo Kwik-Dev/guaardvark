@@ -191,7 +191,7 @@ def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = No
     return out
 
 
-def _director_options(batch_len: int, *, rich: bool) -> dict:
+def _director_options(batch_len: int, *, rich: bool, sampling: dict | None = None) -> dict:
     """Single source of truth for the Ollama sampling/window options per Director call.
 
     The original code set only ``temperature`` (no ``num_predict``), so large responses
@@ -199,11 +199,23 @@ def _director_options(batch_len: int, *, rich: bool) -> dict:
     We now size ``num_predict`` to the batch and give a modest ``num_ctx`` (kept small to
     respect tight VRAM — the small model runs partly on CPU). The first/rich batch also
     writes the whole-video treatment, so it gets more room.
+
+    ``sampling`` (optional) is a pure sampling-knob dict — e.g.
+    ``sampling_profiles.get_profile(CREATIVE)`` — whose keys (temperature, top_p, top_k,
+    min_p, repeat/presence/frequency penalties) override the built-in defaults. It must
+    NOT carry ``num_ctx``/``num_predict``: those stay authoritative here because the
+    batch-sized output budget is the gemma JSON-truncation fix. Any window keys in
+    ``sampling`` are dropped defensively. ``sampling=None`` ⇒ byte-identical to before.
     """
     bl = max(1, batch_len)
     if rich:
-        return {"temperature": 0.7, "num_ctx": 8192, "num_predict": min(4096, 200 * bl + 2048)}
-    return {"temperature": 0.65, "num_ctx": 4096, "num_predict": min(3072, 200 * bl + 512)}
+        opts = {"temperature": 0.7, "num_ctx": 8192, "num_predict": min(4096, 200 * bl + 2048)}
+    else:
+        opts = {"temperature": 0.65, "num_ctx": 4096, "num_predict": min(3072, 200 * bl + 512)}
+    if sampling:
+        knobs = {k: v for k, v in sampling.items() if k not in ("num_ctx", "num_predict")}
+        opts.update(knobs)
+    return opts
 
 
 def _parse_prompts(content: str, n: int) -> dict[int, str]:
@@ -340,12 +352,16 @@ def _build_shots_only_user(
     )
 
 
-def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int, rich: bool):
+def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int, rich: bool,
+                   sampling: dict | None = None):
     """One ``ollama.chat(format='json')`` with a small transient-error retry loop (connection
     refused / server just came up). Returns ``(parsed_dict, raw_content)``. Raises only if all
-    transient retries are exhausted; an unparseable-but-returned response yields empty prompts."""
+    transient retries are exhausted; an unparseable-but-returned response yields empty prompts.
+
+    ``sampling`` (optional) overrides the sampling knobs (e.g. CREATIVE profile); window/budget
+    keys stay authoritative — see ``_director_options``."""
     import time
-    opts = _director_options(batch_len, rich=rich)
+    opts = _director_options(batch_len, rich=rich, sampling=sampling)
     resp = None
     for attempt in range(3):
         try:
@@ -382,6 +398,7 @@ def _generate_shots_for_batch(
     max_stretch: float | None,
     fill_method: str | None,
     rich: bool,
+    sampling: dict | None = None,
 ) -> dict:
     """Generate per-shot prompts for ONE batch of cuts.
 
@@ -404,7 +421,7 @@ def _generate_shots_for_batch(
         else:
             system = _SHOTS_ONLY_SYSTEM
             user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context)
-        data, content = _director_chat(ollama=ollama, model=model, system=system, user=user, batch_len=b, rich=rich)
+        data, content = _director_chat(ollama=ollama, model=model, system=system, user=user, batch_len=b, rich=rich, sampling=sampling)
         prompts_map = data.get("prompts", {}) or {}
         treatment = data.get("treatment")
         shots = data.get("shots", []) or []
@@ -413,7 +430,7 @@ def _generate_shots_for_batch(
         if not prompts_map:
             try:
                 rec_user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context)
-                data2, _ = _director_chat(ollama=ollama, model=model, system=_SHOTS_ONLY_SYSTEM, user=rec_user, batch_len=b, rich=False)
+                data2, _ = _director_chat(ollama=ollama, model=model, system=_SHOTS_ONLY_SYSTEM, user=rec_user, batch_len=b, rich=False, sampling=sampling)
                 if data2.get("prompts"):
                     prompts_map = data2.get("prompts", {})
                     treatment = treatment or data2.get("treatment")
@@ -440,6 +457,7 @@ def _generate_storyline_and_prompts(
     user_treatment: str | None = None,
     max_stretch: float | None = None,
     fill_method: str | None = None,
+    sampling: dict | None = None,
 ) -> dict:
     """Internal: returns {'prompts': list[str], 'storyline': str | None}.
     The storyline is the actual narrative arc the model invented for this video.
@@ -518,6 +536,7 @@ def _generate_storyline_and_prompts(
                 max_stretch=max_stretch,
                 fill_method=fill_method,
                 rich=(bi == 0),
+                sampling=sampling,
             )
             if bi == 0 and res.get("treatment"):
                 treatment = res.get("treatment")

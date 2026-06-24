@@ -352,7 +352,7 @@ def run_analyzer(mv_id: int):
         # problem. Still degrades gracefully to the old behavior on any LLM failure.
         shot_plans = {}
         if s.get("director_enabled", True):
-            from backend.services.music_video_director import _generate_storyline_and_prompts, DIRECTOR_MODEL, _is_embedding_model
+            from backend.services.music_video_director import DIRECTOR_MODEL, _is_embedding_model
             director_model = s.get("director_model") or DIRECTOR_MODEL
             if _is_embedding_model(director_model):
                 logging.getLogger(__name__).warning("overriding bad director_model=%s (embedding model cannot chat) -> %s", director_model, DIRECTOR_MODEL)
@@ -368,16 +368,25 @@ def run_analyzer(mv_id: int):
                               "build — only their pose, action, wardrobe, framing, camera, lighting, and "
                               "setting. Refer to them only as 'the figure' or 'she/he' if needed.")
                 _dir_guidance = f"{_dir_guidance}\n{_lock_note}" if _dir_guidance else _lock_note
-            result = _generate_storyline_and_prompts(
-                mv.style_prompt,
-                plan,
+            # Unified Director (SONG_CUTPLAN). `plan` (the cut plan) shadows the imported
+            # function name, so alias it. creativity=None ⇒ engine-default sampling: this is a
+            # BYTE-IDENTICAL migration of the fragile MV path (still temp 0.7/0.65). We can flip
+            # MV to the CREATIVE profile later as a separate, tested change.
+            from backend.services.director_service import plan as director_plan, DirectorBrief, DirectorMode
+            _res = director_plan(DirectorBrief(
+                mode=DirectorMode.SONG_CUTPLAN,
+                style=mv.style_prompt,
+                cut_plan=plan,
+                creativity=None,
                 model=director_model,
                 planning_mode=s.get("planning_mode", "narrative"),
                 extra_guidance=_dir_guidance,
                 user_treatment=s.get("user_treatment") or s.get("director_treatment"),
                 max_stretch=float(s.get("max_stretch", 2.0)),
                 fill_method=s.get("fill_method"),
-            )
+            ))
+            # Use the engine's native dict so every downstream read below is unchanged.
+            result = _res.raw if _res.raw is not None else {"prompts": [], "treatment": _res.treatment}
             # P0 guard application (story-arc plan): ensure the prompts we store for
             # storyboards + i2v are distinct + energy-aware even on marginal LLM output.
             # Also the natural place to (in future) pass stretch context for duration suggestions.

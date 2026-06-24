@@ -62,9 +62,14 @@ Be one flowing descriptive phrase. No narration, no "the image depicts", no meta
 STYLE (if given) is appended by caller; do not repeat it wholesale.
 Return STRICT JSON: {"prompts": ["enriched1", "enriched2", ...]} exactly one per input, same order."""
 
-def _options(n: int) -> dict:
+def _options(n: int, sampling: Optional[dict] = None) -> dict:
     n = max(1, n)
-    return {"temperature": 0.68, "num_ctx": 4096, "num_predict": min(3072, 180 * n + 512)}
+    opts = {"temperature": 0.68, "num_ctx": 4096, "num_predict": min(3072, 180 * n + 512)}
+    if sampling:
+        # Sampling-profile knobs override temperature etc.; window/budget stay authoritative
+        # (num_predict sized to N is the JSON-truncation fix).
+        opts.update({k: v for k, v in sampling.items() if k not in ("num_ctx", "num_predict")})
+    return opts
 
 def _parse_image_prompts(content: str, n: int) -> List[str]:
     """Tolerant list parse for image plans/enhance. Accepts {"prompts": [...]}, {"shots": [...]}, bare array."""
@@ -109,6 +114,7 @@ def enhance_prompts(
     extra_guidance: Optional[str] = None,
     model: Optional[str] = None,
     cast_descriptors: Optional[List[str]] = None,
+    sampling: Optional[dict] = None,
 ) -> List[str]:
     """Enrich a list of user prompts into rich pure-visual shot-ready prompts via director LLM.
     Best-effort: on any failure returns originals (or lightly cued).
@@ -138,6 +144,7 @@ def enhance_prompts(
             user=user,
             batch_len=n,
             rich=False,
+            sampling=sampling,
         )
         # _base returns dict? adapt
         if isinstance(parsed, dict) and parsed.get("prompts"):
@@ -158,6 +165,7 @@ def storyboard_from_concept(
     style: str = "",
     extra_guidance: Optional[str] = None,
     model: Optional[str] = None,
+    sampling: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Expand ONE concept into N coherent visual prompts (+ optional treatment).
     Returns {"treatment": str|None, "prompts": [str, ...]} .
@@ -176,7 +184,7 @@ def storyboard_from_concept(
     try:
         # Use a direct chat wrapper for storyboard (rich)
         import ollama
-        opts = _options(n)
+        opts = _options(n, sampling)
         resp = ollama.chat(
             model=resolved,
             format="json",
