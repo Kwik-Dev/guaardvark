@@ -93,7 +93,13 @@ def model_tier(ram_gb: float, gpu: dict[str, Any], arch: str) -> dict[str, str]:
     """Pick chat + embed models for the host.
 
     Mirrors start.sh's bootstrap tiers: <=8 GB RAM or ARM -> 1B chat model;
-    otherwise the standard 8B-class chat model. Embed model is constant.
+    otherwise the standard vision-capable Gemma4 chat model. Embed model is
+    constant.
+
+    Gemma4 is the default because it's the model the agentic screen-control
+    system (servo / box_2d) is validated against — see the "validate non-Gemma4
+    models" task. e2b (5.1B, ~7.2GB, vision) is the smallest Gemma4, so it's the
+    broadest-running default; the small/ARM tier stays text-only (can't fit it).
 
     `gpu` is reserved for a future VRAM-aware quantisation tier; today's
     selection is RAM/arch-driven only.
@@ -102,7 +108,7 @@ def model_tier(ram_gb: float, gpu: dict[str, Any], arch: str) -> dict[str, str]:
     is_arm = arch in ("aarch64", "arm64")
     if is_arm or (0 < (ram_gb or 0) <= 8):
         return {"chat": "llama3.2:1b", "embed": "nomic-embed-text"}
-    return {"chat": "llama3.1:8b", "embed": "nomic-embed-text"}
+    return {"chat": "gemma4:e2b", "embed": "nomic-embed-text"}
 
 
 def policy_fingerprint(hardware: dict[str, Any]) -> str:

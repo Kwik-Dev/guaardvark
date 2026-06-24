@@ -107,9 +107,9 @@ def test_model_tier_arm_wins_even_with_high_ram():
 
 
 def test_model_tier_standard_for_normal_box():
-    # Pinned to start.sh's actual standard-tier id (reconciled in Task 10).
+    # Pinned to start.sh's actual standard-tier id (vision-capable Gemma4 default).
     t = hp.model_tier(ram_gb=125, gpu={"vendor": "nvidia", "vram_mb": 16311}, arch="x86_64")
-    assert t["chat"] == "llama3.1:8b"
+    assert t["chat"] == "gemma4:e2b"
     assert t["embed"] == "nomic-embed-text"
 
 

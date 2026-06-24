@@ -210,7 +210,7 @@ class VisionAnalyzer:
                 override = os.environ.get("GUAARDVARK_DECISION_MODEL")
                 if override and override in models:
                     return override
-                for preferred in ["gemma4:e4b", "llama3.1:8b",
+                for preferred in ["gemma4:e4b", "gemma4:e2b", "llama3.1:8b",
                                   "llama3:8b", "llama3:latest", "mistral:latest", "gemma2:latest"]:
                     if preferred in models:
                         return preferred

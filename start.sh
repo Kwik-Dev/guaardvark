@@ -1474,7 +1474,11 @@ fi
 # This step: if Ollama is up and is missing a chat and/or embedding model, pull a
 # small hardware-appropriate default of each. Sizes are chosen by RAM + arch:
 #   ≤8GB RAM or aarch64  → chat llama3.2:1b   + embed nomic-embed-text
-#   otherwise            → chat llama3.1:8b   + embed nomic-embed-text
+#   otherwise            → chat gemma4:e2b    + embed nomic-embed-text
+# gemma4:e2b (5.1B, vision) is the standard default because the agentic screen-
+# control system is validated against Gemma4; the small/ARM tier stays text-only
+# (a 7.2GB Gemma4 won't fit ≤8GB). hardware_policy.model_tier is the source of
+# truth; these inline values are the fallback when that module isn't importable.
 # Models are per-machine (Ollama-local, under data/ for this box) — NOT synced via
 # the Interconnector, so every node bootstraps its own. Guarded by
 # GUAARDVARK_BOOTSTRAP_MODELS (default on; set =0 to skip pulls entirely).
@@ -1517,7 +1521,7 @@ except Exception:
             BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.2:1b}"
             vader_info "Model bootstrap: small-hardware tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
         else
-            BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-llama3.1:8b}"
+            BOOT_CHAT_MODEL="${GUAARDVARK_DEFAULT_LLM:-gemma4:e2b}"
             vader_info "Model bootstrap: standard tier (RAM=${BOOT_RAM_GB}GB arch=${BOOT_ARCH})"
         fi
         BOOT_EMBED_MODEL="${GUAARDVARK_EMBEDDING_MODEL:-nomic-embed-text}"

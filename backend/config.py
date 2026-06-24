@@ -286,8 +286,9 @@ def _hardware_default_llm() -> str:
     Mirrors the get_chat_keep_alive / default_advanced_rag hardware-detection pattern
     in this file: on a small box (≤8GB RAM) or ARM (aarch64/arm64), a fresh install
     should default to a 1-3B tag so first-run chat actually loads; otherwise the
-    8B-class default. GUAARDVARK_DEFAULT_LLM always overrides. Detection failure
-    falls back to today's behavior ("llama3.1:latest") — defensive, never crashes.
+    standard vision-capable Gemma4 default (gemma4:e2b — the model the agentic
+    system is validated against). GUAARDVARK_DEFAULT_LLM always overrides.
+    Detection failure stays defensive and never crashes.
     """
     env = os.environ.get("GUAARDVARK_DEFAULT_LLM")
     if env:
@@ -308,7 +309,7 @@ def _hardware_default_llm() -> str:
             return "llama3.2:1b"
     except Exception:
         pass
-    return "llama3.1:latest"
+    return "gemma4:e2b"
 
 
 def get_default_llm():
