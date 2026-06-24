@@ -8,6 +8,24 @@ from backend.models import db, Production, Project
 from backend.services.production_service import ProductionService
 from backend.services.swarm.script_markup import effective_cast_required
 
+# Repo root for resolving relative lora_path values (stored as "data/training/loras/x.safetensors"
+# or as absolute paths). backend/api/production_api.py -> parents[2] is the repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _lora_on_disk(lora_path: str | None) -> bool:
+    """Pre-cast freshness gate: a subject claiming 'trained' must have a real LoRA file on disk.
+    Mirrors scripts/verify_training_outputs' >100KB check (catches a missing file or the ~8-byte
+    mock-trainer stub). This is what would have blocked Subjects 8 (file missing) and 10 (stale)
+    from being cast while falsely marked trained."""
+    if not lora_path:
+        return False
+    p = Path(lora_path) if Path(lora_path).is_absolute() else _REPO_ROOT / lora_path
+    try:
+        return p.exists() and p.stat().st_size > 100_000
+    except OSError:
+        return False
+
 bp = Blueprint("production_api", __name__, url_prefix="/api/production")
 log = logging.getLogger(__name__)
 
@@ -243,6 +261,23 @@ def confirm_casting(prod_id):
     ]
     if incomplete:
         return jsonify({"error": "all production subjects must be cast before continuing", "incomplete_subjects": incomplete}), 400
+
+    # Pre-cast freshness gate: a cast member marked 'trained' must have a real LoRA file on disk.
+    # Without this, a stale/missing artifact (Subjects 8 & 10 were exactly this) sails through and
+    # the render silently produces an off-model character.
+    stale = [
+        {"id": s.id, "name": s.name, "lora_path": s.lora_path}
+        for s in subjects
+        if effective_cast_required(s.cast_required, s.kind)
+        and s.training_status == "trained"
+        and not _lora_on_disk(s.lora_path)
+    ]
+    if stale:
+        return jsonify({
+            "error": "some cast members are marked 'trained' but their LoRA file is missing or "
+                     "stale on disk — retrain before casting",
+            "stale_subjects": stale,
+        }), 400
 
     svc = ProductionService(db.session)
     advanced = svc.advance_if_predecessor(prod_id, expected_predecessor="casting")
