@@ -260,7 +260,13 @@ except (OSError, ValueError):
 try:
     with open(plugin_json) as f:
         cfg = (json.load(f) or {}).get("config", {})
-    print("True" if cfg.get("enabled", False) else "False")
+    # Manifests store the fresh-install default under `default_enabled` (the
+    # Python loader, PluginConfig.from_dict, reads the same key with an
+    # `enabled` legacy fallback). Reading bare `enabled` here returned False for
+    # every fresh clone — silently skipping Ollama startup + model bootstrap on
+    # any box without a pre-existing ollama service (e.g. macOS). Keep shell and
+    # Python in parity.
+    print("True" if cfg.get("default_enabled", cfg.get("enabled", False)) else "False")
 except (OSError, ValueError):
     print("False")
 PYEOF
