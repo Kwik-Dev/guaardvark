@@ -42,7 +42,19 @@ function buildProxy(flaskPort) {
     secure: false,
     xfwd: true,
     configure: (proxy) => {
-      proxy.on("error", (err) => {
+      proxy.on("error", (err, _req, res) => {
+        // Honest status when the backend is unreachable. Without this, Vite's
+        // built-in proxy error handler writes a hardcoded HTTP 500 for every
+        // ECONNREFUSED — which reads as "the server crashed" when the backend is
+        // simply down. Writing the response here (for the /api path, where `res`
+        // is a ServerResponse) sets res.headersSent, so Vite's handler skips its
+        // 500. A 502 + machine-readable body lets the client show "backend
+        // offline" instead of a misleading wall of 500s. The /socket.io WS path
+        // passes a raw socket (no writeHead) — left to reconnect on its own.
+        if (res && typeof res.writeHead === "function" && !res.headersSent) {
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "backend_offline" }));
+        }
         if (BENIGN_PROXY_RESET.test(err?.message || "")) return;
         logError(`[vite] http proxy error: ${err?.message || err}`);
       });

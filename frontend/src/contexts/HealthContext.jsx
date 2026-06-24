@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { getCeleryHealth, getBackendHealth, getDbHealth, getRedisHealth } from '../api';
 
 const HealthContext = createContext();
@@ -63,6 +63,19 @@ export const HealthProvider = ({ children }) => {
     return newData;
   }, [healthData.lastUpdated]);
 
+  // Background poll so the app notices the backend going down/coming back without a
+  // manual reload. updateHealthData's identity changes every poll (its deps include
+  // lastUpdated), so we drive the interval off a ref to avoid resetting it each tick.
+  const updateRef = useRef(updateHealthData);
+  useEffect(() => {
+    updateRef.current = updateHealthData;
+  }, [updateHealthData]);
+  useEffect(() => {
+    updateRef.current(true); // prime immediately on mount
+    const id = setInterval(() => updateRef.current(true), 10000);
+    return () => clearInterval(id);
+  }, []);
+
   // Subscribe/unsubscribe mechanism for components
   const subscribe = useCallback((callback) => {
     setSubscribers(prev => new Set([...prev, callback]));
@@ -80,10 +93,16 @@ export const HealthProvider = ({ children }) => {
     subscribers.forEach(callback => callback(healthData));
   }, [healthData, subscribers]);
 
+  // Confirmed offline = we have polled at least once (lastUpdated set) and the backend
+  // health probe failed (null). Distinct from the initial pre-poll state where backend
+  // is null simply because we haven't checked yet.
+  const isBackendOffline = healthData.lastUpdated !== null && healthData.backend === null;
+
   const value = {
     healthData,
     updateHealthData,
     subscribe,
+    isBackendOffline,
     // Convenience getters
     getCeleryHealth: () => healthData.celery,
     getBackendHealth: () => healthData.backend,

@@ -10,11 +10,13 @@ import React, {
   useRef,
 } from "react";
 import { getCurrentModel, getModelStatus } from "../api";
+import { useHealth } from "./HealthContext";
 
 // 1. Create the Context
 const StatusContext = createContext(null);
 
 export const StatusProvider = ({ children }) => {
+  const { isBackendOffline } = useHealth();
   const [activeModel, setActiveModel] = useState("");
   const [isLoadingModel, setIsLoadingModel] = useState(true);
   const [modelError, setModelError] = useState(null);
@@ -91,6 +93,20 @@ export const StatusProvider = ({ children }) => {
 
     initializeStatus();
   }, []);
+
+  // Auto-recover the mount-once fetches when the backend comes back. Without this,
+  // a backend blip leaves activeModel stuck on "Error" until a manual page reload.
+  const wasOfflineRef = useRef(false);
+  useEffect(() => {
+    if (isBackendOffline) {
+      wasOfflineRef.current = true;
+    } else if (wasOfflineRef.current) {
+      wasOfflineRef.current = false;
+      setLastFetchTime(0); // bypass the 30s status throttle on recovery
+      fetchModel();
+      fetchModelStatus();
+    }
+  }, [isBackendOffline, fetchModel, fetchModelStatus]);
 
   // Value provided by the context
   const contextValue = {

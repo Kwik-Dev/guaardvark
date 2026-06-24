@@ -55,6 +55,17 @@ export const handleResponse = async (response) => {
     const error = new Error(errorMessage);
     error.status = response.status;
     error.data = errorData;
+    // The Vite proxy returns 502 (and {"error":"backend_offline"}) when the Flask
+    // backend is unreachable; 504 is a proxy timeout. Surface a single flag so
+    // callers (StatusContext, VoiceContext, HealthContext) can distinguish
+    // "backend is down" from a genuine application error and recover gracefully.
+    if (
+      response.status === 502 ||
+      response.status === 504 ||
+      errorData?.error === "backend_offline"
+    ) {
+      error.backendOffline = true;
+    }
     console.error(
       `apiClient: handleResponse throwing error for ${response.url}:`,
       error.message,

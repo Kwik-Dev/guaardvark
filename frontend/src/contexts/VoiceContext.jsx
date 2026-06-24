@@ -7,6 +7,7 @@ import voiceService, {
   playAudio,
 } from "../api/voiceService";
 import { BACKEND_URL } from "../api/apiClient";
+import { useHealth } from "./HealthContext";
 
 const VoiceContext = createContext();
 export const useVoice = () => useContext(VoiceContext);
@@ -18,6 +19,7 @@ const debugLog = (...args) => {
 };
 
 export const VoiceProvider = ({ children }) => {
+  const { isBackendOffline } = useHealth();
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [transcribedText, setTranscribedText] = useState("");
@@ -317,45 +319,57 @@ export const VoiceProvider = ({ children }) => {
     }
   }, []);
 
-  useEffect(() => {
-    const initializeVoice = async () => {
+  const initializeVoice = useCallback(async () => {
+    if (!isMountedRef.current) return;
+
+    try {
+      const status = await getVoiceStatus();
       if (!isMountedRef.current) return;
-      
-      try {
-        const status = await getVoiceStatus();
-        if (!isMountedRef.current) return;
-        setVoiceStatus(status);
+      setVoiceStatus(status);
 
-        const voices = await getAvailableVoices();
-        if (!isMountedRef.current) return;
-        setAvailableVoices(voices.voices || []);
+      const voices = await getAvailableVoices();
+      if (!isMountedRef.current) return;
+      setAvailableVoices(voices.voices || []);
 
-        if (voices.voices && voices.voices.length > 0) {
-          if (!isMountedRef.current) return;
-          
-          const isCurrentVoiceAvailable = voices.voices.some(v => v.id === selectedVoice);
-          if (!isCurrentVoiceAvailable) {
-            const defaultVoice = voices.voices.find(v => v.id === "libritts") || voices.voices[0];
-            if (defaultVoice) {
-              if (!isMountedRef.current) return;
-              setSelectedVoice(defaultVoice.id);
-            }
+      if (voices.voices && voices.voices.length > 0) {
+        if (!isMountedRef.current) return;
+
+        const isCurrentVoiceAvailable = voices.voices.some(v => v.id === selectedVoice);
+        if (!isCurrentVoiceAvailable) {
+          const defaultVoice = voices.voices.find(v => v.id === "libritts") || voices.voices[0];
+          if (defaultVoice) {
+            if (!isMountedRef.current) return;
+            setSelectedVoice(defaultVoice.id);
           }
         }
-
-        if (!isMountedRef.current) return;
-        await checkMicrophonePermissions();
-        
-      } catch (error) {
-        console.error("VoiceContext: Failed to initialize voice features:", error);
-        if (isMountedRef.current) {
-          setVoiceStatus({ status: "error", error: error.message });
-        }
       }
-    };
 
-    initializeVoice();
+      if (!isMountedRef.current) return;
+      await checkMicrophonePermissions();
+
+    } catch (error) {
+      console.error("VoiceContext: Failed to initialize voice features:", error);
+      if (isMountedRef.current) {
+        setVoiceStatus({ status: "error", error: error.message });
+      }
+    }
   }, [checkMicrophonePermissions, selectedVoice]);
+
+  useEffect(() => {
+    initializeVoice();
+  }, [initializeVoice]);
+
+  // Auto-recover when the backend comes back: re-run voice init so voiceStatus stops
+  // being stuck on { status: "error" } after a backend blip, without a manual reload.
+  const voiceWasOfflineRef = useRef(false);
+  useEffect(() => {
+    if (isBackendOffline) {
+      voiceWasOfflineRef.current = true;
+    } else if (voiceWasOfflineRef.current) {
+      voiceWasOfflineRef.current = false;
+      initializeVoice();
+    }
+  }, [isBackendOffline, initializeVoice]);
 
   useEffect(() => {
     const handleStorageChange = (e) => {

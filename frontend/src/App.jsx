@@ -61,6 +61,8 @@ const MusicVideoPage = lazy(() => import("./pages/MusicVideoPage"));
 import Sidebar from "./components/layout/Sidebar";
 import ProgressFooterBar from "./components/layout/ProgressFooterBar";
 import { StatusProvider } from "./contexts/StatusContext";
+import { HealthProvider } from "./contexts/HealthContext";
+import BackendOfflineBanner from "./components/common/BackendOfflineBanner";
 import { SnackbarProvider } from "./components/common/SnackbarProvider";
 import { ErrorProvider } from "./components/common/ErrorProvider";
 import ErrorBoundary from "./components/common/ErrorBoundary";
@@ -163,6 +165,8 @@ const AppContainer = () => {
   return (
     <MuiThemeProvider theme={theme}>
       <CssBaseline />
+      <HealthProvider>
+      <BackendOfflineBanner />
       <StatusProvider>
         <Router
           future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
@@ -567,6 +571,7 @@ const AppContainer = () => {
           </UnifiedProgressProvider>
         </Router>
       </StatusProvider>
+      </HealthProvider>
     </MuiThemeProvider>
   );
 };
