@@ -975,6 +975,40 @@ def _switch_model_background(app, new_model_name: str):
                 logger.warning(f"Failed to compute adaptive num_ctx: {e}, using 8192")
                 num_ctx = 8192
 
+            # Tight-VRAM guard: the "load new first as fallback" strategy below keeps
+            # the OLD model resident while the NEW one loads. On a single tight GPU
+            # (e.g. 16GB) two ~6GB chat models + KV cache exceed VRAM and OOM the
+            # Ollama runner mid-load → the client sees `EOF (status code: -1)`. If the
+            # free VRAM can't hold the new model alongside the old, unload the old one
+            # FIRST (accepting a brief no-fallback window) so the swap can't OOM.
+            try:
+                from backend.utils.ollama_resource_manager import (
+                    get_system_resources, get_model_info, GPU_RESERVE_MB,
+                )
+                _res = get_system_resources()
+                _gpu_free_mb = _res.get("gpu_free_mb", 0.0)
+                _new_size_mb = (get_model_info(new_model_name) or {}).get("size_mb", 0) or 0
+                _needs_mb = _new_size_mb + GPU_RESERVE_MB
+                if (
+                    _gpu_free_mb > 0 and _new_size_mb > 0 and _gpu_free_mb < _needs_mb
+                    and old_model_name and old_model_name.lower() != new_model_name.lower()
+                ):
+                    logger.warning(
+                        f"Tight VRAM: {_gpu_free_mb:.0f}MB free < {_needs_mb:.0f}MB needed for "
+                        f"{new_model_name}; unloading {old_model_name} BEFORE load to avoid an "
+                        f"OOM/EOF during the swap."
+                    )
+                    socketio.emit("model_switch", {
+                        "status": "loading",
+                        "model": new_model_name,
+                        "message": f"Freeing VRAM (unloading {old_model_name})...",
+                    }, namespace="/")
+                    unload_model_from_ollama(old_model_name)
+                    gc.collect()
+                    old_model_name = None  # already unloaded; skip the post-load unload below
+            except Exception as _vram_err:
+                logger.warning(f"VRAM pre-check skipped (non-critical): {_vram_err}")
+
             # --- Load NEW model FIRST (old model stays as fallback) ---
             logger.info(f"Creating new Ollama instance for model: {new_model_name} (num_ctx={num_ctx})")
             new_llm = Ollama(

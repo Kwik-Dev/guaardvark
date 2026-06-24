@@ -2162,6 +2162,54 @@ class UnifiedChatEngine:
                 except Exception as retry_err:
                     logger.error(f"Retry also failed: {retry_err}", exc_info=True)
                     raise
+
+            # Ollama runner dropped the connection (EOF / status code: -1). Almost
+            # always transient: the model is still loading, or a VRAM swap (e.g. a
+            # model switch that briefly double-loaded two models on a tight GPU)
+            # OOM'd the runner. If nothing has been streamed to the user yet, let the
+            # runner settle and retry ONCE (non-streamed, mirroring the serialization
+            # retry above). Guard on _chat_kwargs (unset on the cloud path).
+            _retry_kwargs = locals().get("_chat_kwargs")
+            is_eof = ("EOF" in error_str) or ("status code: -1" in error_str)
+            if is_eof and not accumulated and _retry_kwargs:
+                logger.warning(
+                    f"Ollama EOF (runner dropped — likely model load / VRAM swap); "
+                    f"retrying once after settle: {error_str}"
+                )
+                try:
+                    import time as _time
+                    _time.sleep(3.0)
+                    stream = ollama.chat(**_retry_kwargs)
+                    for chunk in stream:
+                        if is_aborted(session_id):
+                            break
+                        msg = chunk.get("message", {})
+                        token = msg.get("content", "")
+                        thinking_token = msg.get("thinking", "")
+                        if _native_active:
+                            try:
+                                _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+                            except Exception:
+                                _tc = None
+                            if _tc:
+                                _native_tool_calls_acc.extend(_tc)
+                        if token:
+                            accumulated.append(token)
+                        if thinking_token:
+                            accumulated_thinking.append(thinking_token)
+                        if chunk.get("done"):
+                            input_tokens = chunk.get("prompt_eval_count", 0) or 0
+                            output_tokens = chunk.get("eval_count", 0) or 0
+                    content = "".join(accumulated).strip()
+                    content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
+                    if _native_active:
+                        self._native_pending_tool_calls = _native_tool_calls_acc or None
+                    logger.info("Ollama EOF retry succeeded")
+                    return content, input_tokens, output_tokens
+                except Exception as eof_retry_err:
+                    logger.error(f"EOF retry also failed: {eof_retry_err}", exc_info=True)
+                    raise
+
             logger.error(f"Ollama streaming failed: {e}", exc_info=True)
             raise
 
