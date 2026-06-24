@@ -198,9 +198,9 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
     if not s.get("use_lora_consistency"):
         return [], base_prompt
 
+    from backend.services.cast_lock import subjects_to_lock, apply_lock
+
     lora_paths: list[str] = []
-    triggers: list[str] = []
-    bibles: list[str] = []   # canonical appearance-lock per subject (hair length etc.)
 
     # (1) explicit paths in settings (accept either key name).
     explicit = s.get("loras") or s.get("lora_paths") or []
@@ -209,28 +209,20 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
             if isinstance(p, str) and p.strip():
                 lora_paths.append(p.strip())
 
-    # (2) subject_ids → trained Subject LoRAs (the cast seam, mirrors Film Crew).
+    # (2) subject_ids → trained Subject LoRAs (the cast seam, shared with Film Crew via
+    # cast_lock.subjects_to_lock — trigger(s) bind the LoRA, verbatim bible(s) pin constant
+    # features like hair length the LoRA under-constrains).
+    lock = ""
     subject_ids = s.get("subject_ids") or []
     if isinstance(subject_ids, (list, tuple)) and subject_ids:
         from backend.models import Subject
-        for sid in subject_ids:
-            subj = db.session.get(Subject, sid)
-            if subj and subj.lora_path:
-                lora_paths.append(subj.lora_path)
-                triggers.append((subj.trigger_word or subj.name or "").strip())
-                # The bible pins constant attributes the LoRA under-constrains
-                # (hair length is the classic drifter). Injecting it verbatim per
-                # cut — and telling the Director NOT to describe appearance — is
-                # what keeps the character on-model across every scene.
-                if subj.bible:
-                    bibles.append(subj.bible.strip())
+        subjects = [db.session.get(Subject, sid) for sid in subject_ids]
+        subj_paths, lock = subjects_to_lock([x for x in subjects if x], include_bible=True)
+        lora_paths.extend(subj_paths)
 
     # De-dupe paths while preserving order.
     seen: set[str] = set()
     lora_paths = [p for p in lora_paths if not (p in seen or seen.add(p))]
-    triggers = [t for t in triggers if t]
-    bseen: set[str] = set()
-    bibles = [b for b in bibles if b and not (b in bseen or bseen.add(b))]
 
     if not lora_paths:
         log.info(
@@ -241,25 +233,21 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
         )
         return [], base_prompt
 
-    # Identity lock goes at the FRONT of the prompt: trigger(s) first (binds the
-    # LoRA), then the verbatim bible(s) (pins hair length / constant features),
-    # then the per-cut scene. e.g. "sage_harlow, chin-length wavy black bob, ...,
-    # <scene for this cut>".
-    lock = ", ".join([*triggers, *bibles])
-    prompt = f"{lock}, {base_prompt}" if lock else base_prompt
+    # Identity lock goes at the FRONT of the prompt (trigger(s) → bible(s) → per-cut scene),
+    # e.g. "sage_harlow, chin-length wavy black bob, ..., <scene for this cut>".
+    prompt = apply_lock(base_prompt, lock)
     log.info("music_video %s keyframe: applying %d LoRA(s) %s (bible-lock=%s)",
-             mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths], bool(bibles))
+             mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths], bool(lock))
     return lora_paths, prompt
 
 
 def _keyframe_lora_strength(s: dict) -> float:
     """Model-aware default keyframe LoRA strength, shared by the clip path AND both
-    storyboard endpoints so review thumbnails match the final render. SDXL rank-16
-    character LoRAs sit at ~0.25 (higher fries them); the FLUX-dev route holds identity
-    at ~0.9 (verified on sage_harlow 2026-06-22). Operator override in settings wins."""
-    kfm = (s.get("keyframe_model") or "").lower()
-    default = 0.9 if ("flux" in kfm and "dev" in kfm) else 0.25
-    return max(0.0, min(1.5, float(s.get("keyframe_lora_strength", default))))
+    storyboard endpoints so review thumbnails match the final render. Delegates to the shared
+    cast_lock.resolve_lora_strength (one source of truth across all video features); operator
+    override in settings wins."""
+    from backend.services.cast_lock import resolve_lora_strength
+    return resolve_lora_strength(s.get("keyframe_model"), s.get("keyframe_lora_strength"))
 
 
 @contextmanager

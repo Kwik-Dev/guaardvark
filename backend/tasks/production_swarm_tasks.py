@@ -331,8 +331,10 @@ def _cinematographer_via_director(input_data: dict):
             mode=DirectorMode.SCRIPT_SCENES,
             scenes=scenes,
             subjects=input_data.get("subjects", []) or [],
-            # T1.6 will populate cast here; until then identity stays render-time injected
-            # in _shot_loras_and_prompt (no double-lock).
+            # cast is intentionally NOT passed: identity is injected at RENDER time in
+            # _shot_loras_and_prompt (via shared cast_lock) — that survives prompt edits and
+            # stays per-shot scoped, which plan-time global injection would lose. Leaving
+            # brief.cast empty here is what keeps the lock applied exactly once (no double-lock).
         ))
         directed = result.shots or []
         # Require a usable, full-coverage result; otherwise fall back to the agent.
@@ -416,21 +418,18 @@ def run_cinematographer(prod_id: int, llm=None):
 
 
 def _shot_loras_and_prompt(shot) -> tuple[list[str], str]:
-    """Collect a shot's character LoRA paths and build the generation prompt
-    with each Subject's trigger word prepended — the LoRA only locks identity
-    when the token it was trained on is actually present at inference."""
-    lora_paths: list[str] = []
-    triggers: list[str] = []
-    for pss in shot.shot_subjects:
-        subj = pss.subject
-        if subj.lora_path:
-            lora_paths.append(subj.lora_path)
-            triggers.append((subj.trigger_word or subj.name or "").strip())
-    triggers = [t for t in triggers if t]
-    prompt = shot.description
-    if triggers:
-        prompt = f"{', '.join(triggers)}, {prompt}"
-    return lora_paths, prompt
+    """Collect a shot's character LoRA paths and build the generation prompt with each
+    Subject's identity lock prepended — the LoRA only locks identity when the trigger token
+    it was trained on is present at inference.
+
+    Uses the shared cast_lock.subjects_to_lock (one source of truth with music-video). As of
+    the 2026-06-23 cast convergence this now also injects each subject's BIBLE (was trigger-only),
+    giving Film Crew the same trigger+bible lock music-video already had — and it stays correctly
+    PER-SHOT scoped (only the subjects actually in this shot)."""
+    from backend.services.cast_lock import subjects_to_lock, apply_lock
+    subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+    lora_paths, lock = subjects_to_lock(subjects, include_bible=True)
+    return lora_paths, apply_lock(shot.description, lock)
 
 
 def _storyboard_path(prod_id: int, shot_number: int) -> str:
