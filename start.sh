@@ -98,6 +98,16 @@ if [ -f "$SCRIPT_DIR/scripts/platform/detect.sh" ]; then
     [ -f "$GUAARDVARK_PLATFORM_BACKEND" ] && source "$GUAARDVARK_PLATFORM_BACKEND"
 fi
 
+# is_macos - single source of truth for "are we on Darwin?". Prefers the
+# detect.sh flag, falls back to `uname` so it still works on older checkouts
+# that predate scripts/platform/. Used to gate Linux-only steps (inotify/sysctl,
+# apt advice, Xvfb/X11 agent display) so they no-op cleanly on macOS (#41).
+is_macos() {
+    [ "${GUAARDVARK_OS:-}" = macos ] && return 0
+    [ "$(uname -s 2>/dev/null)" = Darwin ] && return 0
+    return 1
+}
+
 MANAGER_SCRIPT="$SCRIPT_DIR/scripts/system-manager/system-manager"
 if [ -f "$MANAGER_SCRIPT" ]; then
     # Ensure ./manager symlink exists (may be missing after Code Release restore)
@@ -335,6 +345,21 @@ check_npm() {
 }
 
 detect_browser() {
+    # macOS: browsers are .app bundles launched via `open -a`, rarely on PATH.
+    # Probe the standard install locations; report the bundle name (#41 — the
+    # PATH-only check falsely claimed "no browser" on a Mac with Chrome/Safari).
+    if is_macos; then
+        local app
+        for app in "Firefox" "Google Chrome" "Brave Browser" "Microsoft Edge" "Safari"; do
+            if [ -d "/Applications/$app.app" ] || [ -d "$HOME/Applications/$app.app" ]; then
+                echo "$app"
+                return 0
+            fi
+        done
+        # Safari ships with macOS — guaranteed fallback.
+        echo "Safari"
+        return 0
+    fi
     if command_exists firefox; then
         echo "firefox"
         return 0
@@ -385,16 +410,28 @@ check_gpu_optimizations() {
 launch_browser_app() {
     local url="$1"
     local browser_cmd
-    
+
     browser_cmd=$(detect_browser)
     if [ $? -ne 0 ]; then
-        vader_warn "Firefox not found. Cannot launch in app mode."
-        vader_info "Install Firefox: sudo apt-get install -y firefox"
+        if is_macos; then
+            vader_warn "No browser found. Open manually: $url"
+        else
+            vader_warn "Firefox not found. Cannot launch in app mode."
+            vader_info "Install Firefox: sudo apt-get install -y firefox"
+        fi
         return 1
     fi
-    
+
+    # macOS: hand the URL to the detected .app via `open -a` (no systemd/setsid).
+    if is_macos; then
+        vader_info "Launching $browser_cmd: $url"
+        open -a "$browser_cmd" "$url" >/dev/null 2>&1 \
+            && { vader_success "$browser_cmd launched"; return 0; } \
+            || { vader_warn "Could not launch $browser_cmd. Open manually: $url"; return 1; }
+    fi
+
     vader_info "Launching Firefox in new window: $browser_cmd"
-    
+
     if [[ "$browser_cmd" == "firefox" ]]; then
         # Use systemd-run to isolate browser in its own cgroup.
         # Without this, Firefox inherits the terminal's cgroup, and if the
@@ -582,12 +619,30 @@ check_frontend_build() {
 # (which carries its own proxy + host allowlist) will serve the page over the LAN.
 get_lan_ips() {
     local ips
+    local private_re='^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)'
+    # macOS: no `hostname -I`, no `ip`/`ss`. Walk interfaces with ipconfig +
+    # ifconfig (both BSD-native) so Wi-Fi/Ethernet LAN IPs are found (#41 —
+    # "No private LAN IP detected" was a false negative on Mac).
+    if is_macos; then
+        if command -v ipconfig >/dev/null 2>&1; then
+            ips=$(
+                for iface in $(ifconfig -lu 2>/dev/null); do
+                    ipconfig getifaddr "$iface" 2>/dev/null
+                done | grep -E "$private_re" | tr '\n' ' ' | sed 's/ $//'
+            )
+        fi
+        if [ -z "$ips" ] && command -v ifconfig >/dev/null 2>&1; then
+            ips=$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -E "$private_re" | tr '\n' ' ' | sed 's/ $//')
+        fi
+        echo "$ips"
+        return 0
+    fi
     # Prefer hostname -I (common on Debian/Ubuntu etc.); fall back to ip tool.
     if command -v hostname >/dev/null 2>&1; then
-        ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | tr '\n' ' ' | sed 's/ $//')
+        ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E "$private_re" | tr '\n' ' ' | sed 's/ $//')
     fi
     if [ -z "$ips" ] && command -v ip >/dev/null 2>&1; then
-        ips=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -E '^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | tr '\n' ' ' | sed 's/ $//')
+        ips=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -E "$private_re" | tr '\n' ' ' | sed 's/ $//')
     fi
     echo "$ips"
 }
@@ -1863,8 +1918,12 @@ vader_step 11 "Launching Frontend..."
 cd "$FRONTEND_DIR" || { vader_error "Failed to cd to $FRONTEND_DIR"; exit 1; }
 
 INOTIFY_MIN=524288
+# macOS watches files via FSEvents, not inotify — there is no
+# /proc/sys/fs/inotify and no fs.inotify sysctl. Skip the whole tune (#41).
 INOTIFY_CURRENT=$(cat /proc/sys/fs/inotify/max_user_watches 2>/dev/null || echo 0)
-if [ "$INOTIFY_CURRENT" -lt "$INOTIFY_MIN" ]; then
+if is_macos; then
+    : # no-op on macOS; Vite uses FSEvents
+elif [ "$INOTIFY_CURRENT" -lt "$INOTIFY_MIN" ]; then
     vader_info "inotify watchers too low ($INOTIFY_CURRENT). Raising to $INOTIFY_MIN..."
     if sudo -n sysctl -q fs.inotify.max_user_watches=$INOTIFY_MIN 2>/dev/null; then
         vader_success "inotify watchers raised to $INOTIFY_MIN"
@@ -2000,6 +2059,14 @@ AGENT_DISPLAY_STARTED=0
 ensure_agent_display() {
     # Start the agent virtual display if not already running
     if [ "$AGENT_DISPLAY_STARTED" -eq 1 ]; then return 0; fi
+    # The agent desktop is Xvfb + x11vnc + XFCE — X11-only. macOS has no X11
+    # without XQuartz, so the attempt only emits BSD-sed errors and a bogus
+    # "failed to start". Skip cleanly; everything else (chat/voice/API) works (#41).
+    if is_macos; then
+        vader_info "Agent virtual display (Xvfb/X11) is Linux-only — skipped on macOS. Chat, voice, and the API are unaffected."
+        AGENT_DISPLAY_STARTED=1
+        return 0
+    fi
     AGENT_DISPLAY_SCRIPT="$SCRIPT_DIR/scripts/start_agent_display.sh"
     if [ -x "$AGENT_DISPLAY_SCRIPT" ]; then
         if pgrep -f "Xvfb :${GUAARDVARK_AGENT_DISPLAY:-99}" > /dev/null 2>&1; then

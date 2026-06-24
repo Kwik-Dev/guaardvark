@@ -937,6 +937,19 @@ sync_only() {
     init_browser_profile "$BROWSER" "$PROFILE_DIR"
 }
 
+# Hard guard: this whole subsystem is X11 (Xvfb + x11vnc + XFCE) and cannot run
+# on macOS without XQuartz. Bail before start/restart/sync so we don't emit
+# BSD-sed errors or half-start a broken display. start.sh already skips us on
+# macOS; this protects direct/plugin invocation too (#41). stop/status stay safe.
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    case "${1:-start}" in
+        start|restart|sync)
+            echo "Agent virtual display is Linux/X11-only — skipped on macOS (no Xvfb/X11)."
+            exit 0
+            ;;
+    esac
+fi
+
 case "${1:-start}" in
     start)  start ;;
     stop)   stop ;;
