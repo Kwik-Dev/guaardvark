@@ -8,6 +8,28 @@ import axios from "axios";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const DEFAULT_ACCEPT = "image/png,image/jpeg,image/webp,image/gif,image/bmp";
 
+// An already-uploaded reference image, shown as a real thumbnail (visuals beat
+// filename chips). Served by index from the subject's ref_image_paths; falls back
+// to a filename chip if there's no subject id yet or the image fails to load.
+function ExistingThumb({ subjectId, index, name }) {
+  const [failed, setFailed] = useState(false);
+  if (!subjectId || failed) {
+    return <Chip icon={<ImageIcon sx={{ fontSize: 16 }} />} label={name} size="small" variant="outlined" />;
+  }
+  return (
+    <Box sx={{ width: 64, height: 64, borderRadius: 1, overflow: "hidden", border: 1, borderColor: "divider" }}>
+      <img
+        src={`${API_BASE}/cast-library/subjects/${subjectId}/refs/${index}/image`}
+        alt={name}
+        title={name}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+      />
+    </Box>
+  );
+}
+
 /**
  * Reusable drag-and-drop image uploader. Native HTML5 — no react-dropzone dep.
  *
@@ -211,15 +233,9 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
       )}
 
       {existingPaths.length > 0 && (
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5, mt: 1 }}>
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mt: 1 }}>
           {existingPaths.map((p, idx) => (
-            <Chip
-              key={idx}
-              icon={<ImageIcon sx={{ fontSize: 16 }} />}
-              label={p.split("/").pop()}
-              size="small"
-              variant="outlined"
-            />
+            <ExistingThumb key={idx} subjectId={subjectId} index={idx} name={p.split("/").pop()} />
           ))}
         </Box>
       )}

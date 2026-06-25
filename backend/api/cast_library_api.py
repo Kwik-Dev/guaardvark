@@ -138,6 +138,23 @@ def subject_preview(subject_id):
     return jsonify({"error": "no_preview"}), 404
 
 
+@bp.get("/subjects/<int:subject_id>/refs/<int:index>/image")
+def ref_image(subject_id: int, index: int):
+    """Serve the Nth reference image for a Subject (by position in ref_image_paths).
+    The preview route only serves the first; this lets the UI render EVERY ref as a
+    thumbnail. Resolved through the same containment guard as preview."""
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+    paths = s.ref_image_paths or []
+    if index < 0 or index >= len(paths):
+        return jsonify({"error": "not_found"}), 404
+    resolved = _resolve_ref_path(paths[index])
+    if not resolved:
+        return jsonify({"error": "no_image"}), 404
+    return send_file(resolved, max_age=3600)
+
+
 @bp.delete("/subjects/<int:subject_id>")
 def delete_subject(subject_id):
     s = db.session.get(Subject, subject_id)
