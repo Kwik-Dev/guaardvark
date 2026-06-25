@@ -170,11 +170,13 @@ class PDFProcessor(FileProcessor):
     
     def process(self, file_path: str) -> ProcessedContent:
         try:
-            # Try PyPDF2 first, then fallback to LlamaIndex
-            import PyPDF2
-            
+            # Try pypdf first, then fallback to LlamaIndex. (Was PyPDF2 — that package
+            # was renamed to pypdf and isn't installed, so this primary path silently
+            # never ran; pypdf is API-identical and pinned in requirements.)
+            import pypdf
+
             with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
+                pdf_reader = pypdf.PdfReader(file)
                 
                 # Extract metadata
                 metadata_dict = pdf_reader.metadata or {}
@@ -202,7 +204,7 @@ class PDFProcessor(FileProcessor):
                 )
                 
         except ImportError:
-            logger.warning("PyPDF2 not available, falling back to LlamaIndex PDF reader")
+            logger.warning("pypdf not available, falling back to LlamaIndex PDF reader")
             return self._process_with_llamaindex(file_path)
         except Exception as e:
             logger.error(f"Error processing PDF file {file_path}: {e}")
