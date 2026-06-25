@@ -350,6 +350,36 @@ def list_samples(subject_id: int):
     })
 
 
+@bp.get("/subjects/<int:subject_id>/samples/<int:sample_id>/image")
+def sample_image(subject_id: int, sample_id: int):
+    """Serve a generated SubjectSample's PNG. image_path is an absolute disk path
+    (not web-accessible), so resolve it through the same containment guard the
+    preview route uses and send_file it. 404 until generation writes the image."""
+    row = db.session.get(SubjectSample, sample_id)
+    if row is None or row.subject_id != subject_id:
+        return jsonify({"error": "not_found"}), 404
+    resolved = _resolve_ref_path(row.image_path) if row.image_path else None
+    if not resolved:
+        return jsonify({"error": "no_image"}), 404
+    return send_file(resolved, max_age=3600)
+
+
+@bp.post("/subjects/<int:subject_id>/train")
+def dispatch_train(subject_id: int):
+    """Dispatch a LoRA training run for this subject directly from the Cast Studio
+    (the production casting flow is the only other trigger). The lora_trainer.train_lora
+    Celery task is subject-centric (args=[subject_id]) — no Production context needed."""
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+    if s.training_status == "training":
+        return jsonify({"error": "already_training", "subject_id": subject_id}), 409
+
+    from backend.celery_app import celery
+    task = celery.send_task("lora_trainer.train_lora", args=[subject_id])
+    return jsonify({"task_id": task.id, "subject_id": subject_id}), 202
+
+
 @bp.post("/subjects/<int:subject_id>/samples/<int:sample_id>/regenerate")
 def dispatch_regen_sample(subject_id: int, sample_id: int):
     """Dispatch character.regen_sample for a single SubjectSample.

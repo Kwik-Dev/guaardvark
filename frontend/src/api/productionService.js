@@ -61,6 +61,58 @@ export const deleteCastSubject = async (id) => {
   await axios.delete(`${API_BASE}/cast-library/subjects/${id}`);
 };
 
+// ── Cast & LoRA Studio (Casting Director) ────────────────────────────────────
+// No single-subject GET on the backend — reuse the list and pick the id.
+export const getCastSubject = async (id) => {
+  const { subjects = [] } = await listCastLibrary();
+  return subjects.find((s) => String(s.id) === String(id)) || null;
+};
+
+export const updateCastSubject = async (id, patch) => {
+  const response = await axios.patch(`${API_BASE}/cast-library/subjects/${id}`, patch);
+  return response.data;
+};
+
+// Casting Director: plan the bible + N shot prompts (SYNC — returns {bible, samples}).
+export const planCharacter = async (id, body = {}) => {
+  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/plan`, body);
+  return response.data;
+};
+
+// Dispatch the FLUX image loop for the whole sheet (ASYNC — returns {task_id}).
+export const generateSamples = async (id) => {
+  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/generate`);
+  return response.data;
+};
+
+export const listSamples = async (id) => {
+  const response = await axios.get(`${API_BASE}/cast-library/subjects/${id}/samples`);
+  return response.data;
+};
+
+// Regenerate one sample (ASYNC). body: { prompt_override?, seed? }.
+export const regenerateSample = async (id, sampleId, body = {}) => {
+  const response = await axios.post(
+    `${API_BASE}/cast-library/subjects/${id}/samples/${sampleId}/regenerate`,
+    body,
+  );
+  return response.data;
+};
+
+export const approveSamples = async (id, sampleIds, approved = true) => {
+  const response = await axios.post(
+    `${API_BASE}/cast-library/subjects/${id}/samples/approve`,
+    { sample_ids: sampleIds, approved },
+  );
+  return response.data;
+};
+
+// Kick off LoRA training for this subject (ASYNC — returns {task_id}).
+export const trainSubject = async (id) => {
+  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/train`);
+  return response.data;
+};
+
 const productionService = {
   listProductions,
   getProduction,
@@ -73,6 +125,14 @@ const productionService = {
   listCastLibrary,
   createCastSubject,
   deleteCastSubject,
+  getCastSubject,
+  updateCastSubject,
+  planCharacter,
+  generateSamples,
+  listSamples,
+  regenerateSample,
+  approveSamples,
+  trainSubject,
 };
 
 export default productionService;

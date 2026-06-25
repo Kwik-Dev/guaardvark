@@ -2877,6 +2877,13 @@ class SubjectSample(db.Model):
             "image_prompt": self.image_prompt,
             "seed": self.seed,
             "image_path": self.image_path,
+            # Web-accessible URL for the generated PNG (served by cast_library_api's
+            # sample-image route). NULL until generation writes image_path — the UI
+            # shows a placeholder for pending/failed samples.
+            "image_url": (
+                f"/api/cast-library/subjects/{self.subject_id}/samples/{self.id}/image"
+                if self.image_path else None
+            ),
             "status": self.status,
             "approved": self.approved,
             "placeholder": self.placeholder,

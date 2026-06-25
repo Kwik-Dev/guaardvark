@@ -58,6 +58,8 @@ const VoiceChatPage = lazy(() => import("./pages/VoiceChatPage"));
 const SystemMapPage = lazy(() => import("./pages/SystemMapPage"));
 const FilmCrewPage = lazy(() => import("./pages/FilmCrewPage"));
 const MusicVideoPage = lazy(() => import("./pages/MusicVideoPage"));
+const CastStudioPage = lazy(() => import("./pages/CastStudioPage"));
+const CastMemberPage = lazy(() => import("./pages/CastMemberPage"));
 import Sidebar from "./components/layout/Sidebar";
 import ProgressFooterBar from "./components/layout/ProgressFooterBar";
 import { StatusProvider } from "./contexts/StatusContext";
@@ -475,6 +477,26 @@ const AppContainer = () => {
                           <AppLayout>
                             <ErrorBoundary>
                               <MusicVideoPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/cast"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <CastStudioPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/cast/:subjectId"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <CastMemberPage />
                             </ErrorBoundary>
                           </AppLayout>
                         }

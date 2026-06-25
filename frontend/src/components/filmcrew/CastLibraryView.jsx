@@ -28,7 +28,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
 // Thumbnail with graceful fallback to the subject's initials when no ref image
 // is on disk (preview endpoint 404s).
-const SubjectThumb = ({ subject }) => {
+export const SubjectThumb = ({ subject }) => {
   const [failed, setFailed] = useState(false);
   const initials = (subject.name || '?').split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
   return (
@@ -46,7 +46,11 @@ const SubjectThumb = ({ subject }) => {
 
 const KINDS = ['character', 'environment', 'prop'];
 
-const CastLibraryView = () => {
+// `onOpenSubject` lets a host page (the Cast & LoRA Studio) intercept a card
+// click. When omitted (e.g. the Film Crew tab), clicking opens the studio detail
+// route directly — so cast management always lands in the dedicated studio, never
+// the old dead /images link.
+const CastLibraryView = ({ onOpenSubject } = {}) => {
   const [subjects, setSubjects] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -56,8 +60,7 @@ const CastLibraryView = () => {
   const uploaderRef = useRef(null);
   const navigate = useNavigate();
 
-  // "Generate" jumps to the Images page with this character pre-cast.
-  const handleGenerate = (subject) => navigate(`/images?character=${subject.id}`);
+  const openDetail = onOpenSubject || ((subject) => navigate(`/cast/${subject.id}`));
 
   useEffect(() => {
     loadLibrary();
@@ -131,12 +134,17 @@ const CastLibraryView = () => {
       ) : (
         <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 2 }}>
           {subjects.map((s) => (
-            <Card key={s.id} variant="outlined" sx={{ display: 'flex', flexDirection: 'column' }}>
+            <Card key={s.id} variant="outlined"
+                  onClick={() => openDetail(s)}
+                  sx={{ display: 'flex', flexDirection: 'column', cursor: 'pointer',
+                        '&:hover': { borderColor: 'primary.main' } }}>
               <SubjectThumb subject={s} />
               <CardContent sx={{ flexGrow: 1, pb: 1 }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1 }}>
                   <Typography variant="subtitle1" noWrap sx={{ fontWeight: 'bold' }}>{s.name}</Typography>
-                  <IconButton size="small" onClick={() => handleDelete(s.id)} color="inherit" aria-label="remove from cast library">
+                  <IconButton size="small"
+                              onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }}
+                              color="inherit" aria-label="remove from cast library">
                     <CloseIcon fontSize="small" />
                   </IconButton>
                 </Box>
@@ -154,10 +162,9 @@ const CastLibraryView = () => {
                 <Button
                   size="small"
                   startIcon={<AutoAwesomeIcon />}
-                  disabled={s.training_status !== 'trained'}
-                  onClick={() => handleGenerate(s)}
+                  onClick={(e) => { e.stopPropagation(); openDetail(s); }}
                 >
-                  {s.training_status === 'trained' ? 'Generate' : 'Not trained'}
+                  Open studio
                 </Button>
               </CardActions>
             </Card>

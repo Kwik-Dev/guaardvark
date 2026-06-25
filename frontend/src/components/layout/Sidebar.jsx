@@ -83,6 +83,7 @@ const navGroups = [
     label: "Studio",
     items: [
       { text: "Film Crew", icon: <LocalMoviesIcon />, path: "/film-crew" },
+      { text: "Cast & LoRA", icon: <AccountBoxIcon />, path: "/cast" },
       { text: "Music Video", icon: <MusicVideoIcon />, path: "/music-video" },
       { text: "Video Editor", icon: <MovieFilterIcon />, path: "/video-editor" },
       { text: "Video Gen", icon: <VideoCameraBackIcon />, path: "/video" },
