@@ -116,7 +116,12 @@ def create_lora_trainer_tasks(celery_app: Celery):
         with current_app.app_context():
             train_subject_lora_for_subject(subject_id)
 
-    return {"train_lora": train_lora_task}
+    @celery_app.task(name="lora_trainer.reap_stuck_training")
+    def reap_stuck_training_task():
+        with current_app.app_context():
+            return reap_stuck_training_subjects()
+
+    return {"train_lora": train_lora_task, "reap_stuck_training": reap_stuck_training_task}
 
 
 def train_subject_lora_for_subject(subject_id: int) -> None:
@@ -136,10 +141,35 @@ def train_subject_lora_for_subject(subject_id: int) -> None:
         s.lora_path = result["lora_path"]
         s.lora_version = result.get("lora_version", 1)
         s.training_status = "trained"
+        s.training_error = None
     else:
         s.training_status = "failed"
-        # Stash error somewhere readable by the UI. Subject doesn't have an
-        # error column today — log it and use ref_image_paths' sidecar for now.
-        # (v1.1 may add a dedicated error column.)
+        # Surface the reason on the Subject so the Cast card can show WHY it
+        # failed instead of a dead-end 'failed' chip.
+        s.training_error = (result.get("error") or "training failed")[:2000]
         logger.warning(f"lora train failed for subject {subject_id}: {result.get('error')}")
     db.session.commit()
+
+
+def reap_stuck_training_subjects() -> dict:
+    """Flip Subjects wedged in training_status='training' past the train cap to
+    'failed' so the UI re-enables the Train button. A worker that dies mid-run
+    (its trainer daemon now reaped by PR_SET_PDEATHSIG) loses the Celery task, so
+    nothing marks the Subject failed — it would otherwise stay 'training' forever.
+    The 45-minute cutoff is deliberately > the 30-min _TRAIN_TIMEOUT_S, so a job
+    that is genuinely still running is never reaped. Uses the DB clock to avoid
+    process/DB timezone skew."""
+    from sqlalchemy import text
+    stale = (
+        Subject.query
+        .filter(Subject.training_status == "training",
+                Subject.updated_at < text("now() - interval '45 minutes'"))
+        .all()
+    )
+    for s in stale:
+        s.training_status = "failed"
+        s.training_error = "Training did not finish (worker stopped or timed out). Safe to retry."
+        logger.warning(f"reap_stuck_training: subject {s.id} ({s.name}) stuck in 'training' — marked failed")
+    if stale:
+        db.session.commit()
+    return {"reaped": len(stale)}

@@ -343,6 +343,11 @@ const CastMemberPage = () => {
               status: {subject.training_status}
             </Typography>
           )}
+          {subject.training_status === 'failed' && subject.training_error && (
+            <Alert severity="error" sx={{ mt: 1 }}>
+              Training failed: {subject.training_error}
+            </Alert>
+          )}
         </Box>
       )}
 

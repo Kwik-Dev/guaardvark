@@ -119,6 +119,16 @@ cd "$SCRIPT_DIR" || exit 1
 mkdir -p "$LOGS_DIR"
 mkdir -p "$SCRIPT_DIR/pids"
 
+# Load .env so workers get DATABASE_URL / REDIS_URL / CELERY_* etc. Launched bare
+# (not via start.sh) this script otherwise leaves workers on the default DB
+# password and every task dies with 'password authentication failed'. The
+# explicit exports below still win over anything in .env.
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a
+  . "$SCRIPT_DIR/.env"
+  set +a
+fi
+
 export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 export GUAARDVARK_ENHANCED_MODE=true
 export GUAARDVARK_ROOT="$SCRIPT_DIR"

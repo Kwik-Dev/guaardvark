@@ -144,6 +144,14 @@ def create_celery_app():
                 'schedule': 60.0,  # 1 minute
                 'options': {'queue': 'default'},
             },
+            # Reap Subjects stuck in training_status='training' past the train cap
+            # (worker died mid-run → Celery task lost → never marked failed). Flips
+            # them to 'failed' so the Cast UI re-enables the Train button.
+            'reap-stuck-lora-training': {
+                'task': 'lora_trainer.reap_stuck_training',
+                'schedule': 300.0,  # every 5 min
+                'options': {'queue': 'default'},
+            },
             # Scout the channel's own videos for new replies left under
             # Guaardvark's comments. Read-only — emits "candidate" rows that
             # flow through the same draft/grade/dispatch pipeline as

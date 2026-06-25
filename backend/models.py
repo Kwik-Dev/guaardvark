@@ -2783,6 +2783,10 @@ class Subject(db.Model):
     lora_path = db.Column(db.String(512), nullable=True)
     lora_version = db.Column(db.Integer, nullable=False, default=0)
     training_status = db.Column(db.String(32), nullable=False, default="untrained", index=True)
+    # Human-readable reason the last training run failed (OOM, GPU busy, worker
+    # died, …). Surfaced on the Cast card so a 'failed' status isn't a dead end
+    # with no explanation. Cleared when a new run starts / succeeds.
+    training_error = db.Column(db.Text, nullable=True)
     # Whether this Subject is an identity-locked cast member that REQUIRES a
     # trained LoRA before a production can leave the casting stage. Characters
     # default True; props/environments default False (they are generated inline

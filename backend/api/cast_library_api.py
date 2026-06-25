@@ -72,6 +72,7 @@ def _serialize(s: Subject) -> dict:
         "lora_path": s.lora_path,
         "lora_version": s.lora_version,
         "training_status": s.training_status,
+        "training_error": s.training_error,  # why the last run failed (UI surfaces it)
         "bible": s.bible,  # the appearance-lock injected per cut; surfaced for UI preview
     }
 
@@ -430,6 +431,7 @@ def dispatch_train(subject_id: int):
     # pre-commit races the worker — it loads the still-'untrained' row and
     # returns immediately, so the button appears to do nothing. Commit first.
     s.training_status = "training"
+    s.training_error = None  # clear any prior failure reason before the new run
     db.session.commit()
 
     from backend.celery_app import celery
