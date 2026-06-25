@@ -392,8 +392,23 @@ def dispatch_train(subject_id: int):
     if s.training_status == "training":
         return jsonify({"error": "already_training", "subject_id": subject_id}), 409
 
+    # Commit the status transition to 'training' BEFORE dispatching. The
+    # lora_trainer.train_lora worker skips any subject not already committed as
+    # 'training' (idempotency guard in lora_trainer_tasks.py). Dispatching
+    # pre-commit races the worker — it loads the still-'untrained' row and
+    # returns immediately, so the button appears to do nothing. Commit first.
+    s.training_status = "training"
+    db.session.commit()
+
     from backend.celery_app import celery
-    task = celery.send_task("lora_trainer.train_lora", args=[subject_id])
+    try:
+        task = celery.send_task("lora_trainer.train_lora", args=[subject_id])
+    except Exception:
+        # Roll the status back so the subject isn't stranded as 'training'
+        # forever when the broker is unreachable.
+        s.training_status = "untrained"
+        db.session.commit()
+        raise
     return jsonify({"task_id": task.id, "subject_id": subject_id}), 202
 
 
