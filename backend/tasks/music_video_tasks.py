@@ -40,8 +40,10 @@ GPU_COOLDOWN_RETRY_S = 12
 
 
 def _settings(mv: MusicVideo) -> dict:
-    """Render settings with defaults. Landscape 1080p @24fps (WAN's native fps);
-    stills generated at a VRAM-friendly 16:9 and cover-scaled at fill time."""
+    """Render settings with defaults. Final timeline is landscape 1080p @24fps;
+    the Wan i2v CLIPS are generated at 16fps (Wan 2.2 14B's native rate — matches
+    the engine default and the VideoGen page) and conformed onto that timeline.
+    Stills generated at a VRAM-friendly 16:9 and cover-scaled at fill time."""
     s = dict(mv.settings_json or {})
     s.setdefault("fps", 24)
     s.setdefault("width", 1920)
@@ -64,6 +66,24 @@ def _settings(mv: MusicVideo) -> dict:
         engine = s.get("i2v_engine", "wan")
         s["i2v_model"] = "wan22-14b-i2v" if engine == "wan" else "cogvideox-5b-i2v"
     s.setdefault("i2v_engine", "wan")  # keep for _max_clip_s etc.
+    # Keyframe model — enforce the identity-lock invariant in the BACKEND, not just
+    # as a fragile frontend onChange (MusicVideoPage promotes it on the consistency
+    # checkbox, but restored settings / API / CLI never fire that). A trained
+    # character LoRA only binds on the FLUX-dev(+LoRA) or SDXL(+LoRA) branch of
+    # comfyui_image_generator; the flux-schnell branch has no LoRA loader nodes and
+    # SILENTLY drops the LoRA (comfyui_image_generator.py:165) — you get the trigger
+    # word with none of the weights. So when consistency is ON and a LoRA reference
+    # is reachable, never let keyframe_model stay LoRA-blind (flux-schnell / unset).
+    _lora_reachable = bool(s.get("loras") or s.get("lora_paths") or s.get("subject_ids"))
+    _kf = (s.get("keyframe_model") or "").strip().lower()
+    if s.get("use_lora_consistency") and _lora_reachable:
+        # Promote ONLY a LoRA-blind choice (unset or flux-schnell). Respect an
+        # explicit LoRA-capable pick (flux-dev-lora / sdxl / sdxl-lora). flux-dev-lora
+        # matches the frontend promotion and the FLUX-dev character LoRA route.
+        if not _kf or "schnell" in _kf:
+            s["keyframe_model"] = "flux-dev-lora"
+    else:
+        s.setdefault("keyframe_model", "flux-schnell")
     # --- Playback / cost tuning (per-video; surfaced in the create form) -------
     # fill_method: how a short generated clip is stretched to fill its cut slot.
     #   "forward"   — forward motion only, slow-to-fill (DEFAULT; fixes the moonwalk)
@@ -105,10 +125,10 @@ def _settings(mv: MusicVideo) -> dict:
 def _max_clip_s(s: dict) -> float:
     """Longest real forward clip the chosen i2v engine produces, in seconds.
 
-    Derived from the frame clamp in _generate_one_clip: WAN ≤49 frames @24fps,
+    Derived from the frame clamp in _generate_one_clip: WAN ≤49 frames @16fps,
     CogVideoX ≤25 frames @7fps. The planner uses this × max_stretch as its cut
     ceiling so a forward clip can always fill its slot without a reverse."""
-    return (49 / 24) if s.get("i2v_engine", "wan") == "wan" else (25 / 7)
+    return (49 / 16) if s.get("i2v_engine", "wan") == "wan" else (25 / 7)
 
 
 # Fraction of the full Clip Stretch budget applied to the *shortest* (highest-energy) cuts.
@@ -558,7 +578,11 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     # Wan 2.2 I2V is preferred for quality when the user has the GPU budget.
     i2v_model = s.get("i2v_model", "wan22-14b-i2v")
     if "wan" in i2v_model.lower():
-        i2v_fps = 24
+        # Wan 2.2 14B (A14B) is a 16fps model — matches the engine's own default
+        # (comfyui_video_generator._create_wan22_i2v_workflow fps=16) and the
+        # VideoGeneratorPage. The old 24 here (the 5B TI2V rate) tagged the same
+        # frames 1.5x fast, so motion played sped-up vs the VideoGen page.
+        i2v_fps = 16
         frames = max(17, min(49, int(round(motion_len_s * i2v_fps)) or 25))
     else:
         i2v_fps = 7

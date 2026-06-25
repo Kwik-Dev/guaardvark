@@ -244,7 +244,7 @@ def test_settings_exposes_tuning_defaults(app):
     assert s["max_stretch"] == 2.0
     assert s["i2v_steps"] is None
     assert s["interpolation_multiplier"] == 2          # preserves prior implicit default
-    assert mvt._max_clip_s(s) == pytest.approx(49 / 24)  # WAN native forward length
+    assert mvt._max_clip_s(s) == pytest.approx(49 / 16)  # WAN native forward length (16fps)
 
 
 def test_generate_one_clip_threads_steps_interp_and_fill_method(app, monkeypatch, tmp_path):
