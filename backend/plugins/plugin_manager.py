@@ -531,6 +531,11 @@ class PluginManager:
                     self._plugin_status[plugin_id] = PluginStatus.RUNNING
                 else:
                     self._plugin_status[plugin_id] = PluginStatus.STOPPED
+            else:
+                # Non-service tools (lora_trainer etc.) have no health endpoint —
+                # "enabled" means available/ready (work runs via the task queue), so
+                # don't leave them UNKNOWN or flap them to STOPPED like a dead server.
+                self._plugin_status[plugin_id] = PluginStatus.RUNNING
     
     def _fail_plugin_start(self, plugin_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         # Core pillars (e.g. ollama — the inference backbone) are exempt from the
@@ -602,6 +607,21 @@ class PluginManager:
         if self._plugin_status.get(plugin_id) == PluginStatus.RUNNING:
             self._broadcast_plugins_status(f"start:{plugin_id}:already_running")
             return {'success': True, 'message': 'Plugin already running'}
+
+        # Non-service plugins (e.g. lora_trainer — a TOOL the celery worker invokes
+        # on demand) have NO long-running server to launch or health-check. "Starting"
+        # one just means it's enabled and ready; the real work runs in the task queue.
+        # Treat start as a graceful success instead of demanding a scripts/start.sh +
+        # port-8203 health endpoint that will never exist (that was the "No start
+        # script found" 400). stop_plugin already no-ops cleanly for these
+        # (_check_service_running returns False for non-service), and the GPU/cooldown
+        # gate below is for real service spin-ups, so we return before acquiring it.
+        if metadata.type != 'service':
+            self._plugin_status[plugin_id] = PluginStatus.RUNNING
+            self._save_running()
+            self._broadcast_plugins_status(f"start:{plugin_id}:ready")
+            logger.info(f"Plugin '{plugin_id}' (type={metadata.type}) marked ready — no service to start")
+            return {'success': True, 'message': 'Enabled — runs on demand via the task queue (no server to start).'}
 
         # ── Traffic light: rate-limit rapid clicks and enforce GPU exclusivity ──
         acquired, cooldown, reason = self._gate.try_acquire(plugin_id)

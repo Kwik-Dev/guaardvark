@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "description": "Trains character/environment/prop LoRAs for the Film Crew. v1 ships the wiring with a mock implementation; v1.1 lands real Diffusers training in an isolated torch venv.",
   "author": "Guaardvark",
-  "type": "service",
+  "type": "tool",
   "category": "training",
   "port": 8203,
-  "vram_estimate_mb": 14000,
+  "vram_estimate_mb": 0,
   "core": false,
   "dependencies": [],
   "config": {
