@@ -1025,17 +1025,26 @@ class UnifiedChatEngine:
 
         user_msg = {"role": "user", "content": user_content}
         if self._image_data:
-            # Run pasted image through a vision model (moondream/gemma4) first,
-            # since the chat model (llama3 etc.) is text-only and ignores images.
-            vision_description = self._analyze_pasted_image(self._image_data, message)
-            if vision_description:
-                user_msg["content"] = (
-                    f"[The user pasted an image. Vision model analysis: {vision_description}]\n\n"
-                    f"{user_msg['content']}"
-                )
-            else:
-                # Fallback: attach raw image for multimodal models (gemma4, llava)
+            # Guide-dog gate (capability-driven): a vision-capable chat model SEES
+            # the image directly — attach the raw image, no degraded detour. A
+            # text-only model can't see, so a vision model describes the image (the
+            # "guide dog") and we inject that description as text for it to act on.
+            # Previously this ALWAYS ran the describe-then-inject detour and only
+            # attached the raw image on failure — which silently downgraded a model
+            # that could see for itself to a moondream paragraph about the image.
+            from backend.utils.chat_utils import is_vision_model
+            if is_vision_model(model_name):
                 user_msg["images"] = [self._image_data]
+            else:
+                vision_description = self._analyze_pasted_image(self._image_data, message)
+                if vision_description:
+                    user_msg["content"] = (
+                        f"[The user pasted an image. Vision model analysis: {vision_description}]\n\n"
+                        f"{user_msg['content']}"
+                    )
+                else:
+                    # Last-ditch: attach raw image (multimodal) if the guide dog failed.
+                    user_msg["images"] = [self._image_data]
         ollama_messages.append(user_msg)
 
         # 5. Save user message to DB (with image metadata if present)
