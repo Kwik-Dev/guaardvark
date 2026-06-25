@@ -1,13 +1,39 @@
 from __future__ import annotations
+import ctypes
 import json
 import logging
+import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _set_pdeathsig():
+    """preexec_fn: ask the kernel to SIGKILL this daemon when its parent (the
+    celery worker that spawned it) dies. The trainer daemon is a plain Popen
+    child with no lifecycle link to the worker, so a worker restart/crash/recycle
+    used to ORPHAN it — and an orphaned daemon keeps ~7GB of SDXL resident,
+    OOMing the next training job until someone kills it by hand. PR_SET_PDEATHSIG
+    closes that gap: parent gone → daemon dies → VRAM freed automatically.
+
+    Linux-only (prctl); a silent no-op on other platforms. Runs in the forked
+    child between fork() and exec(), so it must stay tiny and lock-free — a single
+    libc call is safe; touching Python-level locks here is not."""
+    if sys.platform != "linux":
+        return
+    PR_SET_PDEATHSIG = 1
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+    except Exception:
+        # Best-effort: if prctl is unavailable the daemon simply behaves as before
+        # (the per-job shutdown() still reaps it on normal completion).
+        pass
 
 class RealLoraTrainer:
     """Spawns and drives plugins/lora_trainer/scripts/run_trainer.py inside
@@ -50,6 +76,8 @@ class RealLoraTrainer:
             text=True,
             bufsize=1,
             cwd=str(self._PLUGIN_ROOT),
+            # Die with the worker so a restart/crash can't orphan a 7GB daemon.
+            preexec_fn=_set_pdeathsig,
         )
 
         def _pump_stderr():
