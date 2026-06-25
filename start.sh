@@ -227,6 +227,21 @@ VITE_PROCESS_PATTERN="node.*vite"
 # by lsof/ss in kill_process() and repo_listener_pids().
 FLASK_PROCESS_PATTERN="python.*backend[./]app|flask run"
 
+# Portable process working-directory lookup. Linux exposes it at /proc/<pid>/cwd; macOS/BSD
+# have no /proc, so fall back to lsof's cwd file descriptor. Returns the absolute cwd, or
+# empty if it can't be determined. Every "is this process from THIS checkout?" guard funnels
+# through here — without the lsof fallback, the cwd check silently returned empty on macOS and
+# our own stale frontend/backend/celery were never reaped (issue #41: zombie vite on :4173).
+_proc_cwd() {
+    local pid="$1" cwd=""
+    if [ -e "/proc/$pid/cwd" ]; then
+        cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+    elif command -v lsof >/dev/null 2>&1; then
+        cwd=$(lsof -a -d cwd -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    fi
+    printf '%s' "$cwd"
+}
+
 FLASK_DEBUG_FLAG=""
 if [[ " $* " == *" --debug "* ]]; then
   FLASK_DEBUG_FLAG="--debug"
@@ -480,7 +495,7 @@ kill_process() {
         local port_pids=$(lsof -i TCP:"$port" -sTCP:LISTEN -t 2>/dev/null)
         if [ -n "$port_pids" ]; then
             for pid in $port_pids; do
-                local proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+                local proc_cwd=$(_proc_cwd "$pid")
                 if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
                     kill -15 "$pid" 2>/dev/null
                     sleep 1
@@ -524,7 +539,7 @@ kill_process() {
         if [ -n "$pid_list" ]; then
             local env_pids=""
             for pid in $pid_list; do
-                local proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+                local proc_cwd=$(_proc_cwd "$pid")
                 if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
                     env_pids="$env_pids $pid"
                 fi
@@ -583,12 +598,12 @@ port_owned_elsewhere() {
     if command_exists lsof; then
         owner_pid=$(lsof -i TCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
         if [ -n "$owner_pid" ]; then
-            owner_cwd=$(readlink -f "/proc/$owner_pid/cwd" 2>/dev/null)
+            owner_cwd=$(_proc_cwd "$owner_pid")
         fi
     elif command_exists ss; then
         owner_pid=$(ss -tlpn 2>/dev/null | awk -v p=":$port" '$4 ~ p {print $NF}' | sed 's/users://;s/"//g' | cut -d',' -f2 | cut -d'=' -f2 | head -1)
         if [ -n "$owner_pid" ]; then
-            owner_cwd=$(readlink -f "/proc/$owner_pid/cwd" 2>/dev/null)
+            owner_cwd=$(_proc_cwd "$owner_pid")
         fi
     fi
 
@@ -710,7 +725,7 @@ repo_listener_pids() {
     [ -z "$pids" ] && return 0
     local out="" matched=0
     for pid in $pids; do
-        local proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+        local proc_cwd=$(_proc_cwd "$pid")
         if [ -n "$proc_cwd" ]; then
             if [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
                 out="$out $pid"; matched=1
@@ -1112,7 +1127,7 @@ wait
 if [ -f "$SCRIPT_DIR/pids/celery.pid" ]; then
     celery_pid=$(cat "$SCRIPT_DIR/pids/celery.pid" 2>/dev/null)
     if [ -n "$celery_pid" ] && kill -0 "$celery_pid" 2>/dev/null; then
-        proc_cwd=$(readlink -f "/proc/$celery_pid/cwd" 2>/dev/null)
+        proc_cwd=$(_proc_cwd "$celery_pid")
         if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
             kill -15 "$celery_pid" 2>/dev/null
             sleep 2
@@ -1128,7 +1143,7 @@ fi
 celery_pids=$(pgrep -f "celery.*(worker|beat)" 2>/dev/null)
 if [ -n "$celery_pids" ]; then
     for pid in $celery_pids; do
-        proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+        proc_cwd=$(_proc_cwd "$pid")
         if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
             kill -15 "$pid" 2>/dev/null
             sleep 1

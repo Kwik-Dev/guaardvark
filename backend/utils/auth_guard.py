@@ -153,26 +153,6 @@ def _effective_client_ip():
     return peer
 
 
-def _effective_client_ip():
-    """Real client IP, accounting for the trusted local Vite proxy.
-
-    `start.sh` serves the production UI via `vite preview`, whose proxy forwards
-    /api and /socket.io to Flask from 127.0.0.1 — so a LAN device's request would
-    otherwise look local and bypass this guard entirely. The Vite proxy sets
-    X-Forwarded-For (xfwd) with the originating client. We trust that header ONLY
-    when the direct TCP peer is loopback (i.e. it came through our own local
-    proxy). A LAN attacker connecting straight to the backend port has a
-    non-loopback peer, so a forged X-Forwarded-For from them is ignored.
-    """
-    peer = request.remote_addr
-    if peer in ('127.0.0.1', '::1'):
-        xff = request.headers.get('X-Forwarded-For', '')
-        if xff:
-            # Leftmost entry is the original client.
-            return xff.split(',')[0].strip()
-    return peer
-
-
 def _is_protected():
     """Check if the current request targets a protected endpoint."""
     path = request.path

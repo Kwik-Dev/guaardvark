@@ -55,6 +55,21 @@ kill_and_cleanup() {
     fi
 }
 
+# ── Helper: portable process working-directory lookup ──
+# Linux exposes it at /proc/<pid>/cwd; macOS/BSD have no /proc, so fall back to lsof's cwd
+# fd. Returns the absolute cwd or empty. The frontend/backend/celery confinement checks below
+# funnel through here — without the lsof fallback the cwd check returned empty on macOS, so our
+# own stale processes (e.g. the zombie vite on :4173 in issue #41) were never reaped.
+_proc_cwd() {
+    local pid="$1" cwd=""
+    if [ -e "/proc/$pid/cwd" ]; then
+        cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+    elif command -v lsof >/dev/null 2>&1; then
+        cwd=$(lsof -a -d cwd -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    fi
+    printf '%s' "$cwd"
+}
+
 # ── Helper: check if a plugin is enabled in its plugin.json ──
 _plugin_enabled() {
     local plugin_json="$SCRIPT_DIR/plugins/$1/plugin.json"
@@ -241,7 +256,7 @@ vader_info "Cleaning up any remaining processes from this environment..."
 flask_pids=$(pgrep -f "(python.*backend[./]app|flask run)" 2>/dev/null)
 if [ -n "$flask_pids" ]; then
     for pid in $flask_pids; do
-        proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+        proc_cwd=$(_proc_cwd "$pid")
         if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
             vader_info "Force killing Flask/SocketIO process (PID: $pid) from this environment..."
             kill -TERM "$pid" 2>/dev/null
@@ -260,7 +275,7 @@ celery_pids=$(pgrep -f "celery.*(worker|beat)" 2>/dev/null)
 if [ -n "$celery_pids" ]; then
     env_celery_pids=()
     for pid in $celery_pids; do
-        proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+        proc_cwd=$(_proc_cwd "$pid")
         if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
             env_celery_pids+=("$pid")
         fi
@@ -293,12 +308,14 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     VITE_PORT=${VITE_PORT:-5173}
 fi
 
-for port in $VITE_PORT 5174 5175 5176 5177; do
+# 4173 = `vite preview` default (an old-rev preview server outlived its rev and kept serving a
+# stale bundle whose /api proxy 403'd — issue #41); 5173 = `vite dev` default when VITE_PORT differs.
+for port in $VITE_PORT 4173 5173 5174 5175 5176 5177; do
     if command -v lsof >/dev/null 2>&1; then
         port_pids=$(lsof -i TCP:"$port" -sTCP:LISTEN -t 2>/dev/null)
         if [ -n "$port_pids" ]; then
             for pid in $port_pids; do
-                proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+                proc_cwd=$(_proc_cwd "$pid")
                 if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
                     vader_info "Force killing node/vite process on port $port (PID: $pid) from this environment..."
                     kill -TERM "$pid" 2>/dev/null
@@ -315,7 +332,7 @@ done
 vite_pids=$(pgrep -f "node.*vite" 2>/dev/null)
 if [ -n "$vite_pids" ]; then
     for pid in $vite_pids; do
-        proc_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+        proc_cwd=$(_proc_cwd "$pid")
         if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
             vader_info "Force killing Vite process (PID: $pid) from this environment..."
             kill -TERM "$pid" 2>/dev/null
