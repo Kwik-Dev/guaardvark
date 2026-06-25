@@ -61,6 +61,13 @@ export const deleteCastSubject = async (id) => {
   await axios.delete(`${API_BASE}/cast-library/subjects/${id}`);
 };
 
+// Remove a single reference image (by its index in ref_image_paths). Returns the
+// updated subject so the caller can refresh the thumbnail grid.
+export const deleteSubjectRef = async (id, index) => {
+  const response = await axios.delete(`${API_BASE}/cast-library/subjects/${id}/refs/${index}`);
+  return response.data;
+};
+
 // ── Cast & LoRA Studio (Casting Director) ────────────────────────────────────
 // No single-subject GET on the backend — reuse the list and pick the id.
 export const getCastSubject = async (id) => {

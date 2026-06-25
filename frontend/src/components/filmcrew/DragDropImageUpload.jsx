@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Typography, Chip, IconButton, CircularProgress, Alert } from "@mui/material";
+import {
+  Box, Typography, Chip, IconButton, CircularProgress, Alert,
+  Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button,
+} from "@mui/material";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import ImageIcon from "@mui/icons-material/Image";
 import CloseIcon from "@mui/icons-material/Close";
@@ -52,7 +55,29 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
   const [error, setError] = useState(null);
   const [skipped, setSkipped] = useState([]);
   const [dragOver, setDragOver] = useState(false);
+  // Index (into existingPaths) pending a delete-confirm, or null. Deleting an
+  // already-uploaded reference removes it from the subject AND from disk.
+  const [confirmIdx, setConfirmIdx] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   const inputRef = useRef(null);
+
+  const confirmDeleteExisting = useCallback(async () => {
+    if (confirmIdx == null || !subjectId) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      const res = await axios.delete(
+        `${API_BASE}/cast-library/subjects/${subjectId}/refs/${confirmIdx}`,
+      );
+      // Parent refreshes off the returned ref_image_paths (re-indexes thumbs).
+      if (onUploaded) onUploaded(res.data?.ref_image_paths || []);
+      setConfirmIdx(null);
+    } catch (e) {
+      setError(e.response?.data?.error || "Failed to delete image.");
+    } finally {
+      setDeleting(false);
+    }
+  }, [confirmIdx, subjectId, onUploaded]);
 
   const reset = useCallback(() => {
     staged.forEach((s) => URL.revokeObjectURL(s.previewUrl));
@@ -235,10 +260,42 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
       {existingPaths.length > 0 && (
         <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mt: 1 }}>
           {existingPaths.map((p, idx) => (
-            <ExistingThumb key={idx} subjectId={subjectId} index={idx} name={p.split("/").pop()} />
+            <Box key={idx} sx={{ position: "relative", display: "inline-flex" }}>
+              <ExistingThumb subjectId={subjectId} index={idx} name={p.split("/").pop()} />
+              {subjectId && (
+                <IconButton
+                  size="small"
+                  aria-label="delete reference image"
+                  onClick={(e) => { e.stopPropagation(); setConfirmIdx(idx); }}
+                  sx={{
+                    position: "absolute", top: -8, right: -8,
+                    bgcolor: "background.paper",
+                    "&:hover": { bgcolor: "background.paper" },
+                  }}
+                >
+                  <CloseIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              )}
+            </Box>
           ))}
         </Box>
       )}
+
+      <Dialog open={confirmIdx != null} onClose={() => !deleting && setConfirmIdx(null)}>
+        <DialogTitle>Delete reference image?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This removes the image from this character and deletes the file from disk.
+            This can't be undone.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmIdx(null)} disabled={deleting}>Cancel</Button>
+          <Button onClick={confirmDeleteExisting} color="error" variant="contained" disabled={deleting}>
+            {deleting ? "Deleting…" : "Delete"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 });

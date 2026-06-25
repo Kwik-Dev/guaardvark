@@ -155,6 +155,38 @@ def ref_image(subject_id: int, index: int):
     return send_file(resolved, max_age=3600)
 
 
+@bp.delete("/subjects/<int:subject_id>/refs/<int:index>")
+def delete_subject_ref(subject_id: int, index: int):
+    """Remove the Nth reference image from a Subject — both the entry in
+    ref_image_paths and the file on disk. The Training Data tab calls this so a
+    user can prune a bad/over-large reference set (e.g. dropped 57, wants fewer)
+    without nuking the whole character. Index is the position in ref_image_paths,
+    matching the GET …/refs/<index>/image the thumbnails render from."""
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+    paths = list(s.ref_image_paths or [])
+    if index < 0 or index >= len(paths):
+        return jsonify({"error": "index_out_of_range"}), 404
+
+    removed = paths.pop(index)
+    # Reassign (not in-place mutate) so SQLAlchemy flags the JSON column dirty.
+    s.ref_image_paths = paths
+    db.session.commit()
+
+    # Best-effort disk cleanup — only delete files that resolve INSIDE an allowed
+    # root (same containment guard as serving), so a crafted stored path can't
+    # make us unlink something outside cast_refs/.
+    try:
+        resolved = _resolve_ref_path(removed)
+        if resolved and os.path.isfile(resolved):
+            os.remove(resolved)
+    except OSError as e:
+        log.warning("delete_subject_ref: could not unlink %s: %s", removed, e)
+
+    return jsonify(_serialize(s)), 200
+
+
 @bp.delete("/subjects/<int:subject_id>")
 def delete_subject(subject_id):
     s = db.session.get(Subject, subject_id)

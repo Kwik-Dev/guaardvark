@@ -62,18 +62,40 @@ def _train_impl(subject_id: int) -> dict:
         # gated. On contention, return a clean failed result (rather than
         # raising) so train_subject_lora_for_subject marks the Subject 'failed'
         # instead of leaving it stuck in 'training'.
-        from backend.services.job_operation_gate import get_gate, GpuBusyError
+        from backend.services.job_operation_gate import GpuBusyError
         from backend.services.job_types import JobKind
-        gate = get_gate()
+        from backend.services.gpu_resource_policy import gpu_session
         try:
-            with gate.gpu_exclusive(JobKind.LORA_TRAIN, f"subject_{s.id}"):
-                return _TRAINER.train_subject_lora(
-                    subject_id=s.id,
-                    subject_name=s.name,
-                    trigger_word=s.trigger_word,
-                    ref_image_paths=train_images,
-                    output_dir=_output_dir(),
-                )
+            # gpu_session = the gate's exclusivity PLUS VRAM reclaim once the slot
+            # is won. evict_ollama/free_comfyui are the actual fix for Dean's OOM:
+            # ollama keeps a chat model (~6GB) resident and ComfyUI can hold a FLUX,
+            # which left no room for SDXL on the 16GB card. The bare gate did no
+            # VRAM math, so training claimed "exclusive" while ollama still owned
+            # 6.7GB → CUDA OOM. Reclaim runs only AFTER we hold the slot.
+            with gpu_session(JobKind.LORA_TRAIN, f"subject_{s.id}",
+                             evict_ollama=True, free_comfyui=True):
+                try:
+                    return _TRAINER.train_subject_lora(
+                        subject_id=s.id,
+                        subject_name=s.name,
+                        trigger_word=s.trigger_word,
+                        ref_image_paths=train_images,
+                        output_dir=_output_dir(),
+                    )
+                finally:
+                    # Free the ~7GB of SDXL the trainer daemon holds. Without this
+                    # the daemon stays resident IDLE between jobs, and a single
+                    # leftover daemon starves the next run on the shared 16GB card
+                    # — the exact OOM Dean hit (subject 16: 137MiB free, a zombie
+                    # daemon holding 6.7GB). Shutting down also drops any
+                    # half-applied PEFT/LoRA state from a failed run. Reload on the
+                    # next job is ~6s (model is disk-cached), a cheap price for not
+                    # leaking the card. Best-effort: never let cleanup mask the
+                    # real training result/error.
+                    try:
+                        _TRAINER.shutdown()
+                    except Exception as _e:
+                        logger.warning(f"lora_trainer: daemon shutdown after subject {subject_id} failed (non-fatal): {_e}")
         except GpuBusyError as e:
             logger.warning(f"lora_trainer: GPU busy for subject {subject_id}: {e}")
             return {"status": "failed", "error": f"GPU busy: {e}"}

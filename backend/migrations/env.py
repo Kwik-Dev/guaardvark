@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from logging.config import fileConfig
@@ -10,7 +11,16 @@ from config import DATABASE_URL as DEFAULT_DATABASE_URL
 from models import db
 
 config = context.config
-fileConfig(config.config_file_name)
+# Only let alembic.ini reconfigure logging when running as the standalone
+# `alembic` CLI (root logger has no handlers yet). When env.py is loaded
+# in-process — every startup `command.stamp` does this — fileConfig() would
+# clobber the app's logging: it resets `alembic` to INFO (overriding app.py's
+# WARNING pin) and adds a second console handler, so the MigrationContext lines
+# the /health poll triggers every ~10s flood backend_startup.log (doubled).
+# Skipping it here keeps the app's logging authoritative; the CLI path is
+# unaffected.
+if config.config_file_name is not None and not logging.getLogger().handlers:
+    fileConfig(config.config_file_name)
 
 if not config.get_main_option("sqlalchemy.url"):
     env_url = os.environ.get("SQLALCHEMY_DATABASE_URI") or os.environ.get(
