@@ -99,6 +99,10 @@ export const regenerateSample = async (id, sampleId, body = {}) => {
   return response.data;
 };
 
+export const deleteSample = async (id, sampleId) => {
+  await axios.delete(`${API_BASE}/cast-library/subjects/${id}/samples/${sampleId}`);
+};
+
 export const approveSamples = async (id, sampleIds, approved = true) => {
   const response = await axios.post(
     `${API_BASE}/cast-library/subjects/${id}/samples/approve`,
@@ -132,6 +136,7 @@ const productionService = {
   listSamples,
   regenerateSample,
   approveSamples,
+  deleteSample,
   trainSubject,
 };
 

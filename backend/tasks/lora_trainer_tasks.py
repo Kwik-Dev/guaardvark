@@ -29,6 +29,22 @@ def _train_impl(subject_id: int) -> dict:
     if s is None:
         return {"status": "failed", "error": f"subject {subject_id} not found"}
 
+    # Training set = the subject's uploaded reference images (the primary Step-1
+    # flow) UNION any APPROVED, done generated samples (the fallback: "no images?
+    # generate some with the Character Generator, approve the good ones, train").
+    # Without this union the approve step was cosmetic — approved samples never
+    # reached the trainer, which only ever read ref_image_paths.
+    from backend.models import SubjectSample
+    train_images = list(s.ref_image_paths or [])
+    approved = (
+        SubjectSample.query
+        .filter_by(subject_id=s.id, approved=True, status="done")
+        .all()
+    )
+    for smp in approved:
+        if smp.image_path and smp.image_path not in train_images:
+            train_images.append(smp.image_path)
+
     backend = os.environ.get("GUAARDVARK_LORA_BACKEND", "auto").lower()
     use_real = False
     if backend == "real":
@@ -55,7 +71,7 @@ def _train_impl(subject_id: int) -> dict:
                     subject_id=s.id,
                     subject_name=s.name,
                     trigger_word=s.trigger_word,
-                    ref_image_paths=s.ref_image_paths or [],
+                    ref_image_paths=train_images,
                     output_dir=_output_dir(),
                 )
         except GpuBusyError as e:
@@ -67,7 +83,7 @@ def _train_impl(subject_id: int) -> dict:
     return train_subject_lora(
         subject_id=s.id,
         subject_name=s.name,
-        ref_image_paths=s.ref_image_paths or [],
+        ref_image_paths=train_images,
         output_dir=_output_dir(),
     )
 

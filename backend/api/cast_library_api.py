@@ -397,6 +397,19 @@ def dispatch_train(subject_id: int):
     return jsonify({"task_id": task.id, "subject_id": subject_id}), 202
 
 
+@bp.delete("/subjects/<int:subject_id>/samples/<int:sample_id>")
+def delete_sample(subject_id: int, sample_id: int):
+    """Delete one generated SubjectSample — the UI '✕' on an unwanted generation.
+    Leaves the PNG on disk (harmless, in outputs); just drops the row so it
+    vanishes from the sheet and never reaches training."""
+    row = db.session.get(SubjectSample, sample_id)
+    if row is None or row.subject_id != subject_id:
+        return jsonify({"error": "not_found"}), 404
+    db.session.delete(row)
+    db.session.commit()
+    return "", 204
+
+
 @bp.post("/subjects/<int:subject_id>/samples/<int:sample_id>/regenerate")
 def dispatch_regen_sample(subject_id: int, sample_id: int):
     """Dispatch character.regen_sample for a single SubjectSample.

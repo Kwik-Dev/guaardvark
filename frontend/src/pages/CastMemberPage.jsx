@@ -15,7 +15,7 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
 import {
   getCastSubject, updateCastSubject, planCharacter, generateSamples,
-  listSamples, regenerateSample, approveSamples, trainSubject,
+  listSamples, regenerateSample, approveSamples, deleteSample, trainSubject,
 } from '../api/productionService';
 import { SubjectThumb } from '../components/filmcrew/CastLibraryView';
 import DragDropImageUpload from '../components/filmcrew/DragDropImageUpload';
@@ -193,6 +193,17 @@ const CastMemberPage = () => {
     }
   };
 
+  const handleDeleteSample = async (sample) => {
+    try {
+      await deleteSample(subjectId, sample.id);
+      // Keep the lightbox sane if the open image was the one removed.
+      setLightboxIdx((i) => (i === null ? i : Math.max(0, Math.min(i, samples.length - 2))));
+      await loadSamples();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to delete sample.');
+    }
+  };
+
   const approveAllDone = async () => {
     const ids = samples.filter((s) => s.status === 'done').map((s) => s.id);
     if (!ids.length) return;
@@ -236,6 +247,11 @@ const CastMemberPage = () => {
   const failedCount = samples.filter((s) => s.status === 'failed').length;
   const total = samples.length;
   const active = generatingCount > 0 || polling;
+  const refCount = (subject.ref_image_paths || []).length;
+  // Trainable from EITHER uploaded reference images (the primary Step-1 flow) OR
+  // approved generated samples (the no-images fallback) — the backend trains on
+  // the union of both.
+  const trainable = refCount > 0 || approvedCount > 0;
   const training = subject.training_status === 'training';
 
   return (
@@ -308,6 +324,25 @@ const CastMemberPage = () => {
             onUploaded={loadSubject}
             helperText="Uploads immediately to this cast member."
           />
+
+          <Divider sx={{ my: 3 }} />
+          <Typography variant="subtitle2" gutterBottom>Train the LoRA</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            {refCount > 0
+              ? `${refCount} reference image${refCount > 1 ? 's' : ''} ready${approvedCount > 0 ? ` + ${approvedCount} approved generated` : ''}.`
+              : approvedCount > 0
+                ? `No uploads yet — will train on ${approvedCount} approved generated sample${approvedCount > 1 ? 's' : ''}.`
+                : 'Drop in reference images above (or generate + approve some in the Generate Character tab) to enable training.'}
+          </Typography>
+          <Button variant="contained" color="secondary" onClick={handleTrain}
+                  disabled={busy || training || !trainable}>
+            {training ? 'Training…' : 'Train LoRA'}
+          </Button>
+          {subject.training_status && subject.training_status !== 'untrained' && (
+            <Typography variant="caption" color="text.secondary" sx={{ ml: 2 }}>
+              status: {subject.training_status}
+            </Typography>
+          )}
         </Box>
       )}
 
@@ -392,14 +427,21 @@ const CastMemberPage = () => {
                           {s.approved ? <CheckCircleIcon fontSize="small" /> : <RadioButtonUncheckedIcon fontSize="small" />}
                         </IconButton>
                       </Tooltip>
-                      <Tooltip title="Regenerate this sample">
-                        <span>
-                          <IconButton size="small" onClick={() => { setRegenTarget(s); setRegenPrompt(s.image_prompt || ''); }}
-                                      disabled={isPending(s)} aria-label="regenerate sample">
-                            <RefreshIcon fontSize="small" />
+                      <Box>
+                        <Tooltip title="Regenerate this sample">
+                          <span>
+                            <IconButton size="small" onClick={() => { setRegenTarget(s); setRegenPrompt(s.image_prompt || ''); }}
+                                        disabled={isPending(s)} aria-label="regenerate sample">
+                              <RefreshIcon fontSize="small" />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                        <Tooltip title="Remove this generation">
+                          <IconButton size="small" onClick={() => handleDeleteSample(s)} aria-label="remove sample">
+                            <CloseIcon fontSize="small" />
                           </IconButton>
-                        </span>
-                      </Tooltip>
+                        </Tooltip>
+                      </Box>
                     </CardActions>
                   </Card>
                 </Grid>
@@ -495,11 +537,17 @@ const CastMemberPage = () => {
                 {lightboxIdx + 1}/{samples.length} · {samples[lightboxIdx].angle || `Shot ${lightboxIdx + 1}`}
               </Typography>
             </Tooltip>
-            <Button size="small" startIcon={samples[lightboxIdx].approved ? <CheckCircleIcon /> : <RadioButtonUncheckedIcon />}
-                    onClick={() => toggleApprove(samples[lightboxIdx])}
-                    color={samples[lightboxIdx].approved ? 'success' : 'inherit'}>
-              {samples[lightboxIdx].approved ? 'Approved' : 'Approve'}
-            </Button>
+            <Box>
+              <Button size="small" startIcon={<CloseIcon />} color="inherit"
+                      onClick={() => handleDeleteSample(samples[lightboxIdx])}>
+                Remove
+              </Button>
+              <Button size="small" startIcon={samples[lightboxIdx].approved ? <CheckCircleIcon /> : <RadioButtonUncheckedIcon />}
+                      onClick={() => toggleApprove(samples[lightboxIdx])}
+                      color={samples[lightboxIdx].approved ? 'success' : 'inherit'}>
+                {samples[lightboxIdx].approved ? 'Approved' : 'Approve'}
+              </Button>
+            </Box>
           </DialogActions>
         </Dialog>
       )}
