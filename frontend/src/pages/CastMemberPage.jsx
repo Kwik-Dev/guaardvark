@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   Box, Tabs, Tab, Typography, Button, TextField, Card, CardMedia, CardContent,
   CardActions, Chip, CircularProgress, Alert, Dialog, DialogTitle, DialogContent,
-  DialogActions, Grid, IconButton, Tooltip, Divider, Link,
+  DialogActions, Grid, IconButton, Tooltip, Divider, Link, LinearProgress,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
@@ -208,6 +208,11 @@ const CastMemberPage = () => {
   }
 
   const approvedCount = samples.filter((s) => s.approved).length;
+  const doneCount = samples.filter((s) => s.status === 'done').length;
+  const generatingCount = samples.filter((s) => s.status === 'generating').length;
+  const failedCount = samples.filter((s) => s.status === 'failed').length;
+  const total = samples.length;
+  const active = generatingCount > 0 || polling;
   const training = subject.training_status === 'training';
 
   return (
@@ -302,12 +307,36 @@ const CastMemberPage = () => {
                   color={approvedCount > 0 ? 'success' : 'default'} variant="outlined" />
           </Box>
 
+          {/* Progress + honest status — so a planned-but-not-generated sheet doesn't
+              read as "stuck", and a real render shows how far along it is. */}
+          {total > 0 && (
+            <Box sx={{ mb: 2 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                <Typography variant="caption" color="text.secondary">
+                  {active
+                    ? `Generating… ${doneCount}/${total} done`
+                    : doneCount === 0
+                      ? `Planned ${total} shots — click "Generate images" to render them.`
+                      : doneCount < total
+                        ? `${doneCount}/${total} rendered${failedCount ? ` · ${failedCount} failed` : ''} — click "Generate images" to finish.`
+                        : `All ${total} rendered.`}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">{doneCount}/{total}</Typography>
+              </Box>
+              <LinearProgress
+                variant={active && doneCount === 0 ? 'indeterminate' : 'determinate'}
+                value={total ? (doneCount / total) * 100 : 0}
+              />
+            </Box>
+          )}
+
           {!samples.length ? (
             <Typography color="text.secondary" sx={{ p: 4, textAlign: 'center' }}>
               No reference sheet yet. Click <b>Plan reference sheet</b> to have the Casting Director write a
               frozen identity bible + ~32 varied shot prompts, then <b>Generate images</b>.
             </Typography>
           ) : (
+            <Box sx={{ maxHeight: '60vh', overflowY: 'auto', pr: 1, mx: -0.5, px: 0.5 }}>
             <Grid container spacing={2}>
               {samples.map((s) => (
                 <Grid item xs={6} sm={4} md={3} lg={2} key={s.id}>
@@ -318,7 +347,9 @@ const CastMemberPage = () => {
                     ) : (
                       <Box sx={{ height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center',
                                  bgcolor: 'action.hover' }}>
-                        {isPending(s) ? <CircularProgress size={22} />
+                        {s.status === 'generating' ? <CircularProgress size={22} />
+                          : s.status === 'pending' ? <Typography variant="caption" color="text.disabled">queued</Typography>
+                          : s.status === 'failed' ? <Typography variant="caption" color="error">failed</Typography>
                           : <Typography variant="caption" color="text.secondary">{s.status}</Typography>}
                       </Box>
                     )}
@@ -350,6 +381,7 @@ const CastMemberPage = () => {
                 </Grid>
               ))}
             </Grid>
+            </Box>
           )}
 
           <Divider sx={{ my: 3 }} />

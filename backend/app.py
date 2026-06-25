@@ -255,6 +255,14 @@ werkzeug_log_level = os.getenv("WERKZEUG_LOG_LEVEL", "WARNING").upper()
 werkzeug_logger = logging.getLogger("werkzeug")
 werkzeug_logger.setLevel(getattr(logging, werkzeug_log_level, logging.WARNING))
 
+# Alembic's MigrationContext logs "Context impl PostgresqlImpl" + "Will assume
+# transactional DDL" at INFO every time it's configured. The /health migration
+# check (migration_utils.get_health) runs on every frontend health poll (~10s),
+# so at INFO this floods backend.log endlessly. Nothing actionable lives in those
+# lines — pin the alembic loggers to WARNING.
+logging.getLogger("alembic.runtime.migration").setLevel(logging.WARNING)
+logging.getLogger("alembic").setLevel(logging.WARNING)
+
 # Suppress "Werkzeug appears to be used in a production deployment" warning —
 # Flask-SocketIO requires Werkzeug in threading mode for dev; not actionable.
 class _WerkzeugProductionFilter(logging.Filter):
