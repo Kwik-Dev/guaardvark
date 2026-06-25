@@ -22,9 +22,12 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import MemoryIcon from "@mui/icons-material/Memory";
 import axios from "axios";
 
-const VideoModelsModal = ({ open, onClose, showMessage }) => {
+const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
   const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(true);
+  // When the parent opens us pointed at a specific model (because the user tried
+  // to generate with an uninstalled one), scroll it into view and pulse it.
+  const highlightRef = useRef(null);
   const [downloadStatus, setDownloadStatus] = useState({
     is_downloading: false,
     current_model: null,
@@ -103,6 +106,13 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
     return () => clearInterval(interval);
   }, [open, downloadStatus.is_downloading, fetchDownloadStatus]);
 
+  // Once the model list is rendered, bring the highlighted row into view.
+  useEffect(() => {
+    if (open && highlightModelId && !loading && highlightRef.current) {
+      highlightRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [open, highlightModelId, loading, models]);
+
   const handleDownload = async (modelId) => {
     try {
       const res = await axios.post("/api/batch-video/models/download", { model_id: modelId });
@@ -163,8 +173,26 @@ const VideoModelsModal = ({ open, onClose, showMessage }) => {
           <List disablePadding>
             {models.map((model) => {
               const isThis = isDownloading && currentModel === model.id;
+              const isHighlight = !!highlightModelId && model.id === highlightModelId;
               return (
-                <ListItem key={model.id} divider sx={{ py: 1.5 }}>
+                <ListItem
+                  key={model.id}
+                  divider
+                  ref={isHighlight ? highlightRef : undefined}
+                  sx={{
+                    py: 1.5,
+                    ...(isHighlight && {
+                      border: 2,
+                      borderColor: "warning.main",
+                      borderRadius: 1,
+                      "@keyframes vmPulse": {
+                        "0%, 100%": { boxShadow: "0 0 0 0 rgba(255,167,38,0)" },
+                        "50%": { boxShadow: "0 0 0 4px rgba(255,167,38,0.55)" },
+                      },
+                      animation: "vmPulse 1.2s ease-in-out 3",
+                    }),
+                  }}
+                >
                   <ListItemIcon>
                     <MovieCreationIcon color={(model.is_ready ?? model.is_downloaded) ? "primary" : "action"} />
                   </ListItemIcon>

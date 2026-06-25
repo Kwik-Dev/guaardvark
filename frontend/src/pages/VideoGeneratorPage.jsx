@@ -439,23 +439,45 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // Active accelerator label (e.g. "Apple Silicon · MPS · 64GB unified") for an
   // honest "where will this run" chip — issue #43 Tier 1. null until known.
   const [accelLabel, setAccelLabel] = useState(null);
+  // Per-model readiness from the backend registry, keyed by model id:
+  // { is_ready, missing_files, name }. Drives the pre-flight that blocks a
+  // silent fall-back to a lesser model when the *selected* model isn't fully
+  // installed (the "I clicked Wan 2.2 and got CogVideoX without being told" bug).
+  const [modelMeta, setModelMeta] = useState({});
+  // When set, the selected model isn't installed — surface a blocking banner
+  // ({ id, name, missing }) instead of generating with a fallback.
+  const [modelNotReady, setModelNotReady] = useState(null);
+  // Model id to scroll-to + pulse inside the Manage Video Models modal.
+  const [highlightModelId, setHighlightModelId] = useState(null);
+
+  // Pull the authoritative model list + readiness. Extracted so we can re-run it
+  // after the user closes the install modal (a freshly-installed model should
+  // clear the "not ready" banner without a page reload).
+  const refreshModels = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/batch-video/models`);
+      const data = await res.json();
+      if (data.success && data.data?.models) {
+        const vids = data.data.models.filter(m => m.type === "cogvideox" || m.type === "wan");
+        const ids = new Set(vids.map(m => m.id));
+        if (ids.size > 0) setApiModelIds(ids);
+        setAnyModelReady(vids.some(m => m.is_ready));
+        const meta = {};
+        vids.forEach(m => {
+          meta[m.id] = { is_ready: m.is_ready, missing_files: m.missing_files || [], name: m.name };
+        });
+        setModelMeta(meta);
+        // If a previously-flagged model is now ready, retract the banner.
+        setModelNotReady(prev => (prev && meta[prev.id]?.is_ready ? null : prev));
+      }
+    } catch (e) {
+      // Offline / API down — fall back to the (already-culled) MODEL_OPTIONS.
+    }
+  }, []);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch(`${API_BASE}/batch-video/models`);
-        const data = await res.json();
-        if (data.success && data.data?.models) {
-          const vids = data.data.models.filter(m => m.type === "cogvideox" || m.type === "wan");
-          const ids = new Set(vids.map(m => m.id));
-          if (ids.size > 0) setApiModelIds(ids);
-          setAnyModelReady(vids.some(m => m.is_ready));
-        }
-      } catch (e) {
-        // Offline / API down — fall back to the (already-culled) MODEL_OPTIONS.
-      }
-    })();
-  }, []);
+    refreshModels();
+  }, [refreshModels]);
 
   // Surface the accelerator the backend actually detected (NVIDIA/CUDA, Apple
   // Silicon/MPS, or CPU) so Mac users can see Metal is in play. Best-effort.
@@ -1032,6 +1054,22 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       return;
     }
 
+    // Pre-flight: never silently substitute a worse model. If the model the user
+    // selected isn't fully installed, the backend falls back to whatever IS
+    // installed (e.g. Wan 2.2 I2V → CogVideoX I2V) and hands back a low-quality
+    // result the user never asked for — then blames the product. Stop here and
+    // route them to install it. Fail-OPEN when readiness is unknown (API down /
+    // offline) so we never block a legitimately-installed model.
+    const effectiveModelId = computedParams.model || model;
+    const selMeta = modelMeta[effectiveModelId];
+    if (selMeta && selMeta.is_ready === false) {
+      const niceName = selMeta.name || MODEL_OPTIONS[effectiveModelId]?.label || effectiveModelId;
+      setModelNotReady({ id: effectiveModelId, name: niceName, missing: selMeta.missing_files || [] });
+      setHighlightModelId(effectiveModelId);
+      setVideoModelsModalOpen(true);
+      return;
+    }
+
     setIsGenerating(true);
     try {
       const imagePaths = selectedImages.map(img => img.path);
@@ -1262,6 +1300,33 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       {success && (
         <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
           {success}
+        </Alert>
+      )}
+
+      {/* Selected model not installed — block generation rather than silently
+          downgrade to a worse model. The action button reopens the install
+          modal and pulses the exact model to download. */}
+      {modelNotReady && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 3 }}
+          onClose={() => setModelNotReady(null)}
+          action={
+            <Button
+              color="inherit"
+              size="small"
+              startIcon={<SettingsIcon />}
+              onClick={() => { setHighlightModelId(modelNotReady.id); setVideoModelsModalOpen(true); }}
+            >
+              Download {modelNotReady.name}
+            </Button>
+          }
+        >
+          <strong>{modelNotReady.name} isn’t fully installed.</strong> Generating now would
+          silently fall back to a lower-quality model — so it’s blocked. Install it first
+          {modelNotReady.missing?.length
+            ? ` (${modelNotReady.missing.length} file${modelNotReady.missing.length > 1 ? "s" : ""} missing)`
+            : ""}, then generate again.
         </Alert>
       )}
 
@@ -3026,7 +3091,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       <React.Suspense fallback={null}>
         <VideoModelsModal
           open={videoModelsModalOpen}
-          onClose={() => setVideoModelsModalOpen(false)}
+          onClose={() => {
+            setVideoModelsModalOpen(false);
+            setHighlightModelId(null);
+            // Re-pull readiness: a just-finished install should clear the banner.
+            refreshModels();
+          }}
+          highlightModelId={highlightModelId}
           showMessage={(msg, severity) => {
             if (severity === "error") setError(msg);
             else setSuccess(msg);
