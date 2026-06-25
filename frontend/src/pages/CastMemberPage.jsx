@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
 import {
   Box, Tabs, Tab, Typography, Button, TextField, Card, CardMedia, CardContent,
   CardActions, Chip, CircularProgress, Alert, Dialog, DialogTitle, DialogContent,
@@ -14,7 +15,7 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
 import {
-  getCastSubject, updateCastSubject, planCharacter, generateSamples,
+  getCastSubject, getCastSubjectDetail, updateCastSubject, planCharacter, generateSamples,
   listSamples, regenerateSample, approveSamples, deleteSample, trainSubject,
 } from '../api/productionService';
 import { SubjectThumb } from '../components/filmcrew/CastLibraryView';
@@ -58,13 +59,30 @@ const CastMemberPage = () => {
   const [lightboxIdx, setLightboxIdx] = useState(null); // open enlarged viewer at this samples[] index
 
   const loadSubject = useCallback(async () => {
-    const s = await getCastSubject(subjectId);
-    setSubject(s);
-    if (s) setForm({
-      name: s.name || '', description: s.description || '',
-      trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
-    });
-    return s;
+    // Prefer efficient single-subject (with samples when convenient).
+    // Falls back gracefully.
+    try {
+      const detail = await getCastSubjectDetail(subjectId, { includeSamples: true });
+      const s = detail?.subject || detail;
+      setSubject(s);
+      if (s) setForm({
+        name: s.name || '', description: s.description || '',
+        trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
+      });
+      if (detail?.samples) {
+        setSamples(detail.samples);
+      }
+      return s;
+    } catch (e) {
+      // legacy fallback
+      const s = await getCastSubject(subjectId);
+      setSubject(s);
+      if (s) setForm({
+        name: s.name || '', description: s.description || '',
+        trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
+      });
+      return s;
+    }
   }, [subjectId]);
 
   const loadSamples = useCallback(async () => {
@@ -119,6 +137,31 @@ const CastMemberPage = () => {
 
   const startPolling = () => { pollCount.current = 0; setPolling(true); };
 
+  // React to unified progress jobs for *this* subject (key for batch queue of many cast trainings).
+  // The backend now creates processes with additional_data.subject_id on dispatch.
+  // This lets the page get live updates / terminal notifications without sole reliance on 5s poll,
+  // enabling long-running day+ batch jobs to surface correctly.
+  const { activeProcesses } = useUnifiedProgress();
+  useEffect(() => {
+    if (!subjectId) return;
+    const procs = Array.from(activeProcesses.values());
+    const match = procs.find((p) => {
+      const ad = p.additional_data || p.metadata || p;
+      return String(ad.subject_id || ad.sample_subject_id || '') === String(subjectId);
+    });
+    if (match) {
+      const st = (match.status || '').toLowerCase();
+      if (['complete', 'end', 'error', 'cancelled', 'failed'].includes(st)) {
+        // terminal — refresh authoritative cast state
+        loadSubject();
+        loadSamples();
+        setPolling(false);
+      } else if (match.progress != null) {
+        // optional: could surface unified % alongside local progress bar
+      }
+    }
+  }, [activeProcesses, subjectId, loadSubject, loadSamples]);
+
   // Arrow-key / Escape navigation for the enlarged image viewer.
   useEffect(() => {
     if (lightboxIdx === null) return undefined;
@@ -160,8 +203,11 @@ const CastMemberPage = () => {
   const handleGenerate = async () => {
     setBusy(true); setError(null);
     try {
-      await generateSamples(subjectId);
+      const res = await generateSamples(subjectId);
       await loadSamples();
+      if (res?.job_id) {
+        console.debug('[CastMemberPage] generate job', res.job_id);
+      }
       startPolling();
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to start sample generation.');
@@ -176,8 +222,9 @@ const CastMemberPage = () => {
     setRegenTarget(null); setRegenPrompt('');
     setError(null);
     try {
-      await regenerateSample(subjectId, sid, body);
+      const res = await regenerateSample(subjectId, sid, body);
       await loadSamples();
+      if (res?.job_id) console.debug('[CastMemberPage] regen job', res.job_id);
       startPolling();
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to regenerate sample.');
@@ -218,8 +265,12 @@ const CastMemberPage = () => {
   const handleTrain = async () => {
     setBusy(true); setError(null);
     try {
-      await trainSubject(subjectId);
+      const res = await trainSubject(subjectId); // now may include job_id
       await loadSubject();
+      if (res?.job_id) {
+        // job is now in unified system; the useUnifiedProgress effect above will react
+        console.debug('[CastMemberPage] train job started', res.job_id);
+      }
       startPolling();
     } catch (e) {
       setError(e.response?.data?.error
@@ -261,7 +312,11 @@ const CastMemberPage = () => {
         <Typography variant="h5" sx={{ fontWeight: 600 }}>{subject.name}</Typography>
         <Chip label={subject.kind} size="small" variant="outlined" />
         <Chip label={subject.training_status} size="small"
-              color={subject.training_status === 'trained' ? 'success' : training ? 'warning' : 'default'} />
+              color={
+                subject.training_status === 'trained' ? 'success' :
+                subject.training_status === 'failed' ? 'error' :
+                training ? 'warning' : 'default'
+              } />
         {polling && <CircularProgress size={18} sx={{ ml: 1 }} />}
       </Box>
 
@@ -316,7 +371,9 @@ const CastMemberPage = () => {
       {tab === 1 && (
         <Box sx={{ maxWidth: 720 }}>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            Reference images used to train this character's LoRA. Drop more in to expand the set.
+            Images that will be used for the *next* training run (uploaded refs + any approved generated samples).
+            The current LoRA version was trained on a previous snapshot of this set.
+            Add new outfits / details then click Train to amend.
           </Typography>
           <DragDropImageUpload
             subjectId={subject.id}
@@ -333,6 +390,7 @@ const CastMemberPage = () => {
               : approvedCount > 0
                 ? `No uploads yet — will train on ${approvedCount} approved generated sample${approvedCount > 1 ? 's' : ''}.`
                 : 'Drop in reference images above (or generate + approve some in the Generate Character tab) to enable training.'}
+            {' '}Training incorporates the current set. Add new data (outfits, details) later and Train again to amend/evolve.
           </Typography>
           <Button variant="contained" color="secondary" onClick={handleTrain}
                   disabled={busy || training || !trainable}>
@@ -343,9 +401,31 @@ const CastMemberPage = () => {
               status: {subject.training_status}
             </Typography>
           )}
+
+          {/* Enhanced error + recovery for real hardware (RTX 4070 Ti SUPER etc.)
+              Matches user's "no simulations" requirement and the exact failure mode
+              seen when the venv-torch cannot see CUDA despite a working GPU. */}
           {subject.training_status === 'failed' && subject.training_error && (
-            <Alert severity="error" sx={{ mt: 1 }}>
-              Training failed: {subject.training_error}
+            <Alert severity="error" sx={{ mt: 1.5 }}>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                Training failed
+              </Typography>
+              <Typography
+                variant="body2"
+                component="pre"
+                sx={{ 
+                  whiteSpace: 'pre-wrap', 
+                  fontFamily: 'monospace', 
+                  fontSize: '0.8rem',
+                  mt: 0.5,
+                  mb: 0.5
+                }}
+              >
+                {subject.training_error}
+              </Typography>
+              <Typography variant="caption">
+                Fix the problem, then click “Train LoRA” again. New training data (additional outfits etc.) will be incorporated on the next run (amend).
+              </Typography>
             </Alert>
           )}
         </Box>

@@ -83,6 +83,33 @@ def list_subjects():
     return jsonify({"subjects": [_serialize(s) for s in subjects]})
 
 
+@bp.get("/subjects/<int:subject_id>")
+def get_subject(subject_id: int):
+    """Efficient single-subject fetch (replaces the previous client-side list+find
+    pattern in productionService.getCastSubject for the detail page).
+
+    Supports ?include=samples to return the full ordered SubjectSample list
+    inline, reducing roundtrips for CastMemberPage loads and polling.
+    """
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+
+    data = {"subject": _serialize(s)}
+
+    # Optional eager samples for the Cast detail page (Generate + Training tabs).
+    if request.args.get("include") == "samples":
+        samples = (
+            SubjectSample.query
+            .filter_by(subject_id=subject_id)
+            .order_by(SubjectSample.index)
+            .all()
+        )
+        data["samples"] = [r.to_dict() for r in samples]
+
+    return jsonify(data)
+
+
 @bp.post("/subjects")
 def create_subject():
     body = request.get_json(silent=True) or {}
@@ -193,7 +220,21 @@ def delete_subject(subject_id):
     s = db.session.get(Subject, subject_id)
     if s is None:
         return jsonify({"error": "not_found"}), 404
-    db.session.delete(s); db.session.commit()
+
+    # Best-effort: if this subject had an active training or gen job, mark it
+    # failed/cancelled so the unified queue and UI reflect reality. The actual
+    # Celery task may still run to completion but will see the subject gone or
+    # status changed and short-circuit (idempotency guards exist).
+    if s.training_status == "training":
+        s.training_status = "failed"
+        s.training_error = "Subject deleted — training job cancelled/purged."
+    db.session.commit()
+
+    # Future: use unified progress + job ids stored in additional_data or on
+    # subject to call cancel_process / job cancel for precise purge.
+
+    db.session.delete(s)
+    db.session.commit()
     return "", 204
 
 
@@ -377,8 +418,16 @@ def dispatch_generate_samples(subject_id: int):
         return jsonify({"error": "not_found"}), 404
 
     from backend.celery_app import celery
-    task = celery.send_task("character.generate_samples", args=[subject_id])
-    return jsonify({"task_id": task.id, "subject_id": subject_id}), 202
+    from backend.utils.unified_progress_system import get_unified_progress, ProcessType
+
+    progress = get_unified_progress()
+    job_id = progress.create_process(
+        ProcessType.IMAGE_GENERATION,
+        f"Character reference sheet generation for subject {subject_id}",
+        additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen"},
+    )
+    task = celery.send_task("character.generate_samples", args=[subject_id, job_id])
+    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id}), 202
 
 
 @bp.get("/subjects/<int:subject_id>/samples")
@@ -435,15 +484,33 @@ def dispatch_train(subject_id: int):
     db.session.commit()
 
     from backend.celery_app import celery
+    from backend.utils.unified_progress_system import get_unified_progress, ProcessType
+
+    progress = get_unified_progress()
+    # Use LORA_TRAIN (or TRAINING) process type so it participates in the unified
+    # job queue, Activity, sockets, long-running batch, resume, and cancel paths.
+    # additional_data.subject_id allows frontend (and delete purge) to correlate
+    # without dedicated kind changes initially. This is the effective architecture
+    # choice for the system.
+    job_id = progress.create_process(
+        ProcessType.TRAINING,  # or IMAGE_GENERATION for consistency with other GPU work; TRAINING fits LoRA intent
+        f"LoRA training for cast subject {subject_id} ({s.name})",
+        additional_data={"subject_id": subject_id, "operation": "train_lora", "kind": "cast_training"},
+    )
+
     try:
-        task = celery.send_task("lora_trainer.train_lora", args=[subject_id])
+        task = celery.send_task("lora_trainer.train_lora", args=[subject_id, job_id])
     except Exception:
         # Roll the status back so the subject isn't stranded as 'training'
-        # forever when the broker is unreachable.
+        # forever when the broker is unreachable. Also clean the process.
+        try:
+            progress.error_process(job_id, "Dispatch failed")
+        except Exception:
+            pass
         s.training_status = "untrained"
         db.session.commit()
         raise
-    return jsonify({"task_id": task.id, "subject_id": subject_id}), 202
+    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id}), 202
 
 
 @bp.delete("/subjects/<int:subject_id>/samples/<int:sample_id>")
@@ -482,11 +549,19 @@ def dispatch_regen_sample(subject_id: int, sample_id: int):
             return jsonify({"error": "seed must be an integer"}), 400
 
     from backend.celery_app import celery
+    from backend.utils.unified_progress_system import get_unified_progress, ProcessType
+
+    progress = get_unified_progress()
+    job_id = progress.create_process(
+        ProcessType.IMAGE_GENERATION,
+        f"Regen sample {sample_id} for cast subject {subject_id}",
+        additional_data={"subject_id": subject_id, "sample_id": sample_id, "operation": "regen_sample", "kind": "cast_character_gen"},
+    )
     task = celery.send_task(
         "character.regen_sample",
-        args=[sample_id, prompt_override, seed],
+        args=[sample_id, prompt_override, seed, job_id],
     )
-    return jsonify({"task_id": task.id, "sample_id": sample_id}), 202
+    return jsonify({"task_id": task.id, "job_id": job_id, "sample_id": sample_id}), 202
 
 
 @bp.post("/subjects/<int:subject_id>/samples/approve")

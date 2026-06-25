@@ -69,10 +69,18 @@ export const deleteSubjectRef = async (id, index) => {
 };
 
 // ── Cast & LoRA Studio (Casting Director) ────────────────────────────────────
-// No single-subject GET on the backend — reuse the list and pick the id.
+// Efficient single-subject detail (with optional samples). Falls back to
+// list+find only for legacy callers.
 export const getCastSubject = async (id) => {
   const { subjects = [] } = await listCastLibrary();
   return subjects.find((s) => String(s.id) === String(id)) || null;
+};
+
+// Preferred for CastMemberPage — single fetch, optionally includes samples.
+export const getCastSubjectDetail = async (id, { includeSamples = false } = {}) => {
+  const qs = includeSamples ? "?include=samples" : "";
+  const response = await axios.get(`${API_BASE}/cast-library/subjects/${id}${qs}`);
+  return response.data; // { subject, samples? }
 };
 
 export const updateCastSubject = async (id, patch) => {
@@ -137,6 +145,7 @@ const productionService = {
   createCastSubject,
   deleteCastSubject,
   getCastSubject,
+  getCastSubjectDetail,
   updateCastSubject,
   planCharacter,
   generateSamples,

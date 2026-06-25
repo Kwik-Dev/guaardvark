@@ -55,8 +55,41 @@ class RealLoraTrainer:
 
     @classmethod
     def is_available(cls) -> bool:
-        """True iff venv-torch/bin/python exists. Used by the selector."""
-        return cls._VENV_PYTHON.exists()
+        """True iff venv-torch/bin/python exists AND it can actually see a CUDA GPU.
+        This prevents picking the REAL backend on systems that have the venv
+        but no working NVIDIA driver/CUDA runtime visible to torch (common
+        cause of the "CUDA not available" failure on capable hardware like
+        RTX 4070 Ti SUPER).
+        """
+        if not cls._VENV_PYTHON.exists():
+            return False
+        try:
+            # Fast probe inside the exact venv python that will be used.
+            probe = subprocess.run(
+                [
+                    str(cls._VENV_PYTHON),
+                    "-c",
+                    "import torch, sys; "
+                    "ok = torch.cuda.is_available() and torch.cuda.device_count() > 0; "
+                    "print('OK' if ok else 'NO'); "
+                    "print(torch.cuda.get_device_name(0) if ok else '', file=sys.stderr)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            if probe.returncode == 0 and "OK" in probe.stdout:
+                return True
+            # Log the reason for debugging (visible in lora_trainer_daemon.log or worker logs)
+            logger.warning(
+                "real_trainer: venv exists but CUDA probe failed: stdout=%r stderr=%r",
+                probe.stdout.strip(),
+                probe.stderr.strip(),
+            )
+            return False
+        except Exception as e:
+            logger.warning("real_trainer: CUDA probe crashed: %s", e)
+            return False
 
     def _ensure_proc(self) -> None:
         if self._proc is not None and self._proc.poll() is None:

@@ -194,6 +194,39 @@ const FolderContents = ({
     fetchInitial();
   }, [fetchInitial, refreshKey]);
 
+  // Optimistic removal listener: instantly drop deleted items from this window's local list
+  // when deletes happen anywhere (desktop or other windows). Keys use getItemKey format.
+  useEffect(() => {
+    const handleRemoved = (event) => {
+      const { keys = [] } = event?.detail || {};
+      if (!keys.length) return;
+      setItems((prev) => {
+        const keySet = new Set(keys);
+        const filteredFolders = prev.folders.filter((f) => {
+          const k1 = getItemKey(f, 'folder');
+          const k2 = `folder-${f.id}`;
+          return !keySet.has(k1) && !keySet.has(k2);
+        });
+        const filteredFiles = prev.files.filter((f) => {
+          const k1 = getItemKey(f, 'file');
+          const k2 = `file-${f.id}`;
+          return !keySet.has(k1) && !keySet.has(k2);
+        });
+        // If selection included removed, parent will have cleared via its slot, but clean here too
+        if (onSelectionChange && selectedItems.size > 0) {
+          const stillValid = new Set(Array.from(selectedItems).filter((k) => !keySet.has(k)));
+          if (stillValid.size !== selectedItems.size) {
+            // Defer to avoid set during render
+            setTimeout(() => onSelectionChange(stillValid), 0);
+          }
+        }
+        return { folders: filteredFolders, files: filteredFiles };
+      });
+    };
+    window.addEventListener('documents-items-removed', handleRemoved);
+    return () => window.removeEventListener('documents-items-removed', handleRemoved);
+  }, [selectedItems, onSelectionChange]);
+
   // Keyboard shortcuts - only active when this component has focus
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -215,20 +248,14 @@ const FolderContents = ({
         }
       }
 
-      // Delete: Delete selected items
+      // Delete: Delete selected items (direct confirm via page handler + optimistic removal)
       if (e.key === 'Delete' && selectedItems.size > 0) {
         e.preventDefault();
-        // Show context menu at center of screen for delete confirmation
-        const fakeEvent = {
-          clientX: window.innerWidth / 2,
-          clientY: window.innerHeight / 2,
-          preventDefault: () => { },
-          stopPropagation: () => { },
-        };
-        if (onContextMenu) {
-          // Trigger context menu which has delete option
-          onContextMenu(fakeEvent, null, 'folder-window');
-        }
+        // Do not fake a context menu (that would require a second click on Delete).
+        // The page-level key handler (DocumentsPage) will see non-empty activeSelection
+        // (via refs) for this surface and open the confirm dialog. Once confirmed,
+        // optimistic removal + bulk/parallel delete makes it instant.
+        // Selection scoping + focus already happened on prior clicks.
       }
 
       // Escape: Clear selection

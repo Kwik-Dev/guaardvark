@@ -333,7 +333,22 @@ const DocumentsPage = () => {
           state: 'folded',
         }));
 
-        return [...updatedWindows, ...newWindows];
+        const finalWindows = [...updatedWindows, ...newWindows];
+        // Prune any stale icon positions for items no longer present (quality + prevents ghost icons)
+        const validKeys = new Set([
+          ...finalWindows.map((w) => `folder-${w.folderId}`),
+          ...files.map((f) => getItemKey(f, 'file')),
+        ]);
+        setIconPositions((prev) => {
+          const next = {};
+          Object.keys(prev).forEach((k) => {
+            if (validKeys.has(k)) next[k] = prev[k];
+          });
+          iconPositionsRef.current = next;
+          return next;
+        });
+
+        return finalWindows;
       });
     } catch (err) {
       if (isMountedRef.current) {
@@ -345,16 +360,23 @@ const DocumentsPage = () => {
   // Listen for file/folder changes from any tab/component and refresh in place
   useEffect(() => {
     const handleExternalUpdate = (event) => {
-      const _payload = event?.detail || event?.data;
-      refreshData();
-      // Force any open folder windows to re-fetch their contents
-      setFolderRefreshKeys(prev => {
-        const updated = { ...prev };
-        windowsRef.current.forEach(w => {
-          updated[w.folderId] = (updated[w.folderId] || 0) + 1;
+      const payload = event?.detail || event?.data || {};
+      const fromSelf = payload.source && payload.source === clientIdRef.current;
+      // Always refresh root data for cross-tab / external consistency (lightweight fields=light)
+      if (!fromSelf) {
+        refreshData();
+      }
+      // Only force re-fetch inside open folder windows for *external* changes.
+      // Self-changes (e.g. our deletes) use optimistic 'documents-items-removed' for instant UX.
+      if (!fromSelf) {
+        setFolderRefreshKeys(prev => {
+          const updated = { ...prev };
+          windowsRef.current.forEach(w => {
+            updated[w.folderId] = (updated[w.folderId] || 0) + 1;
+          });
+          return updated;
         });
-        return updated;
-      });
+      }
     };
 
     window.addEventListener('documents-updated', handleExternalUpdate);
@@ -375,8 +397,9 @@ const DocumentsPage = () => {
     };
   }, [refreshData]);
 
-  // Axios interceptor: any successful mutation to /api/files triggers a refresh event
-  // This is for cross-tab sync - each handler also calls refreshData directly
+  // Axios interceptor: any successful mutation to /api/files triggers a refresh event (for cross-tab).
+  // Primary delete/move/create now use optimistic removal where possible; refreshData is recovery + external sync.
+  // Self-originated events are filtered in handler to avoid unnecessary folder re-fetches.
   useEffect(() => {
     // Helper to extract pathname from full or relative URLs
     const getPathname = (urlString) => {
@@ -1292,27 +1315,102 @@ const DocumentsPage = () => {
     setDeleteConfirmOpen(true);
   }, [activeSelection]);
 
-  const handleDeleteConfirm = useCallback(async () => {
-    setDeleteConfirmOpen(false);
-    if (activeSelection.size === 0) return;
+  // Optimistically remove items from visible UI state immediately (for instant feel).
+  // Only affects desktop root lists if deleting from desktop context.
+  // Always prunes iconPositions and clears the relevant selection slot.
+  // Dispatches event so open FolderContents (and others) can filter locally.
+  const applyOptimisticDeletions = useCallback((keys) => {
+    if (!keys || keys.length === 0) return;
+    const contextKey = activeContextKeyRef.current || 'desktop';
+    const folderIds = new Set();
+    const fileIds = new Set();
+    const keysToRemoveFromPositions = new Set(keys);
 
-    try {
-      for (const key of activeSelection) {
-        const [type, id] = key.split('-');
-        if (type === 'folder') {
-          await axios.delete(`${API_BASE}/folder/${id}`);
-        } else {
-          await axios.delete(`${API_BASE}/document/${id}`);
-        }
+    keys.forEach((key) => {
+      const [type, idStr] = String(key).split('-');
+      const id = parseInt(idStr, 10);
+      if (!isNaN(id)) {
+        if (type === 'folder') folderIds.add(id);
+        else fileIds.add(id);
       }
-      showMessage?.(`Deleted ${activeSelection.size} item(s)`, 'success');
-      // Clear only the slot we just deleted from
-      handleSelectionChange(activeContextKeyRef.current, new Set());
-      await refreshData();
-    } catch (err) {
-      showMessage?.('Delete failed', 'error');
+    });
+
+    // Desktop-level lists only when acting on desktop surface
+    if (contextKey === 'desktop') {
+      if (fileIds.size > 0) {
+        setRootFiles((prev) => prev.filter((f) => !fileIds.has(f.id)));
+      }
+      if (folderIds.size > 0) {
+        setWindows((prev) => prev.filter((w) => !folderIds.has(w.folderId)));
+      }
     }
-  }, [activeSelection, showMessage, refreshData, handleSelectionChange]);
+
+    // Always prune icon positions for removed desktop/root keys (prevents ghosts)
+    setIconPositions((prev) => {
+      const next = { ...prev };
+      keysToRemoveFromPositions.forEach((k) => {
+        delete next[k];
+        // Also try alternate forms if any
+        const alt = k.startsWith('file-') || k.startsWith('folder-') ? k : null;
+        if (alt) delete next[alt];
+      });
+      iconPositionsRef.current = next;
+      return next;
+    });
+
+    // Clear the selection for the acting context/slot
+    handleSelectionChange(contextKey, new Set());
+
+    // Notify other surfaces (esp. folder windows) for instant removal of their items
+    try {
+      window.dispatchEvent(new CustomEvent('documents-items-removed', { detail: { keys, contextKey } }));
+    } catch (e) {
+      // dispatch best-effort; ignore in non-browser or blocked envs
+    }
+  }, [handleSelectionChange]);
+
+  const handleDeleteConfirm = useCallback(() => {
+    setDeleteConfirmOpen(false);
+    const keysToDelete = Array.from(activeSelection);
+    if (keysToDelete.length === 0) return;
+
+    // INSTANT: remove from UI now (optimistic). This is the key UX fix.
+    applyOptimisticDeletions(keysToDelete);
+
+    // Fire deletes async (parallel, prefer bulk endpoint if available)
+    const doDeletes = async () => {
+      try {
+        // Try bulk first
+        const bulkPayload = {
+          items: keysToDelete.map((k) => {
+            const [type, idStr] = String(k).split('-');
+            return { type: type === 'folder' ? 'folder' : 'document', id: parseInt(idStr, 10) };
+          }),
+        };
+        try {
+          await axios.post(`${API_BASE}/bulk-delete`, bulkPayload);
+        } catch (bulkErr) {
+          // Fallback to individuals (parallel) on bulk failure/unavailable
+          await Promise.allSettled(
+            keysToDelete.map((key) => {
+              const [type, id] = key.split('-');
+              const url = type === 'folder' ? `${API_BASE}/folder/${id}` : `${API_BASE}/document/${id}`;
+              return axios.delete(url);
+            })
+          );
+        }
+        showMessage?.(`Deleted ${keysToDelete.length} item(s)`, 'success');
+        // No full refresh needed on success path (optimistic + server done); cross-tab uses announce via interceptor
+        // Optional: we can still announce to be sure
+        // announceDocumentsChange(); // interceptor will have fired per response or bulk
+      } catch (err) {
+        showMessage?.('Some deletes may have failed — refreshing state', 'error');
+        // On error, re-sync to restore any inconsistent UI
+        await refreshData();
+      }
+    };
+    doDeletes();
+  }, [activeSelection, showMessage, refreshData, applyOptimisticDeletions]);
 
   const handleRename = useCallback(async () => {
     setContextMenu(null);
@@ -1543,6 +1641,12 @@ const DocumentsPage = () => {
     try {
       await axios.delete(`${API_BASE}/document/${fileId}`);
       showMessage?.('File deleted successfully', 'success');
+      // Instant reflect + cross-surface: dispatch removal before/after close
+      try {
+        window.dispatchEvent(new CustomEvent('documents-items-removed', { detail: { keys: [`file-${fileId}`], contextKey: 'properties' } }));
+      } catch (e) {
+        // ignore
+      }
       setPropertiesOpen(false);
     } catch (err) {
       const errorMsg = err.response?.data?.message || err.message || 'Failed to delete file';
@@ -2556,6 +2660,16 @@ const DocumentsPage = () => {
           onDelete={async (folderId) => {
             await axios.delete(`${API_BASE}/folder/${folderId}`);
             showMessage?.('Folder deleted', 'success');
+            // Optimistic + cross update for instant removal from desktop/folders
+            try {
+              window.dispatchEvent(new CustomEvent('documents-items-removed', { detail: { keys: [`folder-${folderId}`], contextKey: 'properties' } }));
+            } catch (e) {
+              // ignore dispatch failure
+            }
+            // Close the properties modal on successful folder delete
+            setPropertiesOpen(false);
+            // Also trigger a light refresh for counts/parents in other views
+            setTimeout(() => { try { refreshData(); } catch (e) { /* ignore */ } }, 0);
           }}
         />
       )}

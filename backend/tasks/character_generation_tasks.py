@@ -48,7 +48,7 @@ def _sample_image_path(subject_id: int, index: int) -> str:
 
 # ── task implementations (plain functions for testability) ─────────────────────
 
-def generate_samples(subject_id: int) -> dict:
+def generate_samples(subject_id: int, job_id: str | None = None) -> dict:
     """Plan + generate the full reference-sheet for a Subject.
 
     Flow:
@@ -63,6 +63,10 @@ def generate_samples(subject_id: int) -> dict:
     Mirror of run_storyboard_artist: same gate, same commit pattern, same
     error surface (raises on ComfyUI unavailability so the Celery task retries
     or marks itself failed — no silent rot).
+
+    job_id (optional): unified progress process id from dispatch. When present we
+    drive updates so the job appears in unified queue / Activity / sockets for
+    long batch runs of many cast items.
     """
     from backend.models import db, Subject, SubjectSample
     from backend.services.character_generator_service import generate_character_sheet
@@ -85,9 +89,23 @@ def generate_samples(subject_id: int) -> dict:
         trigger_word=subject.trigger_word or None,
     )
 
+    # Per user vision for the Generate Character tab:
+    # - Initially (no or partial training): bare generations produce the reference sheet for training.
+    # - After training: the same tab / mechanism should be usable to generate *additional* images
+    #   that stay consistent with the trained/evolved character (new outfits, tattoos, environments).
+    # Current impl intentionally uses no loras (this *is* the data that will train the LoRA).
+    # Future: accept flag or check subject.lora_path and pass loras + strength to
+    # image_generator.generate_image when desired for "flesh out using trained identity".
+
     if plan.get("error"):
         log.error("Character Generator: bible generation failed for subject %s: %s",
                   subject_id, plan["error"])
+        if job_id:
+            try:
+                from backend.utils.unified_progress_system import get_unified_progress
+                get_unified_progress().error_process(job_id, plan["error"])
+            except Exception:
+                pass
         return {"error": plan["error"]}
 
     bible = plan["bible"]
@@ -127,6 +145,13 @@ def generate_samples(subject_id: int) -> dict:
     log.info("Character Generator: inserted %d SubjectSample rows for subject %s",
              len(sample_rows), subject_id)
 
+    if job_id:
+        try:
+            from backend.utils.unified_progress_system import get_unified_progress
+            get_unified_progress().update_process(job_id, 15, f"Plan complete — {len(sample_rows)} shots ready for FLUX")
+        except Exception:
+            pass
+
     # --- 5. Image generation loop (GPU-exclusive) ----------------------------
     ensure_plugins_for_stage("film-crew", "storyboard_gen")  # ensures comfyui plugin is up
     image_generator = ComfyUIImageGenerator(model="flux-schnell")
@@ -138,13 +163,32 @@ def generate_samples(subject_id: int) -> dict:
     done_count = 0
     failed_count = 0
 
+    from backend.utils.unified_progress_system import get_unified_progress
+    total = len(sample_rows)
+
+    if job_id:
+        try:
+            get_unified_progress().update_process(job_id, 5, f"Starting FLUX generation of {total} samples")
+        except Exception:
+            pass
+
     with gate.gpu_exclusive(JobKind.VIDEO_RENDER, f"char_samples_{subject_id}"):
-        for row in sample_rows:
+        for idx, row in enumerate(sample_rows):
             output_path = _sample_image_path(subject_id, row.index)
             seed = random.randint(1, 2 ** 31 - 1)
             row.status = "generating"
             row.seed = seed
             db.session.commit()
+
+            pct = int(((idx) / total) * 100) if total else 0
+            if job_id:
+                try:
+                    get_unified_progress().update_process(
+                        job_id, max(5, pct),
+                        f"Generating sample {idx+1}/{total} ({row.angle or 'shot'})"
+                    )
+                except Exception:
+                    pass
 
             try:
                 image_generator.generate_image(
@@ -180,13 +224,32 @@ def generate_samples(subject_id: int) -> dict:
             finally:
                 db.session.commit()
 
+            if job_id:
+                try:
+                    get_unified_progress().update_process(
+                        job_id, int(((idx + 1) / total) * 100),
+                        f"Sample {idx+1}/{total} complete"
+                    )
+                except Exception:
+                    pass
+
+    if job_id:
+        try:
+            get_unified_progress().complete_process(
+                job_id,
+                f"Character sample generation finished: {done_count} done, {failed_count} failed",
+                additional_data={"subject_id": subject_id, "done": done_count, "failed": failed_count, "total": total}
+            )
+        except Exception:
+            pass
+
     log.info("Character Generator: finished subject %s — %d done, %d failed",
              subject_id, done_count, failed_count)
     return {"subject_id": subject_id, "done": done_count, "failed": failed_count,
             "total": len(sample_rows)}
 
 
-def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int | None = None) -> dict:
+def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int | None = None, job_id: str | None = None) -> dict:
     """Regenerate the image for a single SubjectSample.
 
     Cloned from regen_storyboard_shot: same GPU gate, same single-commit pattern.
@@ -200,9 +263,16 @@ def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int |
     from backend.services.job_types import JobKind
     from backend.services.plugin_bridge import ensure_plugins_for_stage
 
+    from backend.utils.unified_progress_system import get_unified_progress
+
     row = db.session.get(SubjectSample, sample_id)
     if row is None:
         log.error("regen_sample: SubjectSample %s not found", sample_id)
+        if job_id:
+            try:
+                get_unified_progress().error_process(job_id, "sample not found")
+            except Exception:
+                pass
         return {"error": "sample_not_found"}
 
     ensure_plugins_for_stage("film-crew", "storyboard_gen")
@@ -217,8 +287,19 @@ def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int |
     row.seed = effective_seed
     db.session.commit()
 
+    if job_id:
+        try:
+            get_unified_progress().update_process(job_id, 10, "Starting regen")
+        except Exception:
+            pass
+
     with gate.gpu_exclusive(JobKind.VIDEO_RENDER, f"char_regen_{row.subject_id}"):
         try:
+            if job_id:
+                try:
+                    get_unified_progress().update_process(job_id, 50, "Generating image")
+                except Exception:
+                    pass
             image_generator.generate_image(
                 prompt=effective_prompt,
                 loras=[],
@@ -229,11 +310,27 @@ def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int |
             row.image_path = output_path
             row.status = "done"
             log.info("regen_sample: sample %s regenerated → %s", sample_id, output_path)
+            if job_id:
+                try:
+                    get_unified_progress().update_process(job_id, 90, "Image ready")
+                except Exception:
+                    pass
         except Exception as exc:
             row.status = "failed"
             log.error("regen_sample: sample %s failed: %s", sample_id, exc)
+            if job_id:
+                try:
+                    get_unified_progress().error_process(job_id, str(exc))
+                except Exception:
+                    pass
         finally:
             db.session.commit()
+
+    if job_id:
+        try:
+            get_unified_progress().complete_process(job_id, "Regen complete", additional_data={"sample_id": sample_id, "status": row.status})
+        except Exception:
+            pass
 
     return {"sample_id": sample_id, "status": row.status, "image_path": row.image_path}
 
@@ -247,15 +344,15 @@ def create_character_generation_tasks(celery_app: Celery):
     """
 
     @celery_app.task(name="character.generate_samples")
-    def generate_samples_task(subject_id: int):
+    def generate_samples_task(subject_id: int, job_id: str | None = None):
         with current_app.app_context():
-            return generate_samples(subject_id)
+            return generate_samples(subject_id, job_id=job_id)
 
     @celery_app.task(name="character.regen_sample")
     def regen_sample_task(sample_id: int, prompt_override: str | None = None,
-                          seed: int | None = None):
+                          seed: int | None = None, job_id: str | None = None):
         with current_app.app_context():
-            return regen_sample(sample_id, prompt_override=prompt_override, seed=seed)
+            return regen_sample(sample_id, prompt_override=prompt_override, seed=seed, job_id=job_id)
 
     return {
         "generate_samples": generate_samples_task,

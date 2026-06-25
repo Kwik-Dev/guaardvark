@@ -19,14 +19,21 @@ def _output_dir() -> str:
             or "data/training/loras")
 
 
-def _train_impl(subject_id: int) -> dict:
+def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
     """Picks mock or real trainer based on:
        1. GUAARDVARK_LORA_BACKEND env var (mock|real|auto, default auto)
        2. Auto: real if plugins/lora_trainer/venv-torch/bin/python exists, else mock.
        Logs which backend it picked."""
     import os
+    from backend.utils.unified_progress_system import get_unified_progress
+
     s = db.session.get(Subject, subject_id)
     if s is None:
+        if job_id:
+            try:
+                get_unified_progress().error_process(job_id, "subject not found in _train_impl")
+            except Exception:
+                pass
         return {"status": "failed", "error": f"subject {subject_id} not found"}
 
     # Training set = the subject's uploaded reference images (the primary Step-1
@@ -56,6 +63,11 @@ def _train_impl(subject_id: int) -> dict:
     if use_real:
         from plugins.lora_trainer.real_trainer import RealLoraTrainer, _TRAINER
         logger.info(f"lora_trainer: using REAL backend for subject {subject_id}")
+        if job_id:
+            try:
+                get_unified_progress().update_process(job_id, 20, "Starting real LoRA trainer (SDXL)")
+            except Exception:
+                pass
         # Real LoRA training is a full GPU load on the shared 16GB card — claim
         # the GPU exclusively (LORA_TRAIN slot) so it serializes against video
         # render / model finetune. The MOCK path below is CPU-only and is NOT
@@ -74,6 +86,11 @@ def _train_impl(subject_id: int) -> dict:
             # 6.7GB → CUDA OOM. Reclaim runs only AFTER we hold the slot.
             with gpu_session(JobKind.LORA_TRAIN, f"subject_{s.id}",
                              evict_ollama=True, free_comfyui=True):
+                if job_id:
+                    try:
+                        get_unified_progress().update_process(job_id, 30, "GPU claimed, training epochs running (can take hours)")
+                    except Exception:
+                        pass
                 try:
                     return _TRAINER.train_subject_lora(
                         subject_id=s.id,
@@ -102,6 +119,11 @@ def _train_impl(subject_id: int) -> dict:
 
     from plugins.lora_trainer.mock_trainer import train_subject_lora
     logger.info(f"lora_trainer: using MOCK backend for subject {subject_id}")
+    if job_id:
+        try:
+            get_unified_progress().update_process(job_id, 60, "Running mock trainer (fast path)")
+        except Exception:
+            pass
     return train_subject_lora(
         subject_id=s.id,
         subject_name=s.name,
@@ -112,9 +134,9 @@ def _train_impl(subject_id: int) -> dict:
 
 def create_lora_trainer_tasks(celery_app: Celery):
     @celery_app.task(name="lora_trainer.train_lora")
-    def train_lora_task(subject_id: int):
+    def train_lora_task(subject_id: int, job_id: str | None = None):
         with current_app.app_context():
-            train_subject_lora_for_subject(subject_id)
+            train_subject_lora_for_subject(subject_id, job_id=job_id)
 
     @celery_app.task(name="lora_trainer.reap_stuck_training")
     def reap_stuck_training_task():
@@ -124,30 +146,76 @@ def create_lora_trainer_tasks(celery_app: Celery):
     return {"train_lora": train_lora_task, "reap_stuck_training": reap_stuck_training_task}
 
 
-def train_subject_lora_for_subject(subject_id: int) -> None:
+def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -> None:
     """Module-level entry point — directly callable from tests."""
+    from backend.utils.unified_progress_system import get_unified_progress
+
     s = db.session.get(Subject, subject_id)
     if s is None:
         logger.warning(f"train_lora called for unknown subject {subject_id}")
+        if job_id:
+            try:
+                get_unified_progress().error_process(job_id, "subject not found")
+            except Exception:
+                pass
         return
     if s.training_status != "training":
         # Cast endpoint sets training_status='training' before dispatching.
         # If it's anything else, someone double-dispatched or the row was
         # raced. Idempotency: do nothing.
         logger.info(f"skip train_lora for subject {subject_id} (status={s.training_status!r})")
+        if job_id:
+            try:
+                get_unified_progress().error_process(job_id, f"skipped (status={s.training_status})")
+            except Exception:
+                pass
         return
-    result = _train_impl(subject_id)
+
+    if job_id:
+        try:
+            get_unified_progress().update_process(job_id, 10, "Preparing training images (refs + approved samples)")
+        except Exception:
+            pass
+
+    result = _train_impl(subject_id, job_id=job_id)
+
+    if job_id:
+        try:
+            if result.get("status") == "ok":
+                get_unified_progress().update_process(job_id, 95, "Finalizing LoRA")
+            else:
+                get_unified_progress().error_process(job_id, result.get("error") or "training failed")
+        except Exception:
+            pass
+
     if result.get("status") == "ok":
         s.lora_path = result["lora_path"]
         s.lora_version = result.get("lora_version", 1)
         s.training_status = "trained"
         s.training_error = None
+        if job_id:
+            try:
+                get_unified_progress().complete_process(job_id, "LoRA training complete", additional_data={"lora_path": s.lora_path, "subject_id": subject_id})
+            except Exception:
+                pass
     else:
         s.training_status = "failed"
-        # Surface the reason on the Subject so the Cast card can show WHY it
-        # failed instead of a dead-end 'failed' chip.
-        s.training_error = (result.get("error") or "training failed")[:2000]
-        logger.warning(f"lora train failed for subject {subject_id}: {result.get('error')}")
+        err = result.get("error") or "training failed"
+        s.training_error = err[:2000]
+        logger.warning(f"lora train failed for subject {subject_id}: {err}")
+
+        # Give very specific guidance for the most common real-hardware failure
+        # ("CUDA not available") even though the box has a real GPU.
+        if "CUDA not available" in err or "cuda.is_available" in err.lower():
+            s.training_error = (
+                "CUDA not available inside the isolated trainer venv.\n\n"
+                "Your RTX 4070 Ti SUPER should work. Run these on the host:\n"
+                "  1. nvidia-smi   (must show your 4070 Ti SUPER and a recent driver)\n"
+                "  2. cd plugins/lora_trainer && ./scripts/setup_venv.sh\n"
+                "  3. Reboot if drivers were just installed.\n"
+                "Then click 'Train LoRA' again from the Cast page.\n\n"
+                "Original error: " + err
+            )[:2000]
     db.session.commit()
 
 

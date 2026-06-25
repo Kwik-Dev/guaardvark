@@ -171,8 +171,13 @@ const FolderPropertiesModal = ({
     
     if (confirm(`Delete folder "${folderData?.name}" and all its contents?`)) {
       setDeleting(true);
+      const fid = folderData.id;
       try {
-        await onDelete(folderData.id);
+        // Optimistic event for instant UI remove (parent will also close + refresh)
+        try {
+          window.dispatchEvent(new CustomEvent('documents-items-removed', { detail: { keys: [`folder-${fid}`], contextKey: 'folder-properties' } }));
+        } catch (_) {}
+        await onDelete(fid);
       } finally {
         setDeleting(false);
       }

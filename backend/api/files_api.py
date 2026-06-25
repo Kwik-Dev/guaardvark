@@ -1093,6 +1093,107 @@ def delete_document(doc_id):
         return error_response("Failed to delete document", 500, "DELETE_ERROR")
 
 
+@files_bp.route("/bulk-delete", methods=["POST"])
+@ensure_db_session_cleanup
+def bulk_delete():
+    """POST /api/files/bulk-delete - Delete multiple folders and/or documents in one call.
+    Body: { "items": [ {"type": "folder"|"document", "id": N}, ... ] }
+    Returns aggregated results. Deindexes collected at end when possible.
+    """
+    logger.info("API: Bulk delete request")
+    data = request.get_json(silent=True) or {}
+    raw_items = data.get("items") or []
+    # Also accept convenience arrays
+    folder_ids = data.get("folder_ids") or []
+    document_ids = data.get("document_ids") or []
+    items = list(raw_items)
+    for fid in folder_ids:
+        items.append({"type": "folder", "id": int(fid)})
+    for did in document_ids:
+        items.append({"type": "document", "id": int(did)})
+
+    if not items:
+        return error_response("No items provided", 400, "NO_ITEMS")
+
+    deleted_folders = []
+    deleted_documents = []
+    doc_ids_to_deindex = []
+    errors = []
+
+    try:
+        for item in items:
+            typ = (item or {}).get("type")
+            iid = (item or {}).get("id")
+            if not iid:
+                errors.append({"item": item, "error": "missing id"})
+                continue
+            try:
+                if typ == "folder":
+                    folder = db.session.get(Folder, int(iid))
+                    if not folder:
+                        errors.append({"type": "folder", "id": iid, "error": "not found"})
+                        continue
+                    # Reuse recursive (it does physical + db.delete + per-sub deindex attempts, no commit)
+                    _delete_folder_recursive(folder, deleted_folders, deleted_documents)
+                    # Collect any docs it may have marked? Recursive already appended names; for deindex we rely on its internal
+                elif typ == "document":
+                    document = db.session.get(DBDocument, int(iid))
+                    if not document:
+                        errors.append({"type": "document", "id": iid, "error": "not found"})
+                        continue
+                    doc_ids_to_deindex.append(str(document.id))
+                    doc_path = document.path
+                    physical_path = get_physical_path(doc_path)
+                    if physical_path.exists():
+                        try:
+                            physical_path.unlink()
+                            logger.info(f"Deleted physical file: {physical_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete physical file {physical_path}: {e}")
+                    deleted_documents.append(document.filename)
+                    db.session.delete(document)
+                else:
+                    errors.append({"item": item, "error": "unknown type"})
+            except Exception as item_err:
+                errors.append({"item": item, "error": str(item_err)})
+                logger.warning(f"Bulk delete item failed: {item} -> {item_err}")
+
+        # One commit for the batch
+        db.session.commit()
+
+        # Best-effort deindex collected (in addition to any done inside folder recursive)
+        index_instance = current_app.config.get("LLAMA_INDEX_INDEX")
+        storage_dir = current_app.config.get("STORAGE_DIR")
+        if doc_ids_to_deindex and index_instance and storage_dir and hasattr(index_instance, "delete_ref_doc"):
+            for ref_doc_id in doc_ids_to_deindex:
+                try:
+                    index_instance.delete_ref_doc(ref_doc_id, delete_from_docstore=True)
+                    logger.info(f"Bulk: removed document {ref_doc_id} from vector index")
+                except Exception:
+                    logger.warning(f"Bulk: failed to remove doc {ref_doc_id} from index (continuing)")
+            try:
+                index_instance.storage_context.persist(persist_dir=storage_dir)
+            except Exception as pe:
+                logger.warning(f"Bulk: failed to persist index after bulk delete: {pe}")
+
+        logger.info(f"Bulk delete complete: folders={len(deleted_folders)}, docs={len(deleted_documents)}, errors={len(errors)}")
+        return success_response({
+            "message": "Bulk delete completed",
+            "deleted_folders": len(deleted_folders),
+            "deleted_documents": len(deleted_documents),
+            "errors": errors,
+            "folder_names": deleted_folders[:10],  # sample
+        })
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error(f"DB error in bulk delete: {e}", exc_info=True)
+        return error_response("Database error during bulk delete", 500, "DB_ERROR")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error in bulk delete: {e}", exc_info=True)
+        return error_response("Failed bulk delete", 500, "DELETE_ERROR")
+
+
 @files_bp.route("/document/<int:doc_id>/link", methods=["PUT"])
 @ensure_db_session_cleanup
 def link_document_to_entity(doc_id):

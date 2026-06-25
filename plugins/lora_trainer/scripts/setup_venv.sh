@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Bootstrap the isolated torch venv for the lora_trainer plugin.
 #
-# Run once on a host with CUDA 12+. Takes ~5-10 min depending on bandwidth.
-# Can re-run safely (uses --upgrade if requested).
+# Run once on a host with a real NVIDIA GPU (e.g. RTX 4070 Ti SUPER).
+# Auto-detects the driver's CUDA version and installs a matching torch wheel
+# so that torch.cuda.is_available() returns True inside the venv at runtime.
+# Takes ~5-10 min. Can be re-run.
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,18 +30,59 @@ fi
 echo "Upgrading pip in venv-torch…"
 "${VENV}/bin/pip" install --upgrade pip wheel
 
+echo "Detecting host CUDA version for correct torch wheel..."
+# Prefer the CUDA version reported by the installed NVIDIA driver.
+# This is critical on Ubuntu 24.04 + RTX 40-series (like 4070 Ti SUPER) so
+# the venv-torch can actually see cuda.is_available() == True at runtime.
+HOST_CUDA=""
+if command -v nvidia-smi >/dev/null 2>&1; then
+    HOST_CUDA=$(nvidia-smi | grep -oP 'CUDA Version:\s*\K[0-9.]+' | head -1 || true)
+fi
+
+CU_INDEX="cu128"   # safe recent default
+TORCH_VER="2.5.1"  # more widely available than hypothetical 2.11; matches common 2026 setups
+
+if [[ -n "$HOST_CUDA" ]]; then
+    # Turn 12.6 into cu126, 12.4 into cu124, 13.x into cu130 etc.
+    MAJOR_MINOR=$(echo "$HOST_CUDA" | cut -d. -f1-2 | tr -d '.')
+    if [[ "$MAJOR_MINOR" -ge 130 ]]; then
+        CU_INDEX="cu130"
+    elif [[ "$MAJOR_MINOR" -ge 128 ]]; then
+        CU_INDEX="cu128"
+    elif [[ "$MAJOR_MINOR" -ge 124 ]]; then
+        CU_INDEX="cu124"
+    elif [[ "$MAJOR_MINOR" -ge 121 ]]; then
+        CU_INDEX="cu121"
+    fi
+    echo "Host reports CUDA $HOST_CUDA -> using torch index $CU_INDEX"
+else
+    echo "WARNING: nvidia-smi did not report CUDA version. Defaulting to $CU_INDEX."
+    echo "         Please ensure proprietary NVIDIA drivers are installed:"
+    echo "         sudo ubuntu-drivers autoinstall && sudo reboot"
+fi
+
 echo "Installing torch + torchvision (CUDA wheels)…"
-# Install both from the cu130 index so torchvision picks the matching cu130
-# build for torch 2.11. Pinning torchvision against PyPI fails because the
-# version space tracks torch builds and PyPI doesn't host cu130 wheels.
+# Use the detected index. torchvision must come from the same index.
 "${VENV}/bin/pip" install \
-    torch==2.11.0 torchvision \
-    --index-url https://download.pytorch.org/whl/cu130
+    "torch==${TORCH_VER}" torchvision \
+    --index-url "https://download.pytorch.org/whl/${CU_INDEX}"
 
 echo "Installing remaining requirements…"
 "${VENV}/bin/pip" install -r "${REQS}"
 
 echo "Verifying CUDA in venv-torch…"
-"${VENV}/bin/python" -c "import torch; assert torch.cuda.is_available(), 'CUDA not visible from venv-torch'; print(f'OK: torch {torch.__version__} on {torch.cuda.get_device_name(0)}')"
+"${VENV}/bin/python" -c '
+import torch, sys
+print("Python torch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("Device:", torch.cuda.get_device_name(0))
+    print("Build CUDA:", getattr(torch.version, "cuda", "n/a"))
+else:
+    print("ERROR: CUDA not visible inside venv-torch.")
+    print("Fix: ensure nvidia-smi works on host, then re-run this script.")
+    sys.exit(1)
+'
 
-echo "Done. The plugin will auto-pick the real backend on next train dispatch."
+echo "Done. The plugin will auto-pick the real backend on next train dispatch from CastMemberPage."
+echo "If you still see 'CUDA not available' at runtime after this, reboot the machine."
