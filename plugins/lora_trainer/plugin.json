@@ -13,11 +13,15 @@
   "config": {
     "default_enabled": true,
     "default_auto_start": false,
+    "service_url": null,
+    "timeout": 30,
+    "fallback_enabled": false,
     "output_dir": "data/training/loras",
     "max_ref_images": 30,
     "default_backend": "auto"
   },
   "requirements": {
     "gpu": false
-  }
+  },
+  "endpoints": {}
 }

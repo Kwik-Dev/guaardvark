@@ -222,3 +222,205 @@ def upload_subject_refs(subject_id):
         "saved": saved_paths,
         "skipped": skipped,
     })
+
+
+# ── Character Generator endpoints ─────────────────────────────────────────────
+#
+# POST  /cast-library/subjects/<id>/plan          — run Casting Director LLM
+#                                                   synchronously; persist bible +
+#                                                   SubjectSample rows; return them.
+# POST  /cast-library/subjects/<id>/generate      — dispatch character.generate_samples
+#                                                   (FLUX loop, async Celery task).
+# GET   /cast-library/subjects/<id>/samples       — list SubjectSamples.
+# POST  /cast-library/subjects/<id>/samples/<sid>/regenerate
+#                                                 — dispatch character.regen_sample.
+# POST  /cast-library/subjects/<id>/samples/approve
+#                                                 — bulk-approve a set of samples.
+
+
+@bp.post("/subjects/<int:subject_id>/plan")
+def plan_character(subject_id: int):
+    """Run the Casting Director synchronously to produce bible + shot plan.
+
+    Calls generate_character_sheet() (LLM / Ollama, GPU-free), persists the
+    bible and trigger_word on the Subject, deletes any existing SubjectSample
+    rows, inserts one row per shot with status=pending, and returns the full
+    set.  Images are NOT generated here — dispatch /generate next.
+
+    Request body (JSON, all optional):
+      n            int   — number of reference shots to plan (default 32).
+      trigger_word str   — force a specific trigger token.
+    """
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    n = int(body.get("n", 32))
+    trigger_word = (body.get("trigger_word") or "").strip() or None
+
+    from backend.services.character_generator_service import generate_character_sheet
+    plan = generate_character_sheet(
+        name=s.name,
+        kind=s.kind,
+        description=s.description or "",
+        n=n,
+        trigger_word=trigger_word or s.trigger_word or None,
+    )
+
+    if plan.get("error"):
+        return jsonify({"error": plan["error"]}), 502
+
+    bible = plan["bible"]
+    trigger = plan["trigger_word"]
+    shots = plan["shots"]
+
+    # Persist bible + (new) trigger on the Subject.
+    s.bible = bible
+    if trigger:
+        s.trigger_word = trigger
+    db.session.flush()
+
+    # Idempotent: delete existing samples so a re-plan is a clean slate.
+    SubjectSample.query.filter_by(subject_id=subject_id).delete()
+    db.session.flush()
+
+    rows: list[SubjectSample] = []
+    for shot in shots:
+        row = SubjectSample(
+            subject_id=subject_id,
+            index=shot["index"],
+            angle=shot.get("angle") or "",
+            framing=shot.get("framing") or "",
+            expression=shot.get("expression") or "",
+            lighting=shot.get("lighting") or "",
+            scene=shot.get("scene") or "",
+            image_prompt=shot.get("image_prompt") or "",
+            placeholder=bool(shot.get("placeholder", False)),
+            status="pending",
+            approved=False,
+        )
+        db.session.add(row)
+        rows.append(row)
+
+    db.session.commit()
+
+    return jsonify({
+        "subject": _serialize(s),
+        "bible": bible,
+        "trigger_word": trigger,
+        "samples": [r.to_dict() for r in rows],
+    }), 201
+
+
+@bp.post("/subjects/<int:subject_id>/generate")
+def dispatch_generate_samples(subject_id: int):
+    """Dispatch the character.generate_samples Celery task.
+
+    The task re-runs generate_character_sheet, persists a fresh plan, then
+    runs the FLUX image loop under gpu_exclusive.  Call /plan first if you
+    want to inspect (and possibly edit) the shot plan before committing GPU
+    time, or call this endpoint directly to do both in one task.
+    """
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+
+    from backend.celery_app import celery
+    task = celery.send_task("character.generate_samples", args=[subject_id])
+    return jsonify({"task_id": task.id, "subject_id": subject_id}), 202
+
+
+@bp.get("/subjects/<int:subject_id>/samples")
+def list_samples(subject_id: int):
+    """Return all SubjectSamples for a Subject, ordered by index."""
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+
+    samples = (
+        SubjectSample.query
+        .filter_by(subject_id=subject_id)
+        .order_by(SubjectSample.index)
+        .all()
+    )
+    return jsonify({
+        "subject_id": subject_id,
+        "samples": [r.to_dict() for r in samples],
+    })
+
+
+@bp.post("/subjects/<int:subject_id>/samples/<int:sample_id>/regenerate")
+def dispatch_regen_sample(subject_id: int, sample_id: int):
+    """Dispatch character.regen_sample for a single SubjectSample.
+
+    Request body (JSON, all optional):
+      prompt_override  str  — use this prompt instead of the stored image_prompt.
+      seed             int  — fixed seed for reproducibility; omit for random.
+    """
+    # Validate ownership — the sample must belong to this subject.
+    row = db.session.get(SubjectSample, sample_id)
+    if row is None or row.subject_id != subject_id:
+        return jsonify({"error": "not_found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    prompt_override = (body.get("prompt_override") or "").strip() or None
+    seed = body.get("seed")
+    if seed is not None:
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError):
+            return jsonify({"error": "seed must be an integer"}), 400
+
+    from backend.celery_app import celery
+    task = celery.send_task(
+        "character.regen_sample",
+        args=[sample_id, prompt_override, seed],
+    )
+    return jsonify({"task_id": task.id, "sample_id": sample_id}), 202
+
+
+@bp.post("/subjects/<int:subject_id>/samples/approve")
+def approve_samples(subject_id: int):
+    """Bulk-approve (or un-approve) a set of SubjectSamples.
+
+    Request body (JSON):
+      sample_ids   list[int]   — IDs to act on.
+      approved     bool        — True to approve, False to un-approve (default True).
+
+    Only samples that belong to this subject are modified; unknown IDs are
+    silently ignored (idempotent — the frontend can fire this on every toggle).
+    Returns the updated sample list.
+    """
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    sample_ids = body.get("sample_ids")
+    if not isinstance(sample_ids, list):
+        return jsonify({"error": "sample_ids must be a list of integers"}), 400
+
+    approved_flag = bool(body.get("approved", True))
+
+    rows = (
+        SubjectSample.query
+        .filter(SubjectSample.subject_id == subject_id)
+        .filter(SubjectSample.id.in_(sample_ids))
+        .all()
+    )
+    for row in rows:
+        row.approved = approved_flag
+    db.session.commit()
+
+    all_samples = (
+        SubjectSample.query
+        .filter_by(subject_id=subject_id)
+        .order_by(SubjectSample.index)
+        .all()
+    )
+    return jsonify({
+        "subject_id": subject_id,
+        "updated": len(rows),
+        "samples": [r.to_dict() for r in all_samples],
+    })

@@ -346,6 +346,13 @@ def create_celery_app():
         logger.warning(f"Could not import music video tasks: {e}")
 
     try:
+        from backend.tasks.character_generation_tasks import create_character_generation_tasks
+        create_character_generation_tasks(celery_app)
+        logger.info("Character generation tasks registered successfully")
+    except ImportError as e:
+        logger.warning(f"Could not import character generation tasks: {e}")
+
+    try:
         from backend.tasks.social_outreach_tasks import (
             engage_with_subreddit,
             self_share,

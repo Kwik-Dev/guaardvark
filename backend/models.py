@@ -2791,8 +2791,98 @@ class Subject(db.Model):
     # this column → callers fall back to kind-based default
     # (see script_markup.default_cast_required / effective_cast_required).
     cast_required = db.Column(db.Boolean, nullable=True)
+    # Frozen identity paragraph written by BibleDesigner; stored so the API can
+    # re-surface it without re-running the LLM, and so SubjectSample prompts can
+    # be re-composed from it without another generation pass.
+    bible = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     updated_at = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "name": self.name,
+            "description": self.description,
+            "ref_image_paths": self.ref_image_paths or [],
+            "voice_id": self.voice_id,
+            "trigger_word": self.trigger_word,
+            "lora_path": self.lora_path,
+            "lora_version": self.lora_version,
+            "training_status": self.training_status,
+            "cast_required": self.cast_required,
+            "bible": self.bible,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class SubjectSample(db.Model):
+    """One reference-sheet image for a Subject — output of the Character Generator.
+
+    The Casting Director (BibleDesigner + ShotDesigner) plans N shots; each shot
+    becomes a SubjectSample row.  FLUX generates the image; the user approves the
+    set before it is sent to the LoRA trainer.  Rows are idempotent on re-plan:
+    generate_character_sheet is re-runnable and replaces the existing set.
+    """
+    __tablename__ = "subject_samples"
+
+    id = db.Column(db.Integer, primary_key=True)
+    subject_id = db.Column(
+        db.Integer,
+        db.ForeignKey("subjects.id", name="fk_subject_sample_subject_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # 0-based position within the planned shot list (preserved for ordering and
+    # idempotent re-plan: if the user re-plans, rows are deleted and re-inserted).
+    index = db.Column(db.Integer, nullable=False)
+    # Shot variation metadata (from ShotDesigner / angle taxonomy).
+    angle = db.Column(db.String(128), nullable=True)
+    framing = db.Column(db.String(64), nullable=True)
+    expression = db.Column(db.String(128), nullable=True)
+    lighting = db.Column(db.String(128), nullable=True)
+    scene = db.Column(db.String(255), nullable=True)
+    # The composed image prompt (trigger + bible + variation); stored so the UI
+    # can display it and the regen endpoint can override it without re-running LLM.
+    image_prompt = db.Column(db.Text, nullable=True)
+    # Seed used at generation time; stored so a regen can reproduce or vary.
+    seed = db.Column(db.Integer, nullable=True)
+    # Absolute path to the generated PNG on disk; NULL until generation completes.
+    image_path = db.Column(db.String(512), nullable=True)
+    # Lifecycle: pending → generating → done | failed
+    status = db.Column(db.String(32), nullable=False, default="pending", index=True)
+    # Human approval gate: the frontend lets the user mark each sample before
+    # sending the approved set to the LoRA trainer.
+    approved = db.Column(db.Boolean, nullable=False, default=False)
+    # True when the ShotDesigner produced no variation for this slot (placeholder
+    # from the top-up loop).  Placeholder samples are generated but flagged so the
+    # UI can prompt the user to regen them.
+    placeholder = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
+    updated_at = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
+
+    subject = db.relationship("Subject", backref=db.backref("samples", cascade="all, delete-orphan"))
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "subject_id": self.subject_id,
+            "index": self.index,
+            "angle": self.angle,
+            "framing": self.framing,
+            "expression": self.expression,
+            "lighting": self.lighting,
+            "scene": self.scene,
+            "image_prompt": self.image_prompt,
+            "seed": self.seed,
+            "image_path": self.image_path,
+            "status": self.status,
+            "approved": self.approved,
+            "placeholder": self.placeholder,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
 
 
 class ProductionSubject(db.Model):

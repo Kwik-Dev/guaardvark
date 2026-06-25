@@ -250,3 +250,32 @@ regroup-reports/
 frontend/.npm_stamp
 data/gpu_stack_status.json
 data/ollama-dropin.rendered.conf
+
+# === Non-code artifacts — NEVER in git (Dean's standing rule, 2026-06-24) ===
+# Policy: main tracks STANDARD APPLICATION CODE ONLY. No model weights, no
+# training data/outputs, no personal transcripts, no runtime state. Dean keeps
+# his own local backups for these — git is for source, not for gigabytes.
+#
+# Model weights & checkpoints (anywhere in the tree)
+*.safetensors
+*.ckpt
+*.gguf
+*.pt
+*.pth
+*.bin
+*.onnx
+# External trainer repos cloned into the lora_trainer plugin (multi-GB, third-party)
+plugins/lora_trainer/SimpleTuner/
+plugins/lora_trainer/ai-toolkit/
+plugins/lora_trainer/musubi-tuner/
+plugins/lora_trainer/sd-scripts-flux/
+# Per-run training workspaces: datasets, outputs, checkpoints, caches, run configs, logs
+training/sage_harlow/
+training/lora_smoke/
+cast_lora_16gb.yaml
+# Logs, debug dumps, LLM/agent transcripts (personal / regenerable)
+*.log
+debug.log
+grok-transcript.mc
+# Per-machine runtime state written by the app
+data/video_model_download_status.json
