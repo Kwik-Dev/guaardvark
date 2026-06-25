@@ -10,6 +10,9 @@ import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
+import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
+import CloseIcon from '@mui/icons-material/Close';
 import {
   getCastSubject, updateCastSubject, planCharacter, generateSamples,
   listSamples, regenerateSample, approveSamples, trainSubject,
@@ -52,6 +55,7 @@ const CastMemberPage = () => {
   const pollCount = useRef(0);
   const [regenTarget, setRegenTarget] = useState(null); // sample being regenerated
   const [regenPrompt, setRegenPrompt] = useState('');
+  const [lightboxIdx, setLightboxIdx] = useState(null); // open enlarged viewer at this samples[] index
 
   const loadSubject = useCallback(async () => {
     const s = await getCastSubject(subjectId);
@@ -76,7 +80,14 @@ const CastMemberPage = () => {
       try {
         const s = await loadSubject();
         if (alive && !s) setError('Subject not found.');
-        await loadSamples();
+        const rows = await loadSamples();
+        // If a generation/regeneration is already in flight when we land on the
+        // page (e.g. after a refresh), auto-resume polling so finished images
+        // appear without a manual reload.
+        if (alive && ((rows || []).some(isPending) || s?.training_status === 'training')) {
+          pollCount.current = 0;
+          setPolling(true);
+        }
       } catch (e) {
         if (alive) setError('Failed to load this cast member.');
       } finally {
@@ -107,6 +118,18 @@ const CastMemberPage = () => {
   }, [polling, loadSubject, loadSamples]);
 
   const startPolling = () => { pollCount.current = 0; setPolling(true); };
+
+  // Arrow-key / Escape navigation for the enlarged image viewer.
+  useEffect(() => {
+    if (lightboxIdx === null) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'ArrowLeft') setLightboxIdx((i) => (i > 0 ? i - 1 : i));
+      else if (e.key === 'ArrowRight') setLightboxIdx((i) => (i < samples.length - 1 ? i + 1 : i));
+      else if (e.key === 'Escape') setLightboxIdx(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightboxIdx, samples.length]);
 
   const handleSave = async () => {
     setSaving(true); setError(null);
@@ -338,12 +361,13 @@ const CastMemberPage = () => {
           ) : (
             <Box sx={{ maxHeight: '60vh', overflowY: 'auto', pr: 1, mx: -0.5, px: 0.5 }}>
             <Grid container spacing={2}>
-              {samples.map((s) => (
+              {samples.map((s, idx) => (
                 <Grid item xs={6} sm={4} md={3} lg={2} key={s.id}>
                   <Card variant="outlined">
                     {s.image_url ? (
                       <CardMedia component="img" height="160" image={s.image_url} alt={s.angle || `sample ${s.index}`}
-                                 sx={{ objectFit: 'cover' }} />
+                                 onClick={() => setLightboxIdx(idx)}
+                                 sx={{ objectFit: 'cover', cursor: 'zoom-in' }} />
                     ) : (
                       <Box sx={{ height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center',
                                  bgcolor: 'action.hover' }}>
@@ -434,6 +458,51 @@ const CastMemberPage = () => {
           <Button variant="contained" onClick={submitRegen}>Regenerate</Button>
         </DialogActions>
       </Dialog>
+
+      {/* Lightbox — click a thumbnail to enlarge; ←/→ or buttons to step, Esc to close. */}
+      {lightboxIdx !== null && samples[lightboxIdx] && (
+        <Dialog open onClose={() => setLightboxIdx(null)} maxWidth="lg" fullWidth
+                PaperProps={{ sx: { bgcolor: 'grey.900' } }}>
+          <DialogContent sx={{ position: 'relative', p: 0, display: 'flex', alignItems: 'center',
+                                justifyContent: 'center', minHeight: '70vh', bgcolor: 'black' }}>
+            {samples[lightboxIdx].image_url ? (
+              <Box component="img" src={samples[lightboxIdx].image_url}
+                   alt={samples[lightboxIdx].angle || `sample ${lightboxIdx + 1}`}
+                   sx={{ maxWidth: '100%', maxHeight: '82vh', objectFit: 'contain', display: 'block' }} />
+            ) : (
+              <Typography color="grey.500">{samples[lightboxIdx].status}</Typography>
+            )}
+            <IconButton onClick={() => setLightboxIdx((i) => Math.max(0, i - 1))} disabled={lightboxIdx === 0}
+                        sx={{ position: 'absolute', left: 8, color: 'white', bgcolor: 'rgba(0,0,0,0.45)',
+                              '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' } }} aria-label="previous">
+              <ChevronLeftIcon />
+            </IconButton>
+            <IconButton onClick={() => setLightboxIdx((i) => Math.min(samples.length - 1, i + 1))}
+                        disabled={lightboxIdx === samples.length - 1}
+                        sx={{ position: 'absolute', right: 8, color: 'white', bgcolor: 'rgba(0,0,0,0.45)',
+                              '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' } }} aria-label="next">
+              <ChevronRightIcon />
+            </IconButton>
+            <IconButton onClick={() => setLightboxIdx(null)}
+                        sx={{ position: 'absolute', top: 8, right: 8, color: 'white', bgcolor: 'rgba(0,0,0,0.45)',
+                              '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' } }} aria-label="close">
+              <CloseIcon />
+            </IconButton>
+          </DialogContent>
+          <DialogActions sx={{ justifyContent: 'space-between', bgcolor: 'grey.900' }}>
+            <Tooltip title={samples[lightboxIdx].image_prompt || ''}>
+              <Typography variant="caption" color="grey.400" noWrap sx={{ px: 1, maxWidth: '70%' }}>
+                {lightboxIdx + 1}/{samples.length} · {samples[lightboxIdx].angle || `Shot ${lightboxIdx + 1}`}
+              </Typography>
+            </Tooltip>
+            <Button size="small" startIcon={samples[lightboxIdx].approved ? <CheckCircleIcon /> : <RadioButtonUncheckedIcon />}
+                    onClick={() => toggleApprove(samples[lightboxIdx])}
+                    color={samples[lightboxIdx].approved ? 'success' : 'inherit'}>
+              {samples[lightboxIdx].approved ? 'Approved' : 'Approve'}
+            </Button>
+          </DialogActions>
+        </Dialog>
+      )}
     </Box>
   );
 };
