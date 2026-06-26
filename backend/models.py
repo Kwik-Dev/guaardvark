@@ -2787,6 +2787,16 @@ class Subject(db.Model):
     # died, …). Surfaced on the Cast card so a 'failed' status isn't a dead end
     # with no explanation. Cleared when a new run starts / succeeds.
     training_error = db.Column(db.Text, nullable=True)
+    # Link to the current/last unified progress job (process_id) for this training.
+    # Enables reliable cancel on delete, resume awareness, and correlation with
+    # the global job queue.
+    current_training_job_id = db.Column(db.String(64), nullable=True)
+    # Snapshot of the exact image paths (refs + approved samples) that were
+    # actually fed into the last *successful* training run. This lets the UI
+    # show "images used in training to date" vs the current pool, and detect
+    # whether a catch-up/amend is needed.
+    last_trained_image_paths = db.Column(db.JSON, nullable=False, default=list)
+    last_trained_at = db.Column(db.DateTime, nullable=True)
     # Whether this Subject is an identity-locked cast member that REQUIRES a
     # trained LoRA before a production can leave the casting stage. Characters
     # default True; props/environments default False (they are generated inline
@@ -2814,6 +2824,9 @@ class Subject(db.Model):
             "lora_path": self.lora_path,
             "lora_version": self.lora_version,
             "training_status": self.training_status,
+            "current_training_job_id": self.current_training_job_id,
+            "last_trained_image_paths": self.last_trained_image_paths or [],
+            "last_trained_at": self.last_trained_at.isoformat() if self.last_trained_at else None,
             "cast_required": self.cast_required,
             "bible": self.bible,
             "created_at": self.created_at.isoformat() if self.created_at else None,

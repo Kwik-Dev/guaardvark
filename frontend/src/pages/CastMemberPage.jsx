@@ -58,6 +58,10 @@ const CastMemberPage = () => {
   const [regenPrompt, setRegenPrompt] = useState('');
   const [lightboxIdx, setLightboxIdx] = useState(null); // open enlarged viewer at this samples[] index
 
+  // Local state to surface training progress from unified jobs (so frontend "knows"
+  // when GPU is crunching on long LoRA train, even if subject poll lags or health/celery 503s).
+  const [trainingJob, setTrainingJob] = useState(null);
+
   const loadSubject = useCallback(async () => {
     // Prefer efficient single-subject (with samples when convenient).
     // Falls back gracefully.
@@ -145,22 +149,77 @@ const CastMemberPage = () => {
   useEffect(() => {
     if (!subjectId) return;
     const procs = Array.from(activeProcesses.values());
-    const match = procs.find((p) => {
+
+    // Find any job for this subject (samples or training)
+    const subjectMatch = procs.find((p) => {
       const ad = p.additional_data || p.metadata || p;
       return String(ad.subject_id || ad.sample_subject_id || '') === String(subjectId);
     });
-    if (match) {
-      const st = (match.status || '').toLowerCase();
+
+    // Specifically for training job (from dispatch additional_data or kind)
+    const trainingMatch = procs.find((p) => {
+      const ad = p.additional_data || p.metadata || p;
+      const isThisSubject = String(ad.subject_id || '') === String(subjectId);
+      const isTrain = ad.operation === 'train_lora' || p.kind === 'training' || ad.kind === 'cast_training';
+      return isThisSubject && isTrain;
+    });
+
+    if (trainingMatch) {
+      const st = (trainingMatch.status || '').toLowerCase();
       if (['complete', 'end', 'error', 'cancelled', 'failed'].includes(st)) {
-        // terminal — refresh authoritative cast state
+        setTrainingJob(null);
         loadSubject();
         loadSamples();
         setPolling(false);
-      } else if (match.progress != null) {
-        // optional: could surface unified % alongside local progress bar
+      } else {
+        setTrainingJob({
+          id: trainingMatch.id || trainingMatch.job_id,
+          progress: trainingMatch.progress,
+          message: trainingMatch.message || trainingMatch.status,
+        });
+      }
+    } else if (trainingJob) {
+      // no longer in active processes
+      setTrainingJob(null);
+    }
+
+    if (subjectMatch) {
+      const st = (subjectMatch.status || '').toLowerCase();
+      if (['complete', 'end', 'error', 'cancelled', 'failed'].includes(st)) {
+        loadSubject();
+        loadSamples();
+        setPolling(false);
       }
     }
   }, [activeProcesses, subjectId, loadSubject, loadSamples]);
+
+  // Safety net: if the subject status updates to not-training (e.g. from a manual
+  // refresh or late poll), make sure we stop the sample/training poll spinner.
+  useEffect(() => {
+    if (subject && subject.training_status !== 'training') {
+      const stillGen = samples.some(isPending);
+      if (!stillGen) {
+        setPolling(false);
+      }
+    }
+  }, [subject, samples]);
+
+  // Slow background poll for subject status (every 30s) so that even if the
+  // main polling flag was turned off prematurely (e.g. due to race on complete
+  // event before DB commit), we eventually see the final 'trained' status and
+  // clear the spinner / footer state.
+  useEffect(() => {
+    if (!subjectId) return undefined;
+    const id = setInterval(() => {
+      loadSubject().then((s) => {
+        if (s && s.training_status !== 'training') {
+          const stillGen = samples.some(isPending);
+          if (!stillGen) setPolling(false);
+        }
+      }).catch(() => {});
+    }, 30000);
+    return () => clearInterval(id);
+  }, [subjectId, loadSubject, samples]);
 
   // Arrow-key / Escape navigation for the enlarged image viewer.
   useEffect(() => {
@@ -203,7 +262,10 @@ const CastMemberPage = () => {
   const handleGenerate = async () => {
     setBusy(true); setError(null);
     try {
-      const res = await generateSamples(subjectId);
+      // If we have a trained LoRA, ask the backend to use it so the generated
+      // samples are consistent with the trained/evolved character (new costumes etc.).
+      const options = subject.lora_path ? { use_trained_lora: true } : {};
+      const res = await generateSamples(subjectId, options);
       await loadSamples();
       if (res?.job_id) {
         console.debug('[CastMemberPage] generate job', res.job_id);
@@ -268,7 +330,7 @@ const CastMemberPage = () => {
       const res = await trainSubject(subjectId); // now may include job_id
       await loadSubject();
       if (res?.job_id) {
-        // job is now in unified system; the useUnifiedProgress effect above will react
+        setTrainingJob({ id: res.job_id, operation: 'train_lora' });
         console.debug('[CastMemberPage] train job started', res.job_id);
       }
       startPolling();
@@ -304,6 +366,18 @@ const CastMemberPage = () => {
   // the union of both.
   const trainable = refCount > 0 || approvedCount > 0;
   const training = subject.training_status === 'training';
+
+  // For "images that have been used in training to date" + amend/catch-up vision.
+  // IMPORTANT: This count is ONLY populated for REAL (non-mock) successful training runs.
+  // See backend/tasks/lora_trainer_tasks.py - sidecar "mock": false + file size check.
+  // If it shows N images here, training actually used (and succeeded on) exactly those images.
+  const lastTrainedPaths = subject.last_trained_image_paths || [];
+  const lastTrainedCount = lastTrainedPaths.length;
+  const currentPoolSize = refCount + approvedCount;  // approx size of union used for next train
+  const hasPendingAmend = lastTrainedCount > 0 && currentPoolSize > lastTrainedCount;
+  const trainingStatusLabel = hasPendingAmend && subject.training_status === 'trained'
+    ? 'trained (pending amend)'
+    : subject.training_status;
 
   return (
     <Box sx={{ p: { xs: 1, sm: 2 } }}>
@@ -369,12 +443,35 @@ const CastMemberPage = () => {
 
       {/* ── Training Data ──────────────────────────────────────────────────── */}
       {tab === 1 && (
-        <Box sx={{ maxWidth: 720 }}>
+        <Box sx={{ maxWidth: 1100, mx: 'auto', pb: 3, width: '100%' }}>
+          {/* Intro and status info stay at top */}
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
             Images that will be used for the *next* training run (uploaded refs + any approved generated samples).
-            The current LoRA version was trained on a previous snapshot of this set.
             Add new outfits / details then click Train to amend.
           </Typography>
+
+          {/* Prominent display of last-trained count and amend status */}
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
+            <Chip 
+              size="small" 
+              label={`Current pool: ${currentPoolSize} image${currentPoolSize === 1 ? '' : 's'}`} 
+              variant="outlined" 
+            />
+            {lastTrainedCount > 0 && (
+              <Chip 
+                size="small" 
+                label={`Last trained (real, verified): ${lastTrainedCount}`} 
+                color="success" 
+                variant="outlined" 
+              />
+            )}
+            {hasPendingAmend && (
+              <Chip size="small" label="Pending amend / catch-up" color="warning" />
+            )}
+            {lastTrainedCount === 0 && subject.training_status === 'trained' && (
+              <Chip size="small" label="Trained (mock or no images recorded)" color="default" />
+            )}
+          </Box>
           <DragDropImageUpload
             subjectId={subject.id}
             existingPaths={subject.ref_image_paths || []}
@@ -394,12 +491,31 @@ const CastMemberPage = () => {
           </Typography>
           <Button variant="contained" color="secondary" onClick={handleTrain}
                   disabled={busy || training || !trainable}>
-            {training ? 'Training…' : 'Train LoRA'}
+            {training ? 'Training…' : hasPendingAmend ? 'Train LoRA (catch-up/amend)' : 'Train LoRA'}
           </Button>
           {subject.training_status && subject.training_status !== 'untrained' && (
             <Typography variant="caption" color="text.secondary" sx={{ ml: 2 }}>
-              status: {subject.training_status}
+              status: {trainingStatusLabel} {lastTrainedCount > 0 ? `(last real verified trained on ${lastTrainedCount} images)` : ''}
             </Typography>
+          )}
+
+          {/* Live training progress from unified job system. This lets the frontend
+              know the GPU is actively training (see nvitop) even while the global
+              celery health endpoint returns 503/busy (worker monopolized by the
+              long-running LoRA task) and the subject DB status is only updated at the end.
+              The job progress is pushed via sockets/unified context. */}
+          {(training || trainingJob) && (
+            <Box sx={{ mt: 2, maxWidth: 480 }}>
+              <LinearProgress
+                variant={trainingJob?.progress != null ? "determinate" : "indeterminate"}
+                value={trainingJob?.progress || 0}
+              />
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                {trainingJob?.message || 'LoRA training running — GPU active'}
+                {trainingJob?.id && ` · job ${String(trainingJob.id).slice(0, 12)}...`}
+                {' · (health/celery may report busy/503; this is expected for long GPU tasks)'}
+              </Typography>
+            </Box>
           )}
 
           {/* Enhanced error + recovery for real hardware (RTX 4070 Ti SUPER etc.)
@@ -440,7 +556,7 @@ const CastMemberPage = () => {
             </Button>
             <Button variant="contained" startIcon={<AutoAwesomeIcon />} onClick={handleGenerate}
                     disabled={busy || planning || !samples.length}>
-              Generate images
+              {subject.lora_path ? 'Generate additional (using trained LoRA)' : 'Generate images'}
             </Button>
             <Button size="small" onClick={approveAllDone} disabled={!samples.some((s) => s.status === 'done')}>
               Approve all generated
@@ -539,7 +655,7 @@ const CastMemberPage = () => {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <Button variant="contained" color="secondary" onClick={handleTrain}
                     disabled={busy || training || approvedCount === 0}>
-              {training ? 'Training…' : 'Train LoRA'}
+              {training ? 'Training…' : hasPendingAmend ? 'Train LoRA (catch-up/amend)' : 'Train LoRA'}
             </Button>
             <Typography variant="caption" color="text.secondary">
               {approvedCount === 0

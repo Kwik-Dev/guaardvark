@@ -44,17 +44,25 @@ export const HealthProvider = ({ children }) => {
 
     const [backendRes, dbRes, celeryRes, redisRes] = results;
 
+    const celeryValue = celeryRes.status === 'fulfilled' ? celeryRes.value : null;
+    const isCeleryBusy = celeryValue && (celeryValue.status === 'busy' || (celeryValue.message || '').toLowerCase().includes('busy'));
+
     const newData = {
       backend: backendRes.status === 'fulfilled' ? backendRes.value : null,
       db: dbRes.status === 'fulfilled' ? dbRes.value : null,
-      celery: celeryRes.status === 'fulfilled' ? celeryRes.value : null,
+      celery: celeryValue,
       redis: redisRes.status === 'fulfilled' ? redisRes.value : null,
       lastUpdated: now,
       isLoading: false,
       errors: {
         backend: backendRes.status === 'rejected' ? backendRes.reason?.message : null,
         db: dbRes.status === 'rejected' ? dbRes.reason?.message : null,
-        celery: celeryRes.status === 'rejected' ? celeryRes.reason?.message : null,
+        // Do not surface celery "busy" (during long GPU tasks like LoRA training) as an error.
+        // Prevents repeated 503/timeout console spam while the worker is legitimately occupied.
+        // The CastMemberPage now tracks its own training jobs via unified progress.
+        celery: (celeryRes.status === 'rejected' || (celeryValue && celeryValue.status === 'down' && !isCeleryBusy))
+          ? (celeryRes.reason?.message || celeryValue?.error)
+          : null,
         redis: redisRes.status === 'rejected' ? redisRes.reason?.message : null
       }
     };

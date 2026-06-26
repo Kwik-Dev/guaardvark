@@ -48,7 +48,7 @@ def _sample_image_path(subject_id: int, index: int) -> str:
 
 # ── task implementations (plain functions for testability) ─────────────────────
 
-def generate_samples(subject_id: int, job_id: str | None = None) -> dict:
+def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool = False) -> dict:
     """Plan + generate the full reference-sheet for a Subject.
 
     Flow:
@@ -160,6 +160,11 @@ def generate_samples(subject_id: int, job_id: str | None = None) -> dict:
     # Refresh rows now that they have PKs (after commit).
     sample_rows = SubjectSample.query.filter_by(subject_id=subject_id).order_by(SubjectSample.index).all()
 
+    loras_for_gen = []
+    if use_lora and subject.lora_path:
+        loras_for_gen = [subject.lora_path]
+        log.info("Character Generator: using trained LoRA for additional consistent images: %s", subject.lora_path)
+
     done_count = 0
     failed_count = 0
 
@@ -193,7 +198,7 @@ def generate_samples(subject_id: int, job_id: str | None = None) -> dict:
             try:
                 image_generator.generate_image(
                     prompt=row.image_prompt or subject.name,
-                    loras=[],  # no LoRA yet — this IS the training-data pass
+                    loras=loras_for_gen,
                     output_path=output_path,
                     seed=seed,
                     model="flux-schnell",
@@ -344,9 +349,9 @@ def create_character_generation_tasks(celery_app: Celery):
     """
 
     @celery_app.task(name="character.generate_samples")
-    def generate_samples_task(subject_id: int, job_id: str | None = None):
+    def generate_samples_task(subject_id: int, job_id: str | None = None, use_lora: bool = False):
         with current_app.app_context():
-            return generate_samples(subject_id, job_id=job_id)
+            return generate_samples(subject_id, job_id=job_id, use_lora=use_lora)
 
     @celery_app.task(name="character.regen_sample")
     def regen_sample_task(sample_id: int, prompt_override: str | None = None,

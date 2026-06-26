@@ -1148,6 +1148,10 @@ try:
                 ("subjects", "voice_id", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS voice_id VARCHAR(128)"),
                 ("subjects", "trigger_word", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS trigger_word VARCHAR(64)"),
                 ("subjects", "cast_required", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS cast_required BOOLEAN"),
+                # Added for CastMemberPage last-trained tracking + job queue linkage (amend/catch-up, delete purge).
+                ("subjects", "current_training_job_id", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS current_training_job_id VARCHAR(64)"),
+                ("subjects", "last_trained_image_paths", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS last_trained_image_paths JSON NOT NULL DEFAULT '[]'::json"),
+                ("subjects", "last_trained_at", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS last_trained_at TIMESTAMP"),
                 ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
                 # Local source folder for swarm/agent code runs (added Phase 2).
@@ -1728,7 +1732,9 @@ def health_celery():
     try:
         from backend.celery_app import celery
         result = celery.send_task('backend.celery_tasks_isolated.ping', queue='health')
-        status = result.get(timeout=15)
+        # Short timeout: if the worker is busy with a long task (LoRA train etc.) we don't want
+        # the health check itself to block the UI for 15s. We detect "busy" below.
+        status = result.get(timeout=3)
 
         inspect = celery.control.inspect()
         active_tasks = inspect.active()
@@ -1754,7 +1760,29 @@ def health_celery():
     except Exception as exc:
         error_msg = str(exc)
         
+        # If the ping timed out, the worker is likely busy with a long task (e.g. LoRA training).
+        # Check active tasks via inspect instead of treating as hard "down".
+        # This prevents 503 spam in frontend health polling during GPU-heavy jobs.
         if "timeout" in error_msg.lower():
+            try:
+                inspect = celery.control.inspect()
+                active = inspect.active() or {}
+                scheduled = inspect.scheduled() or {}
+                reserved = inspect.reserved() or {}
+                has_work = any(
+                    len(tasks or []) > 0 for tasks in list(active.values()) + list(scheduled.values()) + list(reserved.values())
+                )
+                if has_work:
+                    worker_info = {
+                        "active_tasks": sum(len(v or []) for v in active.values()),
+                        "message": "Worker processing long-running task (e.g. training)"
+                    }
+                    busy_response = jsonify({"status": "busy", **worker_info}), 200
+                    _celery_health_cache["data"] = busy_response
+                    _celery_health_cache["timestamp"] = current_time
+                    return busy_response
+            except Exception:
+                pass
             error_msg = f"Worker busy or overloaded: {error_msg}"
         
         error_response = jsonify({

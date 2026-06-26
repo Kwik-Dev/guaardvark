@@ -95,8 +95,11 @@ export const planCharacter = async (id, body = {}) => {
 };
 
 // Dispatch the FLUX image loop for the whole sheet (ASYNC — returns {task_id}).
-export const generateSamples = async (id) => {
-  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/generate`);
+// Pass {use_trained_lora: true} after a successful training to generate additional
+// images that are consistent with the trained LoRA (per user vision for the
+// Generate Character tab).
+export const generateSamples = async (id, options = {}) => {
+  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/generate`, options);
   return response.data;
 };
 

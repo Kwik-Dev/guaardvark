@@ -20,7 +20,7 @@ function ExistingThumb({ subjectId, index, name }) {
     return <Chip icon={<ImageIcon sx={{ fontSize: 16 }} />} label={name} size="small" variant="outlined" />;
   }
   return (
-    <Box sx={{ width: 64, height: 64, borderRadius: 1, overflow: "hidden", border: 1, borderColor: "divider" }}>
+    <Box sx={{ width: 72, height: 72, borderRadius: 1, overflow: "hidden", border: 1, borderColor: "divider" }}>
       <img
         src={`${API_BASE}/cast-library/subjects/${subjectId}/refs/${index}/image`}
         alt={name}
@@ -233,40 +233,33 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
       )}
 
       {staged.length > 0 && (
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mt: 1 }}>
-          {staged.map((s, idx) => (
-            <Box key={idx} sx={{ position: "relative", width: 64, height: 64 }}>
-              <img
-                src={s.previewUrl}
-                alt={s.file.name}
-                style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4 }}
-              />
-              <IconButton
-                size="small"
-                onClick={(e) => { e.stopPropagation(); removeStaged(idx); }}
-                sx={{
-                  position: "absolute", top: -8, right: -8,
-                  bgcolor: "background.paper",
-                  "&:hover": { bgcolor: "background.paper" },
-                }}
-              >
-                <CloseIcon sx={{ fontSize: 14 }} />
-              </IconButton>
-            </Box>
-          ))}
-        </Box>
-      )}
-
-      {existingPaths.length > 0 && (
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mt: 1 }}>
-          {existingPaths.map((p, idx) => (
-            <Box key={idx} sx={{ position: "relative", display: "inline-flex" }}>
-              <ExistingThumb subjectId={subjectId} index={idx} name={p.split("/").pop()} />
-              {subjectId && (
+        <Box 
+          sx={{ 
+            maxHeight: 140, 
+            overflowY: 'auto', 
+            border: '1px solid', 
+            borderColor: 'divider', 
+            borderRadius: 1, 
+            p: 1, 
+            mt: 1,
+            bgcolor: 'action.hover',
+            width: '100%'
+          }}
+        >
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+            Staged uploads ({staged.length}) — scroll if needed
+          </Typography>
+          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, justifyContent: 'flex-start' }}>
+            {staged.map((s, idx) => (
+              <Box key={idx} sx={{ position: "relative", width: 72, height: 72 }}>
+                <img
+                  src={s.previewUrl}
+                  alt={s.file.name}
+                  style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4 }}
+                />
                 <IconButton
                   size="small"
-                  aria-label="delete reference image"
-                  onClick={(e) => { e.stopPropagation(); setConfirmIdx(idx); }}
+                  onClick={(e) => { e.stopPropagation(); removeStaged(idx); }}
                   sx={{
                     position: "absolute", top: -8, right: -8,
                     bgcolor: "background.paper",
@@ -275,9 +268,50 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
                 >
                   <CloseIcon sx={{ fontSize: 14 }} />
                 </IconButton>
-              )}
-            </Box>
-          ))}
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      )}
+
+      {existingPaths.length > 0 && (
+        <Box 
+          sx={{ 
+            maxHeight: 180, 
+            overflowY: 'auto', 
+            border: '1px solid', 
+            borderColor: 'divider', 
+            borderRadius: 1, 
+            p: 1, 
+            mt: 1,
+            bgcolor: 'action.hover',
+            width: '100%'
+          }}
+        >
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+            Current references ({existingPaths.length}) — scroll to see all
+          </Typography>
+          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, justifyContent: 'flex-start' }}>
+            {existingPaths.map((p, idx) => (
+              <Box key={idx} sx={{ position: "relative", display: "inline-flex" }}>
+                <ExistingThumb subjectId={subjectId} index={idx} name={p.split("/").pop()} />
+                {subjectId && (
+                  <IconButton
+                    size="small"
+                    aria-label="delete reference image"
+                    onClick={(e) => { e.stopPropagation(); setConfirmIdx(idx); }}
+                    sx={{
+                      position: "absolute", top: -8, right: -8,
+                      bgcolor: "background.paper",
+                      "&:hover": { bgcolor: "background.paper" },
+                    }}
+                  >
+                    <CloseIcon sx={{ fontSize: 14 }} />
+                  </IconButton>
+                )}
+              </Box>
+            ))}
+          </Box>
         </Box>
       )}
 
