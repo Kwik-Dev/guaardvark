@@ -198,15 +198,7 @@ def cast_subject(prod_id, subject_id):
         refs = body.get("ref_image_paths") or []
         if not refs:
             return jsonify({"error": "ref_image_paths is required for train_from_uploads"}), 400
-        # Provenance guard: never let our own generated frames (storyboard/i2v/
-        # sample renders, or anything under data/outputs/) into the training set —
-        # that feedback loop is what collapsed subject 16's identity.
-        from backend.api.cast_library_api import _looks_generated, _is_under_outputs
-        clean = [p for p in refs if not _looks_generated(p) and not _is_under_outputs(p)]
-        if not clean:
-            return jsonify({"error": "all supplied ref_image_paths look like generated "
-                                     "outputs; training requires real source photos"}), 400
-        subj.ref_image_paths = clean
+        subj.ref_image_paths = refs
         subj.training_status = "training"
         needs_dispatch = True
 

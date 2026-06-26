@@ -53,44 +53,13 @@ def _resolve_ref_path(p: str) -> str | None:
 _ALLOWED_REF_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _MAX_REF_BYTES = 25 * 1024 * 1024  # 25 MB per image — generous, but caps runaway uploads.
 
-# Provenance guard. Training a character on the system's OWN generated frames is a
-# feedback loop that collapses identity — it's exactly what polluted subject 16
-# (44 of 51 "references" were storyboard/i2v outputs re-dropped into cast_refs).
-# These are the filename_prefixes the generators stamp on their outputs
-# (SaveImage filename_prefix in comfyui_image_generator / *_video_generator, plus
-# the character-sample writer). Heuristic only — a user CAN rename a file past this,
-# and that's documented honestly — but it catches the common "drag the nice
-# storyboard frame back in as a reference" mistake that caused the original bug.
-_GENERATED_NAME_PREFIXES = ("storyboard-", "storyboard_", "wan22_", "wan22-",
-                            "cogvideo", "sample_", "keyframe_", "keyframe-",
-                            "review-", "i2v_", "i2v-")
-_GENERATED_NAME_SUBSTRINGS = ("_i2v_", "-i2v-", "flux-dev_", "flux-schnell_",
-                              "storyboard-flux")
-
-
-def _looks_generated(filename: str) -> bool:
-    """True if a filename looks like one of OUR generated outputs (not a real
-    source photo). Used to keep generated frames out of a character's reference
-    set. Heuristic on the basename only — see _GENERATED_NAME_PREFIXES note."""
-    base = Path(filename or "").name.lower()
-    if base.startswith(_GENERATED_NAME_PREFIXES):
-        return True
-    return any(tok in base for tok in _GENERATED_NAME_SUBSTRINGS)
-
-
-def _is_under_outputs(stored_path: str) -> bool:
-    """True if a stored ref path resolves INTO data/outputs/ (the generated-media
-    tree). A real reference never lives there. Reuses _resolve_ref_path so the
-    same containment logic applies; falls back to a substring check when the file
-    isn't on disk yet (e.g. a create-API body referencing a future path)."""
-    if not stored_path:
-        return False
-    resolved = _resolve_ref_path(stored_path)
-    needle = f"{os.sep}outputs{os.sep}"
-    if resolved and needle in f"{os.sep}{os.path.relpath(resolved, _PROJECT_ROOT)}":
-        return True
-    norm = stored_path.replace("/", os.sep)
-    return needle in norm or norm.startswith(f"outputs{os.sep}") or "/outputs/" in stored_path
+# NOTE: there is intentionally NO "generated-frame" provenance guard here. An earlier
+# version rejected uploads whose filenames looked like the system's own outputs
+# (storyboard/i2v/sample frames) to avoid a model-collapse feedback loop. Removed at
+# Dean's call (2026-06-25): characters here are often AI-generated to begin with, so
+# "real photo vs generated" is a false distinction — generated-but-on-model frames are
+# legitimate training material. Curating a coherent reference pool is the user's job;
+# the system should not second-guess which images belong to a character.
 
 
 def _cast_ref_dir(subject_id: int) -> Path:
@@ -161,16 +130,10 @@ def create_subject():
         return jsonify({"error": f"kind must be one of {sorted(VALID_KINDS)}"}), 400
     if not name:
         return jsonify({"error": "name is required"}), 400
-    # Provenance guard on the create-API body: ref_image_paths can be set directly
-    # here, so strip any path that is one of our generated outputs or lives under
-    # data/outputs/ — references must be real source photos (subject-16 fix).
-    raw_refs = body.get("ref_image_paths") or []
-    clean_refs = [p for p in raw_refs
-                  if not _looks_generated(p) and not _is_under_outputs(p)]
     s = Subject(
         kind=kind, name=name,
         description=body.get("description") or "",
-        ref_image_paths=clean_refs,
+        ref_image_paths=body.get("ref_image_paths") or [],
         trigger_word=(body.get("trigger_word") or "").strip() or None,
         voice_id=(body.get("voice_id") or "").strip() or None,
     )
@@ -321,16 +284,6 @@ def upload_subject_refs(subject_id):
         ext = Path(safe_name).suffix.lower()
         if ext not in _ALLOWED_REF_EXTS:
             skipped.append({"name": f.filename, "reason": f"unsupported extension {ext!r}"})
-            continue
-        # Provenance guard: refuse our own generated frames so training stays on
-        # real source photos (the subject-16 model-collapse fix). Check both the
-        # uploaded filename and the secured name in case secure_filename mangled it.
-        if _looks_generated(f.filename) or _looks_generated(safe_name):
-            skipped.append({
-                "name": f.filename,
-                "reason": "looks like a generated output (storyboard/i2v/sample frame); "
-                          "references must be real source photos, not the model's own renders",
-            })
             continue
 
         # Resolve collisions by appending -1, -2, … so multiple uploads with
