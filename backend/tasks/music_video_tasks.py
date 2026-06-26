@@ -246,7 +246,14 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
     if isinstance(subject_ids, (list, tuple)) and subject_ids:
         from backend.models import Subject
         subjects = [db.session.get(Subject, sid) for sid in subject_ids]
-        subj_paths, lock = subjects_to_lock([x for x in subjects if x], include_bible=True)
+        # include_bible=False ON PURPOSE: the appearance bible is ~195 tokens, which
+        # ALONE blows past SDXL CLIP's 77-token limit — front-loading it truncates the
+        # per-cut scene/style ("space-punk, sci-fi scenery") clean off the prompt, so
+        # every keyframe collapsed to a plain character portrait. The trained LoRA
+        # already encodes the character strongly (the Generate-Character tab proves it),
+        # so the trigger token is enough to lock identity while leaving the token budget
+        # for the SCENE. (If identity ever drifts we can add back a 1-line short bible.)
+        subj_paths, lock = subjects_to_lock([x for x in subjects if x], include_bible=False)
         lora_paths.extend(subj_paths)
 
     # De-dupe paths while preserving order.
@@ -262,8 +269,10 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
         )
         return [], base_prompt
 
-    # Identity lock goes at the FRONT of the prompt (trigger(s) → bible(s) → per-cut scene),
-    # e.g. "sage_harlow, chin-length wavy black bob, ..., <scene for this cut>".
+    # Trigger token goes at the FRONT (binds the LoRA), then the per-cut scene — e.g.
+    # "sage_harlow, neon space-punk alley, sci-fi cityscape, ...". No bible here (see
+    # above): keeping the prompt short lets the scene/style actually survive SDXL's
+    # 77-token CLIP budget instead of being truncated by a 195-token appearance bible.
     prompt = apply_lock(base_prompt, lock)
     log.info("music_video %s keyframe: applying %d LoRA(s) %s (bible-lock=%s)",
              mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths], bool(lock))
@@ -623,7 +632,10 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
             # in ComfyUIImageGenerator is required for identity. When false, we can in the
             # future swap to FLUX or other high-aesthetic models for prettier keyframes
             # before feeding to the chosen I2V (Wan2.2 I2V etc.).
-            kf_steps = s.get("keyframe_steps") or 30
+            # SDXL keyframe steps. Bumped 30→45 for crisper detail on the identity anchor
+            # (per Dean) — it's a single still, so the extra steps are cheap vs the i2v.
+            # Operator can override via settings.keyframe_steps.
+            kf_steps = s.get("keyframe_steps") or 45
             # Thread the trained character/style LoRA(s) into the SDXL keyframe so
             # identity actually shows up in the still that the i2v then animates
             # (mirrors Film Crew's storyboard_artist). No-op unless LoRA
