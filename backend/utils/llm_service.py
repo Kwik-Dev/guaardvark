@@ -548,7 +548,7 @@ def get_default_embed_model():
 
         embed_model = OllamaEmbedding(
             model_name=model_name,
-            base_url="http://localhost:11434",
+            base_url=OLLAMA_BASE_URL,
             ollama_additional_kwargs={"mirostat": 0},
             keep_alive=0,  # Unload after use to free VRAM for chat
         )

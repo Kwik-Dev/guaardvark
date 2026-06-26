@@ -1490,7 +1490,7 @@ OLLAMA_ENABLED=$(plugin_effective_enabled "ollama" "$OLLAMA_PLUGIN_JSON")
 
 if [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ]; then
     # Step 1: Check if already running
-    if curl -sf --max-time 3 http://localhost:11434/ >/dev/null 2>&1; then
+    if curl -sf --max-time 3 http://127.0.0.1:11434/ >/dev/null 2>&1; then
         vader_success "Ollama service is already active"
     else
         # Step 2: Kill any zombie process holding the port but not responding
@@ -1508,7 +1508,7 @@ if [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ]; then
         if command_exists "systemctl" && sudo -n systemctl start ollama >> "$BACKEND_STARTUP_LOG_FILE" 2>&1; then
             for _i in {1..5}; do
                 sleep 2
-                if curl -sf --max-time 3 http://localhost:11434/ >/dev/null 2>&1; then
+                if curl -sf --max-time 3 http://127.0.0.1:11434/ >/dev/null 2>&1; then
                     OLLAMA_STARTED=1
                     vader_success "Ollama service started (systemctl)"
                     break
@@ -1525,7 +1525,7 @@ if [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ]; then
             echo "$OLLAMA_PID" > "$SCRIPT_DIR/pids/ollama.pid"
             for _i in {1..8}; do
                 sleep 2
-                if curl -sf --max-time 3 http://localhost:11434/ >/dev/null 2>&1; then
+                if curl -sf --max-time 3 http://127.0.0.1:11434/ >/dev/null 2>&1; then
                     OLLAMA_STARTED=1
                     vader_success "Ollama process started (direct, PID: $OLLAMA_PID)"
                     break
@@ -1563,7 +1563,7 @@ fi
 # GUAARDVARK_BOOTSTRAP_MODELS (default on; set =0 to skip pulls entirely).
 if [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ] \
    && [ "${GUAARDVARK_BOOTSTRAP_MODELS:-1}" != "0" ] \
-   && curl -sf --max-time 3 http://localhost:11434/ >/dev/null 2>&1; then
+   && curl -sf --max-time 3 http://127.0.0.1:11434/ >/dev/null 2>&1; then
 
     # Detect RAM(GB) + arch. Prefer hardware_detector's hardware.json if present
     # (authoritative, already arch/RAM-aware); else fall back to uname + meminfo.

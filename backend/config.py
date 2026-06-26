@@ -246,7 +246,12 @@ else:
 
 DEFAULT_LLM = None
 DEFAULT_EMBEDDING_MODEL = None
-OLLAMA_BASE_URL = "http://localhost:11434"
+# Use 127.0.0.1, not "localhost": on macOS "localhost" resolves to both ::1 and
+# 127.0.0.1, and if Ollama is bound IPv4-only (the default for Ollama.app and
+# `brew services`), a connect to the ::1 address can fail — so the backend "can't see"
+# an Ollama that other apps reach fine. 127.0.0.1 is unambiguous. Override with the
+# OLLAMA_BASE_URL env var (full URL) to point Guaardvark at an Ollama elsewhere.
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 ACTIVE_MODEL_FILE = os.path.join(STORAGE_DIR, "active_model.json")
 
 # --- Cloud LLM providers (optional, opt-in; OFF by default) -------------------
@@ -566,7 +571,7 @@ def get_default_embedding_model():
 
         return OllamaEmbedding(
             model_name=model_name,
-            base_url="http://localhost:11434",
+            base_url=OLLAMA_BASE_URL,
         )
     except Exception as e:
         raise RuntimeError(

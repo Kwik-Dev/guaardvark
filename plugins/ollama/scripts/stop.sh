@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-HEALTH_URL="http://localhost:11434/"
+HEALTH_URL="http://127.0.0.1:11434/"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 PIDS_DIR="$PROJECT_ROOT/pids"
