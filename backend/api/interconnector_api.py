@@ -3425,8 +3425,13 @@ def apply_updates():
         backup_path = None
         
         if valid_files:
+            # remote_wins: the GUI "Update Now" is an authoritative master->client pull, so master
+            # content always wins on a hash mismatch (backup taken first). Using "last_write_wins"
+            # here was the bug behind "updates never stick": its mtime gate skipped every file whose
+            # local mtime was newer than master's (the normal case on a deployed client), so the
+            # hash never converged and the same updates reappeared on every check.
             success, apply_result = file_sync_service.apply_files_atomic(
-                valid_files, "last_write_wins", create_backup=True
+                valid_files, "remote_wins", create_backup=True
             )
             asum = apply_result.get("summary", {})
             summary["total_processed"] = asum.get("total_processed", 0)
@@ -3521,8 +3526,12 @@ def apply_updates():
         except Exception as marker_err:
             logger.debug(f"[UPDATES] Could not write last_core_sync marker (non-fatal): {marker_err}")
 
+        # "applied" = files actually WRITTEN (created + updated), not total_processed (which counts
+        # skips). Reporting total_processed made a 0-write run look like a success, masking the
+        # "nothing actually changed" loop.
+        files_written = summary["total_created"] + summary["total_updated"]
         return success_response({
-            "applied": summary["total_processed"],
+            "applied": files_written,
             "created": summary["total_created"],
             "updated": summary["total_updated"],
             "backed_up": summary["total_backed_up"],
@@ -3532,7 +3541,9 @@ def apply_updates():
             "details": details,
             "timestamp": datetime.now().isoformat(),
             "history_recorded": True,  # signals that the sync was marked
-        }, f"Successfully applied {summary['total_processed']} updates")
+        }, f"Successfully applied {files_written} updates "
+           f"({summary['total_created']} new, {summary['total_updated']} modified, "
+           f"{summary['total_skipped']} skipped)")
         
     except Exception as e:
         logger.error(f"Error applying updates: {e}", exc_info=True)

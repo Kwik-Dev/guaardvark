@@ -624,7 +624,23 @@ class InterconnectorFileSyncService:
             
             logger.warning(f"[FILE_SYNC] File differs from expected state - possible manual modification detected: {relative_path}")
             logger.warning(f"[FILE_SYNC] Local file: modified={local_modified}, hash={local_hash[:16]}...")
-            
+
+            if conflict_strategy == "remote_wins":
+                # Authoritative master->client pull (the "Update Now" core-code sync): master is the
+                # source of truth, so overwrite whenever content differs. The mtime gate in
+                # last_write_wins below caused the "updates never stick" loop: a freshly deployed
+                # client stamps every file with a recent mtime, so local_modified > remote_modified
+                # for all differing files -> they were skipped, the hash never converged, and the
+                # same N updates reappeared on every check forever. A backup is taken first so any
+                # local edit is recoverable.
+                logger.info(f"[FILE_SYNC] remote_wins: master is authoritative, overwriting: {relative_path}")
+                if create_backup:
+                    self._create_backup(file_path)
+                    stats["backed_up"] = True
+                self._write_file(file_path, self._get_file_content(file_data))
+                stats["updated"] = True
+                return True, None, stats
+
             if conflict_strategy == "last_write_wins":
                 remote_modified_str = file_data.get("modified_at", "")
                 try:
@@ -728,7 +744,16 @@ class InterconnectorFileSyncService:
                     local_hash = self.get_file_hash(str(file_path))
                     remote_hash = file_data.get("hash")
                     if local_hash != remote_hash:
-                        if conflict_strategy == "last_write_wins":
+                        if conflict_strategy == "remote_wins":
+                            # Master always wins, so this file WILL be overwritten — back it up
+                            # unconditionally (apply_file is called with create_backup=False below,
+                            # so the backup must happen here in the atomic pre-pass).
+                            if create_backup:
+                                backup_path = self._create_backup_return_path(file_path)
+                                if backup_path:
+                                    backups.append((file_path, backup_path))
+                                    result["summary"]["total_backed_up"] += 1
+                        elif conflict_strategy == "last_write_wins":
                             remote_modified_str = file_data.get("modified_at", "")
                             try:
                                 remote_modified = (
