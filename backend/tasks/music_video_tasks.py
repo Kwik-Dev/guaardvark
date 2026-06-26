@@ -207,6 +207,44 @@ def _resolve_song_path(mv: MusicVideo) -> str | None:
     return None
 
 
+# Identity features worth pinning against drift — the LoRA holds the face, but hair
+# color/length and eye color are the bits that wander shot-to-shot. We pull ONLY the
+# clauses mentioning these, in PRIORITY ORDER (hair + eyes first — most drift-prone and
+# distinctive), so the anchor stays tiny (fits alongside the scene in SDXL's 77-token
+# budget) instead of dumping the whole ~195-token bible.
+_IDENTITY_TIERS = (
+    ("hair", "bangs"),                              # 1. hair: drifts most, most distinctive
+    ("eyes", "eye ", "eye-"),                        # 2. eye color
+    ("tattoo", "beauty mark", "freckl"),             # 3. distinctive marks
+    ("complexion", "skin", "lips", "jaw", "cheekbone"),  # 4. face/skin if room remains
+)
+
+
+def _short_identity_phrase(subjects, max_words: int = 28) -> str:
+    """A compact identity anchor (~max_words) drawn from each subject's bible —
+    the highest-value appearance clauses (hair + eyes first), not the whole bible."""
+    import re
+    out: list[str] = []
+    for subj in subjects or []:
+        bible = (getattr(subj, "bible", None) or "").replace("\n", " ").strip()
+        if not bible:
+            continue
+        # Split on SENTENCE boundaries (not commas) so "Her eyes are large, expressive
+        # hazel-green" stays one clause — comma-splitting dropped the eye color.
+        clauses = [c.strip() for c in re.split(r"[.;]", bible) if c.strip()]
+        picked: list[str] = []
+        seen: set[str] = set()
+        for tier in _IDENTITY_TIERS:
+            for c in clauses:
+                if c not in seen and any(k in c.lower() for k in tier):
+                    picked.append(c)
+                    seen.add(c)
+        if picked:
+            words = ", ".join(picked).split()
+            out.append(" ".join(words[:max_words]))
+    return "; ".join(o for o in out if o)
+
+
 def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tuple[list[str], str]:
     """Resolve the trained LoRA path(s) for the music-video keyframe and prepend
     each Subject's trigger word to the prompt — mirroring Film Crew's
@@ -242,6 +280,7 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
     # cast_lock.subjects_to_lock — trigger(s) bind the LoRA, verbatim bible(s) pin constant
     # features like hair length the LoRA under-constrains).
     lock = ""
+    subjects: list = []
     subject_ids = s.get("subject_ids") or []
     if isinstance(subject_ids, (list, tuple)) and subject_ids:
         from backend.models import Subject
@@ -269,11 +308,16 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
         )
         return [], base_prompt
 
-    # Trigger token goes at the FRONT (binds the LoRA), then the per-cut scene — e.g.
-    # "sage_harlow, neon space-punk alley, sci-fi cityscape, ...". No bible here (see
-    # above): keeping the prompt short lets the scene/style actually survive SDXL's
-    # 77-token CLIP budget instead of being truncated by a 195-token appearance bible.
+    # Trigger token goes at the FRONT (binds the LoRA), then the per-cut scene, then a
+    # SHORT identity anchor — e.g. "sage_harlow, neon space-punk alley, sci-fi cityscape,
+    # shoulder-length wavy black hair with teal highlights, hazel-green eyes". Scene
+    # comes before the anchor so it keeps priority in SDXL's 77-token budget, while the
+    # tiny anchor (hair/eyes/marks only, ~22 words) curbs the drift the bare trigger let
+    # in — without the 195-token full bible that truncated the scene entirely.
     prompt = apply_lock(base_prompt, lock)
+    anchor = _short_identity_phrase([x for x in subjects if x])
+    if anchor:
+        prompt = f"{prompt}, {anchor}"
     log.info("music_video %s keyframe: applying %d LoRA(s) %s (bible-lock=%s)",
              mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths], bool(lock))
     return lora_paths, prompt
