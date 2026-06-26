@@ -48,8 +48,12 @@ def _settings(mv: MusicVideo) -> dict:
     s.setdefault("fps", 24)
     s.setdefault("width", 1920)
     s.setdefault("height", 1080)
-    s.setdefault("still_width", 1024)
-    s.setdefault("still_height", 576)
+    # Keyframe still at SDXL's native 16:9 bucket (1344x768 ≈ 1.03MP, matching SDXL's
+    # ~1.05MP training res). The old 1024x576 (0.59MP) was well under native and made
+    # SDXL render soft/blurry — a sharp, high-res identity anchor also gives the i2v a
+    # far better frame to animate (it cover-scales down to i2v_width/height anyway).
+    s.setdefault("still_width", 1344)
+    s.setdefault("still_height", 768)
     # i2v RENDER dims — 16:9 landscape (832x480 = WAN's standard 480p, low OOM risk,
     # divisible-by-16). WITHOUT this the request defaults to 512x512 and every clip
     # renders SQUARE, then the fill cover-crops it (the "square video" bug). The
@@ -75,13 +79,18 @@ def _settings(mv: MusicVideo) -> dict:
     # word with none of the weights. So when consistency is ON and a LoRA reference
     # is reachable, never let keyframe_model stay LoRA-blind (flux-schnell / unset).
     _lora_reachable = bool(s.get("loras") or s.get("lora_paths") or s.get("subject_ids"))
-    _kf = (s.get("keyframe_model") or "").strip().lower()
     if s.get("use_lora_consistency") and _lora_reachable:
-        # Promote ONLY a LoRA-blind choice (unset or flux-schnell). Respect an
-        # explicit LoRA-capable pick (flux-dev-lora / sdxl / sdxl-lora). flux-dev-lora
-        # matches the frontend promotion and the FLUX-dev character LoRA route.
-        if not _kf or "schnell" in _kf:
-            s["keyframe_model"] = "flux-dev-lora"
+        # FORCE the SDXL keyframe model for any character LoRA. This app's trainer
+        # produces SDXL LoRAs, and comfyui_image_generator's capability guard routes
+        # ANY LoRA generation to the SDXL branch regardless of the requested model.
+        # So the keyframe model MUST be "sdxl" — not just so the LoRA binds, but so the
+        # model-aware LoRA strength resolves to SDXL's 0.25. A "flux-dev-lora" pick
+        # (the old promote target, and a frontend option) resolves to 0.9, which then
+        # FRIES the SDXL LoRA on the rerouted SDXL branch → blurry/teal mush keyframes
+        # (the Music-Video storyboards looking far worse than the Generate-Character
+        # tab, which already uses SDXL + 0.25). We override any value here, including an
+        # explicit flux-dev-lora, because none of them change that the bytes are SDXL.
+        s["keyframe_model"] = "sdxl"
     else:
         s.setdefault("keyframe_model", "flux-schnell")
     # --- Playback / cost tuning (per-video; surfaced in the create form) -------
