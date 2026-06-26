@@ -34,6 +34,15 @@ from backend.models import (
 )
 from backend.services.interconnector_sync_service import get_sync_service
 from backend.services.interconnector_file_sync_service import get_file_sync_service
+from backend.services.interconnector_sync_registry import (
+    SyncRegistry,
+    classify_files,
+    ensure_backfilled,
+    AVAILABLE_ACTIONS,
+    ACTION_CREATE,
+    ACTION_UPDATE,
+    ACTION_DRIFT,
+)
 from backend.utils.response_utils import (
     success_response,
     error_response,
@@ -3069,65 +3078,49 @@ def check_for_updates():
         
         # Build lookup dict of local files
         local_lookup = {f["path"]: f for f in local_files}
-        
-        # Compare files
-        updates_needed = []
-        new_files = []
-        modified_files = []
-        
-        for master_file in master_files:
-            path = master_file.get("path")
-            master_hash = master_file.get("hash")
-            
-            local_file = local_lookup.get(path)
-            
-            if not local_file:
-                # New file on master
-                logger.debug(f"[UPDATES] New file on master: {path}")
-                new_files.append({
-                    "path": path,
-                    "action": "create",
-                    "size": master_file.get("size", 0)
-                })
-                updates_needed.append(master_file)
-            elif local_file.get("hash") != master_hash:
-                # File differs
-                logger.debug(f"[UPDATES] File differs: {path} (local={local_file.get('hash', 'NULL')[:16] if local_file.get('hash') else 'NULL'}... vs master={master_hash[:16] if master_hash else 'NULL'}...)")
-                modified_files.append({
-                    "path": path,
-                    "action": "update",
-                    "size": master_file.get("size", 0),
-                    "local_modified": local_file.get("modified_at"),
-                    "master_modified": master_file.get("modified_at")
-                })
-                updates_needed.append(master_file)
-        
+
+        # Consult the REAL registry (data/interconnector/synced_hashes.json) — the
+        # durable per-path record of what this client has actually synced. On an
+        # upgraded/existing client with no registry yet, seed it from the currently-
+        # converged baseline so a converged client shows 0 (not a spurious full list).
+        registry = SyncRegistry(file_sync_service.get_project_root())
+        ensure_backfilled(
+            registry, master_files, local_lookup,
+            node_name=config.get("node_name"), master_url=master_url, master_version=master_timestamp,
+        )
+        classified = classify_files(master_files, local_lookup, registry)
+        updates_needed = [c for c in classified if c["action"] in AVAILABLE_ACTIONS]
+        new_files = [c for c in updates_needed if c["action"] == ACTION_CREATE]
+        modified_files = [c for c in updates_needed if c["action"] == ACTION_UPDATE]
+        drift_files = [c for c in updates_needed if c["action"] == ACTION_DRIFT]
+
         # Build summary by directory
         summary = {"backend": 0, "frontend": 0, "other": 0}
-        for f in updates_needed:
-            path = f.get("path", "")
+        for c in updates_needed:
+            path = c.get("path", "")
             if path.startswith("backend/"):
                 summary["backend"] += 1
             elif path.startswith("frontend/"):
                 summary["frontend"] += 1
             else:
                 summary["other"] += 1
-        
+
         # Get local version (most recent file modification)
         local_version = None
         if local_files:
             local_times = [f.get("modified_at") for f in local_files if f.get("modified_at")]
             if local_times:
                 local_version = max(local_times)
-        
+
         logger.info(f"[UPDATES] Check complete: {len(updates_needed)} updates available "
-                   f"({len(new_files)} new, {len(modified_files)} modified)")
-        
+                   f"({len(new_files)} new, {len(modified_files)} modified, {len(drift_files)} drift)")
+
         return success_response({
             "available": len(updates_needed) > 0,
             "count": len(updates_needed),
             "new_files": len(new_files),
             "modified_files": len(modified_files),
+            "drift_files": len(drift_files),
             "summary": summary,
             "master_version": master_timestamp,
             "local_version": local_version,
@@ -3246,41 +3239,50 @@ def preview_updates():
         file_sync_service = get_file_sync_service()
         local_files = file_sync_service.scan_files(include_content=False)
         local_lookup = {f["path"]: f for f in local_files}
-        
+        master_timestamp = master_data.get("data", {}).get("timestamp")
+
+        # Same registry-aware classification as /updates/check, so preview and check agree.
+        registry = SyncRegistry(file_sync_service.get_project_root())
+        ensure_backfilled(
+            registry, master_files, local_lookup,
+            node_name=config.get("node_name"), master_url=master_url, master_version=master_timestamp,
+        )
+        classified = classify_files(master_files, local_lookup, registry)
+
         # Build detailed preview
         preview_files = []
         total_size = 0
-        
-        for master_file in master_files:
-            path = master_file.get("path")
-            master_hash = master_file.get("hash")
-            file_size = master_file.get("size", 0)
-            
-            local_file = local_lookup.get(path)
-            
-            if not local_file:
+
+        for c in classified:
+            if c["action"] not in AVAILABLE_ACTIONS:
+                continue
+            path = c["path"]
+            file_size = c.get("size", 0)
+            if c["action"] == ACTION_CREATE:
                 preview_files.append({
                     "path": path,
                     "action": "create",
                     "size": file_size,
                     "size_display": _format_size(file_size),
-                    "master_modified": master_file.get("modified_at")
+                    "master_modified": c.get("master_modified"),
                 })
-                total_size += file_size
-            elif local_file.get("hash") != master_hash:
-                size_diff = file_size - local_file.get("size", 0)
+            else:
+                # update or drift — both resolve to master-wins overwrite.
+                local_size = (local_lookup.get(path) or {}).get("size", 0)
+                size_diff = file_size - local_size
                 preview_files.append({
                     "path": path,
-                    "action": "update",
+                    "action": c["action"],  # "update" | "drift"
                     "size": file_size,
                     "size_display": _format_size(file_size),
                     "size_diff": size_diff,
                     "size_diff_display": f"+{_format_size(size_diff)}" if size_diff >= 0 else f"-{_format_size(abs(size_diff))}",
-                    "local_modified": local_file.get("modified_at"),
-                    "master_modified": master_file.get("modified_at")
+                    "local_modified": c.get("local_modified"),
+                    "master_modified": c.get("master_modified"),
+                    "note": "locally modified — will be restored from master" if c["action"] == ACTION_DRIFT else None,
                 })
-                total_size += file_size
-        
+            total_size += file_size
+
         # Sort by path for consistent display
         preview_files.sort(key=lambda x: x["path"])
         
@@ -3361,22 +3363,23 @@ def apply_updates():
         file_sync_service = get_file_sync_service()
         local_files = file_sync_service.scan_files(include_content=False)
         local_lookup = {f["path"]: f for f in local_files}
-        
-        # Step 3: Determine which files need updating
-        files_to_update = []
-        for master_file in master_files:
-            path = master_file.get("path")
-            master_hash = master_file.get("hash")
-            
-            # If specific files requested, only update those
-            if requested_files and path not in requested_files:
-                continue
-            
-            local_file = local_lookup.get(path)
-            
-            if not local_file or local_file.get("hash") != master_hash:
-                files_to_update.append(path)
-        
+        master_timestamp = master_manifest.get("data", {}).get("timestamp")
+        master_hash_lookup = {mf.get("path"): mf.get("hash") for mf in master_files}
+
+        # Step 3: Determine which files need updating — via the SAME registry-aware
+        # classification as /updates/check, so what we apply matches what we showed.
+        registry = SyncRegistry(file_sync_service.get_project_root())
+        ensure_backfilled(
+            registry, master_files, local_lookup,
+            node_name=config.get("node_name"), master_url=master_url, master_version=master_timestamp,
+        )
+        classified = classify_files(master_files, local_lookup, registry)
+        files_to_update = [
+            c["path"] for c in classified
+            if c["action"] in AVAILABLE_ACTIONS
+            and (not requested_files or c["path"] in requested_files)
+        ]
+
         if not files_to_update:
             return success_response({
                 "applied": 0,
@@ -3413,17 +3416,19 @@ def apply_updates():
             )
         
         success = True
+        apply_result = {}
         summary = {
             "total_processed": 0,
             "total_created": 0,
             "total_updated": 0,
             "total_backed_up": 0,
             "total_errors": 0,
-            "total_skipped": 0
+            "total_skipped": 0,
+            "rolled_back": False,
         }
         details = []
         backup_path = None
-        
+
         if valid_files:
             # remote_wins: the GUI "Update Now" is an authoritative master->client pull, so master
             # content always wins on a hash mismatch (backup taken first). Using "last_write_wins"
@@ -3440,6 +3445,7 @@ def apply_updates():
             summary["total_backed_up"] = asum.get("total_backed_up", 0)
             summary["total_errors"] = asum.get("total_errors", 0)
             summary["total_skipped"] = asum.get("total_skipped", 0)
+            summary["rolled_back"] = asum.get("rolled_back", False)
             for d in apply_result.get("details", []):
                 action = "skipped"
                 if d.get("created"):
@@ -3463,7 +3469,50 @@ def apply_updates():
             backup_path = str(backup_dir)
         
         logger.info(f"[UPDATES] Update complete: {summary}")
-        
+
+        # ── REAL registry update (the source of truth for future "is this an update?") ──
+        # Record into data/interconnector/synced_hashes.json, but ONLY files that GENUINELY
+        # converged on disk: re-hash each written file and compare to the master hash. This
+        # is the no-pretend guarantee — if a file was written but its bytes don't match the
+        # master (e.g. a transfer/encoding bug), we do NOT mark it synced; it will correctly
+        # reappear as an update and we log a visible warning instead of silently looping.
+        rolled_back = bool(summary.get("rolled_back"))
+        registry_recorded = 0
+        try:
+            if valid_files and success and not rolled_back:
+                project_root = file_sync_service.get_project_root()
+                converged = {}
+                not_converged = []
+                for d in apply_result.get("details", []):
+                    if not (d.get("created") or d.get("updated")):
+                        continue
+                    path = d.get("path")
+                    master_hash = master_hash_lookup.get(path)
+                    if not master_hash:
+                        continue
+                    disk_hash = file_sync_service.get_file_hash(str(project_root / path))
+                    if disk_hash == master_hash:
+                        converged[path] = {"hash": master_hash, "master_version": master_timestamp}
+                    else:
+                        not_converged.append(path)
+                if converged:
+                    registry_recorded = registry.record_synced_bulk(
+                        converged,
+                        node_name=config.get("node_name"),
+                        master_url=master_url,
+                        master_version=master_timestamp,
+                    )
+                if not_converged:
+                    logger.warning(
+                        f"[UPDATES] {len(not_converged)} file(s) were written but do NOT match the "
+                        f"master hash — NOT recorded as synced (they will reappear as updates): "
+                        f"{not_converged[:10]}"
+                    )
+            elif rolled_back:
+                logger.error("[UPDATES] Apply rolled back — registry NOT updated (nothing converged).")
+        except Exception as reg_err:
+            logger.warning(f"[UPDATES] Failed to update sync registry (non-fatal): {reg_err}")
+
         # Record that the core system files were synced (marks the sync in history so status,
         # last sync time, and incremental logic on clients recognize the files as up-to-date).
         # This is the key "mark as synced" step that was missing from the streamlined GUI apply path.
@@ -3530,6 +3579,14 @@ def apply_updates():
         # skips). Reporting total_processed made a 0-write run look like a success, masking the
         # "nothing actually changed" loop.
         files_written = summary["total_created"] + summary["total_updated"]
+        if rolled_back:
+            # Honest failure: the atomic batch rolled back, nothing persisted. Don't
+            # dress it up as a success — that masking is what hid the original loop.
+            return error_response(
+                f"Update failed: the atomic batch rolled back ({summary['total_errors']} error(s)); "
+                f"no files were changed. See backend log [FILE_SYNC]/[UPDATES] for the failing file.",
+                500,
+            )
         return success_response({
             "applied": files_written,
             "created": summary["total_created"],
@@ -3537,6 +3594,8 @@ def apply_updates():
             "backed_up": summary["total_backed_up"],
             "skipped": summary["total_skipped"],
             "errors": summary["total_errors"],
+            "rolled_back": rolled_back,
+            "registry_recorded": registry_recorded,
             "backup_path": backup_path,
             "details": details,
             "timestamp": datetime.now().isoformat(),
@@ -3548,6 +3607,29 @@ def apply_updates():
     except Exception as e:
         logger.error(f"Error applying updates: {e}", exc_info=True)
         return error_response(f"Update failed: {str(e)}", 500)
+
+
+@interconnector_bp.route("/updates/sync-status", methods=["GET"])
+def sync_status():
+    """Client endpoint: summary of the real per-path sync registry.
+
+    Surfaces what the durable registry (data/interconnector/synced_hashes.json) actually
+    knows — tracked file count, last-synced time, the master it synced from — so the UI
+    can show genuine state instead of a client-side clock.
+    """
+    try:
+        config = _get_config()
+        if not config.get("is_enabled"):
+            return error_response("Interconnector is not enabled", 400)
+        if config.get("node_mode") != "client":
+            return error_response("Sync status is only available on client nodes", 400)
+
+        file_sync_service = get_file_sync_service()
+        registry = SyncRegistry(file_sync_service.get_project_root())
+        return success_response(registry.summary(), "Sync status")
+    except Exception as e:
+        logger.error(f"Error getting sync status: {e}", exc_info=True)
+        return error_response(f"Sync status failed: {str(e)}", 500)
 
 
 @interconnector_bp.route("/receive-directive", methods=["POST"])

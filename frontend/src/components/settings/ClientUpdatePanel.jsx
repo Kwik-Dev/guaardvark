@@ -54,12 +54,16 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
     count: 0,
     newFiles: 0,
     modifiedFiles: 0,
+    driftFiles: 0,
     summary: { backend: 0, frontend: 0, other: 0 },
     masterVersion: null,
     localVersion: null,
     lastChecked: null,
     error: null,
   });
+
+  // Real sync registry state (data/interconnector/synced_hashes.json)
+  const [syncStatus, setSyncStatus] = useState({ trackedFiles: 0, lastSyncedAt: null, exists: false });
 
   // Preview state
   const [showPreview, setShowPreview] = useState(false);
@@ -111,12 +115,24 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
         count: data.count || 0,
         newFiles: data.new_files || 0,
         modifiedFiles: data.modified_files || 0,
+        driftFiles: data.drift_files || 0,
         summary: data.summary || { backend: 0, frontend: 0, other: 0 },
         masterVersion: data.master_version,
         localVersion: data.local_version,
         lastChecked: new Date().toLocaleString(),
         error: null,
       });
+
+      // Pull the real registry summary so the UI shows durable synced state, not just a clock.
+      const statusResp = await interconnectorApi.getSyncStatus();
+      const statusData = statusResp?.data || statusResp;
+      if (statusData && !statusResp?.error) {
+        setSyncStatus({
+          trackedFiles: statusData.tracked_files || 0,
+          lastSyncedAt: statusData.last_synced_at || null,
+          exists: Boolean(statusData.exists),
+        });
+      }
 
       // Clear preview if no updates available
       if (!data.available) {
@@ -238,7 +254,13 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
   const getActionIcon = (action) => {
     if (action === "create") return <NewIcon fontSize="small" color="success" />;
     if (action === "update") return <EditIcon fontSize="small" color="primary" />;
+    if (action === "drift") return <EditIcon fontSize="small" color="warning" />;
     return <InfoIcon fontSize="small" />;
+  };
+
+  const formatSyncedAt = (iso) => {
+    if (!iso) return null;
+    try { return new Date(iso).toLocaleString(); } catch { return iso; }
   };
 
   // Not enabled or not configured
@@ -296,6 +318,12 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             Last checked: {updateStatus.lastChecked || "Never"}
           </Typography>
+          {syncStatus.exists && (
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+              {syncStatus.trackedFiles} file{syncStatus.trackedFiles !== 1 ? "s" : ""} tracked
+              {syncStatus.lastSyncedAt ? ` · last synced ${formatSyncedAt(syncStatus.lastSyncedAt)}` : ""}
+            </Typography>
+          )}
         </Box>
       )}
 
@@ -352,6 +380,20 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
                     size="small"
                     sx={{
                       bgcolor: "rgba(0,0,0,0.15)",
+                      color: "#000",
+                      borderRadius: 1,
+                      height: 22,
+                      "& .MuiChip-label": { px: 1, fontSize: "0.75rem" }
+                    }}
+                  />
+                )}
+                {updateStatus.driftFiles > 0 && (
+                  <Chip
+                    label={`${updateStatus.driftFiles} locally modified`}
+                    size="small"
+                    title="These files were edited on this client; the master copy will be restored."
+                    sx={{
+                      bgcolor: "rgba(180,83,9,0.25)",
                       color: "#000",
                       borderRadius: 1,
                       height: 22,

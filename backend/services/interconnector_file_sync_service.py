@@ -127,6 +127,10 @@ class InterconnectorFileSyncService:
             "plugins/upscaling/models/",
             "plugins/upscaling/input/",
             "plugins/upscaling/output/",
+            # Generated media output dirs (e.g. plugins/audio_foundry/outputs/*.wav). These are
+            # runtime artifacts, not code — shipping them bloated the sync and they never
+            # converge (the master regenerates them). No git-tracked source lives under outputs/.
+            "outputs/",
             "*.pth",
             "*.gguf",
             "*.onnx",

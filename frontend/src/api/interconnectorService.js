@@ -644,6 +644,23 @@ export const applyUpdates = async (files = []) => {
 };
 
 /**
+ * Get the real per-path sync registry summary (durable synced state).
+ * @returns {Promise<Object>} - { tracked_files, last_synced_at, node_name, master_url, exists }
+ */
+export const getSyncStatus = async () => {
+  try {
+    debugLog("[INTERCONNECTOR API] Getting sync status");
+    const response = await fetchWithTimeout(`${BASE_URL}/interconnector/updates/sync-status`, {
+      method: "GET",
+    }, 15000);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("[INTERCONNECTOR API] Error getting sync status:", err);
+    return { error: err.message };
+  }
+};
+
+/**
  * Send heartbeat to master server
  * @param {string} masterUrl - Master server URL
  * @param {string} apiKey - API key
