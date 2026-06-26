@@ -63,33 +63,45 @@ class RealLoraTrainer:
         """
         if not cls._VENV_PYTHON.exists():
             return False
-        try:
-            # Fast probe inside the exact venv python that will be used.
-            probe = subprocess.run(
-                [
-                    str(cls._VENV_PYTHON),
-                    "-c",
-                    "import torch, sys; "
-                    "ok = torch.cuda.is_available() and torch.cuda.device_count() > 0; "
-                    "print('OK' if ok else 'NO'); "
-                    "print(torch.cuda.get_device_name(0) if ok else '', file=sys.stderr)",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-            if probe.returncode == 0 and "OK" in probe.stdout:
-                return True
-            # Log the reason for debugging (visible in lora_trainer_daemon.log or worker logs)
-            logger.warning(
-                "real_trainer: venv exists but CUDA probe failed: stdout=%r stderr=%r",
-                probe.stdout.strip(),
-                probe.stderr.strip(),
-            )
-            return False
-        except Exception as e:
-            logger.warning("real_trainer: CUDA probe crashed: %s", e)
-            return False
+        # Probe a few times before giving up. A single reading can be a transient
+        # false-negative — right after a host restart the NVIDIA stack is still
+        # settling, and a fresh torch import can momentarily race driver init or
+        # brief GPU contention while other services spin up. That blip used to
+        # block a real training run (subject 16, 2026-06-25, two failed clicks
+        # while the probe passed seconds later from a shell). The GPU gate already
+        # serializes real contention, so retrying here only filters out the blip;
+        # if CUDA is genuinely unavailable, all attempts fail and we still bail.
+        attempts = 3
+        last = ""
+        for i in range(attempts):
+            try:
+                probe = subprocess.run(
+                    [
+                        str(cls._VENV_PYTHON),
+                        "-c",
+                        "import torch, sys; "
+                        "ok = torch.cuda.is_available() and torch.cuda.device_count() > 0; "
+                        "print('OK' if ok else 'NO'); "
+                        "print(torch.cuda.get_device_name(0) if ok else '', file=sys.stderr)",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,  # cold torch+CUDA init after a restart can exceed 8s
+                )
+                if probe.returncode == 0 and "OK" in probe.stdout:
+                    if i:
+                        logger.info("real_trainer: CUDA probe OK on attempt %d/%d", i + 1, attempts)
+                    return True
+                last = f"stdout={probe.stdout.strip()!r} stderr={probe.stderr.strip()!r}"
+            except Exception as e:
+                last = f"probe crashed: {e}"
+            if i < attempts - 1:
+                time.sleep(2)  # let the driver/contention settle, then retry
+        logger.warning(
+            "real_trainer: venv exists but CUDA probe failed after %d attempts: %s",
+            attempts, last,
+        )
+        return False
 
     def _ensure_proc(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
