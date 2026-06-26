@@ -247,6 +247,17 @@ const CastMemberPage = () => {
   };
 
   const handlePlan = async () => {
+    // Re-plan starts a FRESH sheet — it discards the current set, including any
+    // approved keepers. Guard against accidental loss (the append flow exists
+    // precisely so users don't have to wipe to add more).
+    if (approvedCount > 0) {
+      const ok = window.confirm(
+        `Re-plan will discard the current sheet, including your ${approvedCount} approved ` +
+        `sample${approvedCount > 1 ? 's' : ''}. To ADD more without losing these, use ` +
+        `"Generate additional" instead.\n\nRe-plan from scratch anyway?`
+      );
+      if (!ok) return;
+    }
     setPlanning(true); setError(null);
     try {
       const data = await planCharacter(subjectId);
@@ -262,9 +273,10 @@ const CastMemberPage = () => {
   const handleGenerate = async () => {
     setBusy(true); setError(null);
     try {
-      // If we have a trained LoRA, ask the backend to use it so the generated
-      // samples are consistent with the trained/evolved character (new costumes etc.).
-      const options = subject.lora_path ? { use_trained_lora: true } : {};
+      // Append a new batch onto the curated set (keeps approved keepers, stacks the
+      // new shots above them). If we have a trained LoRA, use it so the new samples
+      // stay consistent with the trained character (new costumes, angles, etc.).
+      const options = { append: true, ...(subject.lora_path ? { use_trained_lora: true } : {}) };
       const res = await generateSamples(subjectId, options);
       await loadSamples();
       if (res?.job_id) {
@@ -555,7 +567,7 @@ const CastMemberPage = () => {
               {planning ? 'Planning…' : subject.bible ? 'Re-plan sheet' : 'Plan reference sheet'}
             </Button>
             <Button variant="contained" startIcon={<AutoAwesomeIcon />} onClick={handleGenerate}
-                    disabled={busy || planning || !samples.length}>
+                    disabled={busy || planning || !(samples.length || subject.lora_path || subject.bible)}>
               {subject.lora_path ? 'Generate additional (using trained LoRA)' : 'Generate images'}
             </Button>
             <Button size="small" onClick={approveAllDone} disabled={!samples.some((s) => s.status === 'done')}>
@@ -565,6 +577,14 @@ const CastMemberPage = () => {
             <Chip label={`${approvedCount}/${samples.length} approved`} size="small"
                   color={approvedCount > 0 ? 'success' : 'default'} variant="outlined" />
           </Box>
+
+          {/* Make the append-vs-replace distinction explicit so users grow the set
+              instead of accidentally wiping it (the data-loss footgun). */}
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+            <strong>Generate additional</strong> stacks a new batch onto your approved samples (keeps your
+            keepers). <strong>Re-plan sheet</strong> starts a fresh sheet from scratch. Approve the good
+            ones, then <strong>Train LoRA</strong> learns from your references + every approved sample.
+          </Typography>
 
           {/* Progress + honest status — so a planned-but-not-generated sheet doesn't
               read as "stuck", and a real render shows how far along it is. */}
@@ -660,7 +680,7 @@ const CastMemberPage = () => {
             <Typography variant="caption" color="text.secondary">
               {approvedCount === 0
                 ? 'Approve at least one sample to train.'
-                : `Trains on the ${approvedCount} approved sample${approvedCount > 1 ? 's' : ''}. ~hours on a 16GB GPU; runs in the background.`}
+                : `Trains on your ${(subject.ref_image_paths?.length || 0)} reference image${(subject.ref_image_paths?.length || 0) === 1 ? '' : 's'} + ${approvedCount} approved sample${approvedCount > 1 ? 's' : ''}. ~hours on a 16GB GPU; runs in the background.`}
             </Typography>
           </Box>
         </Box>
