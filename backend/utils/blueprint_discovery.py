@@ -28,7 +28,11 @@ class BlueprintDiscovery:
         
     def should_exclude_module(self, module_name: str) -> bool:
         """Check if a module should be excluded from blueprint discovery"""
-        if not module_name or module_name.startswith('_'):
+        # `.`-prefixed names are dotfiles / macOS AppleDouble sidecars (`._uploads_route.py`),
+        # which appear when the repo lives on an exFAT/SMB volume. Their stem (`._uploads_route`)
+        # does NOT start with `_`, so the underscore guard below misses them and they import as
+        # `backend.routes.._uploads_route` → ModuleNotFoundError. Exclude leading-dot names too.
+        if not module_name or module_name.startswith('_') or module_name.startswith('.'):
             return True
             
         for excluded in self.excluded_modules:

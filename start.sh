@@ -1948,9 +1948,17 @@ if check_backend_health "$FLASK_PORT" 1; then
         vader_success "Backend already healthy on port $FLASK_PORT (adopted, skipping launch)"
     fi
     BACKEND_ADOPTED=1
-elif command_exists ss && ss -tlpn 2>/dev/null | grep -q ":$FLASK_PORT\b"; then
+elif { command_exists ss && ss -tlpn 2>/dev/null | grep -q ":$FLASK_PORT\b"; } \
+     || { command_exists lsof && lsof -ti tcp:"$FLASK_PORT" >/dev/null 2>&1; }; then
     # Port is occupied but NOT answering /api/health — a foreign (non-Guaardvark) process.
-    vader_error "Port $FLASK_PORT is in use by a non-Guaardvark process that does not respond to /api/health. Free it or set FLASK_PORT, then retry."
+    # macOS has no `ss`, so fall back to `lsof` (otherwise this guard silently never fires on
+    # macOS and the backend just dies on bind with a cryptic "Address already in use").
+    if [ "$(uname -s)" = "Darwin" ] && [ "$FLASK_PORT" = "5000" ]; then
+        vader_error "Port 5000 is in use — on macOS this is almost always the 'AirPlay Receiver' (System Settings → General → AirDrop & Handoff → AirPlay Receiver)."
+        vader_error "Either turn AirPlay Receiver off, or keep it on and set a different backend port: add 'FLASK_PORT=5055' to your .env, then re-run ./start.sh."
+    else
+        vader_error "Port $FLASK_PORT is in use by a non-Guaardvark process that does not respond to /api/health. Free it or set FLASK_PORT, then retry."
+    fi
     deactivate
     cd "$SCRIPT_DIR"
     exit 1
