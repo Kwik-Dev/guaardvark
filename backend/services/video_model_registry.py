@@ -141,6 +141,93 @@ VIDEO_MODEL_REGISTRY = {
         "vram_mb": 0,
         "type": "upscaler",
     },
+    # ── FLUX keyframe / storyboard IMAGE models ─────────────────────────────────
+    # These are ComfyUI models (GGUF unet + encoders + VAE) that MUST live in
+    # ComfyUI/models/{unet,clip,vae}, so they ride this registry's downloader (same
+    # as Wan) rather than the diffusers Image-Models modal (which targets data/models/).
+    # The filenames here are the SINGLE SOURCE OF TRUTH and must match the defaults
+    # in comfyui_image_generator.py (FLUX_UNET / FLUX_T5 / FLUX_CLIP / FLUX_VAE and
+    # the FLUX_DEV_* set) or the keyframe workflow throws "Value not in list".
+    "flux-schnell": {
+        "name": "FLUX.1-schnell (keyframe / storyboard image model)",
+        "description": "Default keyframe + storyboard image model (fast, ~8 steps, Apache-2.0). "
+                       "Needed for cinematic keyframes and the video keyframe→I2V path. Pulls its "
+                       "CLIP-L + T5 + VAE companions automatically.",
+        "hf_repo": "city96/FLUX.1-schnell-gguf",
+        "local_subdir": "unet",
+        "files": [
+            {"src": "flux1-schnell-Q8_0.gguf", "dst": "flux1-schnell-Q8_0.gguf"},
+        ],
+        "requires": ["flux-clip-l", "flux-t5-fp8", "flux-vae-ae"],
+        "size_gb": 12.6,
+        "vram_mb": 12000,
+        "type": "flux",
+    },
+    "flux-dev": {
+        "name": "FLUX.1-dev (high-fidelity keyframe — GATED)",
+        "description": "Higher-fidelity keyframe model for the strongest character identity lock. "
+                       "GATED: the install needs a Hugging Face token that has accepted the FLUX.1-dev "
+                       "license, or the download 401s. Shares the CLIP-L + VAE companions; adds the FP16 T5.",
+        "hf_repo": "black-forest-labs/FLUX.1-dev",
+        "local_subdir": "unet",
+        "files": [
+            {"src": "flux1-dev.safetensors", "dst": "flux1-dev.safetensors"},
+        ],
+        "requires": ["flux-clip-l", "flux-t5-fp16", "flux-vae-ae"],
+        "size_gb": 23.8,
+        "vram_mb": 12000,
+        "type": "flux",
+    },
+    "flux-clip-l": {
+        "name": "FLUX CLIP-L Text Encoder",
+        "description": "Required by every FLUX image model (schnell + dev). Loaded by DualCLIPLoader.",
+        "hf_repo": "comfyanonymous/flux_text_encoders",
+        "local_subdir": "clip",
+        "files": [
+            {"src": "clip_l.safetensors", "dst": "clip_l.safetensors"},
+        ],
+        "size_gb": 0.25,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "flux-t5-fp8": {
+        "name": "FLUX T5-XXL Text Encoder (FP8)",
+        "description": "Required by FLUX.1-schnell. FP8 keeps it light for the 16GB card. "
+                       "Installs to clip/t5/ to match the schnell workflow's loader path.",
+        "hf_repo": "comfyanonymous/flux_text_encoders",
+        "local_subdir": "clip",
+        "files": [
+            {"src": "t5xxl_fp8_e4m3fn.safetensors", "dst": "t5/t5xxl_fp8_e4m3fn.safetensors"},
+        ],
+        "size_gb": 4.9,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "flux-t5-fp16": {
+        "name": "FLUX T5-XXL Text Encoder (FP16)",
+        "description": "Required by FLUX.1-dev (the dev branch loads the FP16 T5 directly from clip/).",
+        "hf_repo": "comfyanonymous/flux_text_encoders",
+        "local_subdir": "clip",
+        "files": [
+            {"src": "t5xxl_fp16.safetensors", "dst": "t5xxl_fp16.safetensors"},
+        ],
+        "size_gb": 9.8,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "flux-vae-ae": {
+        "name": "FLUX VAE (ae)",
+        "description": "Shared autoencoder for all FLUX image models (schnell + dev). From the "
+                       "ungated FLUX.1-schnell repo.",
+        "hf_repo": "black-forest-labs/FLUX.1-schnell",
+        "local_subdir": "vae",
+        "files": [
+            {"src": "ae.safetensors", "dst": "ae.safetensors"},
+        ],
+        "size_gb": 0.33,
+        "vram_mb": 0,
+        "type": "vae",
+    },
 }
 
 

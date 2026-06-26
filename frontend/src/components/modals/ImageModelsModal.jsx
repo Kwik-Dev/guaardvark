@@ -203,6 +203,19 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
             )}
           </List>
         )}
+
+        {/* FLUX keyframe/storyboard models are ComfyUI GGUF models (they live in
+            ComfyUI/models/, not the diffusers models dir these rows manage), so they
+            are downloaded from the Video / ComfyUI Models manager. Point users there
+            instead of silently omitting them. */}
+        <Box sx={{ mt: 2, p: 1.5, borderRadius: 1, bgcolor: "action.hover" }}>
+          <Typography variant="caption" color="text.secondary">
+            Looking for <strong>FLUX.1-schnell / FLUX.1-dev</strong> (cinematic keyframe &amp;
+            storyboard models)? Those are ComfyUI models — install them from the{" "}
+            <strong>Video Models</strong> manager, which downloads into ComfyUI&apos;s
+            unet/clip/vae folders.
+          </Typography>
+        </Box>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={isDownloading}>
