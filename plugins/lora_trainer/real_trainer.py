@@ -53,6 +53,27 @@ class RealLoraTrainer:
         self._lock = threading.Lock()
         self._loaded = False
 
+    @staticmethod
+    def _gpu_env() -> dict:
+        """Environment for the trainer subprocesses, immune to the backend's own
+        CPU-forcing env poison.
+
+        The backend sets ``CUDA_VISIBLE_DEVICES=''`` IN-PROCESS to push RAG /
+        embeddings / indexing onto the CPU (see indexing_service.py,
+        llama_index_local_config.py, gpu_embedding). A celery worker that has
+        touched that code carries the empty value in its os.environ for the rest
+        of its life — and a child spawned with the default (inherited) env would
+        see ZERO GPUs (torch.cuda.device_count() == 0), which is exactly the
+        "CUDA probe failed" that blocked subject 16's amend runs even on a free
+        card. We force a real device for our GPU subprocess. An explicit non-empty
+        value (a real multi-GPU pin) is respected; only ''/unset is repaired.
+        """
+        import os
+        env = dict(os.environ)
+        if not env.get("CUDA_VISIBLE_DEVICES"):  # '' or missing → the poisoned case
+            env["CUDA_VISIBLE_DEVICES"] = "0"
+        return env
+
     @classmethod
     def is_available(cls) -> bool:
         """True iff venv-torch/bin/python exists AND it can actually see a CUDA GPU.
@@ -87,6 +108,7 @@ class RealLoraTrainer:
                     capture_output=True,
                     text=True,
                     timeout=20,  # cold torch+CUDA init after a restart can exceed 8s
+                    env=cls._gpu_env(),  # immune to the worker's CUDA_VISIBLE_DEVICES='' poison
                 )
                 if probe.returncode == 0 and "OK" in probe.stdout:
                     if i:
@@ -121,6 +143,10 @@ class RealLoraTrainer:
             text=True,
             bufsize=1,
             cwd=str(self._PLUGIN_ROOT),
+            # Force a real GPU device: the worker may carry CUDA_VISIBLE_DEVICES=''
+            # from the backend's CPU-forced RAG/embeddings, which the daemon would
+            # otherwise inherit and train blind (or fail). See _gpu_env().
+            env=self._gpu_env(),
             # Die with the worker so a restart/crash can't orphan a 7GB daemon.
             preexec_fn=_set_pdeathsig,
         )
