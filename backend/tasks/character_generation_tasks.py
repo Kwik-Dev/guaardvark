@@ -48,8 +48,9 @@ def _sample_image_path(subject_id: int, index: int) -> str:
 
 # ── task implementations (plain functions for testability) ─────────────────────
 
-def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool = False) -> dict:
-    """Plan + generate the full reference-sheet for a Subject.
+def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool = False,
+                     append: bool = True) -> dict:
+    """Plan + generate a batch of reference-sheet samples for a Subject.
 
     Flow:
       1. Load the Subject row; validate it exists.
@@ -118,16 +119,28 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
         subject.trigger_word = trigger
     db.session.flush()
 
-    # --- 3. Idempotent re-plan: delete existing samples ----------------------
-    SubjectSample.query.filter_by(subject_id=subject_id).delete()
-    db.session.flush()
+    # --- 3. Prepare the sample set (APPEND by default) -----------------------
+    # APPEND mode: "generate an additional batch" STACKS onto the user's curated
+    # set instead of wiping it. We keep every APPROVED sample and clear only the
+    # un-approved leftovers (rejects/pending/failed from a prior run) so the tab
+    # doesn't accumulate junk. New rows are indexed ABOVE every kept index so
+    # neither the DB rows nor the sample_<index>.png files collide with the
+    # approved keepers. REPLACE mode (append=False) restores the old clean slate.
+    if append:
+        SubjectSample.query.filter_by(subject_id=subject_id, approved=False).delete()
+        db.session.flush()
+        kept = SubjectSample.query.filter_by(subject_id=subject_id).all()
+        base_index = (max((s.index for s in kept), default=-1)) + 1
+    else:
+        SubjectSample.query.filter_by(subject_id=subject_id).delete()
+        db.session.flush()
+        base_index = 0
 
-    # --- 4. Insert SubjectSample rows (status=pending) -----------------------
-    sample_rows: list[SubjectSample] = []
+    # --- 4. Insert THIS batch's SubjectSample rows (status=pending) ----------
     for shot in shots:
         row = SubjectSample(
             subject_id=subject_id,
-            index=shot["index"],
+            index=base_index + shot["index"],
             angle=shot.get("angle") or "",
             framing=shot.get("framing") or "",
             expression=shot.get("expression") or "",
@@ -139,11 +152,16 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
             approved=False,
         )
         db.session.add(row)
-        sample_rows.append(row)
 
     db.session.commit()
-    log.info("Character Generator: inserted %d SubjectSample rows for subject %s",
-             len(sample_rows), subject_id)
+    # This batch = ONLY the rows we just created (status=pending), now with PKs.
+    # In append mode the kept approved samples are status=done and are deliberately
+    # excluded here so the loop never re-renders (and overwrites) the user's keepers.
+    sample_rows = SubjectSample.query.filter_by(
+        subject_id=subject_id, status="pending"
+    ).order_by(SubjectSample.index).all()
+    log.info("Character Generator: %s %d new SubjectSample rows for subject %s (base_index=%d)",
+             "appended" if append else "inserted", len(sample_rows), subject_id, base_index)
 
     if job_id:
         try:
@@ -156,9 +174,6 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
     ensure_plugins_for_stage("film-crew", "storyboard_gen")  # ensures comfyui plugin is up
     image_generator = ComfyUIImageGenerator(model="flux-schnell")
     gate = get_gate()
-
-    # Refresh rows now that they have PKs (after commit).
-    sample_rows = SubjectSample.query.filter_by(subject_id=subject_id).order_by(SubjectSample.index).all()
 
     loras_for_gen = []
     if use_lora and subject.lora_path:
@@ -349,9 +364,10 @@ def create_character_generation_tasks(celery_app: Celery):
     """
 
     @celery_app.task(name="character.generate_samples")
-    def generate_samples_task(subject_id: int, job_id: str | None = None, use_lora: bool = False):
+    def generate_samples_task(subject_id: int, job_id: str | None = None, use_lora: bool = False,
+                              append: bool = True):
         with current_app.app_context():
-            return generate_samples(subject_id, job_id=job_id, use_lora=use_lora)
+            return generate_samples(subject_id, job_id=job_id, use_lora=use_lora, append=append)
 
     @celery_app.task(name="character.regen_sample")
     def regen_sample_task(sample_id: int, prompt_override: str | None = None,

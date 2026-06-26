@@ -439,15 +439,18 @@ def dispatch_generate_samples(subject_id: int):
 
     body = request.get_json(silent=True) or {}
     use_lora = bool(body.get("use_trained_lora", False))
+    # APPEND by default: a new batch stacks onto the user's curated (approved)
+    # samples instead of wiping them. Pass append=false to start a clean slate.
+    append = bool(body.get("append", True))
 
     progress = get_unified_progress()
     job_id = progress.create_process(
         ProcessType.IMAGE_GENERATION,
         f"Character reference sheet generation for subject {subject_id}",
-        additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen", "use_trained_lora": use_lora},
+        additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen", "use_trained_lora": use_lora, "append": append},
     )
-    task = celery.send_task("character.generate_samples", args=[subject_id, job_id, use_lora])
-    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id, "use_trained_lora": use_lora}), 202
+    task = celery.send_task("character.generate_samples", args=[subject_id, job_id, use_lora, append])
+    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id, "use_trained_lora": use_lora, "append": append}), 202
 
 
 @bp.get("/subjects/<int:subject_id>/samples")
