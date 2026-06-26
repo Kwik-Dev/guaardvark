@@ -5,7 +5,9 @@ thin: load Subject, call mock_trainer (or real trainer in v1.1), persist
 results. No state-machine interaction with Production — training is per-Subject
 and the cast endpoint already records the user's chosen action."""
 from __future__ import annotations
+import json
 import logging
+from pathlib import Path
 from celery import Celery
 from flask import current_app
 
@@ -53,9 +55,25 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
             train_images.append(smp.image_path)
 
     backend = os.environ.get("GUAARDVARK_LORA_BACKEND", "auto").lower()
+    # Mock training is a TEST-ONLY backend. Per the NO-MOCKS-IN-PRODUCTION policy
+    # (CLAUDE.md), a production process must NEVER fall back to it: a 27-byte fake
+    # LoRA that reports status="ok" is exactly what polluted subject 16's pipeline
+    # (it set training_status='trained' on a stub that then fails to load at render).
+    # So the mock is reachable only under pytest; everywhere else we FAIL LOUD.
+    _under_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     use_real = False
+    allow_mock = False
     if backend == "real":
         use_real = True
+    elif backend == "mock":
+        if _under_pytest:
+            allow_mock = True
+        else:
+            msg = ("GUAARDVARK_LORA_BACKEND=mock is a test-only backend and is "
+                   "refused in production (NO-MOCKS policy). Unset it or set it to "
+                   "'real'/'auto' to train a genuine LoRA.")
+            logger.error("lora_trainer: %s", msg)
+            return {"status": "failed", "error": msg, "used_images": train_images}
     elif backend == "auto":
         from plugins.lora_trainer.real_trainer import RealLoraTrainer
         use_real = RealLoraTrainer.is_available()
@@ -92,13 +110,16 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
                     except Exception:
                         pass
                 try:
-                    return _TRAINER.train_subject_lora(
+                    real_result = _TRAINER.train_subject_lora(
                         subject_id=s.id,
                         subject_name=s.name,
                         trigger_word=s.trigger_word,
                         ref_image_paths=train_images,
                         output_dir=_output_dir(),
                     )
+                    if isinstance(real_result, dict):
+                        real_result.setdefault("used_images", train_images)
+                    return real_result
                 finally:
                     # Free the ~7GB of SDXL the trainer daemon holds. Without this
                     # the daemon stays resident IDLE between jobs, and a single
@@ -115,21 +136,45 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
                         logger.warning(f"lora_trainer: daemon shutdown after subject {subject_id} failed (non-fatal): {_e}")
         except GpuBusyError as e:
             logger.warning(f"lora_trainer: GPU busy for subject {subject_id}: {e}")
-            return {"status": "failed", "error": f"GPU busy: {e}"}
+            return {"status": "failed", "error": f"GPU busy: {e}", "used_images": train_images}
 
+    # Reaching here means the real trainer was NOT selected. Outside of pytest that
+    # is a hard failure — we do NOT silently produce a fake LoRA (NO-MOCKS policy).
+    # The most common cause in 'auto' is that RealLoraTrainer.is_available() returned
+    # False: the venv-torch CUDA probe didn't see a GPU (or timed out under contention).
+    # Fail loud with guidance; the caller marks the Subject 'failed' with this message.
+    if not allow_mock:
+        msg = ("Real LoRA trainer unavailable (venv-torch/CUDA probe failed). "
+               "Verify the GPU is free (nvidia-smi) and the trainer venv exists "
+               "(plugins/lora_trainer/scripts/setup_venv.sh), then retry. To bypass "
+               "the probe under contention, set GUAARDVARK_LORA_BACKEND=real. "
+               "Mock training is disabled by policy.")
+        logger.error("lora_trainer: %s (subject %s)", msg, subject_id)
+        if job_id:
+            try:
+                get_unified_progress().error_process(job_id, msg)
+            except Exception:
+                pass
+        return {"status": "failed", "error": msg, "used_images": train_images}
+
+    # TEST-ONLY mock path (allow_mock is True only under pytest).
     from plugins.lora_trainer.mock_trainer import train_subject_lora
-    logger.info(f"lora_trainer: using MOCK backend for subject {subject_id}")
+    logger.info(f"lora_trainer: using TEST-ONLY MOCK backend for subject {subject_id}")
     if job_id:
         try:
-            get_unified_progress().update_process(job_id, 60, "Running mock trainer (fast path)")
+            get_unified_progress().update_process(job_id, 60, "Running mock trainer (test-only path)")
         except Exception:
             pass
-    return train_subject_lora(
+    result = train_subject_lora(
         subject_id=s.id,
         subject_name=s.name,
         ref_image_paths=train_images,
         output_dir=_output_dir(),
     )
+    # Attach the images that were actually used (for snapshot on success)
+    if isinstance(result, dict):
+        result.setdefault("used_images", train_images)
+    return result
 
 
 def create_lora_trainer_tasks(celery_app: Celery):
@@ -179,22 +224,54 @@ def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -
 
     result = _train_impl(subject_id, job_id=job_id)
 
-    if job_id:
-        try:
-            if result.get("status") == "ok":
-                get_unified_progress().update_process(job_id, 95, "Finalizing LoRA")
-            else:
-                get_unified_progress().error_process(job_id, result.get("error") or "training failed")
-        except Exception:
-            pass
-
+    # Perform all DB updates and commit BEFORE notifying the progress system.
+    # This avoids a race where the frontend receives the "complete" event and
+    # does loadSubject() before the status='trained' is committed, leaving the
+    # UI stuck with polling=true / spinner / "starting training" even after the
+    # GPU work is finished.
     if result.get("status") == "ok":
         s.lora_path = result["lora_path"]
         s.lora_version = result.get("lora_version", 1)
         s.training_status = "trained"
         s.training_error = None
+        from datetime import datetime
+        s.last_trained_at = datetime.utcnow()
+
+        # Verify it was actually real training (not mock) before recording the image count.
+        # This ensures "Last trained on N images" is truthful: only real successful
+        # training with the real backend (venv-torch + CUDA) will set the list.
+        # Mock runs (or failed real) will not claim the images as "trained on".
+        used_images = result.get("used_images") or []
+        is_real_trained = False
+        try:
+            lora_file = Path(s.lora_path)
+            sidecar_path = lora_file.with_suffix(".json")
+            if sidecar_path.exists():
+                with open(sidecar_path) as f:
+                    sidecar = json.load(f)
+                is_real_trained = sidecar.get("mock") is False
+            # Extra check: real lora file must not be the tiny mock header (8 bytes)
+            if is_real_trained and lora_file.exists():
+                if lora_file.stat().st_size < 100:  # mock header is tiny
+                    is_real_trained = False
+                    logger.warning(f"lora file for {subject_id} looks like mock stub despite sidecar")
+            mock_flag = sidecar.get('mock') if 'sidecar' in locals() and isinstance(sidecar, dict) else 'n/a'
+            logger.info(f"lora train for {subject_id}: sidecar mock={mock_flag}, real_trained={is_real_trained}, size={lora_file.stat().st_size if lora_file.exists() else 0}")
+        except Exception as e:
+            logger.warning(f"Failed to read sidecar/lora for real-training verification: {e}")
+            is_real_trained = False
+
+        if is_real_trained:
+            s.last_trained_image_paths = used_images
+        else:
+            s.last_trained_image_paths = []
+            logger.warning(f"lora train for {subject_id} succeeded but was not real (mock or unverifiable); not recording last_trained_image_paths")
+
+        db.session.commit()
+
         if job_id:
             try:
+                get_unified_progress().update_process(job_id, 95, "Finalizing LoRA")
                 get_unified_progress().complete_process(job_id, "LoRA training complete", additional_data={"lora_path": s.lora_path, "subject_id": subject_id})
             except Exception:
                 pass
@@ -204,8 +281,6 @@ def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -
         s.training_error = err[:2000]
         logger.warning(f"lora train failed for subject {subject_id}: {err}")
 
-        # Give very specific guidance for the most common real-hardware failure
-        # ("CUDA not available") even though the box has a real GPU.
         if "CUDA not available" in err or "cuda.is_available" in err.lower():
             s.training_error = (
                 "CUDA not available inside the isolated trainer venv.\n\n"
@@ -216,7 +291,13 @@ def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -
                 "Then click 'Train LoRA' again from the Cast page.\n\n"
                 "Original error: " + err
             )[:2000]
-    db.session.commit()
+        db.session.commit()
+
+        if job_id:
+            try:
+                get_unified_progress().error_process(job_id, result.get("error") or "training failed")
+            except Exception:
+                pass
 
 
 def reap_stuck_training_subjects() -> dict:

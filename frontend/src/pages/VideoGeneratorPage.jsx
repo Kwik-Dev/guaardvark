@@ -411,6 +411,27 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     lora_strength: 1.0,
   });
 
+  // Cast picker: trained character Subjects whose SDXL LoRA locks identity into a
+  // cinematic keyframe (the video model can't apply a LoRA — identity rides in the
+  // keyframe). Mirrors the MusicVideoPage cast picker. Selecting cast implies the
+  // cinematic-keyframe path on the backend.
+  const [castSubjects, setCastSubjects] = useState([]);
+  const [selectedSubjectIds, setSelectedSubjectIds] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/cast-library")
+      .then((r) => (r.ok ? r.json() : { subjects: [] }))
+      .then((d) => {
+        if (!alive) return;
+        const trained = (d.subjects || []).filter(
+          (s) => s.kind === "character" && s.lora_path
+        );
+        setCastSubjects(trained);
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
   // CogVideoX-specific power features
   const [teaCacheEnabled, setTeaCacheEnabled] = useState(false);
   const [teaCacheThreshold, setTeaCacheThreshold] = useState(0.3);
@@ -700,6 +721,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       face_restore: advancedParams.face_restore,
       lora_name: advancedParams.lora_name,
       lora_strength: advancedParams.lora_strength,
+      // Trained cast members to lock into each clip (SDXL LoRA baked into the
+      // keyframe). Selecting cast implies the cinematic-keyframe path on the backend.
+      subject_ids: selectedSubjectIds,
       // Post-processing: interpolation and upscaling from quality tier
       interpolation_multiplier: tier.interpolation,
       upscale: tier.upscale,
@@ -714,7 +738,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       teacache_threshold: teaCacheEnabled && isCogVideoXModel(effectiveModel) ? teaCacheThreshold : null,
       feta_weight: fetaEnabled && isCogVideoXModel(effectiveModel) ? fetaWeight : null,
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, teaCacheEnabled, teaCacheThreshold, fetaEnabled, fetaWeight]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, teaCacheEnabled, teaCacheThreshold, fetaEnabled, fetaWeight, selectedSubjectIds]);
 
   // Fetch enhanced prompt preview from backend (re-uses the same enhance_video_prompt logic + fidelity_mode)
   const fetchPromptPreview = async () => {
@@ -2102,8 +2126,38 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   sx={{ ml: 0 }}
                 />
                 <TextField
+                  select
                   size="small"
-                  label="LoRA File Name"
+                  label="Cast (trained characters to lock)"
+                  value={selectedSubjectIds}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSelectedSubjectIds(typeof v === "string" ? v.split(",").map(Number) : v);
+                  }}
+                  SelectProps={{
+                    multiple: true,
+                    renderValue: (sel) =>
+                      castSubjects
+                        .filter((s) => sel.includes(s.id))
+                        .map((s) => s.name)
+                        .join(", ") || "Select cast…",
+                  }}
+                  helperText={
+                    castSubjects.length === 0
+                      ? "No trained characters yet — train one in the Cast Library first."
+                      : "Each selected character's SDXL LoRA is baked into an identity keyframe, then animated."
+                  }
+                  sx={{ width: { xs: '100%', sm: '280px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
+                >
+                  {castSubjects.map((s) => (
+                    <MenuItem key={s.id} value={s.id}>
+                      {s.name}{s.trigger_word ? ` (${s.trigger_word})` : ""}
+                    </MenuItem>
+                  ))}
+                </TextField>
+                <TextField
+                  size="small"
+                  label="LoRA File Name (advanced)"
                   value={advancedParams.lora_name}
                   onChange={(e) =>
                     setAdvancedParams({
@@ -2111,8 +2165,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       lora_name: e.target.value,
                     })
                   }
-                  disabled={isCogVideoXModel(model)}
-                  helperText={isCogVideoXModel(model) ? "Not supported for Cog (see backend logs)" : "Optional (e.g. character.safetensors)"}
+                  disabled={isCogVideoXModel(model) || selectedSubjectIds.length > 0}
+                  helperText={
+                    selectedSubjectIds.length > 0
+                      ? "Overridden by the Cast selection above"
+                      : isCogVideoXModel(model)
+                        ? "Not supported for Cog (see backend logs)"
+                        : "Optional raw LoRA filename (e.g. character.safetensors)"
+                  }
                   sx={{ width: { xs: '100%', sm: '280px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
                 />
                 {advancedParams.lora_name && (

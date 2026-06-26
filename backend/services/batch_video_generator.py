@@ -107,6 +107,10 @@ class BatchVideoRequest:
     face_restore: bool = False
     lora_name: Optional[str] = None
     lora_strength: float = 1.0
+    # Cast members (trained character LoRAs) to lock into each clip. Resolved once
+    # per batch via cast_lock.subjects_to_lock; the LoRA is baked into the cinematic
+    # keyframe (the video model can't apply it). Selecting cast implies cinematic.
+    subject_ids: List[int] = field(default_factory=list)
     # Quality pipeline (v2.6.2 — ported from the music-video generator). All opt-in;
     # defaults preserve the existing fast single-pass text-to-video behavior.
     director_mode: bool = False           # rewrite each prompt via the Video Director (cinematic)
@@ -343,10 +347,19 @@ class BatchVideoGenerator:
 
     def _generate_keyframe_still(self, *, prompt: str, width: int, height: int,
                                  out_path: str, seed: int,
-                                 keyframe_model: Optional[str] = None) -> Optional[str]:
+                                 keyframe_model: Optional[str] = None,
+                                 loras: Optional[list] = None,
+                                 lora_strength: float = 0.25) -> Optional[str]:
         """Cinematic mode: render a keyframe still for ``prompt``, then evict it from VRAM
         so the I2V animator can load (the music-video FLUX->i2v handoff — the i2v nodes
         don't ask ComfyUI to make room, so without this they OOM on a still-full card).
+
+        When ``loras`` is given (a cast member's trained character LoRA), this is the
+        ONLY place identity can be locked in: the video models (Wan/CogVideoX) cannot
+        apply a LoRA, so the character must be baked into THIS keyframe, which then
+        seeds image-to-video. Character LoRAs are SDXL, so we force the SDXL keyframe
+        model (the flux branches drop/mismatch an SDXL LoRA — see comfyui_image_generator
+        capability guard).
 
         Returns the still path on success, or None to fall back to plain text-to-video.
         Never raises."""
@@ -356,15 +369,21 @@ class BatchVideoGenerator:
             # Snap to /16 (Wan/diffusion alignment); keep the still at the clip's aspect.
             w = max(256, (int(width) // 16) * 16)
             h = max(256, (int(height) // 16) * 16)
-            # FLUX-schnell is the keyframe model (high aesthetic, low steps) — it uses the
-            # same env-baked FLUX_* defaults the music-video keyframe path relies on, so no
-            # settings need threading here. Operator can override via metadata.keyframe_model
-            # (e.g. "sdxl"). If FLUX models aren't present, generate_image fails and we fall
-            # back to plain text-to-video below.
-            model = keyframe_model or "flux-schnell"
+            # Model selection: with a character LoRA we MUST use SDXL (where the LoRA
+            # actually applies). Without one, FLUX-schnell is the default keyframe model
+            # (high aesthetic, low steps) using the env-baked FLUX_* defaults the
+            # music-video keyframe path relies on. Operator can override a no-LoRA still
+            # via metadata.keyframe_model. If the chosen models aren't present,
+            # generate_image fails and we fall back to plain text-to-video below.
+            has_loras = bool(loras)
+            if has_loras:
+                model = "sdxl"
+            else:
+                model = keyframe_model or "flux-schnell"
             steps = 8 if "flux" in model.lower() else 30  # flux-schnell is an 8-step model
-            still = ComfyUIImageGenerator().generate_image(
+            still = ComfyUIImageGenerator(lora_strength=lora_strength).generate_image(
                 prompt=prompt,
+                loras=list(loras) if has_loras else None,
                 output_path=out_path,
                 width=w,
                 height=h,
@@ -435,6 +454,45 @@ class BatchVideoGenerator:
             batch_dir = Path(batch_request.output_dir)
             batch_dir.mkdir(parents=True, exist_ok=True)
 
+            # Resolve cast members (trained character LoRAs) ONCE for the batch.
+            # The video model can't apply a LoRA, so identity is baked into the
+            # cinematic keyframe — selecting cast therefore implies cinematic-keyframe
+            # mode and forces the SDXL keyframe path in _generate_keyframe_still.
+            # Reuses cast_lock (the single source of truth, same as music-video).
+            cast_lora_paths: list[str] = []
+            cast_lock_prefix = ""
+            cast_lora_strength = batch_request.lora_strength
+            if getattr(batch_request, "subject_ids", None):
+                try:
+                    from flask import current_app
+                    try:
+                        _app = current_app._get_current_object()
+                    except RuntimeError:
+                        from backend.app import get_or_create_app
+                        _app = get_or_create_app()
+                    with _app.app_context():
+                        from backend.models import db as _db, Subject
+                        from backend.services.cast_lock import subjects_to_lock, resolve_lora_strength
+                        subs = [_db.session.get(Subject, int(sid)) for sid in batch_request.subject_ids]
+                        cast_lora_paths, cast_lock_prefix = subjects_to_lock(
+                            [s for s in subs if s], include_bible=True)
+                        # Character LoRAs are SDXL → SDXL keyframe strength (~0.25).
+                        # Treat the dataclass default (1.0) as "unset" so the model-aware
+                        # default applies; any other value is an explicit operator override.
+                        _override = None if batch_request.lora_strength == 1.0 else batch_request.lora_strength
+                        cast_lora_strength = resolve_lora_strength("sdxl", _override)
+                        _db.session.remove()
+                    if cast_lora_paths:
+                        logger.info(
+                            "Batch %s: locking %d cast LoRA(s) into cinematic keyframes "
+                            "(prefix=%r, strength=%.2f)",
+                            batch_request.batch_id, len(cast_lora_paths),
+                            cast_lock_prefix, cast_lora_strength)
+                except Exception as e:
+                    logger.warning(
+                        "Batch %s: cast resolution failed (%s); proceeding without "
+                        "character LoRAs", batch_request.batch_id, e)
+
             # Storyboard / Director pass: rewrite prompts into cinematic shot prompts before
             # generation. Runs here (background worker, not the HTTP handler) and never
             # raises. Storyboard expands ONE concept into N connected shots; it already
@@ -466,17 +524,27 @@ class BatchVideoGenerator:
                         # Cinematic mode: for a TEXT item, synthesize a keyframe still and
                         # animate it with Wan 2.2 I2V (the music-video quality path). An item
                         # that already brought its own image just uses that image as-is.
+                        # Selecting cast (cast_lora_paths) implies cinematic — it's the only
+                        # way to lock a character LoRA into a video (baked into the keyframe).
                         item_model = batch_request.model
-                        if (getattr(batch_request, "cinematic_keyframe", False)
-                                and not item.image_path and (item.prompt or "").strip()):
+                        want_cinematic = (getattr(batch_request, "cinematic_keyframe", False)
+                                          or bool(cast_lora_paths))
+                        if (want_cinematic and not item.image_path and (item.prompt or "").strip()):
+                            # Front-load the identity lock (trigger + bible) so the LoRA binds.
+                            kf_prompt = item.prompt
+                            if cast_lock_prefix:
+                                from backend.services.cast_lock import apply_lock
+                                kf_prompt = apply_lock(item.prompt, cast_lock_prefix)
                             still_path = str(Path(batch_dir) / f"keyframe_{item.id}.png")
                             kf = self._generate_keyframe_still(
-                                prompt=item.prompt,
+                                prompt=kf_prompt,
                                 width=batch_request.width,
                                 height=batch_request.height,
                                 out_path=still_path,
                                 seed=(batch_request.seed if batch_request.seed is not None else 1000),
                                 keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
+                                loras=(cast_lora_paths or None),
+                                lora_strength=cast_lora_strength,
                             )
                             if kf:
                                 meta["image_path"] = kf
@@ -695,6 +763,7 @@ class BatchVideoGenerator:
             face_restore=bool(params.get("face_restore", False)),
             lora_name=params.get("lora_name"),
             lora_strength=float(params.get("lora_strength", 1.0)),
+            subject_ids=[int(s) for s in (params.get("subject_ids") or []) if str(s).strip()],
             director_mode=bool(params.get("director_mode", False)),
             cinematic_keyframe=bool(params.get("cinematic_keyframe", False)),
             director_guidance=params.get("director_guidance") or None,

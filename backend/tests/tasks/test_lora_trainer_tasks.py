@@ -108,7 +108,7 @@ def test_train_lora_marks_failed_on_trainer_failure(app, monkeypatch):
         db.session.commit()
         s_id = s.id
 
-    def fake_train_impl(subject_id):
+    def fake_train_impl(subject_id, job_id=None):
         return {"status": "failed", "error": "mock failure"}
     
     monkeypatch.setattr("backend.tasks.lora_trainer_tasks._train_impl", fake_train_impl)
@@ -147,7 +147,10 @@ def test_backend_selector_uses_mock_when_env_set_to_mock(app, tmp_path, monkeypa
         
     assert called_mock
 
-def test_backend_selector_uses_mock_when_real_unavailable_in_auto(app, tmp_path, monkeypatch):
+def test_backend_selector_fails_loud_when_real_unavailable_in_auto(app, tmp_path, monkeypatch):
+    """NO-MOCKS policy: in 'auto', if the real trainer probe says unavailable, we
+    FAIL LOUD — we must NOT silently substitute a fake 27-byte mock LoRA (the bug
+    that polluted subject 16). The Subject is marked 'failed', no LoRA is written."""
     with app.app_context():
         s = Subject(name="Hero", kind="character", training_status="training", ref_image_paths=["/tmp/1.jpg"])
         db.session.add(s)
@@ -156,21 +159,27 @@ def test_backend_selector_uses_mock_when_real_unavailable_in_auto(app, tmp_path,
 
     monkeypatch.setattr("backend.tasks.lora_trainer_tasks._output_dir", lambda: str(tmp_path))
     monkeypatch.setenv("GUAARDVARK_LORA_BACKEND", "auto")
-    
+
     monkeypatch.setattr("plugins.lora_trainer.real_trainer.RealLoraTrainer.is_available", lambda: False)
-    
+
+    # The mock must NOT be invoked even though real is "unavailable".
     called_mock = False
     def fake_mock(*args, **kwargs):
         nonlocal called_mock
         called_mock = True
         return {"status": "ok", "lora_path": "/tmp/mock.safetensors", "lora_version": 1}
-        
     monkeypatch.setattr("plugins.lora_trainer.mock_trainer.train_subject_lora", fake_mock)
 
     with app.app_context():
         train_subject_lora_for_subject(s_id)
-        
-    assert called_mock
+
+    assert called_mock is False, "mock must never run as a production auto fallback"
+    with app.app_context():
+        s = db.session.get(Subject, s_id)
+        assert s.training_status == "failed"
+        assert s.lora_path is None
+    # No fake LoRA file written.
+    assert not list(tmp_path.iterdir())
 
 def test_backend_selector_uses_real_when_real_available_in_auto(app, tmp_path, monkeypatch):
     with app.app_context():

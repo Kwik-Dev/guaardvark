@@ -1930,11 +1930,14 @@ class Wan22I2VGenerator:
     """Wan 2.2 image-to-video adapter for the Editor's I2VGenerator protocol.
 
     This is the film pipeline's preferred animator (Layer 2 of the film-orchestrator
-    plan). Identity rides in the LoRA-consistent storyboard frame, exactly as with
-    the SVD/CogVideoX adapter — but UNLIKE that one, Wan 2.2 takes a text prompt
-    (motion guidance) and a LoRA (holds identity through motion), so we pass both.
-    Per-step progress is surfaced automatically by the Layer-1 ws bridge inside
-    generate_video. Short clips keep identity stable and VRAM in budget on 16 GB.
+    plan). Identity rides ENTIRELY in the LoRA-locked storyboard/keyframe image that
+    seeds the animation — Wan 2.2 takes a text prompt (motion guidance) plus that
+    init frame. It does NOT apply a LoRA: the Wan GGUF backbone (UnetLoaderGGUF) has
+    no LoRA hook (see _build_workflow's "no LoRA hook" skip), so any lora_name passed
+    here is currently inert — it's threaded through only for forward-compat if a
+    Wan-format LoRA loader is ever added. Lock the character in the keyframe upstream,
+    not here. Per-step progress is surfaced automatically by the Layer-1 ws bridge
+    inside generate_video. Short clips keep identity stable and VRAM in budget on 16 GB.
     """
 
     def __init__(self, fps: int = 24):
@@ -1957,8 +1960,9 @@ class Wan22I2VGenerator:
             fps=self.fps,
             enhance_prompt=False,
             output_dir=out_dir,                      # known base → result path resolves
-            # Wan I2V honors a single LoRA — re-applying the character LoRA helps
-            # hold identity through motion (the frame anchors it; the LoRA steadies it).
+            # NOTE: the Wan GGUF backbone applies NO LoRA (no loader hook — see
+            # _build_workflow). Identity comes from the LoRA-locked init frame, not
+            # from this. lora_name is passed through inert for forward-compat only.
             lora_name=(loras[0] if loras else None),
             metadata={"image_path": image_path},
         )

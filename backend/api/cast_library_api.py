@@ -53,6 +53,45 @@ def _resolve_ref_path(p: str) -> str | None:
 _ALLOWED_REF_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _MAX_REF_BYTES = 25 * 1024 * 1024  # 25 MB per image — generous, but caps runaway uploads.
 
+# Provenance guard. Training a character on the system's OWN generated frames is a
+# feedback loop that collapses identity — it's exactly what polluted subject 16
+# (44 of 51 "references" were storyboard/i2v outputs re-dropped into cast_refs).
+# These are the filename_prefixes the generators stamp on their outputs
+# (SaveImage filename_prefix in comfyui_image_generator / *_video_generator, plus
+# the character-sample writer). Heuristic only — a user CAN rename a file past this,
+# and that's documented honestly — but it catches the common "drag the nice
+# storyboard frame back in as a reference" mistake that caused the original bug.
+_GENERATED_NAME_PREFIXES = ("storyboard-", "storyboard_", "wan22_", "wan22-",
+                            "cogvideo", "sample_", "keyframe_", "keyframe-",
+                            "review-", "i2v_", "i2v-")
+_GENERATED_NAME_SUBSTRINGS = ("_i2v_", "-i2v-", "flux-dev_", "flux-schnell_",
+                              "storyboard-flux")
+
+
+def _looks_generated(filename: str) -> bool:
+    """True if a filename looks like one of OUR generated outputs (not a real
+    source photo). Used to keep generated frames out of a character's reference
+    set. Heuristic on the basename only — see _GENERATED_NAME_PREFIXES note."""
+    base = Path(filename or "").name.lower()
+    if base.startswith(_GENERATED_NAME_PREFIXES):
+        return True
+    return any(tok in base for tok in _GENERATED_NAME_SUBSTRINGS)
+
+
+def _is_under_outputs(stored_path: str) -> bool:
+    """True if a stored ref path resolves INTO data/outputs/ (the generated-media
+    tree). A real reference never lives there. Reuses _resolve_ref_path so the
+    same containment logic applies; falls back to a substring check when the file
+    isn't on disk yet (e.g. a create-API body referencing a future path)."""
+    if not stored_path:
+        return False
+    resolved = _resolve_ref_path(stored_path)
+    needle = f"{os.sep}outputs{os.sep}"
+    if resolved and needle in f"{os.sep}{os.path.relpath(resolved, _PROJECT_ROOT)}":
+        return True
+    norm = stored_path.replace("/", os.sep)
+    return needle in norm or norm.startswith(f"outputs{os.sep}") or "/outputs/" in stored_path
+
 
 def _cast_ref_dir(subject_id: int) -> Path:
     """Where reference images for a Subject live on disk. Created lazily."""
@@ -72,8 +111,11 @@ def _serialize(s: Subject) -> dict:
         "lora_path": s.lora_path,
         "lora_version": s.lora_version,
         "training_status": s.training_status,
-        "training_error": s.training_error,  # why the last run failed (UI surfaces it)
-        "bible": s.bible,  # the appearance-lock injected per cut; surfaced for UI preview
+        "training_error": getattr(s, 'training_error', None),
+        "current_training_job_id": getattr(s, 'current_training_job_id', None),
+        "last_trained_image_paths": getattr(s, 'last_trained_image_paths', None) or [],
+        "last_trained_at": getattr(s, 'last_trained_at', None).isoformat() if getattr(s, 'last_trained_at', None) else None,
+        "bible": getattr(s, 'bible', None),
     }
 
 
@@ -119,10 +161,16 @@ def create_subject():
         return jsonify({"error": f"kind must be one of {sorted(VALID_KINDS)}"}), 400
     if not name:
         return jsonify({"error": "name is required"}), 400
+    # Provenance guard on the create-API body: ref_image_paths can be set directly
+    # here, so strip any path that is one of our generated outputs or lives under
+    # data/outputs/ — references must be real source photos (subject-16 fix).
+    raw_refs = body.get("ref_image_paths") or []
+    clean_refs = [p for p in raw_refs
+                  if not _looks_generated(p) and not _is_under_outputs(p)]
     s = Subject(
         kind=kind, name=name,
         description=body.get("description") or "",
-        ref_image_paths=body.get("ref_image_paths") or [],
+        ref_image_paths=clean_refs,
         trigger_word=(body.get("trigger_word") or "").strip() or None,
         voice_id=(body.get("voice_id") or "").strip() or None,
     )
@@ -221,17 +269,23 @@ def delete_subject(subject_id):
     if s is None:
         return jsonify({"error": "not_found"}), 404
 
-    # Best-effort: if this subject had an active training or gen job, mark it
-    # failed/cancelled so the unified queue and UI reflect reality. The actual
-    # Celery task may still run to completion but will see the subject gone or
-    # status changed and short-circuit (idempotency guards exist).
+    # Cancel the associated unified progress job (if any) so it disappears from
+    # the global queue/Activity. This is key for "if a character is deleted,
+    # then any jobs should cancel and be purged (training jobs)".
+    if s.current_training_job_id:
+        try:
+            from backend.utils.unified_progress_system import get_unified_progress
+            prog = get_unified_progress()
+            prog.cancel_process(s.current_training_job_id, reason="Subject deleted")
+        except Exception:
+            pass  # best effort
+
+    # Mark training as purged if it was running.
     if s.training_status == "training":
         s.training_status = "failed"
         s.training_error = "Subject deleted — training job cancelled/purged."
+    s.current_training_job_id = None
     db.session.commit()
-
-    # Future: use unified progress + job ids stored in additional_data or on
-    # subject to call cancel_process / job cancel for precise purge.
 
     db.session.delete(s)
     db.session.commit()
@@ -267,6 +321,16 @@ def upload_subject_refs(subject_id):
         ext = Path(safe_name).suffix.lower()
         if ext not in _ALLOWED_REF_EXTS:
             skipped.append({"name": f.filename, "reason": f"unsupported extension {ext!r}"})
+            continue
+        # Provenance guard: refuse our own generated frames so training stays on
+        # real source photos (the subject-16 model-collapse fix). Check both the
+        # uploaded filename and the secured name in case secure_filename mangled it.
+        if _looks_generated(f.filename) or _looks_generated(safe_name):
+            skipped.append({
+                "name": f.filename,
+                "reason": "looks like a generated output (storyboard/i2v/sample frame); "
+                          "references must be real source photos, not the model's own renders",
+            })
             continue
 
         # Resolve collisions by appending -1, -2, … so multiple uploads with
@@ -420,14 +484,17 @@ def dispatch_generate_samples(subject_id: int):
     from backend.celery_app import celery
     from backend.utils.unified_progress_system import get_unified_progress, ProcessType
 
+    body = request.get_json(silent=True) or {}
+    use_lora = bool(body.get("use_trained_lora", False))
+
     progress = get_unified_progress()
     job_id = progress.create_process(
         ProcessType.IMAGE_GENERATION,
         f"Character reference sheet generation for subject {subject_id}",
-        additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen"},
+        additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen", "use_trained_lora": use_lora},
     )
-    task = celery.send_task("character.generate_samples", args=[subject_id, job_id])
-    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id}), 202
+    task = celery.send_task("character.generate_samples", args=[subject_id, job_id, use_lora])
+    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id, "use_trained_lora": use_lora}), 202
 
 
 @bp.get("/subjects/<int:subject_id>/samples")
@@ -474,29 +541,23 @@ def dispatch_train(subject_id: int):
     if s.training_status == "training":
         return jsonify({"error": "already_training", "subject_id": subject_id}), 409
 
-    # Commit the status transition to 'training' BEFORE dispatching. The
-    # lora_trainer.train_lora worker skips any subject not already committed as
-    # 'training' (idempotency guard in lora_trainer_tasks.py). Dispatching
-    # pre-commit races the worker — it loads the still-'untrained' row and
-    # returns immediately, so the button appears to do nothing. Commit first.
-    s.training_status = "training"
-    s.training_error = None  # clear any prior failure reason before the new run
-    db.session.commit()
-
     from backend.celery_app import celery
     from backend.utils.unified_progress_system import get_unified_progress, ProcessType
 
     progress = get_unified_progress()
-    # Use LORA_TRAIN (or TRAINING) process type so it participates in the unified
-    # job queue, Activity, sockets, long-running batch, resume, and cancel paths.
-    # additional_data.subject_id allows frontend (and delete purge) to correlate
-    # without dedicated kind changes initially. This is the effective architecture
-    # choice for the system.
     job_id = progress.create_process(
         ProcessType.TRAINING,  # or IMAGE_GENERATION for consistency with other GPU work; TRAINING fits LoRA intent
         f"LoRA training for cast subject {subject_id} ({s.name})",
         additional_data={"subject_id": subject_id, "operation": "train_lora", "kind": "cast_training"},
     )
+
+    # Store linkage on the subject *before* the status commit so the worker
+    # and delete path have a reliable way to find the job. Commit status+job_id
+    # first (per the idempotency requirement for the lora task).
+    s.current_training_job_id = job_id
+    s.training_status = "training"
+    s.training_error = None  # clear any prior failure reason before the new run
+    db.session.commit()
 
     try:
         task = celery.send_task("lora_trainer.train_lora", args=[subject_id, job_id])
@@ -508,6 +569,7 @@ def dispatch_train(subject_id: int):
         except Exception:
             pass
         s.training_status = "untrained"
+        s.current_training_job_id = None
         db.session.commit()
         raise
     return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id}), 202

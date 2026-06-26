@@ -154,6 +154,11 @@ frontend/public/*.onnx
 training/models/
 unsloth_compiled_cache/
 plugins/upscaling/models/*.pth
+# Root training snapshot archive — a 2GB binary (a full training/ dir tarball, e.g.
+# the gvk-eye model). Not source; must never reach a commit. Keep the FILE on disk
+# (it can be the only surviving copy of a trained model) but keep it out of git.
+training.zip
+/*.zip
 
 # Dependency reconciler runtime state (per-machine)
 data/dep_reconciler/

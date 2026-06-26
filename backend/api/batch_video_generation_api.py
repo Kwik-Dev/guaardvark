@@ -159,6 +159,10 @@ def generate_text_to_video_batch():
             "director_mode": str(data.get("director_mode", "false")).lower() == "true",
             "cinematic_keyframe": str(data.get("cinematic_keyframe", "false")).lower() == "true",
             "director_guidance": data.get("director_guidance") or None,
+            # Trained cast members to lock into each clip. The video model can't apply
+            # a LoRA, so each selected character's SDXL LoRA is baked into a cinematic
+            # keyframe (which then seeds I2V) — selecting cast implies cinematic mode.
+            "subject_ids": _parse_list(data.get("subject_ids")),
             "storyboard_concept": storyboard_concept or None,
             "metadata": {
                 **(data.get("metadata") or {}),

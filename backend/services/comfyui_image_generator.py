@@ -105,13 +105,37 @@ class ComfyUIImageGenerator:
     ) -> dict:
         effective_model = model or self.model
         ml = (effective_model or "").lower()
+
+        # ── Capability guard (subject-16 model-collapse fix) ──────────────────
+        # Our trained character LoRAs are SDXL (the trainer is a
+        # StableDiffusionXLPipeline — see plugins/lora_trainer/scripts/run_trainer.py).
+        # Branch selection here is by model STRING, which used to let a stray
+        # model name silently drop the LoRA: the flux-schnell branch has NO LoRA
+        # nodes at all, and the flux-DEV branch expects FLUX-format LoRAs (an SDXL
+        # LoRA loaded there is wrong/garbled). So whenever LoRAs are present we
+        # force the verified-correct SDXL LoraLoader chain below — identity must
+        # actually be applied, not dropped. A flux model with NO LoRAs keeps its
+        # branch (plain stylistic stills are unaffected).
+        if lora_names and "flux" in ml:
+            logger.warning(
+                "Keyframe requested model=%r WITH %d LoRA(s); character LoRAs are "
+                "SDXL and flux branches drop/mismatch them — overriding to the SDXL "
+                "LoRA branch so identity is actually applied.",
+                effective_model, len(lora_names),
+            )
+            effective_model = "sdxl"
+            ml = "sdxl"
+
         if "flux" in ml and "dev" in ml:
-            # FLUX-dev + LoRA identity-lock branch. This is the route trained
-            # character LoRAs (e.g. sage_harlow) MUST take — the schnell branch
-            # below silently ignores LoRAs, and SDXL can't load a FLUX LoRA at all.
-            # Model-only LoRA chain: these character LoRAs don't train the text
-            # encoder (SimpleTuner "text encoder was not trained"), so clip is left
-            # untouched and the trigger word in the prompt does the identity work.
+            # FLUX-dev branch. As of the subject-16 fix this only fires for an
+            # explicit flux-dev model with NO LoRAs (plain flux-dev stills) — the
+            # capability guard above re-routes every LoRA request to the SDXL
+            # branch because this app's character LoRAs are SDXL. The LoraLoaderModelOnly
+            # chain below is retained for a FUTURE flux trainer; a flux-format LoRA
+            # would need to bypass the guard (e.g. a model tag like "flux-dev-loras")
+            # to reach it. Model-only chain: FLUX character LoRAs don't train the
+            # text encoder (SimpleTuner "text encoder was not trained"), so clip is
+            # left untouched and the trigger word in the prompt does the identity work.
             # Dev UNET/T5 come from the FLUX_DEV_* module constants (override via
             # GUAARDVARK_FLUX_DEV_UNET / _T5) — NOT the per-instance flux_unet/flux_t5,
             # which default to the schnell GGUF and would break this graph.

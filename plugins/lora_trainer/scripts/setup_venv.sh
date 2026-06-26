@@ -39,8 +39,12 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     HOST_CUDA=$(nvidia-smi | grep -oP 'CUDA Version:\s*\K[0-9.]+' | head -1 || true)
 fi
 
-CU_INDEX="cu128"   # safe recent default
-TORCH_VER="2.5.1"  # more widely available than hypothetical 2.11; matches common 2026 setups
+CU_INDEX="cu130"   # matches the working install on this box (RTX 4070 Ti SUPER, CUDA 13)
+# Pin the torch version that the live, known-good venv-torch actually runs. The old
+# 2.5.1 pin did NOT match disk (the working venv has 2.11.0+cu130), so re-running this
+# script would have downgraded torch and broken the real LoRA trainer. Verified via
+# `plugins/lora_trainer/venv-torch/bin/python -c "import torch; print(torch.__version__)"`.
+TORCH_VER="2.11.0"
 
 if [[ -n "$HOST_CUDA" ]]; then
     # Turn 12.6 into cu126, 12.4 into cu124, 13.x into cu130 etc.

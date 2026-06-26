@@ -15,9 +15,11 @@ def app(tmp_path):
     app.config.update({
         "TESTING": True,
         "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
-        # Cast-ref upload endpoint resolves data/cast_refs/ under DATA_DIR;
-        # tests redirect to a tmp dir so the repo's data/ doesn't get polluted.
-        "DATA_DIR": str(tmp_path),
+        # Cast-ref upload endpoint resolves data/cast_refs/ under STORAGE_DIR (the
+        # key the code actually reads — see cast_library_api._cast_ref_dir). Point
+        # it at a tmp dir so uploads NEVER touch the repo's real data/cast_refs/.
+        # (Was "DATA_DIR", which the code ignores → tests polluted ./data/cast_refs/1.)
+        "STORAGE_DIR": str(tmp_path),
     })
     db.init_app(app)
     app.register_blueprint(cast_library_bp)
@@ -187,6 +189,49 @@ def test_upload_refs_skips_unsupported_extension(client):
     assert data["saved"] == []
     assert len(data["skipped"]) == 1
     assert "unsupported" in data["skipped"][0]["reason"].lower()
+
+
+def test_upload_refs_rejects_generated_frames(client):
+    """Provenance guard: the system's own generated outputs (storyboard/i2v/
+    sample frames) must never be accepted as training references — that feedback
+    loop is what collapsed subject 16's identity. Negative case."""
+    from io import BytesIO
+    subj = _create_subject(client)
+    resp = client.post(
+        f"/api/cast-library/subjects/{subj['id']}/upload-refs",
+        data={"files": [
+            (BytesIO(_png_bytes()), "wan22_i2v_01045_.png"),
+            (BytesIO(_png_bytes()), "storyboard-flux-dev_00169_.png"),
+            (BytesIO(_png_bytes()), "real_headshot.jpg"),  # positive case
+        ]},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Only the real photo is saved; both generated frames are skipped.
+    assert len(data["saved"]) == 1
+    assert data["saved"][0].endswith("real_headshot.jpg")
+    skipped_names = {s["name"] for s in data["skipped"]}
+    assert "wan22_i2v_01045_.png" in skipped_names
+    assert "storyboard-flux-dev_00169_.png" in skipped_names
+    for s in data["skipped"]:
+        assert "generated" in s["reason"].lower()
+
+
+def test_create_subject_strips_generated_ref_paths(client):
+    """create-API body provenance guard: ref_image_paths that are generated
+    outputs or live under data/outputs/ are stripped; real photos survive."""
+    resp = client.post("/api/cast-library/subjects", json={
+        "kind": "character", "name": "Polluted",
+        "ref_image_paths": [
+            "/home/x/data/outputs/storyboards/3/storyboard-flux-dev_1_.png",
+            "data/outputs/character_samples/16/sample_0.png",
+            "/home/x/refs/real_photo_001.jpg",
+        ],
+    })
+    assert resp.status_code == 201
+    refs = resp.get_json()["ref_image_paths"]
+    assert refs == ["/home/x/refs/real_photo_001.jpg"]
 
 
 def test_upload_refs_appends_to_existing_list(client):
