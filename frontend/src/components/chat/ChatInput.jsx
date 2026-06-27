@@ -948,6 +948,22 @@ Please select a supported file type.`;
       reader.readAsDataURL(file);
     };
 
+    // Drag-and-drop: accept LOCAL image files only. We read dataTransfer.FILES and
+    // deliberately NEVER read dataTransfer URLs (text/uri-list / text/html) — a drag
+    // from a browser tab carries a remote URL there, and fetching it would break
+    // offline-first. Local files go through the same base64 path as paste/paperclip.
+    const handleImageDrop = (event) => {
+      event.preventDefault();
+      const files = event.dataTransfer?.files;
+      if (!files || !files.length) return;
+      for (const f of Array.from(files)) {
+        if (f.type && f.type.startsWith("image/")) handleImageUpload(f);
+      }
+    };
+    const handleDragOver = (event) => {
+      event.preventDefault();
+    };
+
     const handleImagePaste = (event) => {
       const items = event.clipboardData?.items;
       if (!items) return;
@@ -1242,6 +1258,8 @@ Total URLs: ${analysis.totalUrls}`;
 
     return (
       <Box
+        onDrop={handleImageDrop}
+        onDragOver={handleDragOver}
         sx={{
           p: 2,
           borderTop: 1,
@@ -1315,7 +1333,7 @@ Total URLs: ${analysis.totalUrls}`;
               ))}
               {imageState.images.length < MAX_IMAGES && (
                 <Typography variant="caption" color="text.secondary">
-                  +{MAX_IMAGES - imageState.images.length} more
+                  add up to {MAX_IMAGES - imageState.images.length} more
                 </Typography>
               )}
             </Box>

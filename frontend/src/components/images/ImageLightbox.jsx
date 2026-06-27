@@ -11,6 +11,7 @@ import {
   Edit as EditIcon,
 } from '@mui/icons-material';
 import ImageEditor from './ImageEditor';
+import { guardedMediaSrc } from '../../utils/assetGuard';
 
 const ImageLightbox = ({
   imageUrl,
@@ -145,10 +146,11 @@ const ImageLightbox = ({
         </IconButton>
       )}
 
-      {/* Image */}
+      {/* Image — offline-first: a remote (non-local) URL is swapped for a blocked
+          placeholder so opening the lightbox never issues an outbound request. */}
       <Box
         component="img"
-        src={imageUrl}
+        src={guardedMediaSrc(imageUrl)}
         alt={imageName}
         onClick={(e) => e.stopPropagation()}
         sx={{

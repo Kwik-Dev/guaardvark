@@ -395,6 +395,13 @@ class FrontendResourceManager {
       delete checkObj.images;
       delete checkObj.frame;
       delete checkObj.file;  // attachment payload (e.g. a pasted image as base64) — large by nature, not text bloat
+      // The chat image attach actually rides in voiceOptions.imageBase64 / imagePreview
+      // (a ~2MB base64 data URL), so it tripped the text-size cap and fell off the queue.
+      // Strip those two fields but keep the rest of voiceOptions (small config).
+      if (checkObj.voiceOptions && typeof checkObj.voiceOptions === 'object') {
+        const { imageBase64, imagePreview, ...voRest } = checkObj.voiceOptions;
+        checkObj.voiceOptions = voRest;
+      }
       const messageStr = JSON.stringify(checkObj);
       if (messageStr.length > queue.maxLength) {
         const errorMessage = `Message object too large: ${messageStr.length} > ${queue.maxLength} characters`;
