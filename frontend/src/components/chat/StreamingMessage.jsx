@@ -4,6 +4,7 @@
  */
 import React, { useEffect, useState, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
 import PropTypes from "prop-types";
+import { guardedMediaSrc } from "../../utils/assetGuard";
 import {
   Box,
   Paper,
@@ -461,7 +462,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
                       borderColor: "divider",
                       display: "block",
                     }}
-                    src={img.url}
+                    src={guardedMediaSrc(img.url)}
                   />
                 ) : (
                   <CardMedia
@@ -477,7 +478,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
                       objectFit: "contain",
                       cursor: "pointer",
                     }}
-                    image={img.url}
+                    image={guardedMediaSrc(img.url)}
                     alt={img.alt}
                     onClick={() => {
                       const imgList = images.filter(i => i.type !== "video").map(i => ({ url: i.url, name: i.alt || i.caption || "Image" }));
@@ -520,6 +521,8 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
           >
             <ReactMarkdown
               components={{
+                // Offline-first: never load a remote image URL from message markdown.
+                img: (props) => <img {...props} src={guardedMediaSrc(props.src)} alt={props.alt || ""} />,
                 code({ inline, className, children, ...props }) {
                   const match = /language-(\w+)/.exec(className || "");
                   return !inline && match ? (
