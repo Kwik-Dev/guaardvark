@@ -31,6 +31,7 @@ import {
   CircularProgress,
   Switch,
   FormControlLabel,
+  Collapse,
 } from "@mui/material";
 import PageLayout from "../components/layout/PageLayout";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
@@ -38,6 +39,7 @@ import {
   PlayArrow as PlayIcon,
   Refresh as RefreshIcon,
   Download as DownloadIcon,
+  CloudDownload as CloudDownloadIcon,
   VideoLibrary as VideoIcon,
   Image as ImageIcon,
   DriveFileRenameOutline as RenameIcon,
@@ -45,7 +47,6 @@ import {
   Settings as SettingsIcon,
   Speed as SpeedIcon,
   Timer as TimerIcon,
-  Animation as MotionIcon,
   Upload as UploadIcon,
   Collections as GalleryIcon,
   Close as CloseIcon,
@@ -178,26 +179,52 @@ const MOTION_PRESETS = {
   },
 };
 
-// Post-processing quality tiers (interpolation + upscaling + power features guidance)
+// Post-processing quality tiers (interpolation + upscaling)
 const OUTPUT_QUALITY_TIERS = {
   draft: {
     label: "Draft",
-    description: "Raw output, fastest (no extra post)",
+    description: "Raw model output — fastest, lowest polish",
     interpolation: 1,
     upscale: false,
   },
   standard: {
     label: "Standard",
-    description: "2x FPS interpolation",
+    description: "2x FPS interpolation for smoother motion",
     interpolation: 2,
     upscale: false,
   },
   cinema: {
     label: "Cinema",
-    description: "2x FPS + 2x upscale + recommended power features",
+    description: "2x FPS + 2x upscale — recommended for final output",
     interpolation: 2,
     upscale: true,
   },
+};
+
+// Keyframe still models for the cinematic keyframe → I2V quality path
+const KEYFRAME_MODEL_OPTIONS = {
+  "flux-schnell": {
+    label: "FLUX.1-schnell",
+    description: "Fast, beautiful stills (default)",
+  },
+  "flux-dev-lora": {
+    label: "FLUX-dev + LoRA",
+    description: "Best identity lock for trained characters",
+  },
+  sdxl: {
+    label: "SDXL",
+    description: "High-fidelity stills without LoRA",
+  },
+  "sdxl-lora": {
+    label: "SDXL + LoRA",
+    description: "Legacy identity lock via character LoRAs",
+  },
+};
+const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
+
+const MODEL_DEFAULT_GUIDANCE = {
+  wan: 3.5,
+  cogvideox: 6.0,
 };
 
 // Aspect ratio presets
@@ -341,8 +368,6 @@ const snapDimensions = (width, height, model) => {
     height: Math.round(height / align) * align,
   };
 };
-const isSvdModel = (model) => MODEL_OPTIONS[model]?.type === "svd";
-
 // Lazy import for VideoModelsModal
 const VideoModelsModal = React.lazy(() => import("../components/modals/VideoModelsModal"));
 
@@ -383,6 +408,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [directorGuidance, setDirectorGuidance] = useState("");      // optional free-text steer for the Director
   const [storyboardMode, setStoryboardMode] = useState(false);       // one concept -> N director-written shots
   const [storyboardShots, setStoryboardShots] = useState(6);
+  const [keyframeModel, setKeyframeModel] = useState(DEFAULT_KEYFRAME_MODEL);
+  const [highConsistencyMode, setHighConsistencyMode] = useState(false);
+  const [postUpscale, setPostUpscale] = useState(false); // independent 2x upscale (quality post-processing)
+  const [faceRestoreNodeAvailable, setFaceRestoreNodeAvailable] = useState(null);
+  const [faceRestoreModelReady, setFaceRestoreModelReady] = useState(null);
+  const faceRestoreAvailable =
+    faceRestoreNodeAvailable === true && faceRestoreModelReady === true;
 
   // Prompt preview state (calls /enhance-preview)
   const [previewEnhanced, setPreviewEnhanced] = useState("");
@@ -417,6 +449,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // cinematic-keyframe path on the backend.
   const [castSubjects, setCastSubjects] = useState([]);
   const [selectedSubjectIds, setSelectedSubjectIds] = useState([]);
+  // Q1: approved reference stills of the (single) selected character, and the one the
+  // user picked to animate directly as the I2V start frame. Animating that exact
+  // high-quality still is what makes the clip match the "Generate Character" images.
+  const [castSamples, setCastSamples] = useState([]);
+  const [selectedKeyframeSampleId, setSelectedKeyframeSampleId] = useState(null);
   useEffect(() => {
     let alive = true;
     fetch("/api/cast-library")
@@ -432,11 +469,103 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return () => { alive = false; };
   }, []);
 
-  // CogVideoX-specific power features
-  const [teaCacheEnabled, setTeaCacheEnabled] = useState(false);
-  const [teaCacheThreshold, setTeaCacheThreshold] = useState(0.3);
+  // CogVideoX temporal-coherence feature (quality, not speed)
   const [fetaEnabled, setFetaEnabled] = useState(false);
   const [fetaWeight, setFetaWeight] = useState(1.0);
+
+  // Cast selection implies cinematic keyframe on the backend — mirror that in the UI.
+  useEffect(() => {
+    if (selectedSubjectIds.length > 0) {
+      setCinematicKeyframe(true);
+      if (keyframeModel === "flux-schnell") {
+        setKeyframeModel("flux-dev-lora");
+      }
+    }
+  }, [selectedSubjectIds.length]);
+
+  // Q1: when exactly one trained character is selected, load its APPROVED reference
+  // stills so the user can pick one as the I2V start frame. More than one subject (or
+  // none) clears the picker — a single start frame only makes sense per character.
+  useEffect(() => {
+    if (selectedSubjectIds.length !== 1) {
+      setCastSamples([]);
+      setSelectedKeyframeSampleId(null);
+      return;
+    }
+    let alive = true;
+    const sid = selectedSubjectIds[0];
+    fetch(`/api/cast-library/subjects/${sid}/samples`)
+      .then((r) => (r.ok ? r.json() : { samples: [] }))
+      .then((d) => {
+        if (!alive) return;
+        setCastSamples((d.samples || []).filter((s) => s.approved && s.image_path));
+        setSelectedKeyframeSampleId(null);
+      })
+      .catch(() => { if (alive) setCastSamples([]); });
+    return () => { alive = false; };
+  }, [selectedSubjectIds]);
+
+  // Apply one-click quality & consistency preset when the master switch is enabled.
+  useEffect(() => {
+    if (!highConsistencyMode) return;
+    setDirectorMode(true);
+    setEnhancePrompt(true);
+    setFidelityMode(false);
+    setQualityTier("cinema");
+    setPostUpscale(true);
+    setAdvancedParams((prev) => ({
+      ...prev,
+      face_restore: faceRestoreAvailable === true,
+      freeu: isWanModel(model),
+    }));
+    if (isCogVideoXModel(model)) {
+      setFetaEnabled(true);
+      setFetaWeight(1.0);
+    }
+    if (inputMode === "text") {
+      setCinematicKeyframe(true);
+    }
+  }, [highConsistencyMode, model, inputMode, faceRestoreAvailable]);
+
+  const refreshFaceRestoreStatus = useCallback(async () => {
+    try {
+      const [gpuRes, modelsRes] = await Promise.all([
+        fetch(`${API_BASE}/gpu/comfyui/status`),
+        fetch(`${API_BASE}/batch-video/models`),
+      ]);
+      let nodeOk = false;
+      let modelOk = false;
+      if (gpuRes.ok) {
+        const gpu = await gpuRes.json();
+        nodeOk = gpu?.data?.face_restore_node_available === true;
+        setFaceRestoreNodeAvailable(nodeOk);
+      }
+      if (modelsRes.ok) {
+        const models = await modelsRes.json();
+        const codeformer = models?.data?.models?.find((m) => m.id === "codeformer");
+        modelOk = !!codeformer?.is_ready;
+        setFaceRestoreModelReady(modelOk);
+      }
+      if (!nodeOk || !modelOk) {
+        setAdvancedParams((prev) => (prev.face_restore ? { ...prev, face_restore: false } : prev));
+      }
+    } catch {
+      // ComfyUI down / API unavailable — leave toggle disabled until known.
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshFaceRestoreStatus();
+  }, [refreshFaceRestoreStatus]);
+
+  // Sync guidance scale to model-family defaults when the model changes.
+  useEffect(() => {
+    const family = MODEL_OPTIONS[model]?.type;
+    const defaultCfg = MODEL_DEFAULT_GUIDANCE[family];
+    if (defaultCfg != null) {
+      setAdvancedParams((prev) => ({ ...prev, guidance_scale: defaultCfg }));
+    }
+  }, [model]);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState("");
@@ -698,47 +827,46 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
     // Post-processing quality tier
     const tier = OUTPUT_QUALITY_TIERS[qualityTier] || OUTPUT_QUALITY_TIERS.standard;
+    const useKeyframePath = cinematicKeyframe || selectedSubjectIds.length > 0;
+    // FETA improves temporal coherence on CogVideoX — auto-on for Cinema tier.
+    const effectiveFeta =
+      isCogVideoXModel(effectiveModel) &&
+      (fetaEnabled || qualityTier === "cinema" || highConsistencyMode);
 
-    // Build final params - don't spread quality since it has SVD-specific width/height
-    // that shouldn't override our calculated videoDimensions for CogVideoX
+    // Build final params - don't spread quality since it has legacy width/height
+    // fields that shouldn't override our calculated videoDimensions for CogVideoX
     return {
       model: effectiveModel,
       duration_frames: effectiveDurationFrames,
       fps: effectiveFps,
       motion_strength: motion.motion_strength,
-      // Use calculated (and possibly clamped) dimensions from videoDimensions
       width,
       height,
-      // Steps from quality preset (or advanced override)
       num_inference_steps: effectiveSteps,
-      // Advanced params (but don't override steps if we computed it above)
       guidance_scale: advancedParams.guidance_scale,
       generate_frames_only: advancedParams.generate_frames_only,
-      // For Low VRAM mode, use frames_per_batch=1 to minimize memory usage
       frames_per_batch: lowVramMode && (isCogVideoXModel(model) || isWanModel(model)) ? 1 : advancedParams.frames_per_batch,
       combine_frames: advancedParams.combine_frames,
       freeu: advancedParams.freeu,
       face_restore: advancedParams.face_restore,
       lora_name: advancedParams.lora_name,
       lora_strength: advancedParams.lora_strength,
-      // Trained cast members to lock into each clip (SDXL LoRA baked into the
-      // keyframe). Selecting cast implies the cinematic-keyframe path on the backend.
       subject_ids: selectedSubjectIds,
-      // Post-processing: interpolation and upscaling from quality tier
       interpolation_multiplier: tier.interpolation,
-      upscale: tier.upscale,
-      // Prompt enhancement
+      upscale: tier.upscale || postUpscale,
       prompt_style: promptStyle,
       enhance_prompt: enhancePrompt,
-      // Quality pipeline (v2.6.2): cinematic Director + FLUX-keyframe -> I2V
       director_mode: directorMode,
-      cinematic_keyframe: cinematicKeyframe,
+      cinematic_keyframe: cinematicKeyframe || selectedSubjectIds.length > 0,
       director_guidance: directorGuidance.trim() || null,
-      // CogVideoX power features
-      teacache_threshold: teaCacheEnabled && isCogVideoXModel(effectiveModel) ? teaCacheThreshold : null,
-      feta_weight: fetaEnabled && isCogVideoXModel(effectiveModel) ? fetaWeight : null,
+      feta_weight: effectiveFeta ? fetaWeight : null,
+      metadata: {
+        ...(useKeyframePath ? { keyframe_model: keyframeModel } : {}),
+        // Q1: animate this exact approved still as the I2V start frame (full-quality parity).
+        ...(selectedKeyframeSampleId ? { keyframe_sample_id: selectedKeyframeSampleId } : {}),
+      },
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, teaCacheEnabled, teaCacheThreshold, fetaEnabled, fetaWeight, selectedSubjectIds]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, selectedKeyframeSampleId]);
 
   // Fetch enhanced prompt preview from backend (re-uses the same enhance_video_prompt logic + fidelity_mode)
   const fetchPromptPreview = async () => {
@@ -1106,10 +1234,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         ? parsedPrompts.map((p) => `${p}, ${lf}`)
         : parsedPrompts;
 
-      // SVD ignores negative prompts (image-conditioned only). Hide it from the wire too.
-      const isSvd = (computedParams.model || model || "").toLowerCase().includes("svd");
       const trimmedNeg = negativePrompt.trim();
-      const negativePayload = !isSvd && trimmedNeg ? { negative_prompt: trimmedNeg } : {};
+      const negativePayload = trimmedNeg ? { negative_prompt: trimmedNeg } : {};
 
       // Storyboard mode (text only): the whole prompt box is ONE concept the Director
       // expands into N shots. The backend creates N items and writes the shots.
@@ -1408,6 +1534,32 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   }
                   sx={{ mt: 1 }}
                 />
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={highConsistencyMode}
+                      onChange={(e) => setHighConsistencyMode(e.target.checked)}
+                      color="secondary"
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Box>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        High consistency mode
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Enables Director, keyframe→I2V, face restore, Cinema post-processing, and temporal coherence (FETA on CogVideoX / FreeU on Wan).
+                      </Typography>
+                    </Box>
+                  }
+                  sx={{ mt: 1.5 }}
+                />
+                {highConsistencyMode && lowVramMode && (
+                  <Alert severity="warning" sx={{ mt: 1 }}>
+                    Low VRAM mode reduces resolution and steps — it trades quality for memory. Turn it off for best consistency.
+                  </Alert>
+                )}
               </Box>
 
               {/* Main Generation Form */}
@@ -1444,13 +1596,20 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           {/* Prompt/Image Input */}
           {inputMode === "text" ? (
             <TextField
-              label="What do you want to see? (one prompt per line)"
+              label={storyboardMode ? "Storyboard concept (one idea — the Director expands it)" : "What do you want to see? (one prompt per line)"}
               multiline
-              minRows={3}
-              maxRows={6}
+              minRows={storyboardMode ? 2 : 3}
+              maxRows={storyboardMode ? 4 : 6}
               value={promptsText}
               onChange={(e) => setPromptsText(e.target.value)}
-              placeholder="A majestic eagle soaring over mountains at sunset&#10;A playful cat chasing butterflies in a garden"
+              placeholder={storyboardMode
+                ? "A lone astronaut discovers a bioluminescent forest on an alien moon"
+                : "A majestic eagle soaring over mountains at sunset&#10;A playful cat chasing butterflies in a garden"}
+              helperText={storyboardMode
+                ? `One concept only — becomes ${storyboardShots} connected shots. Extra lines are ignored.`
+                : parsedPrompts.length > 1
+                  ? `${parsedPrompts.length} clips in this batch — use Look & Feel for shared style.`
+                  : undefined}
               fullWidth
               variant="outlined"
             />
@@ -1642,33 +1801,23 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               size="small"
             />
 
-            {!(model || "").toLowerCase().includes("svd") ? (
-              <TextField
-                label="Negative Prompt (optional, applied to every prompt)"
-                multiline
-                minRows={2}
-                maxRows={4}
-                value={negativePrompt}
-                onChange={(e) => setNegativePrompt(e.target.value)}
-                placeholder="blurry, distorted hands, washed out colors, watermark, text overlay"
-                helperText="What to avoid in every video. Quality defects work better than content restrictions."
-                fullWidth
-                variant="outlined"
-                size="small"
-              />
-            ) : (
-              <Tooltip
-                title="SVD is image-conditioned only — it has no text-negative path, so a negative prompt would be ignored. Pick CogVideoX or Wan 2.2 to use this field."
-                placement="right"
-                arrow
-              >
-                <Box>
-                  <Alert severity="info" variant="outlined" sx={{ py: 0.5 }}>
-                    Negative Prompt isn't supported by SVD. Switch to CogVideoX or Wan 2.2 to use it.
-                  </Alert>
-                </Box>
-              </Tooltip>
-            )}
+            <TextField
+              label="Negative Prompt (optional, applied to every prompt)"
+              multiline
+              minRows={2}
+              maxRows={4}
+              value={negativePrompt}
+              onChange={(e) => setNegativePrompt(e.target.value)}
+              placeholder="blurry, distorted hands, washed out colors, flickering, jittery motion"
+              helperText={
+                enhancePrompt && !negativePrompt.trim()
+                  ? "Enhance Prompt is on — the backend also auto-adds quality-focused negatives (blur, artifacts, anatomy defects) when this field is empty."
+                  : "Target technical defects (blur, flicker, bad anatomy) for better consistency."
+              }
+              fullWidth
+              variant="outlined"
+              size="small"
+            />
 
             {/* Fidelity / Exact text mode + live preview of enhancement */}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
@@ -1704,85 +1853,169 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               </Button>
             </Box>
 
-            {/* Cinematic quality pipeline (v2.6.2): Director + FLUX-keyframe -> I2V.
-                Ported from the Music Video generator; both opt-in, default off. */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', mt: 1 }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={directorMode}
-                    onChange={(e) => setDirectorMode(e.target.checked)}
+            {/* Creative pipeline — biggest quality/consistency levers */}
+            <Box sx={{ mt: 2, p: 2, borderRadius: 2, border: 1, borderColor: 'divider', bgcolor: 'action.hover' }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1.5 }}>
+                Creative pipeline
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+                These options improve shot quality, character consistency, and connected sequences.
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={directorMode}
+                      onChange={(e) => setDirectorMode(e.target.checked)}
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Tooltip title="Rewrites each prompt into a shot-ready cinematic description (camera, lens, lighting, motion) before generation.">
+                      <Typography variant="body2">Cinematic Director</Typography>
+                    </Tooltip>
+                  }
+                />
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={cinematicKeyframe || selectedSubjectIds.length > 0}
+                      onChange={(e) => setCinematicKeyframe(e.target.checked)}
+                      disabled={selectedSubjectIds.length > 0}
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Tooltip title="Renders a high-quality still per clip, then animates it with image-to-video. Sharpest faces and detail — the main quality upgrade for text-to-video.">
+                      <Typography variant="body2">Keyframe → I2V</Typography>
+                    </Tooltip>
+                  }
+                />
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={storyboardMode}
+                      onChange={(e) => setStoryboardMode(e.target.checked)}
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Tooltip title="One concept becomes N connected shots written by the Director — a sequence, not duplicate seeds.">
+                      <Typography variant="body2">Storyboard sequence</Typography>
+                    </Tooltip>
+                  }
+                />
+                {storyboardMode && (
+                  <TextField
+                    type="number"
+                    label="Shots"
+                    value={storyboardShots}
+                    onChange={(e) => setStoryboardShots(Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 1)))}
                     size="small"
+                    sx={{ width: 100 }}
+                    inputProps={{ min: 1, max: 50 }}
                   />
-                }
-                label={
-                  <Tooltip title="Cinematic Director: a local LLM rewrites each prompt into a rich, shot-ready cinematic prompt (camera, lens, lighting, mood, motion) before generation — the same director the Music Video generator uses.">
-                    <Typography variant="body2">🎬 Cinematic Director</Typography>
-                  </Tooltip>
-                }
-                sx={{ mr: 1 }}
-              />
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={cinematicKeyframe}
-                    onChange={(e) => setCinematicKeyframe(e.target.checked)}
-                    size="small"
-                  />
-                }
-                label={
-                  <Tooltip title="Keyframe pathway: render a high-quality still per clip, then animate it with Wan 2.2 image-to-video instead of pure text-to-video. Much sharper (especially faces/detail). Slower — renders clips one at a time.">
-                    <Typography variant="body2">✨ Cinematic keyframe (still → I2V)</Typography>
-                  </Tooltip>
-                }
-                sx={{ mr: 1 }}
-              />
-            </Box>
-            {(directorMode || storyboardMode) && (
-              <TextField
-                value={directorGuidance}
-                onChange={(e) => setDirectorGuidance(e.target.value)}
-                placeholder="Optional director guidance (e.g. 'handheld, 35mm, moody teal grade, slow push-ins')"
-                size="small"
-                fullWidth
-                sx={{ mt: 1 }}
-              />
-            )}
-
-            {/* Storyboard from one concept: the Director writes N connected shots. */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', mt: 1 }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={storyboardMode}
-                    onChange={(e) => setStoryboardMode(e.target.checked)}
-                    size="small"
-                  />
-                }
-                label={
-                  <Tooltip title="Storyboard mode: treat the prompt box as ONE concept and let the Director write N distinct, connected shots from it (a sequence — not N reseeds of the same image). Each shot becomes a clip.">
-                    <Typography variant="body2">🎞️ Storyboard from one concept</Typography>
-                  </Tooltip>
-                }
-                sx={{ mr: 1 }}
-              />
-              {storyboardMode && (
+                )}
+              </Box>
+              {(directorMode || storyboardMode) && (
                 <TextField
-                  type="number"
-                  label="Shots"
-                  value={storyboardShots}
-                  onChange={(e) => setStoryboardShots(Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 1)))}
+                  value={directorGuidance}
+                  onChange={(e) => setDirectorGuidance(e.target.value)}
+                  placeholder="Director guidance (e.g. handheld 35mm, moody teal grade, slow push-ins, consistent wardrobe)"
                   size="small"
-                  sx={{ width: 110 }}
-                  inputProps={{ min: 1, max: 50 }}
+                  fullWidth
+                  sx={{ mt: 1.5 }}
                 />
               )}
+              <Collapse in={cinematicKeyframe || selectedSubjectIds.length > 0}>
+                <TextField
+                  select
+                  size="small"
+                  fullWidth
+                  label="Keyframe image model"
+                  value={keyframeModel}
+                  onChange={(e) => setKeyframeModel(e.target.value)}
+                  helperText="The still that gets animated — identity and detail quality depend on this choice."
+                  sx={{ mt: 1.5 }}
+                >
+                  {Object.entries(KEYFRAME_MODEL_OPTIONS).map(([key, cfg]) => (
+                    <MenuItem key={key} value={key}>
+                      {cfg.label} — {cfg.description}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              </Collapse>
+              <TextField
+                select
+                size="small"
+                fullWidth
+                label="Cast (trained characters — locks identity across clips)"
+                value={selectedSubjectIds}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSelectedSubjectIds(typeof v === "string" ? v.split(",").map(Number) : v);
+                }}
+                SelectProps={{
+                  multiple: true,
+                  renderValue: (sel) =>
+                    castSubjects
+                      .filter((s) => sel.includes(s.id))
+                      .map((s) => s.name)
+                      .join(", ") || "None selected",
+                }}
+                helperText={
+                  castSubjects.length === 0
+                    ? "Train a character in Cast Library to lock identity into every keyframe."
+                    : "Character LoRA is baked into the keyframe still, then animated — best consistency path."
+                }
+                sx={{ mt: 1.5 }}
+              >
+                {castSubjects.map((s) => (
+                  <MenuItem key={s.id} value={s.id}>
+                    {s.name}{s.trigger_word ? ` (${s.trigger_word})` : ""}
+                  </MenuItem>
+                ))}
+              </TextField>
+              {selectedSubjectIds.length === 1 && castSamples.length > 0 && (
+                <Box sx={{ mt: 1.5 }}>
+                  <Typography variant="caption" color="text.secondary">
+                    Start frame (optional) — pick an approved reference still to animate it directly at full quality. Leave unset to render a fresh keyframe per shot.
+                  </Typography>
+                  <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mt: 0.75 }}>
+                    {castSamples.map((s) => {
+                      const picked = selectedKeyframeSampleId === s.id;
+                      return (
+                        <Box
+                          key={s.id}
+                          onClick={() => setSelectedKeyframeSampleId(picked ? null : s.id)}
+                          title={s.angle || `Sample ${s.index ?? s.id}`}
+                          sx={{
+                            width: 64,
+                            height: 64,
+                            borderRadius: 1,
+                            overflow: "hidden",
+                            cursor: "pointer",
+                            border: (theme) => `2px solid ${picked ? theme.palette.primary.main : "transparent"}`,
+                            opacity: picked || !selectedKeyframeSampleId ? 1 : 0.55,
+                          }}
+                        >
+                          <img
+                            src={`/api/cast-library/subjects/${selectedSubjectIds[0]}/samples/${s.id}/image`}
+                            alt={s.angle || `sample ${s.id}`}
+                            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                          />
+                        </Box>
+                      );
+                    })}
+                  </Box>
+                </Box>
+              )}
+              {inputMode === "text" && (cinematicKeyframe || selectedSubjectIds.length > 0) && (
+                <Alert severity="info" sx={{ mt: 1.5 }}>
+                  Keyframe mode renders a still first, then animates via image-to-video on the backend — much sharper than pure text-to-video.
+                </Alert>
+              )}
             </Box>
-            {storyboardMode && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                The whole prompt box is read as one concept. It becomes {storyboardShots} connected clip{storyboardShots === 1 ? "" : "s"}.
-              </Typography>
-            )}
 
             {showPreview && previewEnhanced && (
               <TextField
@@ -1946,86 +2179,70 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 </FormControl>
               </Grid>
             </Grid>
+            {isCogVideoXModel(model) && qualityPreset !== "maximum" && (
+              <Alert severity="info" sx={{ mb: 2 }}>
+                CogVideoX needs at least 50 inference steps for clean output — lower presets are raised automatically.
+              </Alert>
+            )}
 
             {/* Video Dimensions Row */}
             <Grid container spacing={2} sx={{ mb: 2 }}>
-              {/* Aspect Ratio — not applicable for SVD (fixed 512x512) */}
-              {!isSvdModel(model) && (
-              <Grid item xs={12} sm={6} md={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>Aspect Ratio</InputLabel>
-                  <Select
-                    value={aspectRatio}
-                    onChange={(e) => setAspectRatio(e.target.value)}
-                    label="Aspect Ratio"
-                  >
-                    {Object.entries(ASPECT_RATIO_PRESETS).map(([key, preset]) => (
-                      <MenuItem key={key} value={key}>
-                        <Box>
-                          <Typography variant="body2">{preset.label}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {preset.description}
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-              )}
-
-              {/* Video Size — not applicable for SVD (fixed 512x512) */}
-              {!isSvdModel(model) && (
-              <Grid item xs={12} sm={6} md={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>Video Size</InputLabel>
-                  <Select
-                    value={videoSize}
-                    onChange={(e) => setVideoSize(e.target.value)}
-                    label="Video Size"
-                  >
-                    {Object.entries(VIDEO_SIZE_PRESETS).map(([key, preset]) => (
-                      <MenuItem key={key} value={key}>
-                        <Box>
-                          <Typography variant="body2">{preset.label}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {preset.description}
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-              )}
-
-              {/* Motion Preset - only for SVD models */}
-              {isSvdModel(model) && (
+              {isCogVideoXModel(model) ? (
                 <Grid item xs={12} sm={6} md={4}>
-                  <FormControl fullWidth size="small">
-                    <InputLabel>
-                      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                        <MotionIcon fontSize="small" /> Motion
-                      </Box>
-                    </InputLabel>
-                    <Select
-                      value={motionPreset}
-                      onChange={(e) => setMotionPreset(e.target.value)}
-                      label="Motion"
-                    >
-                      {Object.entries(MOTION_PRESETS).map(([key, preset]) => (
-                        <MenuItem key={key} value={key}>
-                          <Box>
-                            <Typography variant="body2">{preset.label}</Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {preset.description}
-                            </Typography>
-                          </Box>
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
+                  <Chip
+                    label={`${computedParams.width}×${computedParams.height} native resolution`}
+                    variant="outlined"
+                    sx={{ height: 40, fontSize: '0.85rem' }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                    CogVideoX is trained at 720×480 — other aspects distort output. Crop in post if needed.
+                  </Typography>
                 </Grid>
+              ) : (
+                <>
+                  <Grid item xs={12} sm={6} md={4}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Aspect Ratio</InputLabel>
+                      <Select
+                        value={aspectRatio}
+                        onChange={(e) => setAspectRatio(e.target.value)}
+                        label="Aspect Ratio"
+                      >
+                        {Object.entries(ASPECT_RATIO_PRESETS).map(([key, preset]) => (
+                          <MenuItem key={key} value={key}>
+                            <Box>
+                              <Typography variant="body2">{preset.label}</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {preset.description}
+                              </Typography>
+                            </Box>
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={4}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Video Size</InputLabel>
+                      <Select
+                        value={videoSize}
+                        onChange={(e) => setVideoSize(e.target.value)}
+                        label="Video Size"
+                      >
+                        {Object.entries(VIDEO_SIZE_PRESETS).map(([key, preset]) => (
+                          <MenuItem key={key} value={key}>
+                            <Box>
+                              <Typography variant="body2">{preset.label}</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {preset.description}
+                              </Typography>
+                            </Box>
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                </>
               )}
 
               {/* Output Quality Tier (post-processing) */}
@@ -2056,11 +2273,148 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               </Grid>
             </Grid>
 
-            {/* Advanced Parameters Row — hidden for SVD (no text prompt controls) */}
-            {!isSvdModel(model) && (
+            {/* Post-processing — directly affects output polish and consistency */}
+            <Box sx={{ mt: 1, mb: 2, p: 2, borderRadius: 2, border: 1, borderColor: 'divider' }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
+                Post-processing
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 2, flexWrap: 'wrap' }}>
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                  <Tooltip
+                    title={
+                      faceRestoreAvailable
+                        ? "Restores faces and reduces anatomy defects via CodeFormer"
+                        : "Requires facerestore_cf ComfyUI node + CodeFormer weights (Manage Video Models)"
+                    }
+                  >
+                    <span>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={advancedParams.face_restore}
+                            onChange={(e) => setAdvancedParams({ ...advancedParams, face_restore: e.target.checked })}
+                            disabled={!faceRestoreAvailable}
+                            size="small"
+                          />
+                        }
+                        label={
+                          <Box>
+                            <Typography variant="body2">Fix anatomy (CodeFormer)</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {faceRestoreAvailable
+                                ? "Restores faces and reduces anatomy defects"
+                                : faceRestoreNodeAvailable === null || faceRestoreModelReady === null
+                                  ? "Checking requirements…"
+                                  : !faceRestoreNodeAvailable
+                                    ? "ComfyUI node missing — restart ComfyUI from Plugins"
+                                    : "CodeFormer weights not installed"}
+                            </Typography>
+                          </Box>
+                        }
+                      />
+                    </span>
+                  </Tooltip>
+                  {faceRestoreNodeAvailable && faceRestoreModelReady === false && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<CloudDownloadIcon />}
+                      onClick={() => {
+                        setHighlightModelId("codeformer");
+                        setVideoModelsModalOpen(true);
+                      }}
+                      sx={{ alignSelf: "flex-start", ml: 4 }}
+                    >
+                      Install CodeFormer
+                    </Button>
+                  )}
+                </Box>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={postUpscale || qualityTier === 'cinema'}
+                      onChange={(e) => setPostUpscale(e.target.checked)}
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Box>
+                      <Typography variant="body2">2× upscale (Real-ESRGAN)</Typography>
+                      <Typography variant="caption" color="text.secondary">Sharper detail after generation</Typography>
+                    </Box>
+                  }
+                />
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={advancedParams.generate_frames_only}
+                      onChange={(e) => setAdvancedParams({ ...advancedParams, generate_frames_only: e.target.checked })}
+                      size="small"
+                    />
+                  }
+                  label={
+                    <Box>
+                      <Typography variant="body2">Export PNG frames</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Also save a lossless PNG sequence (alongside the MP4) to stitch in your own editor — motion is preserved, no compression loss
+                      </Typography>
+                    </Box>
+                  }
+                />
+                {isWanModel(model) && (
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={advancedParams.freeu}
+                        onChange={(e) => setAdvancedParams({ ...advancedParams, freeu: e.target.checked })}
+                        size="small"
+                      />
+                    }
+                    label={
+                      <Box>
+                        <Typography variant="body2">FreeU detail boost</Typography>
+                        <Typography variant="caption" color="text.secondary">Improves fine detail on Wan</Typography>
+                      </Box>
+                    }
+                  />
+                )}
+                {isCogVideoXModel(model) && (
+                  <>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={fetaEnabled || qualityTier === 'cinema' || highConsistencyMode}
+                          onChange={(e) => setFetaEnabled(e.target.checked)}
+                          size="small"
+                        />
+                      }
+                      label={
+                        <Box>
+                          <Typography variant="body2">Enhance-A-Video (FETA)</Typography>
+                          <Typography variant="caption" color="text.secondary">Improves temporal coherence between frames</Typography>
+                        </Box>
+                      }
+                    />
+                    {(fetaEnabled || qualityTier === 'cinema' || highConsistencyMode) && (
+                      <TextField
+                        size="small"
+                        label="FETA weight"
+                        type="number"
+                        inputProps={{ step: 0.1, min: 0.1, max: 3.0 }}
+                        value={fetaWeight}
+                        onChange={(e) => setFetaWeight(Number(e.target.value))}
+                        helperText="1.0 is a good default"
+                        sx={{ width: 140 }}
+                      />
+                    )}
+                  </>
+                )}
+              </Box>
+            </Box>
+
             <Box sx={{ mt: 2.5, mb: 2 }}>
               <Typography variant="caption" color="text.secondary" sx={{ mb: 1.5, display: "block", fontWeight: 500 }}>
-                Advanced Parameters
+                Prompt tuning
               </Typography>
               <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2, flexWrap: "wrap" }}>
                 <TextField
@@ -2075,7 +2429,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       guidance_scale: Number(e.target.value),
                     })
                   }
-                  helperText="Higher = more prompt adherence"
+                  helperText={`Default for ${isWanModel(model) ? 'Wan' : 'CogVideoX'}: ${MODEL_DEFAULT_GUIDANCE[MODEL_OPTIONS[model]?.type] ?? 6}. Higher = stricter prompt adherence.`}
                   sx={{
                     width: { xs: '100%', sm: '280px' },
                     '& .MuiFormHelperText-root': {
@@ -2119,189 +2473,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     <Box>
                       <Typography variant="body2">Enhance Prompt</Typography>
                       <Typography variant="caption" color="text.secondary">
-                        Add quality descriptors automatically
-                      </Typography>
-                    </Box>
-                  }
-                  sx={{ ml: 0 }}
-                />
-                <TextField
-                  select
-                  size="small"
-                  label="Cast (trained characters to lock)"
-                  value={selectedSubjectIds}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setSelectedSubjectIds(typeof v === "string" ? v.split(",").map(Number) : v);
-                  }}
-                  SelectProps={{
-                    multiple: true,
-                    renderValue: (sel) =>
-                      castSubjects
-                        .filter((s) => sel.includes(s.id))
-                        .map((s) => s.name)
-                        .join(", ") || "Select cast…",
-                  }}
-                  helperText={
-                    castSubjects.length === 0
-                      ? "No trained characters yet — train one in the Cast Library first."
-                      : "Each selected character's SDXL LoRA is baked into an identity keyframe, then animated."
-                  }
-                  sx={{ width: { xs: '100%', sm: '280px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
-                >
-                  {castSubjects.map((s) => (
-                    <MenuItem key={s.id} value={s.id}>
-                      {s.name}{s.trigger_word ? ` (${s.trigger_word})` : ""}
-                    </MenuItem>
-                  ))}
-                </TextField>
-                <TextField
-                  size="small"
-                  label="LoRA File Name (advanced)"
-                  value={advancedParams.lora_name}
-                  onChange={(e) =>
-                    setAdvancedParams({
-                      ...advancedParams,
-                      lora_name: e.target.value,
-                    })
-                  }
-                  disabled={isCogVideoXModel(model) || selectedSubjectIds.length > 0}
-                  helperText={
-                    selectedSubjectIds.length > 0
-                      ? "Overridden by the Cast selection above"
-                      : isCogVideoXModel(model)
-                        ? "Not supported for Cog (see backend logs)"
-                        : "Optional raw LoRA filename (e.g. character.safetensors)"
-                  }
-                  sx={{ width: { xs: '100%', sm: '280px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
-                />
-                {advancedParams.lora_name && (
-                  <TextField
-                    size="small"
-                    label="LoRA Strength"
-                    type="number"
-                    inputProps={{ step: 0.1, min: 0.1, max: 2.0 }}
-                    value={advancedParams.lora_strength}
-                    onChange={(e) =>
-                      setAdvancedParams({
-                        ...advancedParams,
-                        lora_strength: Number(e.target.value),
-                      })
-                    }
-                    disabled={isCogVideoXModel(model)}
-                    helperText="Default 1.0"
-                    sx={{ width: { xs: '100%', sm: '140px' }, '& .MuiFormHelperText-root': { mt: 0.5 } }}
-                  />
-                )}
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={advancedParams.freeu}
-                      onChange={(e) => setAdvancedParams({...advancedParams, freeu: e.target.checked})}
-                      color="primary"
-                      size="small"
-                      disabled={isCogVideoXModel(model)}
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2">FreeU Enhance</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {isCogVideoXModel(model) ? "Not supported for CogVideoX (type incompatibility)" : "Improve fine details"}
-                      </Typography>
-                    </Box>
-                  }
-                  sx={{ ml: 0 }}
-                />
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={advancedParams.face_restore}
-                      onChange={(e) => setAdvancedParams({...advancedParams, face_restore: e.target.checked})}
-                      color="primary"
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2">Fix Anatomy</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Restore faces automatically
+                        Adds quality + motion descriptors for consistency
                       </Typography>
                     </Box>
                   }
                   sx={{ ml: 0 }}
                 />
               </Box>
-              {/* CogVideoX Power Features */}
-              {isCogVideoXModel(model) && (
-              <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2, flexWrap: "wrap", mt: 2 }}>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={teaCacheEnabled}
-                      onChange={(e) => setTeaCacheEnabled(e.target.checked)}
-                      color="primary"
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2">Speed Boost (TeaCache)</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        ~1.5x faster generation
-                      </Typography>
-                    </Box>
-                  }
-                  sx={{ ml: 0 }}
-                />
-                {teaCacheEnabled && (
-                  <TextField
-                    size="small"
-                    label="Cache Threshold"
-                    type="number"
-                    inputProps={{ step: 0.1, min: 0.1, max: 1.0 }}
-                    value={teaCacheThreshold}
-                    onChange={(e) => setTeaCacheThreshold(Number(e.target.value))}
-                    helperText="Higher = faster, lower quality"
-                    sx={{ width: 160 }}
-                  />
-                )}
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={fetaEnabled}
-                      onChange={(e) => setFetaEnabled(e.target.checked)}
-                      color="primary"
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2">Enhance-A-Video</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Improved temporal coherence
-                      </Typography>
-                    </Box>
-                  }
-                  sx={{ ml: 0 }}
-                />
-                {fetaEnabled && (
-                  <TextField
-                    size="small"
-                    label="Enhancement Weight"
-                    type="number"
-                    inputProps={{ step: 0.1, min: 0.1, max: 3.0 }}
-                    value={fetaWeight}
-                    onChange={(e) => setFetaWeight(Number(e.target.value))}
-                    helperText="Higher = stronger effect"
-                    sx={{ width: 160 }}
-                  />
-                )}
-              </Box>
-              )}
             </Box>
-            )}
             {/* Low VRAM Mode Active Warning */}
             {lowVramMode && (isCogVideoXModel(model) || isWanModel(model)) && (
               <Alert
@@ -2343,19 +2522,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   label="Wan 2.2"
                   sx={{ fontWeight: 600 }}
                 />
-              ) : isCogVideoXModel(model) ? (
+              ) : (
                 <Chip
                   size="small"
                   color="primary"
                   label="CogVideoX"
                   sx={{ fontWeight: 600 }}
-                />
-              ) : (
-                <Chip
-                  size="small"
-                  color="default"
-                  label="SVD"
-                  sx={{ fontWeight: 500 }}
                 />
               )}
               <Chip
@@ -2383,12 +2555,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 variant="outlined"
                 label={`${computedParams.width}x${computedParams.height}`}
               />
-              {isSvdModel(model) && (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  label={`Motion: ${computedParams.motion_strength}x`}
-                />
+              {(cinematicKeyframe || selectedSubjectIds.length > 0) && (
+                <Chip size="small" variant="outlined" color="secondary" label={`Keyframe: ${keyframeModel}`} />
+              )}
+              {directorMode && (
+                <Chip size="small" variant="outlined" color="secondary" label="Director" />
+              )}
+              {advancedParams.face_restore && (
+                <Chip size="small" variant="outlined" color="success" label="Face restore" />
+              )}
+              {advancedParams.freeu && isWanModel(model) && (
+                <Chip size="small" variant="outlined" color="success" label="FreeU" />
               )}
               {computedParams.interpolation_multiplier > 1 && (
                 <Chip
@@ -2412,14 +2589,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   variant="outlined"
                   color="warning"
                   label={`${PROMPT_STYLES[computedParams.prompt_style]?.label || computedParams.prompt_style} style`}
-                />
-              )}
-              {computedParams.teacache_threshold && (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  color="success"
-                  label={`TeaCache ${computedParams.teacache_threshold}`}
                 />
               )}
               {computedParams.feta_weight && (
@@ -3156,6 +3325,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
             setHighlightModelId(null);
             // Re-pull readiness: a just-finished install should clear the banner.
             refreshModels();
+            refreshFaceRestoreStatus();
           }}
           highlightModelId={highlightModelId}
           showMessage={(msg, severity) => {

@@ -839,6 +839,39 @@ class UnifiedChatEngine:
             context = context[:5997] + "..."
         return f"Interface-provided context:\n{context}"
 
+    def _inject_attached_image(self, tool_name: str, params: dict) -> dict:
+        """Forward the user's most-recently-attached chat image into edit_image when
+        the LLM called it without an explicit `image` (the common case: the user
+        attaches a picture and says 'put a cowboy hat on this character')."""
+        if tool_name != "edit_image" or params.get("image"):
+            return params
+        path = self._materialize_attached_image()
+        if path:
+            params = {**params, "image": path}
+        return params
+
+    def _materialize_attached_image(self):
+        """Write the in-memory attached image (base64) to a temp file so edit_image
+        has a real path to upload. Returns None when nothing is attached."""
+        data = getattr(self, "_image_data", None)
+        if not data:
+            return None
+        try:
+            import base64, os, uuid
+            from backend.config import OUTPUT_DIR
+            if isinstance(data, str) and data.startswith("data:"):
+                data = data.split(",", 1)[1]
+            raw = base64.b64decode(data)
+            d = os.path.join(OUTPUT_DIR, "edit_inputs")
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, f"edit_src_{uuid.uuid4().hex[:12]}.png")
+            with open(p, "wb") as f:
+                f.write(raw)
+            return p
+        except Exception as e:
+            logger.warning("edit_image: could not materialize attached image: %s", e)
+            return None
+
     def _run_chat(self, session_id: str, message: str, options: Dict[str, Any],
                   emit_fn: Callable, request_id: str, steps: List) -> Dict[str, Any]:
         """Internal chat execution with app context assumed."""
@@ -1233,7 +1266,9 @@ class UnifiedChatEngine:
             # Each entry: (tool_call_obj, tool_name, resolved_params)
             tool_jobs = [
                 (tc, tc.tool_name,
-                 self._normalize_parameters(tc.parameters, tool_name=tc.tool_name))
+                 self._inject_attached_image(
+                     tc.tool_name,
+                     self._normalize_parameters(tc.parameters, tool_name=tc.tool_name)))
                 for tc in parsed.tool_calls
             ]
 

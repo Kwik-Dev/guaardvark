@@ -46,6 +46,18 @@ def _sample_image_path(subject_id: int, index: int) -> str:
     return str(_sample_output_dir(subject_id) / f"sample_{index}.png")
 
 
+def _aspect_for_row(row) -> tuple[int, int]:
+    """Pick the FLUX canvas for a shot. A standing full-length figure needs vertical room, so
+    full-body slots render PORTRAIT (832x1216, /16-aligned); face/close-up/medium stay square
+    1024x1024. Full-body detection is shared with the prompt composer (is_full_body) so the canvas
+    and the prompt's framing directive never disagree. Note: 832x1216 (~1.01 MP) < 1024^2 (~1.05 MP),
+    so portrait costs no extra VRAM."""
+    from backend.services.character_generator_service import is_full_body
+    if is_full_body(getattr(row, "angle", "") or "", getattr(row, "framing", "") or ""):
+        return 832, 1216
+    return 1024, 1024
+
+
 # ── task implementations (plain functions for testability) ─────────────────────
 
 def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool = False,
@@ -210,12 +222,15 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
                 except Exception:
                     pass
 
+            width, height = _aspect_for_row(row)
             try:
                 image_generator.generate_image(
                     prompt=row.image_prompt or subject.name,
                     loras=loras_for_gen,
                     output_path=output_path,
                     seed=seed,
+                    width=width,
+                    height=height,
                     model="flux-schnell",
                 )
                 row.image_path = output_path
@@ -320,11 +335,14 @@ def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int |
                     get_unified_progress().update_process(job_id, 50, "Generating image")
                 except Exception:
                     pass
+            width, height = _aspect_for_row(row)
             image_generator.generate_image(
                 prompt=effective_prompt,
                 loras=[],
                 output_path=output_path,
                 seed=effective_seed,
+                width=width,
+                height=height,
                 model="flux-schnell",
             )
             row.image_path = output_path

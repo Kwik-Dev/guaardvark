@@ -22,8 +22,34 @@ Both the batch-video API (download/install) and comfyui_video_generator
 """
 
 import logging
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def comfyui_models_dir() -> Path:
+    """Root of ComfyUI's models/ tree (where downloads land)."""
+    try:
+        from backend.config import COMFYUI_DIR
+    except ImportError:
+        COMFYUI_DIR = os.path.join(
+            os.environ.get("GUAARDVARK_ROOT", "."), "plugins", "comfyui", "ComfyUI"
+        )
+    return Path(COMFYUI_DIR) / "models"
+
+
+def is_model_installed(model_id: str) -> bool:
+    """True when every check_file for model_id exists and is non-empty."""
+    entry = VIDEO_MODEL_REGISTRY.get(model_id)
+    if not entry:
+        return False
+    base = comfyui_models_dir() / entry.get("local_subdir", "")
+    for check_file in entry.get("check_files", []):
+        fpath = base / check_file
+        if not fpath.exists() or fpath.stat().st_size == 0:
+            return False
+    return True
 
 
 VIDEO_MODEL_REGISTRY = {
@@ -130,6 +156,22 @@ VIDEO_MODEL_REGISTRY = {
         "vram_mb": 0,
         "type": "encoder",
     },
+    "codeformer": {
+        "name": "CodeFormer (Face Restore)",
+        "description": "Post-processing weights for Fix Anatomy — restores faces and reduces anatomy "
+                       "defects after video generation. Requires the facerestore_cf ComfyUI node "
+                       "(installed automatically when ComfyUI starts).",
+        "local_subdir": "facerestore_models",
+        "direct_urls": [
+            {
+                "url": "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth",
+                "dst": "codeformer.pth",
+            }
+        ],
+        "size_gb": 0.35,
+        "vram_mb": 0,
+        "type": "facerestore",
+    },
     "realesrgan-x2": {
         "name": "Real-ESRGAN 2x Upscaler",
         "description": "Upscales video frames 2x. Applied as post-processing after generation.",
@@ -228,6 +270,24 @@ VIDEO_MODEL_REGISTRY = {
         "vram_mb": 0,
         "type": "vae",
     },
+    # ── FLUX.1 Kontext [dev] — instruction IMAGE EDITING (not video) ─────────────
+    # Shares the ComfyUI models/ tree, so it rides this SSOT downloader alongside the
+    # video entries. Drives "put a cowboy hat on this character"-style edits from chat.
+    # NON-COMMERCIAL license. Companions (t5xxl_fp8, clip_l, ae.safetensors) are
+    # already on disk from the FLUX stack and reused verbatim — NOT re-downloaded.
+    "flux-kontext-dev": {
+        "name": "FLUX.1 Kontext [dev] (GGUF Q6_K)",
+        "description": "Natural-language image editing — edits an uploaded image from a text "
+                       "instruction. Non-commercial license. ~10GB; fits 16GB with the fp8 T5 "
+                       "encoder smart-offloaded.",
+        "hf_repo": "QuantStack/FLUX.1-Kontext-dev-GGUF",
+        "hf_filename": "flux1-kontext-dev-Q6_K.gguf",
+        "local_subdir": "unet",
+        "check_files": ["flux1-kontext-dev-Q6_K.gguf"],
+        "size_gb": 9.85,
+        "vram_mb": 14000,
+        "type": "flux-edit",
+    },
 }
 
 
@@ -242,6 +302,8 @@ def _normalize_registry() -> None:
         files = entry.get("files")
         if files:
             entry["check_files"] = [f["dst"] for f in files]
+        elif entry.get("direct_urls"):
+            entry["check_files"] = [f["dst"] for f in entry["direct_urls"]]
         elif "check_files" not in entry and "hf_filename" in entry:
             entry["check_files"] = [entry["hf_filename"]]
 

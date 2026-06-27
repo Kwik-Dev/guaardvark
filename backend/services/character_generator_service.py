@@ -18,6 +18,7 @@ into SubjectSample rows. GPU-free — pure LLM (Ollama).
 from __future__ import annotations
 import hashlib
 import math
+import re
 
 from backend.services.swarm.agents.character_designer import (
     BibleDesigner,
@@ -25,16 +26,19 @@ from backend.services.swarm.agents.character_designer import (
     ShotVariation,
 )
 
-# Angle taxonomy (label, weight). Two "face-forward" buckets intentionally over-weight
-# frontal coverage (one plain, one expressive) — frontal identity matters most to a LoRA.
+# Angle taxonomy (label, weight). Two "face-forward" buckets intentionally over-weight frontal
+# coverage (one plain, one expressive) — frontal identity matters most to a LoRA. Full-body is
+# now ~32% (front + three-quarter), up from 15%, so the eventual LoRA training set isn't ~72%
+# face-framed (which would bake a close-up bias into the trained character). Weights sum to 1.0.
 _ANGLE_WEIGHTS: list[tuple[str, float]] = [
-    ("face-forward", 0.22),
-    ("three-quarter left", 0.13),
-    ("three-quarter right", 0.13),
-    ("profile left", 0.08),
-    ("profile right", 0.08),
-    ("full-body front", 0.15),
-    ("face-forward", 0.21),  # expressive frontal variety
+    ("face-forward", 0.18),
+    ("three-quarter left", 0.11),
+    ("three-quarter right", 0.11),
+    ("profile left", 0.07),
+    ("profile right", 0.07),
+    ("full-body front", 0.20),
+    ("full-body three-quarter", 0.12),
+    ("face-forward", 0.14),  # expressive frontal variety
 ]
 
 
@@ -62,8 +66,55 @@ def _fallback_trigger(name: str) -> str:
     return f"{cons}{suffix}"
 
 
+def is_full_body(angle: str = "", framing: str = "") -> bool:
+    """True when a shot calls for a head-to-toe figure — by its angle label ('full-body ...') or
+    its framing ('full-body'). Shared by _compose_prompt (prompt ordering) and the task layer
+    (portrait aspect) so the prompt's framing directive and the canvas never disagree."""
+    return ("full-body" in (angle or "").lower()) or ((framing or "").strip().lower() == "full-body")
+
+
+# Emphatic full-length directive. For full-body slots this LEADS the prompt (before the bible) so
+# the framing isn't drowned by the ~195-token, face-saturated identity bible that follows.
+_FULL_BODY_LEAD = (
+    "full body shot, head to toe, full-length, entire figure visible, "
+    "standing, feet visible, wide framing"
+)
+
+# Fine facial MINUTIAE (the "EXACT placement" marks the bible packs in per character_designer's
+# _BIBLE_SYSTEM). Word-boundary matched so 'scar' doesn't catch 'scarlet'. These magnetise FLUX
+# toward a close-up face and, at full-body size, won't even be visible — so we drop clauses that
+# are PURELY these. Coarse identity (face shape, eye colour) is NOT in this set and stays.
+_FACE_MICRO_RE = re.compile(
+    r"\b(freckles?|moles?|scars?|dimples?|eyelashes?|philtrum|nostrils?|"
+    r"wrinkles?|stubble|blemish(?:es)?|birthmarks?|beauty\s+marks?|crow'?s\s+feet)\b",
+    re.IGNORECASE,
+)
+# A clause survives even if it names a minutia, when it ALSO carries coarse body/hair/wardrobe
+# identity (so we never strip the build/outfit/hair the full-body shot most needs to stay on-model).
+_KEEP_RE = re.compile(
+    r"\b(build|frame|tall|short|height|shoulders?|torso|physique|athletic|slender|stocky|"
+    r"lean|muscular|hair|skin|complexion|wears?|wearing|jacket|shirt|trousers|pants|dress|"
+    r"coat|boots|shoes|outfit|wardrobe|aged?|years?)\b",
+    re.IGNORECASE,
+)
+
+
+def _soften_face_detail(bible: str) -> str:
+    """For full-body slots: drop bible clauses that are PURELY fine facial minutiae so they don't
+    pull FLUX toward a close-up or eat the token budget the full-length directive needs. A clause
+    is dropped only when it matches _FACE_MICRO_RE and NOT _KEEP_RE. Never returns empty (falls
+    back to the full bible) so identity is never wiped out."""
+    frags = [f.strip() for f in re.split(r"(?<=[.;,])\s+", bible) if f.strip()]
+    kept = [f for f in frags if not (_FACE_MICRO_RE.search(f) and not _KEEP_RE.search(f))]
+    return " ".join(kept).strip() or bible.strip()
+
+
 def _compose_prompt(trigger: str, bible: str, v: ShotVariation, angle: str) -> str:
-    """The load-bearing step: trigger + VERBATIM bible + the shot's variation phrases."""
+    """The load-bearing step: trigger + VERBATIM bible + the shot's variation phrases.
+
+    Full-body slots are special-cased: the full-length directive LEADS (so framing isn't drowned
+    by the bible) and the bible's fine facial minutiae are softened. Close-up/medium are unchanged.
+    """
     bits = [
         angle,
         v.framing,
@@ -72,7 +123,11 @@ def _compose_prompt(trigger: str, bible: str, v: ShotVariation, angle: str) -> s
         v.scene,
     ]
     variation = ", ".join(b for b in bits if b)
-    core = f"{trigger} {bible}".strip()
+    if is_full_body(angle, v.framing):
+        identity = _soften_face_detail(bible)
+        core = f"{_FULL_BODY_LEAD}. {trigger} {identity}".strip()
+    else:
+        core = f"{trigger} {bible}".strip()
     return f"{core}. {variation}." if variation else core
 
 

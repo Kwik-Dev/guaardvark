@@ -22,6 +22,17 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import MemoryIcon from "@mui/icons-material/Memory";
 import axios from "axios";
 
+const GENERATION_TYPES = new Set(["wan", "cogvideox"]);
+const TYPE_LABELS = {
+  wan: "Video",
+  cogvideox: "Video",
+  facerestore: "Face restore",
+  upscaler: "Upscale",
+  flux: "Keyframe image",
+  vae: "Dependency",
+  encoder: "Dependency",
+};
+
 const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
   const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -143,9 +154,122 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
   const isDownloading = downloadStatus.is_downloading;
   const currentModel = downloadStatus.current_model;
 
+  const generationModels = models.filter((m) => GENERATION_TYPES.has(m.type));
+  const postModels = models.filter((m) => !GENERATION_TYPES.has(m.type));
+
+  const renderModelRow = (model) => {
+    const isThis = isDownloading && currentModel === model.id;
+    const isHighlight = !!highlightModelId && model.id === highlightModelId;
+    const typeLabel = TYPE_LABELS[model.type] || model.type;
+    return (
+      <ListItem
+        key={model.id}
+        divider
+        ref={isHighlight ? highlightRef : undefined}
+        sx={{
+          py: 1.5,
+          ...(isHighlight && {
+            border: 2,
+            borderColor: "warning.main",
+            borderRadius: 1,
+            "@keyframes vmPulse": {
+              "0%, 100%": { boxShadow: "0 0 0 0 rgba(255,167,38,0)" },
+              "50%": { boxShadow: "0 0 0 4px rgba(255,167,38,0.55)" },
+            },
+            animation: "vmPulse 1.2s ease-in-out 3",
+          }),
+        }}
+      >
+        <ListItemIcon>
+          <MovieCreationIcon color={(model.is_ready ?? model.is_downloaded) ? "primary" : "action"} />
+        </ListItemIcon>
+        <ListItemText
+          primary={
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+              <Typography variant="body1" fontWeight={500}>
+                {model.name}
+              </Typography>
+              <Chip label={typeLabel} size="small" variant="outlined" sx={{ height: 20, fontSize: "0.65rem" }} />
+              <Chip label={`${model.size_gb} GB`} size="small" variant="outlined" />
+              {model.vram_mb > 0 && (
+                <Chip
+                  icon={<MemoryIcon />}
+                  label={`${(model.vram_mb / 1024).toFixed(0)}GB VRAM`}
+                  size="small"
+                  variant="outlined"
+                />
+              )}
+            </Box>
+          }
+          secondary={model.description}
+        />
+
+        <Box sx={{ ml: 2, minWidth: 120, textAlign: "right" }}>
+          {isThis ? (
+            <Box sx={{ width: 130 }}>
+              <Typography variant="caption" noWrap>
+                {downloadStatus.status === "starting"
+                  ? "Starting..."
+                  : `${downloadStatus.progress}% — ${downloadStatus.speed_mbps} MB/s`}
+              </Typography>
+              <LinearProgress
+                variant={downloadStatus.progress > 0 ? "determinate" : "indeterminate"}
+                value={downloadStatus.progress}
+                sx={{ mt: 0.5 }}
+              />
+              <Typography variant="caption" color="text.secondary">
+                {downloadStatus.downloaded_gb.toFixed(1)} / {downloadStatus.total_gb.toFixed(1)} GB
+              </Typography>
+            </Box>
+          ) : (model.is_ready ?? model.is_downloaded) ? (
+            <Chip
+              icon={<CheckCircleIcon />}
+              label="Installed"
+              color="success"
+              size="small"
+              variant="outlined"
+            />
+          ) : (
+            <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<CloudDownloadIcon />}
+                onClick={() => handleDownload(model.id)}
+                disabled={isDownloading}
+              >
+                {model.install_size_gb ? `Install (${model.install_size_gb} GB)` : "Install"}
+              </Button>
+              {model.requires?.length > 0 && (
+                <Typography variant="caption" color="text.secondary" noWrap>
+                  includes {model.requires.length} required file{model.requires.length > 1 ? "s" : ""}
+                </Typography>
+              )}
+              {model.is_downloaded && !(model.is_ready ?? true) && (
+                <Typography variant="caption" color="warning.main" noWrap>
+                  model present — missing dependencies
+                </Typography>
+              )}
+              {!(model.is_ready ?? model.is_downloaded) && model.missing_files?.length > 0 && (
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  noWrap
+                  title={model.missing_files.join("\n")}
+                >
+                  {model.missing_files.length} file{model.missing_files.length > 1 ? "s" : ""} missing
+                </Typography>
+              )}
+            </Box>
+          )}
+        </Box>
+      </ListItem>
+    );
+  };
+
   return (
     <Dialog open={open} onClose={() => !isDownloading && onClose()} maxWidth="sm" fullWidth>
-      <DialogTitle>Manage Video Generation Models</DialogTitle>
+      <DialogTitle>Manage Video Models</DialogTitle>
       <DialogContent dividers>
         {error && (
           <Box mb={2}>
@@ -171,116 +295,22 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
           </Box>
         ) : (
           <List disablePadding>
-            {models.map((model) => {
-              const isThis = isDownloading && currentModel === model.id;
-              const isHighlight = !!highlightModelId && model.id === highlightModelId;
-              return (
-                <ListItem
-                  key={model.id}
-                  divider
-                  ref={isHighlight ? highlightRef : undefined}
-                  sx={{
-                    py: 1.5,
-                    ...(isHighlight && {
-                      border: 2,
-                      borderColor: "warning.main",
-                      borderRadius: 1,
-                      "@keyframes vmPulse": {
-                        "0%, 100%": { boxShadow: "0 0 0 0 rgba(255,167,38,0)" },
-                        "50%": { boxShadow: "0 0 0 4px rgba(255,167,38,0.55)" },
-                      },
-                      animation: "vmPulse 1.2s ease-in-out 3",
-                    }),
-                  }}
-                >
-                  <ListItemIcon>
-                    <MovieCreationIcon color={(model.is_ready ?? model.is_downloaded) ? "primary" : "action"} />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={
-                      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                        <Typography variant="body1" fontWeight={500}>
-                          {model.name}
-                        </Typography>
-                        <Chip label={`${model.size_gb} GB`} size="small" variant="outlined" />
-                        {model.vram_mb > 0 && (
-                          <Chip
-                            icon={<MemoryIcon />}
-                            label={`${(model.vram_mb / 1024).toFixed(0)}GB VRAM`}
-                            size="small"
-                            variant="outlined"
-                          />
-                        )}
-                      </Box>
-                    }
-                    secondary={model.description}
-                  />
-
-                  <Box sx={{ ml: 2, minWidth: 120, textAlign: "right" }}>
-                    {isThis ? (
-                      <Box sx={{ width: 130 }}>
-                        <Typography variant="caption" noWrap>
-                          {downloadStatus.status === "starting"
-                            ? "Starting..."
-                            : `${downloadStatus.progress}% — ${downloadStatus.speed_mbps} MB/s`}
-                        </Typography>
-                        <LinearProgress
-                          variant={downloadStatus.progress > 0 ? "determinate" : "indeterminate"}
-                          value={downloadStatus.progress}
-                          sx={{ mt: 0.5 }}
-                        />
-                        <Typography variant="caption" color="text.secondary">
-                          {downloadStatus.downloaded_gb.toFixed(1)} / {downloadStatus.total_gb.toFixed(1)} GB
-                        </Typography>
-                      </Box>
-                    ) : (model.is_ready ?? model.is_downloaded) ? (
-                      <Chip
-                        icon={<CheckCircleIcon />}
-                        label="Installed"
-                        color="success"
-                        size="small"
-                        variant="outlined"
-                      />
-                    ) : (
-                      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          startIcon={<CloudDownloadIcon />}
-                          onClick={() => handleDownload(model.id)}
-                          disabled={isDownloading}
-                        >
-                          {model.install_size_gb ? `Install (${model.install_size_gb} GB)` : "Install"}
-                        </Button>
-                        {model.requires?.length > 0 && (
-                          <Typography variant="caption" color="text.secondary" noWrap>
-                            includes {model.requires.length} required file{model.requires.length > 1 ? "s" : ""}
-                          </Typography>
-                        )}
-                        {model.is_downloaded && !(model.is_ready ?? true) && (
-                          <Typography variant="caption" color="warning.main" noWrap>
-                            model present — missing dependencies
-                          </Typography>
-                        )}
-                        {/* Which exact files are still missing (issue #36) — the
-                            full list is in the tooltip so a partial/wrong-quant
-                            install is diagnosable instead of a silent "not ready". */}
-                        {!(model.is_ready ?? model.is_downloaded) && model.missing_files?.length > 0 && (
-                          <Typography
-                            variant="caption"
-                            color="text.secondary"
-                            noWrap
-                            title={model.missing_files.join("\n")}
-                          >
-                            {model.missing_files.length} file{model.missing_files.length > 1 ? "s" : ""} missing
-                          </Typography>
-                        )}
-                      </Box>
-                    )}
-                  </Box>
-                </ListItem>
-              );
-            })}
+            {generationModels.length > 0 && (
+              <>
+                <Typography variant="overline" color="text.secondary" sx={{ px: 2, pt: 1, display: "block" }}>
+                  Video generation
+                </Typography>
+                {generationModels.map(renderModelRow)}
+              </>
+            )}
+            {postModels.length > 0 && (
+              <>
+                <Typography variant="overline" color="text.secondary" sx={{ px: 2, pt: 2, display: "block" }}>
+                  Post-processing &amp; dependencies
+                </Typography>
+                {postModels.map(renderModelRow)}
+              </>
+            )}
             {models.length === 0 && !loading && (
               <Typography variant="body2" color="textSecondary" align="center" sx={{ py: 3 }}>
                 No video models configured.

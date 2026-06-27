@@ -313,3 +313,112 @@ class AnimationGeneratorTool(BaseTool):
                 success=False,
                 error=f"Animation generation failed: {str(e)}",
             )
+
+
+class EditImageTool(BaseTool):
+    """Edit an EXISTING image from a natural-language instruction (FLUX.1 Kontext).
+
+    Use when the user SUPPLIES or ATTACHES an image and asks to add/remove/change
+    something in it — e.g. 'put a cowboy hat on this character', 'make it night',
+    'remove the sign'. Preserves the original's identity/composition and applies
+    only the requested change. (Contrast generate_image, which makes a brand-new
+    image from text with no input picture.)"""
+
+    name = "edit_image"
+    description = (
+        "Edit an existing image using a natural-language instruction. Use this when "
+        "the user has attached/uploaded an image (or names one) and asks to add, "
+        "remove, or change something in it, e.g. 'put a cowboy hat on this character'. "
+        "Preserves the original subject and only applies the requested edit. If the "
+        "user did not attach an image, ask them to attach one. Do NOT use this to make "
+        "a brand-new image from scratch — use generate_image for that."
+    )
+    parameters = {
+        "instruction": ToolParameter(
+            name="instruction", type="string",
+            description="The edit to perform, e.g. 'put a cowboy hat on this character', 'change the shirt to red'.",
+            required=True,
+        ),
+        "image": ToolParameter(
+            name="image", type="string",
+            description=("Path, URL, or reference of the image to edit. Usually omit this — "
+                         "the image the user just attached is used automatically."),
+            required=False, default="",
+        ),
+        "steps": ToolParameter(
+            name="steps", type="int",
+            description="Diffusion steps (more = higher fidelity, slower). Default 20.",
+            required=False, default=20,
+        ),
+    }
+
+    def _resolve_image(self, image: str):
+        """Resolve a path / URL / data-URI to a local file. None if unresolvable.
+        (The common case — the user's attached image — is injected by the chat engine
+        as a real disk path, so this is the fallback for explicit paths/URLs.)"""
+        if not image:
+            return None
+        if os.path.exists(image):
+            return image
+        try:
+            from backend.config import OUTPUT_DIR
+        except Exception:
+            OUTPUT_DIR = "."
+        edit_dir = os.path.join(OUTPUT_DIR, "edit_inputs")
+        os.makedirs(edit_dir, exist_ok=True)
+        # data URI or bare base64 blob
+        if image.startswith("data:") or (len(image) > 256 and "/" not in image[:64] and " " not in image[:64]):
+            try:
+                import base64
+                raw = base64.b64decode(image.split(",", 1)[1] if image.startswith("data:") else image)
+                p = os.path.join(edit_dir, f"edit_src_{uuid.uuid4().hex[:12]}.png")
+                with open(p, "wb") as f:
+                    f.write(raw)
+                return p
+            except Exception:
+                return None
+        # a served output URL → map back to disk
+        if "/api/outputs/" in image:
+            cand = os.path.join(OUTPUT_DIR, image.split("/api/outputs/", 1)[1].split("?", 1)[0])
+            if os.path.exists(cand):
+                return cand
+        # remote URL → download
+        if image.startswith("http://") or image.startswith("https://"):
+            try:
+                import urllib.request
+                p = os.path.join(edit_dir, f"edit_src_{uuid.uuid4().hex[:12]}.png")
+                urllib.request.urlretrieve(image, p)
+                return p
+            except Exception:
+                return None
+        return None
+
+    def execute(self, instruction: str, image: str = "", steps: int = 20, **kwargs) -> ToolResult:
+        src = self._resolve_image(image)
+        if not src:
+            return ToolResult(
+                success=False,
+                error="No image to edit. Ask the user to attach the image they want edited.",
+            )
+        try:
+            from backend.config import OUTPUT_DIR
+            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+
+            output_dir = os.path.join(OUTPUT_DIR, "generated_images")
+            os.makedirs(output_dir, exist_ok=True)
+            filename = f"edit_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
+            output_path = os.path.join(output_dir, filename)
+
+            ComfyUIImageGenerator().edit_image(
+                image_path=src, instruction=instruction,
+                output_path=output_path, steps=int(steps),
+            )
+            image_url = f"/api/outputs/generated_images/{filename}"
+            return ToolResult(
+                success=True,
+                output=f"Image edited successfully.\nImage URL: {image_url}\nEdit: {instruction}",
+                metadata={"image_url": image_url, "filename": filename, "instruction": instruction},
+            )
+        except Exception as e:
+            logger.error(f"EditImageTool error: {e}", exc_info=True)
+            return ToolResult(success=False, error=f"Image edit failed: {str(e)}")

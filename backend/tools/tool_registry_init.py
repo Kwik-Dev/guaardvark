@@ -551,6 +551,15 @@ def register_image_tools() -> List[str]:
     except Exception as e:
         logger.warning(f"Failed to register animation tools: {e}")
 
+    try:
+        from backend.tools.image_tools import EditImageTool
+        register_tool(EditImageTool())
+        registered.append("edit_image")
+        _tool_categories["edit_image"] = "image"
+        logger.debug("Registered: EditImageTool")
+    except Exception as e:
+        logger.warning(f"Failed to register edit_image tool: {e}")
+
     return registered
 
 

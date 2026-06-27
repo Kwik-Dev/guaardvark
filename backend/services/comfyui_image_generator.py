@@ -57,6 +57,23 @@ FLUX_DEV_T5 = os.environ.get("GUAARDVARK_FLUX_DEV_T5", "t5xxl_fp16.safetensors")
 FLUX_DEV_WEIGHT_DTYPE = os.environ.get("GUAARDVARK_FLUX_DEV_DTYPE", "fp8_e4m3fn")
 FLUX_DEV_GUIDANCE = float(os.environ.get("GUAARDVARK_FLUX_DEV_GUIDANCE", "3.5"))
 
+# ── FLUX.1 Kontext [dev] — instruction image editing ───────────────────────────
+# The loader filename is single-sourced from the ComfyUI-models registry (SSOT) so
+# the download destination and the loader node can never drift (issue #36 class of
+# bug). Companions (t5xxl_fp8, clip_l, ae) are the SAME files the FLUX branches
+# already use above — no new asset names introduced.
+try:
+    from backend.services.video_model_registry import (
+        VIDEO_MODEL_REGISTRY as _VMR,
+        is_model_installed as _is_model_installed,
+        comfyui_models_dir as _comfy_models_dir,
+    )
+    KONTEXT_UNET = _VMR.get("flux-kontext-dev", {}).get("hf_filename", "flux1-kontext-dev-Q6_K.gguf")
+except Exception:  # pragma: no cover - registry import is environment-specific
+    KONTEXT_UNET = "flux1-kontext-dev-Q6_K.gguf"
+    _is_model_installed = None
+    _comfy_models_dir = None
+
 # A neutral SDXL negative — keeps anatomy/quality sane without fighting the LoRA.
 DEFAULT_NEGATIVE = (
     "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
@@ -341,6 +358,98 @@ class ComfyUIImageGenerator:
                 urllib.request.urlretrieve(url, output_path)
                 return output_path
         return None
+
+    # ── instruction editing (FLUX.1 Kontext) ──────────────────────────
+    def _upload_image_to_comfyui(self, image_path: str) -> Optional[str]:
+        """POST a local image to ComfyUI's /upload/image and return its server-side
+        name (replicates comfyui_video_generator._upload_image_to_comfyui — that file
+        is owned by the video path, so the small uploader is duplicated here)."""
+        try:
+            with open(image_path, "rb") as fh:
+                files = {"image": (os.path.basename(image_path), fh, "image/png")}
+                resp = requests.post(f"{self.comfy_url}/upload/image", files=files, timeout=30)
+            resp.raise_for_status()
+            return resp.json().get("name")
+        except Exception as e:
+            logger.error("Kontext: failed to upload edit image to ComfyUI: %s", e)
+            return None
+
+    def _kontext_installed(self) -> bool:
+        """Honest install gate — True only when the Kontext GGUF is actually on disk."""
+        if _is_model_installed:
+            try:
+                return _is_model_installed("flux-kontext-dev")
+            except Exception:
+                pass
+        try:
+            base = _comfy_models_dir() if _comfy_models_dir else (
+                Path(__file__).resolve().parents[3] / "plugins" / "comfyui" / "ComfyUI" / "models"
+            )
+            f = base / "unet" / KONTEXT_UNET
+            return f.exists() and f.stat().st_size > 0
+        except Exception:
+            return False
+
+    def _build_kontext_workflow(self, *, src_image_name: str, instruction: str,
+                                steps: int, guidance: float, seed: int) -> dict:
+        # Native ComfyUI Kontext graph (nodes verified present in this fork:
+        # comfy_extras/nodes_flux.py + nodes_edit_model.py). We use CLIPTextEncode +
+        # FluxGuidance + ReferenceLatent — NOT CLIPTextEncodeFlux, which bakes its own
+        # guidance and would double-apply it alongside FluxGuidance.
+        return {
+            "unet": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": KONTEXT_UNET}},
+            "clip": {"class_type": "DualCLIPLoader",
+                     "inputs": {"clip_name1": self.flux_t5, "clip_name2": self.flux_clip, "type": "flux"}},
+            "vae_loader": {"class_type": "VAELoader", "inputs": {"vae_name": self.flux_vae}},
+            "load": {"class_type": "LoadImage", "inputs": {"image": src_image_name}},
+            "scale": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["load", 0]}},
+            "encode": {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae_loader", 0]}},
+            "pos": {"class_type": "CLIPTextEncode", "inputs": {"text": instruction, "clip": ["clip", 0]}},
+            "ref": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["pos", 0], "latent": ["encode", 0]}},
+            "guid": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["ref", 0], "guidance": guidance}},
+            "neg": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["pos", 0]}},
+            "sampler": {"class_type": "KSampler",
+                        "inputs": {"seed": seed, "steps": steps, "cfg": 1.0,
+                                   "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                                   "model": ["unet", 0], "positive": ["guid", 0],
+                                   "negative": ["neg", 0], "latent_image": ["encode", 0]}},
+            "vae": {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]}},
+            "save": {"class_type": "SaveImage", "inputs": {"filename_prefix": "edit-kontext", "images": ["vae", 0]}},
+        }
+
+    def edit_image(self, *, image_path: str, instruction: str, output_path: str,
+                   steps: int = 20, guidance: float = 2.5, seed: int = 42) -> str:
+        """Instruction-guided edit of an existing image via FLUX.1 Kontext [dev].
+        Honest failure if ComfyUI is down or the Kontext model isn't installed —
+        never returns a fake/unedited image."""
+        if not self._available():
+            raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url} — cannot edit image")
+        if not os.path.exists(image_path):
+            raise RuntimeError(f"Source image not found: {image_path}")
+        if not self._kontext_installed():
+            raise RuntimeError(
+                f"FLUX.1 Kontext [dev] model not installed (expected "
+                f"ComfyUI/models/unet/{KONTEXT_UNET}). Image editing is unavailable "
+                f"until that model finishes downloading."
+            )
+        src_name = self._upload_image_to_comfyui(image_path)
+        if not src_name:
+            raise RuntimeError("Failed to upload the source image to ComfyUI")
+        workflow = self._build_kontext_workflow(
+            src_image_name=src_name, instruction=instruction,
+            steps=max(int(steps), 1), guidance=guidance, seed=seed,
+        )
+        prompt_id = self._queue(workflow)
+        if not prompt_id:
+            raise RuntimeError("ComfyUI did not accept the Kontext edit workflow")
+        outputs = self._wait(prompt_id)
+        if outputs is None:
+            raise RuntimeError(f"ComfyUI image edit timed out (prompt {prompt_id})")
+        result = self._fetch_first_image(outputs, output_path)
+        if result is None:
+            raise RuntimeError(f"ComfyUI produced no edited image for prompt {prompt_id}")
+        logger.info("Kontext edit complete: %s", result)
+        return result
 
     # ── public API (ImageGenerator protocol) ──────────────────────────
     def _preflight_loras(self, lora_paths: list[str]) -> None:

@@ -366,9 +366,17 @@ class BatchVideoGenerator:
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
             from backend.services.gpu_resource_policy import free_comfyui_vram
-            # Snap to /16 (Wan/diffusion alignment); keep the still at the clip's aspect.
-            w = max(256, (int(width) // 16) * 16)
-            h = max(256, (int(height) // 16) * 16)
+            # Render the keyframe LARGER than the clip (long edge ~1024, /16-aligned) so
+            # the start frame is sharp — Wan downscales it when conditioning, and a
+            # 480p-native still came out soft. Keep the clip's aspect ratio.
+            _long = 1024
+            _ar = (float(width) / float(height)) if height else 1.0
+            if width >= height:
+                w, h = _long, int(round(_long / _ar))
+            else:
+                w, h = int(round(_long * _ar)), _long
+            w = max(256, (w // 16) * 16)
+            h = max(256, (h // 16) * 16)
             # Model selection: with a character LoRA we MUST use SDXL (where the LoRA
             # actually applies). Without one, FLUX-schnell is the default keyframe model
             # (high aesthetic, low steps) using the env-baked FLUX_* defaults the
@@ -462,6 +470,11 @@ class BatchVideoGenerator:
             cast_lora_paths: list[str] = []
             cast_lock_prefix = ""
             cast_lora_strength = batch_request.lora_strength
+            # Q1: an explicitly-picked approved reference still (metadata.keyframe_sample_id)
+            # is animated directly as the I2V start frame — that exact 1024-class character
+            # image is what makes the clip match the high-quality "Generate Character" stills.
+            # Resolved once here (needs app context), consumed per-item below.
+            cast_keyframe_image: Optional[str] = None
             if getattr(batch_request, "subject_ids", None):
                 try:
                     from flask import current_app
@@ -481,6 +494,21 @@ class BatchVideoGenerator:
                         # default applies; any other value is an explicit operator override.
                         _override = None if batch_request.lora_strength == 1.0 else batch_request.lora_strength
                         cast_lora_strength = resolve_lora_strength("sdxl", _override)
+                        # Q1: resolve an explicitly-chosen APPROVED still → I2V start frame.
+                        # Defends that the sample is approved, on disk, and belongs to one of
+                        # the selected subjects before trusting it.
+                        kf_sid = (batch_request.metadata or {}).get("keyframe_sample_id")
+                        if kf_sid:
+                            from backend.models import SubjectSample as _SubjectSample
+                            _samp = _db.session.get(_SubjectSample, int(kf_sid))
+                            _sel_ids = [int(x) for x in batch_request.subject_ids]
+                            if (_samp and _samp.approved and _samp.image_path
+                                    and _samp.subject_id in _sel_ids
+                                    and Path(_samp.image_path).exists()):
+                                cast_keyframe_image = _samp.image_path
+                                logger.info(
+                                    "Batch %s: animating approved sample %s as the I2V start "
+                                    "frame (%s)", batch_request.batch_id, kf_sid, _samp.image_path)
                         _db.session.remove()
                     if cast_lora_paths:
                         logger.info(
@@ -528,29 +556,38 @@ class BatchVideoGenerator:
                         # way to lock a character LoRA into a video (baked into the keyframe).
                         item_model = batch_request.model
                         want_cinematic = (getattr(batch_request, "cinematic_keyframe", False)
-                                          or bool(cast_lora_paths))
+                                          or bool(cast_lora_paths)
+                                          or bool(cast_keyframe_image))
                         if (want_cinematic and not item.image_path and (item.prompt or "").strip()):
-                            # Front-load the identity lock (trigger + bible) so the LoRA binds.
-                            kf_prompt = item.prompt
-                            if cast_lock_prefix:
-                                from backend.services.cast_lock import apply_lock
-                                kf_prompt = apply_lock(item.prompt, cast_lock_prefix)
-                            still_path = str(Path(batch_dir) / f"keyframe_{item.id}.png")
-                            kf = self._generate_keyframe_still(
-                                prompt=kf_prompt,
-                                width=batch_request.width,
-                                height=batch_request.height,
-                                out_path=still_path,
-                                seed=(batch_request.seed if batch_request.seed is not None else 1000),
-                                keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
-                                loras=(cast_lora_paths or None),
-                                lora_strength=cast_lora_strength,
-                            )
-                            if kf:
-                                meta["image_path"] = kf
+                            if cast_keyframe_image:
+                                # Q1: the user picked an APPROVED reference still — animate
+                                # THAT exact high-quality image (no re-render, no model/res
+                                # mismatch). Identity + fidelity carry into the clip directly.
+                                meta["image_path"] = cast_keyframe_image
                                 meta["cinematic_keyframe"] = True
                                 item_model = self._to_i2v_model(batch_request.model)
-                            # else: keyframe failed -> fall through to plain text-to-video
+                            else:
+                                # Front-load the identity lock (trigger + bible) so the LoRA binds.
+                                kf_prompt = item.prompt
+                                if cast_lock_prefix:
+                                    from backend.services.cast_lock import apply_lock
+                                    kf_prompt = apply_lock(item.prompt, cast_lock_prefix)
+                                still_path = str(Path(batch_dir) / f"keyframe_{item.id}.png")
+                                kf = self._generate_keyframe_still(
+                                    prompt=kf_prompt,
+                                    width=batch_request.width,
+                                    height=batch_request.height,
+                                    out_path=still_path,
+                                    seed=(batch_request.seed if batch_request.seed is not None else 1000),
+                                    keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
+                                    loras=(cast_lora_paths or None),
+                                    lora_strength=cast_lora_strength,
+                                )
+                                if kf:
+                                    meta["image_path"] = kf
+                                    meta["cinematic_keyframe"] = True
+                                    item_model = self._to_i2v_model(batch_request.model)
+                                # else: keyframe failed -> fall through to plain text-to-video
 
                         gen_request = VideoGenerationRequest(
                             prompt=item.prompt or "",

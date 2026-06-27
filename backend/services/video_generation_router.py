@@ -352,6 +352,20 @@ class VideoGenerationRouter:
     def get_status(self) -> dict:
         """Get current status of the video generation system."""
         comfyui_running = self._check_comfyui()
+        face_restore_node_available = False
+        face_restore_model_ready = False
+        if comfyui_running:
+            try:
+                from backend.services.comfyui_video_generator import ComfyUIVideoGenerator
+                from backend.services.video_model_registry import is_model_installed
+                gen = ComfyUIVideoGenerator()
+                face_restore_node_available = (
+                    gen.comfy_node_available("FaceRestoreModelLoader")
+                    and gen.comfy_node_available("FaceRestoreCFWithModel")
+                )
+                face_restore_model_ready = is_model_installed("codeformer")
+            except Exception:
+                pass
         return {
             "backend_preference": self._backend_pref,
             "comfyui_running": comfyui_running,
@@ -361,6 +375,9 @@ class VideoGenerationRouter:
             "idle_timeout": COMFYUI_IDLE_TIMEOUT,
             "active_generations": self._active_generation_count,
             "is_generating": self.is_generating,
+            "face_restore_node_available": face_restore_node_available,
+            "face_restore_model_ready": face_restore_model_ready,
+            "face_restore_available": face_restore_node_available and face_restore_model_ready,
         }
 
 

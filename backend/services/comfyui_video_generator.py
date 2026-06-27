@@ -146,11 +146,30 @@ class ComfyUIVideoGenerator:
         self.comfy_output_dir = Path(COMFYUI_OUTPUT_DIR if config_available else os.environ.get('COMFYUI_OUTPUT_DIR', os.path.join(os.environ.get('GUAARDVARK_ROOT', '.'), 'data', 'outputs', 'video')))
 
         self.service_available = self._check_comfyui_connection()
+        self._object_info_cache: Optional[dict] = None
 
         if self.service_available:
             logger.info(f"ComfyUI video generator connected to {self.comfy_url}")
         else:
             logger.warning(f"ComfyUI not available at {self.comfy_url}. Video generation will fail unless ComfyUI is started.")
+
+    def _get_object_info(self) -> dict:
+        """Fetch ComfyUI /object_info once and cache (node class availability probe)."""
+        if self._object_info_cache is not None:
+            return self._object_info_cache
+        try:
+            response = requests.get(f"{self.comfy_url}/object_info", timeout=5)
+            response.raise_for_status()
+            self._object_info_cache = response.json()
+        except Exception as e:
+            logger.debug(f"Could not fetch ComfyUI object_info: {e}")
+            self._object_info_cache = {}
+        return self._object_info_cache
+
+    def comfy_node_available(self, class_type: str) -> bool:
+        if not self.service_available and not self._check_comfyui_connection():
+            return False
+        return class_type in self._get_object_info()
 
     def _check_comfyui_connection(self) -> bool:
         try:
@@ -1237,19 +1256,19 @@ class ComfyUIVideoGenerator:
         }
         
         workflow[restore_node_id] = {
-            "class_type": "FaceRestoreWithModel",
+            "class_type": "FaceRestoreCFWithModel",
             "inputs": {
                 "facerestore_model": [restore_loader_id, 0],
                 "image": [source_node_id, 0],
                 "facedetection": "retinaface_resnet50",
-                "codeformer_fidelity": 0.5
-            }
+                "codeformer_fidelity": 0.5,
+            },
         }
-        
+
         # Rewire VHS_VideoCombine to take frames from FaceRestore
         workflow[video_combine_node_id]["inputs"]["images"] = [restore_node_id, 0]
-        
-        logger.info(f"Added FaceRestoreWithModel ({restore_node_id}) after node {source_node_id}")
+
+        logger.info(f"Added FaceRestoreCFWithModel ({restore_node_id}) after node {source_node_id}")
         return workflow
 
     def interrupt(self) -> bool:
@@ -1405,6 +1424,41 @@ class ComfyUIVideoGenerator:
             return False
         except Exception as e:
             logger.warning(f"Failed to extract thumbnail: {e}")
+            return False
+
+    def _add_frame_export(self, workflow: dict, item_id) -> bool:
+        """Q3: tee the FINAL frames (the exact images feeding VHS_VideoCombine — after
+        any upscale / face-restore / RIFE interpolation) into a lossless PNG sequence
+        ALONGSIDE the MP4. Additive: never disturbs the video path; if the frame source
+        can't be found we just skip. The PNGs let the user stitch in their own editor
+        without the h264/yuv420p loss the MP4 carries."""
+        try:
+            vhs_node_id = next(
+                (nid for nid, node in workflow.items() if node.get("class_type") == "VHS_VideoCombine"),
+                None,
+            )
+            if not vhs_node_id:
+                return False
+            source_ref = workflow[vhs_node_id]["inputs"].get("images", [None])[0]
+            if not source_ref:
+                return False
+            import re as _re
+            slug = _re.sub(r"[^A-Za-z0-9_-]", "_", str(item_id or "clip"))
+            existing_ids = [int(k) for k in workflow.keys() if str(k).isdigit()]
+            nid = (max(existing_ids) + 1) if existing_ids else 9000
+            while str(nid) in workflow:
+                nid += 1
+            workflow[str(nid)] = {
+                "class_type": "SaveImage",
+                "inputs": {
+                    "filename_prefix": f"frames/{slug}_frame",
+                    "images": [source_ref, 0],
+                },
+            }
+            logger.info("Frame export enabled: SaveImage(%s) tapped from frame source %s", nid, source_ref)
+            return True
+        except Exception as e:
+            logger.warning("Frame export node not added (non-fatal): %s", e)
             return False
 
     def generate_video(self, request: VideoGenerationRequest) -> VideoGenerationResult:
@@ -1634,16 +1688,38 @@ class ComfyUIVideoGenerator:
                     if source_ref:
                         self._add_upscale_node(workflow, source_ref, vhs_node_id)
 
-            # Apply FaceRestore if requested
+            # Apply FaceRestore if requested (requires facerestore_cf custom node)
             if request.face_restore:
-                vhs_node_id = next(
-                    (nid for nid, node in workflow.items() if node.get("class_type") == "VHS_VideoCombine"),
-                    None
-                )
-                if vhs_node_id:
-                    source_ref = workflow[vhs_node_id]["inputs"].get("images", [None])[0]
-                    if source_ref:
-                        self._add_face_detailer_node(workflow, source_ref, vhs_node_id)
+                try:
+                    from backend.services.video_model_registry import is_model_installed
+                    model_ready = is_model_installed("codeformer")
+                except Exception:
+                    model_ready = False
+                if (
+                    self.comfy_node_available("FaceRestoreModelLoader")
+                    and self.comfy_node_available("FaceRestoreCFWithModel")
+                    and model_ready
+                ):
+                    vhs_node_id = next(
+                        (nid for nid, node in workflow.items() if node.get("class_type") == "VHS_VideoCombine"),
+                        None
+                    )
+                    if vhs_node_id:
+                        source_ref = workflow[vhs_node_id]["inputs"].get("images", [None])[0]
+                        if source_ref:
+                            self._add_face_detailer_node(workflow, source_ref, vhs_node_id)
+                else:
+                    if not self.comfy_node_available("FaceRestoreModelLoader"):
+                        logger.warning(
+                            "Face restore requested but ComfyUI node FaceRestoreModelLoader is not "
+                            "installed. Restart ComfyUI to load facerestore_cf. Continuing without "
+                            "face restore."
+                        )
+                    else:
+                        logger.warning(
+                            "Face restore requested but codeformer.pth is not installed. "
+                            "Install CodeFormer from Manage Video Models. Continuing without face restore."
+                        )
 
             # Apply FreeU if requested
             if request.freeu:
@@ -1718,6 +1794,14 @@ class ComfyUIVideoGenerator:
                         request.lora_name, family,
                     )
 
+            # Frame-sequence export (Q3): when frames are requested, tee the FINAL
+            # frames (post upscale/face-restore/interpolation — the exact frames the
+            # MP4 receives) to a lossless PNG sequence ALONGSIDE the MP4, so they can be
+            # stitched in an external editor without the h264/yuv420p loss. Additive —
+            # the MP4 is still produced.
+            if getattr(request, "generate_frames_only", False):
+                self._add_frame_export(workflow, item_id)
+
             logger.info("Sending workflow to ComfyUI...")
             # ── Layer 1: live progress bridge ────────────────────────────────
             # Listen to ComfyUI's /ws so the UI sees per-step progress instead of
@@ -1782,13 +1866,22 @@ class ComfyUIVideoGenerator:
                 result.error = "No files were generated by ComfyUI"
                 return result
 
+            # Separate the rendered video(s) from any exported PNG frame sequence:
+            # Q3 frame export adds a SaveImage node alongside VHS_VideoCombine, so the
+            # download set can now contain both an MP4 and a PNG sequence. The video is
+            # the primary artifact (and what the blank-render guard must inspect).
+            _vid_exts = (".mp4", ".webm", ".avi", ".mov", ".gif")
+            video_files = [f for f in downloaded_files if Path(f).suffix.lower() in _vid_exts]
+            frame_files = sorted(f for f in downloaded_files if Path(f).suffix.lower() == ".png")
+            primary = video_files[0] if video_files else downloaded_files[0]
+
             # Zero-placebo guard (issue #36 Phase 3): never report success for a
             # blank/empty/all-black render. ComfyUI can emit a black clip when a
             # model/loader fails silently. Opt out for dev/preview via
             # metadata.allow_placeholder, mirroring the offline path.
             allow_placeholder = bool((request.metadata or {}).get("allow_placeholder"))
             if not allow_placeholder:
-                blank_reason = _looks_like_blank_video(Path(downloaded_files[0]))
+                blank_reason = _looks_like_blank_video(Path(primary))
                 if blank_reason:
                     result.error = (
                         f"ComfyUI produced an invalid video: {blank_reason}. This usually "
@@ -1798,12 +1891,16 @@ class ComfyUIVideoGenerator:
                     logger.error(f"Zero-placebo guard rejected ComfyUI output: {blank_reason}")
                     return result  # success stays False — no fake 'done'
 
-            result.video_path = str(Path(downloaded_files[0]).relative_to(batch_dir))
-            result.frame_paths = [str(Path(f).relative_to(batch_dir)) for f in downloaded_files]
+            result.video_path = str(Path(primary).relative_to(batch_dir))
+            # frame_paths exposes the lossless PNG sequence when it was exported (for
+            # self-stitching); otherwise it stays the produced video file(s), preserving
+            # prior behavior.
+            _fp_source = frame_files if frame_files else (video_files or downloaded_files)
+            result.frame_paths = [str(Path(f).relative_to(batch_dir)) for f in _fp_source]
             result.success = True
 
-            # Extract thumbnail from the first video file
-            video_file = Path(downloaded_files[0])
+            # Extract thumbnail from the primary video file
+            video_file = Path(primary)
             if video_file.exists() and video_file.suffix.lower() in (".mp4", ".webm", ".avi", ".mov"):
                 thumb_filename = video_file.stem + "_thumb.jpg"
                 thumb_path = thumbs_dir / thumb_filename

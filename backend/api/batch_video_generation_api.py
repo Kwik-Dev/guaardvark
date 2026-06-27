@@ -929,7 +929,15 @@ def download_video_model():
 
             def _pull_one(einfo, local_dir):
                 """Pull a single registry entry's files into local_dir."""
-                if "files" in einfo:
+                if "direct_urls" in einfo:
+                    import urllib.request
+                    for spec in einfo["direct_urls"]:
+                        dst = local_dir / spec["dst"]
+                        if dst.exists() and dst.stat().st_size > 0:
+                            continue
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        urllib.request.urlretrieve(spec["url"], str(dst))
+                elif "files" in einfo:
                     # Explicit per-file pulls: only the bytes we actually need,
                     # placed at the exact name ComfyUI's loaders expect.
                     for spec in einfo["files"]:

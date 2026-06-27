@@ -118,6 +118,10 @@ export default defineConfig(({ mode }) => {
       '@mui/material/Tooltip',
       '@mui/material/Popper',
       '@popperjs/core',
+      '@mui/icons-material',
+      'react',
+      'react-dom',
+      'react/jsx-runtime'
     ],
     esbuildOptions: {
       define: {

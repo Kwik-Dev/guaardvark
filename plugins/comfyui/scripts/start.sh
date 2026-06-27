@@ -72,6 +72,25 @@ fi
 # re-run when something actually changed.
 CN_DIR="$COMFYUI_DIR/custom_nodes"
 CN_STAMP="$PLUGIN_ROOT/.custom_nodes_installed"
+
+# Face restore (CodeFormer) — required by video post-processing when face_restore is on.
+# Without facerestore_cf, ComfyUI rejects workflows with FaceRestoreModelLoader.
+FACERESTORE_DIR="$CN_DIR/facerestore_cf"
+if [ ! -f "$FACERESTORE_DIR/__init__.py" ]; then
+    echo "Installing facerestore_cf custom node (face restore / CodeFormer)..."
+    rm -rf "$FACERESTORE_DIR"
+    git clone --depth 1 https://github.com/mav-rik/facerestore_cf.git "$FACERESTORE_DIR" 2>&1 | tail -3
+fi
+FR_MODELS_DIR="$COMFYUI_DIR/models/facerestore_models"
+mkdir -p "$FR_MODELS_DIR"
+if [ ! -f "$FR_MODELS_DIR/codeformer.pth" ]; then
+    echo "Downloading codeformer.pth for face restore..."
+    curl -fsSL -o "$FR_MODELS_DIR/codeformer.pth" \
+        "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth" \
+        || wget -q -O "$FR_MODELS_DIR/codeformer.pth" \
+        "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth"
+fi
+
 if [ -d "$CN_DIR" ]; then
     CN_REQ_FILES=$(find "$CN_DIR" -mindepth 2 -maxdepth 2 -name requirements.txt -type f 2>/dev/null | sort || true)
     if [ -n "$CN_REQ_FILES" ]; then
