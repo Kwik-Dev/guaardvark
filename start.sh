@@ -1658,13 +1658,19 @@ else
     WHISPER_DIR="$BACKEND_DIR/tools/voice/whisper.cpp"
     WHISPER_BUILD_DIR="$WHISPER_DIR/build"
     WHISPER_CLI="$WHISPER_BUILD_DIR/bin/whisper-cli"
-    WHISPER_LIB="$WHISPER_BUILD_DIR/src/libwhisper.so.1"
+    # whisper.cpp's shared library name is platform-specific: libwhisper.so* on
+    # Linux, libwhisper*.dylib on macOS. Match either so a SUCCESSFUL build on a
+    # Mac isn't misreported as "binary/library not found" (#41).
+    _whisper_lib_present() {
+        ls "$WHISPER_BUILD_DIR"/src/libwhisper*.dylib \
+           "$WHISPER_BUILD_DIR"/src/libwhisper.so* 2>/dev/null | grep -q .
+    }
 
     if [ ! -d "$WHISPER_DIR" ]; then
         vader_warn "Whisper.cpp folder missing. Install via Settings > Voice to enable speech recognition."
         VOICE_AVAILABLE=0
     else
-        if [ ! -f "$WHISPER_CLI" ] || [ ! -f "$WHISPER_LIB" ]; then
+        if [ ! -f "$WHISPER_CLI" ] || ! _whisper_lib_present; then
             if [ -f "$WHISPER_DIR/Makefile" ] || [ -f "$WHISPER_DIR/CMakeLists.txt" ]; then
                 vader_info "Whisper.cpp not built. Building from source..."
                 if ! command_exists cmake || ! command_exists make || ! command_exists gcc; then
@@ -1684,7 +1690,7 @@ else
                     if [ "$VOICE_AVAILABLE" -eq 1 ]; then
                         vader_info "Building Whisper.cpp from source..."
                         if make build >/dev/null 2>&1 || cmake --build . >/dev/null 2>&1; then
-                            if [ -f "$WHISPER_CLI" ] && [ -f "$WHISPER_LIB" ]; then
+                            if [ -f "$WHISPER_CLI" ] && _whisper_lib_present; then
                                 vader_success "Whisper.cpp built successfully"
                             else
                                 vader_warn "Whisper.cpp build completed but binary/library not found"
@@ -1702,7 +1708,9 @@ else
                 VOICE_AVAILABLE=0
             fi
         else
-            if LD_LIBRARY_PATH="$WHISPER_BUILD_DIR/src" "$WHISPER_CLI" --help >/dev/null 2>&1; then
+            # Linux honors LD_LIBRARY_PATH, macOS honors DYLD_LIBRARY_PATH; set both
+            # (each platform ignores the other's) so the readiness probe works on Mac (#41).
+            if LD_LIBRARY_PATH="$WHISPER_BUILD_DIR/src" DYLD_LIBRARY_PATH="$WHISPER_BUILD_DIR/src" "$WHISPER_CLI" --help >/dev/null 2>&1; then
                 vader_success "Whisper.cpp is ready"
             else
                 vader_warn "Whisper.cpp binary exists but may not be working properly"

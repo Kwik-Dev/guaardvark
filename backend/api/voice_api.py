@@ -1828,12 +1828,12 @@ def stream_voice_chat():
                 ggml_lib_path = os.path.join(project_root, "tools/voice/whisper.cpp/build/ggml/src")
             
             env = os.environ.copy()
-            # Include both whisper and ggml library paths
-            lib_paths = [whisper_lib_path, ggml_lib_path]
-            if "LD_LIBRARY_PATH" in env:
-                env["LD_LIBRARY_PATH"] = f"{':'.join(lib_paths)}:{env['LD_LIBRARY_PATH']}"
-            else:
-                env["LD_LIBRARY_PATH"] = ":".join(lib_paths)
+            # Include both whisper and ggml library paths. Linux uses LD_LIBRARY_PATH,
+            # macOS uses DYLD_LIBRARY_PATH; set both (each OS ignores the other's) so
+            # whisper-cli finds libwhisper.* (.so on Linux, .dylib on macOS — #41).
+            joined_lib_paths = ":".join([whisper_lib_path, ggml_lib_path])
+            for _ld_var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+                env[_ld_var] = f"{joined_lib_paths}:{env[_ld_var]}" if env.get(_ld_var) else joined_lib_paths
             
             logger.debug(
                 "VOICE API: Running enhanced Whisper transcription "
@@ -2455,7 +2455,10 @@ def install_whisper():
         if os.path.exists(whisper_cli):
             try:
                 env = os.environ.copy()
-                env["LD_LIBRARY_PATH"] = os.path.join(whisper_dir, "build/src")
+                # Linux: LD_LIBRARY_PATH; macOS: DYLD_LIBRARY_PATH (#41 — set both).
+                _whisper_src = os.path.join(whisper_dir, "build/src")
+                env["LD_LIBRARY_PATH"] = _whisper_src
+                env["DYLD_LIBRARY_PATH"] = _whisper_src
                 result = subprocess.run(
                     [whisper_cli, "--help"],
                     capture_output=True, timeout=10, env=env
