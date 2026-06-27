@@ -223,7 +223,7 @@ if command -v lsof >/dev/null 2>&1; then
     if [ -n "$port_11434_pids" ]; then
         for pid in $port_11434_pids; do
             # Only kill if it doesn't respond to health check (zombie)
-            if ! curl -sf --max-time 2 http://localhost:11434/ >/dev/null 2>&1; then
+            if ! curl -sf --max-time 2 http://127.0.0.1:11434/ >/dev/null 2>&1; then
                 vader_info "Killing unresponsive process on port 11434 (PID: $pid)..."
                 kill -TERM "$pid" 2>/dev/null
                 sleep 1

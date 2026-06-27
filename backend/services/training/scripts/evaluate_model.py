@@ -20,7 +20,7 @@ from pathlib import Path
 import requests
 from PIL import Image
 
-OLLAMA_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 
 
 def evaluate(model: str, data_path: str, ollama_url: str = OLLAMA_URL):

@@ -189,7 +189,7 @@ def force_local_llama_index_config():
                 _instr_kwargs["text_instruction"] = text_instruction
             local_embed_model = OllamaEmbedding(
                 model_name=model_name,
-                base_url="http://localhost:11434",
+                base_url="http://127.0.0.1:11434",
                 ollama_additional_kwargs={"mirostat": 0},
                 # Hardware-aware: short TTL on GPU (frees VRAM after idle, no per-query churn),
                 # resident on CPU-only (no disk reload every cycle). See config.get_embedding_keep_alive.
@@ -279,7 +279,7 @@ def get_local_embedding_model():
 
         return OllamaEmbedding(
             model_name=model_name,
-            base_url="http://localhost:11434",
+            base_url="http://127.0.0.1:11434",
             keep_alive=get_embedding_keep_alive(),  # consistent with the primary client
             **_instr_kwargs,
         )

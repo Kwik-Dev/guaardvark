@@ -586,7 +586,7 @@ class GPUResourceCoordinator:
                 "available_mb": 0
             }
 
-    def unload_ollama_models(self, ollama_url: str = "http://localhost:11434") -> Dict[str, Any]:
+    def unload_ollama_models(self, ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
         """
         Unload all models from Ollama to free GPU memory.
 
@@ -744,6 +744,6 @@ def has_gpu() -> bool:
         return False
 
 
-def unload_ollama_models(ollama_url: str = "http://localhost:11434") -> Dict[str, Any]:
+def unload_ollama_models(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
     """Unload Ollama models. Convenience wrapper for get_gpu_coordinator().unload_ollama_models()"""
     return get_gpu_coordinator().unload_ollama_models(ollama_url)

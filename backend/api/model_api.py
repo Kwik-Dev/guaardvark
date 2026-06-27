@@ -74,7 +74,7 @@ except ImportError as e:
         f"Failed to import local models/utils in model_api: {e}"
     )
     db = Setting = prompt_utils = None
-    OLLAMA_BASE_URL = "http://localhost:11434"  # Fallback
+    OLLAMA_BASE_URL = "http://127.0.0.1:11434"  # Fallback
     local_imports_ok = False
 
 model_bp = Blueprint("model_api", __name__, url_prefix="/api/model")

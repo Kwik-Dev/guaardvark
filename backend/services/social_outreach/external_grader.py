@@ -31,7 +31,7 @@ smaller params, still gives some independence from the main e4b drafter."""
 
 FALLBACK_GRADER_MODEL = "gemma4:e2b"
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
 GRADER_SYSTEM = """You are a strict outreach-comment grader. You did NOT write this draft. You score it against the rubric below and return only JSON.
 

@@ -61,7 +61,7 @@ metrics_logger.propagate = False
 if not metrics_logger.handlers:
     metrics_logger.addHandler(logging.NullHandler())
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 
 
 def _clear_pycache_folders(root_dir: str) -> int:

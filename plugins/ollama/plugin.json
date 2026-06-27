@@ -13,7 +13,7 @@
   "config": {
     "default_enabled": true,
     "default_auto_start": false,
-    "service_url": "http://localhost:11434",
+    "service_url": "http://127.0.0.1:11434",
     "timeout": 30,
     "fallback_enabled": true
   },

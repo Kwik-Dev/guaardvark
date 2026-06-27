@@ -105,7 +105,7 @@ def test_services():
 
     def ollama_connection():
         import urllib.request
-        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        req = urllib.request.Request("http://127.0.0.1:11434/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
             model_count = len(data.get("models", []))
@@ -234,7 +234,7 @@ def test_llm():
 
     def ollama_models():
         import urllib.request
-        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        req = urllib.request.Request("http://127.0.0.1:11434/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
             models = [m["name"] for m in data.get("models", [])]
@@ -247,7 +247,7 @@ def test_llm():
         import urllib.request
         payload = json.dumps({"model": model, "input": "test"}).encode()
         req = urllib.request.Request(
-            "http://localhost:11434/api/embed",
+            "http://127.0.0.1:11434/api/embed",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -269,7 +269,7 @@ def test_llm():
             "options": {"num_predict": 10},
         }).encode()
         req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
+            "http://127.0.0.1:11434/api/generate",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",

@@ -908,7 +908,7 @@ class AgentBrain:
             try:
                 import requests as _req
                 _req.post(
-                    "http://localhost:11434/api/generate",
+                    "http://127.0.0.1:11434/api/generate",
                     json={"model": self.state.active_model, "keep_alive": 0},
                     timeout=5,
                 )

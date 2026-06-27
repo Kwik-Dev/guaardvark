@@ -233,7 +233,7 @@ class EmbeddingRouter:
             from backend.config import OLLAMA_BASE_URL
             return OLLAMA_BASE_URL
         except ImportError:
-            return "http://localhost:11434"
+            return "http://127.0.0.1:11434"
 
     def _get_gpu_embedding(self):
         """Get or create GPU embedding client (default Ollama, uses VRAM)."""

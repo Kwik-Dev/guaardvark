@@ -127,10 +127,10 @@ FRONTEND_COLOR="${GREEN}"
 [ "$FRONTEND_UP" = "OFFLINE" ] && FRONTEND_COLOR="${RED}"
 echo -e "  ${WHITE}Frontend:${NC} ${FRONTEND_COLOR}${FRONTEND_UP}${NC} (port ${VITE_PORT:-5173})"
 
-OLLAMA_UP=$(curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "ONLINE" || echo "OFFLINE")
+OLLAMA_UP=$(curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && echo "ONLINE" || echo "OFFLINE")
 OLLAMA_COLOR="${GREEN}"
 [ "$OLLAMA_UP" = "OFFLINE" ] && OLLAMA_COLOR="${RED}"
-OLLAMA_MODELS=$(curl -sf http://localhost:11434/api/tags 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo "?")
+OLLAMA_MODELS=$(curl -sf http://127.0.0.1:11434/api/tags 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo "?")
 echo -e "  ${WHITE}Ollama:${NC} ${OLLAMA_COLOR}${OLLAMA_UP}${NC} ($OLLAMA_MODELS models)"
 
 GPU_INFO=$(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null)

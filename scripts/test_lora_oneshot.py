@@ -10,7 +10,7 @@ without the GPU.
 
 RUN IT (on the box with the 4070 Ti SUPER):
     # stop Ollama first so the VRAM reading is clean (it can hold ~11 GB):
-    #   curl -s http://localhost:11434/api/... or just `./stop.sh` the ollama plugin
+    #   curl -s http://127.0.0.1:11434/api/... or just `./stop.sh` the ollama plugin
     backend/venv/bin/python scripts/test_lora_oneshot.py --refs /path/to/vampire_cowboy_stills
 
     # bigger card? push resolution up:

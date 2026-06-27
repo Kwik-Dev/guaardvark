@@ -56,7 +56,7 @@ def _check_model_metadata_for_vision(model_name: str) -> bool:
     """Check Ollama model metadata for vision capability indicators."""
     try:
         import requests
-        base_url = "http://localhost:11434"
+        base_url = "http://127.0.0.1:11434"
         try:
             from backend.config import OLLAMA_BASE_URL
             base_url = OLLAMA_BASE_URL

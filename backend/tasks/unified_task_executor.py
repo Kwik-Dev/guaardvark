@@ -197,7 +197,7 @@ def execute_generic_llm_task(task: Dict[str, Any], progress_callback) -> str:
             # Query Ollama for available models
             try:
                 import requests as _requests
-                ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434')
+                ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
                 resp = _requests.get(f"{ollama_base_url}/api/tags", timeout=5)
                 if resp.ok:
                     models = resp.json().get('models', [])
@@ -270,7 +270,7 @@ def _generate_llm_content(task: Dict[str, Any], model_name: str, progress_callba
     try:
         from llama_index.llms.ollama import Ollama
 
-        ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434')
+        ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
         timeout = float(os.environ.get('LLM_REQUEST_TIMEOUT', '300'))
 
         llm = Ollama(model=model_name, base_url=ollama_base_url, request_timeout=min(timeout, 300.0))
@@ -299,7 +299,7 @@ def _generate_code_file(task: Dict[str, Any], model_name: str, progress_callback
         from llama_index.llms.ollama import Ollama
         from llama_index.core.llms import ChatMessage, MessageRole
 
-        ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434')
+        ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
         timeout = float(os.environ.get('LLM_REQUEST_TIMEOUT', '600'))
 
         llm = Ollama(model=model_name, base_url=ollama_base_url, request_timeout=min(timeout, 600.0))
@@ -816,7 +816,7 @@ def _execute_csv_generation(task: Dict[str, Any], progress_callback) -> Optional
         # Get LLM
         if model_name:
             from llama_index.llms.ollama import Ollama
-            ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434')
+            ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
             timeout = float(os.environ.get('LLM_REQUEST_TIMEOUT', '180'))
             llm = Ollama(model=model_name, base_url=ollama_base_url, request_timeout=min(timeout, 180.0))
         else:

@@ -2465,7 +2465,7 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         """Find a vision model capable of both seeing and deciding (4b+ VLM)."""
         try:
             import requests as _requests
-            response = _requests.get("http://localhost:11434/api/tags", timeout=5)
+            response = _requests.get("http://127.0.0.1:11434/api/tags", timeout=5)
             if response.status_code == 200:
                 models = [m["name"] for m in response.json().get("models", [])]
                 # Prefer larger VLMs that can reason + see
@@ -2481,7 +2481,7 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         """Find the best available thinking model for obstacle escalation."""
         try:
             import requests as _requests
-            response = _requests.get("http://localhost:11434/api/tags", timeout=5)
+            response = _requests.get("http://127.0.0.1:11434/api/tags", timeout=5)
             if response.status_code == 200:
                 models = [m["name"] for m in response.json().get("models", [])]
                 for preferred in ["lfm2.5-thinking:1.2b-bf16", "deepseek-r1:8b"]:

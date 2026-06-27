@@ -1434,7 +1434,7 @@ class UnifiedChatEngine:
                     _evict_model = getattr(self.llm, "model", None)
                     if _evict_model:
                         _req.post(
-                            "http://localhost:11434/api/generate",
+                            "http://127.0.0.1:11434/api/generate",
                             json={"model": _evict_model, "prompt": "", "keep_alive": 0, "options": {"num_ctx": 1}},
                             timeout=15,
                         )

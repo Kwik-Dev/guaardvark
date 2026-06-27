@@ -88,7 +88,7 @@ def _execute_task(app, task_id: int) -> None:
                     # Query Ollama directly for any available model
                     try:
                         import requests as _requests
-                        ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434')
+                        ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
                         resp = _requests.get(f"{ollama_base_url}/api/tags", timeout=5)
                         if resp.ok:
                             models = resp.json().get('models', [])

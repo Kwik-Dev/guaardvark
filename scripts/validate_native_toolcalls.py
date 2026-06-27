@@ -16,7 +16,7 @@ import json
 import sys
 import requests
 
-OLLAMA = "http://localhost:11434"
+OLLAMA = "http://127.0.0.1:11434"
 CAPABLE = "qwen2.5:14b"      # [completion, tools]
 NONTOOLS = "llama3:latest"   # [completion] only
 

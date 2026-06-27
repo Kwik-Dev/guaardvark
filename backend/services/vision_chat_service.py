@@ -29,7 +29,7 @@ try:
 except ImportError as e:
     logger.error(f"Failed to import config dependencies: {e}")
     config_available = False
-    OLLAMA_BASE_URL = "http://localhost:11434"
+    OLLAMA_BASE_URL = "http://127.0.0.1:11434"
     LLM_REQUEST_TIMEOUT = 120
 
 @dataclass
