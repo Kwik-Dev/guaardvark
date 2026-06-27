@@ -382,15 +382,16 @@ class EditImageTool(BaseTool):
             cand = os.path.join(OUTPUT_DIR, image.split("/api/outputs/", 1)[1].split("?", 1)[0])
             if os.path.exists(cand):
                 return cand
-        # remote URL → download
+        # OFFLINE-FIRST: never fetch an external URL. A remote image URL (e.g. a
+        # files.oaiusercontent.com / CDN link that rode in with the attachment) must
+        # NOT trigger an outbound request. Same-host app URLs were already mapped to
+        # disk above; anything else is refused, not downloaded.
         if image.startswith("http://") or image.startswith("https://"):
-            try:
-                import urllib.request
-                p = os.path.join(edit_dir, f"edit_src_{uuid.uuid4().hex[:12]}.png")
-                urllib.request.urlretrieve(image, p)
-                return p
-            except Exception:
-                return None
+            logger.warning(
+                "edit_image: refusing to fetch a non-local image URL (offline-first): %s",
+                image[:80],
+            )
+            return None
         return None
 
     def execute(self, instruction: str, image: str = "", steps: int = 20, **kwargs) -> ToolResult:
