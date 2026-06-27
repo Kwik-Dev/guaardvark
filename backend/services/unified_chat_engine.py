@@ -350,6 +350,21 @@ def _pin_repo_intel_tools(message: str, selected: List[str], all_tool_names: Lis
     return pinned + list(selected) if pinned else selected
 
 
+def _pin_image_edit_tools(has_image: bool, selected: List[str], all_tool_names: List[str]) -> List[str]:
+    """Force `edit_image` into the toolset whenever the user attached an image.
+
+    Real edit requests ("put a cowboy hat on this character", "make it night",
+    "remove the sign") almost never contain the words "edit" or "image", so the
+    semantic/keyword selector drops edit_image — and the model, looking at the picture
+    with no edit tool offered, says it can't edit images. Pinning it (prepended so a
+    downstream cap can't truncate it) makes it available; the tool's own description
+    gates when it fires, so this stays harmless for "what's in this image?" questions.
+    """
+    if not has_image or "edit_image" not in all_tool_names or "edit_image" in selected:
+        return selected
+    return ["edit_image"] + list(selected)
+
+
 def build_concise_tool_list(registry, tool_names: List[str]) -> str:
     """Build a concise tool description list for the system prompt (~20 tokens per tool)."""
     lines = []
@@ -937,6 +952,10 @@ class UnifiedChatEngine:
         # clearly about a repo (map / dependencies / class extraction). Done
         # after the router merge so the pin can't be truncated by the cap above.
         selected_tools = _pin_repo_intel_tools(message, selected_tools, self.registry.list_tools())
+        # Pin edit_image whenever an image is attached — real edit requests ("put a
+        # cowboy hat on this character") lack "edit"/"image" keywords, so the selector
+        # drops it and the model thinks it can't edit images.
+        selected_tools = _pin_image_edit_tools(bool(self._image_data), selected_tools, self.registry.list_tools())
 
         # Agent screen gate — when the user isn't actively watching the virtual
         # screen, hide the tools that drive it so the LLM can't decide to click
