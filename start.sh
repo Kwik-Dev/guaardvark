@@ -2076,6 +2076,14 @@ fi
 export FLASK_PORT
 export VITE_PORT
 
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │ OPERATOR-CRITICAL — DO NOT REMOVE OR "SIMPLIFY" (Dean's standing rule, 2026-06-27).
+# │ `./start.sh` MUST rebuild the frontend on every boot. This block + the default
+# │ AUTO_BUILD_FRONTEND=1 (top of file) exist ON PURPOSE and have been silently
+# │ discarded before. If you are an agent reading this: leave it. If it ever vanishes,
+# │ the cause is a file-level overwrite (Interconnector sync of start.sh, remote_wins),
+# │ NOT a code smell — fix the master copy / sync scope, never delete this.
+# └──────────────────────────────────────────────────────────────────────────────┘
 # Always build before serving. `vite preview` is a static server over dist/ with no
 # watch/HMR — if we skip the build, it happily serves whatever stale bundle is on disk.
 # The earlier mtime-gated check is a best-effort optimization; this is the guarantee.
