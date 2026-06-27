@@ -214,6 +214,13 @@ if [[ "$GUAARDVARK_UPLOAD_DIR" != /* ]]; then GUAARDVARK_UPLOAD_DIR="$GUAARDVARK
 if [[ "$GUAARDVARK_CACHE_DIR" != /* ]]; then GUAARDVARK_CACHE_DIR="$GUAARDVARK_ROOT/$GUAARDVARK_CACHE_DIR"; fi
 export GUAARDVARK_LOG_DIR GUAARDVARK_OUTPUT_DIR GUAARDVARK_STORAGE_DIR GUAARDVARK_UPLOAD_DIR GUAARDVARK_CACHE_DIR
 
+# HuggingFace transfer reliability: the Xet protocol (hf_xet) stalls near completion on
+# some networks — it hung the FLUX.1-Kontext-dev pull (and left lock files on the Wan
+# I2V quants). Force plain, resumable HTTPS downloads for the backend + Celery model
+# downloaders (the "Install" buttons). Override with HF_HUB_DISABLE_XET=0 ./start.sh if
+# Xet works on your network.
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
+
 BACKEND_STARTUP_LOG_FILE="$LOGS_DIR/backend_startup.log"
 FRONTEND_LOG_FILE="$LOGS_DIR/frontend.log"
 
