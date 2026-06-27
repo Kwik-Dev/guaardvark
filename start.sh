@@ -2109,12 +2109,26 @@ ensure_frontend_deps
 # into VITE_ALLOWED_HOSTS so the normal start.sh path just works on the LAN, while
 # a bare `vite preview`/`vite` run stays localhost-only by default (PR #40 policy).
 PRIMARY_LAN_IP=$(get_lan_ips | awk '{print $1}')
+# The machine's own short hostname (e.g. "vogon"). vite.config.js also allows this
+# and its ".local" form on its own, but we pass it through too so the env-driven
+# path is explicit and a pre-set VITE_ALLOWED_HOSTS doesn't accidentally drop it.
+SELF_HOSTNAME=$(hostname 2>/dev/null | awk -F. '{print tolower($1)}')
 if [ -n "$PRIMARY_LAN_IP" ]; then
-    # Honor any pre-set VITE_ALLOWED_HOSTS (.env), else allow the detected LAN IP.
-    export VITE_ALLOWED_HOSTS="${VITE_ALLOWED_HOSTS:-$PRIMARY_LAN_IP}"
+    # Honor any pre-set VITE_ALLOWED_HOSTS (.env), else allow the detected LAN IP
+    # plus this box's own hostname so reaching it by name also works.
+    _default_hosts="$PRIMARY_LAN_IP"
+    [ -n "$SELF_HOSTNAME" ] && _default_hosts="${_default_hosts},${SELF_HOSTNAME},${SELF_HOSTNAME}.local"
+    export VITE_ALLOWED_HOSTS="${VITE_ALLOWED_HOSTS:-$_default_hosts}"
     vader_info "LAN IP detected (${PRIMARY_LAN_IP}); allowing it in vite preview (VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS}). Frontend uses relative URLs proxied to Flask."
 else
-    vader_info "No private LAN IP detected; preview stays localhost-only (set VITE_ALLOWED_HOSTS to enable LAN access)."
+    # No LAN IP found — still allow this box's own hostname so the operator isn't
+    # locked out with an opaque browser "403 Forbidden / Blocked request" (#41).
+    if [ -n "$SELF_HOSTNAME" ]; then
+        export VITE_ALLOWED_HOSTS="${VITE_ALLOWED_HOSTS:-${SELF_HOSTNAME},${SELF_HOSTNAME}.local}"
+        vader_info "No private LAN IP detected; allowing localhost + this host (${SELF_HOSTNAME}/.local) in vite preview. A browser '403 Forbidden / Blocked request' means the host you typed isn't allowed — set VITE_ALLOWED_HOSTS=<your-ip-or-name> in .env to add it."
+    else
+        vader_info "No private LAN IP detected; preview stays localhost-only. A browser '403 Forbidden / Blocked request' means the host you typed isn't allowed — set VITE_ALLOWED_HOSTS=<your-ip-or-name> in .env to enable LAN access."
+    fi
 fi
 
 vader_info "Building frontend (production) before serving..."

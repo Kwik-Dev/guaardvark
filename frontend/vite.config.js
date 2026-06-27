@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLogger, defineConfig, loadEnv } from "vite";
@@ -80,9 +81,26 @@ function resolveAllowedHosts(rootEnv) {
     .split(",")
     .map((h) => h.trim())
     .filter(Boolean);
-  return extraAllowedHosts.includes("all")
-    ? "all"
-    : ["localhost", "127.0.0.1", ".local", ...extraAllowedHosts];
+  if (extraAllowedHosts.includes("all")) {
+    return "all";
+  }
+  // Always allow the machine's own hostname (and its Bonjour/.local form) so the
+  // box serves the UI under its own name even when start.sh's LAN detection comes
+  // up empty (#41: a Mac reached via raw hostname/IP got an opaque Vite "403
+  // Forbidden / Blocked request" with no hint). `.local` already covers *.local
+  // Bonjour names; this adds the bare hostname (e.g. "vogon") and a normalized
+  // "<host>.local" so neither form locks the operator out of their own machine.
+  const selfHost = (os.hostname() || "").trim().toLowerCase();
+  const selfHosts = selfHost
+    ? [selfHost, selfHost.endsWith(".local") ? selfHost : `${selfHost}.local`]
+    : [];
+  return [
+    "localhost",
+    "127.0.0.1",
+    ".local",
+    ...selfHosts,
+    ...extraAllowedHosts,
+  ];
 }
 
 export default defineConfig(({ mode }) => {
