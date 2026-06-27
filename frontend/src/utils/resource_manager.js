@@ -394,6 +394,7 @@ class FrontendResourceManager {
       delete checkObj.image_data;
       delete checkObj.images;
       delete checkObj.frame;
+      delete checkObj.file;  // attachment payload (e.g. a pasted image as base64) — large by nature, not text bloat
       const messageStr = JSON.stringify(checkObj);
       if (messageStr.length > queue.maxLength) {
         const errorMessage = `Message object too large: ${messageStr.length} > ${queue.maxLength} characters`;
