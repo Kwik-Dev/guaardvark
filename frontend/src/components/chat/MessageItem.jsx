@@ -8,6 +8,7 @@ import { Box, Paper, Avatar, CardMedia, Chip, CircularProgress, Typography } fro
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { guardedMediaSrc } from "../../utils/assetGuard";
 // No user avatar icon — user messages are clean right-aligned bubbles
 import ImageIcon from "@mui/icons-material/Image";
 import ThumbUpOutlinedIcon from "@mui/icons-material/ThumbUpOutlined";
@@ -364,7 +365,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
                 borderColor: 'divider',
                 objectFit: 'contain'
               }}
-              image={message.imageUrl || message.relatedImageUrl}
+              image={guardedMediaSrc(message.imageUrl || message.relatedImageUrl)}
               alt={message.imageFileName || "Uploaded image"}
             />
             {message.imageFileName && (
@@ -402,7 +403,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
                       display: "block",
                       cursor: "pointer",
                     }}
-                    src={img.url}
+                    src={guardedMediaSrc(img.url)}
                   />
                 ) : (
                   <CardMedia
@@ -418,7 +419,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
                       objectFit: "contain",
                       cursor: "pointer",
                     }}
-                    image={img.url}
+                    image={guardedMediaSrc(img.url)}
                     alt={img.alt || "Generated image"}
                     onClick={() => {
                       const images = message.generatedImages.filter(i => i.type !== "video").map(i => ({ url: i.url, name: i.alt || i.caption || "Generated image" }));
@@ -555,6 +556,8 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
         >
           <ReactMarkdown
             components={{
+              // Offline-first: never load a remote image URL from message markdown.
+              img: (props) => <img {...props} src={guardedMediaSrc(props.src)} alt={props.alt || ""} />,
               code({ inline, className, children, ...props }) {
                 const match = /language-(\w+)/.exec(className || "");
                 return !inline && match ? (
