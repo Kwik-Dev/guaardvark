@@ -236,7 +236,7 @@ class InfographicGenerator:
         import uuid as _uuid
         with gpu_session(JobKind.VIDEO_RENDER, f"infographic_{_uuid.uuid4().hex[:8]}",
                          on_busy="raise", evict_ollama=True, free_comfyui=True,
-                         vram_estimate_mb=10000):
+                         vram_estimate_mb=10000, require_fit=True):
             prompt_id = self._queue(workflow)
             logger.info(
                 f"[INFOGRAPHIC] queued prompt_id={prompt_id} "

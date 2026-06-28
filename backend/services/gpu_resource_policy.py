@@ -99,6 +99,33 @@ def _orchestrator_release(slot_id: str) -> None:
         log.warning("orchestrator release_model(%s) failed (non-fatal): %s", slot_id, e)
 
 
+def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) -> None:
+    """After eviction, re-probe PHYSICAL free VRAM and fail fast if it still won't fit.
+
+    The physical probe (pynvml/nvidia-smi via the coordinator) already includes ComfyUI +
+    plugin-sidecar allocations that the in-process registry can't see — so admitting
+    against it inherently accounts for every consumer. If estimate + headroom won't fit,
+    raise GpuBusyError so the caller gets a clean 'busy, retry' instead of a CUDA OOM or a
+    hung allocation. Probe-unavailable (CPU-only host / no driver) admits — never blocks."""
+    try:
+        from backend.services.gpu_resource_coordinator import get_gpu_coordinator
+        info = get_gpu_coordinator().get_available_vram()
+    except Exception as e:  # noqa: BLE001
+        log.warning("VRAM fit-check probe failed (%s); admitting (advisory)", e)
+        return
+    if not info.get("success"):
+        return  # no usable GPU probe — do not block
+    free = int(info.get("available_mb") or 0)
+    need = int(estimate_mb) + margin_mb
+    if free < need:
+        from backend.services.job_operation_gate import GpuBusyError
+        raise GpuBusyError(
+            f"Not enough free VRAM for {slot}: need ~{need}MB (est {estimate_mb} + "
+            f"{margin_mb} headroom), only {free}MB free after eviction — another model/render "
+            f"is resident. Try again shortly."
+        )
+
+
 # --- The front door -----------------------------------------------------------
 
 @contextlib.contextmanager
@@ -110,6 +137,7 @@ def gpu_session(
     evict_ollama: bool = False,
     free_comfyui: bool = False,
     vram_estimate_mb: Optional[int] = None,
+    require_fit: bool = False,
     slot_id: Optional[str] = None,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
@@ -135,6 +163,10 @@ def gpu_session(
             acquired = acq
             if acquired:
                 reclaim_gpu(evict_ollama=evict_ollama, free_comfyui=free_comfyui)
+                # Strict admission (opt-in): after eviction, refuse with a clean "busy" if
+                # the estimate still won't physically fit — turns a CUDA OOM/hang into retry.
+                if require_fit and vram_estimate_mb:
+                    _ensure_fits_or_busy(vram_estimate_mb, _slot)
                 if vram_estimate_mb:
                     _orchestrator_request(_slot, vram_estimate_mb)
             yield acquired

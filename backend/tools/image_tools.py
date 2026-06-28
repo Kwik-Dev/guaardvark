@@ -137,7 +137,8 @@ class ImageGeneratorTool(BaseTool):
             from backend.services.job_types import JobKind
             try:
                 with gpu_session(JobKind.VIDEO_RENDER, f"chat_imggen_{uuid.uuid4().hex[:8]}",
-                                 on_busy="raise", evict_ollama=True, vram_estimate_mb=11000):
+                                 on_busy="raise", evict_ollama=True, vram_estimate_mb=11000,
+                                 require_fit=True):
                     result = generator.generate_image(request)
             except GpuBusyError:
                 return ToolResult(
