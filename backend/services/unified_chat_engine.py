@@ -897,6 +897,15 @@ class UnifiedChatEngine:
         if media_result is not None:
             return media_result
 
+        # Image-edit intercept: an attached image + an edit instruction ("put a cowboy
+        # hat on this character") deterministically calls edit_image, bypassing the
+        # small local model's unreliable tool choice (gemma4 tends to DESCRIBE the
+        # image rather than call the tool). 'What is this?'-style messages have no edit
+        # verb and fall through to the normal vision/describe path.
+        edit_result = self._try_image_edit_direct(message, session_id, emit_fn, request_id)
+        if edit_result is not None:
+            return edit_result
+
         # Resolve the per-request "thinking" preference for thinking-capable models
         # (gemma4:12b, qwen3, deepseek-r1, ...). Precedence: explicit per-chat override
         # from the /thinking command (options["think"]) > global default Setting
@@ -1886,6 +1895,69 @@ class UnifiedChatEngine:
 
         return None  # Not a media command
 
+    def _try_image_edit_direct(self, message: str, session_id: str,
+                               emit_fn: Callable, request_id: str) -> Optional[Dict[str, Any]]:
+        """Attached image + an edit instruction → call edit_image DIRECTLY.
+
+        Small local models (gemma4) reliably DESCRIBE an attached image instead of
+        calling the edit tool, so the dispatch is not left to the model. Returns a
+        result dict when handled, else None to fall through to normal chat (so
+        'what is this?' still routes to the vision/describe path)."""
+        if not getattr(self, "_image_data", None):
+            return None
+        if not re.search(
+            r"\b(add|put|place|remove|delete|erase|change|replace|swap|"
+            r"make\s+(?:it|him|her|them|this)|give\s+(?:him|her|them|it|the)|"
+            r"turn\s+.+\binto\b|recolou?r|wear(?:ing|s)?|edit|retouch)\b",
+            message or "", re.IGNORECASE):
+            return None
+        if not self.registry.get_tool("edit_image"):
+            return None
+        img_path = self._materialize_attached_image()
+        if not img_path:
+            return None
+        instruction = (message or "").strip()
+        logger.info("Image-edit direct: edit_image(instruction=%r)", instruction[:80])
+        self._save_message(session_id, "user", message)
+        emit_fn("chat:tool_call", {"tool": "edit_image",
+                                   "params": {"instruction": instruction}, "iteration": 1})
+        try:
+            result = self.registry.execute_tool("edit_image", instruction=instruction, image=img_path)
+        except Exception as e:
+            text = f"Image edit failed: {e}"
+            emit_fn("chat:complete", {"response": text, "iterations": 1, "steps": [],
+                                      "session_id": session_id, "request_id": request_id})
+            self._save_message(session_id, "assistant", text)
+            return {"success": False, "error": str(e), "request_id": request_id, "session_id": session_id}
+        emit_fn("chat:tool_result", {
+            "tool": "edit_image",
+            "result": {"success": result.success,
+                       "output": str(result.output)[:2000] if result.success else None,
+                       "error": result.error if not result.success else None},
+        })
+        image_url = (result.metadata or {}).get("image_url") if result.success else None
+        generated_images = []
+        if image_url:
+            emit_fn("chat:image", {"image_url": image_url, "alt": "Edited image",
+                                   "caption": instruction[:120], "session_id": session_id})
+            generated_images.append({"url": image_url, "type": "image", "alt": "Edited image"})
+        if result.success and image_url:
+            response = "Here's the edited image."
+        elif result.success:
+            response = str(result.output)
+        else:
+            response = f"Sorry, I couldn't edit the image: {result.error}"
+        complete_payload = {"response": response, "iterations": 1, "steps": [],
+                            "session_id": session_id, "request_id": request_id}
+        if generated_images:
+            complete_payload["generated_images"] = generated_images
+        emit_fn("chat:complete", complete_payload)
+        self._save_message(session_id, "assistant", response,
+                           extra_data={"generatedImages": generated_images} if generated_images else None)
+        return {"success": True, "response": response, "iterations": 1, "steps": [],
+                "request_id": request_id, "session_id": session_id,
+                "generated_images": generated_images}
+
     def _native_tool_calls_to_response(self, native_calls, llm_response: str):
         """Convert Ollama-native message.tool_calls into a ToolCallResponse.
 
@@ -2873,9 +2945,23 @@ RULES:
 
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _strip_remote_image_urls(text):
+        """Offline-first: neutralize remote image references in assistant output so a
+        hallucinated/stale URL (e.g. files.oaiusercontent.com) never persists or
+        renders. Local images use relative /api/... URLs, so an absolute http(s)
+        markdown image is remote by definition and is removed."""
+        if not text or not isinstance(text, str):
+            return text
+        text = re.sub(r"!\[[^\]]*\]\(\s*https?://[^)]+\)", "[remote image removed — offline]", text)
+        text = re.sub(r"https?://[^\s)\]<>\"']*oaiusercontent[^\s)\]<>\"']*", "[remote image removed]", text)
+        return text
+
     def _save_message(self, session_id: str, role: str, content: str,
                       extra_data: Optional[Dict] = None):
         """Save a message to the database (thread-safe with app context)."""
+        if role == "assistant":
+            content = self._strip_remote_image_urls(content)
         try:
             from flask import has_app_context
             from backend.models import LLMSession, LLMMessage, db
