@@ -365,6 +365,12 @@ def _pin_image_edit_tools(has_image: bool, selected: List[str], all_tool_names: 
     return ["edit_image"] + list(selected)
 
 
+# Per-session memory of the last edited image (disk path), so a FOLLOW-UP edit with no
+# new attachment ("make the horse bigger") re-edits the previous result. Process-global
+# keyed by session_id; lost on restart (then a re-attach is needed), which is fine.
+_SESSION_LAST_EDIT: Dict[str, str] = {}
+
+
 def build_concise_tool_list(registry, tool_names: List[str]) -> str:
     """Build a concise tool description list for the system prompt (~20 tokens per tool)."""
     lines = []
@@ -1903,24 +1909,42 @@ class UnifiedChatEngine:
         calling the edit tool, so the dispatch is not left to the model. Returns a
         result dict when handled, else None to fall through to normal chat (so
         'what is this?' still routes to the vision/describe path)."""
-        if not getattr(self, "_image_data", None):
-            return None
         if not re.search(
-            r"\b(add|put|place|remove|delete|erase|change|replace|swap|"
-            r"make\s+(?:it|him|her|them|this)|give\s+(?:him|her|them|it|the)|"
-            r"turn\s+.+\binto\b|recolou?r|wear(?:ing|s)?|edit|retouch)\b",
+            r"\b(add|put|place|insert|remove|delete|erase|change|replace|swap|recolou?r|"
+            r"brighten|darken|enlarge|shrink|resize|rescale|scale|zoom|increase|decrease|"
+            r"crop|rotate|flip|blur|sharpen|fix|adjust|edit|retouch|restyle|repaint|dress|"
+            r"turn\s+.+\binto\b|wear(?:ing|s)?|make\s+(?:it|him|her|them|this|the|that|his|its)|"
+            r"give\s+(?:him|her|them|it|the|this))\b",
             message or "", re.IGNORECASE):
             return None
         if not self.registry.get_tool("edit_image"):
             return None
-        img_path = self._materialize_attached_image()
+        # Source image: a freshly attached image, else this session's last result
+        # (FOLLOW-UP edits — "the horse is too small, make it bigger"). Bail to normal
+        # chat if there is nothing to edit.
+        if getattr(self, "_image_data", None):
+            img_path = self._materialize_attached_image()
+            followup = False
+        else:
+            img_path = _SESSION_LAST_EDIT.get(session_id)
+            if img_path and not os.path.exists(img_path):
+                img_path = None
+            followup = True
         if not img_path:
             return None
         instruction = (message or "").strip()
-        logger.info("Image-edit direct: edit_image(instruction=%r)", instruction[:80])
+        logger.info("Image-edit direct (%s): edit_image(instruction=%r)",
+                    "follow-up" if followup else "attached", instruction[:80])
         self._save_message(session_id, "user", message)
         emit_fn("chat:tool_call", {"tool": "edit_image",
                                    "params": {"instruction": instruction}, "iteration": 1})
+        # Free the chat model's VRAM so Kontext loads fully instead of CPU-offloading on
+        # the shared 16GB card; gemma4 reloads lazily on the next chat message.
+        try:
+            from backend.services.gpu_resource_policy import evict_ollama_models
+            evict_ollama_models()
+        except Exception as _ev:
+            logger.warning("Pre-edit Ollama eviction failed (non-fatal): %s", _ev)
         try:
             result = self.registry.execute_tool("edit_image", instruction=instruction, image=img_path)
         except Exception as e:
@@ -1941,6 +1965,16 @@ class UnifiedChatEngine:
             emit_fn("chat:image", {"image_url": image_url, "alt": "Edited image",
                                    "caption": instruction[:120], "session_id": session_id})
             generated_images.append({"url": image_url, "type": "image", "alt": "Edited image"})
+            # Remember this result so a FOLLOW-UP ("make it bigger") re-edits it.
+            try:
+                from backend.config import OUTPUT_DIR
+                _fn = (result.metadata or {}).get("filename")
+                if _fn:
+                    _local = os.path.join(OUTPUT_DIR, "generated_images", _fn)
+                    if os.path.exists(_local):
+                        _SESSION_LAST_EDIT[session_id] = _local
+            except Exception:
+                pass
         if result.success and image_url:
             response = "Here's the edited image."
         elif result.success:
