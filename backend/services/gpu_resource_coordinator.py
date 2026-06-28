@@ -458,6 +458,66 @@ class GPUResourceCoordinator:
                 "ollama_restarted": False
             }
 
+    # --- Generic cross-process GPU lease -------------------------------------
+    # Used by gpu_session() so ANY heavy GPU op (chat image gen / edit / infographic /
+    # music-video) arbitrates cross-process against video generation on the SAME single-
+    # holder lock file. Interoperates with acquire_for_video_generation: each acquire
+    # refuses if *anything* already holds the lock, so a generic op and a video render
+    # mutually exclude. Unlike acquire_for_video_generation this does NOT stop the Ollama
+    # service (gpu_session evicts models via keep_alive=0 and lets them lazily reload) and
+    # does not touch the vision pipeline. Non-blocking: returns success=False if held.
+    GENERIC_LEASE_SECONDS = 900  # 15 min — ample for any single image/edit/render
+
+    def acquire_generic(self, label: str, lease_seconds: int = None) -> Dict[str, Any]:
+        """Acquire the cross-process GPU lock for a generic heavy op (non-blocking)."""
+        with self._internal_lock:
+            lease_seconds = lease_seconds or self.GENERIC_LEASE_SECONDS
+            current_lock = self._read_lock_file()
+            if current_lock is not None:
+                # Stale-PID / expired-lease cleanup (mirror acquire_for_video_generation).
+                if not self._is_process_alive(current_lock.pid):
+                    logger.warning(f"Stale GPU lock from dead PID {current_lock.pid}, cleaning up")
+                    self._release_lock_file()
+                    current_lock = None
+                elif current_lock.lease_expires_at:
+                    expires = datetime.fromisoformat(current_lock.lease_expires_at)
+                    if datetime.now() > expires:
+                        logger.warning("Previous GPU lock lease expired, cleaning up")
+                        self._release_lock_file()
+                        current_lock = None
+            if current_lock is not None:
+                return {
+                    "success": False,
+                    "error": f"GPU already locked by {current_lock.owner}",
+                    "lock_info": current_lock.to_dict(),
+                }
+            now = datetime.now()
+            lock_info = GPULockInfo(
+                owner=label,
+                acquired_at=now.isoformat(),
+                pid=os.getpid(),
+                lease_expires_at=(now + timedelta(seconds=lease_seconds)).isoformat(),
+                metadata={"kind": "generic"},
+            )
+            self._write_lock_file(lock_info)
+            logger.info(f"GPU lock acquired (generic: {label})")
+            return {"success": True, "lock_info": lock_info.to_dict()}
+
+    def release_generic(self, label: str) -> Dict[str, Any]:
+        """Release a generic GPU lock previously acquired by THIS process under `label`."""
+        with self._internal_lock:
+            current_lock = self._read_lock_file()
+            if current_lock is None:
+                return {"success": True, "message": "No lock to release"}
+            if current_lock.owner != label:
+                # Not ours (e.g. a video lock, or a different op) — never release it.
+                return {"success": False, "error": f"Lock owned by {current_lock.owner}, not {label}"}
+            if current_lock.pid != os.getpid() and self._is_process_alive(current_lock.pid):
+                return {"success": False, "error": "Lock owned by a different live process"}
+            self._release_lock_file()
+            logger.info(f"GPU lock released (generic: {label})")
+            return {"success": True}
+
     # Class-level cache: once we confirm there's no NVIDIA hardware on this host,
     # stop retrying on every poll. Saves ~120 ERROR lines per hour in backend.log
     # on CPU-only machines. Reset on process restart — if a GPU is hot-plugged or

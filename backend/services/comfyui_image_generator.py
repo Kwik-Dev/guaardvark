@@ -442,7 +442,7 @@ class ComfyUIImageGenerator:
         import uuid as _uuid
         with gpu_session(JobKind.VIDEO_RENDER, f"chat_edit_{_uuid.uuid4().hex[:8]}",
                          on_busy="raise", evict_ollama=True, free_comfyui=True,
-                         vram_estimate_mb=11000, require_fit=True):
+                         vram_estimate_mb=11000, require_fit=True, cross_process=True):
             src_name = self._upload_image_to_comfyui(image_path)
             if not src_name:
                 raise RuntimeError("Failed to upload the source image to ComfyUI")

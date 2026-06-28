@@ -126,6 +126,40 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
         )
 
 
+import threading as _threading
+
+# Per-thread reentrancy flag: set while THIS thread holds a gpu_session slot, so a nested
+# gpu_session on the same thread becomes a pass-through instead of dead-locking on the
+# (process-wide) in-PID gate or double-acquiring the cross-process lease.
+_session_tls = _threading.local()
+
+
+def _acquire_cross_process_lease(slot: str) -> bool:
+    """Acquire the cross-process GPU file lock AFTER the in-PID gate (lock ordering) and
+    BEFORE eviction. Raise GpuBusyError if ANOTHER process holds it (the in-PID gate has
+    already serialized same-process work). Returns True if acquired; False if the
+    coordinator is unavailable (degrade to in-process-only rather than block)."""
+    try:
+        from backend.services.gpu_resource_coordinator import get_gpu_coordinator
+        coord = get_gpu_coordinator()
+    except Exception as e:  # noqa: BLE001
+        log.warning("cross-process GPU lease unavailable (%s); proceeding in-process only", e)
+        return False
+    res = coord.acquire_generic(slot)
+    if res.get("success"):
+        return True
+    from backend.services.job_operation_gate import GpuBusyError
+    raise GpuBusyError(f"GPU is held by another process ({res.get('error', 'busy')}).")
+
+
+def _release_cross_process_lease(slot: str) -> None:
+    try:
+        from backend.services.gpu_resource_coordinator import get_gpu_coordinator
+        get_gpu_coordinator().release_generic(slot)
+    except Exception as e:  # noqa: BLE001
+        log.warning("cross-process GPU lease release failed (%s)", e)
+
+
 # --- The front door -----------------------------------------------------------
 
 @contextlib.contextmanager
@@ -138,6 +172,7 @@ def gpu_session(
     free_comfyui: bool = False,
     vram_estimate_mb: Optional[int] = None,
     require_fit: bool = False,
+    cross_process: bool = False,
     slot_id: Optional[str] = None,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
@@ -153,15 +188,29 @@ def gpu_session(
     so adopting it in one caller never changes another's behavior. Yields the gate's
     acquired bool (False only in the degraded ``on_busy='register'`` path).
     """
+    # Reentrancy: a same-thread nested gpu_session is a pass-through — the outer call owns
+    # the gate, the cross-process lease, the eviction and the 8s cooldown. Prevents self-
+    # deadlock if enforcement ever lives inside a generator a wrapped caller also wraps.
+    if getattr(_session_tls, "held", False):
+        log.debug("gpu_session(%s) reentrant pass-through", op_id)
+        yield True
+        return
+
     from backend.services.job_operation_gate import get_gate
 
     gate = get_gate()
     _slot = slot_id or f"{getattr(kind, 'value', kind)}:{op_id}"
     acquired = False
+    lease_held = False
     try:
         with gate.gpu_exclusive(kind, op_id, on_busy=on_busy) as acq:
             acquired = acq
             if acquired:
+                _session_tls.held = True
+                # Cross-process lease (opt-in): acquire AFTER the in-PID gate (lock
+                # ordering), BEFORE eviction — only evict once we own both locks.
+                if cross_process:
+                    lease_held = _acquire_cross_process_lease(_slot)
                 reclaim_gpu(evict_ollama=evict_ollama, free_comfyui=free_comfyui)
                 # Strict admission (opt-in): after eviction, refuse with a clean "busy" if
                 # the estimate still won't physically fit — turns a CUDA OOM/hang into retry.
@@ -183,6 +232,10 @@ def gpu_session(
                 except Exception:
                     pass  # best-effort; release below will still run
     finally:
+        if acquired:
+            _session_tls.held = False
+        if lease_held:
+            _release_cross_process_lease(_slot)
         if acquired and vram_estimate_mb:
             _orchestrator_release(_slot)
 
