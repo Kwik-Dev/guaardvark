@@ -257,6 +257,20 @@ fi
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# Portable `timeout`: base macOS ships no `timeout` (it's GNU coreutils). Without this,
+# `timeout N ollama list` hits command-not-found, the `|| true` swallows it, and the
+# caller sees an EMPTY result — which made the boot model-presence check report
+# "No chat model found" and re-pull (a no-op) on every macOS start (#41). Prefer the real
+# command, fall back to `gtimeout` (brew coreutils), else run with NO limit (drop the
+# duration arg). No-op on Linux, where `timeout` already exists.
+if ! command_exists timeout; then
+    if command_exists gtimeout; then
+        timeout() { gtimeout "$@"; }
+    else
+        timeout() { shift; "$@"; }
+    fi
+fi
+
 # Resolve the EFFECTIVE enabled state for a plugin:
 #   1. data/plugin_state.json's `user_enabled[<id>]` if the user has toggled it
 #   2. plugin.json's `config.enabled` otherwise (manifest default)
@@ -1659,10 +1673,14 @@ else
     WHISPER_BUILD_DIR="$WHISPER_DIR/build"
     WHISPER_CLI="$WHISPER_BUILD_DIR/bin/whisper-cli"
     # whisper.cpp's shared library name is platform-specific: libwhisper.so* on
-    # Linux, libwhisper*.dylib on macOS. Match either so a SUCCESSFUL build on a
-    # Mac isn't misreported as "binary/library not found" (#41).
+    # Linux, libwhisper*.dylib on macOS. Its OUTPUT DIR also varies by CMake version:
+    # some emit the shared lib into build/src/, others (the macOS build #41's reporter
+    # hit) into build/bin/ alongside whisper-cli. Match either name in either dir so a
+    # SUCCESSFUL build isn't misreported as "binary/library not found" (#41).
     _whisper_lib_present() {
-        ls "$WHISPER_BUILD_DIR"/src/libwhisper*.dylib \
+        ls "$WHISPER_BUILD_DIR"/bin/libwhisper*.dylib \
+           "$WHISPER_BUILD_DIR"/src/libwhisper*.dylib \
+           "$WHISPER_BUILD_DIR"/bin/libwhisper.so* \
            "$WHISPER_BUILD_DIR"/src/libwhisper.so* 2>/dev/null | grep -q .
     }
 
@@ -1710,7 +1728,7 @@ else
         else
             # Linux honors LD_LIBRARY_PATH, macOS honors DYLD_LIBRARY_PATH; set both
             # (each platform ignores the other's) so the readiness probe works on Mac (#41).
-            if LD_LIBRARY_PATH="$WHISPER_BUILD_DIR/src" DYLD_LIBRARY_PATH="$WHISPER_BUILD_DIR/src" "$WHISPER_CLI" --help >/dev/null 2>&1; then
+            if LD_LIBRARY_PATH="$WHISPER_BUILD_DIR/bin:$WHISPER_BUILD_DIR/src" DYLD_LIBRARY_PATH="$WHISPER_BUILD_DIR/bin:$WHISPER_BUILD_DIR/src" "$WHISPER_CLI" --help >/dev/null 2>&1; then
                 vader_success "Whisper.cpp is ready"
             else
                 vader_warn "Whisper.cpp binary exists but may not be working properly"
