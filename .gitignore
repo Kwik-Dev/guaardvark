@@ -152,6 +152,10 @@ frontend/public/ort-*
 frontend/public/*.wasm
 frontend/public/*.onnx
 
+# Per-machine / personal training helper — hardcodes an absolute /home path and
+# targets the gitignored training/sage_harlow/ workspace; not portable source.
+scripts/gen_sage_candidates.py
+
 # Training model weights (too large for git)
 training/models/
 unsloth_compiled_cache/
