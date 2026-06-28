@@ -1330,7 +1330,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     }
   };
 
-  const _handleDeleteBatch = async (batchId) => {
+  const handleDeleteBatch = async (batchId, displayName) => {
+    if (!window.confirm(
+      `Delete "${displayName || batchId.slice(0, 8)}" and all of its videos? This can't be undone.`
+    )) {
+      return;
+    }
     try {
       const res = await fetch(`${API_BASE}/batch-video/delete/${batchId}`, {
         method: "DELETE",
@@ -1338,12 +1343,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       if (res.ok) {
         await fetchBatches();
         if (activeBatchId === batchId) {
+          setActiveBatchId(null);
           setBatchStatus(null);
           stopPolling();
         }
+        setSuccess("Batch deleted.");
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || `Delete failed: HTTP ${res.status}`);
       }
     } catch (e) {
-      // ignore
+      setError(`Delete failed: ${e.message}`);
     }
   };
 
@@ -2815,16 +2825,28 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   </Box>
                 )}
 
-                {batchStatus.status === 'completed' && (
-                  <Button
-                    startIcon={<DownloadIcon />}
-                    variant="contained"
-                    fullWidth
-                    onClick={() => handleDownloadBatch(batchStatus.batch_id)}
-                    sx={{ mb: 2 }}
-                  >
-                    Download All Videos
-                  </Button>
+                {(batchStatus.status === 'completed' || batchStatus.status === 'error' || batchStatus.status === 'cancelled') && (
+                  <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+                    {batchStatus.status === 'completed' && (
+                      <Button
+                        startIcon={<DownloadIcon />}
+                        variant="contained"
+                        sx={{ flex: 2 }}
+                        onClick={() => handleDownloadBatch(batchStatus.batch_id)}
+                      >
+                        Download All Videos
+                      </Button>
+                    )}
+                    <Button
+                      startIcon={<CloseIcon />}
+                      variant="outlined"
+                      color="error"
+                      sx={{ flex: 1, whiteSpace: 'nowrap' }}
+                      onClick={() => handleDeleteBatch(batchStatus.batch_id, batchStatus.display_name)}
+                    >
+                      Delete
+                    </Button>
+                  </Box>
                 )}
 
                 <Divider sx={{ my: 2 }} />
@@ -3053,6 +3075,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                           transform: 'translateY(-4px)',
                           boxShadow: 6,
                           '& .batch-overlay': { opacity: 1 },
+                          '& .batch-delete': { opacity: 1 },
                         },
                       }}
                     >
@@ -3122,6 +3145,23 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               }}
                             />
                           )}
+                          {/* Delete batch — reveals on card hover (X per the no-trash-icon rule) */}
+                          <Tooltip title="Delete batch">
+                            <IconButton
+                              size="small"
+                              className="batch-delete"
+                              onClick={(e) => { e.stopPropagation(); handleDeleteBatch(b.batch_id, rawName); }}
+                              sx={{
+                                position: 'absolute', top: 4, left: 4,
+                                width: 24, height: 24,
+                                bgcolor: 'rgba(0,0,0,0.6)', color: 'white',
+                                opacity: 0, transition: 'opacity 0.2s',
+                                '&:hover': { bgcolor: 'error.main' },
+                              }}
+                            >
+                              <CloseIcon sx={{ fontSize: 16 }} />
+                            </IconButton>
+                          </Tooltip>
                         </Box>
                       </Box>
                       {/* Batch label */}
