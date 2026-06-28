@@ -87,8 +87,8 @@ class BatchVideoRequest:
     items: List[BatchVideoItem]
     output_dir: str
     model: str = "wan22-5b"  # 16GB-native single model (A14B offloads → ~38 min/clip)
-    duration_frames: int = 25
-    fps: int = 7
+    duration_frames: int = 49  # 2s @ 24fps (Wan 5B is 24fps-native; was 25 @ 7fps = choppy); 49 is also CogVideoX's max
+    fps: int = 24
     width: int = 512
     height: int = 512
     motion_strength: float = 1.0

@@ -89,7 +89,7 @@ class VideoGenerationRequest:
     negative_prompt: str = ""
     model: str = "cogvideox-5b"
     duration_frames: int = 25
-    fps: int = 7
+    fps: int = 24  # 24fps default — Wan 5B is 24fps-native (was 7 → choppy slow-motion)
     width: int = 512
     height: int = 512
     motion_strength: float = 1.0

@@ -134,8 +134,8 @@ def generate_text_to_video_batch():
 
         params = {
             "model": data.get("model", "cogvideox-5b"),
-            "duration_frames": int(data.get("duration_frames", 25)),
-            "fps": int(data.get("fps", 7)),
+            "duration_frames": int(data.get("duration_frames", 49)),
+            "fps": int(data.get("fps", 24)),
             "width": int(data.get("width", 512)),
             "height": int(data.get("height", 512)),
             "motion_strength": float(data.get("motion_strength", 1.0)),
@@ -200,8 +200,8 @@ def generate_image_to_video_batch():
         params = {
             "prompt": data.get("prompt", ""),
             "model": data.get("model", "cogvideox-5b-i2v"),
-            "duration_frames": int(data.get("duration_frames", 25)),
-            "fps": int(data.get("fps", 7)),
+            "duration_frames": int(data.get("duration_frames", 49)),
+            "fps": int(data.get("fps", 24)),
             "width": int(data.get("width", 512)),
             "height": int(data.get("height", 512)),
             "motion_strength": float(data.get("motion_strength", 1.0)),
@@ -649,7 +649,7 @@ def download_batch(batch_id: str):
 def combine_frames(batch_id: str):
     try:
         data = request.get_json(silent=True) or {}
-        fps = int(data.get("fps", 7))
+        fps = int(data.get("fps", 24))
         item_id = data.get("item_id")
         generator = get_batch_video_generator()
         combined = generator.combine_frames(batch_id, item_id=item_id, fps=fps)
