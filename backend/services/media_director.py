@@ -161,6 +161,49 @@ def enhance_prompts(
     # Fallback: return originals (caller may still do keyword enhance)
     return list(prompts)
 
+
+_SYSTEM_REFINE_EDIT = """You are an expert prompt writer for an instruction-based image EDITOR (FLUX Kontext).
+Rewrite the user's terse edit request into ONE precise, imperative edit directive.
+Rules:
+- Name the TARGET (what changes), the CHANGE (exactly what it becomes — material, color, placement, style), and what to PRESERVE (keep the same face, identity, pose, framing, lighting, background, and everything not mentioned).
+- Do NOT add new subjects, do NOT describe the whole scene, do NOT turn it into a from-scratch image prompt.
+- Keep it to one or two sentences.
+Return ONLY JSON: {"instruction": "<the rewritten edit directive>"}."""
+
+
+def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
+                            sampling: Optional[dict] = None) -> str:
+    """Rewrite a terse image-EDIT instruction into a precise Kontext edit directive via the
+    director LLM (gemma4). Best-effort: returns the ORIGINAL on any failure.
+
+    Distinct from enhance_prompts (which writes a txt2img *visual* prompt and would inject
+    new subjects) — this MUST stay an edit directive: target + change + what-to-preserve."""
+    instr = (instruction or "").strip()
+    if not instr:
+        return instruction
+    resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)
+    try:
+        import ollama
+        import json as _json
+        resp = ollama.chat(
+            model=resolved,
+            format="json",
+            messages=[
+                {"role": "system", "content": _SYSTEM_REFINE_EDIT},
+                {"role": "user", "content": f"User edit request: {instr}"},
+            ],
+            options=_options(1, sampling),
+        )
+        data = _json.loads(resp["message"]["content"])
+        refined = (data.get("instruction") or "").strip()
+        if refined:
+            return refined
+        log.warning("media_director.refine_edit_instruction returned empty; using original")
+    except Exception as e:  # noqa: BLE001
+        log.warning("media_director.refine_edit_instruction failed (%s); using original", e)
+    return instruction
+
+
 def storyboard_from_concept(
     concept: str,
     n: int,

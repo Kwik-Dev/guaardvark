@@ -204,7 +204,12 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
         except Exception:
             pass
 
-    with gate.gpu_exclusive(JobKind.VIDEO_RENDER, f"char_samples_{subject_id}"):
+    # gpu_session (not bare gpu_exclusive) so Ollama is evicted UNDER the held slot —
+    # this is the path that maxed the GPU earlier (gate without evict = FLUX + resident
+    # chat model on a 16GB card).
+    from backend.services.gpu_resource_policy import gpu_session
+    with gpu_session(JobKind.VIDEO_RENDER, f"char_samples_{subject_id}",
+                     evict_ollama=True, vram_estimate_mb=9000):
         for idx, row in enumerate(sample_rows):
             output_path = _sample_image_path(subject_id, row.index)
             seed = random.randint(1, 2 ** 31 - 1)
@@ -328,7 +333,9 @@ def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int |
         except Exception:
             pass
 
-    with gate.gpu_exclusive(JobKind.VIDEO_RENDER, f"char_regen_{row.subject_id}"):
+    from backend.services.gpu_resource_policy import gpu_session
+    with gpu_session(JobKind.VIDEO_RENDER, f"char_regen_{row.subject_id}",
+                     evict_ollama=True, vram_estimate_mb=9000):
         try:
             if job_id:
                 try:

@@ -129,7 +129,21 @@ class ImageGeneratorTool(BaseTool):
                 model=model,
             )
 
-            result = generator.generate_image(request)
+            # Hold the GPU for the whole generation (exclusivity + evict Ollama UNDER the
+            # held lease) so it can't OOM against a resident chat model or a concurrent
+            # render. Friendly "busy" instead of a CUDA OOM on contention.
+            from backend.services.gpu_resource_policy import gpu_session
+            from backend.services.job_operation_gate import GpuBusyError
+            from backend.services.job_types import JobKind
+            try:
+                with gpu_session(JobKind.VIDEO_RENDER, f"chat_imggen_{uuid.uuid4().hex[:8]}",
+                                 on_busy="raise", evict_ollama=True, vram_estimate_mb=11000):
+                    result = generator.generate_image(request)
+            except GpuBusyError:
+                return ToolResult(
+                    success=False,
+                    error="GPU is busy with another render right now — try again in a moment.",
+                )
 
             if result.success and result.image_path and os.path.exists(result.image_path):
                 # Copy generated image to the served output directory
@@ -347,8 +361,8 @@ class EditImageTool(BaseTool):
         ),
         "steps": ToolParameter(
             name="steps", type="int",
-            description="Diffusion steps (more = higher fidelity, slower). Default 20.",
-            required=False, default=20,
+            description="Diffusion steps (more = higher fidelity, slower). Default 28.",
+            required=False, default=28,
         ),
     }
 
@@ -394,7 +408,7 @@ class EditImageTool(BaseTool):
             return None
         return None
 
-    def execute(self, instruction: str, image: str = "", steps: int = 20, **kwargs) -> ToolResult:
+    def execute(self, instruction: str, image: str = "", steps: int = 28, **kwargs) -> ToolResult:
         src = self._resolve_image(image)
         if not src:
             return ToolResult(

@@ -458,7 +458,9 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
         from backend.services.job_operation_gate import get_gate
         from backend.services.job_types import JobKind
         gate = get_gate()
-        with gate.gpu_exclusive(JobKind.VIDEO_RENDER, f"storyboard_{prod_id}"):
+        from backend.services.gpu_resource_policy import gpu_session
+        with gpu_session(JobKind.VIDEO_RENDER, f"storyboard_{prod_id}",
+                         evict_ollama=True, vram_estimate_mb=9000):
             for i, shot in enumerate(shots):
                 lora_paths, prompt = _shot_loras_and_prompt(shot)
                 output_path = _storyboard_path(prod_id, shot.shot_number or (i + 1))
@@ -661,7 +663,9 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
     from backend.services.job_operation_gate import get_gate
     from backend.services.job_types import JobKind
     gate = get_gate()
-    with gate.gpu_exclusive(JobKind.VIDEO_RENDER, f"storyboard_{shot.production_id}"):
+    from backend.services.gpu_resource_policy import gpu_session
+    with gpu_session(JobKind.VIDEO_RENDER, f"storyboard_{shot.production_id}",
+                     evict_ollama=True, vram_estimate_mb=9000):
         shot.storyboard_image_path = image_generator.generate_image(
             prompt=prompt, loras=lora_paths, output_path=output_path,
         )

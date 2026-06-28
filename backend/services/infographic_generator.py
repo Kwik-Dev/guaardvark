@@ -229,13 +229,20 @@ class InfographicGenerator:
         workflow["7"]["inputs"]["seed"] = seed
 
         started = time.monotonic()
-        prompt_id = self._queue(workflow)
-        logger.info(
-            f"[INFOGRAPHIC] queued prompt_id={prompt_id} "
-            f"{width}x{height} seed={seed} style={spec.style}"
-        )
-
-        outputs = self._wait_for(prompt_id, timeout=180)
+        # Hold the GPU (evict Ollama + free ComfyUI UNDER the lease) so the ~10GB FLUX
+        # infographic render can't OOM against a resident chat model or concurrent render.
+        from backend.services.gpu_resource_policy import gpu_session
+        from backend.services.job_types import JobKind
+        import uuid as _uuid
+        with gpu_session(JobKind.VIDEO_RENDER, f"infographic_{_uuid.uuid4().hex[:8]}",
+                         on_busy="raise", evict_ollama=True, free_comfyui=True,
+                         vram_estimate_mb=10000):
+            prompt_id = self._queue(workflow)
+            logger.info(
+                f"[INFOGRAPHIC] queued prompt_id={prompt_id} "
+                f"{width}x{height} seed={seed} style={spec.style}"
+            )
+            outputs = self._wait_for(prompt_id, timeout=180)
         filename, subfolder = self._extract_image(outputs)
 
         # `/view` is ComfyUI's serving endpoint. The frontend can hit it

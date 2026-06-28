@@ -1442,7 +1442,7 @@ class UnifiedChatEngine:
             # Image/video generation needs ~3.5GB+ VRAM. The Ollama LLM stays
             # resident for its default 5-min keep_alive, competing for the GPU.
             # Evict it now so the SD pipeline can load without OOM.
-            GPU_HEAVY_TOOLS = {"generate_image", "generate_animation"}
+            GPU_HEAVY_TOOLS = {"generate_image", "generate_animation", "edit_image"}
             if GPU_HEAVY_TOOLS.intersection(t_name for _, t_name, _ in tool_jobs):
                 try:
                     import requests as _req
@@ -1933,18 +1933,27 @@ class UnifiedChatEngine:
         if not img_path:
             return None
         instruction = (message or "").strip()
+        # Quality: while gemma4 is still resident, rewrite a TERSE edit request into a
+        # precise Kontext edit directive (target + change + what-to-preserve). Runs BEFORE
+        # any eviction (gemma4 is loaded here); edit_image then evicts it under its own
+        # gpu_session and renders — so the order is refine -> evict -> render. Detailed
+        # instructions (>=12 words) pass through untouched.
+        if len(instruction.split()) < 12:
+            try:
+                from backend.services.media_director import refine_edit_instruction
+                refined = refine_edit_instruction(instruction)
+                if refined and refined.strip() and refined.strip() != instruction:
+                    logger.info("Image-edit refine: %r -> %r", instruction[:60], refined.strip()[:90])
+                    instruction = refined.strip()
+            except Exception as _rf:
+                logger.warning("Edit-instruction refine failed (non-fatal): %s", _rf)
         logger.info("Image-edit direct (%s): edit_image(instruction=%r)",
                     "follow-up" if followup else "attached", instruction[:80])
         self._save_message(session_id, "user", message)
         emit_fn("chat:tool_call", {"tool": "edit_image",
                                    "params": {"instruction": instruction}, "iteration": 1})
-        # Free the chat model's VRAM so Kontext loads fully instead of CPU-offloading on
-        # the shared 16GB card; gemma4 reloads lazily on the next chat message.
-        try:
-            from backend.services.gpu_resource_policy import evict_ollama_models
-            evict_ollama_models()
-        except Exception as _ev:
-            logger.warning("Pre-edit Ollama eviction failed (non-fatal): %s", _ev)
+        # VRAM eviction is now owned by edit_image's gpu_session (it evicts Ollama UNDER the
+        # held GPU lease, after the refine above), so no separate pre-evict here.
         try:
             result = self.registry.execute_tool("edit_image", instruction=instruction, image=img_path)
         except Exception as e:

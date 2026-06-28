@@ -418,10 +418,15 @@ class ComfyUIImageGenerator:
         }
 
     def edit_image(self, *, image_path: str, instruction: str, output_path: str,
-                   steps: int = 20, guidance: float = 2.5, seed: int = 42) -> str:
+                   steps: int = 28, guidance: float = 2.5, seed: int = 42) -> str:
         """Instruction-guided edit of an existing image via FLUX.1 Kontext [dev].
         Honest failure if ComfyUI is down or the Kontext model isn't installed —
-        never returns a fake/unedited image."""
+        never returns a fake/unedited image. Default 28 steps (Kontext is under-rendered
+        at 20); guidance ~2.5 (do not exceed ~3.5 — over-bakes/identity-drift; cfg stays 1.0).
+
+        Holds the GPU for the whole edit (exclusivity + evict Ollama + free ComfyUI UNDER
+        the held lease) so the ~11GB Kontext load can't OOM against a resident chat model
+        or a concurrent render — enforced HERE so no caller can bypass it."""
         if not self._available():
             raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url} — cannot edit image")
         if not os.path.exists(image_path):
@@ -432,22 +437,28 @@ class ComfyUIImageGenerator:
                 f"ComfyUI/models/unet/{KONTEXT_UNET}). Image editing is unavailable "
                 f"until that model finishes downloading."
             )
-        src_name = self._upload_image_to_comfyui(image_path)
-        if not src_name:
-            raise RuntimeError("Failed to upload the source image to ComfyUI")
-        workflow = self._build_kontext_workflow(
-            src_image_name=src_name, instruction=instruction,
-            steps=max(int(steps), 1), guidance=guidance, seed=seed,
-        )
-        prompt_id = self._queue(workflow)
-        if not prompt_id:
-            raise RuntimeError("ComfyUI did not accept the Kontext edit workflow")
-        outputs = self._wait(prompt_id)
-        if outputs is None:
-            raise RuntimeError(f"ComfyUI image edit timed out (prompt {prompt_id})")
-        result = self._fetch_first_image(outputs, output_path)
-        if result is None:
-            raise RuntimeError(f"ComfyUI produced no edited image for prompt {prompt_id}")
+        from backend.services.gpu_resource_policy import gpu_session
+        from backend.services.job_types import JobKind
+        import uuid as _uuid
+        with gpu_session(JobKind.VIDEO_RENDER, f"chat_edit_{_uuid.uuid4().hex[:8]}",
+                         on_busy="raise", evict_ollama=True, free_comfyui=True,
+                         vram_estimate_mb=11000):
+            src_name = self._upload_image_to_comfyui(image_path)
+            if not src_name:
+                raise RuntimeError("Failed to upload the source image to ComfyUI")
+            workflow = self._build_kontext_workflow(
+                src_image_name=src_name, instruction=instruction,
+                steps=max(int(steps), 1), guidance=guidance, seed=seed,
+            )
+            prompt_id = self._queue(workflow)
+            if not prompt_id:
+                raise RuntimeError("ComfyUI did not accept the Kontext edit workflow")
+            outputs = self._wait(prompt_id)
+            if outputs is None:
+                raise RuntimeError(f"ComfyUI image edit timed out (prompt {prompt_id})")
+            result = self._fetch_first_image(outputs, output_path)
+            if result is None:
+                raise RuntimeError(f"ComfyUI produced no edited image for prompt {prompt_id}")
         logger.info("Kontext edit complete: %s", result)
         return result
 
