@@ -299,7 +299,20 @@ const VIDEO_SIZE_PRESETS = {
 };
 
 const MODEL_OPTIONS = {
-  // Wan 2.2 models (state-of-the-art, recommended)
+  // Wan 2.2 TI2V-5B — single model, fits 16GB natively (no CPU offload). Does BOTH
+  // text- and image-to-video; ~200x faster per step than the A14B MoE on 16GB cards.
+  "wan22-5b": {
+    label: "Wan 2.2 5B TI2V (Recommended)",
+    description: "Fast 5s clips, fits 16GB — no offload. Text + image to video.",
+    type: "wan",
+    maxFrames: 121,
+    resolution: [1280, 704],
+    defaultSteps: 20,
+    supportsT2V: true,
+    supportsI2V: true,
+    dimensionAlignment: 16,
+  },
+  // Wan 2.2 14B MoE (top quality, but ~22GB → CPU-offloads on 16GB; slow per step)
   "wan22-14b": {
     label: "Wan 2.2 14B (GGUF Q5)",
     description: "Best quality, 5s videos (~11GB VRAM)",
@@ -324,8 +337,8 @@ const MODEL_OPTIONS = {
   },
   // CogVideoX 5b — the in-process diffusers option (no ComfyUI needed).
   "cogvideox-5b": {
-    label: "CogVideoX 5B (Recommended)",
-    description: "6s videos, best quality (~16GB VRAM)",
+    label: "CogVideoX 5B",
+    description: "6s videos, in-process diffusers — no ComfyUI needed (~16GB VRAM)",
     type: "cogvideox",
     maxFrames: 49,
     resolution: [720, 480],
@@ -347,12 +360,11 @@ const MODEL_OPTIONS = {
   },
 };
 
-// Default model per input mode
-const DEFAULT_T2V_MODEL = "wan22-14b";
-// Wan 2.2 I2V is the strictly-better default (cinematic motion, lower VRAM,
-// no kijai-wrapper schema-drift gotchas). CogVideoX I2V stays in the dropdown
-// for users who want it.
-const DEFAULT_I2V_MODEL = "wan22-14b-i2v";
+// Default model per input mode — Wan 2.2 5B TI2V for both: it's the only Wan model
+// that actually FITS 16GB (the A14B offloads to CPU → ~38 min/clip). One model does
+// text- and image-to-video. A14B stays in the dropdown for >16GB cards.
+const DEFAULT_T2V_MODEL = "wan22-5b";
+const DEFAULT_I2V_MODEL = "wan22-5b";
 
 // Helper to check model type
 const isCogVideoXModel = (model) => MODEL_OPTIONS[model]?.type === "cogvideox";

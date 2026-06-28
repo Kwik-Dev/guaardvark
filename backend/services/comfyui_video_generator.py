@@ -1066,6 +1066,112 @@ class ComfyUIVideoGenerator:
 
         return workflow
 
+    def _create_wan22_5b_workflow(
+        self,
+        prompt: str,
+        negative_prompt: str = "",
+        model_key: str = "wan22-5b",
+        image_filename: Optional[str] = None,
+        num_frames: int = 121,
+        num_inference_steps: int = 20,
+        guidance_scale: float = 5.0,
+        width: int = 1280,
+        height: int = 704,
+        seed: Optional[int] = None,
+        fps: int = 24,
+        interpolation_multiplier: int = 1,
+    ) -> dict:
+        """Wan 2.2 TI2V-5B — single-model text+image-to-video that FITS 16GB (no MoE
+        two-pass, no CPU offload → none of the 38-min-per-clip A14B pain). Graph mirrors
+        ComfyUI's bundled `video_wan2_2_5B_ti2v` template: UNETLoader + CLIPLoader(wan) +
+        VAELoader(wan2.2 VAE) → CLIPTextEncode ×2 → Wan22ImageToVideoLatent (start_image
+        optional) → ModelSamplingSD3(shift 8) → single KSampler (uni_pc/simple, denoise 1)
+        → decode. image_filename set → image-to-video; else text-to-video.
+        """
+        if seed is None:
+            seed = int(time.time() * 1000) % (2**31)
+
+        cfg = self.WAN22_MODELS.get(model_key, {})
+        unet = cfg.get("unet") or "wan2.2_ti2v_5B_fp16.safetensors"
+        clip = cfg.get("clip") or "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+        vae = cfg.get("vae") or "wan2.2_vae.safetensors"
+
+        if not negative_prompt:
+            negative_prompt = (
+                "blurry, low quality, worst quality, deformed, disfigured, poor anatomy, "
+                "bad proportions, extra limbs, missing limbs, mutated hands, fused fingers, "
+                "extra fingers, deformed face, asymmetrical eyes, weird body, static, "
+                "overexposed"
+            )
+
+        # Wan22ImageToVideoLatent: vae + dims (+ optional start_image) → conditioned LATENT.
+        latent_inputs = {
+            "vae": ["4", 0],
+            "width": width,
+            "height": height,
+            "length": num_frames,
+            "batch_size": 1,
+        }
+
+        workflow = {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+            "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip, "type": "wan", "device": "default"}},
+            "4": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["3", 0], "text": prompt}},
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["3", 0], "text": negative_prompt}},
+            "7": {"class_type": "Wan22ImageToVideoLatent", "inputs": latent_inputs},
+            "8": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 8.0}},
+            # Single sampling pass — the whole point (no high/low expert swap).
+            "10": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["8", 0],
+                    "positive": ["5", 0],
+                    "negative": ["6", 0],
+                    "latent_image": ["7", 0],
+                    "seed": seed,
+                    "steps": num_inference_steps,
+                    "cfg": guidance_scale,
+                    "sampler_name": "uni_pc",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                },
+            },
+            "12": self._build_vae_decode_node("10", "4", width, height),
+            "13": {
+                "class_type": "VHS_VideoCombine",
+                "inputs": {
+                    "images": ["12", 0],
+                    "frame_rate": fps,
+                    "loop_count": 0,
+                    "filename_prefix": "wan22_5b",
+                    "format": "video/h264-mp4",
+                    "pix_fmt": "yuv420p",
+                    "crf": 19,
+                    "save_metadata": True,
+                    "pingpong": False,
+                    "save_output": True,
+                    "videopreview": {"hidden": False, "paused": False, "params": {}},
+                },
+            },
+        }
+
+        # Image-to-video: bake the start frame into the latent node.
+        if image_filename:
+            workflow["14"] = {"class_type": "LoadImage", "inputs": {"image": image_filename}}
+            workflow["7"]["inputs"]["start_image"] = ["14", 0]
+
+        if interpolation_multiplier > 1:
+            self._add_rife_interpolation(
+                workflow,
+                source_node_id="12",
+                video_combine_node_id="13",
+                base_fps=fps,
+                multiplier=interpolation_multiplier,
+            )
+
+        return workflow
+
     def _build_vae_decode_node(self, samples_node: str, vae_node: str, width: int, height: int) -> dict:
         """Pick the right VAE decode strategy based on resolution.
 
@@ -1564,7 +1670,31 @@ class ComfyUIVideoGenerator:
                 cfg = self.WAN22_MODELS[model_key]
                 is_i2v = cfg.get("type") == "i2v"
 
-                if is_i2v:
+                if cfg.get("single"):
+                    # Wan 2.2 TI2V-5B: ONE model does both — image-to-video if a start
+                    # image is given, else text-to-video. Fits 16GB, no MoE two-pass.
+                    img_name = None
+                    if image_path and Path(image_path).exists():
+                        img_name = self._upload_image_to_comfyui(image_path)
+                        if not img_name:
+                            result.error = "Failed to upload image to ComfyUI"
+                            return result
+                    workflow = self._create_wan22_5b_workflow(
+                        prompt=request.prompt,
+                        negative_prompt=request.negative_prompt,
+                        model_key=model_key,
+                        image_filename=img_name,
+                        num_frames=request.duration_frames,
+                        num_inference_steps=request.num_inference_steps,
+                        guidance_scale=request.guidance_scale,
+                        width=request.width,
+                        height=request.height,
+                        seed=seed,
+                        fps=request.fps,
+                        interpolation_multiplier=interpolation,
+                    )
+                    logger.info(f"Using Wan 2.2 TI2V-5B ({'i2v' if img_name else 't2v'}, {model_key}) via ComfyUI")
+                elif is_i2v:
                     if not image_path or not Path(image_path).exists():
                         result.error = "Wan 2.2 I2V requires an input image."
                         return result

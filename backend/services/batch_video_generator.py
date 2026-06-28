@@ -86,7 +86,7 @@ class BatchVideoRequest:
     batch_id: str
     items: List[BatchVideoItem]
     output_dir: str
-    model: str = "cogvideox-5b"
+    model: str = "wan22-5b"  # 16GB-native single model (A14B offloads → ~38 min/clip)
     duration_frames: int = 25
     fps: int = 7
     width: int = 512

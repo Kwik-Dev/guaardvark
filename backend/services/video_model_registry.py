@@ -115,6 +115,20 @@ VIDEO_MODEL_REGISTRY = {
         "vram_mb": 11000,
         "type": "wan",
     },
+    "wan22-5b": {
+        "name": "Wan 2.2 TI2V-5B (fp16)",
+        "description": "Single 5B text+image-to-video model built for 16GB cards — fits VRAM (no CPU offload, no 22GB MoE), fast. Native 1280x704 @ 24fps. The consumer-GPU answer to the A14B.",
+        "hf_repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+        "local_subdir": "diffusion_models",
+        "files": [
+            {"src": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "dst": "wan2.2_ti2v_5B_fp16.safetensors"},
+        ],
+        # TI2V-5B uses the NEW Wan 2.2 VAE (16x16x4), not the 2.1 VAE the A14B uses.
+        "requires": ["wan22-vae", "wan-umt5"],
+        "size_gb": 9.5,
+        "vram_mb": 11000,
+        "type": "wan",
+    },
     "wan-vae": {
         "name": "Wan 2.1/2.2 VAE",
         "description": "Required by all Wan video models. Shared between versions.",
@@ -126,6 +140,18 @@ VIDEO_MODEL_REGISTRY = {
             {"src": "VAE/Wan2.1_VAE.safetensors", "dst": "wan_2.1_vae.safetensors"},
         ],
         "size_gb": 0.25,
+        "vram_mb": 0,
+        "type": "vae",
+    },
+    "wan22-vae": {
+        "name": "Wan 2.2 VAE",
+        "description": "Required by Wan 2.2 TI2V-5B — 16x16x4 compression, NOT interchangeable with the 2.1 VAE.",
+        "hf_repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+        "local_subdir": "vae",
+        "files": [
+            {"src": "split_files/vae/wan2.2_vae.safetensors", "dst": "wan2.2_vae.safetensors"},
+        ],
+        "size_gb": 1.4,
         "vram_mb": 0,
         "type": "vae",
     },
@@ -333,8 +359,11 @@ def wan_comfyui_map() -> dict:
                     vae = dep_dst
                 elif dep_entry.get("type") == "encoder":
                     clip = dep_dst
+            single = high is None and low is None  # single-model TI2V (Wan 2.2 5B)
             out[mid] = {
-                "type": "i2v" if "i2v" in mid else "t2v",
+                "type": "ti2v" if single else ("i2v" if "i2v" in mid else "t2v"),
+                "single": single,
+                "unet": dsts[0] if (single and dsts) else None,
                 "unet_high": high,
                 "unet_low": low,
                 "clip": clip,
@@ -358,7 +387,9 @@ def verify_registry() -> list:
                     problems.append(f"{mid}: requires unknown model '{dep}'")
             if entry.get("type") == "wan":
                 m = wan_comfyui_map().get(mid, {})
-                for k in ("unet_high", "unet_low", "clip", "vae"):
+                # Single-model TI2V (5B) has one `unet`; MoE (A14B) has high/low experts.
+                required = ("unet", "clip", "vae") if m.get("single") else ("unet_high", "unet_low", "clip", "vae")
+                for k in required:
                     if not m.get(k):
                         problems.append(f"{mid}: ComfyUI map missing '{k}' (companion/file not resolvable)")
     except Exception as e:
