@@ -335,7 +335,25 @@ class ComfyUIVideoGenerator:
     }
 
     @classmethod
+    def _ensure_wan_models(cls) -> dict:
+        """The Wan loader map is derived from the registry at IMPORT time (`WAN22_MODELS`
+        above); if that derivation froze to {} (a transient registry/circular-import hiccup
+        at module load) Wan generation would be silently dead for the whole process. Re-resolve
+        lazily here and cache the first non-empty result, so a one-time import-order problem
+        can't permanently break Wan video. No-op once the map is populated."""
+        if not cls.WAN22_MODELS:
+            try:
+                from backend.services.video_model_registry import wan_comfyui_map
+                fresh = wan_comfyui_map() or {}
+                if fresh:
+                    cls.WAN22_MODELS = fresh
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return cls.WAN22_MODELS
+
+    @classmethod
     def _model_family(cls, model: str) -> str:
+        cls._ensure_wan_models()  # unfreeze the map if it froze empty at import
         if model in cls.WAN22_MODELS or model in ("wan22", "wan2.2"):
             return "wan"
         if model in cls.COGVIDEOX_MODELS:
