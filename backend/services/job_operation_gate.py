@@ -155,6 +155,7 @@ class JobOperationGate:
         native_id: str,
         *,
         on_busy: str = "raise",
+        wait_timeout: float = 120.0,
     ) -> Iterator[bool]:
         """Claim the GPU-exclusive slot for the duration of a ``with`` block.
 
@@ -167,6 +168,10 @@ class JobOperationGate:
           - "register": fall back to register_running() for snapshot visibility
             (DEGRADED — the job runs WITHOUT real exclusivity; use only where
             blocking is worse than contention).
+          - "wait": poll up to ``wait_timeout`` seconds for the slot to free, then
+            claim it — for SERIAL BACKGROUND queues (e.g. batch video) that should
+            wait out a transient busy / the 8s post-release cooldown instead of
+            failing the job. Raises GpuBusyError only if it never frees in time.
 
         Yields True when the exclusive slot was acquired, False in the
         degraded ("register") path. Release is idempotent and always runs in
@@ -174,6 +179,19 @@ class JobOperationGate:
         bare register_running() in the degraded path is cleaned up too.
         """
         acquired, reason = self.try_claim_gpu_exclusive(kind, native_id)
+        if not acquired and on_busy == "wait":
+            # Serial background callers wait out a transient busy / the post-release
+            # cooldown rather than fail. Poll try_claim until it frees or we time out.
+            import time as _t
+            deadline = _t.monotonic() + max(0.0, wait_timeout)
+            while not acquired and _t.monotonic() < deadline:
+                _t.sleep(min(1.0, max(0.05, deadline - _t.monotonic())))
+                acquired, reason = self.try_claim_gpu_exclusive(kind, native_id)
+            if acquired:
+                logger.info(
+                    "gpu_exclusive(%s:%s) acquired after waiting out gate busy/cooldown",
+                    kind.value, native_id,
+                )
         if not acquired:
             if on_busy == "register":
                 logger.warning(

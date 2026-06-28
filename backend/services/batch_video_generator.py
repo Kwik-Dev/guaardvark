@@ -424,20 +424,22 @@ class BatchVideoGenerator:
         #      the in-memory gate here makes batch video visible to (and
         #      serialized with) the other in-memory surfaces.
         # Lock-ordering rule: acquire the GPU-exclusive (in-memory) gate FIRST,
-        # then the file-lock. On in-memory contention -> GpuBusyError -> mark the
-        # batch errored, same as a file-lock acquire failure.
+        # then the file-lock. This is a SERIAL background queue, so on busy/cooldown
+        # we WAIT (on_busy="wait") rather than fail — a batch dequeued right after the
+        # previous one finishes would otherwise die on the gate's 8s post-release
+        # cooldown. Only a gate that never frees within wait_timeout -> error.
         from backend.services.job_operation_gate import get_gate, GpuBusyError
         from backend.services.job_types import JobKind
         gate = get_gate()
         try:
-            gate_cm = gate.gpu_exclusive(JobKind.VIDEO_RENDER, batch_request.batch_id)
+            gate_cm = gate.gpu_exclusive(JobKind.VIDEO_RENDER, batch_request.batch_id, on_busy="wait")
             gate_cm.__enter__()
         except GpuBusyError as e:
             status.status = "error"
-            status.error = f"Could not acquire GPU (in-memory gate busy): {e}"
+            status.error = f"Could not acquire GPU after waiting (gate still busy): {e}"
             status.end_time = datetime.now()
             self._save_metadata(status)
-            logger.error(f"Batch {batch_request.batch_id} blocked by in-memory GPU gate: {e}")
+            logger.error(f"Batch {batch_request.batch_id} blocked by GPU gate after waiting: {e}")
             return
 
         # Acquire GPU lock before starting video generation
