@@ -1256,15 +1256,24 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           ? { storyboard_concept: (promptsText || "").trim(), storyboard_shots: storyboardShots }
           : {};
 
+      // Exact control-panel snapshot so "Adjust & Retry" can restore this batch verbatim.
+      const uiConfig = {
+        inputMode, promptsText, lookAndFeel, model,
+        qualityPreset, durationPreset, motionPreset, aspectRatio, videoSize,
+        promptStyle, cinematicKeyframe, fidelityMode, negativePrompt,
+        storyboardMode, storyboardShots, lowVramMode, advancedParams,
+      };
+
       const body =
         inputMode === "text"
-          ? { prompts: finalPrompts, ...computedParams, fidelity_mode: fidelityMode, ...storyboardPayload, ...negativePayload }
+          ? { prompts: finalPrompts, ...computedParams, fidelity_mode: fidelityMode, ...storyboardPayload, ...negativePayload, ui_config: uiConfig }
           : {
               image_paths: imagePaths,
               prompt: lf && motionPrompt ? `${motionPrompt}, ${lf}` : motionPrompt,
               ...computedParams,
               fidelity_mode: fidelityMode,
               ...negativePayload,
+              ui_config: uiConfig,
             };
 
       const url =
@@ -1396,6 +1405,69 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       }
     } catch (e) {
       setError(`Retry failed: ${e.message}`);
+    }
+  };
+
+  // Adjust & Retry: load a batch's saved control-panel config back into the form so
+  // the user can tweak one thing and re-generate (instead of remembering all the
+  // settings). New batches store an exact `ui_config` snapshot → restored verbatim;
+  // older batches fall back to the core fields from the persisted params.
+  const handleAdjustRetry = async (batchId) => {
+    try {
+      const res = await fetch(`${API_BASE}/batch-video/status/${batchId}`);
+      if (!res.ok) { setError(`Couldn't load settings: HTTP ${res.status}`); return; }
+      const data = await res.json();
+      const rd = data?.data?.retry_data || data?.retry_data;
+      const name = data?.data?.metadata?.display_name || batchId.slice(0, 8);
+      if (!rd) { setError("This batch didn't store its settings."); return; }
+
+      const cfg = rd.params?.ui_config;
+      if (cfg) {
+        // Exact round-trip — restore the panel verbatim from the saved snapshot.
+        if (cfg.inputMode) setInputMode(cfg.inputMode);
+        if (typeof cfg.promptsText === "string") setPromptsText(cfg.promptsText);
+        if (typeof cfg.lookAndFeel === "string") setLookAndFeel(cfg.lookAndFeel);
+        if (cfg.model) setModel(cfg.model);
+        if (cfg.qualityPreset) setQualityPreset(cfg.qualityPreset);
+        if (cfg.durationPreset) setDurationPreset(cfg.durationPreset);
+        if (cfg.motionPreset) setMotionPreset(cfg.motionPreset);
+        if (cfg.aspectRatio) setAspectRatio(cfg.aspectRatio);
+        if (cfg.videoSize) setVideoSize(cfg.videoSize);
+        if (cfg.promptStyle) setPromptStyle(cfg.promptStyle);
+        if (typeof cfg.cinematicKeyframe === "boolean") setCinematicKeyframe(cfg.cinematicKeyframe);
+        if (typeof cfg.fidelityMode === "boolean") setFidelityMode(cfg.fidelityMode);
+        if (typeof cfg.negativePrompt === "string") setNegativePrompt(cfg.negativePrompt);
+        if (typeof cfg.storyboardMode === "boolean") setStoryboardMode(cfg.storyboardMode);
+        if (cfg.storyboardShots) setStoryboardShots(cfg.storyboardShots);
+        if (typeof cfg.lowVramMode === "boolean") setLowVramMode(cfg.lowVramMode);
+        if (cfg.advancedParams && typeof cfg.advancedParams === "object") setAdvancedParams(cfg.advancedParams);
+        setSuccess(`Loaded "${name}" settings into the panel — adjust anything, then Generate.`);
+      } else {
+        // Older batch (no snapshot): restore the core from the stored params.
+        const p = rd.params || {};
+        if (rd.mode === "image" && rd.prompt) setPromptsText(rd.prompt);
+        else if (Array.isArray(rd.prompts)) setPromptsText(rd.prompts.join("\n"));
+        if (p.model) setModel(p.model);
+        if (typeof p.negative_prompt === "string") setNegativePrompt(p.negative_prompt);
+        if (p.prompt_style) setPromptStyle(p.prompt_style);
+        if (typeof p.fidelity_mode === "boolean") setFidelityMode(p.fidelity_mode);
+        setAdvancedParams((prev) => ({
+          ...prev,
+          num_inference_steps: p.num_inference_steps ?? prev.num_inference_steps,
+          guidance_scale: p.guidance_scale ?? prev.guidance_scale,
+          freeu: !!p.freeu,
+          face_restore: !!p.face_restore,
+          lora_name: p.lora_name || "",
+          lora_strength: p.lora_strength ?? prev.lora_strength,
+          frames_per_batch: p.frames_per_batch ?? prev.frames_per_batch,
+          combine_frames: !!p.combine_frames,
+        }));
+        setSuccess(`Loaded "${name}" core settings (older batch — double-check resolution/duration).`);
+      }
+      setError("");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e) {
+      setError(`Couldn't load settings: ${e.message}`);
     }
   };
 
@@ -2837,6 +2909,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         Download All Videos
                       </Button>
                     )}
+                    <Button
+                      startIcon={<SettingsIcon />}
+                      variant="outlined"
+                      sx={{ flex: 1, whiteSpace: 'nowrap' }}
+                      onClick={() => handleAdjustRetry(batchStatus.batch_id)}
+                    >
+                      Adjust &amp; Retry
+                    </Button>
                     <Button
                       startIcon={<CloseIcon />}
                       variant="outlined"

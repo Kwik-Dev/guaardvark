@@ -903,6 +903,8 @@ class BatchVideoGenerator:
                 "lora_name": batch_request.lora_name,
                 "lora_strength": batch_request.lora_strength,
                 "metadata": dict(batch_request.metadata or {}),
+                # Exact control-panel snapshot for "Adjust & Retry" (restore the UI verbatim).
+                "ui_config": params.get("ui_config"),
             }
             if is_image_mode:
                 status.retry_data = {

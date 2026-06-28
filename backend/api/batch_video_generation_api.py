@@ -158,6 +158,7 @@ def generate_text_to_video_batch():
             # Quality pipeline (v2.6.2) — opt-in cinematic director + keyframe->I2V.
             "director_mode": str(data.get("director_mode", "false")).lower() == "true",
             "cinematic_keyframe": str(data.get("cinematic_keyframe", "false")).lower() == "true",
+            "ui_config": data.get("ui_config"),
             "director_guidance": data.get("director_guidance") or None,
             # Trained cast members to lock into each clip. The video model can't apply
             # a LoRA, so each selected character's SDXL LoRA is baked into a cinematic
@@ -224,6 +225,7 @@ def generate_image_to_video_batch():
             # Quality pipeline (v2.6.2) — opt-in cinematic director + keyframe->I2V.
             "director_mode": str(data.get("director_mode", "false")).lower() == "true",
             "cinematic_keyframe": str(data.get("cinematic_keyframe", "false")).lower() == "true",
+            "ui_config": data.get("ui_config"),
             "director_guidance": data.get("director_guidance") or None,
             "metadata": {
                 **(data.get("metadata") or {}),
