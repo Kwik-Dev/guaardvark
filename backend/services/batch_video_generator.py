@@ -349,7 +349,8 @@ class BatchVideoGenerator:
                                  out_path: str, seed: int,
                                  keyframe_model: Optional[str] = None,
                                  loras: Optional[list] = None,
-                                 lora_strength: float = 0.25) -> Optional[str]:
+                                 lora_strength: float = 0.25,
+                                 keep_warm: bool = False) -> Optional[str]:
         """Cinematic mode: render a keyframe still for ``prompt``, then evict it from VRAM
         so the I2V animator can load (the music-video FLUX->i2v handoff — the i2v nodes
         don't ask ComfyUI to make room, so without this they OOM on a still-full card).
@@ -399,11 +400,14 @@ class BatchVideoGenerator:
                 steps=steps,
                 model=model,
             )
-            # Evict the still model BEFORE the animator loads.
-            try:
-                free_comfyui_vram()
-            except Exception:
-                pass
+            # Evict the still model BEFORE the animator loads — UNLESS the caller is
+            # batching keyframes (keep_warm): then the still model stays resident across
+            # the whole keyframe pre-pass and is evicted ONCE afterward (warm-model reuse).
+            if not keep_warm:
+                try:
+                    free_comfyui_vram()
+                except Exception:
+                    pass
             return still if still and Path(still).exists() else None
         except Exception as e:  # noqa: BLE001 — fall back to T2V, never fail the item here
             logger.warning(
@@ -536,6 +540,11 @@ class BatchVideoGenerator:
             # but we overlap python work, status updates, and allow the Comfy queue
             # to see multiple jobs. Per-item cancel is checked.
             items = list(batch_request.items)
+            # Warm-model reuse (cinematic): keyframe stills rendered in the pre-pass below
+            # are cached here so the per-item animate phase reuses them — turning
+            # load-FLUX→evict→load-Wan PER ITEM (2N model loads) into one FLUX load + one Wan
+            # load for the whole batch. Empty in non-cinematic batches.
+            precomputed_keyframes: dict = {}
             if items:
                 def _process_item(item):
                     """Inner worker: returns (batch_result, completed_delta, failed_delta, oom_flag)"""
@@ -564,6 +573,13 @@ class BatchVideoGenerator:
                                 # THAT exact high-quality image (no re-render, no model/res
                                 # mismatch). Identity + fidelity carry into the clip directly.
                                 meta["image_path"] = cast_keyframe_image
+                                meta["cinematic_keyframe"] = True
+                                item_model = self._to_i2v_model(batch_request.model)
+                            elif item.id in precomputed_keyframes:
+                                # Warm-model reuse: this keyframe was rendered in the pre-pass
+                                # (the still model stayed warm across the whole batch); just
+                                # animate it — no per-item FLUX load/evict here.
+                                meta["image_path"] = precomputed_keyframes[item.id]
                                 meta["cinematic_keyframe"] = True
                                 item_model = self._to_i2v_model(batch_request.model)
                             else:
@@ -647,6 +663,46 @@ class BatchVideoGenerator:
                             error=err_str + oom_note,
                         )
                         return (br, 0, 1, is_oom)
+
+                # ── Warm-model reuse pre-pass (cinematic only) ────────────────────
+                # Render ALL keyframe stills first with the still model held RESIDENT
+                # (keep_warm), evict it ONCE, then let the per-item animate phase below
+                # reuse them with the Wan animator staying warm — turning 2N model loads
+                # (FLUX→evict→Wan, per item) into 2 (one FLUX, one Wan) for an N-clip batch.
+                # Any per-keyframe failure simply falls back to the lazy path in
+                # _process_item, so this is a pure optimization.
+                _warm_cinematic = bool(getattr(batch_request, "cinematic_keyframe", False) or cast_lora_paths)
+                if _warm_cinematic and not cast_keyframe_image:
+                    from backend.services.gpu_resource_policy import free_comfyui_vram as _free_comfy
+                    for _it in items:
+                        if cancel_event and cancel_event.is_set():
+                            break
+                        if getattr(_it, "image_path", None) or not (_it.prompt or "").strip():
+                            continue  # brought its own image / no prompt → no keyframe needed
+                        _kf_prompt = _it.prompt
+                        if cast_lock_prefix:
+                            from backend.services.cast_lock import apply_lock
+                            _kf_prompt = apply_lock(_it.prompt, cast_lock_prefix)
+                        _kf = self._generate_keyframe_still(
+                            prompt=_kf_prompt,
+                            width=batch_request.width, height=batch_request.height,
+                            out_path=str(Path(batch_dir) / f"keyframe_{_it.id}.png"),
+                            seed=(batch_request.seed if batch_request.seed is not None else 1000),
+                            keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
+                            loras=(cast_lora_paths or None), lora_strength=cast_lora_strength,
+                            keep_warm=True,  # hold the still model across ALL keyframes
+                        )
+                        if _kf:
+                            precomputed_keyframes[_it.id] = _kf
+                    if precomputed_keyframes:
+                        logger.info(
+                            "Warm-reuse: pre-rendered %d keyframe(s) with the still model held; "
+                            "evicting once before the I2V animator loads",
+                            len(precomputed_keyframes))
+                        try:
+                            _free_comfy()
+                        except Exception:
+                            pass
 
                 # Cinematic mode does a stateful FLUX-still -> evict -> I2V handoff per item
                 # on the shared GPU; concurrent items would evict each other's loaded model,
