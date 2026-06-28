@@ -160,6 +160,40 @@ def _release_cross_process_lease(slot: str) -> None:
         log.warning("cross-process GPU lease release failed (%s)", e)
 
 
+def _load_admit_or_busy(slot: str):
+    """RAM/swap/loadavg admission via the (built-but-previously-unwired) GlobalLoadGate.
+    The in-PID GPU slot is already held — lock order (gate FIRST, then this), per the
+    gate's own docstring. Single FAIL-FAST check (timeout=0): refuse heavy work with a
+    clean GpuBusyError when the box has no system-RAM/swap headroom, rather than pile on
+    and drive it into swap-death. VRAM is the gate + _ensure_fits's job, so vram_gb=0 here
+    — this guards system load only. Fail-OPEN (return None, proceed) if the gate/probe is
+    unavailable. Returns the reserved JobWeight (release it on exit) or None."""
+    try:
+        from backend.services.system_load_gate import get_load_gate, JobWeight, LoadGateTimeout
+    except Exception:  # gate module / psutil unavailable -> fail open
+        return None
+    weight = JobWeight(ram_gb=2.0, vram_gb=0.0, cpu_cores=1.0)
+    try:
+        get_load_gate().admit(weight, timeout=0.0)
+        return weight
+    except LoadGateTimeout as e:
+        from backend.services.job_operation_gate import GpuBusyError
+        raise GpuBusyError(f"System under heavy load — {e}")
+    except Exception as e:  # noqa: BLE001 - probe unavailable -> fail open, never block gen
+        log.warning("GlobalLoadGate admit unavailable (%s); proceeding", e)
+        return None
+
+
+def _load_release(weight) -> None:
+    if weight is None:
+        return
+    try:
+        from backend.services.system_load_gate import get_load_gate
+        get_load_gate().release(weight)
+    except Exception as e:  # noqa: BLE001
+        log.warning("GlobalLoadGate release failed (%s)", e)
+
+
 # --- The front door -----------------------------------------------------------
 
 @contextlib.contextmanager
@@ -202,6 +236,7 @@ def gpu_session(
     _slot = slot_id or f"{getattr(kind, 'value', kind)}:{op_id}"
     acquired = False
     lease_held = False
+    load_weight = None
     try:
         with gate.gpu_exclusive(kind, op_id, on_busy=on_busy) as acq:
             acquired = acq
@@ -217,6 +252,11 @@ def gpu_session(
                 if require_fit and vram_estimate_mb:
                     _ensure_fits_or_busy(vram_estimate_mb, _slot)
                 if vram_estimate_mb:
+                    # RAM/swap/loadavg admission (GlobalLoadGate) — heavy/budgeted jobs
+                    # only, so default (estimate-less) callers stay a pure gate pass-
+                    # through. Fail-fast (won't hang), fail-open (won't block on a probe
+                    # error). Serialize-don't-thrash WITHOUT touching output quality.
+                    load_weight = _load_admit_or_busy(_slot)
                     _orchestrator_request(_slot, vram_estimate_mb)
             yield acquired
             # Success path for the unit of work: transition LOADING -> LOADED so
@@ -234,6 +274,7 @@ def gpu_session(
     finally:
         if acquired:
             _session_tls.held = False
+        _load_release(load_weight)
         if lease_held:
             _release_cross_process_lease(_slot)
         if acquired and vram_estimate_mb:
