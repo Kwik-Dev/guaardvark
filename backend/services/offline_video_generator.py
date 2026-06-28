@@ -22,7 +22,7 @@ except Exception as e:
     imageio_available = False
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image
     pillow_available = True
 except Exception as e:
     logger.warning(f"Pillow not available: {e}")
@@ -898,38 +898,6 @@ class OfflineVideoGenerator:
             self._unload_svd_pipeline()
             raise
 
-    def _generate_placeholder_frames(
-        self,
-        frames_dir: Path,
-        num_frames: int,
-        size: Tuple[int, int],
-        prompt: str,
-    ) -> List[str]:
-        frame_paths: List[str] = []
-        if not pillow_available:
-            raise RuntimeError("Pillow is required for placeholder frame generation")
-
-        width, height = size
-        font = None
-        try:
-            font = ImageFont.load_default()
-        except Exception:
-            font = None
-
-        for idx in range(num_frames):
-            img = Image.new("RGB", (width, height), color=(20 + idx * 3 % 200, 40, 80))
-            draw = ImageDraw.Draw(img)
-            text = f"Frame {idx + 1}/{num_frames}\nPrompt: {prompt[:60]}"
-            if font:
-                draw.text((10, 10), text, fill=(255, 255, 255), font=font)
-            else:
-                draw.text((10, 10), text, fill=(255, 255, 255))
-            frame_name = f"frame_{idx + 1:04d}.png"
-            frame_path = frames_dir / frame_name
-            img.save(frame_path)
-            frame_paths.append(str(frame_path))
-        return frame_paths
-
     def _combine_frames_to_video(
         self,
         frames_dir: Path,
@@ -1125,33 +1093,22 @@ class OfflineVideoGenerator:
                     logger.warning(f"Model {request.model} not available")
 
             if not frame_paths:
-                # Zero-placebo guard: never emit a solid-color stand-in clip and
-                # then report success. When no real AI backend produced frames
-                # (model missing, diffusers absent, ComfyUI down), fail loudly with
-                # an actionable message so the caller knows the model isn't there —
-                # rather than handing back a "blank video" the system swears worked.
-                # A placeholder is only ever produced when a caller *explicitly*
-                # opts in (dev/preview), via metadata["allow_placeholder"].
-                allow_placeholder = bool((request.metadata or {}).get("allow_placeholder"))
-                if not allow_placeholder:
-                    result.success = False
-                    if not result.error:
-                        result.error = (
-                            "No video model produced any frames. The offline AI video "
-                            "backend is unavailable (diffusers/CogVideoX not installed) "
-                            "and ComfyUI is not running. Install a video model via "
-                            "Video Generator → Manage Models and make sure ComfyUI is "
-                            "set up. Refusing to emit a blank placeholder clip."
-                        )
-                    logger.error(f"Video generation produced no frames: {result.error}")
-                    return result
-                logger.info("Using placeholder frame generation (explicitly allowed)")
-                frame_paths = self._generate_placeholder_frames(
-                    frames_dir=frames_dir,
-                    num_frames=max(1, request.duration_frames),
-                    size=(request.width, request.height),
-                    prompt=request.prompt,
-                )
+                # Zero-placebo guard (NO-MOCKS charter): never emit a solid-color or
+                # text-stamped stand-in clip and then report success. When no real AI
+                # backend produced frames (model missing, diffusers absent, ComfyUI
+                # down), fail loudly with an actionable message — we do not ship a fake
+                # video, not even behind an opt-in flag.
+                result.success = False
+                if not result.error:
+                    result.error = (
+                        "No video model produced any frames. The offline AI video "
+                        "backend is unavailable (diffusers/CogVideoX not installed) "
+                        "and ComfyUI is not running. Install a video model via "
+                        "Video Generator → Manage Models and make sure ComfyUI is "
+                        "set up. Refusing to emit a blank placeholder clip."
+                    )
+                logger.error(f"Video generation produced no frames: {result.error}")
+                return result
 
             result.frame_paths = [_rel(Path(p)) for p in frame_paths]
 

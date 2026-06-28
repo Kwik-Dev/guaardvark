@@ -4,8 +4,9 @@ Regression test for the zero-placebo guard in OfflineVideoGenerator.
 Background (GitHub issue #36): on a fresh install with no real video backend
 (ComfyUI not installed, diffusers/CogVideoX absent), text-to-video used to
 *silently* emit a solid-color placeholder clip and report success=True. The
-user saw a "blank video" the system swore had worked. The guard makes that path
-fail loudly unless a caller explicitly opts into placeholders.
+user saw a "blank video" the system swore had worked. The placeholder path has
+been removed entirely (NO-MOCKS charter): that path now ALWAYS fails loudly — the
+legacy allow_placeholder opt-in is ignored.
 
 These tests exercise the guard's NEGATIVE case (the WORKFLOW "zero placebo" rule:
 every guard must exercise its negative case).
@@ -13,8 +14,6 @@ every guard must exercise its negative case).
 
 import tempfile
 from pathlib import Path
-
-import pytest
 
 from backend.services.offline_video_generator import OfflineVideoGenerator
 from backend.services.comfyui_video_generator import VideoGenerationRequest
@@ -52,9 +51,9 @@ def test_no_ai_model_fails_loudly_instead_of_blank_video():
     assert not list(Path(tmp).rglob("*.mp4")), "no video file should exist on the failure path"
 
 
-def test_placeholder_still_available_on_explicit_optin():
-    """The placeholder path is preserved, but ONLY behind an explicit opt-in."""
-    pytest.importorskip("PIL")  # placeholder frames are drawn with Pillow
+def test_placeholder_optin_is_ignored_and_still_refuses():
+    """The placeholder path is GONE (NO-MOCKS charter): even with the legacy
+    allow_placeholder opt-in, generation must STILL fail and produce no clip."""
     gen = _no_ai_generator()
     with tempfile.TemporaryDirectory() as tmp:
         req = VideoGenerationRequest(
@@ -68,8 +67,6 @@ def test_placeholder_still_available_on_explicit_optin():
         )
         result = gen.generate_video(req)
 
-    # With the opt-in, the guard does NOT short-circuit with the "no frames" error.
-    # (Whether muxing fully succeeds depends on imageio availability in the env;
-    # the point of this test is that the explicit opt-in bypasses the hard refusal.)
-    if not result.success:
-        assert "Refusing to emit a blank placeholder" not in (result.error or "")
+    assert result.success is False, "opt-in must NOT resurrect the placeholder path"
+    assert not result.video_path, "must not produce a placeholder video"
+    assert not list(Path(tmp).rglob("*.mp4")), "no fake clip should be written even with the flag"

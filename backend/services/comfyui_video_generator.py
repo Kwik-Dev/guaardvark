@@ -2005,21 +2005,18 @@ class ComfyUIVideoGenerator:
             frame_files = sorted(f for f in downloaded_files if Path(f).suffix.lower() == ".png")
             primary = video_files[0] if video_files else downloaded_files[0]
 
-            # Zero-placebo guard (issue #36 Phase 3): never report success for a
-            # blank/empty/all-black render. ComfyUI can emit a black clip when a
-            # model/loader fails silently. Opt out for dev/preview via
-            # metadata.allow_placeholder, mirroring the offline path.
-            allow_placeholder = bool((request.metadata or {}).get("allow_placeholder"))
-            if not allow_placeholder:
-                blank_reason = _looks_like_blank_video(Path(primary))
-                if blank_reason:
-                    result.error = (
-                        f"ComfyUI produced an invalid video: {blank_reason}. This usually "
-                        "means a model/loader failed silently — verify the model is fully "
-                        "installed. (Set metadata.allow_placeholder to keep it anyway.)"
-                    )
-                    logger.error(f"Zero-placebo guard rejected ComfyUI output: {blank_reason}")
-                    return result  # success stays False — no fake 'done'
+            # Zero-placebo guard (issue #36 Phase 3 / NO-MOCKS charter): never report
+            # success for a blank/empty/all-black render. ComfyUI can emit a black clip
+            # when a model/loader fails silently. No opt-out — we do not ship fake output.
+            blank_reason = _looks_like_blank_video(Path(primary))
+            if blank_reason:
+                result.error = (
+                    f"ComfyUI produced an invalid video: {blank_reason}. This usually "
+                    "means a model/loader failed silently — verify the model is fully "
+                    "installed."
+                )
+                logger.error(f"Zero-placebo guard rejected ComfyUI output: {blank_reason}")
+                return result  # success stays False — no fake 'done'
 
             result.video_path = str(Path(primary).relative_to(batch_dir))
             # frame_paths exposes the lossless PNG sequence when it was exported (for
