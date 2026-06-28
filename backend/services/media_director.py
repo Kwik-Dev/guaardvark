@@ -107,6 +107,27 @@ def _style_clause(style: Optional[str]) -> str:
     style = (style or "").strip()
     return f"\nGlobal visual style/aesthetic to honor: {style}." if style else ""
 
+
+def _verbatim_prompts_enabled() -> bool:
+    """True when the operator turned ON 'verbatim prompts' — send the user's EXACT words
+    to the image/video model and SKIP the director-LLM rewrite (no softening, no
+    enrichment). This is the 'no soft limits' switch (your machine, your rules).
+
+    OFF by default (keeps cinematic enrichment). Sources, in order:
+      * env VERBATIM_PROMPTS=1/true/yes/on — restart-proof, wins (good for a live demo), then
+      * the runtime SystemSetting 'verbatim_prompts' (toggle in Settings, no restart).
+    Any error → False (enrichment stays on)."""
+    import os
+    if os.environ.get("VERBATIM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    try:
+        from backend.models import SystemSetting, db
+        row = db.session.query(SystemSetting).filter_by(key="verbatim_prompts").first()
+        return bool(row and str(row.value).lower() == "true")
+    except Exception:
+        return False
+
+
 def enhance_prompts(
     prompts: List[str],
     *,
@@ -122,6 +143,9 @@ def enhance_prompts(
     """
     if not prompts:
         return []
+    if _verbatim_prompts_enabled():
+        log.info("media_director: verbatim prompts ON — sending user prompts to the model as-is (no director rewrite)")
+        return list(prompts)
     n = len(prompts)
     resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)
     style_c = _style_clause(style)
@@ -180,6 +204,9 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
     new subjects) — this MUST stay an edit directive: target + change + what-to-preserve."""
     instr = (instruction or "").strip()
     if not instr:
+        return instruction
+    if _verbatim_prompts_enabled():
+        log.info("media_director: verbatim prompts ON — using edit instruction as-is (no Kontext rewrite)")
         return instruction
     resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)
     try:

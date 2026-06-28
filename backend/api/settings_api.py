@@ -73,6 +73,39 @@ def set_web_access():
     return success_response({"allow_web_search": allow})
 
 
+@settings_bp.route("/verbatim_prompts", methods=["GET"])
+def get_verbatim_prompts():
+    """Whether image/video prompts go to the model verbatim (director-LLM rewrite OFF)."""
+    try:
+        row = db.session.get(SystemSetting, "verbatim_prompts")
+        enabled = bool(row and str(row.value).lower() == "true")
+    except Exception:
+        enabled = False
+    return success_response({"enabled": enabled})
+
+
+@settings_bp.route("/verbatim_prompts", methods=["POST"])
+def set_verbatim_prompts():
+    """Toggle 'verbatim prompts' — when ON, the user's EXACT words go straight to the
+    image/video model with no gemma enrichment/softening. Off by default. (env
+    VERBATIM_PROMPTS=1 force-enables regardless, for a guaranteed-on live demo.)"""
+    if not request.is_json:
+        return error_response("Request must be JSON")
+    enabled = bool(request.get_json().get("enabled"))
+    try:
+        row = db.session.get(SystemSetting, "verbatim_prompts")
+        if row:
+            row.value = "true" if enabled else "false"
+        else:
+            db.session.add(SystemSetting(key="verbatim_prompts", value="true" if enabled else "false"))
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Failed to update verbatim_prompts setting: {e}")
+        return error_response("Failed to update setting", status_code=500)
+    return success_response({"enabled": enabled})
+
+
 @settings_bp.route("/advanced_debug", methods=["GET"])
 def get_advanced_debug():
     enabled = False
