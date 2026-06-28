@@ -149,6 +149,7 @@ const SettingsPage = () => {
   const [advancedRag, setAdvancedRag] = useState(false);
   const [advancedDebug, setAdvancedDebug] = useState(getInitialAdvancedDebug);
   const [llmDebug, setLlmDebugState] = useState(getInitialLlmDebug);
+  const [verbatimPrompts, setVerbatimPromptsState] = useState(false);
   const [behaviorLearningEnabled, setBehaviorLearningEnabled] = useState(
     getInitialBehaviorLearning,
   );
@@ -929,6 +930,20 @@ const SettingsPage = () => {
   }, []);
 
   useEffect(() => {
+    const fetchVerbatim = async () => {
+      try {
+        const result = await apiService.getVerbatimPrompts();
+        if (result && typeof result.enabled === "boolean") {
+          setVerbatimPromptsState(result.enabled);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch verbatim prompts setting:", err);
+      }
+    };
+    fetchVerbatim();
+  }, []);
+
+  useEffect(() => {
     const fetchBehaviorLearning = async () => {
       try {
         const result = await apiService.getBehaviorLearning();
@@ -1482,6 +1497,21 @@ const SettingsPage = () => {
     debugLog("Advanced Debug toggled", { isEnabled });
     showMessage(
       `Advanced debugging ${isEnabled ? "enabled" : "disabled"}.`,
+      "info",
+    );
+  };
+  const handleVerbatimPromptsToggle = (event) => {
+    const isEnabled = deriveToggleValue(event, verbatimPrompts);
+    setVerbatimPromptsState(isEnabled);
+    apiService
+      .setVerbatimPrompts(isEnabled)
+      .catch((err) =>
+        console.warn("Failed to update verbatim prompts setting:", err),
+      );
+    showMessage(
+      isEnabled
+        ? "Verbatim prompts ON — your exact words go to the image/video model (no AI rewrite)."
+        : "Verbatim prompts OFF — prompts get AI enhancement again.",
       "info",
     );
   };
@@ -3221,6 +3251,11 @@ const SettingsPage = () => {
                   <Chip label="Behavior Learning" onClick={handleBehaviorLearningToggle} size="small" color={behaviorLearningEnabled ? "primary" : "default"} variant={behaviorLearningEnabled ? "filled" : "outlined"} />
                   <Chip label="Verbose Logging" onClick={handleAdvancedDebugToggle} size="small" color={advancedDebug ? "primary" : "default"} variant={advancedDebug ? "filled" : "outlined"} />
                   <Chip label="LLM Debug" onClick={handleLlmDebugToggle} size="small" color={llmDebug ? "success" : "default"} variant={llmDebug ? "filled" : "outlined"} />
+                </Box>
+              </SettingsRow>
+              <SettingsRow label="Generation" stacked>
+                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75 }}>
+                  <Chip label="Verbatim Prompts (no AI rewrite)" onClick={handleVerbatimPromptsToggle} size="small" color={verbatimPrompts ? "primary" : "default"} variant={verbatimPrompts ? "filled" : "outlined"} />
                 </Box>
               </SettingsRow>
               <Box sx={{ borderTop: 1, borderColor: "divider", mt: 2, pt: 2 }}>

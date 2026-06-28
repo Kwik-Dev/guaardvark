@@ -261,6 +261,36 @@ export const setAdvancedDebug = async (enabled) => {
   }
 };
 
+export const getVerbatimPrompts = async () => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/verbatim_prompts`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error(
+      "settingsService: Error getting verbatim prompts setting:",
+      err.message,
+    );
+    return { error: err.message };
+  }
+};
+
+export const setVerbatimPrompts = async (enabled) => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/verbatim_prompts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !!enabled }),
+    });
+    return await handleResponse(response);
+  } catch (err) {
+    console.error(
+      "settingsService: Error setting verbatim prompts:",
+      err.message,
+    );
+    return { error: err.message };
+  }
+};
+
 export const getBehaviorLearning = async () => {
   try {
     const response = await fetch(`${BASE_URL}/settings/behavior_learning`);
