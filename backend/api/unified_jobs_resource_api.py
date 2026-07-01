@@ -38,6 +38,7 @@ from backend.services.job_registry import (
     adapt_demo_step,
     adapt_unified_progress,
     adapt_video_gen,
+    adapt_music_video,
     get_job,
     parse_job_id,
 )
@@ -174,6 +175,23 @@ def _collect_unified_progress(*, since, limit) -> Iterable[Job]:
         count += 1
 
 
+def _collect_music_video(*, since, limit) -> Iterable[Job]:
+    """Active and recent music-video pipeline runs."""
+    try:
+        from backend.models import MusicVideo, db
+    except ImportError:
+        return
+    q = db.session.query(MusicVideo).order_by(MusicVideo.updated_at.desc())
+    if since and hasattr(MusicVideo, "updated_at"):
+        q = q.filter(MusicVideo.updated_at >= since)
+    count = 0
+    for row in q.limit(limit).all():
+        if count >= limit:
+            break
+        yield adapt_music_video(row)
+        count += 1
+
+
 def _collect_video_gen(*, since, limit) -> Iterable[Job]:
     """Batch video generation jobs from BatchVideoGenerator."""
     try:
@@ -211,6 +229,7 @@ _COLLECTORS = {
     JobKind.DEMO: _collect_demo_steps,
     JobKind.UNIFIED_PROGRESS: _collect_unified_progress,
     JobKind.VIDEO_GEN: _collect_video_gen,
+    JobKind.MUSIC_VIDEO: _collect_music_video,
 }
 
 

@@ -24,6 +24,8 @@ import {
   RocketLaunch as QuickRenderIcon,
 } from "@mui/icons-material";
 import PageLayout from "../components/layout/PageLayout";
+import GpuGateBanner from "../components/common/GpuGateBanner";
+import useJobsGate from "../hooks/useJobsGate";
 import ProjectBar from "../components/videoeditor/ProjectBar";
 import OpenProjectDialog from "../components/videoeditor/OpenProjectDialog";
 import MediaLibraryPanel from "../components/videoeditor/MediaLibraryPanel";
@@ -99,6 +101,7 @@ const _emptyTimeline = () => ({
 });
 
 const VideoEditorPage = () => {
+  const { gpuBlocked, blockReason } = useJobsGate();
   const { timeline, commitTimeline, handleUndo } = useTimelineHistory(_emptyTimeline());
   const videoElRef = useRef(null);
   const [mediaLibrary, setMediaLibrary] = useState([]);
@@ -784,6 +787,8 @@ const VideoEditorPage = () => {
               />
             </Box>
 
+            <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
+
             {/* Toolbar under the preview — Plan / Render / Open in Shotcut */}
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ pt: 1, mt: 1, borderTop: 1, borderColor: "divider" }}>
               <IconButton onClick={() => setPreviewPlaying(!previewPlaying)} size="small" className="non-draggable">
@@ -823,7 +828,7 @@ const VideoEditorPage = () => {
                     variant="contained"
                     startIcon={rendering ? <CircularProgress size={18} color="inherit" /> : <RenderIcon />}
                     onClick={handleRender}
-                    disabled={!planJob.result || rendering || quickRenderPending}
+                    disabled={!planJob.result || rendering || quickRenderPending || gpuBlocked}
                   >
                     {rendering ? "Rendering..." : "Render"}
                   </Button>
@@ -841,7 +846,7 @@ const VideoEditorPage = () => {
                         : <QuickRenderIcon />
                     }
                     onClick={handleQuickRender}
-                    disabled={!canPlan || rendering || quickRenderPending}
+                    disabled={!canPlan || rendering || quickRenderPending || gpuBlocked}
                   >
                     {quickRenderPending
                       ? (rendering ? "Rendering..." : `Planning... ${Math.round((planJob.progress || 0) * 100)}%`)

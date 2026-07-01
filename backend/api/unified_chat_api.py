@@ -358,3 +358,41 @@ def abort_chat(session_id):
     except Exception:
         pass
     return jsonify({"success": True, "message": f"Abort requested for {session_id}"})
+
+def resume_chat_background(session_id: str, state_id: int):
+    """Resume a suspended chat session in a background thread."""
+    from backend.socketio_instance import socketio
+    from flask import current_app
+    import threading
+    
+    app = current_app._get_current_object()
+    
+    def emit_fn(event, data_payload):
+        data_payload["session_id"] = session_id
+        if socketio.server is None:
+            return
+        socketio.emit(event, data_payload, room=session_id)
+        
+    def run_resume():
+        with app.app_context():
+            from backend.utils.llm_service import get_llm_for_startup
+            from backend.tools.tool_registry_init import initialize_all_tools
+            from backend.services.unified_chat_engine import UnifiedChatEngine
+            
+            llm = app.config.get("LLAMA_INDEX_LLM")
+            if not llm:
+                llm = get_llm_for_startup()
+            registry = initialize_all_tools()
+            engine = UnifiedChatEngine(registry, llm)
+            
+            # The message, options, etc are pulled from state, so we pass empty placeholders
+            engine.chat(
+                session_id=session_id,
+                message="",
+                options={},
+                emit_fn=emit_fn,
+                app=app,
+                resume_state_id=state_id
+            )
+            
+    socketio.start_background_task(run_resume)

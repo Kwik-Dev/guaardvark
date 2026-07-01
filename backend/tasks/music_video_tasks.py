@@ -88,9 +88,13 @@ def _settings(mv: MusicVideo) -> dict:
         # (the old promote target, and a frontend option) resolves to 0.9, which then
         # FRIES the SDXL LoRA on the rerouted SDXL branch → blurry/teal mush keyframes
         # (the Music-Video storyboards looking far worse than the Generate-Character
-        # tab, which already uses SDXL + 0.25). We override any value here, including an
-        # explicit flux-dev-lora, because none of them change that the bytes are SDXL.
-        s["keyframe_model"] = "sdxl"
+        # tab, which already uses SDXL + 0.25).
+        req_model = s.get("keyframe_model") or ""
+        if "flux" in req_model and "dev" in req_model:
+            # The user explicitly wants to use a FLUX-dev pipeline (e.g. for a custom Flux LoRA).
+            pass
+        else:
+            s["keyframe_model"] = "sdxl"
     else:
         s.setdefault("keyframe_model", "flux-schnell")
     # --- Playback / cost tuning (per-video; surfaced in the create form) -------
@@ -538,7 +542,7 @@ def run_clip_generator(mv_id: int):
         return
 
     if (mv.status or "").startswith("cancelled"):
-        logger.info(f"Music video {mv_id} is cancelled; stopping clip generation")
+        log.info(f"Music video {mv_id} is cancelled; stopping clip generation")
         return
 
     clips = list(mv.clips or [])
@@ -608,8 +612,23 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     from backend.services.gpu_resource_policy import gpu_session
     from backend.services.job_types import JobKind
 
+    from backend.utils.unified_progress_system import get_unified_progress, ProcessType
+
     s = _settings(mv)
     idx = clip["index"]
+    clip_count = max(1, len(mv.clips or []))
+    process_id = f"mv_{mv.id}_{idx}"
+    progress = get_unified_progress()
+    progress.create_process(
+        ProcessType.VIDEO_RENDER,
+        f"Music video «{mv.name}» clip {idx + 1}/{clip_count}",
+        process_id=process_id,
+        additional_data={
+            "music_video_id": mv.id,
+            "clip_index": idx,
+            "kind": "music_video_clip",
+        },
+    )
     # Per-cut Director prompt (set in run_analyzer); falls back to the global style for
     # rows seeded before the Director existed or when the Director was disabled.
     clip_prompt = clip.get("prompt") or mv.style_prompt
@@ -668,28 +687,79 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
     # _comfyui_free_vram() below stays explicit (the FLUX→i2v evict is mid-block).
     # vram_estimate_mb makes this keyframe+i2v render visible to the GPU orchestrator's
     # budget so it evicts competing in-process models instead of both fighting for 16GB.
-    with gpu_session(JobKind.VIDEO_RENDER, f"mv_{mv.id}_{idx}", evict_ollama=True,
-                     vram_estimate_mb=14000):
-        if not use_pregen_storyboard:
-            # Keyframe (storyboard still) generation.
-            # When use_lora_consistency is true (or loras are present), the SDXL+LoRA path
-            # in ComfyUIImageGenerator is required for identity. When false, we can in the
-            # future swap to FLUX or other high-aesthetic models for prettier keyframes
-            # before feeding to the chosen I2V (Wan2.2 I2V etc.).
-            # SDXL keyframe steps. Bumped 30→45 for crisper detail on the identity anchor
-            # (per Dean) — it's a single still, so the extra steps are cheap vs the i2v.
-            # Operator can override via settings.keyframe_steps.
-            kf_steps = s.get("keyframe_steps") or 45
-            # Thread the trained character/style LoRA(s) into the SDXL keyframe so
-            # identity actually shows up in the still that the i2v then animates
-            # (mirrors Film Crew's storyboard_artist). No-op unless LoRA
-            # consistency is on AND a LoRA reference is reachable from settings.
-            kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, clip_prompt)
-            # Per media/vram team audit (resumed): allow per-clip keyframe LoRA strength (default 0.25
-            # matches ComfyUIImageGenerator; higher can "fry" identity, lower is safer for
-            # consistency). Source from settings if operator tuned it for this MV.
-            # Preflight + clamp now wired in api paths + generator too (was the noted WIP).
-            kf_lora_strength = _keyframe_lora_strength(s)  # model-aware: 0.9 flux-dev / 0.25 sdxl
+    from backend.services.video_model_registry import vram_mb_for_model
+    mv_vram_mb = vram_mb_for_model(i2v_model, default=14000)
+    try:
+        with gpu_session(
+            JobKind.VIDEO_RENDER,
+            f"mv_{mv.id}_{idx}",
+            evict_ollama=True,
+            free_comfyui=True,
+            vram_estimate_mb=mv_vram_mb,
+            require_fit=True,
+            cross_process=True,
+            slot_id=f"video_render:mv_{mv.id}_{idx}",
+            lease_seconds=3600,
+        ):
+            if not use_pregen_storyboard:
+                progress.update_process(
+                    process_id, 5,
+                    f"Clip {idx + 1}/{clip_count}: generating keyframe still…",
+                )
+                kf_steps = s.get("keyframe_steps") or 45
+                kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, clip_prompt)
+                kf_lora_strength = _keyframe_lora_strength(s)
+                vg = get_video_generator()
+                if not getattr(vg, "service_available", True):
+                    try:
+                        vg.service_available = vg._check_comfyui_connection()
+                    except Exception:
+                        vg.service_available = False
+                if not getattr(vg, "service_available", True):
+                    raise RuntimeError(
+                        "ComfyUI unavailable for music-video keyframe/i2v (start it or free VRAM)."
+                    )
+                img = ComfyUIImageGenerator(
+                    lora_strength=kf_lora_strength,
+                    flux_unet=s.get("flux_unet"),
+                    flux_t5=s.get("flux_t5"),
+                    flux_clip=s.get("flux_clip"),
+                    flux_vae=s.get("flux_vae"),
+                ).generate_image(
+                    prompt=kf_prompt, loras=kf_loras, output_path=still_path,
+                    width=s["still_width"], height=s["still_height"], seed=1000 + idx,
+                    steps=kf_steps,
+                    model=s.get("keyframe_model"),
+                )
+                _comfyui_free_vram()
+            else:
+                _comfyui_free_vram()
+
+            progress.update_process(
+                process_id, 35,
+                f"Clip {idx + 1}/{clip_count}: animating (I2V)…",
+            )
+
+            req_kwargs = dict(
+                model=i2v_model,
+                prompt=clip_prompt,
+                duration_frames=frames,
+                fps=i2v_fps,
+                width=s["i2v_width"],
+                height=s["i2v_height"],
+                enhance_prompt=False,
+                output_dir=out_dir,
+                metadata={
+                    "image_path": img,
+                    "item_id": process_id,
+                    "music_video_id": mv.id,
+                    "clip_index": idx,
+                },
+                interpolation_multiplier=int(s["interpolation_multiplier"]),
+            )
+            if s.get("i2v_steps"):
+                req_kwargs["num_inference_steps"] = int(s["i2v_steps"])
+            req = VideoGenerationRequest(**req_kwargs)
             vg = get_video_generator()
             if not getattr(vg, "service_available", True):
                 try:
@@ -697,91 +767,54 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                 except Exception:
                     vg.service_available = False
             if not getattr(vg, "service_available", True):
-                raise RuntimeError("ComfyUI unavailable for music-video keyframe/i2v (start it or free VRAM).")
-            img = ComfyUIImageGenerator(
-                lora_strength=kf_lora_strength,
-                flux_unet=s.get("flux_unet"),
-                flux_t5=s.get("flux_t5"),
-                flux_clip=s.get("flux_clip"),
-                flux_vae=s.get("flux_vae"),
-            ).generate_image(
-                prompt=kf_prompt, loras=kf_loras, output_path=still_path,
-                width=s["still_width"], height=s["still_height"], seed=1000 + idx,
-                steps=kf_steps,
-                model=s.get("keyframe_model"),
-            )
-            # Evict FLUX before the animator loads — the i2v nodes don't ask ComfyUI to
-            # make room, so without this the animator OOMs on a FLUX-full card.
-            _comfyui_free_vram()
-        else:
-            # Using a user-curated storyboard from the review phase. Still ensure the
-            # card is clean before loading the i2v models (same free as the still path).
-            _comfyui_free_vram()
+                raise RuntimeError("ComfyUI unavailable for music-video i2v clip render.")
+            result = vg.generate_video(req)
+            if not result.success or not result.video_path:
+                err = result.error or "no video produced"
+                if any(kw in (err or "").lower() for kw in ("oom", "out of memory", "cuda")):
+                    raise RuntimeError(
+                        f"{i2v_model} i2v OOM ({err}). Reduce i2v_steps/resolution, ensure VRAM free "
+                        "(Comfy /free), or lower interpolation. See media team audit for preflight."
+                    )
+                raise RuntimeError(f"{i2v_model} i2v failed: {err}")
+            wan_abs = resolve_generated_video_path(result, out_dir)
+            if not wan_abs.exists():
+                raise RuntimeError(f"WAN output not found at resolved path: {wan_abs}")
 
-        req_kwargs = dict(
-            model=i2v_model,
-            prompt=clip_prompt,
-            duration_frames=frames,
-            fps=i2v_fps,
-            width=s["i2v_width"],                    # 16:9 — else WAN renders 512x512 square
-            height=s["i2v_height"],
-            enhance_prompt=False,
-            output_dir=out_dir,                      # known base → resolvable result
-            metadata={"image_path": img},
-            # RIFE interpolation — more source frames for smooth slow-mo at fill.
-            interpolation_multiplier=int(s["interpolation_multiplier"]),
-        )
-        # Only override denoising steps when the operator set them (else the
-        # request's own default stands — don't silently change current behavior).
-        if s.get("i2v_steps"):
-            req_kwargs["num_inference_steps"] = int(s["i2v_steps"])
-        req = VideoGenerationRequest(**req_kwargs)
-        vg = get_video_generator()
-        if not getattr(vg, "service_available", True):
-            try:
-                vg.service_available = vg._check_comfyui_connection()
-            except Exception:
-                vg.service_available = False
-        if not getattr(vg, "service_available", True):
-            raise RuntimeError("ComfyUI unavailable for music-video i2v clip render.")
-        result = vg.generate_video(req)
-        if not result.success or not result.video_path:
-            err = result.error or "no video produced"
-            if any(kw in (err or "").lower() for kw in ("oom", "out of memory", "cuda")):
-                raise RuntimeError(
-                    f"{i2v_model} i2v OOM ({err}). Reduce i2v_steps/resolution, ensure VRAM free "
-                    "(Comfy /free), or lower interpolation. See media team audit for preflight."
-                )
-            raise RuntimeError(f"{i2v_model} i2v failed: {err}")
-        wan_abs = resolve_generated_video_path(result, out_dir)
-        if not wan_abs.exists():
-            raise RuntimeError(f"WAN output not found at resolved path: {wan_abs}")
+        progress.update_process(process_id, 85, f"Clip {idx + 1}/{clip_count}: conforming duration…")
 
-    # Fill to the EXACT cut length (memory #721 sync fix) — CPU ffmpeg, no gate.
+        # Fill to the EXACT cut length (memory #721 sync fix) — CPU ffmpeg, no gate.
     # method=forward keeps motion forward (no moonwalk); max_stretch caps slowdown.
     # fill_target_s (the full slot) guarantees the written clip_*.mp4 duration matches
     # the source_out + timeline slot the assembler will declare for the .mlt.
-    fill_clip_to_duration(
-        str(wan_abs), fill_target_s, final_path,
-        fps=out_fps, width=s["width"], height=s["height"],
-        method=s["fill_method"], max_stretch=float(s["max_stretch"]),
-    )
+        fill_clip_to_duration(
+            str(wan_abs), fill_target_s, final_path,
+            fps=out_fps, width=s["width"], height=s["height"],
+            method=s["fill_method"], max_stretch=float(s["max_stretch"]),
+        )
 
-    # Persist cursor. DEEP copy then reassign: a shallow list copy shares the
-    # dict objects with the stored attribute, so mutating-then-reassigning leaves
-    # old == new and SQLAlchemy's JSON column flushes NOTHING (the cursor update
-    # would be silently lost — and the clip would regenerate forever). deepcopy
-    # makes the new value genuinely differ from the stored one.
-    import copy
-    clips = copy.deepcopy(mv.clips or [])
-    for c in clips:
-        if c["index"] == idx:
-            c["clip_path"] = final_path
-            c["status"] = "done"
-            break
-    mv.clips = clips
-    db.session.commit()
-    log.info("music_video %s clip %s done (%.2fs)", mv.id, idx, fill_target_s)
+        # Persist cursor. DEEP copy then reassign: a shallow list copy shares the
+        # dict objects with the stored attribute, so mutating-then-reassigning leaves
+        # old == new and SQLAlchemy's JSON column flushes NOTHING (the cursor update
+        # would be silently lost — and the clip would regenerate forever). deepcopy
+        # makes the new value genuinely differ from the stored one.
+        import copy
+        clips = copy.deepcopy(mv.clips or [])
+        for c in clips:
+            if c["index"] == idx:
+                c["clip_path"] = final_path
+                c["status"] = "done"
+                break
+        mv.clips = clips
+        db.session.commit()
+        progress.complete_process(process_id, f"Clip {idx + 1}/{clip_count} complete")
+        log.info("music_video %s clip %s done (%.2fs)", mv.id, idx, fill_target_s)
+    except Exception as e:
+        try:
+            progress.error_process(process_id, f"Clip {idx + 1} failed: {e}")
+        except Exception:
+            pass
+        raise
 
 
 # --- Stage: assembling -------------------------------------------------------
@@ -791,7 +824,7 @@ def run_assembler(mv_id: int):
     as the audio track; render the final mp4 via the MLT/melt plugin."""
     mv = db.session.get(MusicVideo, mv_id)
     if mv and (mv.status or "").startswith("cancelled"):
-        logger.info(f"Music video {mv_id} is cancelled; skipping assemble")
+        log.info(f"Music video {mv_id} is cancelled; skipping assemble")
         return
 
     with _mv_run(mv_id, expected_stage="assembling", next_agent=None) as mv:
@@ -874,6 +907,114 @@ def run_assembler(mv_id: int):
                  mv_id, result.get("rendered_mp4"), mv.output_document_id)
 
 
+# --- Storyboard generator (async, pre-approval review thumbnails) ------------
+
+def _set_storyboard_generating(mv_id: int, *, generating: bool, error: str | None = None) -> None:
+    mv = db.session.get(MusicVideo, mv_id)
+    if not mv:
+        return
+    s = dict(mv.settings_json or {})
+    s["storyboard_generating"] = generating
+    if error:
+        s["storyboard_error"] = error
+    elif not generating:
+        s.pop("storyboard_error", None)
+    mv.settings_json = s
+    db.session.commit()
+
+
+def run_storyboard_generator(mv_id: int, force: bool = False):
+    """Generate storyboard keyframes for all cuts (Celery worker entry point)."""
+    mv = db.session.get(MusicVideo, mv_id)
+    if not mv:
+        log.warning("run_storyboard_generator: mv %s not found", mv_id)
+        return
+    if mv.current_stage != "awaiting_approval":
+        _set_storyboard_generating(
+            mv_id, generating=False,
+            error=f"storyboard generation only from awaiting_approval, current={mv.current_stage}",
+        )
+        return
+
+    from backend.services.plugin_bridge import ensure_plugins_for_stage, prepare_plugins_for_route
+    from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+    from backend.services.comfyui_video_generator import get_video_generator
+    from backend.services.gpu_resource_policy import gpu_session, free_comfyui_vram
+    from backend.services.job_types import JobKind
+    from backend.services.job_operation_gate import GpuBusyError
+    import copy
+
+    ensure_plugins_for_stage("music-video", "storyboard")
+    try:
+        prepare_plugins_for_route("/music-video/storyboard")
+    except Exception:
+        log.warning("Failed to prepare plugins for music-video storyboard (non-fatal)", exc_info=True)
+
+    s = _settings(mv)
+    clips = copy.deepcopy(mv.clips or [])
+    out_dir = _clip_dir(mv_id)
+    kf_lora_strength = _keyframe_lora_strength(s)
+
+    try:
+        vg = get_video_generator()
+        if not getattr(vg, "service_available", True):
+            vg.service_available = getattr(vg, "_check_comfyui_connection", lambda: False)()
+    except Exception:
+        pass
+
+    error_msg = None
+    try:
+        with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboards_{mv_id}", evict_ollama=True,
+                         free_comfyui=True, vram_estimate_mb=10000, require_fit=True):
+            for c in clips:
+                has_existing = bool(c.get("storyboard_path") and os.path.exists(c.get("storyboard_path")))
+                if has_existing and not force:
+                    continue
+                prompt = c.get("prompt") or mv.style_prompt
+                idx = c["index"]
+                still_path = str(out_dir / f"storyboard_{idx}.png")
+                try:
+                    kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
+                    if kf_loras:
+                        ComfyUIImageGenerator()._preflight_loras(kf_loras)
+                    gen = ComfyUIImageGenerator(
+                        lora_strength=kf_lora_strength,
+                        flux_unet=s.get("flux_unet"),
+                        flux_t5=s.get("flux_t5"),
+                        flux_clip=s.get("flux_clip"),
+                        flux_vae=s.get("flux_vae"),
+                    )
+                    gen.generate_image(
+                        prompt=kf_prompt,
+                        loras=kf_loras,
+                        output_path=still_path,
+                        width=s.get("still_width", 1024),
+                        height=s.get("still_height", 576),
+                        seed=2000 + idx,
+                        steps=s.get("keyframe_steps") or 20,
+                        model=s.get("keyframe_model"),
+                    )
+                    c["storyboard_path"] = still_path
+                    c["storyboard_variation"] = None
+                except RuntimeError as e:
+                    log.error("run_storyboard_generator ComfyUI failure for mv %s cut %s: %s", mv_id, idx, e)
+                except Exception as e:
+                    log.warning("storyboard still failed for mv %s cut %s: %s", mv_id, idx, e)
+            free_comfyui_vram()
+    except GpuBusyError as e:
+        error_msg = f"GPU busy, cannot generate storyboards right now: {e}"
+    except Exception as e:
+        log.exception("run_storyboard_generator failed for mv %s", mv_id)
+        error_msg = str(e)
+    else:
+        mv = db.session.get(MusicVideo, mv_id)
+        if mv:
+            mv.clips = clips
+            db.session.commit()
+
+    _set_storyboard_generating(mv_id, generating=False, error=error_msg)
+
+
 # --- Celery factory ----------------------------------------------------------
 
 def create_music_video_tasks(celery_app: Celery):
@@ -892,8 +1033,14 @@ def create_music_video_tasks(celery_app: Celery):
         with current_app.app_context():
             run_assembler(mv_id)
 
+    @celery_app.task(name="music_video.run_storyboard_generator")
+    def run_storyboard_generator_task(mv_id: int, force: bool = False):
+        with current_app.app_context():
+            run_storyboard_generator(mv_id, force=force)
+
     return {
         "run_analyzer": run_analyzer_task,
         "run_clip_generator": run_clip_generator_task,
         "run_assembler": run_assembler_task,
+        "run_storyboard_generator": run_storyboard_generator_task,
     }

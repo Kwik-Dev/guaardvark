@@ -85,6 +85,7 @@ def _serialize(s: Subject) -> dict:
         "last_trained_image_paths": getattr(s, 'last_trained_image_paths', None) or [],
         "last_trained_at": getattr(s, 'last_trained_at', None).isoformat() if getattr(s, 'last_trained_at', None) else None,
         "bible": getattr(s, 'bible', None),
+        "training_settings_json": getattr(s, "training_settings_json", None) or {},
     }
 
 
@@ -159,6 +160,9 @@ def update_subject(subject_id):
         s.voice_id = (body["voice_id"] or "").strip() or None
     if "trigger_word" in body:
         s.trigger_word = (body["trigger_word"] or "").strip() or None
+    if "training_settings" in body:
+        from backend.services.lora_training_settings import normalize_training_settings
+        s.training_settings_json = normalize_training_settings(body["training_settings"])
     db.session.commit()
     return jsonify(_serialize(s))
 
@@ -497,38 +501,35 @@ def dispatch_train(subject_id: int):
     if s.training_status == "training":
         return jsonify({"error": "already_training", "subject_id": subject_id}), 409
 
-    from backend.celery_app import celery
-    from backend.utils.unified_progress_system import get_unified_progress, ProcessType
+    body = request.get_json(silent=True) or {}
+    if body.get("training_settings"):
+        from backend.services.lora_training_settings import normalize_training_settings
+        s.training_settings_json = normalize_training_settings(body["training_settings"])
 
-    progress = get_unified_progress()
-    job_id = progress.create_process(
-        ProcessType.TRAINING,  # or IMAGE_GENERATION for consistency with other GPU work; TRAINING fits LoRA intent
-        f"LoRA training for cast subject {subject_id} ({s.name})",
-        additional_data={"subject_id": subject_id, "operation": "train_lora", "kind": "cast_training"},
-    )
-
-    # Store linkage on the subject *before* the status commit so the worker
-    # and delete path have a reliable way to find the job. Commit status+job_id
-    # first (per the idempotency requirement for the lora task).
-    s.current_training_job_id = job_id
     s.training_status = "training"
     s.training_error = None  # clear any prior failure reason before the new run
     db.session.commit()
 
-    try:
-        task = celery.send_task("lora_trainer.train_lora", args=[subject_id, job_id])
-    except Exception:
-        # Roll the status back so the subject isn't stranded as 'training'
-        # forever when the broker is unreachable. Also clean the process.
-        try:
-            progress.error_process(job_id, "Dispatch failed")
-        except Exception:
-            pass
-        s.training_status = "untrained"
-        s.current_training_job_id = None
-        db.session.commit()
-        raise
-    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id}), 202
+    from backend.services.lora_train_dispatch import dispatch_lora_train
+
+    result = dispatch_lora_train(subject_id)
+    return jsonify({**result, "subject_id": subject_id}), 202
+
+
+@bp.post("/subjects/<int:subject_id>/train/cancel")
+def cancel_train(subject_id: int):
+    """Cancel an in-flight LoRA training run for this cast subject."""
+    from backend.services.lora_train_dispatch import cancel_lora_train
+
+    result = cancel_lora_train(subject_id)
+    if not result.get("cancelled"):
+        reason = result.get("reason", "unknown")
+        if reason == "not_found":
+            return jsonify(result), 404
+        if reason == "not_training":
+            return jsonify(result), 409
+        return jsonify(result), 400
+    return jsonify(result), 200
 
 
 @bp.delete("/subjects/<int:subject_id>/samples/<int:sample_id>")

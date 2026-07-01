@@ -74,6 +74,8 @@ class JobOperationGate:
         self._in_progress: dict[JobKind, set[str]] = {k: set() for k in JobKind}
         # GPU exclusivity holder — at most one kind+id at a time
         self._gpu_holder: Optional[tuple[JobKind, str, float]] = None  # (kind, id, claimed_at)
+        # Thread that claimed the GPU slot — if it dies without releasing, reap on next claim.
+        self._holder_thread: Optional[threading.Thread] = None
         # Last-released-at timestamp for cooldown reasoning
         self._gpu_last_released: float = 0.0
 
@@ -92,6 +94,24 @@ class JobOperationGate:
         with self._lock:
             self._in_progress[kind].discard(str(native_id))
 
+    def _reap_dead_holder_locked(self) -> None:
+        """Release the GPU slot if the claiming thread exited without cleanup."""
+        if self._gpu_holder is None:
+            return
+        ht = self._holder_thread
+        if ht is not None and ht.is_alive():
+            return
+        hk, hid, _ = self._gpu_holder
+        logger.warning(
+            "Reaping stale GPU slot held by dead thread: %s:%s",
+            hk.value,
+            hid,
+        )
+        self._gpu_holder = None
+        self._holder_thread = None
+        self._in_progress[hk].discard(hid)
+        self._gpu_last_released = time.monotonic()
+
     def try_claim_gpu_exclusive(
         self, kind: JobKind, native_id: str
     ) -> tuple[bool, str]:
@@ -108,6 +128,7 @@ class JobOperationGate:
 
         with self._lock:
             now = time.monotonic()
+            self._reap_dead_holder_locked()
 
             # Already held? Either by us (idempotent) or by someone else.
             if self._gpu_holder is not None:
@@ -127,6 +148,7 @@ class JobOperationGate:
 
             # OK, take the slot.
             self._gpu_holder = (kind, str(native_id), time.time())
+            self._holder_thread = threading.current_thread()
             self._in_progress[kind].add(str(native_id))
             return True, "GPU claimed exclusively"
 
@@ -143,6 +165,7 @@ class JobOperationGate:
                 self._in_progress[kind].discard(str(native_id))
                 return
             self._gpu_holder = None
+            self._holder_thread = None
             self._gpu_last_released = time.monotonic()
             self._in_progress[kind].discard(str(native_id))
 

@@ -79,9 +79,24 @@ export const cancelMusicVideo = async (id) => {
   return response.data;
 };
 
-export const generateMusicVideoStoryboards = async (id) => {
-  const response = await axios.post(`${API_BASE}/music-video/${id}/generate-storyboards`);
+export const generateMusicVideoStoryboards = async (id, data = {}) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/generate-storyboards`, data);
   return response.data;
+};
+
+/** Poll until async storyboard generation finishes (202 + Celery dispatch). */
+export const pollMusicVideoStoryboards = async (id, { intervalMs = 5000, maxAttempts = 360 } = {}) => {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    const mv = await getMusicVideo(id);
+    if (!mv.storyboard_generating) {
+      if (mv.storyboard_error) {
+        throw new Error(mv.storyboard_error);
+      }
+      return mv;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error("Storyboard generation timed out");
 };
 
 export const regenMusicVideoStoryboard = async (id, index, data = {}) => {

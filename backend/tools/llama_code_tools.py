@@ -13,6 +13,7 @@ These tools enable an LLM agent to:
 Milestone Goal: Enable LLM to remove "Snibbly Nips" button from SettingsPage.jsx
 """
 
+import hashlib
 import os
 import logging
 import subprocess
@@ -76,8 +77,21 @@ Lines: {line_count} | Characters: {char_count}
         char_count = len(content)
         display_path = file_data.get("relative_path") or filepath
 
+        # Compute for drift guard support in subsequent edit_code calls
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        try:
+            mtime = file_data.get("on_disk_path") or filepath
+            # resolve the actual path used
+            from backend.services.guarded_code_service import resolve_repo_path
+            actual_path, _ = resolve_repo_path(filepath, PROJECT_ROOT, allow_external=True)
+            file_mtime = actual_path.stat().st_mtime if actual_path.exists() else None
+        except Exception:
+            file_mtime = None
+
         result = f"""✓ Successfully read: {display_path}
 Lines: {line_count} | Characters: {char_count}
+Hash (for edit_code drift guard): {content_hash}
+Mtime (for edit_code drift guard): {file_mtime}
 
 ========== FILE CONTENT START ==========
 {content}
@@ -165,7 +179,7 @@ def search_code(pattern: str, file_glob: str = "**/*.{py,jsx,js,tsx,ts}") -> str
         return error_msg
 
 
-def edit_code(filepath: str, old_text: str, new_text: str) -> str:
+def edit_code(filepath: str, old_text: str, new_text: str, expected_hash: str = None, expected_mtime: float = None) -> str:
     """
     Edit a source code file by replacing exact text. CRITICAL: Creates automatic backup.
 
@@ -173,6 +187,8 @@ def edit_code(filepath: str, old_text: str, new_text: str) -> str:
         filepath: Relative path from project root
         old_text: The EXACT text to replace (must be unique in file)
         new_text: The new text to insert (can be empty string for deletion)
+        expected_hash: Optional sha256 of content at read time (enables drift guard)
+        expected_mtime: Optional mtime at read time (helps drift guard)
 
     Returns:
         Success message with backup info, or error message
@@ -182,6 +198,7 @@ def edit_code(filepath: str, old_text: str, new_text: str) -> str:
         - Creates .backup file before any changes
         - Verifies exact match before editing
         - Rolls back on verification failure
+        - Drift guard prevents editing stale reads (important for agents/swarm)
 
     Example:
         # To remove the Snibbly Nips button:
@@ -198,6 +215,8 @@ def edit_code(filepath: str, old_text: str, new_text: str) -> str:
             new_text,
             repo_root=PROJECT_ROOT,
             allow_external=True,
+            expected_hash=expected_hash,
+            expected_mtime=expected_mtime,
         )
         old_lines = len(old_text.split('\n'))
         new_lines = len(new_text.split('\n'))

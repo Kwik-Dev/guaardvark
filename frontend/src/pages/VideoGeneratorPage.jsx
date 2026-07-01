@@ -34,7 +34,29 @@ import {
   Collapse,
 } from "@mui/material";
 import PageLayout from "../components/layout/PageLayout";
+import GpuGateBanner from "../components/common/GpuGateBanner";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
+import useJobsGate from "../hooks/useJobsGate";
+import useBatchVideo from "../hooks/useBatchVideo";
+import {
+  QUALITY_PRESETS,
+  COGVIDEOX_DURATION_PRESETS,
+  WAN_DURATION_PRESETS,
+  MOTION_PRESETS,
+  OUTPUT_QUALITY_TIERS,
+  KEYFRAME_MODEL_OPTIONS,
+  DEFAULT_KEYFRAME_MODEL,
+  MODEL_DEFAULT_GUIDANCE,
+  ASPECT_RATIO_PRESETS,
+  PROMPT_STYLES,
+  VIDEO_SIZE_PRESETS,
+  MODEL_OPTIONS,
+  DEFAULT_T2V_MODEL,
+  DEFAULT_I2V_MODEL,
+  isCogVideoXModel,
+  isWanModel,
+  snapDimensions,
+} from "../constants/videoGeneratorPresets";
 import {
   PlayArrow as PlayIcon,
   Refresh as RefreshIcon,
@@ -58,8 +80,7 @@ import {
   NavigateBefore as PrevIcon,
   NavigateNext as NextIcon,
 } from "@mui/icons-material";
-import { io } from "socket.io-client";
-import { SOCKET_URL } from "../api/apiClient";
+
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -80,306 +101,6 @@ const formatVideoDate = (isoStr) => {
   } catch { return null; }
 };
 
-// Preset configurations for easy selection
-const QUALITY_PRESETS = {
-  fast: {
-    label: "⚡ Fast",
-    description: "Quick preview (10 steps)",
-    num_inference_steps: 10,
-    width: 720,
-    height: 480,
-  },
-  standard: {
-    label: "✨ Standard",
-    description: "Good quality (30 steps)",
-    num_inference_steps: 30,
-    width: 720,
-    height: 480,
-  },
-  high: {
-    label: "🎬 High Quality",
-    description: "Best details (40 steps)",
-    num_inference_steps: 40,
-    width: 720,
-    height: 480,
-  },
-  maximum: {
-    label: "🏆 Maximum",
-    description: "Maximum quality (50 steps)",
-    num_inference_steps: 50,
-    width: 720,
-    height: 480,
-  },
-};
-
-// Duration presets for CogVideoX models (49 frames max @ 8fps = 6 seconds)
-const COGVIDEOX_DURATION_PRESETS = {
-  short: {
-    label: "Short",
-    description: "~3 seconds",
-    duration_frames: 24,
-    fps: 8,
-  },
-  medium: {
-    label: "Medium",
-    description: "~4 seconds",
-    duration_frames: 33,
-    fps: 8,
-  },
-  long: {
-    label: "Long",
-    description: "~6 seconds",
-    duration_frames: 49,
-    fps: 8,
-  },
-};
-
-// Duration presets for Wan 2.2 models (81 frames max @ 16fps = ~5 seconds)
-const WAN_DURATION_PRESETS = {
-  short: {
-    label: "Short",
-    description: "~2 seconds",
-    duration_frames: 33,
-    fps: 16,
-  },
-  medium: {
-    label: "Medium",
-    description: "~3 seconds",
-    duration_frames: 49,
-    fps: 16,
-  },
-  long: {
-    label: "Long",
-    description: "~5 seconds",
-    duration_frames: 81,
-    fps: 16,
-  },
-};
-
-const MOTION_PRESETS = {
-  subtle: {
-    label: "🌊 Subtle",
-    description: "Gentle movement",
-    motion_strength: 0.5,
-  },
-  normal: {
-    label: "🎯 Normal",
-    description: "Balanced motion",
-    motion_strength: 1.0,
-  },
-  dynamic: {
-    label: "💨 Dynamic",
-    description: "More movement",
-    motion_strength: 1.5,
-  },
-  intense: {
-    label: "🔥 Intense",
-    description: "Maximum motion",
-    motion_strength: 2.0,
-  },
-};
-
-// Post-processing quality tiers (interpolation + upscaling)
-const OUTPUT_QUALITY_TIERS = {
-  draft: {
-    label: "Draft",
-    description: "Raw model output — fastest, lowest polish",
-    interpolation: 1,
-    upscale: false,
-  },
-  standard: {
-    label: "Standard",
-    description: "2x FPS interpolation for smoother motion",
-    interpolation: 2,
-    upscale: false,
-  },
-  cinema: {
-    label: "Cinema",
-    description: "2x FPS + 2x upscale — recommended for final output",
-    interpolation: 2,
-    upscale: true,
-  },
-};
-
-// Keyframe still models for the cinematic keyframe → I2V quality path
-const KEYFRAME_MODEL_OPTIONS = {
-  "flux-schnell": {
-    label: "FLUX.1-schnell",
-    description: "Fast, beautiful stills (default)",
-  },
-  "flux-dev-lora": {
-    label: "FLUX-dev + LoRA",
-    description: "Best identity lock for trained characters",
-  },
-  sdxl: {
-    label: "SDXL",
-    description: "High-fidelity stills without LoRA",
-  },
-  "sdxl-lora": {
-    label: "SDXL + LoRA",
-    description: "Legacy identity lock via character LoRAs",
-  },
-};
-const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
-
-const MODEL_DEFAULT_GUIDANCE = {
-  wan: 3.5,
-  cogvideox: 6.0,
-};
-
-// Aspect ratio presets
-const ASPECT_RATIO_PRESETS = {
-  "16:9": {
-    label: "16:9",
-    description: "Widescreen",
-    ratio: 16 / 9,
-  },
-  "9:16": {
-    label: "9:16",
-    description: "Portrait/Vertical",
-    ratio: 9 / 16,
-  },
-  "1:1": {
-    label: "1:1",
-    description: "Square",
-    ratio: 1,
-  },
-  "4:3": {
-    label: "4:3",
-    description: "Standard",
-    ratio: 4 / 3,
-  },
-  "3:2": {
-    label: "3:2",
-    description: "Classic",
-    ratio: 3 / 2,
-  },
-};
-
-// Prompt enhancement style presets
-const PROMPT_STYLES = {
-  cinematic: { label: "Cinematic", description: "Film-quality lighting and motion" },
-  realistic: { label: "Realistic", description: "Photorealistic detail" },
-  artistic: { label: "Artistic", description: "Stylized and expressive" },
-  anime: { label: "Anime (Japanese)", description: "Japanese cel-shaded animation" },
-  "3d_animation": { label: "3D Animation (Pixar-style)", description: "Polished CGI, expressive characters" },
-  stop_motion: { label: "Stop-motion / Claymation", description: "Tactile clay, handcrafted feel" },
-  hand_drawn: { label: "Hand-drawn 2D (Ghibli-style)", description: "Painterly watercolor backgrounds" },
-  western_cartoon: { label: "Western Cartoon", description: "Bold outlines, flat shading, snappy motion" },
-  none: { label: "None", description: "No enhancement" },
-};
-
-// Video size presets (base width, height calculated from aspect ratio)
-const VIDEO_SIZE_PRESETS = {
-  small: {
-    label: "Small",
-    description: "512px (faster)",
-    baseSize: 512,
-  },
-  medium: {
-    label: "Medium",
-    description: "576px",
-    baseSize: 576,
-  },
-  large: {
-    label: "Large",
-    description: "720px (CogVideoX native)",
-    baseSize: 720,
-  },
-  hd: {
-    label: "HD",
-    description: "1280px (CPU offload, slower)",
-    baseSize: 1280,
-  },
-  fullhd: {
-    label: "Full HD",
-    description: "1920px (CPU offload, much slower)",
-    baseSize: 1920,
-  },
-};
-
-const MODEL_OPTIONS = {
-  // Wan 2.2 TI2V-5B — single model, fits 16GB natively (no CPU offload). Does BOTH
-  // text- and image-to-video; ~200x faster per step than the A14B MoE on 16GB cards.
-  "wan22-5b": {
-    label: "Wan 2.2 5B TI2V (Recommended)",
-    description: "Fast 5s clips, fits 16GB — no offload. Text + image to video.",
-    type: "wan",
-    maxFrames: 121,
-    resolution: [1280, 704],
-    defaultSteps: 20,
-    supportsT2V: true,
-    supportsI2V: true,
-    dimensionAlignment: 16,
-  },
-  // Wan 2.2 14B MoE (top quality, but ~22GB → CPU-offloads on 16GB; slow per step)
-  "wan22-14b": {
-    label: "Wan 2.2 14B (GGUF Q5)",
-    description: "Best quality, 5s videos (~11GB VRAM)",
-    type: "wan",
-    maxFrames: 81,
-    resolution: [832, 480],
-    defaultSteps: 25,
-    supportsT2V: true,
-    supportsI2V: false,
-    dimensionAlignment: 16,
-  },
-  "wan22-14b-i2v": {
-    label: "Wan 2.2 14B I2V (GGUF Q5)",
-    description: "Top-tier image-to-video, 5s clips (~11GB VRAM)",
-    type: "wan",
-    maxFrames: 81,
-    resolution: [832, 480],
-    defaultSteps: 25,
-    supportsT2V: false,
-    supportsI2V: true,
-    dimensionAlignment: 16,
-  },
-  // CogVideoX 5b — the in-process diffusers option (no ComfyUI needed).
-  "cogvideox-5b": {
-    label: "CogVideoX 5B",
-    description: "6s videos, in-process diffusers — no ComfyUI needed (~16GB VRAM)",
-    type: "cogvideox",
-    maxFrames: 49,
-    resolution: [720, 480],
-    defaultSteps: 50,
-    supportsT2V: true,
-    supportsI2V: false,
-    dimensionAlignment: 16,
-  },
-  "cogvideox-5b-i2v": {
-    label: "CogVideoX 5B I2V",
-    description: "Image-to-video, 6s (~16GB VRAM)",
-    type: "cogvideox",
-    maxFrames: 49,
-    resolution: [720, 480],
-    defaultSteps: 50,
-    supportsT2V: false,
-    supportsI2V: true,
-    dimensionAlignment: 16,
-  },
-};
-
-// Default model per input mode — Wan 2.2 5B TI2V for both: it's the only Wan model
-// that actually FITS 16GB (the A14B offloads to CPU → ~38 min/clip). One model does
-// text- and image-to-video. A14B stays in the dropdown for >16GB cards.
-const DEFAULT_T2V_MODEL = "wan22-5b";
-const DEFAULT_I2V_MODEL = "wan22-5b";
-
-// Helper to check model type
-const isCogVideoXModel = (model) => MODEL_OPTIONS[model]?.type === "cogvideox";
-const isWanModel = (model) => MODEL_OPTIONS[model]?.type === "wan";
-
-// CogVideoX/Wan use 2x2 patch embedding on top of an 8x VAE → dims must be /16.
-// SVD is a U-Net with no patches → /8 is enough. Off-by-one here turns into
-// "tensor a (51) must match tensor b (50)" at scheduler.step. Don't ship without it.
-const snapDimensions = (width, height, model) => {
-  const align = MODEL_OPTIONS[model]?.dimensionAlignment ?? 16;
-  return {
-    width: Math.round(width / align) * align,
-    height: Math.round(height / align) * align,
-  };
-};
 // Lazy import for VideoModelsModal
 const VideoModelsModal = React.lazy(() => import("../components/modals/VideoModelsModal"));
 
@@ -486,14 +207,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [fetaWeight, setFetaWeight] = useState(1.0);
 
   // Cast selection implies cinematic keyframe on the backend — mirror that in the UI.
+  // Character LoRAs are SDXL-trained; backend forces the SDXL keyframe branch.
   useEffect(() => {
     if (selectedSubjectIds.length > 0) {
       setCinematicKeyframe(true);
-      if (keyframeModel === "flux-schnell") {
-        setKeyframeModel("flux-dev-lora");
+      if (keyframeModel === "flux-schnell" || keyframeModel === "flux-dev-lora") {
+        setKeyframeModel("sdxl-lora");
       }
     }
-  }, [selectedSubjectIds.length]);
+  }, [selectedSubjectIds.length, keyframeModel]);
 
   // Q1: when exactly one trained character is selected, load its APPROVED reference
   // stills so the user can pick one as the I2V start frame. More than one subject (or
@@ -582,13 +304,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [activeBatchId, setActiveBatchId] = useState(null);
-  const [batchStatus, setBatchStatus] = useState(null);
-  const [batches, setBatches] = useState([]);
-  const [queue, setQueue] = useState([]);
   const [videoPlayer, setVideoPlayer] = useState(null); // { url, title, batchId, results, currentIndex }
-  const pollingRef = useRef(null);
-  const queuePollingRef = useRef(null);
 
   // Authoritative set of selectable model ids from the backend registry. Null
   // until loaded (then we don't filter). Keeps the dropdown from ever drifting
@@ -880,6 +596,23 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     };
   }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, selectedKeyframeSampleId]);
 
+  const {
+    activeBatchId,
+    setActiveBatchId,
+    batchStatus,
+    setBatchStatus,
+    batches,
+    queue,
+    fetchBatches,
+    startPollingStatus,
+    stopPolling,
+    handleDownloadBatch,
+    handleCombineFrames,
+    handleDeleteBatch,
+    handleCancelBatch,
+    handleRetryBatch,
+  } = useBatchVideo({ setError, setSuccess, computedParams });
+
   // Fetch enhanced prompt preview from backend (re-uses the same enhance_video_prompt logic + fidelity_mode)
   const fetchPromptPreview = async () => {
     // Compute first prompt locally to avoid forward-reference issues with parsedPrompts const
@@ -925,105 +658,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       .map((p) => p.trim())
       .filter(Boolean);
   }, [promptsText]);
-
-  // WebSocket setup for real-time progress
-  const socketRef = useRef(null);
-
-  useEffect(() => {
-    socketRef.current = io(SOCKET_URL);
-
-    socketRef.current.on("video_batch:update", (data) => {
-      setBatchStatus(data);
-      if (
-        data.status === "completed" ||
-        data.status === "error" ||
-        data.status === "cancelled"
-      ) {
-        fetchBatches();
-      }
-    });
-
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
-    };
-  }, []);
-
-  const stopPolling = () => {
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
-  };
-
-  const startPollingStatus = (batchId) => {
-    stopPolling(); // fallback clear
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit("subscribe", { job_id: batchId });
-    }
-    // Initial fetch to get state while socket connects
-    fetch(`${API_BASE}/batch-video/status/${batchId}`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.success) {
-          setBatchStatus(data.data);
-          if (
-            data.data.status === "completed" ||
-            data.data.status === "error" ||
-            data.data.status === "cancelled"
-          ) {
-            fetchBatches();
-          }
-        }
-      })
-      .catch(e => console.error(e));
-  };
-
-  useEffect(() => {
-    fetchBatches();
-    fetchQueue();
-    // Continuous queue polling — cheap, gives the user live feedback as
-    // batches drain and as they stack up new ones.
-    queuePollingRef.current = setInterval(fetchQueue, 2000);
-    return () => {
-      stopPolling();
-      if (queuePollingRef.current) clearInterval(queuePollingRef.current);
-    };
-  }, []);
-
-  const fetchBatches = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/batch-video/list`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          const sorted = (data.data.batches || []).sort((a, b) => {
-            const ta = a.start_time || a.end_time || "";
-            const tb = b.start_time || b.end_time || "";
-            return tb.localeCompare(ta); // newest first
-          });
-          setBatches(sorted);
-        }
-      }
-    } catch (e) {
-      // ignore
-    }
-  };
-
-  const fetchQueue = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/batch-video/queue`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setQueue(data.data.queue || []);
-        }
-      }
-    } catch (e) {
-      // ignore polling errors
-    }
-  };
 
   // File upload handling
   const handleFileUpload = useCallback(async (files) => {
@@ -1317,97 +951,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     }
   };
 
-  const handleDownloadBatch = async (batchId) => {
-    window.open(`${API_BASE}/batch-video/download/${batchId}`, "_blank");
-  };
-
-  const handleCombineFrames = async (batchId, itemId) => {
-    try {
-      const res = await fetch(`${API_BASE}/batch-video/combine-frames/${batchId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fps: computedParams.fps || 7, item_id: itemId }),
-      });
-      if (res.ok) {
-        await fetchBatches();
-        if (activeBatchId === batchId) {
-          startPollingStatus(batchId);
-        }
-      }
-    } catch (e) {
-      // ignore
-    }
-  };
-
-  const handleDeleteBatch = async (batchId, displayName) => {
-    if (!window.confirm(
-      `Delete "${displayName || batchId.slice(0, 8)}" and all of its videos? This can't be undone.`
-    )) {
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE}/batch-video/delete/${batchId}`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        await fetchBatches();
-        if (activeBatchId === batchId) {
-          setActiveBatchId(null);
-          setBatchStatus(null);
-          stopPolling();
-        }
-        setSuccess("Batch deleted.");
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || `Delete failed: HTTP ${res.status}`);
-      }
-    } catch (e) {
-      setError(`Delete failed: ${e.message}`);
-    }
-  };
-
-  const handleCancelBatch = async (batchId) => {
-    try {
-      const res = await fetch(`${API_BASE}/batch-video/batch/${batchId}/cancel`, {
-        method: "POST",
-      });
-      if (res.ok) {
-        await fetchBatches();
-        if (activeBatchId === batchId) {
-          startPollingStatus(batchId);
-        }
-      }
-    } catch (e) {
-      // ignore
-    }
-  };
-
-  const handleRetryBatch = async (batchId) => {
-    try {
-      setError("");
-      const res = await fetch(`${API_BASE}/batch-video/retry/${batchId}`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        setError(errData.error || `Retry failed: HTTP ${res.status}`);
-        return;
-      }
-      const data = await res.json();
-      if (data.success && data.data?.batch_id) {
-        const newBatchId = data.data.batch_id;
-        setActiveBatchId(newBatchId);
-        setBatchStatus(null);
-        startPollingStatus(newBatchId);
-        await fetchBatches();
-        await fetchQueue();
-        setSuccess(`Retried as new batch ${newBatchId}. Original failed batch is preserved in history.`);
-      }
-    } catch (e) {
-      setError(`Retry failed: ${e.message}`);
-    }
-  };
-
   // Adjust & Retry: load a batch's saved control-panel config back into the form so
   // the user can tweak one thing and re-generate (instead of remembering all the
   // settings). New batches store an exact `ui_config` snapshot → restored verbatim;
@@ -1530,6 +1073,16 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   }, [batchStatus, getProcessesByType, activeProcesses]);
 
   const controlsDisabled = isGenerating;
+  const { gpuBlocked, blockReason } = useJobsGate();
+  const castIdentityLocked = selectedSubjectIds.length > 0;
+  const keyframeModelOptions = useMemo(() => {
+    if (!castIdentityLocked) {
+      return Object.entries(KEYFRAME_MODEL_OPTIONS);
+    }
+    return Object.entries(KEYFRAME_MODEL_OPTIONS).filter(
+      ([key]) => key === "sdxl" || key === "sdxl-lora"
+    );
+  }, [castIdentityLocked]);
 
   return (
     <PageLayout title={embedded ? undefined : "Video Generation"} variant={embedded ? "fullscreen" : "standard"} noPadding={embedded}>
@@ -2029,10 +1582,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   label="Keyframe image model"
                   value={keyframeModel}
                   onChange={(e) => setKeyframeModel(e.target.value)}
-                  helperText="The still that gets animated — identity and detail quality depend on this choice."
+                  helperText={
+                    castIdentityLocked
+                      ? "Character LoRAs train on SDXL — keyframe model is locked to SDXL for identity."
+                      : "The still that gets animated — identity and detail quality depend on this choice."
+                  }
                   sx={{ mt: 1.5 }}
                 >
-                  {Object.entries(KEYFRAME_MODEL_OPTIONS).map(([key, cfg]) => (
+                  {keyframeModelOptions.map(([key, cfg]) => (
                     <MenuItem key={key} value={key}>
                       {cfg.label} — {cfg.description}
                     </MenuItem>
@@ -2700,13 +2257,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
           <Divider />
 
+          <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
+
           {/* Generate Button */}
           <Button
             variant="contained"
             size="large"
             startIcon={isGenerating ? null : <PlayIcon />}
             onClick={handleGenerate}
-            disabled={controlsDisabled || isGenerating || (inputMode === "text" ? parsedPrompts.length === 0 : selectedImages.length === 0)}
+            disabled={controlsDisabled || isGenerating || gpuBlocked || (inputMode === "text" ? parsedPrompts.length === 0 : selectedImages.length === 0)}
             sx={{ py: 1.5 }}
             fullWidth
           >

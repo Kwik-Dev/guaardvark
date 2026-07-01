@@ -17,9 +17,11 @@ import {
   TextField,
   Button,
   Chip,
-  Alert
+  Alert,
+  LinearProgress,
 } from '@mui/material';
 import { listCastLibrary, listProductionSubjects, castSubject, confirmCasting } from '../../api/productionService';
+import { useUnifiedProgress } from '../../contexts/UnifiedProgressContext';
 import DragDropImageUpload from './DragDropImageUpload';
 
 const CastingPanel = ({ productionId, onCastingConfirmed }) => {
@@ -29,6 +31,8 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
   const [loading, setLoading] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState(null);
+  const [trainingJobs, setTrainingJobs] = useState({});
+  const { activeProcesses } = useUnifiedProgress();
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +56,32 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
     fetchData();
     return () => { cancelled = true; };
   }, [productionId]);
+
+  // Mirror CastMemberPage: surface live LoRA training progress for subjects
+  // dispatched from this panel (production_api now returns unified job_id).
+  useEffect(() => {
+    const procs = Array.from(activeProcesses.values());
+    const next = {};
+    for (const subj of subjectsToCast) {
+      const match = procs.find((p) => {
+        const ad = p.additional_data || p.metadata || {};
+        const isThisSubject = String(ad.subject_id || '') === String(subj.id);
+        const isTrain = ad.operation === 'train_lora' || ad.kind === 'cast_training';
+        return isThisSubject && isTrain;
+      });
+      if (match) {
+        const st = (match.status || '').toLowerCase();
+        if (!['complete', 'end', 'error', 'cancelled', 'failed'].includes(st)) {
+          next[subj.id] = {
+            id: match.job_id || match.id,
+            progress: match.progress,
+            message: match.message || match.status,
+          };
+        }
+      }
+    }
+    setTrainingJobs(next);
+  }, [activeProcesses, subjectsToCast]);
 
   const handleActionChange = (subjectId, action) => {
     setCastingData(prev => ({
@@ -124,7 +154,13 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
       // form action and would 400 the /cast endpoint with an undefined action.
       for (const subj of subjectsToCast) {
         if (hasValidFormAction(subj)) {
-          await castSubject(productionId, subj.id, castingData[subj.id]);
+          const res = await castSubject(productionId, subj.id, castingData[subj.id]);
+          if (res?.training_job_id) {
+            setTrainingJobs((prev) => ({
+              ...prev,
+              [subj.id]: { id: res.training_job_id, message: 'LoRA training starting…' },
+            }));
+          }
         }
       }
       await confirmCasting(productionId);
@@ -232,6 +268,17 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
                       onUploaded={(paths) => handleRefsUploaded(subj.id, paths)}
                       helperText="Drop a few clear photos — that's the LoRA's only training data."
                     />
+                  )}
+                  {(subj.training_status === 'training' || trainingJobs[subj.id]) && (
+                    <Box sx={{ mt: 1, maxWidth: 280 }}>
+                      <LinearProgress
+                        variant={trainingJobs[subj.id]?.progress != null ? 'determinate' : 'indeterminate'}
+                        value={trainingJobs[subj.id]?.progress || 0}
+                      />
+                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                        {trainingJobs[subj.id]?.message || 'LoRA training in progress…'}
+                      </Typography>
+                    </Box>
                   )}
                 </TableCell>
               </TableRow>

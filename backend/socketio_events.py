@@ -262,6 +262,15 @@ def handle_tool_approval_response(data):
             f"Tool approval response received for session {session_id}: "
             f"approved={approved} scope={scope}"
         )
+        
+        # Check if this session is Suspended and needs to be resumed
+        from backend.models import SuspendedChatState, db
+        state = SuspendedChatState.query.filter_by(session_id=session_id).first()
+        if state:
+            from backend.api.unified_chat_api import resume_chat_background
+            resume_chat_background(session_id, state.id)
+            logger.info(f"Triggered background resume for suspended session {session_id}")
+            
     except Exception as e:
         logger.error(f"Failed to set tool approval response for session {session_id}: {e}")
         emit("error", {"message": f"Approval response failed: {str(e)}"})

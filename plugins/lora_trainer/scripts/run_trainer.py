@@ -94,16 +94,24 @@ def _do_train(cmd):
         images = _torch.stack(images).to("cuda", dtype=_torch.bfloat16)
 
         instance_prompt = params.get("instance_prompt", "a photo")
+        image_prompts = params.get("image_prompts") or []
+        if not image_prompts:
+            image_prompts = [instance_prompt] * len(image_paths)
+        while len(image_prompts) < len(image_paths):
+            image_prompts.append(image_prompts[-1] if image_prompts else instance_prompt)
 
-        # diffusers 0.34 has no public _encode_prompt_sdxl helper. The pipeline's
-        # encode_prompt returns (prompt_embeds, neg_prompt_embeds, pooled, neg_pooled).
-        # CFG off means the negatives come back as None — which is what we want.
-        prompt_embeds, _neg_embeds, pooled_prompt_embeds, _neg_pooled = _pipeline.encode_prompt(
-            prompt=instance_prompt,
-            device=_torch.device("cuda"),
-            num_images_per_prompt=1,
-            do_classifier_free_guidance=False,
-        )
+        # Pre-encode per-image captions (SubjectSample prompts / .txt sidecars).
+        all_prompt_embeds = []
+        all_pooled_embeds = []
+        for prompt in image_prompts[: len(image_paths)]:
+            pe, _neg, pooled, _neg_pooled = _pipeline.encode_prompt(
+                prompt=prompt,
+                device=_torch.device("cuda"),
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=False,
+            )
+            all_prompt_embeds.append(pe)
+            all_pooled_embeds.append(pooled)
 
         # Memory plan for a 16GB card: the VAE and both text encoders are frozen
         # and only needed once. Pre-encode every ref image to a latent up front,
@@ -152,6 +160,8 @@ def _do_train(cmd):
 
                 noisy_latents = _pipeline.scheduler.add_noise(latents, noise, timesteps)
 
+                prompt_embeds = all_prompt_embeds[idx]
+                pooled_prompt_embeds = all_pooled_embeds[idx]
                 add_time_ids = _pipeline._get_add_time_ids((resolution, resolution), (0,0), (resolution, resolution), dtype=prompt_embeds.dtype, text_encoder_projection_dim=proj_dim).to("cuda")
                 added_cond_kwargs = {"text_embeds": pooled_prompt_embeds, "time_ids": add_time_ids}
                 

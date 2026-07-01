@@ -25,26 +25,24 @@ const FolderWindowWrapper = React.forwardRef(
     const [_lastClickTime, setLastClickTime] = useState(0);
     const [_clickCount, setClickCount] = useState(0);
 
-    // Destructure react-grid-layout props to prevent them from spreading to DOM
+    // Destructure react-grid-layout props (and all their common aliases) to prevent them
+    // from leaking as invalid HTML attributes onto the root <div> rendered by MUI Paper.
+    // RGL passes these when using <ReactGridLayout> with custom child components.
     const {
-      _i,
-      _x,
-      _y,
-      _w,
-      _h,
-      _minW,
-      _maxW,
-      _minH,
-      _maxH,
+      // Standard RGL layout item fields (plain + internal _ prefixed)
+      i, x, y, w, h,
+      minW, maxW, minH, maxH,
+      _i, _x, _y, _w, _h,
+      _minW, _maxW, _minH, _maxH,
       isDraggable,
-      _isResizable,
-      _isBounded,
-      static: _staticProp,
-      _moved,
-      _resizeHandles,
+      isResizable, _isResizable,
+      isBounded, _isBounded,
+      static: staticProp, _staticProp,
+      moved, _moved,
+      resizeHandles, _resizeHandles,
       className,
       style,
-      // Filter out legacy color props so they don't spread to DOM
+      // Legacy custom props that were previously leaking
       windowColor: _wc,
       onWindowColorChange: _owcc,
       ...restProps
@@ -154,8 +152,10 @@ const FolderWindowWrapper = React.forwardRef(
           },
           backgroundColor: alpha(theme.palette.background.paper, 0.95),
           border: `1px solid ${alpha(theme.palette.primary.main, 0.15)}`,
-          ...restProps.sx,
+          // Merge any forwarded sx from rest (e.g. from grid layout wrappers) without leaking other props
+          ...(restProps.sx || {}),
         }}
+        // Only forward safe props; RGL layout keys (minW etc.) and internal state have been stripped above
         {...restProps}
       >
         {/* Window Header/Title Bar - Always visible */}

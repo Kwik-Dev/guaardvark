@@ -274,7 +274,7 @@ def render_timeline_endpoint():
     celery.send_task(
         task_name,
         args=(payload, str(output_path), job_id),
-        queue="renders",
+        queue="default",
     )
 
     return success_response(

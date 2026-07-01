@@ -23,7 +23,12 @@ from backend.utils.response_utils import success_response, error_response
 from backend.services.batch_video_generator import get_batch_video_generator
 # Single source of truth for video-model file layout (download dst == install
 # check == ComfyUI loader paths). See backend/services/video_model_registry.py.
-from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
+from backend.services.video_model_registry import (
+    VIDEO_MODEL_REGISTRY,
+    DEFAULT_T2V_MODEL,
+    DEFAULT_I2V_MODEL,
+    preflight_video_model,
+)
 
 # GPU Resource Coordinator for pre-flight availability check
 try:
@@ -132,8 +137,13 @@ def generate_text_to_video_batch():
         if not prompts:
             return error_response("No prompts provided", 400)
 
+        model_id = data.get("model", DEFAULT_T2V_MODEL)
+        ready, preflight_err = preflight_video_model(model_id)
+        if not ready:
+            return error_response(preflight_err, 400)
+
         params = {
-            "model": data.get("model", "cogvideox-5b"),
+            "model": model_id,
             "duration_frames": int(data.get("duration_frames", 49)),
             "fps": int(data.get("fps", 24)),
             "width": int(data.get("width", 512)),
@@ -198,9 +208,14 @@ def generate_image_to_video_batch():
         if not image_paths:
             return error_response("No image_paths provided", 400)
 
+        model_id = data.get("model", DEFAULT_I2V_MODEL)
+        ready, preflight_err = preflight_video_model(model_id)
+        if not ready:
+            return error_response(preflight_err, 400)
+
         params = {
             "prompt": data.get("prompt", ""),
-            "model": data.get("model", "cogvideox-5b-i2v"),
+            "model": model_id,
             "duration_frames": int(data.get("duration_frames", 49)),
             "fps": int(data.get("fps", 24)),
             "width": int(data.get("width", 512)),

@@ -2809,6 +2809,8 @@ class Subject(db.Model):
     # re-surface it without re-running the LLM, and so SubjectSample prompts can
     # be re-composed from it without another generation pass.
     bible = db.Column(db.Text, nullable=True)
+    # Optional LoRA hyperparameters (resolution, rank, steps, learning_rate).
+    training_settings_json = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
     updated_at = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
 
@@ -2829,6 +2831,7 @@ class Subject(db.Model):
             "last_trained_at": self.last_trained_at.isoformat() if self.last_trained_at else None,
             "cast_required": self.cast_required,
             "bible": self.bible,
+            "training_settings_json": self.training_settings_json or {},
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -3184,4 +3187,24 @@ class WebsitePage(db.Model):
         if include_content:
             out["content"] = self.content
         return out
+
+
+class SuspendedChatState(db.Model):
+    """Holds ReACT loop state when blocked on HITL approval."""
+    __tablename__ = "suspended_chat_state"
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(50), nullable=False, unique=True, index=True)
+    request_id = db.Column(db.String(50), nullable=False)
+    iteration = db.Column(db.Integer, nullable=False)
+    history = db.Column(db.Text, nullable=False)
+    ollama_messages = db.Column(db.Text, nullable=False)
+    tool_jobs = db.Column(db.Text, nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    options = db.Column(db.Text, nullable=True)
+    rag_context = db.Column(db.Text, nullable=True)
+    llm_response = db.Column(db.Text, nullable=True)
+    step_info = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 

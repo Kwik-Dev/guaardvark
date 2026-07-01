@@ -87,6 +87,9 @@ def create_celery_app():
             # Custom-named like production.* — explicit route so the per-clip
             # tail-call dispatch can't fall to the unconsumed 'celery' queue.
             'music_video.*': {'queue': 'default'},
+            # video_render_tasks.* were dispatched to an unconsumed 'renders' queue;
+            # route explicitly so send_task(..., queue=...) overrides still land on main.
+            'video_render_tasks.*': {'queue': 'default'},
             # google_indexing.* tasks use custom names (not backend.tasks.*), so
             # they need their own route — without it the on-demand
             # google_indexing.submit_batch_for_site dispatched via .delay() falls

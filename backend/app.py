@@ -595,12 +595,115 @@ def _initialize_app_components(app):
         from pathlib import Path
         
         def poll_celery_progress():
+            from datetime import timezone as _tz
+
             last_modified_times = {}
             terminal_files = set()  # file_keys we've already classified terminal/reaped
             poll_count = 0
             TERMINAL_STATUSES = {'complete', 'error', 'cancelled', 'end'}
             STALE_THRESHOLD = 2700  # 45 minutes - indexing can take 15-25 min per doc
             REDIS_LOSS_STALE = 300    # 5 min aggressive when Redis relay is down (loss detection)
+            VIDEO_RENDER_STALE_HIGH = 900   # 15 min at >=95% (encoding hang)
+            VIDEO_RENDER_STALE_MID = 1800   # 30 min mid-render (denoising)
+
+            def _comfyui_is_down() -> bool:
+                try:
+                    from backend.config import config as _cfg
+                    import requests as _requests
+                    url = getattr(_cfg, "COMFYUI_URL", None) or os.environ.get(
+                        "GUAARDVARK_COMFYUI_URL", "http://127.0.0.1:8188"
+                    )
+                    resp = _requests.get(url, timeout=2)
+                    return resp.status_code != 200
+                except Exception:
+                    return True
+
+            def _job_age_seconds(metadata: dict, file_mtime: float) -> float:
+                last_raw = (
+                    metadata.get("last_update_utc")
+                    or metadata.get("last_update")
+                    or metadata.get("timestamp")
+                )
+                if last_raw:
+                    try:
+                        last_dt = datetime.fromisoformat(str(last_raw).replace("Z", "+00:00"))
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.replace(tzinfo=_tz.utc)
+                        return (datetime.now(_tz.utc) - last_dt).total_seconds()
+                    except ValueError:
+                        pass
+                return max(0.0, time.time() - file_mtime)
+
+            def _stale_threshold_seconds(metadata: dict, redis_healthy: bool, comfyui_down: bool) -> float:
+                if metadata.get("status") in TERMINAL_STATUSES:
+                    return float("inf")
+                if not redis_healthy:
+                    return float(REDIS_LOSS_STALE)
+                if metadata.get("process_type") == "video_render":
+                    if comfyui_down and metadata.get("status") == "processing":
+                        return 0.0
+                    progress = int(metadata.get("progress") or 0)
+                    if progress >= 95:
+                        return float(VIDEO_RENDER_STALE_HIGH)
+                    return float(VIDEO_RENDER_STALE_MID)
+                return float(STALE_THRESHOLD)
+
+            def _stale_error_message(metadata: dict, comfyui_down: bool) -> str:
+                if metadata.get("process_type") == "video_render":
+                    if comfyui_down:
+                        return "ComfyUI connection lost — job orphaned"
+                    if int(metadata.get("progress") or 0) >= 95:
+                        return "Video encode stalled — ComfyUI did not complete"
+                    return "Video generation stalled — worker likely crashed"
+                return "Timed out — worker likely crashed"
+
+            def _cleanup_orphaned_video_job(metadata: dict) -> None:
+                extra = metadata.get("additional_data") or {}
+                batch_id = extra.get("batch_id") or ""
+                if batch_id:
+                    try:
+                        from backend.services.batch_video_generator import get_batch_video_generator
+                        get_batch_video_generator().cancel_batch(str(batch_id))
+                    except Exception:
+                        pass
+                try:
+                    from backend.services.job_operation_gate import get_gate
+                    from backend.services.job_types import JobKind
+                    gate = get_gate()
+                    holder = (gate.snapshot().get("gpu_holder") or {})
+                    native_id = str(holder.get("native_id", ""))
+                    if batch_id and native_id == str(batch_id):
+                        gate.release_gpu_exclusive(JobKind.VIDEO_RENDER, native_id)
+                except Exception:
+                    pass
+
+            def _reap_if_stale(metadata_file, metadata: dict, file_mtime: float,
+                               file_key: str, comfyui_down: bool) -> bool:
+                """Mark job error if stale. Returns True if reaped (caller should continue)."""
+                redis_ok = getattr(app, "_redis_healthy", True)
+                age_s = _job_age_seconds(metadata, file_mtime)
+                threshold = _stale_threshold_seconds(metadata, redis_ok, comfyui_down)
+                if age_s <= threshold:
+                    return False
+                if metadata.get("status") in TERMINAL_STATUSES:
+                    return False
+                metadata["status"] = "error"
+                metadata["message"] = _stale_error_message(metadata, comfyui_down)
+                metadata["is_complete"] = True
+                metadata["completion_time_utc"] = datetime.utcnow().isoformat()
+                with open(metadata_file, "w") as f:
+                    json.dump(metadata, f, indent=4)
+                if metadata.get("process_type") == "video_render":
+                    _cleanup_orphaned_video_job(metadata)
+                app.logger.info(
+                    "Marked stale job as error: %s (age=%.0fs, threshold=%.0fs)",
+                    metadata.get("job_id", "unknown"),
+                    age_s,
+                    threshold,
+                )
+                last_modified_times[file_key] = file_mtime
+                terminal_files.add(file_key)
+                return True
             # Adaptive cadence: this loop is also the ONLY stale-job reaper, so
             # it must keep running forever. But on an idle, offline box the old
             # fixed 1s sleep was a per-second stat storm for nothing. So we poll
@@ -618,6 +721,7 @@ def _initialize_app_components(app):
                     active_jobs = 0
 
                     progress_dir = Path(config.OUTPUT_DIR) / ".progress_jobs"
+                    comfyui_down = _comfyui_is_down()
                     if progress_dir.exists():
                         metadata_files = list(progress_dir.glob("*/metadata.json"))
 
@@ -626,39 +730,26 @@ def _initialize_app_components(app):
                                 current_mtime = metadata_file.stat().st_mtime
                                 file_key = str(metadata_file)
 
-                                # Skip files that haven't changed since last poll.
-                                # An unchanged file we last saw as non-terminal is
-                                # still an in-flight job (it may simply not have
-                                # ticked this second), so keep counting it active
-                                # until it goes terminal or trips the stale reaper.
-                                if file_key in last_modified_times and last_modified_times[file_key] == current_mtime:
-                                    if file_key not in terminal_files:
-                                        active_jobs += 1
-                                    continue
-
-                                # Mark stale non-terminal files as error (zombie job cleanup)
-                                # Improve detection on Redis loss: use shorter threshold when relay not healthy.
-                                effective_stale = REDIS_LOSS_STALE if not getattr(app, '_redis_healthy', True) else STALE_THRESHOLD
-                                if time.time() - current_mtime > effective_stale:
-                                    try:
-                                        with open(metadata_file, 'r') as f:
-                                            stale_meta = json.load(f)
-                                        if stale_meta.get('status') not in TERMINAL_STATUSES:
-                                            stale_meta['status'] = 'error'
-                                            stale_meta['message'] = 'Timed out — worker likely crashed'
-                                            stale_meta['is_complete'] = True
-                                            stale_meta['completion_time_utc'] = datetime.utcnow().isoformat()
-                                            with open(metadata_file, 'w') as f:
-                                                json.dump(stale_meta, f, indent=4)
-                                            app.logger.info(f"Marked stale job as error: {stale_meta.get('job_id', 'unknown')}")
-                                    except Exception:
-                                        logger.warning(f"Failed to mark stale job {stale_meta.get('job_id')} as error (non-fatal)", exc_info=True)  # noqa: BLE001
-                                    last_modified_times[file_key] = current_mtime
-                                    terminal_files.add(file_key)
+                                if file_key in terminal_files:
                                     continue
 
                                 with open(metadata_file, 'r') as f:
                                     metadata = json.load(f)
+
+                                if _reap_if_stale(
+                                    metadata_file, metadata, current_mtime, file_key, comfyui_down
+                                ):
+                                    continue
+
+                                # Unchanged mtime: still an in-flight job unless terminal.
+                                if (
+                                    file_key in last_modified_times
+                                    and last_modified_times[file_key] == current_mtime
+                                ):
+                                    job_status = metadata.get('status', 'unknown')
+                                    if job_status not in TERMINAL_STATUSES:
+                                        active_jobs += 1
+                                    continue
 
                                 # Skip terminal statuses — no need to re-emit completed/errored jobs
                                 job_status = metadata.get('status', 'unknown')

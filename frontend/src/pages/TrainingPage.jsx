@@ -15,6 +15,7 @@ import {
   Tooltip,
   CircularProgress,
   Snackbar,
+  Alert,
   Alert as MuiAlert,
   Tabs,
   Tab,
@@ -57,7 +58,7 @@ import {
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import Editor from "@monaco-editor/react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Link as RouterLink } from "react-router-dom";
 import { useTheme } from "@mui/material/styles";
 import axios from "axios";
 import TrainingDatasetModal from "../components/modals/TrainingDatasetModal";
@@ -563,6 +564,14 @@ const TrainingPage = () => {
       modelStatus
       activeModel={isLoadingModel ? "Loading..." : modelError ? "Error" : activeModel || "Default"}
     >
+      <Alert severity="info" sx={{ mb: 2 }}>
+        This page fine-tunes <strong>LLM chat models</strong> (Ollama/GGUF export).
+        To train a <strong>character LoRA</strong> for video and images, use{" "}
+        <Button component={RouterLink} to="/cast" size="small" variant="outlined" sx={{ ml: 0.5, verticalAlign: "baseline" }}>
+          Cast Studio
+        </Button>
+        {" "}— upload reference shots, approve samples, then Train LoRA on the Training Data tab.
+      </Alert>
       <Paper elevation={2}>
         <Box sx={{ borderBottom: 1, borderColor: "divider" }}>
           <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)}>

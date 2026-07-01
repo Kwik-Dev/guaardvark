@@ -9,6 +9,7 @@ environments.
 
 import json
 import logging
+import os
 import queue
 import subprocess
 import threading
@@ -176,7 +177,77 @@ class BatchVideoGenerator:
         )
         self._worker_thread.start()
 
+        self._restore_pending_batches()
+
         logger.info(f"BatchVideoGenerator initialized - Service available: {self.service_available}")
+
+    def _restore_pending_batches(self) -> None:
+        """Re-enqueue batches left queued/running on disk after a process restart."""
+        restored = 0
+        try:
+            for batch_dir in self.base_output_dir.iterdir():
+                if not batch_dir.is_dir():
+                    continue
+                metadata_file = batch_dir / "batch_metadata.json"
+                if not metadata_file.exists():
+                    continue
+                try:
+                    with open(metadata_file, "r") as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+
+                status = data.get("status")
+                if status not in self._ACTIVE_STATUSES:
+                    continue
+
+                batch_id = data.get("batch_id") or batch_dir.name
+                with self.batch_lock:
+                    if batch_id in self.active_batches:
+                        continue
+
+                rd = data.get("retry_data")
+                if not rd:
+                    logger.warning("Cannot restore batch %s: no retry_data", batch_id)
+                    if status in ("running", "processing"):
+                        data["status"] = "error"
+                        data["error"] = "Interrupted by server restart (no retry_data to resume)"
+                        data["end_time"] = datetime.now().isoformat()
+                        try:
+                            with open(metadata_file, "w") as f:
+                                json.dump(data, f, indent=2)
+                        except Exception:
+                            pass
+                    continue
+
+                params = dict(rd.get("params") or {})
+                params["batch_id"] = batch_id
+                mode = rd.get("mode")
+                try:
+                    if mode == "text":
+                        prompts = rd.get("prompts") or []
+                        if not prompts:
+                            continue
+                        self.start_batch_from_prompts(prompts=prompts, **params)
+                    elif mode == "image":
+                        image_paths = rd.get("image_paths") or []
+                        if not image_paths:
+                            continue
+                        prompt = rd.get("prompt", "") or ""
+                        if prompt:
+                            params["prompt"] = prompt
+                        self.start_batch_from_images(image_paths=image_paths, **params)
+                    else:
+                        logger.warning("Cannot restore batch %s: unknown mode %s", batch_id, mode)
+                        continue
+                    restored += 1
+                except Exception as e:
+                    logger.warning("Failed to restore batch %s: %s", batch_id, e)
+        except Exception as e:
+            logger.warning("Failed to scan for pending batches: %s", e)
+
+        if restored:
+            logger.info("Restored %d pending video batch(es) from disk", restored)
 
     def _queue_worker(self) -> None:
         """Pulls one batch off the queue at a time. Bouncer at the GPU door."""
@@ -416,48 +487,53 @@ class BatchVideoGenerator:
             return None
 
     def _run_batch(self, batch_request: BatchVideoRequest, status: BatchVideoStatus) -> None:
-        # TWO GPU arbiters guard this batch:
-        #   1. JobOperationGate.gpu_exclusive (in-memory) — serializes against
-        #      production renders / training, which only know the in-memory gate.
-        #   2. GPUResourceCoordinator file-lock — the cross-process arbiter that
-        #      also stops Ollama. The two are otherwise mutually blind; claiming
-        #      the in-memory gate here makes batch video visible to (and
-        #      serialized with) the other in-memory surfaces.
-        # Lock-ordering rule: acquire the GPU-exclusive (in-memory) gate FIRST,
-        # then the file-lock. This is a SERIAL background queue, so on busy/cooldown
-        # we WAIT (on_busy="wait") rather than fail — a batch dequeued right after the
-        # previous one finishes would otherwise die on the gate's 8s post-release
-        # cooldown. Only a gate that never frees within wait_timeout -> error.
-        from backend.services.job_operation_gate import get_gate, GpuBusyError
+        # gpu_session composes gate + cross-process lease + Ollama eviction + VRAM
+        # orchestrator debit (P0.3c). Serial background queue waits out the 8s
+        # post-release cooldown (on_busy="wait") instead of failing the batch.
+        from backend.services.gpu_resource_policy import gpu_session
+        from backend.services.job_operation_gate import GpuBusyError
         from backend.services.job_types import JobKind
-        gate = get_gate()
+        from backend.services.video_model_registry import vram_mb_for_model
+
+        slot_id = f"video_render:batch_{batch_request.batch_id}"
+        vram_mb = vram_mb_for_model(batch_request.model)
+        parallel_comfyui = os.environ.get(
+            "GUAARDVARK_BATCH_COMFYUI_PARALLEL", ""
+        ).lower() in ("1", "true", "yes")
+
         try:
-            gate_cm = gate.gpu_exclusive(JobKind.VIDEO_RENDER, batch_request.batch_id, on_busy="wait")
-            gate_cm.__enter__()
+            with gpu_session(
+                JobKind.VIDEO_RENDER,
+                batch_request.batch_id,
+                on_busy="wait",
+                wait_timeout=120.0,
+                evict_ollama=True,
+                free_comfyui=True,
+                cross_process=True,
+                vram_estimate_mb=vram_mb,
+                require_fit=True,
+                slot_id=slot_id,
+                lease_seconds=3600,
+            ):
+                self._run_batch_inner(
+                    batch_request,
+                    status,
+                    parallel_comfyui=parallel_comfyui,
+                )
         except GpuBusyError as e:
             status.status = "error"
-            status.error = f"Could not acquire GPU after waiting (gate still busy): {e}"
+            status.error = f"Could not acquire GPU after waiting: {e}"
             status.end_time = datetime.now()
             self._save_metadata(status)
-            logger.error(f"Batch {batch_request.batch_id} blocked by GPU gate after waiting: {e}")
-            return
+            logger.error(f"Batch {batch_request.batch_id} blocked by GPU session: {e}")
 
-        # Acquire GPU lock before starting video generation
-        gpu_coordinator = get_gpu_coordinator()
-        lock_result = gpu_coordinator.acquire_for_video_generation(
-            batch_id=batch_request.batch_id,
-            lease_seconds=3600  # 1 hour max
-        )
-
-        if not lock_result.get("success"):
-            status.status = "error"
-            status.error = f"Could not acquire GPU: {lock_result.get('error')}"
-            status.end_time = datetime.now()
-            self._save_metadata(status)
-            logger.error(f"Batch {batch_request.batch_id} failed to acquire GPU lock: {lock_result.get('error')}")
-            gate_cm.__exit__(None, None, None)  # release the in-memory gate
-            return
-
+    def _run_batch_inner(
+        self,
+        batch_request: BatchVideoRequest,
+        status: BatchVideoStatus,
+        *,
+        parallel_comfyui: bool = False,
+    ) -> None:
         cancel_event = self.cancel_events.get(batch_request.batch_id)
 
         try:
@@ -706,10 +782,13 @@ class BatchVideoGenerator:
                         except Exception:
                             pass
 
-                # Cinematic mode does a stateful FLUX-still -> evict -> I2V handoff per item
-                # on the shared GPU; concurrent items would evict each other's loaded model,
-                # so it must run strictly serially.
-                if getattr(batch_request, "cinematic_keyframe", False):
+                # ComfyUI serializes GPU work — parallel POST /prompt only queues blocking
+                # polls and amplifies VRAM pressure. Serial by default; opt-in parallel via
+                # GUAARDVARK_BATCH_COMFYUI_PARALLEL=1 (non-cinematic only).
+                if (
+                    getattr(batch_request, "cinematic_keyframe", False)
+                    or not parallel_comfyui
+                ):
                     max_workers = 1
                 else:
                     max_workers = max(1, min(4, len(items)))
@@ -772,12 +851,7 @@ class BatchVideoGenerator:
                     logger.error(f"Failed to register batch videos: {reg_err}")
 
         finally:
-            # Always release GPU lock when batch completes (success or failure).
-            # Release in REVERSE acquire order: file-lock first, then the
-            # in-memory gate (acquired first, released last).
-            gpu_coordinator.release_video_generation_lock(restart_ollama=True)
-            gate_cm.__exit__(None, None, None)
-            logger.info(f"Batch {batch_request.batch_id} released GPU lock")
+            logger.info(f"Batch {batch_request.batch_id} finished render phase")
 
     def start_batch_from_prompts(
         self,
@@ -837,7 +911,7 @@ class BatchVideoGenerator:
             batch_id=batch_id,
             items=items,
             output_dir=str(batch_dir),
-            model=params.get("model", "cogvideox-5b"),
+            model=params.get("model", "wan22-5b"),
             duration_frames=int(params.get("duration_frames", 25)),
             fps=int(params.get("fps", 7)),
             width=int(params.get("width", 512)),
@@ -1206,6 +1280,8 @@ class BatchVideoGenerator:
 
         try:
             gpu_coordinator = get_gpu_coordinator()
+            for batch_id in cancelled:
+                gpu_coordinator.release_generic(f"video_render:batch_{batch_id}")
             gpu_coordinator.release_video_generation_lock(restart_ollama=False)
         except Exception as e:
             logger.warning(f"cancel_all_active: GPU lock release failed: {e}")

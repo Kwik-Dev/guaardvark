@@ -290,3 +290,4 @@ debug.log
 grok-transcript.mc
 # Per-machine runtime state written by the app
 data/video_model_download_status.json
+storage/

@@ -19,6 +19,7 @@ export const JOB_KINDS = {
   DEMO: "demo",
   BATCH_CSV: "batch_csv",
   VIDEO_GEN: "video_gen",
+  MUSIC_VIDEO: "music_video",
   VIDEO_RENDER: "video_render",
   OUTREACH: "outreach",
   WEBSITE: "website",
@@ -32,6 +33,7 @@ export const JOB_KINDS_FOR_JOBS_PAGE = [
   JOB_KINDS.TASK,
   JOB_KINDS.BATCH_CSV,
   JOB_KINDS.VIDEO_GEN,
+  JOB_KINDS.MUSIC_VIDEO,
   JOB_KINDS.VIDEO_RENDER,
 ];
 

@@ -134,7 +134,7 @@ import threading as _threading
 _session_tls = _threading.local()
 
 
-def _acquire_cross_process_lease(slot: str) -> bool:
+def _acquire_cross_process_lease(slot: str, *, lease_seconds: Optional[int] = None) -> bool:
     """Acquire the cross-process GPU file lock AFTER the in-PID gate (lock ordering) and
     BEFORE eviction. Raise GpuBusyError if ANOTHER process holds it (the in-PID gate has
     already serialized same-process work). Returns True if acquired; False if the
@@ -145,7 +145,7 @@ def _acquire_cross_process_lease(slot: str) -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("cross-process GPU lease unavailable (%s); proceeding in-process only", e)
         return False
-    res = coord.acquire_generic(slot)
+    res = coord.acquire_generic(slot, lease_seconds=lease_seconds)
     if res.get("success"):
         return True
     from backend.services.job_operation_gate import GpuBusyError
@@ -202,12 +202,14 @@ def gpu_session(
     op_id: str,
     *,
     on_busy: str = "raise",
+    wait_timeout: float = 120.0,
     evict_ollama: bool = False,
     free_comfyui: bool = False,
     vram_estimate_mb: Optional[int] = None,
     require_fit: bool = False,
     cross_process: bool = False,
     slot_id: Optional[str] = None,
+    lease_seconds: Optional[int] = None,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
 
@@ -238,14 +240,18 @@ def gpu_session(
     lease_held = False
     load_weight = None
     try:
-        with gate.gpu_exclusive(kind, op_id, on_busy=on_busy) as acq:
+        with gate.gpu_exclusive(
+            kind, op_id, on_busy=on_busy, wait_timeout=wait_timeout
+        ) as acq:
             acquired = acq
             if acquired:
                 _session_tls.held = True
                 # Cross-process lease (opt-in): acquire AFTER the in-PID gate (lock
                 # ordering), BEFORE eviction — only evict once we own both locks.
                 if cross_process:
-                    lease_held = _acquire_cross_process_lease(_slot)
+                    lease_held = _acquire_cross_process_lease(
+                        _slot, lease_seconds=lease_seconds
+                    )
                 reclaim_gpu(evict_ollama=evict_ollama, free_comfyui=free_comfyui)
                 # Strict admission (opt-in): after eviction, refuse with a clean "busy" if
                 # the estimate still won't physically fit — turns a CUDA OOM/hang into retry.

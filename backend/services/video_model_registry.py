@@ -334,6 +334,81 @@ def _normalize_registry() -> None:
             entry["check_files"] = [entry["hf_filename"]]
 
 
+def vram_mb_for_model(model_id: str, *, default: int = 11000) -> int:
+    """VRAM debit estimate for gpu_session / orchestrator (registry SSOT)."""
+    entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
+    vram = int(entry.get("vram_mb") or 0)
+    return vram if vram > 0 else default
+
+
+# 16GB-consumer defaults — Wan 2.2 5B TI2V fits without CPU offload.
+DEFAULT_T2V_MODEL = "wan22-5b"
+DEFAULT_I2V_MODEL = "wan22-5b"
+
+
+def _comfyui_reachable() -> bool:
+    try:
+        from backend.services.comfyui_video_generator import get_video_generator
+        vg = get_video_generator()
+        if getattr(vg, "service_available", False):
+            return True
+        if hasattr(vg, "_check_comfyui_connection"):
+            return bool(vg._check_comfyui_connection())
+    except Exception:
+        pass
+    return False
+
+
+def preflight_video_model(model_id: str) -> tuple[bool, str]:
+    """Return (ready, error_message). Blocks silent fallback to the wrong backend."""
+    entry = VIDEO_MODEL_REGISTRY.get(model_id or "")
+    if not entry:
+        return False, f"Unknown video model '{model_id}'"
+
+    name = entry.get("name") or model_id
+    mtype = entry.get("type")
+
+    if mtype == "wan":
+        if not is_model_installed(model_id):
+            return False, (
+                f"{name} is not installed. Open Manage Video Models to download it "
+                f"before queuing a batch."
+            )
+        if not _comfyui_reachable():
+            return False, (
+                f"{name} requires ComfyUI. Start the ComfyUI plugin, then retry."
+            )
+        return True, ""
+
+    if mtype == "cogvideox":
+        if model_id == "cogvideox-5b":
+            offline_ok = False
+            try:
+                from backend.services.offline_video_generator import OfflineVideoGenerator
+                off = OfflineVideoGenerator()
+                offline_ok = bool(getattr(off, "cogvideox_available", False))
+            except Exception:
+                offline_ok = False
+            if offline_ok or is_model_installed(model_id):
+                return True, ""
+            return False, (
+                "CogVideoX 5B is not ready: install the model via Manage Video Models "
+                "or ensure the offline diffusers backend (torch + GPU) is available."
+            )
+
+        if not is_model_installed(model_id):
+            return False, (
+                f"{name} is not installed. Open Manage Video Models to download it."
+            )
+        if not _comfyui_reachable():
+            return False, (
+                f"{name} requires ComfyUI for image-to-video. Start ComfyUI, then retry."
+            )
+        return True, ""
+
+    return True, ""
+
+
 def wan_comfyui_map() -> dict:
     """Build the ComfyUI Wan loader map from the registry (never raises).
 

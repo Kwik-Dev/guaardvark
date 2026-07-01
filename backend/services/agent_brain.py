@@ -94,6 +94,8 @@ DELIBERATION_SIGNALS = [
     re.compile(r"compare.*(?:and|then).*(?:recommend|suggest)", re.IGNORECASE),
     re.compile(r"find\s+.*(?:and|then).*(?:create|generate|write)", re.IGNORECASE),
     re.compile(r"help\s+me\s+(?:figure\s+out|understand|decide)", re.IGNORECASE),
+    # Self-description / codebase overview queries benefit from multi-step (list repos, map, read key files)
+    re.compile(r"(?:tell me|describe|what is|overview of|about).*?(?:codebase|your code|the code|your source|own source)", re.IGNORECASE),
 ]
 
 # Conversational patterns (bare affirmations route to Tier 2 with skip_tools)

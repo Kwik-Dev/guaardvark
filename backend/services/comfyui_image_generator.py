@@ -133,7 +133,7 @@ class ComfyUIImageGenerator:
         # force the verified-correct SDXL LoraLoader chain below — identity must
         # actually be applied, not dropped. A flux model with NO LoRAs keeps its
         # branch (plain stylistic stills are unaffected).
-        if lora_names and "flux" in ml:
+        if lora_names and "flux" in ml and "dev" not in ml:
             logger.warning(
                 "Keyframe requested model=%r WITH %d LoRA(s); character LoRAs are "
                 "SDXL and flux branches drop/mismatch them — overriding to the SDXL "

@@ -14,7 +14,7 @@ defense-in-depth on top of JobOperationGate, not a replacement.
 
 Thresholds for THIS box (60GB RAM / 16GB VRAM / 16 threads):
     RAM available  < 6 GB   -> HARD block      (< 12 GB -> warn)
-    swap used      > 1 GB   -> HARD block
+    swap used      > 8 GB   -> HARD block
     VRAM free      < 1.5 GB -> HARD block      (< 3 GB  -> warn)
     loadavg(1m)    > 18     -> HARD block
 
@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 RAM_HARD_MIN_GB = 6.0      # below this available RAM -> hard block
 RAM_WARN_MIN_GB = 12.0     # below this -> warn (still admit)
-SWAP_HARD_MAX_GB = 1.0     # above this swap used -> hard block
+SWAP_HARD_MAX_GB = 8.0     # above this swap used -> hard block
 VRAM_HARD_MIN_GB = 1.5     # below this free VRAM -> hard block
 VRAM_WARN_MIN_GB = 3.0     # below this -> warn (still admit)
 LOADAVG_HARD_MAX = 18.0    # 1-min loadavg above this -> hard block

@@ -202,7 +202,22 @@ class RealLoraTrainer:
         except json.JSONDecodeError as e:
             raise RuntimeError(f"LoRA trainer daemon returned non-JSON: {response_line!r} ({e})") from e
 
-    def train_subject_lora(self, *, subject_id: int, subject_name: str, ref_image_paths: list[str], output_dir: str, trigger_word: str | None = None, resolution: int = 768, **_) -> dict:
+    def train_subject_lora(
+        self,
+        *,
+        subject_id: int,
+        subject_name: str,
+        ref_image_paths: list[str],
+        output_dir: str,
+        trigger_word: str | None = None,
+        resolution: int = 768,
+        image_prompts: list[str] | None = None,
+        rank: int = 16,
+        alpha: int = 16,
+        learning_rate: float = 1.0e-4,
+        steps: int | None = None,
+        **_,
+    ) -> dict:
         # resolution is the dominant VRAM lever for SDXL LoRA. Default 768 fits a
         # 16 GB card alongside the bf16 + gradient-checkpointing the runner already
         # does; bump to 1024 on a 24 GB+ card for sharper identity. Snap to /64 so
@@ -242,7 +257,13 @@ class RealLoraTrainer:
                     return {"status": "failed", "error": load_resp.get("error", "load failed")}
                 self._loaded = True
 
-            steps = min(1500, max(400, len(ref_image_paths) * 100))
+            if steps is None:
+                steps = min(1500, max(400, len(ref_image_paths) * 100))
+            prompts = list(image_prompts or [])
+            if not prompts:
+                prompts = [f"a photo of {token}"] * len(ref_image_paths)
+            while len(prompts) < len(ref_image_paths):
+                prompts.append(prompts[-1] if prompts else f"a photo of {token}")
 
             train_resp = self._send({
                 "op": "train",
@@ -251,13 +272,14 @@ class RealLoraTrainer:
                     "subject_name": subject_name,
                     "ref_image_paths": ref_image_paths,
                     "output_path": str(output_path),
-                    "rank": 16,
-                    "alpha": 16,
-                    "steps": steps,
-                    "learning_rate": 1.0e-4,
+                    "rank": int(rank),
+                    "alpha": int(alpha),
+                    "steps": int(steps),
+                    "learning_rate": float(learning_rate),
                     "resolution": resolution,
                     "seed": 42,
-                    "instance_prompt": f"a photo of {token}"
+                    "instance_prompt": f"a photo of {token}",
+                    "image_prompts": prompts[: len(ref_image_paths)],
                 }
             }, timeout_s=self._TRAIN_TIMEOUT_S)
 

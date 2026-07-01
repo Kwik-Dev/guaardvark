@@ -270,7 +270,7 @@ class EditCodeTool(BaseTool):
             name="old_text",
             type="string",
             required=True,
-            description="The EXACT text to replace (must be unique in file)"
+            description="The EXACT text to replace (must be unique in file). For best results with the drift guard, obtain this via a recent read_code call."
         ),
         "new_text": ToolParameter(
             name="new_text",
@@ -284,6 +284,18 @@ class EditCodeTool(BaseTool):
             required=False,
             default=False,
             description="If True, verifies the edit matches and compiles without writing changes to disk (default: False)"
+        ),
+        "expected_hash": ToolParameter(
+            name="expected_hash",
+            type="string",
+            required=False,
+            description="Optional sha256 hex digest of the file content at the time it was read (enables drift detection)."
+        ),
+        "expected_mtime": ToolParameter(
+            name="expected_mtime",
+            type="number",
+            required=False,
+            description="Optional file mtime (float from os.stat) at read time (helps drift detection)."
         )
     }
 
@@ -292,6 +304,8 @@ class EditCodeTool(BaseTool):
         old_text = kwargs.get("old_text")
         new_text = kwargs.get("new_text", "")
         dry_run = kwargs.get("dry_run", False)
+        expected_hash = kwargs.get("expected_hash")
+        expected_mtime = kwargs.get("expected_mtime")
 
         if not filepath:
             return ToolResult(
@@ -401,6 +415,8 @@ class EditCodeTool(BaseTool):
                 new_text,
                 dry_run=dry_run,
                 allow_external=True,
+                expected_hash=expected_hash,
+                expected_mtime=expected_mtime,
             )
             diff = edit_result.diff
             if len(diff) > 4000:
@@ -809,6 +825,57 @@ class ReadASTNodeTool(BaseTool):
             return ToolResult(success=False, error=f"Failed to read AST node: {str(e)}")
 
 
+class ListCodeRepositoriesTool(BaseTool):
+    """Tool to list all folders marked as Code Repositories (for discovery in NL flows)."""
+
+    name = "list_code_repositories"
+    description = (
+        "List all Code Repository folders that have been marked as such (is_repository=True) and analyzed. "
+        "Returns id, name, path, and whether repo_metadata is available. "
+        "Use this first when the user refers to 'the uploaded code', 'guaardvark upload folder', 'the code repo in data/uploads/Code', "
+        "or similar to discover the folder_id(s) needed for get_repository_map, get_dependency_graph, read_ast_node, etc. "
+        "This helps the agent get a full picture of available code repositories before analyzing or editing."
+    )
+    parameters = {}
+
+    def execute(self, **kwargs) -> ToolResult:
+        try:
+            repos = Folder.query.filter_by(is_repository=True).all()
+            result = []
+            for f in repos:
+                result.append({
+                    "id": f.id,
+                    "name": f.name,
+                    "path": f.path,
+                    "has_metadata": bool(f.repo_metadata),
+                    "description": (f.description or "")[:200] if f.description else ""
+                })
+
+            # Always surface the live main source root (GUAARDVARK_ROOT) even if not a DB-indexed Code Repo.
+            # Agent can use read_code / search_code / list_code_files with absolute or relative paths from here.
+            # For full map/graph, the folder should be marked is_repository and analyzed.
+            try:
+                root = os.environ.get("GUAARDVARK_ROOT") or os.getcwd()
+                result.append({
+                    "id": "live",
+                    "name": "Live main codebase (GUAARDVARK_ROOT)",
+                    "path": root,
+                    "has_metadata": False,
+                    "description": "The running Guaardvark source root. Use file tools (read_code etc.) directly with this path for exploration. Mark as Code Repo in Documents for map tools."
+                })
+            except Exception:
+                pass
+
+            return ToolResult(
+                success=True,
+                output=result,
+                metadata={"count": len(result)}
+            )
+        except Exception as e:
+            logger.error(f"ListCodeRepositoriesTool failed: {e}", exc_info=True)
+            return ToolResult(success=False, error=f"Failed to list code repos: {str(e)}")
+
+
 # Tool instances for registration
 CODE_MANIPULATION_TOOLS = [
     ReadCodeTool(),
@@ -819,6 +886,7 @@ CODE_MANIPULATION_TOOLS = [
     GetRepositoryMapTool(),
     GetDependencyGraphTool(),
     ReadASTNodeTool(),
+    ListCodeRepositoriesTool(),
 ]
 
 
@@ -841,6 +909,7 @@ __all__ = [
     'EditCodeTool',
     'ListCodeFilesTool',
     'VerifyChangeTool',
+    'ListCodeRepositoriesTool',
     'CODE_MANIPULATION_TOOLS',
     'register_code_manipulation_tools',
 ]

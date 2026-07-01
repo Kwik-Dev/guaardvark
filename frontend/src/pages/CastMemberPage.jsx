@@ -16,13 +16,32 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
 import {
   getCastSubject, getCastSubjectDetail, updateCastSubject, planCharacter, generateSamples,
-  listSamples, regenerateSample, approveSamples, deleteSample, trainSubject,
+  listSamples, regenerateSample, approveSamples, deleteSample, trainSubject, cancelTrainSubject,
 } from '../api/productionService';
 import { SubjectThumb } from '../components/filmcrew/CastLibraryView';
 import DragDropImageUpload from '../components/filmcrew/DragDropImageUpload';
 
 const POLL_MS = 5000;
 const POLL_CAP = 180; // 15 min safety cap on a generate/train poll loop
+
+const DEFAULT_TRAINING_SETTINGS = {
+  resolution: 768,
+  rank: 16,
+  alpha: 16,
+  learning_rate: 1e-4,
+  steps: '',
+};
+
+const trainingSettingsFromSubject = (subject) => {
+  const raw = subject?.training_settings_json || {};
+  return {
+    resolution: raw.resolution ?? DEFAULT_TRAINING_SETTINGS.resolution,
+    rank: raw.rank ?? DEFAULT_TRAINING_SETTINGS.rank,
+    alpha: raw.alpha ?? DEFAULT_TRAINING_SETTINGS.alpha,
+    learning_rate: raw.learning_rate ?? DEFAULT_TRAINING_SETTINGS.learning_rate,
+    steps: raw.steps ?? '',
+  };
+};
 
 // A sample is "in flight" while its image is still being produced.
 const isPending = (s) => s.status === 'pending' || s.status === 'generating';
@@ -61,6 +80,9 @@ const CastMemberPage = () => {
   // Local state to surface training progress from unified jobs (so frontend "knows"
   // when GPU is crunching on long LoRA train, even if subject poll lags or health/celery 503s).
   const [trainingJob, setTrainingJob] = useState(null);
+  const [trainingSettings, setTrainingSettings] = useState(DEFAULT_TRAINING_SETTINGS);
+  const [savingTrainingSettings, setSavingTrainingSettings] = useState(false);
+  const [trainingSettingsSaved, setTrainingSettingsSaved] = useState(false);
 
   const loadSubject = useCallback(async () => {
     // Prefer efficient single-subject (with samples when convenient).
@@ -69,10 +91,13 @@ const CastMemberPage = () => {
       const detail = await getCastSubjectDetail(subjectId, { includeSamples: true });
       const s = detail?.subject || detail;
       setSubject(s);
-      if (s) setForm({
-        name: s.name || '', description: s.description || '',
-        trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
-      });
+      if (s) {
+        setForm({
+          name: s.name || '', description: s.description || '',
+          trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
+        });
+        setTrainingSettings(trainingSettingsFromSubject(s));
+      }
       if (detail?.samples) {
         setSamples(detail.samples);
       }
@@ -81,10 +106,13 @@ const CastMemberPage = () => {
       // legacy fallback
       const s = await getCastSubject(subjectId);
       setSubject(s);
-      if (s) setForm({
-        name: s.name || '', description: s.description || '',
-        trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
-      });
+      if (s) {
+        setForm({
+          name: s.name || '', description: s.description || '',
+          trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
+        });
+        setTrainingSettings(trainingSettingsFromSubject(s));
+      }
       return s;
     }
   }, [subjectId]);
@@ -336,10 +364,36 @@ const CastMemberPage = () => {
     }
   };
 
+  const buildTrainingSettingsPayload = () => {
+    const stepsRaw = trainingSettings.steps;
+    const steps = stepsRaw === '' || stepsRaw == null ? null : Number(stepsRaw);
+    return {
+      resolution: Number(trainingSettings.resolution) || 768,
+      rank: Number(trainingSettings.rank) || 16,
+      alpha: Number(trainingSettings.alpha) || 16,
+      learning_rate: Number(trainingSettings.learning_rate) || 1e-4,
+      steps: Number.isFinite(steps) && steps > 0 ? steps : null,
+    };
+  };
+
+  const handleSaveTrainingSettings = async () => {
+    setSavingTrainingSettings(true);
+    setError(null);
+    try {
+      await updateCastSubject(subjectId, { training_settings: buildTrainingSettingsPayload() });
+      await loadSubject();
+      setTrainingSettingsSaved(true);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to save training settings.');
+    } finally {
+      setSavingTrainingSettings(false);
+    }
+  };
+
   const handleTrain = async () => {
     setBusy(true); setError(null);
     try {
-      const res = await trainSubject(subjectId); // now may include job_id
+      const res = await trainSubject(subjectId, { training_settings: buildTrainingSettingsPayload() });
       await loadSubject();
       if (res?.job_id) {
         setTrainingJob({ id: res.job_id, operation: 'train_lora' });
@@ -349,6 +403,19 @@ const CastMemberPage = () => {
     } catch (e) {
       setError(e.response?.data?.error
         || (e.response?.status === 409 ? 'Already training.' : 'Failed to start training.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCancelTrain = async () => {
+    setBusy(true); setError(null);
+    try {
+      await cancelTrainSubject(subjectId);
+      setTrainingJob(null);
+      await loadSubject();
+    } catch (e) {
+      setError(e.response?.data?.reason || e.response?.data?.error || 'Failed to cancel training.');
     } finally {
       setBusy(false);
     }
@@ -492,6 +559,53 @@ const CastMemberPage = () => {
           />
 
           <Divider sx={{ my: 3 }} />
+          <Typography variant="subtitle2" gutterBottom>Training hyperparameters</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            SDXL LoRA settings for the next run. Steps left blank auto-scale from image count.
+          </Typography>
+          <Grid container spacing={2} sx={{ mb: 2, maxWidth: 720 }}>
+            <Grid item xs={6} sm={4}>
+              <TextField label="Resolution" type="number" size="small" fullWidth
+                value={trainingSettings.resolution}
+                onChange={(e) => { setTrainingSettingsSaved(false); setTrainingSettings({ ...trainingSettings, resolution: e.target.value }); }}
+                helperText="Snapped to 64px (512–1024)" />
+            </Grid>
+            <Grid item xs={6} sm={4}>
+              <TextField label="LoRA rank" type="number" size="small" fullWidth
+                value={trainingSettings.rank}
+                onChange={(e) => { setTrainingSettingsSaved(false); setTrainingSettings({ ...trainingSettings, rank: e.target.value }); }}
+                helperText="4–64" />
+            </Grid>
+            <Grid item xs={6} sm={4}>
+              <TextField label="LoRA alpha" type="number" size="small" fullWidth
+                value={trainingSettings.alpha}
+                onChange={(e) => { setTrainingSettingsSaved(false); setTrainingSettings({ ...trainingSettings, alpha: e.target.value }); }}
+                helperText="Usually matches rank" />
+            </Grid>
+            <Grid item xs={6} sm={4}>
+              <TextField label="Learning rate" type="number" size="small" fullWidth
+                value={trainingSettings.learning_rate}
+                onChange={(e) => { setTrainingSettingsSaved(false); setTrainingSettings({ ...trainingSettings, learning_rate: e.target.value }); }}
+                inputProps={{ step: '0.00001' }} />
+            </Grid>
+            <Grid item xs={6} sm={4}>
+              <TextField label="Steps (optional)" type="number" size="small" fullWidth
+                value={trainingSettings.steps}
+                onChange={(e) => { setTrainingSettingsSaved(false); setTrainingSettings({ ...trainingSettings, steps: e.target.value }); }}
+                helperText="Blank = auto from image count" />
+            </Grid>
+            <Grid item xs={12}>
+              <Button variant="outlined" size="small" onClick={handleSaveTrainingSettings}
+                disabled={savingTrainingSettings || training}>
+                {savingTrainingSettings ? 'Saving…' : 'Save training settings'}
+              </Button>
+              {trainingSettingsSaved && (
+                <Typography variant="caption" color="success.main" sx={{ ml: 2 }}>Saved</Typography>
+              )}
+            </Grid>
+          </Grid>
+
+          <Divider sx={{ my: 3 }} />
           <Typography variant="subtitle2" gutterBottom>Train the LoRA</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
             {refCount > 0
@@ -501,10 +615,17 @@ const CastMemberPage = () => {
                 : 'Drop in reference images above (or generate + approve some in the Generate Character tab) to enable training.'}
             {' '}Training incorporates the current set. Add new data (outfits, details) later and Train again to amend/evolve.
           </Typography>
-          <Button variant="contained" color="secondary" onClick={handleTrain}
-                  disabled={busy || training || !trainable}>
-            {training ? 'Training…' : hasPendingAmend ? 'Train LoRA (catch-up/amend)' : 'Train LoRA'}
-          </Button>
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
+            <Button variant="contained" color="secondary" onClick={handleTrain}
+                    disabled={busy || training || !trainable}>
+              {training ? 'Training…' : hasPendingAmend ? 'Train LoRA (catch-up/amend)' : 'Train LoRA'}
+            </Button>
+            {(training || trainingJob) && (
+              <Button variant="outlined" color="error" onClick={handleCancelTrain} disabled={busy}>
+                Cancel training
+              </Button>
+            )}
+          </Box>
           {subject.training_status && subject.training_status !== 'untrained' && (
             <Typography variant="caption" color="text.secondary" sx={{ ml: 2 }}>
               status: {trainingStatusLabel} {lastTrainedCount > 0 ? `(last real verified trained on ${lastTrainedCount} images)` : ''}

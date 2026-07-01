@@ -54,6 +54,24 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
         if smp.image_path and smp.image_path not in train_images:
             train_images.append(smp.image_path)
 
+    from backend.services.lora_pretrain_gate import validate_cast_training, build_training_captions
+    gate = validate_cast_training(s, train_images)
+    if not gate["pass"]:
+        msg = "; ".join(gate["failures"]) or "pre-train validation failed"
+        logger.warning("lora_trainer: pretrain gate failed for subject %s: %s", subject_id, msg)
+        if job_id:
+            try:
+                get_unified_progress().error_process(job_id, f"Dataset check failed: {msg}")
+            except Exception:
+                pass
+        return {"status": "failed", "error": msg, "used_images": train_images, "gate": gate}
+    if gate.get("warnings"):
+        logger.info("lora_trainer: pretrain warnings for subject %s: %s", subject_id, gate["warnings"])
+
+    image_captions = build_training_captions(s, [p for p in train_images if p])
+    from backend.services.lora_training_settings import settings_for_subject
+    train_settings = settings_for_subject(s)
+
     backend = os.environ.get("GUAARDVARK_LORA_BACKEND", "auto").lower()
     # Mock training is a TEST-ONLY backend. Per the NO-MOCKS-IN-PRODUCTION policy
     # (CLAUDE.md), a production process must NEVER fall back to it: a 27-byte fake
@@ -103,7 +121,8 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
             # VRAM math, so training claimed "exclusive" while ollama still owned
             # 6.7GB → CUDA OOM. Reclaim runs only AFTER we hold the slot.
             with gpu_session(JobKind.LORA_TRAIN, f"subject_{s.id}",
-                             evict_ollama=True, free_comfyui=True):
+                             evict_ollama=True, free_comfyui=True,
+                             vram_estimate_mb=12000, require_fit=True):
                 if job_id:
                     try:
                         get_unified_progress().update_process(job_id, 30, "GPU claimed, training epochs running (can take hours)")
@@ -116,6 +135,12 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
                         trigger_word=s.trigger_word,
                         ref_image_paths=train_images,
                         output_dir=_output_dir(),
+                        image_prompts=image_captions,
+                        resolution=train_settings["resolution"],
+                        rank=train_settings["rank"],
+                        alpha=train_settings["alpha"],
+                        learning_rate=train_settings["learning_rate"],
+                        steps=train_settings["steps"],
                     )
                     if isinstance(real_result, dict):
                         real_result.setdefault("used_images", train_images)
@@ -269,10 +294,39 @@ def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -
 
         db.session.commit()
 
+        smoke = None
+        if is_real_trained and s.lora_path:
+            from backend.services.lora_posttrain_smoke import run_lora_smoke_test
+            from backend.services.lora_training_settings import settings_for_subject
+            train_settings = settings_for_subject(s)
+            smoke = run_lora_smoke_test(
+                subject_id=subject_id,
+                lora_path=s.lora_path,
+                trigger_word=s.trigger_word or s.name,
+                resolution=train_settings.get("resolution", 768),
+            )
+            if smoke.get("ok"):
+                logger.info("lora smoke test passed for subject %s", subject_id)
+            else:
+                logger.warning(
+                    "lora smoke test did not pass for subject %s: %s",
+                    subject_id, smoke.get("error"),
+                )
+
         if job_id:
             try:
                 get_unified_progress().update_process(job_id, 95, "Finalizing LoRA")
-                get_unified_progress().complete_process(job_id, "LoRA training complete", additional_data={"lora_path": s.lora_path, "subject_id": subject_id})
+                additional = {
+                    "lora_path": s.lora_path,
+                    "subject_id": subject_id,
+                    "smoke_test": smoke,
+                }
+                msg = "LoRA training complete"
+                if smoke and smoke.get("ok"):
+                    msg += " (smoke render verified LoRA loads)"
+                elif smoke and smoke.get("error"):
+                    msg += f" (smoke render skipped: {smoke['error'][:120]})"
+                get_unified_progress().complete_process(job_id, msg, additional_data=additional)
             except Exception:
                 pass
     else:

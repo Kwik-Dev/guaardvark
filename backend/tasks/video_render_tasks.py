@@ -4,7 +4,8 @@ from pathlib import Path
 import requests
 
 from backend.models import db, Document
-from backend.services.job_operation_gate import get_gate, GpuBusyError
+from backend.services.gpu_resource_policy import gpu_session
+from backend.services.job_operation_gate import GpuBusyError
 from backend.services.job_types import JobKind
 from backend.utils.unified_progress_system import get_unified_progress, ProcessType
 from backend.services.video_timeline_render import render_timeline, VideoOverlayError
@@ -14,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 # video_editor plugin (Shotcut/MLT backend) — see plugins/video_editor/.
 _VIDEO_EDITOR_PLUGIN_URL = "http://127.0.0.1:8207"
+# Match music_video_tasks GPU gate cooldown retry delay.
+_GPU_COOLDOWN_RETRY_S = 12
 
 def create_video_render_tasks(celery_app):
     @celery_app.task(bind=True, name="video_render_tasks.render_timeline_task")
@@ -23,15 +26,14 @@ def create_video_render_tasks(celery_app):
         
         output_path = Path(output_path_str)
         render_id = output_path.stem
-        gate = get_gate()
 
         try:
-            # Claim the GPU exclusively for the ffmpeg render. Previously this
-            # only register_running()'d (visibility, no exclusivity); a second
-            # render or a training job could load the shared GPU concurrently.
-            # gpu_exclusive serializes on the in-memory gate and releases in its
-            # own finally. GpuBusyError -> reported below as a clean failure.
-            with gate.gpu_exclusive(JobKind.VIDEO_RENDER, render_id):
+            with gpu_session(
+                JobKind.VIDEO_RENDER,
+                render_id,
+                cross_process=True,
+                slot_id=f"video_render:editor_{render_id}",
+            ):
                 # Need to re-fetch documents inside the worker
                 from backend.app import create_app
                 from backend.api.video_overlay_api import _resolve_video_path
@@ -94,7 +96,16 @@ def create_video_render_tasks(celery_app):
 
         except GpuBusyError as e:
             logger.warning("render_timeline_task deferred — GPU busy: %s", e)
-            progress_system.error_process(job_id, f"Render deferred — GPU busy: {e}")
+            progress_system.update_process(
+                job_id,
+                0,
+                f"GPU busy — retrying in {_GPU_COOLDOWN_RETRY_S}s",
+            )
+            celery_app.send_task(
+                "video_render_tasks.render_timeline_task",
+                args=[payload, output_path_str, job_id],
+                countdown=_GPU_COOLDOWN_RETRY_S,
+            )
         except VideoOverlayError as e:
             logger.warning("render_timeline_task failed: %s", e)
             progress_system.error_process(job_id, f"Render failed: {e}")
@@ -115,12 +126,14 @@ def create_video_render_tasks(celery_app):
 
         output_path = Path(output_path_str)
         render_id = output_path.stem
-        gate = get_gate()
 
         try:
-            # Claim the GPU exclusively for the MLT/Shotcut render (same
-            # rationale as render_timeline_task — was register-only before).
-            with gate.gpu_exclusive(JobKind.VIDEO_RENDER, render_id):
+            with gpu_session(
+                JobKind.VIDEO_RENDER,
+                render_id,
+                cross_process=True,
+                slot_id=f"video_render:editor_{render_id}",
+            ):
                 from backend.app import create_app
                 from backend.api.video_overlay_api import _resolve_video_path
                 app = create_app()
@@ -206,7 +219,16 @@ def create_video_render_tasks(celery_app):
                     )
         except GpuBusyError as e:
             logger.warning("mlt_render_timeline_task deferred — GPU busy: %s", e)
-            progress_system.error_process(job_id, f"MLT render deferred — GPU busy: {e}")
+            progress_system.update_process(
+                job_id,
+                0,
+                f"GPU busy — retrying in {_GPU_COOLDOWN_RETRY_S}s",
+            )
+            celery_app.send_task(
+                "video_render_tasks.mlt_render_timeline_task",
+                args=[payload, output_path_str, job_id],
+                countdown=_GPU_COOLDOWN_RETRY_S,
+            )
         except Exception as e:
             logger.exception("mlt_render_timeline_task failed")
             progress_system.error_process(job_id, f"MLT render failed: {type(e).__name__}: {e}")

@@ -1440,28 +1440,102 @@ class ComfyUIVideoGenerator:
             logger.error(f"Failed to queue workflow in ComfyUI: {e}")
             return None
 
+    def _comfyui_alive(self) -> bool:
+        """Quick liveness probe — distinct from service_available cache."""
+        return self._check_comfyui_connection()
+
+    def _prompt_in_queue(self, prompt_id: str) -> Optional[bool]:
+        """Return True/False if prompt is running or pending; None if queue probe failed."""
+        try:
+            response = requests.get(f"{self.comfy_url}/queue", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            ids: set[str] = set()
+            for key in ("queue_running", "queue_pending"):
+                for entry in data.get(key) or []:
+                    if isinstance(entry, (list, tuple)) and len(entry) > 1:
+                        ids.add(str(entry[1]))
+                    elif isinstance(entry, dict) and entry.get("prompt_id"):
+                        ids.add(str(entry["prompt_id"]))
+            return prompt_id in ids
+        except Exception as e:
+            logger.debug(f"ComfyUI queue probe failed: {e}")
+            return None
+
+    @staticmethod
+    def _history_execution_error(entry: dict) -> Optional[str]:
+        """Extract a human error from a ComfyUI history entry, if any."""
+        status = entry.get("status") or {}
+        if status.get("completed") is True and status.get("status_str") != "error":
+            return None
+        messages = status.get("messages") or []
+        for msg in messages:
+            if not isinstance(msg, (list, tuple)) or len(msg) < 2:
+                continue
+            tag, payload = msg[0], msg[1]
+            if tag in ("execution_error", "execution_interrupted"):
+                if isinstance(payload, dict):
+                    text = payload.get("exception_message") or payload.get("message") or str(payload)
+                else:
+                    text = str(payload)
+                return f"ComfyUI {tag}: {text}"
+        if status.get("status_str") == "error":
+            return "ComfyUI reported execution error"
+        return None
+
     def _wait_for_completion(self, prompt_id: str, timeout: int = 600) -> Optional[dict]:
         start_time = time.time()
         last_log_time = start_time
+        poll_count = 0
+        orphan_grace_s = 30  # allow queue/history to populate after POST /prompt
 
         while time.time() - start_time < timeout:
+            poll_count += 1
+
+            if not self._comfyui_alive():
+                logger.error(
+                    "ComfyUI unreachable while waiting for %s — prompt orphaned",
+                    prompt_id,
+                )
+                return None
+
             try:
                 response = requests.get(
                     f"{self.comfy_url}/history/{prompt_id}",
-                    timeout=5
+                    timeout=5,
                 )
                 response.raise_for_status()
                 history = response.json()
 
                 if prompt_id in history:
-                    outputs = history[prompt_id].get('outputs', {})
-                    logger.info(f"Generation complete: {prompt_id}")
-                    return outputs
+                    entry = history[prompt_id]
+                    exec_err = self._history_execution_error(entry)
+                    if exec_err:
+                        logger.error("Generation failed for %s: %s", prompt_id, exec_err)
+                        return None
+                    outputs = entry.get("outputs") or {}
+                    if outputs:
+                        logger.info(f"Generation complete: {prompt_id}")
+                        return outputs
+
+                elapsed = time.time() - start_time
+                if elapsed > orphan_grace_s:
+                    in_queue = self._prompt_in_queue(prompt_id)
+                    if in_queue is False and prompt_id not in history:
+                        logger.error(
+                            "ComfyUI lost prompt %s (not in queue or history) — "
+                            "likely restarted mid-render",
+                            prompt_id,
+                        )
+                        return None
 
                 current_time = time.time()
                 if current_time - last_log_time > 10:
-                    elapsed = int(current_time - start_time)
-                    logger.info(f"Waiting for generation... ({elapsed}s elapsed)")
+                    logger.info(
+                        "Waiting for generation... (%ds elapsed, prompt_id=%s)",
+                        int(elapsed),
+                        prompt_id,
+                    )
                     last_log_time = current_time
 
             except Exception as e:

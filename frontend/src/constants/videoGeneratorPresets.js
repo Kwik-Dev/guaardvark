@@ -1,0 +1,166 @@
+export const QUALITY_PRESETS = {
+  fast: {
+    label: "⚡ Fast",
+    description: "Quick preview (10 steps)",
+    num_inference_steps: 10,
+    width: 720,
+    height: 480,
+  },
+  standard: {
+    label: "✨ Standard",
+    description: "Good quality (30 steps)",
+    num_inference_steps: 30,
+    width: 720,
+    height: 480,
+  },
+  high: {
+    label: "🎬 High Quality",
+    description: "Best details (40 steps)",
+    num_inference_steps: 40,
+    width: 720,
+    height: 480,
+  },
+  maximum: {
+    label: "🏆 Maximum",
+    description: "Maximum quality (50 steps)",
+    num_inference_steps: 50,
+    width: 720,
+    height: 480,
+  },
+};
+
+export const COGVIDEOX_DURATION_PRESETS = {
+  short: { label: "Short", description: "~3 seconds", duration_frames: 24, fps: 8 },
+  medium: { label: "Medium", description: "~4 seconds", duration_frames: 33, fps: 8 },
+  long: { label: "Long", description: "~6 seconds", duration_frames: 49, fps: 8 },
+};
+
+export const WAN_DURATION_PRESETS = {
+  short: { label: "Short", description: "~2 seconds", duration_frames: 33, fps: 16 },
+  medium: { label: "Medium", description: "~3 seconds", duration_frames: 49, fps: 16 },
+  long: { label: "Long", description: "~5 seconds", duration_frames: 81, fps: 16 },
+};
+
+export const MOTION_PRESETS = {
+  subtle: { label: "🌊 Subtle", description: "Gentle movement", motion_strength: 0.5 },
+  normal: { label: "🎯 Normal", description: "Balanced motion", motion_strength: 1.0 },
+  dynamic: { label: "💨 Dynamic", description: "More movement", motion_strength: 1.5 },
+  intense: { label: "🔥 Intense", description: "Maximum motion", motion_strength: 2.0 },
+};
+
+export const OUTPUT_QUALITY_TIERS = {
+  draft: { label: "Draft", description: "Raw model output — fastest, lowest polish", interpolation: 1, upscale: false },
+  standard: { label: "Standard", description: "2x FPS interpolation for smoother motion", interpolation: 2, upscale: false },
+  cinema: { label: "Cinema", description: "2x FPS + 2x upscale — recommended for final output", interpolation: 2, upscale: true },
+};
+
+export const KEYFRAME_MODEL_OPTIONS = {
+  "flux-schnell": { label: "FLUX.1-schnell", description: "Fast, beautiful stills (default)" },
+  "flux-dev-lora": { label: "FLUX-dev + LoRA", description: "Best identity lock for trained characters" },
+  sdxl: { label: "SDXL", description: "High-fidelity stills without LoRA" },
+  "sdxl-lora": { label: "SDXL + LoRA", description: "Legacy identity lock via character LoRAs" },
+};
+
+export const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
+
+export const MODEL_DEFAULT_GUIDANCE = { wan: 3.5, cogvideox: 6.0 };
+
+export const ASPECT_RATIO_PRESETS = {
+  "16:9": { label: "16:9", description: "Widescreen", ratio: 16 / 9 },
+  "9:16": { label: "9:16", description: "Portrait/Vertical", ratio: 9 / 16 },
+  "1:1": { label: "1:1", description: "Square", ratio: 1 },
+  "4:3": { label: "4:3", description: "Standard", ratio: 4 / 3 },
+  "3:2": { label: "3:2", description: "Classic", ratio: 3 / 2 },
+};
+
+export const PROMPT_STYLES = {
+  cinematic: { label: "Cinematic", description: "Film-quality lighting and motion" },
+  realistic: { label: "Realistic", description: "Photorealistic detail" },
+  artistic: { label: "Artistic", description: "Stylized and expressive" },
+  anime: { label: "Anime (Japanese)", description: "Japanese cel-shaded animation" },
+  "3d_animation": { label: "3D Animation (Pixar-style)", description: "Polished CGI, expressive characters" },
+  stop_motion: { label: "Stop-motion / Claymation", description: "Tactile clay, handcrafted feel" },
+  hand_drawn: { label: "Hand-drawn 2D (Ghibli-style)", description: "Painterly watercolor backgrounds" },
+  western_cartoon: { label: "Western Cartoon", description: "Bold outlines, flat shading, snappy motion" },
+  none: { label: "None", description: "No enhancement" },
+};
+
+export const VIDEO_SIZE_PRESETS = {
+  small: { label: "Small", description: "512px (faster)", baseSize: 512 },
+  medium: { label: "Medium", description: "576px", baseSize: 576 },
+  large: { label: "Large", description: "720px (CogVideoX native)", baseSize: 720 },
+  hd: { label: "HD", description: "1280px (CPU offload, slower)", baseSize: 1280 },
+  fullhd: { label: "Full HD", description: "1920px (CPU offload, much slower)", baseSize: 1920 },
+};
+
+export const MODEL_OPTIONS = {
+  "wan22-5b": {
+    label: "Wan 2.2 5B TI2V (Recommended)",
+    description: "Fast 5s clips, fits 16GB — no offload. Text + image to video.",
+    type: "wan",
+    maxFrames: 121,
+    resolution: [1280, 704],
+    defaultSteps: 20,
+    supportsT2V: true,
+    supportsI2V: true,
+    dimensionAlignment: 16,
+  },
+  "wan22-14b": {
+    label: "Wan 2.2 14B (GGUF Q5)",
+    description: "Best quality, 5s videos (~11GB VRAM)",
+    type: "wan",
+    maxFrames: 81,
+    resolution: [832, 480],
+    defaultSteps: 25,
+    supportsT2V: true,
+    supportsI2V: false,
+    dimensionAlignment: 16,
+  },
+  "wan22-14b-i2v": {
+    label: "Wan 2.2 14B I2V (GGUF Q5)",
+    description: "Top-tier image-to-video, 5s clips (~11GB VRAM)",
+    type: "wan",
+    maxFrames: 81,
+    resolution: [832, 480],
+    defaultSteps: 25,
+    supportsT2V: false,
+    supportsI2V: true,
+    dimensionAlignment: 16,
+  },
+  "cogvideox-5b": {
+    label: "CogVideoX 5B",
+    description: "6s videos, in-process diffusers — no ComfyUI needed (~16GB VRAM)",
+    type: "cogvideox",
+    maxFrames: 49,
+    resolution: [720, 480],
+    defaultSteps: 50,
+    supportsT2V: true,
+    supportsI2V: false,
+    dimensionAlignment: 16,
+  },
+  "cogvideox-5b-i2v": {
+    label: "CogVideoX 5B I2V",
+    description: "Image-to-video, 6s (~16GB VRAM)",
+    type: "cogvideox",
+    maxFrames: 49,
+    resolution: [720, 480],
+    defaultSteps: 50,
+    supportsT2V: false,
+    supportsI2V: true,
+    dimensionAlignment: 16,
+  },
+};
+
+export const DEFAULT_T2V_MODEL = "wan22-5b";
+export const DEFAULT_I2V_MODEL = "wan22-5b";
+
+export const isCogVideoXModel = (model) => MODEL_OPTIONS[model]?.type === "cogvideox";
+export const isWanModel = (model) => MODEL_OPTIONS[model]?.type === "wan";
+
+export const snapDimensions = (width, height, model) => {
+  const align = MODEL_OPTIONS[model]?.dimensionAlignment ?? 16;
+  return {
+    width: Math.round(width / align) * align,
+    height: Math.round(height / align) * align,
+  };
+};

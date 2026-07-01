@@ -34,18 +34,22 @@ import {
   regenerateMusicVideoPlan,
   replanMusicVideo,
   generateMusicVideoStoryboards,
+  pollMusicVideoStoryboards,
   regenMusicVideoStoryboard,
   cancelMusicVideo,
 } from "../api/musicVideoService";
 import { getAllPluginStatus } from "../api/pluginsService";
 import { getAvailableModels } from "../api/modelService";
+import GpuGateBanner from "../components/common/GpuGateBanner";
+import useJobsGate from "../hooks/useJobsGate";
+import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 
 const POLL_MS = 5000;
 const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
 
 // Local presentational + interactive component for the cut plan + Director prompts.
 // Keeps the main page component from exploding in size.
-function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, comfyReady = true, comfyDisabled = false, comfyInfo = null }) {
+function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, comfyReady = true, comfyDisabled = false, comfyInfo = null, gpuBlocked = false }) {
   const cutPlan = detail.cut_plan || [];
   const clips = detail.clips || [];
   const isEditable = detail.current_stage === "awaiting_approval";
@@ -321,7 +325,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
                   advances {r.section} (energy {r.energy.toFixed(1)}) of the visual treatment arc
                 </Typography>
                 {isEditable && onRegenStoryboard && (
-                  <Button size="small" onClick={() => handleRegenStoryboard(r.index)} disabled={busy || !comfyReady} sx={{ fontSize: "0.65rem", py: 0 }}>
+                  <Button size="small" onClick={() => handleRegenStoryboard(r.index)} disabled={busy || gpuBlocked || !comfyReady} sx={{ fontSize: "0.65rem", py: 0 }}>
                     Regen
                   </Button>
                 )}
@@ -451,7 +455,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
                           size="small"
                           variant="outlined"
                           onClick={() => handleRegenStoryboard(row.index)}
-                          disabled={busy || !comfyReady}
+                          disabled={busy || gpuBlocked || !comfyReady}
                           sx={{ mt: 0.5 }}
                         >
                           Regen this storyboard
@@ -493,7 +497,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
                 size="small"
                 variant="contained"
                 color="secondary"
-                disabled={busy || comfyDisabled}
+                disabled={busy || gpuBlocked || comfyDisabled}
                 onClick={onGenerateStoryboards}
               >
                 Generate Storyboards (thumbnails first)
@@ -553,7 +557,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
             <Button
               size="small"
               variant="contained"
-              disabled={busy}
+              disabled={busy || gpuBlocked}
               onClick={handleRegen}
             >
               Regenerate
@@ -587,6 +591,8 @@ const stageColor = (stage, status) => {
 };
 
 const MusicVideoPage = () => {
+  const { gpuBlocked, blockReason } = useJobsGate();
+  const { getProcessesByType, activeProcesses } = useUnifiedProgress();
   const [videos, setVideos] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -744,6 +750,21 @@ const MusicVideoPage = () => {
   useEffect(() => {
     refreshDetail(selectedId);
   }, [selectedId, refreshDetail]);
+
+  const activeClipStep = useMemo(() => {
+    if (!detail || detail.current_stage !== "generating") return null;
+    const live = (getProcessesByType("video_render") || []).filter((p) => {
+      const ad = p.additional_data || {};
+      const jobId = String(p.job_id || p.id || "");
+      return (
+        String(ad.music_video_id) === String(detail.id)
+        || ad.kind === "music_video_clip"
+        || jobId.startsWith(`mv_${detail.id}_`)
+      );
+    });
+    if (!live.length) return null;
+    return live.reduce((a, b) => ((b.timestamp || 0) > (a.timestamp || 0) ? b : a));
+  }, [detail, getProcessesByType, activeProcesses]);
 
   const handleCreate = async () => {
     setError(null);
@@ -1018,8 +1039,6 @@ const MusicVideoPage = () => {
                         const checked = e.target.checked;
                         setUseLoraConsistency(checked);
                         if (checked) {
-                          // FLUX-dev + LoRA is the strongest identity lock (verified on
-                          // trained FLUX character LoRAs). SDXL+LoRA remains selectable.
                           setKeyframeModel("flux-dev-lora");
                         } else if (keyframeModel === "sdxl-lora" || keyframeModel === "flux-dev-lora") {
                           setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
@@ -1094,19 +1113,37 @@ const MusicVideoPage = () => {
                     label="Keyframe / Storyboard Image Model"
                     value={keyframeModel}
                     onChange={(e) => setKeyframeModel(e.target.value)}
-                    helperText="FLUX-dev + LoRA = strongest identity lock for trained characters; SDXL+LoRA is the legacy lock; FLUX-schnell for beautiful no-LoRA stills"
+                    helperText={
+                      useLoraConsistency
+                        ? "FLUX-dev + LoRA (or SDXL) for identity lock with trained characters."
+                        : "FLUX-schnell for fast beautiful stills; SDXL for higher-fidelity stills without LoRA."
+                    }
                     sx={{ mt: 1 }}
                   >
-                    <MenuItem value="flux-dev-lora">FLUX-dev + LoRA (best identity lock for trained characters)</MenuItem>
-                    <MenuItem value="flux-schnell">FLUX.1-schnell (fast, beautiful stills) — default</MenuItem>
-                    <MenuItem value="sdxl">SDXL (no LoRA)</MenuItem>
-                    <MenuItem value="sdxl-lora">SDXL + LoRAs (legacy identity lock)</MenuItem>
+                    {[
+                      ...(useLoraConsistency 
+                        ? [
+                            { value: "flux-dev-lora", label: "FLUX-dev + LoRA (recommended identity lock)" },
+                            { value: "sdxl-lora", label: "SDXL + LoRA (identity lock for SDXL characters)" },
+                            { value: "sdxl", label: "SDXL (no LoRA)" }
+                          ]
+                        : [
+                            { value: "flux-schnell", label: "FLUX.1-schnell (fast, beautiful stills) — default" },
+                            { value: "flux-dev-lora", label: "FLUX-dev + LoRA" },
+                            { value: "sdxl", label: "SDXL (no LoRA)" },
+                            { value: "sdxl-lora", label: "SDXL + LoRAs" }
+                          ]
+                      )
+                    ].map(opt => (
+                      <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
+                    ))}
                   </TextField>
                 </Stack>
               </Collapse>
 
               {error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
-              <Button variant="contained" onClick={handleCreate} disabled={busy}>
+              <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
+              <Button variant="contained" onClick={handleCreate} disabled={busy || gpuBlocked}>
                 {busy ? <CircularProgress size={20} /> : (hasActiveGeneration ? "Add another to queue" : "Create & Analyze")}
               </Button>
               {hasActiveGeneration && (
@@ -1212,6 +1249,7 @@ const MusicVideoPage = () => {
                 <PlanViewer
                   detail={detail}
                   busy={busy}
+                  gpuBlocked={gpuBlocked}
                   models={models}
                   comfyReady={comfyReady}
                   comfyDisabled={comfyDisabled}
@@ -1239,8 +1277,13 @@ const MusicVideoPage = () => {
                   onGenerateStoryboards={async () => {
                     try {
                       setBusy(true);
-                      await generateMusicVideoStoryboards(detail.id);
-                      await refreshDetail(detail.id);
+                      const dispatched = await generateMusicVideoStoryboards(detail.id);
+                      if (dispatched?.task_id || dispatched?.status === "dispatched") {
+                        const updated = await pollMusicVideoStoryboards(detail.id);
+                        setDetail(updated);
+                      } else {
+                        await refreshDetail(detail.id);
+                      }
                     } catch (e) {
                       setError(e?.response?.data?.error || e.message || "Failed to generate storyboards");
                     } finally {
@@ -1295,7 +1338,8 @@ const MusicVideoPage = () => {
                     <br />Estimated full video time after storyboards: <b>{detail.estimate.estimated_human}</b>.
                   </Alert>
                   <Box>
-                    <Button variant="contained" color="warning" onClick={handleApprove} disabled={busy}>
+                    <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
+                    <Button variant="contained" color="warning" onClick={handleApprove} disabled={busy || gpuBlocked}>
                       {busy ? <CircularProgress size={20} /> : "Approve & Generate Video"}
                     </Button>
                   </Box>
@@ -1311,6 +1355,18 @@ const MusicVideoPage = () => {
                     variant={detail.clip_count ? "determinate" : "indeterminate"}
                     value={detail.clip_count ? (detail.clips_done / detail.clip_count) * 100 : 0}
                   />
+                  {activeClipStep && (
+                    <Box>
+                      <LinearProgress
+                        variant={activeClipStep.progress != null ? "determinate" : "indeterminate"}
+                        value={activeClipStep.progress || 0}
+                        sx={{ height: 6, borderRadius: 1 }}
+                      />
+                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                        {activeClipStep.message || "Rendering current clip…"}
+                      </Typography>
+                    </Box>
+                  )}
                   <Button
                     size="small"
                     variant="outlined"

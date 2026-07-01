@@ -114,6 +114,9 @@ def _mv_dict(mv: MusicVideo) -> dict:
     # The UI (PlanViewer) can show a warning badge so the operator knows the arc is not fully active.
     if isinstance(s, dict) and s.get("director_diagnostics"):
         out["director_diagnostics"] = s.get("director_diagnostics")
+    out["storyboard_generating"] = bool(s.get("storyboard_generating"))
+    if s.get("storyboard_error"):
+        out["storyboard_error"] = s.get("storyboard_error")
     return out
 
 
@@ -358,6 +361,8 @@ def cancel_music_video(mv_id):
     if mv.current_stage not in cancellable:
         return jsonify({"error": f"Cannot cancel at stage '{mv.current_stage}'"}), 409
 
+    was_generating = mv.current_stage == "generating"
+
     mv.status = "cancelled"
     # Also advance the stage to a terminal "cancelled" value so UI (which keys
     # heavily on current_stage for progress/labels/active filters) and resume
@@ -375,6 +380,22 @@ def cancel_music_video(mv_id):
             c["status"] = "cancelled"
     mv.clips = clips
     db.session.commit()
+
+    if was_generating:
+        try:
+            from backend.services.video_generation_router import get_video_router
+            interrupted = get_video_router().interrupt()
+            log.info(
+                "Music video %s cancel: ComfyUI interrupt sent (ack=%s)",
+                mv_id,
+                interrupted,
+            )
+        except Exception:
+            log.warning(
+                "Music video %s cancel: ComfyUI interrupt failed",
+                mv_id,
+                exc_info=True,
+            )
 
     log.info(f"Music video {mv_id} cancelled by user at stage {mv.current_stage}")
     return jsonify(_mv_dict(mv))
@@ -396,113 +417,36 @@ def get_mv_storyboard(mv_id, idx):
 
 @bp.post("/<int:mv_id>/generate-storyboards")
 def generate_storyboards(mv_id):
-    """Generate (or re-generate) the storyboard keyframes for all cuts using the configured keyframe model.
-    This is the "thumbnails first" step: produces the stills for review/individual regen before the expensive i2v.
-    Only allowed while the plan is approved but video not yet started.
-    """
+    """Dispatch async storyboard keyframe generation for all cuts (thumbnails-first review)."""
     mv = db.session.get(MusicVideo, mv_id)
     if mv is None:
         return jsonify({"error": "not_found"}), 404
     if mv.current_stage != "awaiting_approval":
         return jsonify({"error": f"storyboard generation only from awaiting_approval (plan approved), current={mv.current_stage}"}), 409
 
-    from backend.services.plugin_bridge import ensure_plugins_for_stage
-    ensure_plugins_for_stage("music-video", "storyboard")
+    body = request.get_json(silent=True) or {}
+    force = (
+        request.args.get("force", "").lower() in ("1", "true", "yes")
+        or bool(body.get("force"))
+    )
 
-    # Signal the GPU/memory orchestrator that we need image-gen capacity
-    # (SD/FLUX pipeline). This helps the coordinator/orchestrator track
-    # competing demands (Ollama, other image plugins, etc.) and will become
-    # the hook for automatic plugin toggling once the full orchestrator logic
-    # is wired for music-video storyboard paths.
-    try:
-        from backend.services.plugin_bridge import prepare_plugins_for_route
-        # Use the working prepare path (with persist=False semantics inside ensure for auto).
-        # This wires the sub-intent for storyboard-only needs (comfyui phase) without dead method.
-        prepare_plugins_for_route("/music-video/storyboard")
-    except Exception:
-        logger.warning("Failed to prepare plugins for music-video storyboard (non-fatal)", exc_info=True)  # noqa: BLE001
+    settings = dict(mv.settings_json or {})
+    if settings.get("storyboard_generating"):
+        return jsonify({"error": "storyboard generation already in progress"}), 409
 
-    s = _settings_for_mv(mv)  # small helper below or inline
-    from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-    from backend.tasks.music_video_tasks import _keyframe_loras_and_prompt, _keyframe_lora_strength, _clip_dir
-    import copy
-
-    clips = copy.deepcopy(mv.clips or [])
-    out_dir = None
-    try:
-        out_dir = _clip_dir(mv.id)
-    except Exception:
-        from pathlib import Path
-        out_dir = Path("data/outputs/videos") / f"music_video_{mv_id}" / "clips"  # fallback; non-fatal per bare-excepts audit (infra/security)
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Media team audit (P1-5/P3-12): use the shared _keyframe helper (resolves explicit
-    # loras + subject cast + prepends trigger words) + clamp strength + basic preflight.
-    # This threads LoRA identity into storyboard keyframes (flux-dev/schnell/SDXL path)
-    # the same way the clip i2v path does, so review thumbnails match the final render.
-    # Strength is model-aware via the shared helper (0.9 flux-dev / 0.25 sdxl).
-    kf_lora_strength = _keyframe_lora_strength(s)
-    try:
-        vg = get_video_generator()
-        if not getattr(vg, "service_available", True):
-            vg.service_available = getattr(vg, "_check_comfyui_connection", lambda: False)()
-    except Exception:
-        pass
-
-    try:
-        # vram_estimate_mb makes storyboard gen visible to the GPU orchestrator budget.
-        with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboards_{mv_id}", evict_ollama=True,
-                         vram_estimate_mb=10000):
-            for c in clips:
-                has_existing = bool(c.get("storyboard_path") and os.path.exists(c.get("storyboard_path")))
-                if has_existing and not force:
-                    continue  # already have one (classic "missing only" behavior)
-                prompt = c.get("prompt") or mv.style_prompt
-                idx = c["index"]
-                still_path = str(out_dir / f"storyboard_{idx}.png")
-                try:
-                    # Proper LoRA+trigger resolve for cast consistency in review thumbnails.
-                    kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
-                    # Comfy preflight for LoRAs (existence) — fail soft per cut so one bad
-                    # LoRA doesn't kill the whole storyboard batch.
-                    if kf_loras:
-                        from backend.services.comfyui_image_generator import ComfyUIImageGenerator as _CIG
-                        _CIG()._preflight_loras(kf_loras)  # best-effort; logs warnings
-                    gen = ComfyUIImageGenerator(
-                        lora_strength=kf_lora_strength,
-                        flux_unet=s.get("flux_unet"),
-                        flux_t5=s.get("flux_t5"),
-                        flux_clip=s.get("flux_clip"),
-                        flux_vae=s.get("flux_vae"),
-                    )
-                    gen.generate_image(
-                        prompt=kf_prompt,
-                        loras=kf_loras,
-                        output_path=still_path,
-                        width=s.get("still_width", 1024),
-                        height=s.get("still_height", 576),
-                        seed=2000 + idx,
-                        steps=s.get("keyframe_steps") or 20,
-                        model=s.get("keyframe_model"),
-                    )
-                    c["storyboard_path"] = still_path
-                    c["storyboard_variation"] = None
-                except RuntimeError as e:
-                    # Workflow produced no image (or other Comfy runtime failure).
-                    # Log with prompt_id if present in the message so operator can
-                    # find it in ComfyUI UI. Do not set path for this cut.
-                    log.error("generate-storyboards ComfyUI failure for mv %s cut %s: %s", mv_id, idx, e)
-                except Exception as e:
-                    log.warning(f"storyboard still failed for mv {mv_id} cut {idx}: {e}")
-            # Clean up ComfyUI resident models (e.g. FLUX) so the subsequent i2v
-            # phase has maximum headroom, mirroring the pattern in _generate_one_clip.
-            free_comfyui_vram()
-    except GpuBusyError as e:
-        return jsonify({"error": f"GPU busy, cannot generate storyboards right now: {e}"}), 503
-
-    mv.clips = clips
+    settings["storyboard_generating"] = True
+    settings.pop("storyboard_error", None)
+    mv.settings_json = settings
     db.session.commit()
-    return jsonify(_mv_dict(mv))
+
+    from backend.celery_app import celery
+    task = celery.send_task("music_video.run_storyboard_generator", args=[mv_id, force])
+    return jsonify({
+        "task_id": task.id,
+        "mv_id": mv_id,
+        "status": "dispatched",
+        **_mv_dict(mv),
+    }), 202
 
 
 @bp.post("/<int:mv_id>/regen-storyboard/<int:idx>")

@@ -130,8 +130,13 @@ export const approveSamples = async (id, sampleIds, approved = true) => {
 };
 
 // Kick off LoRA training for this subject (ASYNC — returns {task_id}).
-export const trainSubject = async (id) => {
-  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/train`);
+export const trainSubject = async (id, options = {}) => {
+  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/train`, options);
+  return response.data;
+};
+
+export const cancelTrainSubject = async (id) => {
+  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/train/cancel`);
   return response.data;
 };
 
@@ -157,6 +162,7 @@ const productionService = {
   approveSamples,
   deleteSample,
   trainSubject,
+  cancelTrainSubject,
 };
 
 export default productionService;

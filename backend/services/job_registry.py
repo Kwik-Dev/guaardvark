@@ -251,6 +251,70 @@ def adapt_unified_progress(event: dict[str, Any]) -> Job:
     )
 
 
+_MUSIC_VIDEO_STAGE_STATUS = {
+    "draft": JobStatus.PENDING,
+    "analyzing": JobStatus.RUNNING,
+    "awaiting_approval": JobStatus.PAUSED,
+    "generating": JobStatus.RUNNING,
+    "assembling": JobStatus.RUNNING,
+    "complete": JobStatus.COMPLETED,
+    "cancelled": JobStatus.CANCELLED,
+    "failed": JobStatus.FAILED,
+}
+
+
+def _music_video_job_status(mv) -> JobStatus:
+    st = (getattr(mv, "status", None) or "").lower()
+    if st.startswith("cancelled") or getattr(mv, "current_stage", None) == "cancelled":
+        return JobStatus.CANCELLED
+    if st.startswith("failed") or getattr(mv, "current_stage", None) == "failed":
+        return JobStatus.FAILED
+    return _MUSIC_VIDEO_STAGE_STATUS.get(
+        getattr(mv, "current_stage", None) or "draft",
+        JobStatus.PENDING,
+    )
+
+
+def adapt_music_video(mv) -> Job:
+    """MusicVideo → Job for the Jobs / Activity pages."""
+    clips = mv.clips or []
+    clip_count = len(clips)
+    clips_done = sum(1 for c in clips if c.get("status") == "done")
+    status = _music_video_job_status(mv)
+    progress = None
+    if clip_count > 0 and status.is_active:
+        progress = round(clips_done / clip_count * 100, 1)
+
+    label = f"MusicVideo: {mv.name or f'#{mv.id}'}"
+    if mv.current_stage == "generating" and clip_count:
+        label = f"MusicVideo: {mv.name} ({clips_done}/{clip_count} clips)"
+
+    return Job(
+        id=f"music_video:{mv.id}",
+        kind=JobKind.MUSIC_VIDEO,
+        native_id=mv.id,
+        status=status,
+        label=label,
+        progress=progress,
+        started_at=getattr(mv, "created_at", None),
+        finished_at=getattr(mv, "updated_at", None) if status.is_terminal else None,
+        duration_s=_compute_duration(
+            getattr(mv, "created_at", None),
+            getattr(mv, "updated_at", None) if status.is_terminal else None,
+        ),
+        cancellable=mv.current_stage in ("generating", "assembling", "awaiting_approval"),
+        error_message=(mv.error_blob or {}).get("message") if isinstance(mv.error_blob, dict) else None,
+        metadata={
+            "music_video_id": mv.id,
+            "current_stage": mv.current_stage,
+            "status": mv.status,
+            "clip_count": clip_count,
+            "clips_done": clips_done,
+            "output_document_id": mv.output_document_id,
+        },
+    )
+
+
 def adapt_video_gen(status) -> Job:
     """BatchVideoStatus (or dict) → Job for the Jobs page."""
     if isinstance(status, dict):
@@ -377,6 +441,11 @@ def _load_video_gen(batch_id):
     return get_batch_video_generator().get_batch_status(str(batch_id))
 
 
+def _load_music_video(native_id):
+    from backend.models import MusicVideo, db
+    return db.session.get(MusicVideo, int(native_id))
+
+
 # Per-kind (loader, adapter) pairs. Add a new kind here + a single adapter
 # function and the rest of the system (API resource, socket emitter,
 # Tasks/Jobs page) picks it up automatically.
@@ -390,6 +459,7 @@ REGISTRY: dict[JobKind, tuple[LoaderFn, AdapterFn]] = {
     JobKind.DEMO: (_load_demo_step, adapt_demo_step),
     JobKind.UNIFIED_PROGRESS: (_load_unified_progress, adapt_unified_progress),
     JobKind.VIDEO_GEN: (_load_video_gen, adapt_video_gen),
+    JobKind.MUSIC_VIDEO: (_load_music_video, adapt_music_video),
 }
 
 

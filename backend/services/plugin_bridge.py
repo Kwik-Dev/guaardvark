@@ -25,10 +25,13 @@ sidecar precisely so the backend never fork()s after importing torch.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -212,8 +215,51 @@ def _is_running(plugin_id: str) -> bool:
     return _plugin_status(plugin_id) == PluginStatus.RUNNING
 
 
+def _count_active_video_render_jobs(max_age_s: float = 1800.0) -> int:
+    """Non-terminal video_render progress jobs updated within max_age_s."""
+    try:
+        from backend.config import config
+
+        progress_dir = Path(config.OUTPUT_DIR) / ".progress_jobs"
+        if not progress_dir.is_dir():
+            return 0
+        now = datetime.now(timezone.utc)
+        terminal = frozenset({"complete", "error", "cancelled", "end"})
+        active = 0
+        for meta_path in progress_dir.glob("*/metadata.json"):
+            try:
+                data = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if data.get("process_type") != "video_render":
+                continue
+            if data.get("status") in terminal or data.get("is_complete"):
+                continue
+            last_raw = data.get("last_update_utc") or data.get("last_update")
+            if last_raw:
+                try:
+                    last_dt = datetime.fromisoformat(str(last_raw).replace("Z", "+00:00"))
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    age_s = (now - last_dt).total_seconds()
+                    if age_s > max_age_s:
+                        continue
+                except ValueError:
+                    pass
+            active += 1
+        return active
+    except Exception as e:
+        logger.debug("active video_render scan failed: %s", e)
+        return 0
+
+
 def _stop_blocked_reason(plugin_id: str) -> Optional[str]:
     """Return a human reason if an active job blocks stopping this plugin."""
+    if plugin_id == "comfyui":
+        n = _count_active_video_render_jobs()
+        if n > 0:
+            return f"{n} active video render job(s) in progress"
+
     try:
         from backend.services.job_operation_gate import get_gate
         from backend.services.job_types import JobKind
@@ -435,10 +481,20 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
         # so manual toggles in PluginsPage are not overridden.
         persist = not (route.startswith("/music-video") or route.startswith("/film-crew"))
         ok, detail = _try_start_plugin(plugin_id, persist_user_pref=persist)
-        if ok:
+        if ok and _is_running(plugin_id):
             with _state_lock:
                 _orchestrator_claims.add(plugin_id)
             actions.append({"action": "start", "plugin_id": plugin_id, "detail": detail})
+        elif ok:
+            actions.append({
+                "action": "start_unconfirmed",
+                "plugin_id": plugin_id,
+                "error": detail or "start ack but plugin not running",
+            })
+            logger.warning(
+                "plugin_bridge: route %s start ack for %s but plugin not running",
+                route, plugin_id,
+            )
         else:
             actions.append({"action": "start_failed", "plugin_id": plugin_id, "error": detail})
             logger.warning("plugin_bridge: route %s could not start %s: %s", route, plugin_id, detail)
@@ -454,9 +510,19 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
         "plugin_bridge: route %s → %d actions, claims=%s",
         route, len(actions), result.get("orchestrator_claims"),
     )
-    # P1 phase map integration: if route maps to a known context/stage (e.g. subpath),
-    # ensure phased plugins (non-persist for auto). Full wiring in PipelineService later.
-    if "/music-video/storyboard" in route or route == "/music-video/storyboard":
-        ensure_plugins_for_stage("music-video", "storyboard")
+    # P1 phase map integration: ensure stage-critical plugins (with retry/backoff
+    # inside _try_start_plugin) beyond the coarse ROUTE_PLUGIN_MAP list.
+    norm_route = _normalize_route(route)
+    try:
+        if "/music-video/storyboard" in route or route == "/music-video/storyboard":
+            ensure_plugins_for_stage("music-video", "storyboard")
+        elif norm_route.startswith("/music-video"):
+            ensure_plugins_for_stage("music-video", "generating")
+        elif norm_route.startswith("/film-crew"):
+            ensure_plugins_for_stage("film-crew", "rendering")
+        elif norm_route == "/video":
+            ensure_plugins_for_stage("music-video", "generating")
+    except Exception as exc:
+        logger.warning("plugin_bridge: stage ensure failed for %s: %s", route, exc)
     _emit_plugins_status(f"route:{route}")
     return result

@@ -8,12 +8,14 @@ lock-aware, protected-file-aware, and backed by a diff plus backup.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -511,6 +513,43 @@ def _restore_from_backup(file_path: Path, original_content: str, context: str) -
             500,
         ) from restore_err
 
+def _find_fuzzy_match(content: str, old_text: str, threshold: float = 0.85) -> Optional[str]:
+    """Find a unique fuzzy match for old_text in content."""
+    if len(old_text.strip()) < 15:
+        return None  # Too short for safe fuzzy matching
+        
+    content_lines = content.splitlines()
+    old_lines = old_text.splitlines()
+    
+    if not old_lines or not content_lines:
+        return None
+        
+    target_len = len(old_lines)
+    window_sizes = [target_len - 1, target_len, target_len + 1, target_len + 2]
+    window_sizes = [w for w in window_sizes if w > 0]
+    
+    matches = []
+    
+    for w in window_sizes:
+        for i in range(len(content_lines) - w + 1):
+            window_text = "\n".join(content_lines[i:i+w])
+            ratio = difflib.SequenceMatcher(None, window_text, old_text).ratio()
+            if ratio >= threshold:
+                matches.append((ratio, window_text))
+                
+    if not matches:
+        return None
+        
+    max_ratio = max(m[0] for m in matches)
+    # Filter matches that are very close to max_ratio
+    best_matches = set(m[1] for m in matches if max_ratio - m[0] < 0.01)
+    
+    if len(best_matches) > 1:
+        # Not unique
+        return None
+        
+    return best_matches.pop()
+
 
 def apply_exact_replacement(
     path: str,
@@ -522,8 +561,17 @@ def apply_exact_replacement(
     dry_run: bool = False,
     allow_external: bool = False,
     max_bytes: int = 10 * 1024 * 1024,
+    expected_hash: Optional[str] = None,
+    expected_mtime: Optional[float] = None,
 ) -> GuardedEditResult:
-    """Apply one exact replacement after all guarded-code checks."""
+    """Apply one exact replacement after all guarded-code checks.
+
+    Optional drift protection:
+    - expected_hash: sha256 of the content the caller read. If the on-disk
+      content no longer matches, raise FILE_DRIFT_DETECTED.
+    - expected_mtime: mtime (os.stat().st_mtime) at read time.
+    These are powerful for agentic code editing in concurrent/swarm scenarios.
+    """
     if require_unlocked and is_codebase_locked():
         raise GuardedCodeError("Codebase is locked. Unlock it before applying code changes.", "CODEBASE_LOCKED", 423)
     if old_text is None:
@@ -551,6 +599,36 @@ def apply_exact_replacement(
             raise GuardedCodeError(lifecycle_reason, "READONLY_LIFECYCLE", 403)
 
     current_content = _read_text_file(file_path)
+
+    # Drift guard: if the caller provided a hash or mtime from when it read
+    # the file, verify that the on-disk version has not changed since.
+    # This prevents "read then clobber" races when multiple agents or the
+    # user edit the same file.
+    if expected_hash is not None:
+        current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+        if current_hash != expected_hash:
+            raise GuardedCodeError(
+                "File content has changed since it was read (drift detected). "
+                "Re-read the current content with read_code (or equivalent) before retrying the edit. "
+                "This guard protects against concurrent edits in chat, self-improvement, or swarm scenarios.",
+                "FILE_DRIFT_DETECTED",
+                409,
+            )
+
+    if expected_mtime is not None:
+        try:
+            current_mtime = file_path.stat().st_mtime
+            if abs(current_mtime - expected_mtime) > 0.0001:  # tolerate floating point
+                raise GuardedCodeError(
+                    "File mtime has changed since it was read (drift detected). "
+                    "Re-read before editing.",
+                    "FILE_DRIFT_DETECTED",
+                    409,
+                )
+        except Exception:
+            # If we can't stat, don't block the edit — the hash guard is stronger anyway.
+            pass
+
     occurrence_count = current_content.count(old_text)
 
     using_normalized = False
@@ -564,6 +642,15 @@ def apply_exact_replacement(
             current_content = normalized_content
             old_text = normalized_old
             new_text = new_text.replace("\r\n", "\n")
+
+    if occurrence_count == 0:
+        # Final fallback: Fuzzy matching
+        fuzzy_match = _find_fuzzy_match(current_content, old_text)
+        if fuzzy_match:
+            # We found a unique block of code that is very similar to old_text
+            old_text = fuzzy_match
+            occurrence_count = current_content.count(old_text)
+            logger.info(f"Fuzzy match successful. Applying edit via fuzzy block.")
 
     if occurrence_count == 0:
         raise GuardedCodeError("Exact text was not found; edit was not applied.", "TEXT_NOT_FOUND", 409)

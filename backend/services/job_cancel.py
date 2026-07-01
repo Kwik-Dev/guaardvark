@@ -189,6 +189,58 @@ def _cancel_batch_csv(native_id: str) -> bool:
     return False
 
 
+def _cancel_music_video(native_id: str) -> bool:
+    """Cancel a music-video pipeline run (mirrors music_video_api.cancel)."""
+    try:
+        from backend.models import MusicVideo, db
+    except ImportError:
+        return False
+
+    mv = db.session.get(MusicVideo, int(native_id))
+    if mv is None:
+        return False
+
+    cancellable = ("generating", "assembling", "awaiting_approval")
+    if mv.current_stage not in cancellable:
+        return mv.current_stage in ("complete", "cancelled", "failed")
+
+    was_generating = mv.current_stage == "generating"
+    mv.status = "cancelled"
+    mv.current_stage = "cancelled"
+
+    import copy
+    clips = copy.deepcopy(mv.clips or [])
+    for c in clips:
+        if c.get("status") == "pending":
+            c["status"] = "cancelled"
+    mv.clips = clips
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return False
+
+    if was_generating:
+        try:
+            from backend.services.video_generation_router import get_video_router
+            get_video_router().interrupt()
+        except Exception as e:
+            logger.warning("cancel_music_video: interrupt failed for %s (%s)", native_id, e)
+
+    return True
+
+
+def _cancel_lora_train(native_id: str) -> bool:
+    try:
+        from backend.services.lora_train_dispatch import cancel_lora_train
+        result = cancel_lora_train(int(native_id))
+        return bool(result.get("cancelled"))
+    except Exception as e:
+        logger.warning("cancel_lora_train: %s failed (%s)", native_id, e)
+        return False
+
+
 def _cancel_video_gen(native_id: str) -> bool:
     """Cancel a batch video generation job."""
     try:
@@ -219,7 +271,9 @@ CANCEL_DISPATCH: dict[JobKind, Callable[[str], bool]] = {
     JobKind.DEMO: _cancel_demo,
     JobKind.BATCH_CSV: _cancel_batch_csv,
     JobKind.VIDEO_GEN: _cancel_video_gen,
+    JobKind.MUSIC_VIDEO: _cancel_music_video,
     JobKind.VIDEO_RENDER: _cancel_video_render,
+    JobKind.LORA_TRAIN: _cancel_lora_train,
     JobKind.UNIFIED_PROGRESS: _cancel_unified_progress,
 }
 
