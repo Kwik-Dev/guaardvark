@@ -33,6 +33,7 @@ import {
   updateMusicVideoPlan,
   regenerateMusicVideoPlan,
   replanMusicVideo,
+  analyzeMusicVideo,
   generateMusicVideoStoryboards,
   pollMusicVideoStoryboards,
   regenMusicVideoStoryboard,
@@ -581,13 +582,30 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
 }
 
 
-const stageColor = (stage, status) => {
+const stageColor = (stage, status, cutCount = 0) => {
   if ((status || "").startsWith("cancelled") || stage === "cancelled") return "default";
   if ((status || "").startsWith("failed")) return "error";
   if (stage === "complete") return "success";
+  if (stage === "awaiting_approval" && !cutCount) return "warning";
   if (stage === "awaiting_approval") return "warning";
   if (stage === "generating" || stage === "assembling") return "info";
+  if (stage === "analyzing") return "info";
   return "default";
+};
+
+const hasCutPlan = (mv) => (mv?.cut_plan?.length || mv?.cut_count || 0) > 0;
+const needsAnalysis = (mv) => !!mv && !hasCutPlan(mv);
+const isAnalysisRunning = (mv) =>
+  mv?.current_stage === "analyzing" && !(mv?.status || "").startsWith("failed");
+
+const stageLabel = (mv) => {
+  if (!mv) return "";
+  if (needsAnalysis(mv) && mv.current_stage === "awaiting_approval") return "needs analysis";
+  if (needsAnalysis(mv) && (mv.status || "").startsWith("failed")) return "analysis failed";
+  if (needsAnalysis(mv) && ((mv.status || "").startsWith("cancelled") || mv.current_stage === "cancelled")) {
+    return "cancelled (no plan)";
+  }
+  return mv.current_stage || mv.status || "unknown";
 };
 
 const MusicVideoPage = () => {
@@ -688,6 +706,29 @@ const MusicVideoPage = () => {
   const [useLoraConsistency, setUseLoraConsistency] = useState(false);
   const [keyframeModel, setKeyframeModel] = useState(DEFAULT_KEYFRAME_MODEL);
   const [i2vModel, setI2vModel] = useState("wan22-14b-i2v");
+
+  const keyframeModelOptions = useMemo(
+    () =>
+      useLoraConsistency
+        ? [
+            { value: "flux-dev-lora", label: "FLUX-dev + LoRA (recommended identity lock)" },
+            { value: "sdxl-lora", label: "SDXL + LoRA (identity lock for SDXL characters)" },
+            { value: "sdxl", label: "SDXL (no LoRA)" },
+          ]
+        : [
+            { value: "flux-schnell", label: "FLUX.1-schnell (fast, beautiful stills) — default" },
+            { value: "flux-dev-lora", label: "FLUX-dev + LoRA" },
+            { value: "sdxl", label: "SDXL (no LoRA)" },
+            { value: "sdxl-lora", label: "SDXL + LoRAs" },
+          ],
+    [useLoraConsistency],
+  );
+
+  useEffect(() => {
+    if (!keyframeModelOptions.some((opt) => opt.value === keyframeModel)) {
+      setKeyframeModel(keyframeModelOptions[0]?.value || DEFAULT_KEYFRAME_MODEL);
+    }
+  }, [keyframeModelOptions, keyframeModel]);
 
   // Cast picker: trained character Subjects whose LoRA + bible lock identity per cut.
   const [castSubjects, setCastSubjects] = useState([]);
@@ -824,6 +865,21 @@ const MusicVideoPage = () => {
     }
   };
 
+  const handleContinueAnalyze = async () => {
+    if (!detail) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await analyzeMusicVideo(detail.id);
+      setDetail(updated);
+      await refreshList();
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message || "Failed to start analysis.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleApprove = async () => {
     if (!detail) return;
     setBusy(true);
@@ -841,7 +897,11 @@ const MusicVideoPage = () => {
 
   const handleCancel = async () => {
     if (!detail) return;
-    if (!window.confirm("Cancel this music video generation? Any pending clips will be skipped (current clip may finish).")) return;
+    const analyzing = detail.current_stage === "analyzing";
+    const msg = analyzing
+      ? "Cancel song analysis? You can retry later with Continue & Analyze — your song and settings are kept."
+      : "Cancel this music video generation? Any pending clips will be skipped (current clip may finish).";
+    if (!window.confirm(msg)) return;
     setBusy(true);
     setError(null);
     try {
@@ -965,7 +1025,7 @@ const MusicVideoPage = () => {
               >
                 {showAdvanced ? "▾ Advanced render options" : "▸ Advanced render options"}
               </Link>
-              <Collapse in={showAdvanced} unmountOnExit>
+              <Collapse in={showAdvanced}>
                 <Stack spacing={1.5} sx={{ pt: 0.5 }}>
                   <TextField
                     select size="small" fullWidth label="Clip motion fill"
@@ -1120,21 +1180,7 @@ const MusicVideoPage = () => {
                     }
                     sx={{ mt: 1 }}
                   >
-                    {[
-                      ...(useLoraConsistency 
-                        ? [
-                            { value: "flux-dev-lora", label: "FLUX-dev + LoRA (recommended identity lock)" },
-                            { value: "sdxl-lora", label: "SDXL + LoRA (identity lock for SDXL characters)" },
-                            { value: "sdxl", label: "SDXL (no LoRA)" }
-                          ]
-                        : [
-                            { value: "flux-schnell", label: "FLUX.1-schnell (fast, beautiful stills) — default" },
-                            { value: "flux-dev-lora", label: "FLUX-dev + LoRA" },
-                            { value: "sdxl", label: "SDXL (no LoRA)" },
-                            { value: "sdxl-lora", label: "SDXL + LoRAs" }
-                          ]
-                      )
-                    ].map(opt => (
+                    {keyframeModelOptions.map((opt) => (
                       <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
                     ))}
                   </TextField>
@@ -1183,8 +1229,8 @@ const MusicVideoPage = () => {
                   <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
                     <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>{v.name}</Typography>
                     <Chip
-                      size="small" label={v.current_stage}
-                      color={stageColor(v.current_stage, v.status)}
+                      size="small" label={stageLabel(v)}
+                      color={stageColor(v.current_stage, v.status, v.cut_count)}
                     />
                     <Tooltip title="Remove from log">
                       <IconButton
@@ -1215,19 +1261,31 @@ const MusicVideoPage = () => {
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
                 <Typography variant="h6">{detail.name}</Typography>
                 <Stack direction="row" spacing={1} alignItems="center">
-                  <Chip label={detail.current_stage} color={stageColor(detail.current_stage, detail.status)} />
-                  {(detail.current_stage === "complete" || (detail.status || "").startsWith("failed")) && (
+                  <Chip label={stageLabel(detail)} color={stageColor(detail.current_stage, detail.status, detail.cut_count)} />
+                  {needsAnalysis(detail) && !isAnalysisRunning(detail) && (
+                    <Button
+                      size="small"
+                      variant="contained"
+                      color="primary"
+                      onClick={handleContinueAnalyze}
+                      disabled={busy}
+                    >
+                      {busy ? <CircularProgress size={18} /> : "Continue & Analyze"}
+                    </Button>
+                  )}
+                  {hasCutPlan(detail) && (detail.current_stage === "complete" || (detail.status || "").match(/^(failed|cancelled)/) || detail.current_stage === "cancelled") && (
                     <Button
                       size="small"
                       variant="outlined"
                       onClick={async () => {
-                        if (!window.confirm("Reset this video back to plan review so you can re-edit the treatment/prompts or re-render? The previous output will be cleared.")) return;
+                        const msg = "Reset this video back to plan review so you can re-edit the treatment/prompts or re-render? The previous output will be cleared.";
+                        if (!window.confirm(msg)) return;
                         try {
                           setBusy(true);
                           await replanMusicVideo(detail.id);
                           await refreshDetail(detail.id);
                         } catch (e) {
-                          setError(e?.response?.data?.error || e.message || "Failed to replan");
+                          setError(e?.response?.data?.error || e.message || "Failed to re-plan");
                         } finally {
                           setBusy(false);
                         }
@@ -1237,12 +1295,59 @@ const MusicVideoPage = () => {
                       Re-plan & Re-render
                     </Button>
                   )}
+                  {needsAnalysis(detail) && ((detail.status || "").match(/^(failed|cancelled)/) || detail.current_stage === "cancelled") && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={handleContinueAnalyze}
+                      disabled={busy}
+                    >
+                      Retry Analysis
+                    </Button>
+                  )}
                 </Stack>
               </Stack>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
                 {detail.style_prompt}
               </Typography>
               <Divider sx={{ mb: 2 }} />
+
+              {needsAnalysis(detail) && !isAnalysisRunning(detail) && (
+                <Stack spacing={1.5} sx={{ mb: 2 }}>
+                  <Alert severity={(detail.status || "").startsWith("failed") ? "error" : "info"}>
+                    {(detail.status || "").startsWith("failed") ? (
+                      <>
+                        Analysis failed
+                        {detail.error_blob?.error ? `: ${String(detail.error_blob.error)}` : ""}.
+                        {" "}Your song and settings are saved — click <b>Continue &amp; Analyze</b> to retry.
+                      </>
+                    ) : (
+                      <>
+                        This job was created but the song has not been analyzed yet
+                        {(detail.current_stage === "awaiting_approval") ? " (stuck at approval gate with no cut plan)" : ""}.
+                        {" "}Click <b>Continue &amp; Analyze</b> to build the beat map and Director plan — no need to re-upload.
+                      </>
+                    )}
+                  </Alert>
+                  <Box>
+                    <Button variant="contained" onClick={handleContinueAnalyze} disabled={busy}>
+                      {busy ? <CircularProgress size={20} /> : "Continue & Analyze"}
+                    </Button>
+                    {(detail.current_stage === "analyzing" || detail.current_stage === "awaiting_approval") && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="error"
+                        onClick={handleCancel}
+                        disabled={busy}
+                        sx={{ ml: 1 }}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                  </Box>
+                </Stack>
+              )}
 
               {/* === Video Plan / Director output (visible after analysis) === */}
               {detail.cut_plan && detail.cut_plan.length > 0 && (
@@ -1322,26 +1427,47 @@ const MusicVideoPage = () => {
 
               <Divider sx={{ my: 2 }} />
 
-              {detail.current_stage === "analyzing" && (
-                <Stack spacing={1}>
+              {isAnalysisRunning(detail) && (
+                <Stack spacing={1} sx={{ mb: 2 }}>
                   <Typography variant="body2">Analyzing the song for beats &amp; energy…</Typography>
                   <LinearProgress />
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="error"
+                    onClick={handleCancel}
+                    disabled={busy}
+                    sx={{ alignSelf: "flex-start" }}
+                  >
+                    Cancel Analysis
+                  </Button>
                 </Stack>
               )}
 
-              {detail.current_stage === "awaiting_approval" && detail.estimate && (
+              {detail.current_stage === "awaiting_approval" && hasCutPlan(detail) && detail.estimate && (
                 <Stack spacing={1.5}>
                   <Alert severity="warning">
-                    Plan approved. { (detail.clips || []).some(c => c.storyboard_path) 
+                    Plan ready for review. { (detail.clips || []).some(c => c.storyboard_path) 
                       ? "Storyboards generated — review/regen individuals below, then Approve & Generate the full video (i2v)." 
                       : "Use the 'Generate Storyboards' button in the plan below to create thumbnails first for review." }
                     <br />Estimated full video time after storyboards: <b>{detail.estimate.estimated_human}</b>.
                   </Alert>
                   <Box>
                     <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
-                    <Button variant="contained" color="warning" onClick={handleApprove} disabled={busy || gpuBlocked}>
-                      {busy ? <CircularProgress size={20} /> : "Approve & Generate Video"}
-                    </Button>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Button variant="contained" color="warning" onClick={handleApprove} disabled={busy || gpuBlocked}>
+                        {busy ? <CircularProgress size={20} /> : "Approve & Generate Video"}
+                      </Button>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="error"
+                        onClick={handleCancel}
+                        disabled={busy}
+                      >
+                        Cancel
+                      </Button>
+                    </Stack>
                   </Box>
                 </Stack>
               )}

@@ -229,6 +229,10 @@ def approve(mv_id):
         return jsonify({
             "error": f"music_video is at stage '{mv.current_stage}', not awaiting_approval"
         }), 409
+    if not (mv.cut_plan and len(mv.cut_plan) > 0):
+        return jsonify({
+            "error": "Song analysis is not complete yet — use Continue & Analyze first."
+        }), 409
 
     # LoRA/Comfy preflight+clamp resumed (P1-5/P3-12 media items from team audit; was WIP
     # after phase-map/flux wiring). Now consistent with clip path + generator helper.
@@ -312,6 +316,73 @@ def update_plan(mv_id):
     return jsonify(_mv_dict(updated))
 
 
+def _restart_analysis(mv_id: int) -> MusicVideo | None:
+    """Move a music video back to analyzing and dispatch the analyzer agent."""
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return None
+    mv.current_stage = "analyzing"
+    mv.status = "analyzing"
+    mv.error_blob = None
+    if not (mv.cut_plan and len(mv.cut_plan) > 0):
+        mv.cut_plan = None
+        mv.clips = []
+    db.session.commit()
+    svc = MusicVideoService(db.session)
+    try:
+        svc.dispatch_agent(mv_id, "analyzer")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Analyzer dispatch failed for music_video %s: %s", mv_id, e)
+    db.session.refresh(mv)
+    return mv
+
+
+@bp.post("/<int:mv_id>/analyze")
+def start_analysis(mv_id):
+    """(Re)start song analysis on an existing music video job.
+
+    Use when a job was created but analysis never finished (e.g. plugin was
+    disabled), failed during analyzing, or is stuck at awaiting_approval with
+    no cut plan. Preserves name, song, style, and settings_json.
+    """
+    mv = db.session.get(MusicVideo, mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+
+    stage = mv.current_stage or ""
+    status = mv.status or ""
+    has_plan = bool(mv.cut_plan and len(mv.cut_plan) > 0)
+
+    if stage in ("generating", "assembling"):
+        return jsonify({"error": f"Cannot analyze while at stage '{stage}'"}), 409
+
+    if stage == "analyzing" and status == "analyzing" and not has_plan:
+        svc = MusicVideoService(db.session)
+        try:
+            svc.dispatch_agent(mv_id, "analyzer")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Analyzer re-dispatch failed for music_video %s: %s", mv_id, e)
+        db.session.refresh(mv)
+        return jsonify(_mv_dict(mv))
+
+    needs_analysis = (
+        not has_plan
+        or stage == "draft"
+        or status.startswith("failed")
+        or status == "cancelled"
+        or stage == "cancelled"
+    )
+    if not needs_analysis:
+        return jsonify({
+            "error": "Analysis already complete — approve the plan or use re-plan to re-render."
+        }), 409
+
+    mv = _restart_analysis(mv_id)
+    if mv is None:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(_mv_dict(mv))
+
+
 @bp.post("/<int:mv_id>/replan")
 def replan(mv_id):
     """Reset a terminal music video (complete or failed) back to awaiting_approval
@@ -322,9 +393,17 @@ def replan(mv_id):
     mv = db.session.get(MusicVideo, mv_id)
     if mv is None:
         return jsonify({"error": "not_found"}), 404
-    if not (mv.current_stage in ("complete",) or (mv.status or "").startswith("failed")):
+
+    has_plan = bool(mv.cut_plan and len(mv.cut_plan) > 0)
+    if not has_plan:
+        mv = _restart_analysis(mv_id)
+        if mv is None:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify(_mv_dict(mv))
+
+    if not (mv.current_stage in ("complete",) or (mv.status or "").startswith("failed") or (mv.status or "") == "cancelled" or mv.current_stage == "cancelled"):
         return jsonify({
-            "error": f"replan only allowed on complete or failed videos, current stage is '{mv.current_stage}'"
+            "error": f"replan only allowed on complete, failed, or cancelled videos, current stage is '{mv.current_stage}'"
         }), 409
 
     # Reset generation state but keep the plan + treatment + settings
@@ -357,7 +436,7 @@ def cancel_music_video(mv_id):
     if mv is None:
         return jsonify({"error": "not_found"}), 404
 
-    cancellable = ("generating", "assembling", "awaiting_approval")
+    cancellable = ("generating", "assembling", "awaiting_approval", "analyzing")
     if mv.current_stage not in cancellable:
         return jsonify({"error": f"Cannot cancel at stage '{mv.current_stage}'"}), 409
 

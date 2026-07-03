@@ -74,6 +74,12 @@ export const replanMusicVideo = async (id) => {
   return response.data;
 };
 
+/** (Re)start song analysis on an existing job (preserves upload + settings). */
+export const analyzeMusicVideo = async (id) => {
+  const response = await axios.post(`${API_BASE}/music-video/${id}/analyze`);
+  return response.data;
+};
+
 export const cancelMusicVideo = async (id) => {
   const response = await axios.post(`${API_BASE}/music-video/${id}/cancel`);
   return response.data;

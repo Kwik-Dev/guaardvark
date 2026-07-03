@@ -145,6 +145,49 @@ def test_cancel_generating_music_video(client, app, tmp_path):
     assert data["clips"][1]["status"] == "done"
 
 
+def test_approve_rejects_without_cut_plan(client, app, tmp_path):
+    with app.app_context():
+        doc = _song_doc(tmp_path)
+        svc = MusicVideoService(db.session)
+        mv = svc.create(
+            name="x",
+            song_document_id=doc.id,
+            song_path=str(tmp_path / "song.wav"),
+            style_prompt="x",
+            project_id=None,
+        )
+        mv.current_stage = "awaiting_approval"
+        mv.status = "awaiting_approval"
+        db.session.commit()
+        mv_id = mv.id
+
+    resp = client.post(f"/api/music-video/{mv_id}/approve")
+    assert resp.status_code == 409
+
+
+def test_analyze_restarts_orphaned_awaiting_approval(client, app, tmp_path):
+    with app.app_context():
+        doc = _song_doc(tmp_path)
+        svc = MusicVideoService(db.session)
+        mv = svc.create(
+            name="x",
+            song_document_id=doc.id,
+            song_path=str(tmp_path / "song.wav"),
+            style_prompt="x",
+            project_id=None,
+        )
+        mv.current_stage = "awaiting_approval"
+        mv.status = "awaiting_approval"
+        db.session.commit()
+        mv_id = mv.id
+
+    resp = client.post(f"/api/music-video/{mv_id}/analyze")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["current_stage"] == "analyzing"
+    assert data["status"] == "analyzing"
+
+
 def test_cancel_rejects_non_cancellable_stage(client, app, tmp_path):
     with app.app_context():
         doc = _song_doc(tmp_path)
