@@ -2,22 +2,22 @@ import { BASE_URL, handleResponse } from "./apiClient";
 
 export const getBackendHealth = async () => {
   const response = await fetch(`${BASE_URL}/health`);
-  return handleResponse(response);
+  return handleResponse(response, { quiet: true });
 };
 
 export const getDbHealth = async () => {
   const response = await fetch(`${BASE_URL}/health/db`);
-  return handleResponse(response);
+  return handleResponse(response, { quiet: true });
 };
 
 export const getCeleryHealth = async () => {
   const response = await fetch(`${BASE_URL}/health/celery`);
-  return handleResponse(response);
+  return handleResponse(response, { quiet: true });
 };
 
 export const getRedisHealth = async () => {
   const response = await fetch(`${BASE_URL}/health/redis`);
-  return handleResponse(response);
+  return handleResponse(response, { quiet: true });
 };
 
 export const getCeleryTasks = async () => {

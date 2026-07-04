@@ -905,8 +905,10 @@ const SettingsPage = () => {
     const fetchWebAccess = async () => {
       try {
         const result = await apiService.getWebAccess();
-        if (result && typeof result.allow_web_search === "boolean") {
-          setWebSearchEnabled(result.allow_web_search);
+        const allowWeb =
+          result?.data?.allow_web_search ?? result?.allow_web_search;
+        if (typeof allowWeb === "boolean") {
+          setWebSearchEnabled(allowWeb);
         }
       } catch (err) {
         console.warn("Failed to fetch web access setting from server:", err);
@@ -919,8 +921,10 @@ const SettingsPage = () => {
     const fetchAdvDebug = async () => {
       try {
         const result = await apiService.getAdvancedDebug();
-        if (result && typeof result.advanced_debug === "boolean") {
-          setAdvancedDebug(result.advanced_debug);
+        const advDebug =
+          result?.data?.advanced_debug ?? result?.advanced_debug;
+        if (typeof advDebug === "boolean") {
+          setAdvancedDebug(advDebug);
         }
       } catch (err) {
         console.warn("Failed to fetch advanced debug setting:", err);
@@ -933,8 +937,9 @@ const SettingsPage = () => {
     const fetchVerbatim = async () => {
       try {
         const result = await apiService.getVerbatimPrompts();
-        if (result && typeof result.enabled === "boolean") {
-          setVerbatimPromptsState(result.enabled);
+        const verbatimOn = result?.data?.enabled ?? result?.enabled;
+        if (typeof verbatimOn === "boolean") {
+          setVerbatimPromptsState(verbatimOn);
         }
       } catch (err) {
         console.warn("Failed to fetch verbatim prompts setting:", err);

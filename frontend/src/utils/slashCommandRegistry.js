@@ -17,7 +17,7 @@ const BUILT_IN_COMMANDS = [
   },
   {
     name: "/imagemodel",
-    description: "Switch Stable Diffusion model or show current",
+    description: "Switch chat image model (generation + editing) or show current",
     usage: "/imagemodel [model-name]",
     category: "model",
     args: "optional",

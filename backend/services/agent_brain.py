@@ -21,9 +21,8 @@ from typing import Any, Callable, Dict, List, Optional
 from backend.services.brain_state import (
     BrainState,
     ReflexResult,
-    StepBudget,
-    TierTelemetry,
 )
+from backend.services.step_budget import StepBudget, TierTelemetry
 from backend.services.unified_chat_engine import (
     clear_abort_flag,
     is_aborted,
@@ -98,32 +97,32 @@ DELIBERATION_SIGNALS = [
     re.compile(r"(?:tell me|describe|what is|overview of|about).*?(?:codebase|your code|the code|your source|own source)", re.IGNORECASE),
 ]
 
-# Conversational patterns (bare affirmations route to Tier 2 with skip_tools)
-CONVERSATIONAL_PASSTHROUGH = re.compile(
-    r"^(yes|no|yeah|nah|nope|yep|ok(ay)?|sure|cool|nice|great|awesome|"
-    r"got it|sounds good|makes sense|right|correct|exactly|absolutely|"
-    r"of course|definitely|certainly|perfect|agreed|fine|alright)[\s?!.,]*$",
+# Pure social / affirmation messages → Tier 2 LLM (skip_tools), never hardcoded pools
+SOCIAL_TIER2_PATTERNS = re.compile(
+    r"^(hi|hello|hey|howdy|yo|sup|hiya|"
+    r"good\s+(morning|afternoon|evening|night)|"
+    r"thanks?|thank\s+you|ty|thx|cheers|"
+    r"bye|goodbye|see\s+(ya|you)|later|gn|"
+    r"how\s+are\s+you|how('s|\s+is)\s+it\s+going|what'?s\s+up|"
+    r"who\s+are\s+you|what\s+are\s+you|what\s+can\s+you\s+do|"
+    r"yes|no|yeah|nah|nope|yep|ok(ay)?|sure|cool|nice|great|awesome|"
+    r"got\s+it|sounds\s+good|makes\s+sense|right|correct|exactly|"
+    r"absolutely|of\s+course|definitely|certainly|perfect|agreed|fine|alright)"
+    r"[\s?!.,]*$",
     re.IGNORECASE,
 )
+
+# Back-compat alias (tests / imports)
+CONVERSATIONAL_PASSTHROUGH = SOCIAL_TIER2_PATTERNS
+
+# Pure-chat openers that don't need a screenshot (subset used by gemma4 direct)
+NO_SCREEN_CONTEXT = SOCIAL_TIER2_PATTERNS
 
 # Vision task detection
 VISION_PATTERNS = re.compile(
     r"(?i)(?:virtual\s+(?:screen|display|computer|browser|machine)|"
     r"agent\s+(?:screen|mode|vision)|on\s+(?:the|your)\s+(?:screen|display)|"
     r"(?:your|the)\s+virtual|use\s+(?:the|your)\s+screen|/vision|/agent)",
-)
-
-# Pure-chat openers that don't need a screenshot. Attaching one starves
-# inference for ~minutes on small VRAM, so we skip the eyes for these.
-NO_SCREEN_CONTEXT = re.compile(
-    r"^(hi|hello|hey|howdy|yo|sup|hiya|"
-    r"good\s+(morning|afternoon|evening|night)|"
-    r"thanks|thank\s+you|ty|tysm|cheers|"
-    r"bye|goodbye|see\s+(ya|you)|later|gn|"
-    r"how\s+are\s+you|how('s|\s+is)\s+it\s+going|what'?s\s+up|"
-    r"who\s+are\s+you|what\s+are\s+you|what\s+can\s+you\s+do)"
-    r"[\s?!.,]*$",
-    re.IGNORECASE,
 )
 
 
@@ -180,6 +179,7 @@ class AgentBrain:
         escalated_from = None
         escalation_reason = None
         success = True
+        route_intent = ""
 
         # === Explicit first-class cross-tier StepBudget ===
         # This replaces the previous fragile remaining_steps closure usage.
@@ -290,14 +290,15 @@ class AgentBrain:
                     prompt_key="vision", budget=budget,
                 )
 
-            # -- Conversational pass-through (Tier 2, no tools) --
-            if CONVERSATIONAL_PASSTHROUGH.match(message.strip()):
+            # -- Social / conversational (Tier 2, skip_tools, real LLM) --
+            if SOCIAL_TIER2_PATTERNS.fullmatch(message.strip()):
                 tier_used = 2
-                budget.charge(1, 2, "conversational passthrough")
+                route_intent = "social"
+                budget.charge(1, 2, "social tier2 skip_tools")
                 return self._instinct(
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, is_voice_message=is_voice_message,
-                    skip_tools=True, budget=budget,
+                    skip_tools=True, budget=budget, intent="social",
                 )
 
             # -- Check if Tier 3 is needed --
@@ -329,14 +330,11 @@ class AgentBrain:
                 )
                 tier_used = 3
                 budget.on_escalation(2, cost=2, reason="tier2 escalation signal")
-                # actively query live memory + entity context (cross-layer per Phase 2.1)
                 try:
                     from backend.api.memory_api import get_memories_for_context
-                    mem_text = get_memories_for_context(
+                    get_memories_for_context(
                         limit=5, max_tokens=300, query=message, session_id=session_id
-                    ) or ""
-                    budget.integrate_memory_context(mem_text)
-                    # charge small for introspection
+                    )
                     budget.charge(1, 2, "context query on escalation")
                 except Exception:
                     pass
@@ -379,6 +377,7 @@ class AgentBrain:
                 budget_remaining=budget.remaining if budget is not None else 0,
                 budget_total=budget.total if budget is not None else 20,
                 budget_charges=len(budget.history) if budget is not None else 0,
+                intent=route_intent,
             )
             _log_telemetry(telemetry)
 
@@ -495,8 +494,9 @@ class AgentBrain:
             # actively query memory/entity for context (Phase 2.1)
             try:
                 from backend.api.memory_api import get_memories_for_context
-                mem_text = get_memories_for_context(limit=5, max_tokens=200, query=message) or ""
-                budget.integrate_memory_context(mem_text)
+                get_memories_for_context(
+                    limit=5, max_tokens=200, query=message
+                )
                 budget.charge(1, 0, "gemma context query")
             except Exception:
                 pass
@@ -1007,6 +1007,10 @@ class AgentBrain:
                 image_data=image_data,
                 image_url=image_url,
                 is_voice_message=is_voice_message,
+                brain_state=self.state,
+                skip_tools=skip_tools,
+                prompt_role=prompt_key,
+                budget=budget,
             )
 
             # Post-response narration check

@@ -84,6 +84,30 @@ def get_verbatim_prompts():
     return success_response({"enabled": enabled})
 
 
+@settings_bp.route("/chat_image_model", methods=["GET"])
+def get_chat_image_model_route():
+    """Persisted Stable Diffusion / image-edit model for chat (/imagemodel, generate_image, edit_image)."""
+    from backend.utils.settings_utils import get_chat_image_model
+
+    return success_response({"model": get_chat_image_model()})
+
+
+@settings_bp.route("/chat_image_model", methods=["POST"])
+def set_chat_image_model_route():
+    """Set the chat image model (e.g. auto, zimage-turbo, sd-xl, kontext)."""
+    if not request.is_json:
+        return error_response("Request must be JSON")
+    model = (request.get_json().get("model") or "auto").strip() or "auto"
+    try:
+        from backend.utils.settings_utils import save_setting
+
+        save_setting("chat_image_model", model)
+    except Exception as e:
+        current_app.logger.error(f"Failed to update chat_image_model setting: {e}")
+        return error_response("Failed to update setting", status_code=500)
+    return success_response({"model": model})
+
+
 @settings_bp.route("/verbatim_prompts", methods=["POST"])
 def set_verbatim_prompts():
     """Toggle 'verbatim prompts' — when ON, the user's EXACT words go straight to the

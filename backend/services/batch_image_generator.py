@@ -265,6 +265,8 @@ class BatchImageGenerator:
 
     def _cleanup_gpu_memory(self):
         try:
+            if self.image_generator and hasattr(self.image_generator, "_unload_pipeline"):
+                self.image_generator._unload_pipeline()
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -348,7 +350,8 @@ class BatchImageGenerator:
                     enhance_hands=prompt.enhance_hands,
                     restore_faces=restore_faces,
                     face_restoration_weight=face_restoration_weight,
-                    remove_background=remove_background
+                    remove_background=remove_background,
+                    keep_pipeline_loaded=True,
                 )
 
                 result = self.image_generator.generate_image(gen_request)

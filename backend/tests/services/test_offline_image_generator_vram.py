@@ -5,6 +5,8 @@ free-VRAM check pass while Z-Image actually allocated 9.9GB into a card already
 holding ~9.3GB of resident Ollama models. These tests pin the fix:
 family-aware estimates + canonical Ollama eviction when the card is too full.
 """
+from types import SimpleNamespace
+
 import pytest
 
 import backend.services.offline_image_generator as oig
@@ -103,3 +105,73 @@ def test_admission_failure_never_raises(gen, monkeypatch):
     monkeypatch.setattr(gen, "_device", "cuda")
     monkeypatch.setattr(oig.torch.cuda, "mem_get_info", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     gen._ensure_vram_for_pipeline("Tongyi-MAI/Z-Image-Turbo")  # must not raise
+
+
+# --- img2img pipeline family routing (Z-Image uses transformer, not unet) ---
+
+def _fake_txt2img_pipeline(**components):
+    return SimpleNamespace(**components)
+
+
+def test_build_img2img_zimage_uses_transformer(gen, monkeypatch):
+    if oig.ZImageImg2ImgPipeline is None:
+        pytest.skip("ZImageImg2ImgPipeline not available")
+
+    captured = {}
+
+    class _FakeZImg2Img:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr(oig, "ZImageImg2ImgPipeline", _FakeZImg2Img)
+    gen._pipeline = _fake_txt2img_pipeline(
+        transformer="tr",
+        vae="v",
+        text_encoder="te",
+        tokenizer="tok",
+        scheduler="sch",
+    )
+    gen._build_img2img_pipeline("zimage")
+    assert captured["transformer"] == "tr"
+    assert "unet" not in captured
+
+
+def test_build_img2img_sdxl_uses_dual_encoders(gen, monkeypatch):
+    captured = {}
+
+    class _FakeSdxlImg2Img:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr(oig, "StableDiffusionXLImg2ImgPipeline", _FakeSdxlImg2Img)
+    gen._pipeline = _fake_txt2img_pipeline(
+        vae="v",
+        text_encoder="te",
+        text_encoder_2="te2",
+        tokenizer="tok",
+        tokenizer_2="tok2",
+        unet="u",
+        scheduler="sch",
+    )
+    gen._build_img2img_pipeline("sdxl")
+    assert captured["unet"] == "u"
+    assert captured["text_encoder_2"] == "te2"
+
+
+def test_build_img2img_sd_uses_unet(gen, monkeypatch):
+    captured = {}
+
+    class _FakeSdImg2Img:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr(oig, "StableDiffusionImg2ImgPipeline", _FakeSdImg2Img)
+    gen._pipeline = _fake_txt2img_pipeline(
+        vae="v",
+        text_encoder="te",
+        tokenizer="tok",
+        unet="u",
+        scheduler="sch",
+    )
+    gen._build_img2img_pipeline("sd")
+    assert captured["unet"] == "u"

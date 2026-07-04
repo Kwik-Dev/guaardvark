@@ -445,7 +445,7 @@ class SlashRouter:
             self._console.print()
 
     def _cmd_imagine(self, args: list[str]):
-        """Generate an image from a text prompt."""
+        """Generate an image from a text prompt (direct tool — same path as browser /imagine)."""
         if not args:
             self._console.print("[llx.error]Usage: /imagine <prompt>[/llx.error]")
             self._console.print("[llx.dim]Example: /imagine a sunset over mountains[/llx.dim]")
@@ -457,17 +457,23 @@ class SlashRouter:
         try:
             from llx.client import get_client, LlxError, LlxConnectionError
             client = get_client(server)
-            data = client.post("/api/batch-image/generate/prompts", json={
-                "prompts": [prompt],
-                "steps": 20,
-                "width": 512,
-                "height": 512,
+            data = client.post("/api/chat/unified/direct-tool", json={
+                "slash_command": "imagine",
+                "slash_args": prompt,
+                "params": {"prompt": prompt, "model": "auto"},
+                "message": f"/imagine {prompt}",
+                "session_id": self._state.get("session_id") or "cli_imagine",
             })
-            result = data.get("data", data)
-            batch_id = result.get("batch_id", "unknown")
-            self._console.print(f"[llx.success]Image generation started[/llx.success]")
-            self._console.print(f"[llx.dim]Batch: {batch_id}[/llx.dim]")
-            self._console.print(f"[llx.dim]Track: /images status {batch_id}[/llx.dim]")
+            if data.get("success"):
+                self._console.print("[llx.success]Image generated successfully[/llx.success]")
+                response = data.get("response") or ""
+                if response:
+                    self._console.print(f"[llx.dim]{response}[/llx.dim]")
+            else:
+                err = data.get("error") or data.get("response") or "unknown error"
+                self._console.print(f"[llx.error]Image generation failed: {err}[/llx.error]")
+                if data.get("gpu_busy"):
+                    self._console.print("[llx.dim]GPU busy — run /imagine again in a moment.[/llx.dim]")
         except Exception as e:
             self._console.print(f"[llx.error]Image generation failed: {e}[/llx.error]")
 

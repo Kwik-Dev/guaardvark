@@ -538,6 +538,7 @@ def register_image_tools() -> List[str]:
         from backend.tools.image_tools import ImageGeneratorTool
         register_tool(ImageGeneratorTool())
         registered.append("generate_image")
+        _tool_categories["generate_image"] = "image"
         logger.debug("Registered: ImageGeneratorTool")
     except Exception as e:
         logger.warning(f"Failed to register image tools: {e}")

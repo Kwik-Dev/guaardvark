@@ -1436,6 +1436,26 @@ class ComfyUIVideoGenerator:
             logger.info(f"Queued workflow in ComfyUI: {prompt_id}")
             return prompt_id
 
+        except requests.HTTPError as e:
+            detail = ""
+            try:
+                if e.response is not None:
+                    body = e.response.json()
+                    if isinstance(body, dict):
+                        err = body.get("error", body)
+                        if isinstance(err, dict):
+                            detail = err.get("message") or str(err)
+                        else:
+                            detail = str(err)
+            except Exception:
+                if e.response is not None:
+                    detail = (e.response.text or "")[:500]
+            logger.error(
+                "Failed to queue workflow in ComfyUI: %s%s",
+                e,
+                f" — {detail}" if detail else "",
+            )
+            return None
         except Exception as e:
             logger.error(f"Failed to queue workflow in ComfyUI: {e}")
             return None
@@ -1671,6 +1691,20 @@ class ComfyUIVideoGenerator:
                 prompt_used=request.prompt,
             )
 
+        # Refresh node registry — ComfyUI loads custom nodes only at startup.
+        self._object_info_cache = None
+        if not self.comfy_node_available("VHS_VideoCombine"):
+            return VideoGenerationResult(
+                success=False,
+                error=(
+                    "ComfyUI is missing the VHS_VideoCombine node (Video Helper Suite). "
+                    "This usually means opencv-python (cv2) is not installed in the backend "
+                    "venv or ComfyUI was not restarted after installing it. "
+                    "Fix: backend/venv/bin/pip install opencv-python, then restart ComfyUI."
+                ),
+                prompt_used=request.prompt,
+            )
+
         # ── Prompt enhancement ───────────────────────────────────────
         if request.enhance_prompt and request.prompt:
             try:
@@ -1760,6 +1794,20 @@ class ComfyUIVideoGenerator:
             if model in self.WAN22_MODELS or model in ("wan22", "wan2.2"):
                 model_key = model if model in self.WAN22_MODELS else "wan22-14b"
                 cfg = self.WAN22_MODELS[model_key]
+
+                # Wan 14B MoE uses ComfyUI-GGUF (UnetLoaderGGUF). TI2V-5B uses UNETLoader.
+                if not cfg.get("single") and not self.comfy_node_available("UnetLoaderGGUF"):
+                    return VideoGenerationResult(
+                        success=False,
+                        error=(
+                            "ComfyUI is missing UnetLoaderGGUF (ComfyUI-GGUF custom node). "
+                            "Wan 14B GGUF models need gguf in the backend venv. "
+                            "Fix: backend/venv/bin/pip install 'gguf>=0.13.0' sentencepiece protobuf, "
+                            "then restart ComfyUI."
+                        ),
+                        prompt_used=request.prompt,
+                    )
+
                 is_i2v = cfg.get("type") == "i2v"
 
                 if cfg.get("single"):
@@ -2030,10 +2078,20 @@ class ComfyUIVideoGenerator:
             # a silent /history poll. Additive + flag-gated + self-terminating —
             # if it fails, generation proceeds exactly as before.
             import uuid as _uuid
-            from backend.services.comfyui_progress_bridge import ComfyUIProgressBridge
+
+            class _NoOpProgressBridge:
+                def start(self, *args, **kwargs):
+                    return None
+
+                def stop(self):
+                    return None
+
             client_id = _uuid.uuid4().hex
-            progress_bridge = ComfyUIProgressBridge()
+            progress_bridge = _NoOpProgressBridge()
             try:
+                from backend.services.comfyui_progress_bridge import ComfyUIProgressBridge
+
+                progress_bridge = ComfyUIProgressBridge()
                 progress_bridge.start(
                     client_id=client_id,
                     process_id=item_id,
@@ -2042,7 +2100,7 @@ class ComfyUIVideoGenerator:
                     extra={"batch_id": (request.metadata or {}).get("batch_id", "")},
                 )
             except Exception as _be:
-                logger.warning(f"Progress bridge start failed (non-fatal): {_be}")
+                logger.warning(f"Progress bridge unavailable (non-fatal): {_be}")
 
             prompt_id = self._queue_prompt(workflow, client_id=client_id)
 

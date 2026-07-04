@@ -78,3 +78,42 @@ class TestImageToolSelection:
         )
         assert "VOICE MODE" in prompt
         assert "spoken" in prompt.lower()
+
+    def test_brain_state_prompt_contains_image_gen_rule(self):
+        """BrainState chat prompt must include the shared CRITICAL image rule."""
+        from backend.services.brain_state import BrainState
+
+        brain = BrainState.__new__(BrainState)
+        brain.system_prompts = {"chat": "You are helpful.\n\n{MEMORY_BLOCK}{DESKTOP_STATE}"}
+        brain.tool_registry = None
+        brain._app = None
+
+        prompt = brain.get_system_prompt(
+            role="chat",
+            tool_list="- generate_image(prompt:string) - Generate an image",
+        )
+        assert "CRITICAL" in prompt
+        assert "generate_image" in prompt
+        assert "<prompt>" in prompt
+        assert "<param_name>value</param_name>" not in prompt
+
+    def test_pin_image_generation_on_retry_with_pending_session(self):
+        from backend.services.unified_chat_engine import (
+            _pin_image_generation_tools,
+            _SESSION_PENDING_IMAGE_PROMPT,
+        )
+
+        sid = "pin-test"
+        _SESSION_PENDING_IMAGE_PROMPT[sid] = "a castle"
+        all_tools = ["web_search", "generate_image"]
+        selected = _pin_image_generation_tools(
+            "try again please", [], all_tools, session_id=sid,
+        )
+        assert "generate_image" in selected
+        _SESSION_PENDING_IMAGE_PROMPT.pop(sid, None)
+
+    def test_try_again_not_agent_control_keyword(self):
+        from backend.services.unified_chat_engine import TOOL_CONTEXT_KEYWORDS
+
+        keywords = TOOL_CONTEXT_KEYWORDS["agent_control"][0]
+        assert "try again" not in keywords

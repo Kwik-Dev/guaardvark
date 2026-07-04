@@ -13,6 +13,11 @@ except Exception:  # pragma: no cover - optional dependency
 logger = logging.getLogger(__name__)
 
 
+def get_chat_image_model() -> str:
+    """Chat image model for /imagine, generate_image, and edit_image (default: auto)."""
+    return get_setting("chat_image_model", default="auto") or "auto"
+
+
 def get_web_access() -> bool:
     """Return True if allow_web_search setting is enabled."""
     if not db or not Setting:

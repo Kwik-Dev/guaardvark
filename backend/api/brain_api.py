@@ -36,6 +36,7 @@ def brain_health():
         },
         "health": brain_state.health.to_dict(),
         "reflexes_count": len(brain_state.reflexes),
+        "reflex_names": [r.name for r in brain_state.reflexes],
         "tools_count": len(brain_state.tool_registry.list_tools()) if brain_state.tool_registry else 0,
         "system_prompts": list(brain_state.system_prompts.keys()),
         "lite_mode": brain_state.lite_mode,

@@ -10,19 +10,31 @@ here instead: tool schemas, system prompts, model capabilities, and the
 compiled reflex table.
 """
 
-import hashlib
 import json
 import logging
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .memory_contract import query_tokens, memory_match_score
+from .step_budget import StepBudget, TierTelemetry
 
 logger = logging.getLogger(__name__)
+
+# Re-export for backwards compatibility
+__all__ = [
+    "BrainState",
+    "BrainHealth",
+    "ModelCapabilities",
+    "ReflexAction",
+    "ReflexResult",
+    "StepBudget",
+    "TierTelemetry",
+    "WarmUpStatus",
+    "_build_default_reflexes",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -84,209 +96,24 @@ class ReflexAction:
     priority: int = 100  # lower = checked first
 
 
-@dataclass
-class TierTelemetry:
-    """Captured per interaction for analytics and future auto-reflex promotion."""
-    tier: int
-    latency_ms: int
-    tools_called: List[str] = field(default_factory=list)
-    tool_params: List[Dict] = field(default_factory=list)
-    escalated_from: Optional[int] = None
-    escalation_reason: Optional[str] = None
-    message_hash: str = ""
-    success: bool = True
-    model: str = ""
-    timestamp: str = ""
-    total_agent_steps: int = 0
-    budget_remaining: int = 0
-    budget_total: int = 20
-    budget_charges: int = 0  # number of charges this interaction
+# ---------------------------------------------------------------------------
+# Reflex pattern helpers
+# ---------------------------------------------------------------------------
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "tier": self.tier,
-            "latency_ms": self.latency_ms,
-            "tools_called": self.tools_called,
-            "tool_params": self.tool_params,
-            "escalated_from": self.escalated_from,
-            "escalation_reason": self.escalation_reason,
-            "message_hash": self.message_hash,
-            "success": self.success,
-            "model": self.model,
-            "timestamp": self.timestamp,
-            "total_agent_steps": self.total_agent_steps,
-            "budget_remaining": self.budget_remaining,
-            "budget_total": self.budget_total,
-            "budget_charges": self.budget_charges,
-        }
-
-    @staticmethod
-    def hash_message(message: str) -> str:
-        """One-way hash so telemetry never stores raw user messages."""
-        normalized = message.strip().lower()
-        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-
-
-@dataclass
-class StepBudget:
-    """
-    First-class cross-tier termination budget.
-
-    This is the 'solidification' of agentic limits. Every tier, executor, and
-    control loop should respect the same inherited cap so the agent has a
-    consistent sense of "how much effort I have left".
-
-    The agent can be made *aware* of it (via context on escalation, or even
-    exposed as a tool / in system prompt) so it develops personality-level
-    caution and efficiency instead of blindly burning steps.
-    """
-    total: int = 20
-    used: int = 0
-    history: List[Dict[str, Any]] = field(default_factory=list)
-
-    @property
-    def remaining(self) -> int:
-        return max(0, self.total - self.used)
-
-    def charge(self, amount: int, tier: int, reason: str = "") -> bool:
-        """
-        Charge steps against the budget.
-        Returns False if we are now out of budget (caller should stop escalating
-        or abort gracefully).
-        """
-        if amount <= 0:
-            return True
-        self.used += amount
-        self.history.append({
-            "tier": tier,
-            "amount": amount,
-            "reason": reason or "unspecified",
-            "remaining_after": self.remaining,
-        })
-        return self.remaining > 0
-
-    def on_escalation(self, from_tier: int, cost: int = 2, reason: str = "tier escalation"):
-        """Convenience: deduct a cost when moving from one tier to a heavier one."""
-        self.charge(cost, from_tier, reason)
-
-    def to_context(self) -> str:
-        """Human/agent-readable summary suitable for injecting into LLM context."""
-        if self.remaining <= 3:
-            urgency = " (BUDGET IS LOW — be extremely efficient and prefer short paths)"
-        elif self.remaining <= 8:
-            urgency = " (budget is getting tight)"
-        else:
-            urgency = ""
-        return (
-            f"Cross-tier agentic step budget: used {self.used}/{self.total}, "
-            f"{self.remaining} remaining{urgency}. "
-            "Do not waste steps on unnecessary exploration."
-        )
-
-    def to_llm_summary(self) -> str:
-        """Concise version for per-step LLM prompts (so the agent can 'see' its budget live)."""
-        pct = int((self.used / self.total) * 100) if self.total > 0 else 0
-        return f"[BUDGET: {self.remaining}/{self.total} steps left ({pct}% used)]"
-
-    def to_telemetry(self) -> Dict[str, Any]:
-        return {
-            "total": self.total,
-            "used": self.used,
-            "remaining": self.remaining,
-            "history": self.history[-10:],  # last 10 charges for debugging
-        }
-
-    @classmethod
-    def from_total(cls, total: int) -> "StepBudget":
-        return cls(total=total)
-
-    def query_active_facts(self, min_conf: float = 0.5) -> List[Dict[str, Any]]:
-        """Return high-confidence facts from history or integrated memory (stub for FactsRegistry integration)."""
-        facts = []
-        for entry in self.history:
-            if entry.get("confidence", 1.0) >= min_conf:
-                facts.append(entry)
-        return facts
-
-    def integrate_memory_context(self, memory_text: str):
-        """Score and integrate memory context, charging a small introspection cost if relevant."""
-        tokens = query_tokens(memory_text)
-        score = memory_match_score(memory_text, [], "budget efficiency low remaining prefer direct")
-        if score > 0.2:
-            self.charge(1, 99, f"introspected memory for efficiency: {memory_text[:80]}")
-            # in full impl, would feed to FactsRegistry or memory
-
-    def apply_lesson_efficiency(self, lessons: list):
-        """Apply efficiency lessons (e.g. from lesson_summary memories) to adjust behavior or charge."""
-        for lesson in lessons:
-            if "budget" in str(lesson).lower() or "efficient" in str(lesson).lower():
-                self.charge(0, 99, f"applied lesson: {str(lesson)[:50]}")
-
-    @classmethod
-    def from_hw_policy(cls, hardware: dict) -> "StepBudget":
-        """Derive dynamic budget from hardware (vram, model tier, ollama tuning)."""
-        try:
-            from .hardware_policy import model_tier, ollama_tuning
-            gpu = hardware.get("gpu", {}) or {}
-            ram = hardware.get("ram", {}) or {}
-            arch = hardware.get("arch", "")
-            tier = model_tier(ram.get("total_gb", 16), gpu, arch)
-            ollama = ollama_tuning(gpu)
-            vram = gpu.get("vram_mb", 16000)
-            base = 20
-            if vram < 16000:
-                base = 10  # tighter on low VRAM
-            elif vram > 24000:
-                base = 30
-            # lower for small models
-            if "1b" in tier.get("chat", ""):
-                base = max(5, base // 2)
-            total = base
-            return cls(total=total)
-        except Exception:
-            return cls(total=20)
+def _anchor_pattern(pattern: str, flags: int = re.IGNORECASE) -> "re.Pattern[str]":
+    """Compile a full-message anchored pattern for deterministic Tier-1 matching."""
+    p = pattern.strip()
+    if p.startswith("(?i)"):
+        p = p[4:]
+    if not p.startswith("^"):
+        p = "^" + p
+    if not p.endswith("$"):
+        p = p + r"[\s?!.,]*$"
+    return re.compile(p, flags)
 
 
 # ---------------------------------------------------------------------------
-# Greeting response pool (personality-aware, rotated)
-# ---------------------------------------------------------------------------
-
-_GREETING_POOL = [
-    "Hey! What can I do for you?",
-    "Hey there! What are we working on?",
-    "What's up? Ready when you are.",
-    "Hi! What do you need?",
-    "Hey! Let's get to it.",
-]
-
-_FAREWELL_POOL = [
-    "Later! Hit me up anytime.",
-    "See you around!",
-    "Catch you later!",
-    "Peace! I'll be here.",
-]
-
-_THANKS_POOL = [
-    "You got it!",
-    "Anytime!",
-    "No problem!",
-    "Happy to help!",
-]
-
-_pool_counters: Dict[str, int] = {"greeting": 0, "farewell": 0, "thanks": 0}
-_pool_lock = threading.Lock()
-
-
-def _rotate_response(pool: List[str], pool_name: str) -> str:
-    """Return the next response from the pool, rotating through them."""
-    with _pool_lock:
-        idx = _pool_counters.get(pool_name, 0) % len(pool)
-        _pool_counters[pool_name] = idx + 1
-        return pool[idx]
-
-
-# ---------------------------------------------------------------------------
-# Default reflex table
+# Default reflex table (action reflexes only — no social/chat placebo)
 # ---------------------------------------------------------------------------
 
 def _build_default_reflexes(tool_registry=None) -> List[ReflexAction]:
@@ -360,9 +187,7 @@ def _build_default_reflexes(tool_registry=None) -> List[ReflexAction]:
         if tool_registry.get_tool("media_play"):
             reflexes.append(ReflexAction(
                 name="media_play",
-                patterns=[
-                    re.compile(r"(?i)^play\s+.+"),
-                ],
+                patterns=[_anchor_pattern(r"play\s+.+")],
                 handler=_media_reflex("media_play", _extract_play_query),
                 priority=10,
             ))
@@ -371,7 +196,10 @@ def _build_default_reflexes(tool_registry=None) -> List[ReflexAction]:
             reflexes.append(ReflexAction(
                 name="media_control",
                 patterns=[
-                    re.compile(r"(?i)^(pause|stop|resume|next|skip|previous|prev)(?:\s+(?:the\s+)?(?:music|song|track|playback|player))?[.!]?$"),
+                    _anchor_pattern(
+                        r"(pause|stop|resume|next|skip|previous|prev)"
+                        r"(?:\s+(?:the\s+)?(?:music|song|track|playback|player))?"
+                    ),
                 ],
                 handler=_media_reflex("media_control", _extract_media_action),
                 priority=10,
@@ -381,7 +209,10 @@ def _build_default_reflexes(tool_registry=None) -> List[ReflexAction]:
             reflexes.append(ReflexAction(
                 name="media_volume",
                 patterns=[
-                    re.compile(r"(?i)(?:volume\s+(?:up|down|\d+)|(?:turn|set)\s+(?:the\s+)?volume|(?:louder|quieter|softer)|^(?:mute|unmute)$)"),
+                    _anchor_pattern(r"volume\s+(?:up|down|\d+)"),
+                    _anchor_pattern(r"(?:turn|set)\s+(?:the\s+)?volume(?:\s+\d+)?"),
+                    _anchor_pattern(r"(?:louder|quieter|softer)"),
+                    _anchor_pattern(r"(?:mute|unmute)"),
                 ],
                 handler=_media_reflex("media_volume", _extract_volume),
                 priority=10,
@@ -391,49 +222,14 @@ def _build_default_reflexes(tool_registry=None) -> List[ReflexAction]:
             reflexes.append(ReflexAction(
                 name="media_status",
                 patterns=[
-                    re.compile(r"(?i)(?:what'?s|what\s+is)\s+(?:this\s+)?(?:playing|this\s+song)|(?:current|now)\s+(?:playing|song|track)"),
+                    _anchor_pattern(
+                        r"(?:what'?s|what\s+is)\s+(?:this\s+)?(?:playing|this\s+song)"
+                    ),
+                    _anchor_pattern(r"(?:current|now)\s+(?:playing|song|track)"),
                 ],
                 handler=_media_reflex("media_status"),
                 priority=10,
             ))
-
-    # -- Greeting reflexes (always available, even in lite mode) --
-
-    reflexes.append(ReflexAction(
-        name="greeting",
-        patterns=[
-            re.compile(r"(?i)^(h(ello|i|ey|owdy|ola)|yo|sup|what'?s up|good (morning|afternoon|evening|night)|how are you|how'?s it going|how do you do)[?!.,\s]*$"),
-        ],
-        handler=lambda msg, match, ctx: ReflexResult(
-            response=_rotate_response(_GREETING_POOL, "greeting"),
-            success=True,
-        ),
-        priority=90,
-    ))
-
-    reflexes.append(ReflexAction(
-        name="farewell",
-        patterns=[
-            re.compile(r"(?i)^(bye|goodbye|see ya|later|good night|peace|peace out|cya|ttyl)[?!.,\s]*$"),
-        ],
-        handler=lambda msg, match, ctx: ReflexResult(
-            response=_rotate_response(_FAREWELL_POOL, "farewell"),
-            success=True,
-        ),
-        priority=90,
-    ))
-
-    reflexes.append(ReflexAction(
-        name="thanks",
-        patterns=[
-            re.compile(r"(?i)^(thanks?( you)?|thank you( so much)?|ty|thx|appreciate it)[?!.,\s]*$"),
-        ],
-        handler=lambda msg, match, ctx: ReflexResult(
-            response=_rotate_response(_THANKS_POOL, "thanks"),
-            success=True,
-        ),
-        priority=90,
-    ))
 
     # Sort by priority (lower = first)
     reflexes.sort(key=lambda r: r.priority)
@@ -646,9 +442,8 @@ class BrainState:
             self.model_caps = ModelCapabilities()
 
     def _build_system_prompts(self):
-        """Pre-render system prompts for each tier."""
+        """Pre-render system prompt prefix templates (live blocks filled at request time)."""
 
-        # Load rules persona (user's custom system prompt)
         persona = ""
         try:
             from backend.utils.chat_utils import get_active_system_prompt
@@ -656,7 +451,6 @@ class BrainState:
         except Exception:
             pass
 
-        # Honesty steering (baked in, not injected per-request)
         honesty = ""
         try:
             from backend.services.honesty_steering import HonestySteering
@@ -672,93 +466,167 @@ class BrainState:
             prefix = honesty + "\n\n"
         if persona:
             prefix += persona + "\n\n"
+        prefix += "{MEMORY_BLOCK}{DESKTOP_STATE}"
 
-        # Memory block is filled live at get_system_prompt() time so a
-        # memory typed after startup appears in the next chat turn without
-        # waiting for a restart. The literal "{MEMORY_BLOCK}" token below
-        # is substituted in get_system_prompt().
-        prefix += "{MEMORY_BLOCK}"
+        # Prefix-only templates; role tails assembled in get_system_prompt()
+        self.system_prompts["chat"] = prefix
+        self.system_prompts["vision"] = prefix
+        self.system_prompts["agent"] = prefix
 
-        # Desktop state used to be looked up here and frozen into the prompt
-        # at startup. That meant chat saw whatever the screen looked like at
-        # boot for the rest of the process lifetime — even after the agent
-        # navigated, opened apps, etc. Use a placeholder substituted live in
-        # get_system_prompt(), same pattern as {MEMORY_BLOCK}.
-        prefix += "{DESKTOP_STATE}"
+    _VOICE_INSTRUCTION = (
+        "\n\nIMPORTANT — VOICE MODE: The user is speaking via voice. "
+        "Respond with ONLY what should be spoken — natural, concise, conversational."
+    )
 
-        # -- Chat prompt (Tier 2) --
-        tool_block = ""
-        if self.tool_schemas_json:
-            tool_block = f"""
-You have access to tools. When you need to use a tool, respond with a JSON object:
-{{"thoughts": "your reasoning", "tool_calls": [{{"tool_name": "name", "parameters": {{...}}}}], "final_answer": null}}
+    def get_system_prompt(
+        self,
+        role: str = "chat",
+        query: str = "",
+        session_id: str = None,
+        project_id=None,
+        cli_working_memory: Optional[Dict[str, Any]] = None,
+        budget: Optional[StepBudget] = None,
+        facts_registry=None,
+        skip_tools: bool = False,
+        tool_list: str = "",
+        is_voice_message: bool = False,
+        context: str = None,
+    ) -> str:
+        """Canonical system prompt builder for all tiers.
 
-When you have the answer (no tools needed):
-{{"thoughts": "reasoning", "tool_calls": [], "final_answer": "your answer"}}
+        Args:
+            role: "chat" | "agent" | "vision"
+            context: deprecated alias for role (back-compat)
+            tool_list: XML tool list for chat role (from UCE concise builder)
+        """
+        if context and role == "chat":
+            role = context
 
-Available Tools:
-{self.tool_schemas_json}
+        prefix = self.system_prompts.get(role, self.system_prompts.get("chat", ""))
 
-"""
+        memory_text = ""
+        try:
+            from backend.api.memory_api import get_memories_for_context
+            if self._app is not None:
+                with self._app.app_context():
+                    memory_text = get_memories_for_context(
+                        limit=20,
+                        max_tokens=500,
+                        query=query,
+                        session_id=session_id,
+                        project_id=project_id,
+                        cli_working_memory=cli_working_memory,
+                    ) or ""
+            else:
+                memory_text = get_memories_for_context(
+                    limit=20,
+                    max_tokens=500,
+                    query=query,
+                    session_id=session_id,
+                    project_id=project_id,
+                    cli_working_memory=cli_working_memory,
+                ) or ""
+        except Exception:
+            memory_text = ""
+        memory_block = f"{memory_text}\n\n" if memory_text else ""
 
-        self.system_prompts["chat"] = f"""{prefix}You are an AI assistant. Help the user by answering questions and using tools when needed.
+        desktop_block = ""
+        try:
+            from backend.services.agent_control_service import AgentControlService
+            desktop = AgentControlService._get_desktop_state()
+            if desktop:
+                desktop_block = f"Agent virtual screen state:\n{desktop}\n\n"
+        except Exception:
+            pass
 
-{tool_block}RULES:
-- Use exact parameter names from tool descriptions
-- After tool results, use them to formulate your answer
-- Only state facts found in tool results or your knowledge
-- NEVER fabricate information
-- If you cannot find the answer, say so honestly
-- If a tool fails, try a DIFFERENT tool or different parameters"""
+        budget_block = ""
+        if budget is not None:
+            budget_block = (
+                budget.to_llm_summary()
+                + "\n\nUse budget status to plan efficient paths.\n\n"
+            )
 
-        # -- Vision prompt (Tier 2 vision) --
-        vision_tools = ""
-        if self.tool_registry:
+        facts_block = ""
+        if facts_registry is not None and hasattr(facts_registry, "format_facts_for_prompt"):
             try:
-                vision_tools = self.tool_registry.get_tool_schemas(
-                    format="json_prompt", tool_filter="vision"
-                )
+                fb = facts_registry.format_facts_for_prompt()
+                if fb:
+                    facts_block = fb + "\n\nPrior extracted facts (use for synthesis).\n\n"
             except Exception:
                 pass
 
-        self.system_prompts["vision"] = f"""{prefix}You are controlling a virtual screen (DISPLAY=:99) with Firefox and a desktop environment.
+        voice_suffix = self._VOICE_INSTRUCTION if is_voice_message else ""
 
-Available Tools:
-{vision_tools}
+        filled_prefix = (
+            prefix
+            .replace("{MEMORY_BLOCK}", memory_block)
+            .replace("{DESKTOP_STATE}", desktop_block)
+            + budget_block
+            + facts_block
+        )
 
-RULES:
-- Use agent_mode_start first, then agent_task_execute to perform screen tasks
-- Use agent_screen_capture to see what is currently on screen
-- Do NOT use browser_navigate, browser_execute_js, app_launch, or analyze_website
-- Break complex tasks into small steps: first capture the screen, then one action at a time
-- NEVER fabricate information. Only state facts found in tool results
-- If you cannot complete the task, say so honestly"""
+        if role == "vision":
+            vision_tools = ""
+            if self.tool_registry:
+                try:
+                    vision_tools = self.tool_registry.get_tool_schemas(
+                        format="json_prompt", tool_filter="vision"
+                    )
+                except Exception:
+                    pass
+            return (
+                f"{filled_prefix}You are controlling a virtual screen (DISPLAY=:99) "
+                f"with Firefox and a desktop environment.\n\n"
+                f"Available Tools:\n{vision_tools}\n\n"
+                "RULES:\n"
+                "- Use agent_mode_start first, then agent_task_execute for screen tasks\n"
+                "- Use agent_screen_capture to see what is on screen\n"
+                "- NEVER fabricate information. Only state facts found in tool results\n"
+                f"{voice_suffix}"
+            )
 
-        # -- Agent prompt (Tier 3 ReACT) --
-        self.system_prompts["agent"] = f"""{prefix}You are an AI assistant with access to tools. Help the user by using tools when needed.
+        if role == "agent":
+            return (
+                f"{filled_prefix}You are an AI assistant with access to tools. "
+                "Help the user by using tools when needed.\n\n"
+                f"Available Tools:\n{self.tool_schemas_json}\n\n"
+                "RESPONSE FORMAT:\n"
+                'You MUST respond with a JSON object: "thoughts", "tool_calls", "final_answer".\n'
+                "RULES:\n"
+                "- Use exact parameter names from tool descriptions\n"
+                "- Only state facts found in tool results\n"
+                "- NEVER fabricate information\n"
+                f"{voice_suffix}"
+            )
 
-Available Tools:
-{self.tool_schemas_json}
+        # chat role (Tier 2 / UCE)
+        if skip_tools:
+            return (
+                f"{filled_prefix}Respond directly and conversationally. "
+                "Be helpful, concise, and natural.\n"
+                "You are a private, local AI assistant running on the user's own hardware."
+                f"{voice_suffix}"
+            )
 
-RESPONSE FORMAT:
-You MUST respond with a JSON object. Every response must have these three fields:
-- "thoughts": your reasoning about what to do (string or null)
-- "tool_calls": array of tool calls to execute (empty array if none needed)
-- "final_answer": your final answer to the user (string or null)
+        if not tool_list.strip() and self.tool_registry and query:
+            try:
+                from backend.services.unified_chat_engine import (
+                    build_concise_tool_list,
+                    select_tools_for_context,
+                )
+                fallback_names = select_tools_for_context(
+                    query, self.tool_registry.list_tools()
+                )
+                tool_list = build_concise_tool_list(self.tool_registry, fallback_names)
+            except Exception:
+                pass
 
-Each tool call object has: "tool_name" (string), "parameters" (object), and optional "reasoning" (string).
+        if tool_list.strip():
+            from backend.services.chat_prompt_blocks import build_chat_tools_prompt_tail
+            return f"{filled_prefix}{build_chat_tools_prompt_tail(tool_list, voice_suffix)}"
 
-RULES:
-- Use exact parameter names from the tool descriptions
-- Include ALL required parameters
-- After tool results, use them to formulate your answer
-- Only state facts found in tool results
-- When you have enough information, set final_answer
-- If a tool fails, try a DIFFERENT tool or different parameters. Never retry the same call.
-- NEVER fabricate information. Only state facts found in tool results.
-- If you cannot find the answer, say so honestly."""
-
-    # -- Warm-up ping -------------------------------------------------------
+        # Prefix-only when no tools selected (tests call without query; UCE always passes query=message)
+        return f"{filled_prefix}{voice_suffix}"
 
     @staticmethod
     def _ollama_user_enabled() -> bool:
@@ -868,9 +736,11 @@ RULES:
         except Exception as e:
             logger.error(f"Reflex refresh failed: {e}")
 
-        # Warm up new model
-        if self.health.llm_available:
+        # Warm up new model (respect Ollama plugin toggle)
+        if self.health.llm_available and self._ollama_user_enabled():
             self._start_warmup()
+        elif self.health.llm_available:
+            self.health.warm_up_status = WarmUpStatus.READY
 
         elapsed = (time.monotonic() - start) * 1000
         logger.info(f"BrainState refreshed in {elapsed:.0f}ms")
@@ -891,7 +761,7 @@ RULES:
 
         for reflex in self.reflexes:
             for pattern in reflex.patterns:
-                m = pattern.search(stripped)
+                m = pattern.fullmatch(stripped)
                 if m:
                     return (reflex, m)
         return None
@@ -902,75 +772,3 @@ RULES:
     def is_ready(self) -> bool:
         """True if at least reflexes are loaded (minimum viable state)."""
         return self._initialized and self.health.reflexes_loaded
-
-    def get_system_prompt(
-        self,
-        context: str = "chat",
-        query: str = "",
-        session_id: str = None,
-        project_id=None,
-        cli_working_memory: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Get the system prompt for a context, filling the memory block
-        with a live DB read so new memories apply immediately."""
-        template = self.system_prompts.get(context, self.system_prompts.get("chat", ""))
-        memory_text = ""
-        try:
-            from backend.api.memory_api import get_memories_for_context
-            if self._app is not None:
-                with self._app.app_context():
-                    memory_text = get_memories_for_context(
-                        limit=20,
-                        max_tokens=500,
-                        query=query,
-                        session_id=session_id,
-                        project_id=project_id,
-                        cli_working_memory=cli_working_memory,
-                    ) or ""
-            else:
-                memory_text = get_memories_for_context(
-                    limit=20,
-                    max_tokens=500,
-                    query=query,
-                    session_id=session_id,
-                    project_id=project_id,
-                    cli_working_memory=cli_working_memory,
-                ) or ""
-        except Exception:
-            memory_text = ""
-        memory_block = f"{memory_text}\n\n" if memory_text else ""
-
-        # Live desktop state (mirrors the live MEMORY_BLOCK pattern). Captured
-        # at request time, not at startup, so the LLM sees what's actually
-        # on the virtual screen right now.
-        desktop_block = ""
-        try:
-            from backend.services.agent_control_service import AgentControlService
-            desktop = AgentControlService._get_desktop_state()
-            if desktop:
-                desktop_block = f"Agent virtual screen state:\n{desktop}\n\n"
-        except Exception:
-            desktop_block = ""
-
-        budget_block = ""
-        if getattr(self, '_current_budget', None):
-            budget_block = self._current_budget.to_llm_summary() + "\n\nUse budget status to plan efficient paths (e.g. prefer facts/synthesis on low budget; query memory/lessons for prior efficiency).\n\n"
-
-        # Use Facts + entity recall if available (cross layer) - lean on FactsRegistry (executor) + memory_contract.
-        facts_block = ""
-        try:
-            fr = getattr(self, '_facts_registry', None)
-            if fr and hasattr(fr, 'format_facts_for_prompt'):
-                fb = fr.format_facts_for_prompt()
-                if fb:
-                    facts_block = fb + "\n\nPrior extracted facts (use for synthesis; score via memory_contract).\n\n"
-        except Exception:
-            pass
-
-        return (
-            template
-            .replace("{MEMORY_BLOCK}", memory_block)
-            .replace("{DESKTOP_STATE}", desktop_block)
-            + budget_block  # live budget + awareness for agent personality
-            + facts_block
-        )

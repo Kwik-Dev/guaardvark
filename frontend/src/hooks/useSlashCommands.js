@@ -25,6 +25,11 @@ export default function useSlashCommands({ addMessage, updateMessage, onSendMess
     getAllCommands().then(setAllCommands);
   }, []);
 
+  // Hydrate persisted /imagemodel choice from backend
+  useEffect(() => {
+    import("./slashCommandHandlers").then((m) => m.hydrateChatImageModel?.());
+  }, []);
+
   const handleInputChange = useCallback((text) => {
     currentInput.current = text;
     const trimmed = text.trim();

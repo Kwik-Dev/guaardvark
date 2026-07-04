@@ -33,15 +33,87 @@ get_redis_password() {
   fi
 }
 
+get_redis_url_port() {
+  local url port
+  if [ ! -f "$ENV_FILE" ]; then
+    return
+  fi
+  url=$(grep "^REDIS_URL=" "$ENV_FILE" 2>/dev/null | tail -1 | sed 's/^REDIS_URL=//')
+  [ -n "$url" ] || return
+  port=$(echo "$url" | sed -E 's|^redis://([^@]*@)?[^:]+:([0-9]+).*|\2|')
+  [ -n "$port" ] && echo "$port"
+}
+
 # ─── Helper: test Redis connectivity (with or without auth) ─────────────────
 
 redis_ping() {
   local pass="$1"
+  local port="${2:-$PORT}"
   if [ -n "$pass" ]; then
-    redis-cli -p "$PORT" -a "$pass" --no-auth-warning ping 2>/dev/null | grep -q PONG
+    redis-cli -p "$port" -a "$pass" --no-auth-warning ping 2>/dev/null | grep -q PONG
   else
-    redis-cli -p "$PORT" ping 2>/dev/null | grep -q PONG
+    redis-cli -p "$port" ping 2>/dev/null | grep -q PONG
   fi
+}
+
+redis_port_listening() {
+  local port="${1:-$PORT}"
+  if command_exists ss; then
+    ss -tln 2>/dev/null | grep -q ":${port}\b"
+    return $?
+  fi
+  if command_exists lsof; then
+    lsof -ti "tcp:${port}" >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
+redis_auth_required() {
+  local port="${1:-$PORT}"
+  local out
+  out=$(redis-cli -p "$port" ping 2>&1 || true)
+  echo "$out" | grep -qi NOAUTH
+}
+
+write_redis_env_urls() {
+  local url="$1"
+  [ -f "$ENV_FILE" ] || touch "$ENV_FILE"
+  chmod 600 "$ENV_FILE" 2>/dev/null || true
+  local _tmp="${ENV_FILE}.tmp.$$"
+  grep -vE '^(REDIS_URL|CELERY_BROKER_URL|CELERY_RESULT_BACKEND)=' "$ENV_FILE" > "$_tmp" 2>/dev/null || true
+  {
+    echo "REDIS_URL=${url}"
+    echo "CELERY_BROKER_URL=${url}"
+    echo "CELERY_RESULT_BACKEND=${url}"
+  } >> "$_tmp"
+  mv "$_tmp" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+}
+
+# When :6379 is owned by a passworded system Redis we cannot reconfigure (no sudo),
+# start a local passwordless broker on the next free port and point .env at it.
+start_redis_alt_port() {
+  local alt_port="${REDIS_ALT_PORT:-6380}"
+  while redis_port_listening "$alt_port"; do
+    alt_port=$((alt_port + 1))
+    if [ "$alt_port" -gt 6399 ]; then
+      vader_error "No free Redis port found between 6380-6399."
+      return 1
+    fi
+  done
+
+  vader_warn "Port $PORT is in use with auth we cannot match — starting passwordless broker on :${alt_port}."
+  redis-server --daemonize yes --port "$alt_port" --bind 127.0.0.1 --dir /tmp \
+    --stop-writes-on-bgsave-error no --save "" >/dev/null 2>&1
+  sleep 2
+  if redis_ping "" "$alt_port"; then
+    write_redis_env_urls "redis://localhost:${alt_port}/0"
+    vader_success "Redis broker running on port ${alt_port} (passwordless, local-only)."
+    return 0
+  fi
+  vader_error "Failed to start passwordless Redis on port ${alt_port}."
+  return 1
 }
 
 # ─── macOS (Homebrew) branch ─────────────────────────────────────────────────
@@ -98,8 +170,17 @@ fi
 # ─── Step 1: Check if Redis is already running and reachable ─────────────────
 
 REDIS_PASS=$(get_redis_password)
+ENV_REDIS_PORT=$(get_redis_url_port)
 
 if command_exists redis-cli; then
+  # Honor a broker port already recorded in .env (e.g. alt-port fallback).
+  if [ -n "$ENV_REDIS_PORT" ] && [ "$ENV_REDIS_PORT" != "$PORT" ]; then
+    if redis_ping "$REDIS_PASS" "$ENV_REDIS_PORT" || redis_ping "" "$ENV_REDIS_PORT"; then
+      vader_success "Redis already running on port $ENV_REDIS_PORT."
+      exit 0
+    fi
+  fi
+
   if redis_ping "$REDIS_PASS"; then
     # Redis is running — ensure critical settings are correct at runtime.
     # If systemd started Redis before our config was written (e.g. after reboot),
@@ -160,6 +241,27 @@ REDISEOF
     vader_success "Redis already running on port $PORT."
     exit 0
   fi
+
+  # Port is listening but our ping failed — common when system Redis has a password
+  # we no longer have in .env (e.g. after .env was trimmed) and we lack sudo to
+  # rewrite /etc/redis/redis.conf.
+  if redis_port_listening "$PORT"; then
+    if redis_auth_required "$PORT" && [ -z "$REDIS_PASS" ]; then
+      vader_warn "Redis on port $PORT requires authentication but .env has no password."
+      start_redis_alt_port && exit 0
+      exit 1
+    fi
+    if redis_ping ""; then
+      write_redis_env_urls "redis://localhost:${PORT}/0"
+      vader_success "Redis already running on port $PORT (passwordless)."
+      exit 0
+    fi
+    if [ -n "$REDIS_PASS" ]; then
+      vader_warn "Redis is listening on port $PORT but .env credentials were rejected."
+      start_redis_alt_port && exit 0
+      exit 1
+    fi
+  fi
 fi
 
 # ─── Step 2: Ensure redis-server is installed ────────────────────────────────
@@ -205,6 +307,11 @@ REDISEOF
     vader_success "Redis config written to $REDIS_CONF"
   else
     vader_warn "Cannot write $REDIS_CONF (no sudo). Redis will run without auth."
+    if redis_port_listening "$PORT"; then
+      vader_warn "Port $PORT already in use — will use an alternate local broker port."
+      start_redis_alt_port && exit 0
+      exit 1
+    fi
     REDIS_PASS=""
   fi
 
@@ -262,6 +369,19 @@ fi
 # ─── Step 5: Fallback - start redis-server directly ─────────────────────────
 
 vader_info "Starting redis-server directly on port $PORT..."
+if redis_port_listening "$PORT"; then
+  vader_warn "Port $PORT is already in use."
+  if redis_auth_required "$PORT" || [ -n "$REDIS_PASS" ]; then
+    start_redis_alt_port && exit 0
+  fi
+  if redis_ping ""; then
+    write_redis_env_urls "redis://localhost:${PORT}/0"
+    vader_success "Redis already running on port $PORT."
+    exit 0
+  fi
+  vader_error "Port $PORT is occupied and not reachable with current credentials."
+  exit 1
+fi
 if [ -n "$REDIS_PASS" ]; then
   redis-server --daemonize yes --port "$PORT" --bind "127.0.0.1 ::1" --requirepass "$REDIS_PASS" --dir /tmp --stop-writes-on-bgsave-error no >/dev/null 2>&1
 else

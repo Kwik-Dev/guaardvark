@@ -14,12 +14,10 @@ from backend.services.brain_state import (
     ModelCapabilities,
     ReflexAction,
     ReflexResult,
-    StepBudget,
-    TierTelemetry,
     WarmUpStatus,
     _build_default_reflexes,
-    _rotate_response,
 )
+from backend.services.step_budget import StepBudget, TierTelemetry
 from unittest.mock import MagicMock, patch
 
 
@@ -141,26 +139,13 @@ class TestTierTelemetry:
         h = TierTelemetry.hash_message("test message")
         assert len(h) == 16
 
-    def test_to_dict(self):
+    def test_to_dict_includes_intent_when_set(self):
         t = TierTelemetry(
-            tier=2, latency_ms=150, tools_called=["web_search"],
+            tier=2, latency_ms=150, intent="social",
             success=True, model="llama3.1",
             timestamp="2026-04-05T12:00:00Z",
         )
-        d = t.to_dict()
-        assert d["tier"] == 2
-        assert d["tools_called"] == ["web_search"]
-
-
-# ---------------------------------------------------------------------------
-# Response rotation
-# ---------------------------------------------------------------------------
-
-class TestResponseRotation:
-    def test_rotates_through_pool(self):
-        pool = ["a", "b", "c"]
-        results = [_rotate_response(pool, "test_pool") for _ in range(6)]
-        assert results == ["a", "b", "c", "a", "b", "c"]
+        assert t.to_dict()["intent"] == "social"
 
 
 # ---------------------------------------------------------------------------
@@ -168,40 +153,10 @@ class TestResponseRotation:
 # ---------------------------------------------------------------------------
 
 class TestReflexTable:
-    def test_builds_greeting_reflexes_without_tools(self):
+    def test_no_social_reflexes_without_tools(self):
         reflexes = _build_default_reflexes(tool_registry=None)
         names = [r.name for r in reflexes]
-        assert "greeting" in names
-        assert "farewell" in names
-        assert "thanks" in names
-        # No media reflexes without tool registry
-        assert "media_play" not in names
-
-    def test_greeting_reflex_matches(self):
-        reflexes = _build_default_reflexes(tool_registry=None)
-        greeting = next(r for r in reflexes if r.name == "greeting")
-        for pattern in greeting.patterns:
-            assert pattern.search("hello")
-            assert pattern.search("Hi!")
-            assert pattern.search("Hey")
-            assert pattern.search("How are you?")
-            assert not pattern.search("hello can you help me with something")
-
-    def test_farewell_reflex_matches(self):
-        reflexes = _build_default_reflexes(tool_registry=None)
-        farewell = next(r for r in reflexes if r.name == "farewell")
-        for pattern in farewell.patterns:
-            assert pattern.search("bye")
-            assert pattern.search("Goodbye!")
-            assert not pattern.search("bye the way")
-
-    def test_thanks_reflex_matches(self):
-        reflexes = _build_default_reflexes(tool_registry=None)
-        thanks = next(r for r in reflexes if r.name == "thanks")
-        for pattern in thanks.patterns:
-            assert pattern.search("thanks")
-            assert pattern.search("Thank you!")
-            assert pattern.search("thx")
+        assert names == []
 
     def test_sorted_by_priority(self):
         reflexes = _build_default_reflexes(tool_registry=None)
@@ -221,30 +176,17 @@ class TestReflexTable:
         assert "media_volume" in names
         assert "media_status" in names
 
-    def test_greeting_handler_returns_result(self):
-        reflexes = _build_default_reflexes(tool_registry=None)
-        greeting = next(r for r in reflexes if r.name == "greeting")
-        match = greeting.patterns[0].search("hello")
-        result = greeting.handler("hello", match, {})
-        assert isinstance(result, ReflexResult)
-        assert result.success is True
-        assert len(result.response) > 0
-
 
 # ---------------------------------------------------------------------------
 # BrainState.match_reflex
 # ---------------------------------------------------------------------------
 
 class TestMatchReflex:
-    def test_matches_greeting(self):
+    def test_hello_not_a_reflex(self):
         state = BrainState.get_instance()
         state.reflexes = _build_default_reflexes(tool_registry=None)
         state.health.reflexes_loaded = True
-
-        result = state.match_reflex("hello")
-        assert result is not None
-        action, match = result
-        assert action.name == "greeting"
+        assert state.match_reflex("hello") is None
 
     def test_no_match_for_complex_message(self):
         state = BrainState.get_instance()
@@ -288,7 +230,7 @@ class TestInitializationDegradation:
             state.initialize(lite_mode=False)
 
         assert state.health.tools_available is False
-        assert state.health.reflexes_loaded is True  # greeting reflexes still work
+        assert state.health.reflexes_loaded is True  # reflex table compiles (may be empty)
         assert state._initialized is True
 
     def test_lite_mode_skips_tools(self):
@@ -306,44 +248,26 @@ class TestInitializationDegradation:
         state = BrainState.get_instance()
         assert state.is_ready is False
 
-    def test_get_system_prompt_fallback(self):
+    def test_get_system_prompt_skip_tools(self):
         state = BrainState.get_instance()
-        state.system_prompts = {"chat": "hello", "agent": "react"}
-
-        assert state.get_system_prompt("chat") == "hello"
-        assert state.get_system_prompt("agent") == "react"
-        assert state.get_system_prompt("nonexistent") == "hello"  # falls back to chat
+        state.system_prompts = {"chat": "BASE"}
+        out = state.get_system_prompt(role="chat", skip_tools=True)
+        assert "BASE" in out
+        assert "TOOLS:" not in out
 
 
 # ---------------------------------------------------------------------------
-# StepBudget cross tests (Phase 2.1)
+# StepBudget (pure accounting)
 # ---------------------------------------------------------------------------
 
-class TestStepBudgetFactsIntegration:
-    def test_query_active_facts(self):
-        budget = StepBudget.from_total(20)
-        budget.history.append({"confidence": 0.8, "reason": "fact1"})
-        budget.history.append({"confidence": 0.4, "reason": "fact2"})
-        facts = budget.query_active_facts(min_conf=0.5)
-        assert len(facts) == 1
-        assert facts[0]["reason"] == "fact1"
-
-    def test_integrate_memory_context(self):
-        budget = StepBudget.from_total(20)
-        with patch("backend.services.brain_state.query_tokens") as mock_tokens, \
-             patch("backend.services.brain_state.memory_match_score") as mock_score:
-            mock_tokens.return_value = {"budget", "low"}
-            mock_score.return_value = 0.5
-            budget.integrate_memory_context("previous low budget runs preferred direct tools")
-            assert budget.used > 0  # charged for introspection
-            assert any("introspected memory" in h["reason"] for h in budget.history)
-
-    def test_apply_lesson_efficiency(self):
-        budget = StepBudget.from_total(20)
-        lessons = ["when budget low cite facts first", "prefer synthesis"]
-        budget.apply_lesson_efficiency(lessons)
-        # no direct charge in stub, but can extend
-        assert True  # placeholder for sim
+class TestStepBudgetAccounting:
+    def test_consume_and_is_exhausted(self):
+        budget = StepBudget.from_total(3)
+        assert budget.consume(1, 2, "test")
+        assert budget.remaining == 2
+        assert not budget.is_exhausted()
+        budget.consume(2, 2, "finish")
+        assert budget.is_exhausted()
 
     def test_from_hw_policy(self):
         hw = {"gpu": {"vram_mb": 12000}, "ram": {"total_gb": 8}, "arch": "x86_64"}
@@ -370,26 +294,3 @@ class TestBudgetHWDerivedCap:
         assert budget.total <= 20  # real behavior
         assert budget.total > 0
 
-
-class TestBudgetQueriesMemoryLessons:
-    def test_queries_memory_and_charges_real(self):
-        budget = StepBudget.from_total(20)
-        # real call without heavy mock - integrate will use memory_match internally
-        budget.integrate_memory_context("lesson: when low budget, use facts and synthesis for efficiency")
-        assert any("introspected memory" in h.get("reason", "") for h in budget.history) or budget.used > 0  # may charge or not depending on score
-
-    def test_sim_low_budget_high_facts_prefers_synthesis(self):
-        # Sim low budget + high facts prefers synthesis (no real brain fixture needed)
-        budget = StepBudget.from_total(5)  # low
-        budget.charge(3, 2, "previous")
-        # in executor sim, low budget + facts -> synthesize
-        assert budget.remaining < 5
-        # would early stop and use _synthesize_answer
-        assert True  # sim passes
-
-    def test_memory_match_for_budget_efficiency_real(self):
-        # real internal call to memory_match_score
-        budget = StepBudget.from_total(20)
-        budget.integrate_memory_context("efficiency lesson for low budget")
-        # if score high, charged
-        assert budget.used >= 0  # real execution, may or not charge depending on tokens

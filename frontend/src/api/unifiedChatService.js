@@ -52,6 +52,7 @@ class UnifiedChatService {
     // user explicitly toggled it; otherwise omitted so the backend applies the
     // global `chat_thinking_default` Setting.
     const thinkPref = store.getSessionThinking?.(sessionId);
+    const imageModel = store.chatImageModel || "auto";
     const body = {
       session_id: sessionId,
       message,
@@ -59,6 +60,7 @@ class UnifiedChatService {
         ...options,
         agent_screen_active: agentScreenActive,
         screen_viewer_open: screenOpen,
+        image_model: options.image_model || imageModel,
         ...(thinkPref !== undefined ? { think: thinkPref } : {}),
       },
       project_id: options.project_id,

@@ -10,6 +10,10 @@ from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 
 logger = logging.getLogger(__name__)
 
+_KONTEXT_MODEL_IDS = frozenset({
+    "kontext", "flux-kontext", "flux-kontext-dev", "flux.kontext",
+})
+
 
 class ImageGeneratorTool(BaseTool):
     """
@@ -365,7 +369,89 @@ class EditImageTool(BaseTool):
             description="Diffusion steps (more = higher fidelity, slower). Default 28.",
             required=False, default=28,
         ),
+        "model": ToolParameter(
+            name="model", type="string",
+            description=(
+                "Image model/backend. Default follows /imagemodel (Settings). "
+                "'kontext' or 'auto' uses FLUX.1 Kontext instruction editing when installed; "
+                "other downloaded models (sd-xl, zimage-turbo, …) use img2img."
+            ),
+            required=False, default="auto",
+        ),
     }
+
+    @staticmethod
+    def _uses_kontext_backend(model: str) -> bool:
+        m = (model or "auto").strip().lower()
+        if m in _KONTEXT_MODEL_IDS:
+            return True
+        if m == "auto":
+            try:
+                from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+                return ComfyUIImageGenerator()._kontext_installed()
+            except Exception:
+                return False
+        return False
+
+    def _edit_via_img2img(
+        self, *, src: str, instruction: str, model: str, output_path: str,
+    ) -> ToolResult:
+        from PIL import Image
+        from backend.config import OUTPUT_DIR
+        from backend.services.offline_image_generator import get_image_generator
+        from backend.services.gpu_resource_policy import gpu_session
+        from backend.services.job_operation_gate import GpuBusyError
+        from backend.services.job_types import JobKind
+
+        generator = get_image_generator()
+        if not generator.service_available:
+            return ToolResult(
+                success=False,
+                error="Image edit service not available (offline pipeline not installed).",
+            )
+        init_image = Image.open(src)
+        width, height = init_image.size
+        effective_model = model if model and model != "auto" else "auto"
+        try:
+            with gpu_session(
+                JobKind.VIDEO_RENDER, f"chat_edit_{uuid.uuid4().hex[:8]}",
+                on_busy="raise", evict_ollama=True, vram_estimate_mb=11000,
+                require_fit=True, cross_process=True,
+            ):
+                result = generator.generate_image_from_image(
+                    prompt=instruction,
+                    init_image=init_image,
+                    strength=0.35,
+                    model=effective_model,
+                    width=width,
+                    height=height,
+                    num_inference_steps=28,
+                )
+        except GpuBusyError:
+            return ToolResult(
+                success=False,
+                error="GPU is busy with another render right now — try again in a moment.",
+            )
+        if not result.success or not result.image_path:
+            return ToolResult(success=False, error=result.error or "img2img edit failed")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        shutil.copy2(result.image_path, output_path)
+        filename = os.path.basename(output_path)
+        image_url = f"/api/outputs/generated_images/{filename}"
+        return ToolResult(
+            success=True,
+            output=(
+                f"Image edited successfully (img2img, model={result.model_used or effective_model}).\n"
+                f"Image URL: {image_url}\nEdit: {instruction}"
+            ),
+            metadata={
+                "image_url": image_url,
+                "filename": filename,
+                "instruction": instruction,
+                "model": result.model_used or effective_model,
+                "backend": "img2img",
+            },
+        )
 
     def _resolve_image(self, image: str):
         """Resolve a path / URL / data-URI to a local file. None if unresolvable.
@@ -409,7 +495,8 @@ class EditImageTool(BaseTool):
             return None
         return None
 
-    def execute(self, instruction: str, image: str = "", steps: int = 28, **kwargs) -> ToolResult:
+    def execute(self, instruction: str, image: str = "", steps: int = 28,
+                model: str = "auto", **kwargs) -> ToolResult:
         src = self._resolve_image(image)
         if not src:
             return ToolResult(
@@ -419,21 +506,48 @@ class EditImageTool(BaseTool):
         try:
             from backend.config import OUTPUT_DIR
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+            from backend.utils.settings_utils import get_chat_image_model
 
+            effective_model = (model or "auto").strip() or get_chat_image_model()
             output_dir = os.path.join(OUTPUT_DIR, "generated_images")
             os.makedirs(output_dir, exist_ok=True)
             filename = f"edit_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
             output_path = os.path.join(output_dir, filename)
 
-            ComfyUIImageGenerator().edit_image(
-                image_path=src, instruction=instruction,
-                output_path=output_path, steps=int(steps),
-            )
+            if self._uses_kontext_backend(effective_model):
+                ComfyUIImageGenerator().edit_image(
+                    image_path=src, instruction=instruction,
+                    output_path=output_path, steps=int(steps),
+                )
+                backend = "kontext"
+            else:
+                img2img_result = self._edit_via_img2img(
+                    src=src, instruction=instruction,
+                    model=effective_model, output_path=output_path,
+                )
+                if not img2img_result.success:
+                    return img2img_result
+                image_url = (img2img_result.metadata or {}).get("image_url")
+                return ToolResult(
+                    success=True,
+                    output=img2img_result.output,
+                    metadata={**(img2img_result.metadata or {}), "backend": "img2img"},
+                )
+
             image_url = f"/api/outputs/generated_images/{filename}"
             return ToolResult(
                 success=True,
-                output=f"Image edited successfully.\nImage URL: {image_url}\nEdit: {instruction}",
-                metadata={"image_url": image_url, "filename": filename, "instruction": instruction},
+                output=(
+                    f"Image edited successfully (kontext).\n"
+                    f"Image URL: {image_url}\nEdit: {instruction}"
+                ),
+                metadata={
+                    "image_url": image_url,
+                    "filename": filename,
+                    "instruction": instruction,
+                    "model": effective_model,
+                    "backend": backend,
+                },
             )
         except Exception as e:
             logger.error(f"EditImageTool error: {e}", exc_info=True)

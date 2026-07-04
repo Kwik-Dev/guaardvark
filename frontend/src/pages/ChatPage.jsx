@@ -1620,10 +1620,23 @@ const ChatPage = () => {
             } catch { resolve(); }
           });
 
+          const directToolOptions = {};
+          if (voiceOptions?.direct_tool) {
+            directToolOptions.direct_tool = voiceOptions.direct_tool;
+            directToolOptions.direct_tool_params = voiceOptions.direct_tool_params || {};
+            if (voiceOptions.slash_command) {
+              directToolOptions.slash_command = voiceOptions.slash_command;
+            }
+            if (voiceOptions.slash_args) {
+              directToolOptions.slash_args = voiceOptions.slash_args;
+            }
+          }
+
           const _ackResult = await (serviceToUse || unifiedChatService).sendMessage(sessionId, modifiedInputText, {
             use_rag: true,
             chat_mode: chatMode,
             project_id: projectId,
+            ...directToolOptions,
           }, imageBase64, isVoice);
           console.debug(`[SOCKET-CHAT] POST-SEND ack (normal) session=${sessionId}`);
         } catch (unifiedError) {

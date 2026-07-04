@@ -252,7 +252,8 @@ data/cast_refs/
 /guaardvark_backup.json
 /AGENTS.md
 /PUSH_PREVIEW.md
-docs/local-workspace-only/
+docs/local-workspace-only/*
+!docs/local-workspace-only/MASTER_TASKS.md
 
 # --- Non-essential / generated artifacts (untracked 2026-06-18, public-push sweep) ---
 # Internal multi-agent audit/planning dumps (contain local absolute paths; not source)

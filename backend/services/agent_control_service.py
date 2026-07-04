@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from backend.services.brain_state import StepBudget
+from backend.services.step_budget import StepBudget
 
 
 # ────────────────────────────────────────────────────────────────────────────

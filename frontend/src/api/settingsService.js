@@ -291,6 +291,36 @@ export const setVerbatimPrompts = async (enabled) => {
   }
 };
 
+export const getChatImageModel = async () => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/chat_image_model`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error(
+      "settingsService: Error getting chat image model:",
+      err.message,
+    );
+    return { error: err.message };
+  }
+};
+
+export const setChatImageModel = async (model) => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/chat_image_model`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: model || "auto" }),
+    });
+    return await handleResponse(response);
+  } catch (err) {
+    console.error(
+      "settingsService: Error setting chat image model:",
+      err.message,
+    );
+    return { error: err.message };
+  }
+};
+
 export const getBehaviorLearning = async () => {
   try {
     const response = await fetch(`${BASE_URL}/settings/behavior_learning`);

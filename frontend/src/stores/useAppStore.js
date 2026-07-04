@@ -70,6 +70,11 @@ const createUISlice = (set, get) => ({
     })),
   getSessionThinking: (sessionId) => get().sessionThinking[sessionId],
 
+  // Persisted chat image model (/imagemodel). Backend SystemSetting is source of
+  // truth; hydrated on ChatPage mount. Used for /imagine and LLM image tools.
+  chatImageModel: "auto",
+  setChatImageModel: (model) => set({ chatImageModel: model || "auto" }),
+
   isLoading: false,
   setIsLoading: (loading) => set({ isLoading: loading }),
   

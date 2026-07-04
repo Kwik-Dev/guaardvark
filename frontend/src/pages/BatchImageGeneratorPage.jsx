@@ -146,6 +146,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const fileInputRef = useRef(null);
   const blueprintFileInputRef = useRef(null);
   const pollingRef = useRef(null);
+  // Tracks which batch polling is for; survives interval teardown so in-flight fetches
+  // still apply (pollingRef is cleared on cleanup and must not gate result application).
+  const pollingBatchIdRef = useRef(null);
 
   // Progress system integration
   const { activeProcesses } = useUnifiedProgress();
@@ -452,15 +455,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
   const startPolling = useCallback((batchId) => {
     stopPolling();
+    pollingBatchIdRef.current = batchId;
 
     pollingRef.current = setInterval(async () => {
       try {
         const response = await fetch(`${API_BASE}/batch-image/status/${batchId}?include_results=true`);
-
-        // Check if component is still mounted and batchId is still current
-        if (!pollingRef.current) {
-          return;
-        }
 
         if (!response.ok) {
           console.error('Polling error: HTTP', response.status);
@@ -476,8 +475,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         if (data.success) {
           const batchStatus = data.data;
 
-          // Double-check we're still polling and batch ID matches
-          if (!pollingRef.current || batchStatus.batch_id !== batchId) {
+          // Ignore stale responses after cancel/complete or batch switch
+          if (pollingBatchIdRef.current !== batchId || batchStatus.batch_id !== batchId) {
             return;
           }
 
@@ -525,6 +524,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   }, []);
 
   const stopPolling = useCallback(() => {
+    pollingBatchIdRef.current = null;
     if (pollingRef.current) {
       clearInterval(pollingRef.current);
       pollingRef.current = null;
@@ -539,19 +539,22 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     }
   }, [searchParams]);
 
-  // Monitor active batch progress
+  // Start/stop polling only when batch id or terminal status changes — not on every
+  // progress tick (socket + poll both update activeBatch and used to restart polling,
+  // clearing pollingRef and discarding in-flight status responses).
+  const activeBatchId = activeBatch?.batch_id;
+  const activeBatchStatus = activeBatch?.status;
   useEffect(() => {
-    if (activeBatch && activeBatch.status === 'running') {
-      startPolling(activeBatch.batch_id);
+    if (activeBatchId && activeBatchStatus === 'running') {
+      startPolling(activeBatchId);
     } else {
       stopPolling();
     }
 
     return () => {
-      // Cleanup function to prevent race conditions
       stopPolling();
     };
-  }, [activeBatch]);
+  }, [activeBatchId, activeBatchStatus, startPolling, stopPolling]);
 
   // Keep generatedImages in sync with activeBatch.results (single source of truth for live batch).
   // This prevents stale/mismatched state during rapid polling updates.
@@ -574,12 +577,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           metadata: r.metadata,
           batchId: activeBatch.batch_id,
         }));
-      // Only update if the count changed (avoids unnecessary re-renders)
-      if (synced.length !== generatedImages.length) {
+      const syncedKey = synced.map((img) => img.id).join(',');
+      const currentKey = generatedImages.map((img) => img.id).join(',');
+      if (syncedKey !== currentKey) {
         setGeneratedImages(synced);
       }
     }
-  }, [activeBatch]);
+  }, [activeBatch, generatedImages]);
 
   // Monitor progress system for batch updates
   const completionHandledRef = useRef(null);
@@ -611,7 +615,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         }
       }
     }
-  }, [activeProcesses, activeBatch, loadBatchById]);
+  }, [activeProcesses, activeBatch?.batch_id, loadBatchById]);
 
   const handleBatchItemsChange = (event) => {
     setBatchItems(event.target.value);

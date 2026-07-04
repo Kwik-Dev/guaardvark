@@ -5,7 +5,7 @@ import pytest
 
 from backend.services.agent_brain import (
     AgentBrain,
-    CONVERSATIONAL_PASSTHROUGH,
+    SOCIAL_TIER2_PATTERNS,
     DELIBERATION_SIGNALS,
     VISION_PATTERNS,
 )
@@ -106,29 +106,29 @@ class TestVisionDetection:
 # Conversational passthrough
 # ---------------------------------------------------------------------------
 
-class TestConversationalPassthrough:
-    def test_yes_is_conversational(self):
-        assert CONVERSATIONAL_PASSTHROUGH.match("yes")
+class TestSocialTier2Passthrough:
+    def test_yes_is_social(self):
+        assert SOCIAL_TIER2_PATTERNS.fullmatch("yes")
 
-    def test_no_is_conversational(self):
-        assert CONVERSATIONAL_PASSTHROUGH.match("no")
+    def test_no_is_social(self):
+        assert SOCIAL_TIER2_PATTERNS.fullmatch("no")
 
-    def test_ok_is_conversational(self):
-        assert CONVERSATIONAL_PASSTHROUGH.match("ok")
+    def test_ok_is_social(self):
+        assert SOCIAL_TIER2_PATTERNS.fullmatch("ok")
 
-    def test_sure_is_conversational(self):
-        assert CONVERSATIONAL_PASSTHROUGH.match("sure")
+    def test_sure_is_social(self):
+        assert SOCIAL_TIER2_PATTERNS.fullmatch("sure")
 
-    def test_sounds_good_is_conversational(self):
-        assert CONVERSATIONAL_PASSTHROUGH.match("sounds good")
+    def test_sounds_good_is_social(self):
+        assert SOCIAL_TIER2_PATTERNS.fullmatch("sounds good")
 
-    def test_complex_sentence_not_conversational(self):
-        assert not CONVERSATIONAL_PASSTHROUGH.match(
+    def test_complex_sentence_not_social(self):
+        assert not SOCIAL_TIER2_PATTERNS.fullmatch(
             "Yes, please analyze the website"
         )
 
-    def test_question_not_conversational(self):
-        assert not CONVERSATIONAL_PASSTHROUGH.match(
+    def test_question_not_social(self):
+        assert not SOCIAL_TIER2_PATTERNS.fullmatch(
             "What do you think about this approach?"
         )
 
@@ -138,42 +138,35 @@ class TestConversationalPassthrough:
 # ---------------------------------------------------------------------------
 
 class TestTierRouting:
-    def test_greeting_routes_to_tier1(self, brain):
-        """Greeting should be handled by reflex and return immediately."""
-        emit_calls = []
-        def mock_emit(event, data):
-            emit_calls.append((event, data))
-
+    def test_greeting_routes_to_tier2(self, brain):
+        """Social openers use Tier 2 LLM (skip_tools), not hardcoded reflexes."""
         result = brain.process(
             session_id="test",
             message="hello",
             options={},
-            emit_fn=mock_emit,
+            emit_fn=lambda e, d: None,
         )
+        assert result.get("tier") == 2
+        assert result.get("success") is False  # no LLM in test fixture
+        assert "Model not loaded" in (result.get("error") or "")
 
-        assert result["success"] is True
-        assert result["tier"] == 1
-        assert len(result["response"]) > 0
-
-    def test_farewell_routes_to_tier1(self, brain):
-        emit_calls = []
+    def test_farewell_routes_to_tier2(self, brain):
         result = brain.process(
             session_id="test",
             message="goodbye",
             options={},
-            emit_fn=lambda e, d: emit_calls.append((e, d)),
+            emit_fn=lambda e, d: None,
         )
-        assert result["tier"] == 1
+        assert result.get("tier") == 2
 
-    def test_thanks_routes_to_tier1(self, brain):
-        emit_calls = []
+    def test_thanks_routes_to_tier2(self, brain):
         result = brain.process(
             session_id="test",
             message="thanks!",
             options={},
-            emit_fn=lambda e, d: emit_calls.append((e, d)),
+            emit_fn=lambda e, d: None,
         )
-        assert result["tier"] == 1
+        assert result.get("tier") == 2
 
     def test_complex_message_routes_to_tier2(self, brain):
         """Non-greeting, non-deliberation message should go to Tier 2."""
@@ -211,7 +204,7 @@ class TestTierRouting:
         assert result.get("tier") in (2, 3)
 
     def test_conversational_passthrough_to_tier2(self, brain):
-        """Bare 'yes' should go to Tier 2 (not Tier 1)."""
+        """Bare 'yes' should go to Tier 2 social path."""
         result = brain.process(
             session_id="test",
             message="yes",
@@ -220,14 +213,25 @@ class TestTierRouting:
         )
         assert result.get("tier") == 2
 
-    def test_emit_events_on_tier1(self, brain):
-        """Tier 1 should emit chat:response and chat:complete."""
+    def test_social_without_llm_returns_honest_error(self, brain):
+        result = brain.process(
+            session_id="test",
+            message="hello",
+            options={},
+            emit_fn=lambda e, d: None,
+        )
+        assert result.get("success") is False
+        assert "Model not loaded" in (result.get("error") or "")
+        assert "Hey!" not in (result.get("response") or "")
+
+    def test_emit_events_on_tier2_social(self, brain):
+        """Social path attempts Tier 2 (emits error when LLM unavailable)."""
         events = []
-        brain.process(
+        result = brain.process(
             session_id="test",
             message="hello",
             options={},
             emit_fn=lambda e, d: events.append(e),
         )
-        assert "chat:response" in events
-        assert "chat:complete" in events
+        assert result.get("tier") == 2
+        assert result.get("success") is False

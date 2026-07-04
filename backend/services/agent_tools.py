@@ -391,6 +391,27 @@ class ToolRegistry:
                 
         return coerced
 
+    @staticmethod
+    def _recover_literal_param_value(
+        tool_name: str,
+        param_name: str,
+        agent_context: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Recover a real value when the model copied a schema param name literally."""
+        if not agent_context:
+            return None
+        direct_params = agent_context.get("direct_tool_params") or {}
+        if isinstance(direct_params, dict) and direct_params.get(param_name):
+            return str(direct_params[param_name])
+        if tool_name == "generate_image" and param_name == "prompt":
+            pending = agent_context.get("pending_image_prompt")
+            if pending:
+                return str(pending)
+            user_msg = agent_context.get("user_message") or agent_context.get("message")
+            if user_msg:
+                return str(user_msg)
+        return None
+
     def execute_tool(self, tool_name: str, /, agent_context: Optional[Dict[str, Any]] = None,
                      on_output: Optional[Callable[[str], None]] = None, **kwargs) -> ToolResult:
         """
@@ -433,13 +454,25 @@ class ToolRegistry:
             received_keys = set(kwargs.keys()) - {"_agent_context"}
             logger.info(f"Param recovery: remapped param_name={pname_val} to direct kwarg")
 
+        # Strategy 1b: param_name alone (placeholder copy) — do not use schema name as value
+        if "param_name" in received_keys:
+            pname_val = kwargs.pop("param_name")
+            received_keys = set(kwargs.keys()) - {"_agent_context"}
+            if pname_val in expected_all:
+                logger.warning(
+                    "Param recovery: rejected placeholder param_name=%r without value",
+                    pname_val,
+                )
+            else:
+                kwargs[pname_val] = ""
+                received_keys.add(pname_val)
+
         # Strategy 2: Fuzzy matching for unrecognized params
         missing_required = set(expected_required) - received_keys
         unknown_params = received_keys - set(expected_all)
-        
+
         if unknown_params and (missing_required or len(received_keys) < len(expected_all)):
             for unknown in list(unknown_params):
-                # Try to find a close match in all expected parameters (including optional)
                 matches = difflib.get_close_matches(unknown, expected_all, n=1, cutoff=0.6)
                 if matches:
                     matched_name = matches[0]
@@ -455,9 +488,26 @@ class ToolRegistry:
         if len(unknown_params) == 1 and len(missing_required) == 1:
             wrong_name = unknown_params.pop()
             right_name = missing_required.pop()
-            kwargs[right_name] = kwargs.pop(wrong_name)
-            received_keys = set(kwargs.keys()) - {"_agent_context"}
-            logger.info(f"Param recovery: mapped unknown '{wrong_name}' to missing required '{right_name}'")
+            wrong_val = kwargs.get(wrong_name)
+            if isinstance(wrong_val, str) and wrong_val.strip().lower() == right_name.lower():
+                kwargs.pop(wrong_name, None)
+                recovered = self._recover_literal_param_value(
+                    tool_name, right_name, agent_context,
+                )
+                if recovered is not None:
+                    kwargs[right_name] = recovered
+                    logger.info(
+                        "Param recovery: replaced literal %r with context for %s",
+                        wrong_val, right_name,
+                    )
+                else:
+                    logger.warning(
+                        "Param recovery: dropped literal placeholder %s=%r",
+                        wrong_name, wrong_val,
+                    )
+            else:
+                kwargs[right_name] = kwargs.pop(wrong_name)
+                logger.info(f"Param recovery: mapped unknown '{wrong_name}' to missing required '{right_name}'")
 
         # Strategy 4: Handle comma-separated coords/lists
         missing_required = set(expected_required) - received_keys
@@ -474,6 +524,14 @@ class ToolRegistry:
                     kwargs.pop(wrong_name)
                     received_keys = set(kwargs.keys()) - {"_agent_context"}
                     logger.info(f"Param recovery: split '{wrong_name}' → {missing_sorted}")
+
+        # Strategy 5: fill missing required params from agent_context (slash / retry / user message)
+        missing_required = set(expected_required) - (set(kwargs.keys()) - {"_agent_context"})
+        for pname in list(missing_required):
+            recovered = self._recover_literal_param_value(tool_name, pname, agent_context)
+            if recovered is not None:
+                kwargs[pname] = recovered
+                logger.info("Param recovery: filled %s from agent_context", pname)
 
         # 2. Type Coercion
         kwargs = self._coerce_params(tool, kwargs)

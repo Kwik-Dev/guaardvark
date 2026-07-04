@@ -19,6 +19,7 @@ CRITICAL_PACKAGES = {
     "redis": "redis==5.0.4",
     "llama_index": "llama-index-core>=0.13.0,<0.15.0",
     "lxml": "lxml==6.0.2",
+    "websocket": "websocket-client==1.8.0",  # ComfyUI ws progress bridge + outreach scrapers
     "alembic": "alembic",  # Not in legacy list but needed by the Alembic reconciler
 }
 

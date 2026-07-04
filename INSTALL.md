@@ -1,14 +1,14 @@
 # Guaardvark Code Release
 
 ## Backup Information
-- **Date:** 2026-06-14 19:06:09
+- **Date:** 2026-07-03 02:25:16
 - **Type:** Code Release (no data — database and files are created fresh on first run)
 
 ## Install
 
 1. **Extract:**
    ```bash
-   unzip guaardvark_code_release_20260614_190608.zip
+   unzip fucked-up-version___20260703_022516.zip
    cd guaardvark
    ```
 

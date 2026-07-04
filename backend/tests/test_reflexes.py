@@ -49,42 +49,40 @@ class TestContextFreeRule:
         reflexes = _build_default_reflexes(tool_registry=None)
         for r in reflexes:
             for p in r.patterns:
-                assert not p.search("yes"), (
-                    f"Reflex '{r.name}' matches bare 'yes' — violates context-free rule"
+                assert not p.fullmatch("yes"), (
+                    f"Reflex '{r.name}' matches bare 'yes'"
                 )
 
     def test_bare_ok_not_a_reflex(self):
         reflexes = _build_default_reflexes(tool_registry=None)
         for r in reflexes:
             for p in r.patterns:
-                assert not p.search("ok"), (
-                    f"Reflex '{r.name}' matches bare 'ok' — violates context-free rule"
+                assert not p.fullmatch("ok"), (
+                    f"Reflex '{r.name}' matches bare 'ok'"
                 )
 
     def test_bare_no_not_a_reflex(self):
         reflexes = _build_default_reflexes(tool_registry=None)
         for r in reflexes:
             for p in r.patterns:
-                assert not p.search("no"), (
-                    f"Reflex '{r.name}' matches bare 'no' — violates context-free rule"
+                assert not p.fullmatch("no"), (
+                    f"Reflex '{r.name}' matches bare 'no'"
                 )
 
     def test_sure_not_a_reflex(self):
         reflexes = _build_default_reflexes(tool_registry=None)
         for r in reflexes:
             for p in r.patterns:
-                assert not p.search("sure"), (
-                    f"Reflex '{r.name}' matches bare 'sure' — violates context-free rule"
+                assert not p.fullmatch("sure"), (
+                    f"Reflex '{r.name}' matches bare 'sure'"
                 )
 
-    def test_greeting_with_trailing_question_is_not_complex(self):
-        """'hello' is unambiguous; 'hello can you help me' is not a greeting."""
+    def test_no_social_reflexes_in_table(self):
         reflexes = _build_default_reflexes(tool_registry=None)
-        greeting = next(r for r in reflexes if r.name == "greeting")
-        for p in greeting.patterns:
-            assert p.search("hello")
-            assert not p.search("hello can you help me with something")
-            assert not p.search("hi there, I need to analyze a website")
+        names = {r.name for r in reflexes}
+        assert "greeting" not in names
+        assert "farewell" not in names
+        assert "thanks" not in names
 
 
 # ---------------------------------------------------------------------------
@@ -96,34 +94,34 @@ class TestMediaReflexMatching:
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
         play = next(r for r in reflexes if r.name == "media_play")
         for p in play.patterns:
-            assert p.search("play some jazz")
-            assert p.search("Play my favorite song")
+            assert p.fullmatch("play some jazz")
+            assert p.fullmatch("Play my favorite song")
 
     def test_control_matches(self, mock_registry):
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
         control = next(r for r in reflexes if r.name == "media_control")
         for p in control.patterns:
-            assert p.search("pause")
-            assert p.search("stop the music")
-            assert p.search("next track")
-            assert p.search("skip")
-            assert p.search("resume")
+            assert p.fullmatch("pause")
+            assert p.fullmatch("stop the music")
+            assert p.fullmatch("next track")
+            assert p.fullmatch("skip")
+            assert p.fullmatch("resume")
 
     def test_volume_matches(self, mock_registry):
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
         vol = next(r for r in reflexes if r.name == "media_volume")
-        for p in vol.patterns:
-            assert p.search("volume up")
-            assert p.search("volume 50")
-            assert p.search("louder")
-            assert p.search("mute")
+        for msg in ("volume up", "volume 50", "louder", "mute"):
+            assert any(p.fullmatch(msg) for p in vol.patterns), msg
+        assert not any(
+            p.fullmatch("please volume up the analysis")
+            for p in vol.patterns
+        )
 
     def test_status_matches(self, mock_registry):
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
         status = next(r for r in reflexes if r.name == "media_status")
-        for p in status.patterns:
-            assert p.search("what's playing")
-            assert p.search("current song")
+        for msg in ("what's playing", "current song"):
+            assert any(p.fullmatch(msg) for p in status.patterns), msg
 
     def test_play_does_not_match_non_media(self, mock_registry):
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
@@ -132,7 +130,7 @@ class TestMediaReflexMatching:
         # but complex non-media sentences should not trigger control reflexes
         control = next(r for r in reflexes if r.name == "media_control")
         for p in control.patterns:
-            assert not p.search("can you please stop the analysis and start over")
+            assert not p.fullmatch("can you please stop the analysis and start over")
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +141,7 @@ class TestMediaReflexExecution:
     def test_play_calls_tool(self, mock_registry):
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
         play = next(r for r in reflexes if r.name == "media_play")
-        match = play.patterns[0].search("play some jazz")
+        match = play.patterns[0].fullmatch("play some jazz")
         result = play.handler("play some jazz", match, {})
 
         assert result.success is True
@@ -155,7 +153,7 @@ class TestMediaReflexExecution:
     def test_control_extracts_action(self, mock_registry):
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
         control = next(r for r in reflexes if r.name == "media_control")
-        match = control.patterns[0].search("pause")
+        match = control.patterns[0].fullmatch("pause")
         result = control.handler("pause", match, {})
 
         assert result.success is True
@@ -165,7 +163,7 @@ class TestMediaReflexExecution:
     def test_skip_maps_to_next(self, mock_registry):
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
         control = next(r for r in reflexes if r.name == "media_control")
-        match = control.patterns[0].search("skip")
+        match = control.patterns[0].fullmatch("skip")
         result = control.handler("skip", match, {})
 
         call_kwargs = mock_registry.execute_tool.call_args
@@ -180,7 +178,7 @@ class TestReflexVerification:
     def test_failed_tool_returns_failure(self, mock_registry_failing):
         reflexes = _build_default_reflexes(tool_registry=mock_registry_failing)
         play = next(r for r in reflexes if r.name == "media_play")
-        match = play.patterns[0].search("play something")
+        match = play.patterns[0].fullmatch("play something")
         result = play.handler("play something", match, {})
 
         assert result.success is False
@@ -190,33 +188,17 @@ class TestReflexVerification:
         mock_registry.execute_tool.side_effect = RuntimeError("boom")
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
         play = next(r for r in reflexes if r.name == "media_play")
-        match = play.patterns[0].search("play something")
+        match = play.patterns[0].fullmatch("play something")
         result = play.handler("play something", match, {})
 
         assert result.success is False
 
-    def test_greeting_always_succeeds(self):
-        reflexes = _build_default_reflexes(tool_registry=None)
-        greeting = next(r for r in reflexes if r.name == "greeting")
-        match = greeting.patterns[0].search("hello")
-        result = greeting.handler("hello", match, {})
-        assert result.success is True
-        assert len(result.response) > 0
-
-
-# ---------------------------------------------------------------------------
-# Priority ordering
-# ---------------------------------------------------------------------------
-
 class TestPriority:
-    def test_media_before_greetings(self, mock_registry):
-        """Media reflexes (priority 10) should be checked before greetings (90)."""
+    def test_only_media_reflexes_without_social(self, mock_registry):
         reflexes = _build_default_reflexes(tool_registry=mock_registry)
-        media_priorities = [r.priority for r in reflexes if r.name.startswith("media")]
-        greeting_priorities = [r.priority for r in reflexes
-                               if r.name in ("greeting", "farewell", "thanks")]
-
-        assert all(mp < gp for mp in media_priorities for gp in greeting_priorities)
+        names = [r.name for r in reflexes]
+        assert all(n.startswith("media_") for n in names)
+        assert "greeting" not in names
 
     def test_no_missing_tools_crash(self):
         """Registry where some tools are missing should not crash."""

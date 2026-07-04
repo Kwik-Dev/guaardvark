@@ -18,6 +18,7 @@ try:
         StableDiffusionPipeline,
         StableDiffusionXLPipeline,
         StableDiffusionImg2ImgPipeline,
+        StableDiffusionXLImg2ImgPipeline,
         DPMSolverMultistepScheduler
     )
     from PIL import Image
@@ -31,10 +32,11 @@ except ImportError as e:
 # Z-Image (Tongyi-MAI) ships in diffusers >= 0.38. Import separately so an older
 # diffusers that lacks ZImagePipeline doesn't disable the whole diffusion stack.
 try:
-    from diffusers import ZImagePipeline
+    from diffusers import ZImagePipeline, ZImageImg2ImgPipeline
     zimage_available = True
 except Exception:  # ImportError on older diffusers
     ZImagePipeline = None
+    ZImageImg2ImgPipeline = None
     zimage_available = False
 
 try:
@@ -70,6 +72,9 @@ class ImageGenerationRequest:
     restore_faces: bool = True
     face_restoration_weight: float = 0.5
     remove_background: bool = False  # post-process with rembg -> transparent RGBA PNG
+    # Batch runs set this so we don't reload/unload a 6B pipeline every image —
+    # that peak (especially Z-Image CPU offload) was OOM-killing the Flask process.
+    keep_pipeline_loaded: bool = False
 
 @dataclass
 class ImageGenerationResult:
@@ -223,6 +228,7 @@ class OfflineImageGenerator:
 
         self._pipeline = None
         self._img2img_pipeline = None
+        self._img2img_family = None
         self._current_model = None
         
         self._device = "cpu"
@@ -264,6 +270,43 @@ class OfflineImageGenerator:
         if 'xl' in mid or 'sdxl' in mid:
             return 'sdxl'
         return 'sd'
+
+    def _build_img2img_pipeline(self, family: str):
+        """Share weights from the loaded txt2img pipeline for img2img edits."""
+        if family == 'zimage':
+            if ZImageImg2ImgPipeline is None:
+                raise RuntimeError(
+                    "Z-Image img2img is unavailable (upgrade diffusers >= 0.38)"
+                )
+            return ZImageImg2ImgPipeline(
+                transformer=self._pipeline.transformer,
+                vae=self._pipeline.vae,
+                text_encoder=self._pipeline.text_encoder,
+                tokenizer=self._pipeline.tokenizer,
+                scheduler=self._pipeline.scheduler,
+            )
+        if family == 'sdxl':
+            return StableDiffusionXLImg2ImgPipeline(
+                vae=self._pipeline.vae,
+                text_encoder=self._pipeline.text_encoder,
+                text_encoder_2=self._pipeline.text_encoder_2,
+                tokenizer=self._pipeline.tokenizer,
+                tokenizer_2=self._pipeline.tokenizer_2,
+                unet=self._pipeline.unet,
+                scheduler=self._pipeline.scheduler,
+            )
+        if family == 'sd':
+            return StableDiffusionImg2ImgPipeline(
+                vae=self._pipeline.vae,
+                text_encoder=self._pipeline.text_encoder,
+                tokenizer=self._pipeline.tokenizer,
+                unet=self._pipeline.unet,
+                scheduler=self._pipeline.scheduler,
+                safety_checker=None,
+                feature_extractor=None,
+                requires_safety_checker=False,
+            )
+        raise RuntimeError(f"Model family '{family}' does not support img2img editing")
 
     # Measured pipeline footprints per family (bf16 weights + denoise activations),
     # not aspirations. The 2026-06-10 OOM postmortem: a flat 3500MB estimate let the
@@ -1189,14 +1232,15 @@ Negative Prompt: {negative_prompt}""",
                 result.generation_time = time.time() - start_time
             finally:
                 self._notify_vision_pipeline("stop")
-                # Immediately free VRAM — don't wait for the 300s idle timer.
-                # The LLM needs the GPU back for the next chat turn.
-                self._unload_pipeline()
-                try:
-                    from backend.services.gpu_memory_orchestrator import get_orchestrator
-                    get_orchestrator().release_model("sd:pipeline")
-                except Exception:
-                    pass
+                if not getattr(request, "keep_pipeline_loaded", False):
+                    # Immediately free VRAM — don't wait for the 300s idle timer.
+                    # The LLM needs the GPU back for the next chat turn.
+                    self._unload_pipeline()
+                    try:
+                        from backend.services.gpu_memory_orchestrator import get_orchestrator
+                        get_orchestrator().release_model("sd:pipeline")
+                    except Exception:
+                        pass
 
         return result
 
@@ -1216,6 +1260,7 @@ Negative Prompt: {negative_prompt}""",
         # GPU reload on the next request.
         self._pipeline = None
         self._img2img_pipeline = None
+        self._img2img_family = None
         self._current_model = None
         self._compile_unet_orig = None
         self._compile_vae_orig = None
@@ -1248,29 +1293,42 @@ Negative Prompt: {negative_prompt}""",
         with self._generation_lock:
             self._notify_vision_pipeline("start")
             try:
+                if model in (None, "", "auto"):
+                    model = self._auto_select_model(prompt, "realistic")
+
                 model_id = self.available_models.get(model, model)
-                is_sdxl = 'xl' in model_id.lower() or 'sdxl' in model_id.lower()
+                family = self._model_family(model_id)
+
+                if family == 'zimage':
+                    num_inference_steps = 8
+                    guidance_scale = 1.0
+                elif family == 'sdxl':
+                    if guidance_scale > 9.0:
+                        guidance_scale = 7.5
+                    elif guidance_scale < 4.0:
+                        guidance_scale = 6.0
+
+                max_dim = 1536 if family in ('sdxl', 'zimage') else 768
+                width = min(max(int(width), 256), max_dim)
+                height = min(max(int(height), 256), max_dim)
 
                 # Ensure the base txt2img pipeline is loaded (downloads model if needed)
                 if not self._load_pipeline(model_id):
                     result.error = f"Failed to load model {model} ({model_id})"
                     return result
 
-                # Load img2img pipeline from same weights (shares VAE/UNet/text encoder)
-                if self._img2img_pipeline is None or self._current_model != model_id:
-                    model_path = self._get_model_path(model_id)
-                    logger.info(f"Loading img2img pipeline from {model_path}")
-                    self._img2img_pipeline = StableDiffusionImg2ImgPipeline(
-                        vae=self._pipeline.vae,
-                        text_encoder=self._pipeline.text_encoder,
-                        tokenizer=self._pipeline.tokenizer,
-                        unet=self._pipeline.unet,
-                        scheduler=self._pipeline.scheduler,
-                        safety_checker=None,
-                        feature_extractor=None,
-                        requires_safety_checker=False,
+                if (
+                    self._img2img_pipeline is None
+                    or self._current_model != model_id
+                    or self._img2img_family != family
+                ):
+                    logger.info(
+                        "Building img2img pipeline for %s (family=%s)",
+                        model_id, family,
                     )
-                    logger.info("img2img pipeline ready (shared weights)")
+                    self._img2img_pipeline = self._build_img2img_pipeline(family)
+                    self._img2img_family = family
+                    logger.info("img2img pipeline ready (%s)", family)
 
                 # Resize init_image to target dimensions
                 if init_image.size != (width, height):
@@ -1291,28 +1349,39 @@ Negative Prompt: {negative_prompt}""",
 
                 combined_negative = negative_prompt or "blurry, low quality, distorted"
 
-                logger.info(f"img2img: strength={strength}, steps={num_inference_steps}, prompt={prompt[:80]}...")
+                logger.info(
+                    "img2img (%s): strength=%s, steps=%s, prompt=%r",
+                    family, strength, num_inference_steps, prompt[:80],
+                )
 
-                if self._device == "cuda":
-                    with torch.autocast("cuda"):
+                call_kwargs = dict(
+                    prompt=prompt,
+                    image=init_image,
+                    strength=strength,
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                )
+
+                if family == 'zimage':
+                    # Z-Image is bf16 flow-matching — no autocast; CFG distilled out.
+                    call_kwargs["negative_prompt"] = None
+                    output = self._img2img_pipeline(**call_kwargs)
+                elif self._device == "cuda":
+                    _ac_dtype = (
+                        torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                    )
+                    with torch.autocast("cuda", dtype=_ac_dtype):
                         output = self._img2img_pipeline(
-                            prompt=prompt,
-                            image=init_image,
-                            strength=strength,
+                            **call_kwargs,
                             negative_prompt=combined_negative,
-                            num_inference_steps=num_inference_steps,
-                            guidance_scale=guidance_scale,
-                            generator=generator,
                         )
                 else:
                     output = self._img2img_pipeline(
-                        prompt=prompt,
-                        image=init_image,
-                        strength=strength,
+                        **call_kwargs,
                         negative_prompt=combined_negative,
-                        num_inference_steps=num_inference_steps,
-                        guidance_scale=guidance_scale,
-                        generator=generator,
                     )
 
                 image = output.images[0]

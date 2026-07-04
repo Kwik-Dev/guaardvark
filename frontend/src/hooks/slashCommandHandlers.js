@@ -5,6 +5,7 @@
  */
 
 import { useAppStore } from "../stores/useAppStore";
+import { getChatImageModel, setChatImageModel as persistChatImageModel } from "../api/settingsService";
 
 // ============================================================
 // Dispatcher
@@ -24,7 +25,7 @@ export async function executeBuiltinCommand(name, args, context) {
     "/plan": handlePlan,
     "/training": handleTraining,
     "/agent": handleAgent,
-    "/chat": handleChatMode,
+    "/chat": handleChatMode,  // alias
     "/exit": handleChatMode,  // alias
     "/thinking": handleThinking,
   };
@@ -38,6 +39,37 @@ export async function executeBuiltinCommand(name, args, context) {
   }
 
   return handler(args, context);
+}
+
+/** Read persisted chat image model (backend), with store + legacy sessionStorage fallback. */
+async function resolveCurrentImageModel(defaultModel = "auto") {
+  const storeModel = useAppStore.getState().chatImageModel;
+  if (storeModel && storeModel !== "auto") {
+    return storeModel;
+  }
+  try {
+    const res = await getChatImageModel();
+    const model = res?.data?.model ?? res?.model;
+    if (model) {
+      useAppStore.getState().setChatImageModel(model);
+      return model;
+    }
+  } catch {
+    /* fall through */
+  }
+  const legacy = sessionStorage.getItem("slash_image_model");
+  return legacy || defaultModel;
+}
+
+/** Persist model choice to backend + app store (and sessionStorage for older callers). */
+async function saveImageModelChoice(modelId) {
+  useAppStore.getState().setChatImageModel(modelId);
+  sessionStorage.setItem("slash_image_model", modelId);
+  try {
+    await persistChatImageModel(modelId);
+  } catch (err) {
+    console.warn("Failed to persist chat image model:", err);
+  }
 }
 
 // ============================================================
@@ -160,18 +192,32 @@ async function handleModel(args, { addMessage }) {
 // /imagemodel [name]
 // ============================================================
 
+const KONTEXT_EDIT_OPTION = {
+  id: "kontext",
+  name: "FLUX.1 Kontext [dev] (instruction image editing)",
+  is_downloaded: true,
+};
+
 async function handleImageModel(args, { addMessage }) {
   if (!args) {
     try {
-      const res = await fetch("/api/batch-image/models");
-      const data = await res.json();
+      const [modelsRes, current] = await Promise.all([
+        fetch("/api/batch-image/models"),
+        resolveCurrentImageModel("auto"),
+      ]);
+      const data = await modelsRes.json();
       const models = data?.data?.models || data?.models || [];
-      const defaultModel = data?.data?.default_model || "sd-1.5";
-      const current = sessionStorage.getItem("slash_image_model") || defaultModel;
-      const downloaded = models.filter((m) => m.is_downloaded);
+      const downloaded = [
+        KONTEXT_EDIT_OPTION,
+        ...models.filter((m) => m.is_downloaded),
+      ];
       addMessage({
         role: "system",
-        content: `**Current image model:** ${current}\n\n**Available (downloaded):**\n${downloaded.map((m) => `- \`${m.id}\` — ${m.name}`).join("\n")}\n\n**Not downloaded:**\n${models.filter((m) => !m.is_downloaded).map((m) => `- \`${m.id}\``).join("\n") || "_(none)_"}`,
+        content: `**Current image model:** \`${current}\`\n\n`
+          + `Used for \`/imagine\`, **generate_image**, and **edit_image** in chat.\n\n`
+          + `**Available:**\n${downloaded.map((m) => `- \`${m.id}\` — ${m.name}`).join("\n")}\n\n`
+          + `**Not downloaded:**\n${models.filter((m) => !m.is_downloaded).map((m) => `- \`${m.id}\``).join("\n") || "_(none)_"}\n\n`
+          + `_Tip: \`kontext\` / \`auto\` use FLUX Kontext for edits when installed; other models use img2img._`,
         tempId: `imgmodel-${Date.now()}`,
         type: "command",
       });
@@ -181,8 +227,18 @@ async function handleImageModel(args, { addMessage }) {
     return { handled: true };
   }
 
-  // Validate the model exists
-  const modelName = args.trim();
+  const modelName = args.trim().toLowerCase();
+  if (modelName === "kontext") {
+    await saveImageModelChoice("kontext");
+    addMessage({
+      role: "system",
+      content: "Image model switched to **kontext** (FLUX.1 Kontext instruction editing).",
+      tempId: `imgmodel-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+
   try {
     const res = await fetch("/api/batch-image/models");
     const data = await res.json();
@@ -197,16 +253,16 @@ async function handleImageModel(args, { addMessage }) {
           type: "command",
         });
       } else {
-        sessionStorage.setItem("slash_image_model", match.id);
+        await saveImageModelChoice(match.id);
         addMessage({
           role: "system",
-          content: `Image model switched to **${match.id}** (${match.name}). Will be used for the next \`/imagine\` command.`,
+          content: `Image model switched to **${match.id}** (${match.name}). Used for chat generation and img2img edits.`,
           tempId: `imgmodel-${Date.now()}`,
           type: "command",
         });
       }
     } else {
-      const available = models.filter((m) => m.is_downloaded).map((m) => m.id).join(", ");
+      const available = ["kontext", ...models.filter((m) => m.is_downloaded).map((m) => m.id)].join(", ");
       addMessage({
         role: "system",
         content: `Model \`${modelName}\` not found. Available: ${available}`,
@@ -221,41 +277,47 @@ async function handleImageModel(args, { addMessage }) {
 }
 
 // ============================================================
-// /imagine <prompt> — sends through the normal chat pipeline
+// /imagine <prompt> — direct generate_image tool (no LLM rewrite)
 // ============================================================
-// The unified chat engine has an image_generation tool that the LLM calls.
-// /imagine is a shortcut: it rewrites the prompt to clearly request image
-// generation, then sends it through the normal onSendMessage flow.
-// The LLM calls the generate_image tool → offline_image_generator →
-// saves to data/outputs/generated_images/ → streams result inline.
 
-function handleImagine(args, { addMessage, onSendMessage }) {
+async function handleImagine(args, { addMessage, onSendMessage }) {
   if (!args) {
     addMessage({ role: "system", content: "Usage: `/imagine <prompt>`", tempId: `img-${Date.now()}`, type: "command" });
     return { handled: true };
   }
 
-  const model = sessionStorage.getItem("slash_image_model") || "";
-  const modelHint = model ? ` Use the ${model} model.` : "";
+  const model = await resolveCurrentImageModel("auto");
+  const displayText = `/imagine ${args}`;
 
-  // Send as a normal chat message — the LLM will call the generate_image tool
-  const imagePrompt = `Generate an image: ${args}.${modelHint} Use the generate_image tool to create this image.`;
-  onSendMessage(imagePrompt, null);
+  onSendMessage(displayText, null, {
+    direct_tool: "generate_image",
+    direct_tool_params: { prompt: args, model },
+    slash_command: "imagine",
+    slash_args: args,
+    image_model: model,
+  });
 
   return { handled: true };
 }
 
 // ============================================================
-// /websearch — stub (migration from ChatInput handled in a follow-up)
+// /websearch <query> — direct web_search tool
 // ============================================================
 
-async function handleWebSearch(args, { addMessage }) {
+async function handleWebSearch(args, { addMessage, onSendMessage }) {
   if (!args) {
     addMessage({ role: "system", content: "Usage: `/websearch <query>`", tempId: `ws-${Date.now()}` });
     return { handled: true };
   }
-  // Return unhandled so the existing ChatInput websearch handler can pick it up
-  return { handled: false };
+
+  onSendMessage(`/websearch ${args}`, null, {
+    direct_tool: "web_search",
+    direct_tool_params: { query: args },
+    slash_command: "websearch",
+    slash_args: args,
+  });
+
+  return { handled: true };
 }
 
 // ============================================================
@@ -367,18 +429,12 @@ async function handlePlan(args, { addMessage }) {
     addMessage({ role: "system", content: "Usage: `/plan <request>`", tempId: `plan-${Date.now()}` });
     return { handled: true };
   }
-  // Return unhandled so the existing ChatPage /plan handler can pick it up
   return { handled: false };
 }
 
 // ============================================================
 // /training <task> — runs the agent's 1000-iteration training loop
 // ============================================================
-// Posts the raw task directly to /api/agent-control/execute with
-// training_mode: true, bypassing the chat LLM entirely. The chat
-// LLM's habit of decomposing multi-step tasks into single clicks
-// is what was making every trainer run stop after one action.
-// User watches progress via VNC; backend logs show servo events.
 
 async function handleTraining(args, { addMessage }) {
   if (!args) {
@@ -459,15 +515,6 @@ async function handleDbRule(name, args, { addMessage }) {
 
 // ============================================================
 // /agent and /chat — modal session toggle
-//
-// The session has a `mode` ("chat" | "agent") that lives on the backend.
-// `/agent` flips it to "agent" and (with args) sends the first task as
-// a normal chat message — agent mode routes through the chat LLM so the
-// model can both speak AND act (Gemma4 direct path picks it up via
-// agent_screen_active=true). `/chat` (alias `/exit`) flips back.
-//
-// Slash commands themselves work in either mode; flipping the mode is
-// always a slash, never a natural-language ask.
 // ============================================================
 
 async function _patchSessionMode(sessionId, mode) {
@@ -498,10 +545,6 @@ async function handleAgent(args, { addMessage, onSendMessage, chatState }) {
   const previousMode = useAppStore.getState().getSessionMode(sessionId);
   const trimmedArgs = (args || "").trim();
 
-  // Flip the mode idempotently (PATCH backend + cache locally).
-  // The viewer is NOT touched here — the user controls when the screen
-  // surfaces. Agent mode alone flips `agent_screen_active=true` via the
-  // session-mode half of the OR in unifiedChatService.
   try {
     const data = await _patchSessionMode(sessionId, "agent");
     useAppStore.getState().setSessionMode(sessionId, data?.mode || "agent");
@@ -515,7 +558,6 @@ async function handleAgent(args, { addMessage, onSendMessage, chatState }) {
     return { handled: true };
   }
 
-  // No task → just announce the mode (echo the bare slash so the user sees it)
   if (!trimmedArgs) {
     addMessage({
       role: "user",
@@ -533,10 +575,6 @@ async function handleAgent(args, { addMessage, onSendMessage, chatState }) {
     return { handled: true };
   }
 
-  // Task provided → send it as a normal chat message. The chat LLM (or
-  // Gemma4 direct path) handles speaking + acting. onSendMessage adds the
-  // user bubble itself, so we don't echo the slash — the bare task text
-  // is what the model should see, not "/agent click the button".
   if (typeof onSendMessage === "function") {
     onSendMessage(trimmedArgs, null);
   } else {
@@ -554,10 +592,6 @@ async function handleAgent(args, { addMessage, onSendMessage, chatState }) {
 // /thinking [on|off]
 // ============================================================
 
-// Toggle chain-of-thought for thinking-capable models (gemma4:12b, qwen3, ...)
-// for the CURRENT chat. Off by default (faster). Bare `/thinking` reports state.
-// Stored per-session in the app store; threaded into chat options by
-// unifiedChatService. When unset, the backend uses the global default Setting.
 async function handleThinking(args, { addMessage, chatState }) {
   const sessionId = chatState?.sessionId;
   if (!sessionId) {
@@ -629,15 +663,14 @@ async function handleChatMode(_args, { addMessage, chatState }) {
   const previousMode = useAppStore.getState().getSessionMode(sessionId);
 
   try {
-    // Kill any lingering agent loops
     await fetch(`/api/chat/unified/${encodeURIComponent(sessionId)}/abort`, {
       method: "POST"
-    }).catch(err => {
+    }).catch((err) => {
       console.warn("Failed to send abort signal:", err);
     });
     await fetch("/api/agent-control/kill", {
       method: "POST"
-    }).catch(err => {
+    }).catch((err) => {
       console.warn("Failed to kill agent task:", err);
     });
 
@@ -660,4 +693,30 @@ async function handleChatMode(_args, { addMessage, chatState }) {
     });
   }
   return { handled: true };
+}
+
+/** Hydrate persisted chat image model into the app store (call once on ChatPage mount). */
+export async function hydrateChatImageModel() {
+  const legacy = sessionStorage.getItem("slash_image_model");
+  try {
+    const res = await getChatImageModel();
+    const model = res?.data?.model ?? res?.model;
+    if (model) {
+      useAppStore.getState().setChatImageModel(model);
+      sessionStorage.setItem("slash_image_model", model);
+      return model;
+    }
+  } catch {
+    /* fall through */
+  }
+  if (legacy) {
+    useAppStore.getState().setChatImageModel(legacy);
+    try {
+      await persistChatImageModel(legacy);
+    } catch {
+      /* non-fatal */
+    }
+    return legacy;
+  }
+  return "auto";
 }

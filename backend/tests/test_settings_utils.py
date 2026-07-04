@@ -129,3 +129,17 @@ class TestSaveSetting:
         from backend.utils.settings_utils import save_setting
         with patch("backend.utils.settings_utils.has_app_context", return_value=False):
             save_setting("test_key", "test_value")
+
+
+class TestChatImageModel:
+    def test_default_is_auto(self):
+        from backend.utils.settings_utils import get_chat_image_model
+
+        with patch("backend.utils.settings_utils.get_setting", return_value="auto"):
+            assert get_chat_image_model() == "auto"
+
+    def test_reads_persisted_value(self):
+        from backend.utils.settings_utils import get_chat_image_model
+
+        with patch("backend.utils.settings_utils.get_setting", return_value="zimage-turbo"):
+            assert get_chat_image_model() == "zimage-turbo"

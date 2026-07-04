@@ -19,7 +19,7 @@ export const BACKEND_URL = (
 // Socket.IO connection URL (same as BACKEND_URL)
 export const SOCKET_URL = BACKEND_URL;
 
-export const handleResponse = async (response) => {
+export const handleResponse = async (response, options = {}) => {
   if (response.status === 204) {
     return { success: true, status: 204 };
   }
@@ -66,11 +66,13 @@ export const handleResponse = async (response) => {
     ) {
       error.backendOffline = true;
     }
-    console.error(
-      `apiClient: handleResponse throwing error for ${response.url}:`,
-      error.message,
-      error.data || "",
-    );
+    if (!options.quiet) {
+      console.error(
+        `apiClient: handleResponse throwing error for ${response.url}:`,
+        error.message,
+        error.data || "",
+      );
+    }
     throw error;
   }
 

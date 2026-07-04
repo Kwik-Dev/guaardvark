@@ -59,17 +59,25 @@ def unified_chat():
 
     message = data.get("message", "").strip()
     image_data = data.get("image")  # Optional base64-encoded image
+    raw_options = data.get("options", {})
+    options = raw_options if isinstance(raw_options, dict) else {}
+    has_direct_tool = bool(
+        options.get("direct_tool")
+        or options.get("slash_command")
+    )
 
-    if not message and not image_data:
+    if not message and not image_data and not has_direct_tool:
         return jsonify({"success": False, "error": "Message or image is required"}), 400
 
     # If image provided but no message, set a default
     if not message and image_data:
         message = "Describe this image."
+    if not message and has_direct_tool:
+        slash = (options.get("slash_command") or options.get("direct_tool") or "").strip()
+        args = (options.get("slash_args") or "").strip()
+        message = f"/{slash.lstrip('/')} {args}".strip() if slash else "direct tool"
 
     session_id = data.get("session_id") or str(uuid.uuid4())
-    raw_options = data.get("options", {})
-    options = raw_options if isinstance(raw_options, dict) else {}
     is_voice_message = bool(data.get("is_voice_message", False))
     request_id = str(uuid.uuid4())
     project_id = data.get("project_id")
@@ -306,6 +314,51 @@ def unified_chat():
         "request_id": request_id,
         "session_id": session_id,
     })
+
+
+@unified_chat_bp.route("/direct-tool", methods=["POST"])
+def direct_tool_sync():
+    """
+    POST /api/chat/unified/direct-tool
+    Synchronous direct tool execution (CLI /imagine parity with browser slash commands).
+    Body: { tool, params, session_id?, slash_command? }
+    """
+    data = request.get_json(silent=True) or {}
+    from backend.services.slash_command_executor import resolve_slash_direct_tool
+
+    options = {
+        "direct_tool": data.get("tool"),
+        "direct_tool_params": data.get("params") or {},
+        "slash_command": data.get("slash_command"),
+        "slash_args": data.get("slash_args") or "",
+    }
+    tool_name, params = resolve_slash_direct_tool(options)
+    if not tool_name:
+        return jsonify({"success": False, "error": "tool or slash_command required"}), 400
+
+    session_id = data.get("session_id") or "cli_direct"
+
+    try:
+        from backend.tools.tool_registry_init import initialize_all_tools
+        from backend.services.unified_chat_engine import UnifiedChatEngine
+        from backend.utils.llm_service import get_llm_for_startup
+
+        registry = initialize_all_tools()
+        engine = UnifiedChatEngine(registry=registry, llm_instance=get_llm_for_startup())
+        engine.app = current_app._get_current_object()
+
+        def _noop_emit(_event, _payload):
+            pass
+
+        display = data.get("message") or f"/{data.get('slash_command', tool_name)}"
+        with current_app.app_context():
+            result = engine._run_direct_tool_execution(
+                tool_name, params, session_id, _noop_emit, str(uuid.uuid4()), display,
+            )
+        return jsonify({"success": result.get("success", False), **result})
+    except Exception as exc:
+        logger.error("direct-tool sync failed: %s", exc, exc_info=True)
+        return jsonify({"success": False, "error": str(exc)}), 500
 
 
 @unified_chat_bp.route("/<session_id>/history", methods=["GET"])

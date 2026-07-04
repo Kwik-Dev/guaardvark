@@ -44,7 +44,7 @@ Guaardvark's chat system is the primary interface for interacting with your AI. 
 
 ### Core Chat
 - **Streaming responses** via Socket.IO — tokens appear in real-time as the model generates
-- **Conversational fast-path** — simple messages (greetings, follow-ups) skip RAG and tool routing entirely, responding in ~700ms instead of 25+ seconds
+- **Conversational fast-path** — pure social openers (greetings, thanks, affirmations) route to Tier 2 with `skip_tools` for a real LLM response with persona + memory (no hardcoded greeting pools)
 - **Intent routing** — automatically detects whether a message needs RAG retrieval, tool use, or a direct conversational response
 - **Per-project sessions** — chat context is isolated by project; switching projects gives you a clean context with that project's documents
 - **Session persistence** — conversation history persists across page reloads and browser sessions; sessions also have a `mode` field stored server-side
@@ -80,12 +80,12 @@ A neural router that decides how much work a message deserves before any tools f
 
 | Tier | Name | Latency | LLM Calls | When It Fires |
 |------|------|---------|-----------|---------------|
-| 1 | **Reflex** | <100ms | 0 | Media commands, greetings, exact-match recipes |
-| 2 | **Instinct** | 1–3s | 1 | Most requests — single LLM call with relevant tools in scope |
+| 1 | **Reflex** | <100ms | 0 | Deterministic tool actions only (media commands, exact-match recipes) |
+| 2 | **Instinct** | 1–3s | 1 | Social chat (real LLM, skip_tools) and most requests — single LLM call |
 | 3 | **Deliberation** | 5–30s | 3–10 | Multi-step reasoning (full ReACT loop) |
 
 ### Routing Signals
-- Pre-computed reflex table for fast literal matches
+- Pre-computed reflex table for deterministic tool actions (not social chat)
 - Conversational classifier filters out small-talk before tools get loaded
 - Semantic tool selection picks the right ≤15 tools for the message
 - Screen-active flag gates desktop/agent tools so they only appear when relevant

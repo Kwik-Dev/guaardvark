@@ -1,0 +1,84 @@
+"""Slash command → direct tool execution map.
+
+Slash commands (/imagine, /websearch, …) must call the pertaining registry tool
+directly — not rewrite the user message into an LLM chat prompt.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# Single source of truth: slash command name (no leading /) → registry tool name
+SLASH_COMMAND_TOOL_MAP: Dict[str, str] = {
+    "imagine": "generate_image",
+    "websearch": "web_search",
+    # CLI-only today; browser handler can be added later
+    "video": "generate_animation",
+    "remember": "save_memory",
+}
+
+
+def resolve_slash_direct_tool(
+    options: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Return (tool_name, params) from request options, or (None, {})."""
+    if not isinstance(options, dict):
+        return None, {}
+
+    tool = (options.get("direct_tool") or "").strip()
+    params = options.get("direct_tool_params")
+    if not isinstance(params, dict):
+        params = {}
+
+    if tool:
+        return tool, dict(params)
+
+    slash = (options.get("slash_command") or "").strip().lstrip("/").lower()
+    if not slash:
+        return None, {}
+
+    mapped = SLASH_COMMAND_TOOL_MAP.get(slash)
+    if not mapped:
+        return None, {}
+
+    args = (options.get("slash_args") or options.get("slash_prompt") or "").strip()
+    if slash == "imagine":
+        from backend.utils.settings_utils import get_chat_image_model
+
+        model = (
+            params.get("model")
+            or options.get("image_model")
+            or get_chat_image_model()
+        )
+        prompt = params.get("prompt") or args
+        if not prompt:
+            return None, {}
+        return mapped, {"prompt": prompt, "model": model}
+    if slash == "websearch":
+        query = params.get("query") or args
+        if not query:
+            return None, {}
+        return mapped, {"query": query}
+    if slash == "video":
+        prompt = params.get("prompt") or args
+        if not prompt:
+            return None, {}
+        return mapped, {"prompt": prompt}
+    if slash == "remember":
+        content = params.get("content") or args
+        if not content:
+            return None, {}
+        return mapped, {"content": content}
+
+    return mapped, dict(params)
+
+
+def build_slash_user_message(slash_command: str, args: str) -> str:
+    """Display message stored in chat history for a slash invocation."""
+    cmd = slash_command.strip()
+    if not cmd.startswith("/"):
+        cmd = f"/{cmd}"
+    return f"{cmd} {args}".strip() if args else cmd

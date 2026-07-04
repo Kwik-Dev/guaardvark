@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import re
 
 from backend.services.agent_tools import ToolRegistry, ToolResult
-from backend.services.brain_state import StepBudget
+from backend.services.step_budget import StepBudget
 from backend.utils.agent_output_parser import (
     parse_tool_calls_structured,
     format_tool_result_for_llm,
@@ -359,7 +359,7 @@ class AgentExecutor:
             effective_budget = budget
             if effective_budget is None and max_steps is not None:
                 # Back-compat path
-                from backend.services.brain_state import StepBudget
+                from backend.services.step_budget import StepBudget
                 effective_budget = StepBudget(total=max(1, int(max_steps)))
 
             if effective_budget is not None:
@@ -444,20 +444,20 @@ class AgentExecutor:
                 logger.debug(f"Native tool detection failed, using prompt injection: {e}")
 
             tool_schemas = self.tool_registry.get_tool_schemas(format='json_prompt', tool_filter=tool_filter)
-            if self._native_tools_supported:
-                system_prompt = self._build_system_prompt_native(session_context, is_vision_task=is_vision_task)
-            else:
-                system_prompt = self._build_system_prompt(tool_schemas, session_context, is_vision_task=is_vision_task)
+            system_prompt = self._resolve_system_prompt(
+                tool_schemas, session_context, is_vision_task=is_vision_task
+            )
 
-            # Apply honesty steering to prevent hallucinated fixes
-            try:
-                from backend.services.honesty_steering import HonestySteering
-                steering = HonestySteering()
-                honesty_prefix = steering.get_steering_prompt(intent="general", intensity="standard")
-                if honesty_prefix:
-                    system_prompt = honesty_prefix + "\n\n" + system_prompt
-            except Exception as e:
-                logger.debug(f"Honesty steering not available: {e}")
+            # Honesty steering already in BrainState prefix when available
+            if not self._brain_state_used():
+                try:
+                    from backend.services.honesty_steering import HonestySteering
+                    steering = HonestySteering()
+                    honesty_prefix = steering.get_steering_prompt(intent="general", intensity="standard")
+                    if honesty_prefix:
+                        system_prompt = honesty_prefix + "\n\n" + system_prompt
+                except Exception as e:
+                    logger.debug(f"Honesty steering not available: {e}")
 
             # LLM Debug: log system prompt and user message
             log_system_prompt("agent_executor", system_prompt)
@@ -827,6 +827,39 @@ Otherwise, call the next tool needed. Do NOT repeat a tool you already called wi
             r'/agent\b',
         ]
         return any(re.search(p, combined) for p in vision_patterns)
+
+    def _brain_state_used(self) -> bool:
+        try:
+            from backend.services.brain_state import BrainState
+            bs = BrainState.get_instance()
+            return bool(getattr(bs, "_initialized", False))
+        except Exception:
+            return False
+
+    def _resolve_system_prompt(
+        self, tool_schemas: str, session_context: str = "", is_vision_task: bool = False
+    ) -> str:
+        """Prefer BrainState canonical prompt; fall back to local builders."""
+        try:
+            from backend.services.brain_state import BrainState
+            bs = BrainState.get_instance()
+            if getattr(bs, "_initialized", False):
+                role = "vision" if is_vision_task else "agent"
+                prompt = bs.get_system_prompt(
+                    role=role,
+                    query=getattr(self, "original_query", ""),
+                    budget=getattr(self, "_budget", None),
+                    facts_registry=self.facts_registry,
+                )
+                if session_context and session_context.strip():
+                    prompt += f"\n\n{session_context}"
+                return prompt
+        except Exception as e:
+            logger.debug(f"BrainState system prompt unavailable, using local builder: {e}")
+
+        if self._native_tools_supported:
+            return self._build_system_prompt_native(session_context, is_vision_task=is_vision_task)
+        return self._build_system_prompt(tool_schemas, session_context, is_vision_task=is_vision_task)
 
     def _build_system_prompt(self, tool_schemas: str, session_context: str = "", is_vision_task: bool = False) -> str:
         """Build system prompt with tool descriptions for JSON output"""
