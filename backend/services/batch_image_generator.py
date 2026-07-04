@@ -608,27 +608,27 @@ class BatchImageGenerator:
             self.active_batches[batch_id] = batch_status
 
         def run_batch():
+            batch_status.status = "running"
+            batch_status.start_time = datetime.now()
+
+            if self.progress_system:
+                self._progress_process_id = self.progress_system.create_process(
+                    process_type=ProcessType.IMAGE_GENERATION,
+                    description=f"Batch generation of {len(request.prompts)} images",
+                    process_id=batch_id,
+                    additional_data={
+                        "batch_id": batch_id,
+                        "total_images": len(request.prompts)
+                    }
+                )
+
             def _run_batch_body():
                 try:
-                    batch_status.status = "running"
-                    batch_status.start_time = datetime.now()
-
                     # Director / storyboard pass (if requested). Does NOT raise. Disables auto_enhance on success.
                     try:
                         self._apply_director(request)
                     except Exception:
                         pass
-
-                    if self.progress_system:
-                        self._progress_process_id = self.progress_system.create_process(
-                            process_type=ProcessType.IMAGE_GENERATION,
-                            description=f"Batch generation of {len(request.prompts)} images",
-                            process_id=batch_id,
-                            additional_data={
-                                "batch_id": batch_id,
-                                "total_images": len(request.prompts)
-                            }
-                        )
 
                     max_workers = 1 if self._batch_uses_cuda_offline_gen() else request.max_workers
 

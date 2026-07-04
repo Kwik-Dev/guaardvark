@@ -80,6 +80,9 @@ const mapBatchResultsToImages = (batchStatus) => {
     }));
 };
 
+const POLLABLE_STATUSES = new Set(['pending', 'running']);
+const TERMINAL_BATCH_STATUSES = new Set(['completed', 'error', 'cancelled']);
+
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
     console.debug(...args);
@@ -525,7 +528,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const activeBatchId = activeBatch?.batch_id;
   const activeBatchStatus = activeBatch?.status;
   useEffect(() => {
-    if (activeBatchId && activeBatchStatus === 'running') {
+    if (activeBatchId && POLLABLE_STATUSES.has(activeBatchStatus)) {
       startPolling(activeBatchId);
     } else {
       stopPolling();
@@ -547,7 +550,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         setGeneratedImages(synced);
       }
     }
-  }, [activeBatch, generatedImages]);
+  }, [activeBatch]);
 
   // Monitor progress system for batch updates
   const completionHandledRef = useRef(null);
@@ -566,6 +569,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         // Update active batch with progress info from SocketIO
         setActiveBatch(prev => prev ? {
           ...prev,
+          status: TERMINAL_BATCH_STATUSES.has(prev.status) ? prev.status : 'running',
           completed_images: batchProcess.additional_data.completed || prev.completed_images,
           progress_percentage: batchProcess.progress || prev.progress_percentage
         } : null);
@@ -824,9 +828,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             progress_percentage: 0
           });
           setSuccess(data.data?.message || 'Blueprint batch started. Results will appear as generation completes.');
-          if (batchId) {
-            startPolling(batchId);
-          }
         } else {
           setActiveBatch({
             batch_id: batchId,
@@ -839,11 +840,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             progress_percentage: 0
           });
           setSuccess('Batch generation started successfully');
-
-          // Start polling for status updates
-          if (batchId) {
-            startPolling(batchId);
-          }
         }
       } else {
         const errorMsg = data.error?.message || data.error || data.message || 'Failed to start generation';
