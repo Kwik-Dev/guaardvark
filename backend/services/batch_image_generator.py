@@ -423,8 +423,9 @@ class BatchImageGenerator:
                 generation_time=time.time() - start_time,
                 error=str(e)
             )
-        finally:
-            self._cleanup_gpu_memory()
+        # Pipeline unload is deferred to batch completion (_cleanup_gpu_memory at
+        # run_batch end). Per-image cleanup defeated keep_pipeline_loaded and caused
+        # full Z-Image reload + RAM spike → OOM on multi-image batches.
 
     def _save_batch_metadata(self, batch_status: BatchGenerationStatus, output_dir: Path):
         try:
