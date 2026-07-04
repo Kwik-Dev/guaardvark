@@ -24,13 +24,13 @@ class TestImagineCommand:
             mock_client = MagicMock()
             mock_client.post.return_value = {
                 "success": True,
-                "data": {"batch_id": "batch-123", "prompt_count": 1},
+                "response": "Image saved",
             }
             mock_client_fn.return_value = mock_client
             router.dispatch("/imagine a sunset over mountains")
             mock_client.post.assert_called_once()
             call_args = mock_client.post.call_args
-            assert "/api/batch-image/generate/prompts" in call_args[0][0]
+            assert "/api/chat/unified/direct-tool" in call_args[0][0]
 
     def test_imagine_no_prompt_shows_usage(self, router):
         result = router.dispatch("/imagine")

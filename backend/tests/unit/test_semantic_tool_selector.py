@@ -224,3 +224,41 @@ def test_lazy_init_is_thread_safe():
         f"Expected between {TOOLS_COUNT} and {TOOLS_COUNT + THREAD_COUNT} embed calls, "
         f"got {call_count['n']} — lazy init may not be guarded"
     )
+
+
+def test_select_rebuilds_cache_on_embedding_dim_mismatch(monkeypatch):
+    """Stale cached tool vectors with wrong dimension trigger a one-time rebuild."""
+    SemanticToolSelector = _import_selector()
+    tools = [
+        _make_tool("web_search", "Search the internet", {"query": "string"}),
+        _make_tool("generate_file", "Create files", {"filename": "string"}),
+    ]
+    registry = _make_registry(tools)
+
+    sel = SemanticToolSelector()
+    sel._initialized = True
+    sel._tool_embeddings = {
+        "web_search": _unit_vec(3, 0),
+        "generate_file": _unit_vec(3, 1),
+    }
+
+    calls = {"n": 0}
+
+    def fake_embed(text: str) -> list:
+        calls["n"] += 1
+        return _unit_vec(5, 0)
+
+    sel._embed = fake_embed
+    monkeypatch.setattr(sel, "_lazy_init", lambda registry: None)
+    monkeypatch.setattr(sel, "_embed_missing_tools", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sel, "_invalidate_embedding_cache", lambda: sel.__dict__.update({
+        "_tool_embeddings": {
+            "web_search": _unit_vec(5, 0),
+            "generate_file": _unit_vec(5, 1),
+        },
+        "_initialized": True,
+    }))
+
+    selected = sel.select("find docs", registry, max_tools=5)
+    assert "web_search" in selected
+    assert calls["n"] >= 1

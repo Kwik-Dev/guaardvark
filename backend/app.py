@@ -512,6 +512,11 @@ def _initialize_app_components(app):
         supports_credentials = True
         app.logger.info(f"Production CORS: Allowing only {FRONTEND_URL}")
     else:
+        _flask_port = os.getenv("FLASK_PORT", os.getenv("PORT", "5000"))
+        _backend_origins = [
+            f"http://localhost:{_flask_port}",
+            f"http://127.0.0.1:{_flask_port}",
+        ]
         allowed_origins = [
             "http://localhost:3000",
             "http://localhost:5173",
@@ -520,7 +525,7 @@ def _initialize_app_components(app):
             "http://127.0.0.1:5173",
             "http://127.0.0.1:5175",
             FRONTEND_URL,
-        ]
+        ] + _backend_origins
         supports_credentials = True
         app.logger.info(f"Development CORS: Allowing {len(allowed_origins)} origins")
 

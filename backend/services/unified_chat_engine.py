@@ -632,6 +632,22 @@ class SemanticToolSelector:
             msg_emb = self._embed(message)
             return self._rank_and_select(msg_emb, all_tool_names, max_tools)
         except Exception as exc:
+            if self._is_embedding_dim_mismatch(exc):
+                logger.warning(
+                    "SemanticToolSelector embedding dim mismatch — rebuilding cache: %s",
+                    exc,
+                )
+                self._invalidate_embedding_cache()
+                try:
+                    self._lazy_init(registry)
+                    if not self._disabled:
+                        self._embed_missing_tools(all_tool_names, registry)
+                        msg_emb = self._embed(message)
+                        return self._rank_and_select(msg_emb, all_tool_names, max_tools)
+                except Exception as retry_exc:
+                    logger.warning(
+                        "SemanticToolSelector rebuild failed: %s", retry_exc
+                    )
             logger.warning(
                 f"SemanticToolSelector falling back to keyword selection: {exc}"
             )
@@ -640,6 +656,22 @@ class SemanticToolSelector:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_embedding_dim_mismatch(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "not aligned" in msg or "shapes" in msg and "dim" in msg
+
+    def _invalidate_embedding_cache(self) -> None:
+        with self._lock:
+            self._tool_embeddings = {}
+            self._initialized = False
+            self._disabled = False
+        if os.path.exists(TOOL_EMBEDDING_CACHE):
+            try:
+                os.remove(TOOL_EMBEDDING_CACHE)
+            except OSError:
+                pass
 
     def _lazy_init(self, registry) -> None:
         """Embed all tools once, thread-safely with persistent cache."""
@@ -856,6 +888,10 @@ class SemanticToolSelector:
             if name not in self._tool_embeddings:
                 continue
             tool_vec = np.array(self._tool_embeddings[name], dtype=float)
+            if tool_vec.shape != msg_vec.shape:
+                raise ValueError(
+                    f"embedding dim mismatch: message {msg_vec.shape} vs tool '{name}' {tool_vec.shape}"
+                )
             tool_norm = np.linalg.norm(tool_vec)
             if tool_norm == 0:
                 scores[name] = 0.0
@@ -2760,7 +2796,7 @@ class UnifiedChatEngine:
                 )
                 try:
                     import time as _time
-                    _time.sleep(3.0)
+                    _time.sleep(5.0)
                     # After GPU image jobs evict the chat model, stream retry often
                     # fails until the runner has the weights resident — pin with a
                     # one-token generate before the streaming retry.

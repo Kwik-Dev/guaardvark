@@ -5,10 +5,15 @@ from flask_socketio import SocketIO
 
 # Configure SocketIO with secure CORS settings
 FRONTEND_URL = os.getenv("VITE_FRONTEND_URL", "http://localhost:5173")
+_FLASK_PORT = os.getenv("FLASK_PORT", os.getenv("PORT", "5000"))
+_BACKEND_ORIGINS = [
+    f"http://localhost:{_FLASK_PORT}",
+    f"http://127.0.0.1:{_FLASK_PORT}",
+]
 
 # Environment-specific CORS configuration
 if os.getenv("FLASK_ENV") == "production":
-    allowed_origins = [FRONTEND_URL]
+    allowed_origins = [FRONTEND_URL] + _BACKEND_ORIGINS
 else:
     allowed_origins = [
         FRONTEND_URL,
@@ -18,7 +23,7 @@ else:
         "http://127.0.0.1:5173",  # Alternative localhost
         "http://127.0.0.1:5175",  # Alternative localhost
         "http://127.0.0.1:3000",  # Alternative localhost
-    ]
+    ] + _BACKEND_ORIGINS
 
 # Always allow LAN private-IP origins for local workstation use (phone/tablet/browser
 # on the same network accessing the printed LAN IP + VITE_PORT). This enables

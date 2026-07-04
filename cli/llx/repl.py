@@ -91,6 +91,9 @@ def _build_prompt(ctx: ContextSnapshot, state: dict) -> HTML:
         name = scope.get("name") or f"id:{scope.get('id')}"
         parts.append(f" <style color='#74b9ff'>[{name}]</style>")
 
+    if state.get("agent_mode"):
+        parts.append(" <style color='#e17055'>[agent]</style>")
+
     parts.append(" <b>&gt;</b> ")
     return HTML("".join(parts))
 
@@ -164,6 +167,7 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
         streamer.stream_chat(
             session_id,
             on_token=renderer.on_token,
+            on_thinking=renderer.on_thinking,
             on_tool_call=renderer.on_tool_call,
             on_tool_output_chunk=renderer.on_tool_output_chunk,
             on_complete=renderer.on_complete,
@@ -368,17 +372,30 @@ def launch_repl():
         state.pop("pending_resume", None)
 
         if line.startswith("/"):
-            # Slash command
             keep_going = router.dispatch(line)
             if not keep_going:
                 break
-        else:
-            # Chat message
-            from llx.utils import parse_file_mentions_with_metadata
-            raw_line = line
-            line, attachments = parse_file_mentions_with_metadata(line)
-            memory = normalize_working_memory(state.get("working_memory"))
-            apply_attachments(memory, attachments)
-            apply_user_intent(memory, raw_line)
-            state["working_memory"] = memory
-            _handle_chat(state, ctx, line, raw_message=raw_line, attachments=attachments)
+            continue
+
+        from llx.intent_router import resolve_repl_line
+
+        cli_route = resolve_repl_line(line)
+        if cli_route:
+            cmd, cmd_args = cli_route
+            slash_line = f"/{cmd}"
+            if cmd_args:
+                slash_line = f"{slash_line} {' '.join(cmd_args)}"
+            keep_going = router.dispatch(slash_line)
+            if not keep_going:
+                break
+            continue
+
+        # Chat message
+        from llx.utils import parse_file_mentions_with_metadata
+        raw_line = line
+        line, attachments = parse_file_mentions_with_metadata(line)
+        memory = normalize_working_memory(state.get("working_memory"))
+        apply_attachments(memory, attachments)
+        apply_user_intent(memory, raw_line)
+        state["working_memory"] = memory
+        _handle_chat(state, ctx, line, raw_message=raw_line, attachments=attachments)

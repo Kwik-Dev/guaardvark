@@ -1052,8 +1052,8 @@ ensure_backend_python_environment() {
         fi
 
         # Full reconciler pass for state tracking, CRITICAL_PACKAGES verification, cli_venv, etc.
-        if command -v python >/dev/null 2>&1; then
-            python -m scripts.dep_reconciler --force --only backend_venv,cli_venv --repo-root "$SCRIPT_DIR" >> "$SETUP_LOG" 2>&1 || \
+        if [ -x "$VENV_DIR/bin/python" ]; then
+            "$VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/dep_reconciler.py" --force --only backend_venv,cli_venv --repo-root "$SCRIPT_DIR" >> "$SETUP_LOG" 2>&1 || \
                 vader_warn "dep_reconciler had issues (see setup.log); basic pip may still have succeeded"
         fi
 
@@ -1301,11 +1301,19 @@ if [ -n "${VIRTUAL_ENV:-}" ]; then
 fi
 
 # --- CLI tool setup ---
-# This block only handles the symlink installation into ~/.local/bin.
+# Ensure the editable CLI install exists, then symlink into ~/.local/bin.
 CLI_DIR="$SCRIPT_DIR/cli"
 CLI_VENV_DIR="$VENV_DIR"
 if [ -d "$CLI_DIR" ] && [ -f "$CLI_DIR/setup.py" ]; then
     if [ -d "$CLI_VENV_DIR" ]; then
+        if [ ! -f "$CLI_VENV_DIR/bin/guaardvark" ] && [ -x "$CLI_VENV_DIR/bin/python" ]; then
+            vader_info "CLI binary missing — installing editable cli package..."
+            if "$CLI_VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/dep_reconciler.py" --only cli_venv --force --repo-root "$SCRIPT_DIR" >> "$SETUP_LOG" 2>&1; then
+                vader_success "CLI tool installed"
+            else
+                vader_warn "CLI install failed (see setup.log); guaardvark command may be unavailable"
+            fi
+        fi
         # Symlink CLI commands into ~/.local/bin so they work system-wide
         LOCAL_BIN="$HOME/.local/bin"
         mkdir -p "$LOCAL_BIN"
@@ -1313,6 +1321,9 @@ if [ -d "$CLI_DIR" ] && [ -f "$CLI_DIR/setup.py" ]; then
             CLI_BIN="$CLI_VENV_DIR/bin/$cmd"
             if [ -f "$CLI_BIN" ]; then
                 ln -sf "$CLI_BIN" "$LOCAL_BIN/$cmd"
+            elif [ -L "$LOCAL_BIN/$cmd" ]; then
+                rm -f "$LOCAL_BIN/$cmd"
+                vader_warn "Removed stale symlink $LOCAL_BIN/$cmd (target missing)"
             fi
         done
         # Verify PATH includes ~/.local/bin

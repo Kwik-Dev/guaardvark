@@ -7,9 +7,76 @@ import time
 import uuid
 from typing import Callable
 
+import click
+
 from llx import output
 from llx.command_catalog import COMMAND_META, COMMAND_TREE
 from llx.theme import make_console, THEMES, set_active_theme, get_active_theme_name
+
+
+def _is_required_typer_param(param: inspect.Parameter) -> bool:
+    """True when a Typer-wrapped function param must be supplied by the caller."""
+    if param.default is inspect.Parameter.empty:
+        return True
+    cls_name = param.default.__class__.__name__
+    if cls_name == "ArgumentInfo":
+        default = param.default.default
+        return default is inspect.Parameter.empty or default is ...
+    return False
+
+
+def _resolve_typer_default(param: inspect.Parameter):
+    """Return the real default for a Typer-wrapped param, or None if required."""
+    if param.default is inspect.Parameter.empty:
+        return None
+    cls_name = param.default.__class__.__name__
+    if cls_name in ("OptionInfo", "ArgumentInfo"):
+        default = param.default.default
+        if default is inspect.Parameter.empty or default is ...:
+            return None
+        return default
+    return param.default
+
+
+def _build_simple_command_kwargs(sig: inspect.Signature, args: list[str], injected: dict) -> dict | None:
+    """Build kwargs for a direct Typer command call from slash args."""
+    kwargs = dict(injected)
+    required_positional = [
+        p for p in sig.parameters.values()
+        if _is_required_typer_param(p) and p.name not in kwargs
+    ]
+
+    if required_positional:
+        if not args:
+            return None
+        # First required positional consumes the rest of the line (e.g. search query).
+        kwargs[required_positional[0].name] = " ".join(args)
+
+    for p in sig.parameters.values():
+        if p.name in kwargs:
+            continue
+        resolved = _resolve_typer_default(p)
+        if resolved is not None:
+            kwargs[p.name] = resolved
+
+    return kwargs
+    """Build a one-line usage hint for a simple Typer-backed slash command."""
+    sig = inspect.signature(func)
+    required = [
+        p.name for p in sig.parameters.values()
+        if _is_required_typer_param(p) and p.name not in ("server", "json_out")
+    ]
+    if required:
+        placeholders = " ".join(f"<{n}>" for n in required)
+        return f"Usage: /{name} {placeholders}"
+    return f"Usage: /{name}"
+
+
+def _subapp_usage(name: str) -> str:
+    subs = COMMAND_TREE.get(name, [])
+    if subs:
+        return f"Usage: /{name} {'|'.join(subs)}"
+    return f"Usage: /{name}"
 
 _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("Session Commands", ["new", "history", "export", "clear"]),
@@ -178,37 +245,26 @@ class SlashRouter:
         sig = inspect.signature(func)
 
         def handler(args: list[str]):
-            kwargs = {}
-            # Inject server/json_out if the function accepts them
+            injected = {}
             if "server" in sig.parameters:
-                kwargs["server"] = self._state.get("server")
+                injected["server"] = self._state.get("server")
             if "json_out" in sig.parameters:
-                kwargs["json_out"] = False
+                injected["json_out"] = False
 
-            # For search, the first positional arg is 'query'
-            # For other commands with positional args, pass them through
-            params = list(sig.parameters.values())
-            positional = [
-                p for p in params
-                if p.default is inspect.Parameter.empty
-                or (hasattr(p.default, "__class__") and p.default.__class__.__name__ == "ArgumentInfo")
-            ]
-
-            # Feed positional args from user input
-            pos_idx = 0
-            for p in positional:
-                if p.name in kwargs:
-                    continue
-                if pos_idx < len(args):
-                    kwargs[p.name] = args[pos_idx]
-                    pos_idx += 1
+            kwargs = _build_simple_command_kwargs(sig, args, injected)
+            if kwargs is None:
+                self._console.print(f"[llx.error]{_simple_command_usage(name, func)}[/llx.error]")
+                return
 
             try:
                 func(**kwargs)
-            except SystemExit:
-                pass
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    self._console.print(f"[llx.error]Command failed (exit {e.code})[/llx.error]")
             except Exception as e:
-                self._console.print(f"[llx.error]Error: {e}[/llx.error]")
+                msg = str(e).strip()
+                if msg:
+                    self._console.print(f"[llx.error]Error: {msg}[/llx.error]")
 
         self._commands[name] = handler
 
@@ -218,15 +274,29 @@ class SlashRouter:
             from llx.global_opts import set_global_opts
             from llx.main import app
 
+            if not args:
+                self._console.print(f"[llx.dim]{_subapp_usage(name)}[/llx.dim]")
+                return
+
             server = self._state.get("server")
             set_global_opts(server=server, json_out=False)
 
             try:
                 app(args=[name, *args], standalone_mode=False)
-            except SystemExit:
-                pass
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    self._console.print(f"[llx.error]Command failed (exit {e.code})[/llx.error]")
+            except click.exceptions.Exit as e:
+                if e.exit_code not in (0, None):
+                    self._console.print(f"[llx.error]Command failed (exit {e.exit_code})[/llx.error]")
+            except click.ClickException as e:
+                msg = str(e).strip()
+                if msg:
+                    self._console.print(f"[llx.error]{msg}[/llx.error]")
             except Exception as e:
-                self._console.print(f"[llx.error]Error: {e}[/llx.error]")
+                msg = str(e).strip()
+                if msg:
+                    self._console.print(f"[llx.error]Error: {msg}[/llx.error]")
 
         self._commands[name] = handler
 
@@ -586,17 +656,21 @@ class SlashRouter:
         try:
             from llx.client import get_client
             client = get_client(server)
-            data = client.post("/api/memory", json={
-                "content": content,
-                "source": "cli",
-                "session_id": session_id,
-                "type": "note",
+            data = client.post("/api/chat/unified/direct-tool", json={
+                "slash_command": "remember",
+                "slash_args": content,
+                "params": {"content": content},
+                "message": f"/remember {content}",
+                "session_id": session_id or "cli_remember",
             })
-            result = data.get("data", data)
-            mem_id = result.get("memory", {}).get("id", "")
-            self._console.print(f"[llx.success]Saved to memory[/llx.success]")
-            if mem_id:
-                self._console.print(f"[llx.dim]ID: {mem_id}[/llx.dim]")
+            if data.get("success"):
+                self._console.print("[llx.success]Saved to memory[/llx.success]")
+                response = data.get("response") or ""
+                if response:
+                    self._console.print(f"[llx.dim]{response}[/llx.dim]")
+            else:
+                err = data.get("error") or data.get("response") or "unknown error"
+                self._console.print(f"[llx.error]Failed to save: {err}[/llx.error]")
         except Exception as e:
             self._console.print(f"[llx.error]Failed to save: {e}[/llx.error]")
 

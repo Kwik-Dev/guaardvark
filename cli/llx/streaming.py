@@ -273,6 +273,7 @@ class ChatRenderer:
         self._tokens: list[str] = []
         self._tool_lines: list[str] = []
         self._tool_outputs: dict[str, list[str]] = {}
+        self._thinking_steps: list[dict] = []
         self._complete_data: dict | None = None
         self._error: str | None = None
         self._live: Live | None = None
@@ -281,6 +282,7 @@ class ChatRenderer:
         self._spinner_stop = threading.Event()
         self._last_render_time = 0.0
         self._render_throttle = 0.05  # 50ms throttle for large documents
+        self._live_status = "thinking"
 
     # ── Lifecycle ─────────────────────────────────────────────
 
@@ -289,9 +291,11 @@ class ChatRenderer:
         self._tokens = []
         self._tool_lines = []
         self._tool_outputs = {}
+        self._thinking_steps = []
         self._complete_data = None
         self._error = None
         self._thinking = True
+        self._live_status = "thinking"
         self._spinner_stop.clear()
         self._last_render_time = 0.0
         self._live = Live(
@@ -313,6 +317,8 @@ class ChatRenderer:
 
         # Reset terminal title
         _set_title("guaardvark")
+
+        self._print_thinking_trail()
 
         # Print tool call lines
         for line in self._tool_lines:
@@ -356,6 +362,36 @@ class ChatRenderer:
         self._tokens.append(content)
         self._refresh()
 
+    def on_thinking(self, data: dict):
+        """Record agent thinking steps (single trail, web UI parity)."""
+        if not isinstance(data, dict):
+            return
+        iteration = data.get("iteration")
+        status = (data.get("status") or data.get("label") or "").strip()
+        reasoning = (data.get("reasoning") or "").strip()
+        step = {
+            "iteration": iteration,
+            "status": status,
+            "reasoning": reasoning,
+        }
+        if iteration is not None:
+            for idx, existing in enumerate(self._thinking_steps):
+                if existing.get("iteration") == iteration:
+                    merged = dict(existing)
+                    if status:
+                        merged["status"] = status
+                    if reasoning:
+                        merged["reasoning"] = reasoning
+                    self._thinking_steps[idx] = merged
+                    break
+            else:
+                self._thinking_steps.append(step)
+        else:
+            self._thinking_steps.append(step)
+        if status:
+            self._live_status = status
+        self._refresh()
+
     def on_tool_call(self, data: dict):
         """Record a tool call and refresh the live display."""
         if self._thinking:
@@ -372,8 +408,12 @@ class ChatRenderer:
             args = data.get("args", "")
         if isinstance(args, (dict, list)):
             args = json.dumps(args, sort_keys=True)
-        line = f"[dim]{_ICON_TOOL} Calling: {name}({args})[/dim]"
+        args_preview = str(args)
+        if len(args_preview) > 120:
+            args_preview = args_preview[:117] + "..."
+        line = f"[dim]{_ICON_TOOL} Calling: {name}({args_preview})[/dim]"
         self._tool_lines.append(line)
+        self._live_status = f"tool: {name}"
         self._refresh()
 
     def prompt_for_approval(self, data: dict, expected_target: str | None = None) -> bool:
@@ -482,6 +522,24 @@ class ChatRenderer:
         """Store an error message."""
         self._error = message
 
+    def _print_thinking_trail(self):
+        """Print one collapsed thinking-trail block (never per-step accordions)."""
+        if not self._thinking_steps:
+            return
+        n = len(self._thinking_steps)
+        label = "step" if n == 1 else "steps"
+        self._console.print(
+            f"\n[bold dim]\u25b8 Agent thinking[/bold dim] [dim]({n} {label})[/dim]"
+        )
+        for step in self._thinking_steps:
+            iteration = step.get("iteration", "?")
+            status = step.get("status") or "thinking"
+            self._console.print(f"[dim]  [{iteration}] {status}[/dim]")
+            reasoning = (step.get("reasoning") or "").strip()
+            if reasoning:
+                preview = reasoning[:240] + ("…" if len(reasoning) > 240 else "")
+                self._console.print(f"[dim]    {preview}[/dim]")
+
     # ── Spinner ───────────────────────────────────────────────
 
     def _start_spinner(self):
@@ -490,8 +548,8 @@ class ChatRenderer:
             frame_idx = 0
             while not self._spinner_stop.is_set():
                 f = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
-                # Update title bar
-                _set_title(f"{f} guaardvark — thinking...")
+                status = self._live_status or "thinking"
+                _set_title(f"{f} guaardvark — {status}...")
                 # Update inline display
                 if self._live is not None and self._thinking:
                     self._live.update(Text(f" {f} ", style="bold cyan"))
