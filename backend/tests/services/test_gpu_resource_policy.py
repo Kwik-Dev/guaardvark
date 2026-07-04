@@ -121,3 +121,19 @@ def test_gpu_session_releases_on_exception(fresh_gate, monkeypatch):
             raise RuntimeError("boom")
     assert fresh_gate._gpu_holder is None       # gate released despite the raise
     assert released == ["s"]                     # orchestrator released too
+
+
+def test_gpu_session_ram_admit_uses_custom_weight(fresh_gate, monkeypatch):
+    admitted = []
+    monkeypatch.setattr(grp, "_load_admit_or_busy", lambda slot, ram_gb=2.0: admitted.append(ram_gb) or object())
+    monkeypatch.setattr(grp, "_orchestrator_request", lambda slot, mb: None)
+    monkeypatch.setattr(grp, "_orchestrator_release", lambda slot: None)
+    with grp.gpu_session(
+        JobKind.VIDEO_RENDER,
+        "zimg",
+        vram_estimate_mb=11000,
+        ram_estimate_gb=32.0,
+        slot_id="image_batch:test",
+    ):
+        pass
+    assert admitted == [32.0]

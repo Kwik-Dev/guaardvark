@@ -160,7 +160,7 @@ def _release_cross_process_lease(slot: str) -> None:
         log.warning("cross-process GPU lease release failed (%s)", e)
 
 
-def _load_admit_or_busy(slot: str):
+def _load_admit_or_busy(slot: str, *, ram_gb: float = 2.0):
     """RAM/swap/loadavg admission via the (built-but-previously-unwired) GlobalLoadGate.
     The in-PID GPU slot is already held — lock order (gate FIRST, then this), per the
     gate's own docstring. Single FAIL-FAST check (timeout=0): refuse heavy work with a
@@ -172,7 +172,7 @@ def _load_admit_or_busy(slot: str):
         from backend.services.system_load_gate import get_load_gate, JobWeight, LoadGateTimeout
     except Exception:  # gate module / psutil unavailable -> fail open
         return None
-    weight = JobWeight(ram_gb=2.0, vram_gb=0.0, cpu_cores=1.0)
+    weight = JobWeight(ram_gb=float(ram_gb), vram_gb=0.0, cpu_cores=1.0)
     try:
         get_load_gate().admit(weight, timeout=0.0)
         return weight
@@ -206,6 +206,7 @@ def gpu_session(
     evict_ollama: bool = False,
     free_comfyui: bool = False,
     vram_estimate_mb: Optional[int] = None,
+    ram_estimate_gb: Optional[float] = None,
     require_fit: bool = False,
     cross_process: bool = False,
     slot_id: Optional[str] = None,
@@ -257,12 +258,16 @@ def gpu_session(
                 # the estimate still won't physically fit — turns a CUDA OOM/hang into retry.
                 if require_fit and vram_estimate_mb:
                     _ensure_fits_or_busy(vram_estimate_mb, _slot)
-                if vram_estimate_mb:
+                admit_ram_gb = ram_estimate_gb if ram_estimate_gb is not None else (
+                    2.0 if vram_estimate_mb else None
+                )
+                if admit_ram_gb is not None:
                     # RAM/swap/loadavg admission (GlobalLoadGate) — heavy/budgeted jobs
                     # only, so default (estimate-less) callers stay a pure gate pass-
                     # through. Fail-fast (won't hang), fail-open (won't block on a probe
                     # error). Serialize-don't-thrash WITHOUT touching output quality.
-                    load_weight = _load_admit_or_busy(_slot)
+                    load_weight = _load_admit_or_busy(_slot, ram_gb=admit_ram_gb)
+                if vram_estimate_mb:
                     _orchestrator_request(_slot, vram_estimate_mb)
             yield acquired
             # Success path for the unit of work: transition LOADING -> LOADED so

@@ -55,6 +55,18 @@ def test_estimate_sd15(gen):
     assert gen._vram_estimate_mb("runwayml/stable-diffusion-v1-5") == 4000
 
 
+def test_ram_estimate_zimage(gen):
+    assert gen._ram_estimate_gb("Tongyi-MAI/Z-Image-Turbo") == 32.0
+
+
+def test_ram_estimate_sdxl(gen):
+    assert gen._ram_estimate_gb("stabilityai/stable-diffusion-xl-base-1.0") == 10.0
+
+
+def test_ram_estimate_sd15(gen):
+    assert gen._ram_estimate_gb("runwayml/stable-diffusion-v1-5") == 6.0
+
+
 # --- Eviction decision --------------------------------------------------------
 
 def test_tight_vram_evicts_ollama_and_registers_real_estimate(gen, spy, monkeypatch):

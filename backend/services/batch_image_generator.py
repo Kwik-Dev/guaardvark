@@ -267,11 +267,82 @@ class BatchImageGenerator:
         try:
             if self.image_generator and hasattr(self.image_generator, "_unload_pipeline"):
                 self.image_generator._unload_pipeline()
+            try:
+                from backend.services.gpu_memory_orchestrator import get_orchestrator
+                get_orchestrator().release_model("sd:pipeline")
+            except Exception:
+                pass
+            import gc
             import torch
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+    def _resolve_batch_model_key(self, model_key: str) -> str:
+        """Map a batch prompt model key to a catalog key for resource estimates."""
+        if not model_key or model_key in ("auto", ""):
+            gen = self.image_generator
+            if gen:
+                for preferred in ("zimage-turbo", "sd-xl", gen.default_model):
+                    if preferred and gen.available_models.get(preferred):
+                        if gen._is_model_downloaded(gen.available_models[preferred]):
+                            return preferred
+                return gen.default_model or "sd-1.5"
+            return "zimage-turbo"
+        return model_key
+
+    def _batch_resource_estimates(self, request: BatchImageRequest) -> Tuple[int, float]:
+        """Worst-case (vram_mb, ram_gb) across offline-generator prompts in this batch."""
+        if not self.image_generator:
+            return 4000, 6.0
+        gen = self.image_generator
+        vram_mb = 4000
+        ram_gb = 6.0
+        for prompt in request.prompts:
+            if prompt.loras:
+                model_key = "sd-xl"
+            else:
+                model_key = self._resolve_batch_model_key(prompt.model)
+            catalog_id = gen.available_models.get(model_key, model_key)
+            vram_mb = max(vram_mb, gen._vram_estimate_mb(catalog_id))
+            ram_gb = max(ram_gb, gen._ram_estimate_gb(catalog_id))
+        return vram_mb, ram_gb
+
+    def _batch_uses_cuda_offline_gen(self) -> bool:
+        return bool(
+            self.image_generator
+            and hasattr(self.image_generator, "_device")
+            and self.image_generator._device == "cuda"
+        )
+
+    def _fail_batch_gpu_busy(
+        self,
+        batch_id: str,
+        batch_status: BatchGenerationStatus,
+        output_dir: Path,
+        request: BatchImageRequest,
+        message: str,
+    ) -> None:
+        logger.error(f"Batch {batch_id} blocked: {message}")
+        batch_status.status = "error"
+        batch_status.error = message
+        batch_status.end_time = datetime.now()
+        if request.save_metadata:
+            try:
+                self._save_batch_metadata(batch_status, output_dir)
+            except Exception:
+                pass
+        if self.progress_system:
+            try:
+                self.progress_system.error_process(
+                    process_id=batch_id,
+                    message=message,
+                    additional_data={"batch_id": batch_id},
+                )
+            except Exception:
+                pass
 
     def _generate_with_character_lora(self, prompt: BatchPrompt) -> Optional[ImageGenerationResult]:
         """Generate one image with a cast character's SDXL LoRA via ComfyUI.
@@ -469,47 +540,6 @@ class BatchImageGenerator:
         except Exception as e:
             logger.error(f"Failed to save batch metadata: {e}")
 
-    @staticmethod
-    def _image_gpu_exclusive_enabled() -> bool:
-        """Opt-in: when 'image_gpu_exclusive' is set, batch image acquires the same
-        GPU arbiters as batch video (evicting Ollama to free VRAM). Default OFF so
-        normal operation is unchanged (Dean manages VRAM manually today)."""
-        try:
-            from backend.utils.settings_utils import get_setting
-            return bool(get_setting("image_gpu_exclusive", default=False, cast=bool))
-        except Exception:
-            return False
-
-    def _acquire_gpu_exclusive(self, batch_id: str):
-        """Acquire in-memory GPU gate + file lock (stops Ollama). Mirrors
-        batch_video_generator. Returns (gate_cm, coordinator). Raises on contention."""
-        from backend.services.job_operation_gate import get_gate
-        from backend.services.job_types import JobKind
-        from backend.services.gpu_resource_coordinator import get_gpu_coordinator
-        gate = get_gate()
-        # Shared GPU-exclusive lock — same identity video uses so image/video take turns.
-        gate_cm = gate.gpu_exclusive(JobKind.VIDEO_RENDER, batch_id)
-        gate_cm.__enter__()
-        coordinator = get_gpu_coordinator()
-        lock_result = coordinator.acquire_for_video_generation(batch_id=batch_id, lease_seconds=1800)
-        if not lock_result.get("success"):
-            gate_cm.__exit__(None, None, None)
-            raise RuntimeError(f"GPU busy: {lock_result.get('error')}")
-        return gate_cm, coordinator
-
-    def _release_gpu_exclusive(self, gate_cm, coordinator):
-        """Release in reverse acquire order; restart Ollama. Best-effort, never raises."""
-        if coordinator is not None:
-            try:
-                coordinator.release_video_generation_lock(restart_ollama=True)
-            except Exception as e:
-                logger.warning(f"GPU coordinator release failed: {e}")
-        if gate_cm is not None:
-            try:
-                gate_cm.__exit__(None, None, None)
-            except Exception as e:
-                logger.warning(f"GPU gate release failed: {e}")
-
     def _apply_director(self, request: BatchImageRequest) -> None:
         """If director_mode or storyboard_concept, rewrite prompts via Media Director (LLM visual storyteller).
         Mutates in place and disables downstream generic enhance (director already produces full visual prompts).
@@ -578,242 +608,240 @@ class BatchImageGenerator:
             self.active_batches[batch_id] = batch_status
 
         def run_batch():
-            gate_cm = None
-            gpu_coord = None
-            try:
-                # Opt-in GPU exclusivity (default OFF): take the same arbiters as
-                # batch video so image gen reliably gets VRAM (evicts Ollama).
-                if self._image_gpu_exclusive_enabled():
-                    try:
-                        gate_cm, gpu_coord = self._acquire_gpu_exclusive(batch_id)
-                        logger.info(f"Batch {batch_id} acquired GPU-exclusive lock (image_gpu_exclusive ON)")
-                    except Exception as ge:
-                        logger.error(f"Batch {batch_id} could not acquire GPU lock: {ge}")
-                        batch_status.status = "error"
-                        batch_status.error = f"Could not acquire GPU: {ge}"
-                        batch_status.end_time = datetime.now()
-                        if request.save_metadata:
-                            try:
-                                self._save_batch_metadata(batch_status, output_dir)
-                            except Exception:
-                                pass
-                        if self.progress_system:
-                            try:
-                                self.progress_system.error_process(
-                                    process_id=batch_id,
-                                    message=f"Could not acquire GPU: {ge}",
-                                    additional_data={"batch_id": batch_id},
-                                )
-                            except Exception:
-                                pass
-                        return
-
-                batch_status.status = "running"
-                batch_status.start_time = datetime.now()
-
-                # Director / storyboard pass (if requested). Does NOT raise. Disables auto_enhance on success.
+            def _run_batch_body():
                 try:
-                    self._apply_director(request)
-                except Exception:
-                    pass
+                    batch_status.status = "running"
+                    batch_status.start_time = datetime.now()
 
-                if self.progress_system:
-                    self._progress_process_id = self.progress_system.create_process(
-                        process_type=ProcessType.IMAGE_GENERATION,
-                        description=f"Batch generation of {len(request.prompts)} images",
-                        process_id=batch_id,
-                        additional_data={
-                            "batch_id": batch_id,
-                            "total_images": len(request.prompts)
-                        }
-                    )
+                    # Director / storyboard pass (if requested). Does NOT raise. Disables auto_enhance on success.
+                    try:
+                        self._apply_director(request)
+                    except Exception:
+                        pass
 
-                max_workers = 1 if self.image_generator and hasattr(self.image_generator, '_device') and self.image_generator._device == 'cuda' else request.max_workers
+                    if self.progress_system:
+                        self._progress_process_id = self.progress_system.create_process(
+                            process_type=ProcessType.IMAGE_GENERATION,
+                            description=f"Batch generation of {len(request.prompts)} images",
+                            process_id=batch_id,
+                            additional_data={
+                                "batch_id": batch_id,
+                                "total_images": len(request.prompts)
+                            }
+                        )
 
-                results = []
+                    max_workers = 1 if self._batch_uses_cuda_offline_gen() else request.max_workers
 
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    self.executors[batch_id] = executor
+                    results = []
 
-                    pending_futures = []
-                    prompt_index = 0
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        self.executors[batch_id] = executor
 
-                    while prompt_index < len(request.prompts) or pending_futures:
-                        if batch_status.status == "cancelled":
-                            logger.info(f"Batch {batch_id} cancelled, stopping new submissions")
-                            for future in pending_futures:
-                                future.cancel()
-                            break
+                        pending_futures = []
+                        prompt_index = 0
 
-                        while prompt_index < len(request.prompts) and len(pending_futures) < max_workers:
+                        while prompt_index < len(request.prompts) or pending_futures:
                             if batch_status.status == "cancelled":
+                                logger.info(f"Batch {batch_id} cancelled, stopping new submissions")
+                                for future in pending_futures:
+                                    future.cancel()
                                 break
 
-                            prompt = request.prompts[prompt_index]
-                            future = executor.submit(
-                                self._generate_single_image,
-                                batch_id, prompt, output_dir, batch_status
-                            )
-                            pending_futures.append(future)
-                            prompt_index += 1
+                            while prompt_index < len(request.prompts) and len(pending_futures) < max_workers:
+                                if batch_status.status == "cancelled":
+                                    break
 
-                        if pending_futures:
-                            done_futures = []
-                            for future in pending_futures[:]:
-                                if future.done():
-                                    done_futures.append(future)
-                                    pending_futures.remove(future)
+                                prompt = request.prompts[prompt_index]
+                                future = executor.submit(
+                                    self._generate_single_image,
+                                    batch_id, prompt, output_dir, batch_status
+                                )
+                                pending_futures.append(future)
+                                prompt_index += 1
 
-                            if not done_futures and pending_futures:
-                                try:
-                                    import concurrent.futures
-                                    done, _ = concurrent.futures.wait(
-                                        pending_futures,
-                                        timeout=0.5,
-                                        return_when=concurrent.futures.FIRST_COMPLETED
-                                    )
-                                    for future in done:
+                            if pending_futures:
+                                done_futures = []
+                                for future in pending_futures[:]:
+                                    if future.done():
                                         done_futures.append(future)
                                         pending_futures.remove(future)
-                                except Exception:
-                                    pass
 
-                            for future in done_futures:
-                                try:
-                                    result = future.result()
-                                    results.append(result)
-
-                                    with self.batch_lock:
-                                        if result.success:
-                                            batch_status.completed_images += 1
-                                        else:
-                                            batch_status.failed_images += 1
-                                            if not batch_status.error:
-                                                batch_status.error = result.error
-
-                                        batch_status.results = results
-
-                                    # Save metadata incrementally so results survive batch removal
-                                    if request.save_metadata:
-                                        try:
-                                            self._save_batch_metadata(batch_status, output_dir)
-                                        except Exception:
-                                            pass  # Non-critical, best-effort
-
-                                except Exception as e:
-                                    logger.error(f"Task failed: {e}")
-                                    with self.batch_lock:
-                                        batch_status.failed_images += 1
-
-                batch_status.end_time = datetime.now()
-                if batch_status.status == "cancelled":
-                    pass  # leave cancelled
-                elif batch_status.completed_images == 0 and batch_status.failed_images > 0:
-                    # Every image failed (e.g. CUDA OOM) — surface as error, not a
-                    # misleading "completed" with zero images.
-                    batch_status.status = "error"
-                    if not batch_status.error:
-                        batch_status.error = "All images failed to generate."
-                else:
-                    batch_status.status = "completed"
-
-                if request.save_metadata:
-                    self._save_batch_metadata(batch_status, output_dir)
-
-                # Register images into Documents/Files system — files are already
-                # in data/uploads/Images/ so just create the DB records
-                if batch_status.status == "completed" and batch_status.completed_images > 0:
-                    try:
-                        from flask import current_app
-                        from backend.services.output_registration import ensure_subfolder, register_file
-                        try:
-                            app = current_app._get_current_object()
-                        except RuntimeError:
-                            # Worker thread has no request context — grab the singleton
-                            # instead of rebuilding the entire Flask app from scratch.
-                            from backend.app import get_or_create_app
-                            app = get_or_create_app()
-                        with app.app_context():
-                            try:
-                                ensure_subfolder("Images", batch_id)
-                                images_dir = output_dir / "images"
-                                for img_file in sorted(images_dir.glob("*")):
-                                    if img_file.is_file():
-                                        # Find matching prompt metadata for this image
-                                        img_meta = {}
-                                        for r in batch_status.results:
-                                            if r.success and r.image_path and Path(r.image_path).name == img_file.name:
-                                                img_meta = r.metadata or {}
-                                                break
-                                        register_file(
-                                            physical_path=str(img_file),
-                                            folder_name="Images",
-                                            subfolder_name=batch_id,
-                                            file_metadata={"source": "batch_generation", "batch_id": batch_id, **img_meta},
+                                if not done_futures and pending_futures:
+                                    try:
+                                        import concurrent.futures
+                                        done, _ = concurrent.futures.wait(
+                                            pending_futures,
+                                            timeout=0.5,
+                                            return_when=concurrent.futures.FIRST_COMPLETED
                                         )
-                                logger.info(f"Registered batch {batch_id} images into Documents system")
-                            finally:
-                                from backend.models import db as _db
-                                _db.session.remove()
-                    except Exception as reg_err:
-                        logger.error(f"Failed to register batch images: {reg_err}")
-                        # Don't fail the batch if registration fails
+                                        for future in done:
+                                            done_futures.append(future)
+                                            pending_futures.remove(future)
+                                    except Exception:
+                                        pass
 
-                if self.progress_system:
-                    if batch_status.status == "completed":
-                        self.progress_system.complete_process(
-                            process_id=batch_id,
-                            message=f"Batch generation completed: {batch_status.completed_images}/{batch_status.total_images} successful",
-                            additional_data={
-                                "batch_id": batch_id,
-                                "completed": batch_status.completed_images,
-                                "failed": batch_status.failed_images,
-                                "total": batch_status.total_images
-                            }
-                        )
-                    elif batch_status.status == "error":
+                                for future in done_futures:
+                                    try:
+                                        result = future.result()
+                                        results.append(result)
+
+                                        with self.batch_lock:
+                                            if result.success:
+                                                batch_status.completed_images += 1
+                                            else:
+                                                batch_status.failed_images += 1
+                                                if not batch_status.error:
+                                                    batch_status.error = result.error
+
+                                            batch_status.results = results
+
+                                        if request.save_metadata:
+                                            try:
+                                                self._save_batch_metadata(batch_status, output_dir)
+                                            except Exception:
+                                                pass
+
+                                    except Exception as e:
+                                        logger.error(f"Task failed: {e}")
+                                        with self.batch_lock:
+                                            batch_status.failed_images += 1
+
+                    batch_status.end_time = datetime.now()
+                    if batch_status.status == "cancelled":
+                        pass
+                    elif batch_status.completed_images == 0 and batch_status.failed_images > 0:
+                        batch_status.status = "error"
+                        if not batch_status.error:
+                            batch_status.error = "All images failed to generate."
+                    else:
+                        batch_status.status = "completed"
+
+                    if request.save_metadata:
+                        self._save_batch_metadata(batch_status, output_dir)
+
+                    if batch_status.status == "completed" and batch_status.completed_images > 0:
+                        try:
+                            from flask import current_app
+                            from backend.services.output_registration import ensure_subfolder, register_file
+                            try:
+                                app = current_app._get_current_object()
+                            except RuntimeError:
+                                from backend.app import get_or_create_app
+                                app = get_or_create_app()
+                            with app.app_context():
+                                try:
+                                    ensure_subfolder("Images", batch_id)
+                                    images_dir = output_dir / "images"
+                                    for img_file in sorted(images_dir.glob("*")):
+                                        if img_file.is_file():
+                                            img_meta = {}
+                                            for r in batch_status.results:
+                                                if r.success and r.image_path and Path(r.image_path).name == img_file.name:
+                                                    img_meta = r.metadata or {}
+                                                    break
+                                            register_file(
+                                                physical_path=str(img_file),
+                                                folder_name="Images",
+                                                subfolder_name=batch_id,
+                                                file_metadata={"source": "batch_generation", "batch_id": batch_id, **img_meta},
+                                            )
+                                    logger.info(f"Registered batch {batch_id} images into Documents system")
+                                finally:
+                                    from backend.models import db as _db
+                                    _db.session.remove()
+                        except Exception as reg_err:
+                            logger.error(f"Failed to register batch images: {reg_err}")
+
+                    if self.progress_system:
+                        if batch_status.status == "completed":
+                            self.progress_system.complete_process(
+                                process_id=batch_id,
+                                message=f"Batch generation completed: {batch_status.completed_images}/{batch_status.total_images} successful",
+                                additional_data={
+                                    "batch_id": batch_id,
+                                    "completed": batch_status.completed_images,
+                                    "failed": batch_status.failed_images,
+                                    "total": batch_status.total_images
+                                }
+                            )
+                        elif batch_status.status == "error":
+                            self.progress_system.error_process(
+                                process_id=batch_id,
+                                message=f"Batch generation failed: {batch_status.error or 'all images failed'}",
+                                additional_data={
+                                    "batch_id": batch_id,
+                                    "completed": batch_status.completed_images,
+                                    "failed": batch_status.failed_images,
+                                    "total": batch_status.total_images
+                                }
+                            )
+                        else:
+                            self.progress_system.cancel_process(
+                                process_id=batch_id,
+                                message=f"Batch generation cancelled: {batch_status.completed_images}/{batch_status.total_images} completed",
+                                additional_data={
+                                    "batch_id": batch_id,
+                                    "completed": batch_status.completed_images,
+                                    "failed": batch_status.failed_images,
+                                    "total": batch_status.total_images
+                                }
+                            )
+
+                    with self.batch_lock:
+                        if batch_id in self.executors:
+                            del self.executors[batch_id]
+                    self._cleanup_gpu_memory()
+
+                except Exception as e:
+                    logger.error(f"Batch generation failed: {e}")
+                    batch_status.status = "error"
+                    batch_status.error = str(e)
+                    self._cleanup_gpu_memory()
+
+                    if self.progress_system:
                         self.progress_system.error_process(
                             process_id=batch_id,
-                            message=f"Batch generation failed: {batch_status.error or 'all images failed'}",
-                            additional_data={
-                                "batch_id": batch_id,
-                                "completed": batch_status.completed_images,
-                                "failed": batch_status.failed_images,
-                                "total": batch_status.total_images
-                            }
-                        )
-                    else:
-                        self.progress_system.cancel_process(
-                            process_id=batch_id,
-                            message=f"Batch generation cancelled: {batch_status.completed_images}/{batch_status.total_images} completed",
-                            additional_data={
-                                "batch_id": batch_id,
-                                "completed": batch_status.completed_images,
-                                "failed": batch_status.failed_images,
-                                "total": batch_status.total_images
-                            }
+                            message=f"Batch generation error: {str(e)}",
+                            additional_data={"batch_id": batch_id, "error": str(e)}
                         )
 
-                with self.batch_lock:
-                    if batch_id in self.executors:
-                        del self.executors[batch_id]
-                self._cleanup_gpu_memory()
+            if self._batch_uses_cuda_offline_gen():
+                from backend.services.gpu_resource_policy import gpu_session
+                from backend.services.job_operation_gate import GpuBusyError
+                from backend.services.job_types import JobKind
 
-            except Exception as e:
-                logger.error(f"Batch generation failed: {e}")
-                batch_status.status = "error"
-                batch_status.error = str(e)
-                self._cleanup_gpu_memory()
-
-                if self.progress_system:
-                    self.progress_system.error_process(
-                        process_id=batch_id,
-                        message=f"Batch generation error: {str(e)}",
-                        additional_data={"batch_id": batch_id, "error": str(e)}
+                vram_mb, ram_gb = self._batch_resource_estimates(request)
+                slot_id = f"image_batch:{batch_id}"
+                logger.info(
+                    f"Batch {batch_id} acquiring gpu_session "
+                    f"(vram~{vram_mb}MB ram~{ram_gb}GB)"
+                )
+                try:
+                    with gpu_session(
+                        JobKind.VIDEO_RENDER,
+                        batch_id,
+                        on_busy="wait",
+                        wait_timeout=120.0,
+                        evict_ollama=True,
+                        free_comfyui=False,
+                        cross_process=True,
+                        vram_estimate_mb=vram_mb,
+                        ram_estimate_gb=ram_gb,
+                        require_fit=True,
+                        slot_id=slot_id,
+                        lease_seconds=1800,
+                    ):
+                        _run_batch_body()
+                except GpuBusyError as e:
+                    self._fail_batch_gpu_busy(
+                        batch_id,
+                        batch_status,
+                        output_dir,
+                        request,
+                        f"Could not acquire GPU / system RAM headroom: {e}",
                     )
-            finally:
-                # Always release the GPU-exclusive lock (no-op if not acquired).
-                self._release_gpu_exclusive(gate_cm, gpu_coord)
+            else:
+                _run_batch_body()
 
         thread = threading.Thread(target=run_batch, daemon=True)
         thread.start()

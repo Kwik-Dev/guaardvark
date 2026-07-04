@@ -314,9 +314,15 @@ class OfflineImageGenerator:
     # wall of resident Ollama models (gemma 4.95GB + qwen3-embedding 4.32GB). The
     # zimage figure is WITH model-cpu-offload enabled.
     _FAMILY_VRAM_MB = {"zimage": 11000, "sdxl": 8000, "sd": 4000}
+    # CPU-RAM footprint with enable_model_cpu_offload (weights + PyTorch arena).
+    # Observed: ~47 GB RSS on 60 GB box during Z-Image batch; gate before load.
+    _FAMILY_RAM_GB = {"zimage": 32.0, "sdxl": 10.0, "sd": 6.0}
 
     def _vram_estimate_mb(self, model_id: str) -> int:
         return self._FAMILY_VRAM_MB.get(self._model_family(model_id), 4000)
+
+    def _ram_estimate_gb(self, model_id: str) -> float:
+        return self._FAMILY_RAM_GB.get(self._model_family(model_id), 6.0)
 
     def _ensure_vram_for_pipeline(self, model_id: str) -> None:
         """Make room on the card BEFORE the pipeline load, not after it OOMs.
@@ -1245,25 +1251,47 @@ Negative Prompt: {negative_prompt}""",
         return result
 
     def _unload_pipeline(self):
-        """Fully unload the SD pipeline from GPU and free VRAM immediately."""
+        """Fully unload the pipeline and return RAM/VRAM to the pool."""
         if self._pipeline is None:
             return
-        try:
-            self._pipeline.to("cpu")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            logger.info("SD pipeline moved to CPU, CUDA cache cleared")
-        except Exception as e:
-            logger.warning(f"Failed to unload SD pipeline from GPU: {e}")
-        # Discard the pipeline entirely — compiled CUDA graphs aren't
-        # portable between devices, so _load_pipeline must do a full
-        # GPU reload on the next request.
+
+        pipeline = self._pipeline
         self._pipeline = None
         self._img2img_pipeline = None
         self._img2img_family = None
         self._current_model = None
         self._compile_unet_orig = None
         self._compile_vae_orig = None
+
+        try:
+            # Accelerate CPU-offload hooks retain large CPU weight copies until removed.
+            if hasattr(pipeline, "remove_all_hooks"):
+                pipeline.remove_all_hooks()
+            free_hooks = getattr(pipeline, "maybe_free_model_hooks", None)
+            if callable(free_hooks):
+                free_hooks()
+        except Exception as e:
+            logger.warning(f"Pipeline hook teardown failed (continuing unload): {e}")
+
+        try:
+            pipeline.to("cpu")
+        except Exception as e:
+            logger.debug(f"pipeline.to(cpu) skipped during unload: {e}")
+
+        try:
+            del pipeline
+        except Exception:
+            pass
+
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+        logger.info("SD pipeline unloaded; hooks cleared, gc run, CUDA cache cleared")
 
     def generate_image_from_image(
         self, prompt: str, init_image, strength: float = 0.20,
