@@ -50,8 +50,35 @@ import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import PageLayout from '../components/layout/PageLayout';
 import CharacterPicker from '../components/filmcrew/CharacterPicker';
+import ImageLightbox from '../components/images/ImageLightbox';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+
+const encodeFilename = (filename) => {
+  if (!filename) return '';
+  return filename.split('/').map(part => encodeURIComponent(part)).join('/');
+};
+
+const getFilenameFromPath = (path) => {
+  if (!path) return null;
+  return path.replace(/\\/g, '/').split('/').pop();
+};
+
+const mapBatchResultsToImages = (batchStatus) => {
+  if (!batchStatus?.results) return [];
+  return batchStatus.results
+    .filter(r => r.success && r.image_path)
+    .map(r => ({
+      id: r.prompt_id,
+      path: r.image_path,
+      thumbnail: r.thumbnail_path,
+      imageFilename: getFilenameFromPath(r.image_path),
+      thumbnailFilename: getFilenameFromPath(r.thumbnail_path),
+      prompt: r.metadata?.original_prompt || '',
+      metadata: r.metadata,
+      batchId: batchStatus.batch_id,
+    }));
+};
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -93,7 +120,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [activeBatch, setActiveBatch] = useState(null);
   const [batchHistory, setBatchHistory] = useState([]);
   const [generatedImages, setGeneratedImages] = useState([]);
-  const [selectedImage, setSelectedImage] = useState(null);
+  const [lightboxImage, setLightboxImage] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -138,9 +165,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     generate_thumbnails: true,
     save_metadata: true
   });
-
-  // UI state
-  const [showImageViewer, setShowImageViewer] = useState(false);
 
   // Refs
   const fileInputRef = useRef(null);
@@ -418,30 +442,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         const batchStatus = data.data;
         setActiveBatch(batchStatus);
 
-        // Load generated images
-        if (batchStatus.results) {
-          const images = batchStatus.results
-            .filter(r => r.success && r.image_path)
-            .map(r => {
-              // Extract filename from path for use in API URLs
-              const getFilename = (path) => {
-                if (!path) return null;
-                // Handle both Windows and Unix paths
-                const parts = path.replace(/\\/g, '/').split('/');
-                return parts[parts.length - 1];
-              };
-
-              return {
-                id: r.prompt_id,
-                path: r.image_path,
-                thumbnail: r.thumbnail_path,
-                imageFilename: getFilename(r.image_path),
-                thumbnailFilename: getFilename(r.thumbnail_path),
-                prompt: r.metadata?.original_prompt || '',
-                metadata: r.metadata,
-                batchId: batchStatus.batch_id, // embed for robust URL construction
-              };
-            });
+        const images = mapBatchResultsToImages(batchStatus);
+        if (images.length > 0) {
           setGeneratedImages(images);
         }
 
@@ -482,30 +484,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
           setActiveBatch(batchStatus);
 
-          // Load generated images
-          if (batchStatus.results) {
-            const images = batchStatus.results
-              .filter(r => r.success && r.image_path)
-              .map(r => {
-                // Extract filename from path for use in API URLs
-                const getFilename = (path) => {
-                  if (!path) return null;
-                  // Handle both Windows and Unix paths
-                  const parts = path.replace(/\\/g, '/').split('/');
-                  return parts[parts.length - 1];
-                };
-
-                return {
-                  id: r.prompt_id,
-                  path: r.image_path,
-                  thumbnail: r.thumbnail_path,
-                  imageFilename: getFilename(r.image_path),
-                  thumbnailFilename: getFilename(r.thumbnail_path),
-                  prompt: r.metadata?.original_prompt || '',
-                  metadata: r.metadata,
-                  batchId: batchStatus.batch_id, // embed for robust URL construction during live updates
-                };
-              });
+          const images = mapBatchResultsToImages(batchStatus);
+          if (images.length > 0) {
             setGeneratedImages(images);
           }
 
@@ -560,23 +540,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // This prevents stale/mismatched state during rapid polling updates.
   useEffect(() => {
     if (activeBatch && activeBatch.results && activeBatch.results.length > 0) {
-      const getFilename = (path) => {
-        if (!path) return null;
-        const parts = path.replace(/\\/g, '/').split('/');
-        return parts[parts.length - 1];
-      };
-      const synced = activeBatch.results
-        .filter(r => r.success && r.image_path)
-        .map(r => ({
-          id: r.prompt_id,
-          path: r.image_path,
-          thumbnail: r.thumbnail_path,
-          imageFilename: getFilename(r.image_path),
-          thumbnailFilename: getFilename(r.thumbnail_path),
-          prompt: r.metadata?.original_prompt || '',
-          metadata: r.metadata,
-          batchId: activeBatch.batch_id,
-        }));
+      const synced = mapBatchResultsToImages(activeBatch);
       const syncedKey = synced.map((img) => img.id).join(',');
       const currentKey = generatedImages.map((img) => img.id).join(',');
       if (syncedKey !== currentKey) {
@@ -954,10 +918,78 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     }
   };
 
-  const openImageViewer = (image) => {
-    setSelectedImage(image);
-    setShowImageViewer(true);
-  };
+  const buildBatchImageUrl = useCallback((image, batchId) => {
+    if (!batchId || !image?.imageFilename) return '';
+    return `${API_BASE}/batch-image/image/${batchId}/${encodeFilename(image.imageFilename)}`;
+  }, []);
+
+  const openLightboxAt = useCallback((images, index) => {
+    const img = images[index];
+    if (!img) return;
+    const batchId = img.batchId || activeBatch?.batch_id;
+    const url = buildBatchImageUrl(img, batchId);
+    if (!url) return;
+    setLightboxImage({
+      url,
+      name: img.prompt || img.imageFilename || '',
+      fileIndex: index,
+    });
+  }, [activeBatch?.batch_id, buildBatchImageUrl]);
+
+  const openImageViewer = useCallback((image) => {
+    const idx = generatedImages.findIndex(img => img.id === image.id);
+    openLightboxAt(generatedImages, idx >= 0 ? idx : 0);
+  }, [generatedImages, openLightboxAt]);
+
+  const openHistoryBatchGallery = useCallback(async (batch, startIndex = 0) => {
+    if (!batch?.batch_id) return;
+    try {
+      const response = await fetch(`${API_BASE}/batch-image/status/${batch.batch_id}?include_results=true`);
+      if (!response.ok) {
+        setError(`Failed to load batch: HTTP ${response.status}`);
+        return;
+      }
+      const data = await response.json();
+      if (!data.success) return;
+
+      const batchStatus = data.data;
+      const images = mapBatchResultsToImages(batchStatus);
+      setActiveBatch(batchStatus);
+      setGeneratedImages(images);
+
+      const idx = Math.max(0, Math.min(startIndex, images.length - 1));
+      if (images.length > 0) {
+        openLightboxAt(images, idx);
+      }
+    } catch (err) {
+      setError(`Failed to load batch: ${err.message}`);
+    }
+  }, [openLightboxAt]);
+
+  const closeLightbox = useCallback(() => setLightboxImage(null), []);
+
+  const handleLightboxPrev = useCallback(() => {
+    if (!lightboxImage || lightboxImage.fileIndex <= 0) return;
+    openLightboxAt(generatedImages, lightboxImage.fileIndex - 1);
+  }, [lightboxImage, generatedImages, openLightboxAt]);
+
+  const handleLightboxNext = useCallback(() => {
+    if (!lightboxImage || lightboxImage.fileIndex >= generatedImages.length - 1) return;
+    openLightboxAt(generatedImages, lightboxImage.fileIndex + 1);
+  }, [lightboxImage, generatedImages, openLightboxAt]);
+
+  const handleLightboxDownload = useCallback(() => {
+    if (!lightboxImage) return;
+    const img = generatedImages[lightboxImage.fileIndex];
+    if (!img) return;
+    const batchId = img.batchId || activeBatch?.batch_id;
+    const link = document.createElement('a');
+    link.href = buildBatchImageUrl(img, batchId);
+    link.download = img.imageFilename || 'image.png';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [lightboxImage, generatedImages, activeBatch?.batch_id, buildBatchImageUrl]);
 
   return (
     <PageLayout title={embedded ? undefined : "Image Generator"} variant={embedded ? "fullscreen" : "standard"} noPadding={embedded}>
@@ -1775,13 +1807,41 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     }}>
                       {/* Overlapping thumbnail covers */}
                       {batch.thumbnail_urls?.length > 0 && (
-                        <Box sx={{ mb: 1.5, height: 48, position: 'relative', minWidth: Math.min(batch.thumbnail_urls.length, 4) * 32 + 16 }}>
+                        <Box
+                          sx={{
+                            mb: 1.5,
+                            height: 48,
+                            position: 'relative',
+                            minWidth: Math.min(batch.thumbnail_urls.length, 4) * 32 + 16,
+                            cursor: batch.status === 'completed' ? 'pointer' : 'default',
+                          }}
+                          onClick={() => {
+                            if (batch.status === 'completed') {
+                              openHistoryBatchGallery(batch, 0);
+                            }
+                          }}
+                          role={batch.status === 'completed' ? 'button' : undefined}
+                          tabIndex={batch.status === 'completed' ? 0 : undefined}
+                          onKeyDown={(e) => {
+                            if (batch.status === 'completed' && (e.key === 'Enter' || e.key === ' ')) {
+                              e.preventDefault();
+                              openHistoryBatchGallery(batch, 0);
+                            }
+                          }}
+                          aria-label={batch.status === 'completed' ? `Browse images in batch ${batch.batch_id}` : undefined}
+                        >
                           {batch.thumbnail_urls.slice(0, 4).map((url, idx) => (
                             <Box
                               key={idx}
                               component="img"
                               src={url}
                               alt=""
+                              onClick={(e) => {
+                                if (batch.status === 'completed') {
+                                  e.stopPropagation();
+                                  openHistoryBatchGallery(batch, idx);
+                                }
+                              }}
                               sx={{
                                 width: 48,
                                 height: 48,
@@ -1824,7 +1884,18 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       </Typography>
 
                       {batch.status === 'completed' && (
-                        <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
+                        <Box sx={{ display: 'flex', gap: 1, mt: 1, flexWrap: 'wrap' }}>
+                          <Button
+                            size="small"
+                            startIcon={<Visibility />}
+                            onClick={() => openHistoryBatchGallery(batch, 0)}
+                            sx={{
+                              textTransform: 'none',
+                              borderRadius: 1
+                            }}
+                          >
+                            Browse
+                          </Button>
                           {batch.folder_id && (
                             <Button
                               size="small"
@@ -1860,62 +1931,19 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         )
       }
 
-      {/* Image Viewer Dialog */}
-      <Dialog
-        open={showImageViewer}
-        onClose={() => setShowImageViewer(false)}
-        maxWidth="md"
-        fullWidth
-      >
-        <DialogTitle>
-          {sanitizeText(selectedImage?.prompt)}
-        </DialogTitle>
-        <DialogContent>
-          {selectedImage && (
-            <Box sx={{ textAlign: 'center' }}>
-              <img
-                src={(() => {
-                  const bId = selectedImage.batchId || (activeBatch && activeBatch.batch_id);
-                  return (bId && selectedImage.imageFilename)
-                    ? `${API_BASE}/batch-image/image/${bId}/${selectedImage.imageFilename}`
-                    : '';
-                })()}
-                alt={selectedImage.prompt}
-                style={{ maxWidth: '100%', height: 'auto' }}
-                onError={(e) => {
-                  console.error('Failed to load full-size image:', selectedImage.id);
-                  const batchIdForUrl = selectedImage.batchId || (activeBatch && activeBatch.batch_id);
-                  // Try thumbnail as fallback, then give up (but don't hide immediately if we have a good full src)
-                  if (selectedImage.thumbnailFilename && batchIdForUrl && !e.target.dataset.fallbackAttempted) {
-                    e.target.src = `${API_BASE}/batch-image/image/${batchIdForUrl}/${selectedImage.thumbnailFilename}?thumbnail=true`;
-                    e.target.dataset.fallbackAttempted = 'true';
-                  } else if (!e.target.dataset.hidden) {
-                    e.target.style.display = 'none';
-                    setError('Failed to load image');
-                    e.target.dataset.hidden = 'true';
-                  }
-                }}
-              />
-
-              {selectedImage.metadata && (
-                <Box sx={{ mt: 2, textAlign: 'left' }}>
-                  <Typography variant="subtitle2">Metadata:</Typography>
-                  <Typography variant="body2">
-                    Style: {selectedImage.metadata.style}<br />
-                    Dimensions: {selectedImage.metadata.dimensions}<br />
-                    Steps: {selectedImage.metadata.steps}<br />
-                    Guidance: {selectedImage.metadata.guidance}<br />
-                    {selectedImage.metadata.seed_used && `Seed: ${selectedImage.metadata.seed_used}`}
-                  </Typography>
-                </Box>
-              )}
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowImageViewer(false)}>Close</Button>
-        </DialogActions>
-      </Dialog>
+      {/* Full-screen batch image gallery (prev/next keyboard + arrows) */}
+      {lightboxImage && (
+        <ImageLightbox
+          imageUrl={lightboxImage.url}
+          imageName={lightboxImage.name}
+          onClose={closeLightbox}
+          onPrev={handleLightboxPrev}
+          onNext={handleLightboxNext}
+          onDownload={handleLightboxDownload}
+          hasPrev={lightboxImage.fileIndex > 0}
+          hasNext={lightboxImage.fileIndex < generatedImages.length - 1}
+        />
+      )}
 
       {/* Prompt Preview Dialog */}
       <Dialog
