@@ -56,7 +56,7 @@ def test_estimate_sd15(gen):
 
 
 def test_ram_estimate_zimage(gen):
-    assert gen._ram_estimate_gb("Tongyi-MAI/Z-Image-Turbo") == 32.0
+    assert gen._ram_estimate_gb("Tongyi-MAI/Z-Image-Turbo") == 24.0
 
 
 def test_ram_estimate_sdxl(gen):

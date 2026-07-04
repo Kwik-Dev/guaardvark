@@ -316,7 +316,7 @@ class OfflineImageGenerator:
     _FAMILY_VRAM_MB = {"zimage": 11000, "sdxl": 8000, "sd": 4000}
     # CPU-RAM footprint with enable_model_cpu_offload (weights + PyTorch arena).
     # Observed: ~47 GB RSS on 60 GB box during Z-Image batch; gate before load.
-    _FAMILY_RAM_GB = {"zimage": 32.0, "sdxl": 10.0, "sd": 6.0}
+    _FAMILY_RAM_GB = {"zimage": 24.0, "sdxl": 10.0, "sd": 6.0}
 
     def _vram_estimate_mb(self, model_id: str) -> int:
         return self._FAMILY_VRAM_MB.get(self._model_family(model_id), 4000)

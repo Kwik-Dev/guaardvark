@@ -306,8 +306,18 @@ class BatchImageGenerator:
             else:
                 model_key = self._resolve_batch_model_key(prompt.model)
             catalog_id = gen.available_models.get(model_key, model_key)
-            vram_mb = max(vram_mb, gen._vram_estimate_mb(catalog_id))
-            ram_gb = max(ram_gb, gen._ram_estimate_gb(catalog_id))
+            
+            # If the model is already loaded (resident), its memory footprint is already
+            # reflected in the system's available RAM. Avoid double-gating it.
+            if getattr(gen, "_pipeline", None) is not None and getattr(gen, "_current_model", None) == catalog_id:
+                model_vram = 1024
+                model_ram = 2.0
+            else:
+                model_vram = gen._vram_estimate_mb(catalog_id)
+                model_ram = gen._ram_estimate_gb(catalog_id)
+
+            vram_mb = max(vram_mb, model_vram)
+            ram_gb = max(ram_gb, model_ram)
         return vram_mb, ram_gb
 
     def _batch_uses_cuda_offline_gen(self) -> bool:
@@ -494,6 +504,12 @@ class BatchImageGenerator:
                 generation_time=time.time() - start_time,
                 error=str(e)
             )
+        finally:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         # Pipeline unload is deferred to batch completion (_cleanup_gpu_memory at
         # run_batch end). Per-image cleanup defeated keep_pipeline_loaded and caused
         # full Z-Image reload + RAM spike → OOM on multi-image batches.

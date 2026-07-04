@@ -205,7 +205,7 @@ def test_load_gate_blocks_when_ram_low(monkeypatch):
 
 def test_load_gate_blocks_on_swap(monkeypatch):
     from backend.services.system_load_gate import GlobalLoadGate, JobWeight, LoadGateTimeout
-    _patch_load(monkeypatch, ram_avail_gb=40.0, swap_used_gb=2.0)  # >1 GB swap
+    _patch_load(monkeypatch, ram_avail_gb=40.0, swap_used_gb=10.0)  # >8 GB swap
     g = GlobalLoadGate()
     with pytest.raises(LoadGateTimeout):
         g.admit(JobWeight(ram_gb=1.0), timeout=0.0)
