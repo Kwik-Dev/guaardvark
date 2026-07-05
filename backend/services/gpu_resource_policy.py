@@ -134,6 +134,26 @@ import threading as _threading
 _session_tls = _threading.local()
 
 
+@contextlib.contextmanager
+def adopt_gpu_session() -> Iterator[None]:
+    """Mark THIS thread as covered by a gpu_session held by ANOTHER thread.
+
+    The reentrancy flag above is thread-local, so when a holder fans work out to
+    worker threads (e.g. BatchImageGenerator's batch-level session + ThreadPool
+    workers), any nested gpu_session in the worker would try to claim the gate
+    the batch already holds and fail with GpuBusyError. Wrap the worker's unit of
+    work in this to make nested sessions pass through, exactly as they would on
+    the holder's own thread. Only use when the owning session provably outlives
+    the wrapped work (the batch body runs inside the owning ``with`` block).
+    """
+    prev = getattr(_session_tls, "held", False)
+    _session_tls.held = True
+    try:
+        yield
+    finally:
+        _session_tls.held = prev
+
+
 def _acquire_cross_process_lease(slot: str, *, lease_seconds: Optional[int] = None) -> bool:
     """Acquire the cross-process GPU file lock AFTER the in-PID gate (lock ordering) and
     BEFORE eviction. Raise GpuBusyError if ANOTHER process holds it (the in-PID gate has

@@ -472,54 +472,11 @@ class BatchImageGenerator:
                         generation_time=time.time() - start_time,
                         error="GPU is busy with another render right now — try again in a moment.",
                     )
-                image_ext = Path(result.image_path).suffix or ".png"
-                # Bates-stamped filename: ImageGen_04-02-2026_001.png
-                from backend.services.output_registration import bates_name
-                image_filename = bates_name("image", image_ext, output_dir / "images")
-                target_path = output_dir / "images" / image_filename
 
-                import shutil
-                shutil.move(result.image_path, target_path)
-
-                thumbnail_path = None
-                if batch_status and hasattr(batch_status, 'generate_thumbnails') and batch_status.generate_thumbnails:
-                    thumbnail_path = self._create_thumbnail(str(target_path), output_dir / "thumbnails")
-
-                if self.progress_system:
-                    completed = batch_status.completed_images + 1
-                    progress = int((completed / batch_status.total_images) * 100)
-
-                    self.progress_system.update_process(
-                        process_id=batch_id,
-                        progress=progress,
-                        message=f"Generated image {completed}/{batch_status.total_images}: {prompt.prompt[:50]}...",
-                        additional_data={
-                            "batch_id": batch_id,
-                            "generated_count": completed,
-                            "target_count": batch_status.total_images,
-                            "completed": completed,
-                            "total": batch_status.total_images,
-                            "current_prompt": prompt.prompt[:100]
-                        }
-                    )
-
-                return BatchImageResult(
-                    prompt_id=prompt.id,
-                    success=True,
-                    image_path=str(target_path),
-                    thumbnail_path=thumbnail_path,
-                    generation_time=time.time() - start_time,
-                    metadata={
-                        "original_prompt": prompt.prompt,
-                        "style": prompt.style,
-                        "dimensions": f"{prompt.width}x{prompt.height}",
-                        "steps": prompt.steps,
-                        "guidance": prompt.guidance,
-                        "seed_used": result.seed_used,
-                        "model_used": result.model_used
-                    }
-                )
-            else:
+            # Shared failure/success handling for BOTH paths. (The old code treated
+            # every non-None character-LoRA result as a failure — even successful
+            # ones — and dereferenced result.image_path without checking success.)
+            if not result.success or not result.image_path:
                 error_msg = result.error or "Unknown generation error"
                 logger.error(f"Image generation failed for prompt {prompt.id}: {error_msg}")
 
@@ -529,6 +486,54 @@ class BatchImageGenerator:
                     generation_time=time.time() - start_time,
                     error=error_msg
                 )
+
+            image_ext = Path(result.image_path).suffix or ".png"
+            # Bates-stamped filename: ImageGen_04-02-2026_001.png
+            from backend.services.output_registration import bates_name
+            image_filename = bates_name("image", image_ext, output_dir / "images")
+            target_path = output_dir / "images" / image_filename
+
+            import shutil
+            shutil.move(result.image_path, target_path)
+
+            thumbnail_path = None
+            if batch_status and hasattr(batch_status, 'generate_thumbnails') and batch_status.generate_thumbnails:
+                thumbnail_path = self._create_thumbnail(str(target_path), output_dir / "thumbnails")
+
+            if self.progress_system:
+                completed = batch_status.completed_images + 1
+                progress = int((completed / batch_status.total_images) * 100)
+
+                self.progress_system.update_process(
+                    process_id=batch_id,
+                    progress=progress,
+                    message=f"Generated image {completed}/{batch_status.total_images}: {prompt.prompt[:50]}...",
+                    additional_data={
+                        "batch_id": batch_id,
+                        "generated_count": completed,
+                        "target_count": batch_status.total_images,
+                        "completed": completed,
+                        "total": batch_status.total_images,
+                        "current_prompt": prompt.prompt[:100]
+                    }
+                )
+
+            return BatchImageResult(
+                prompt_id=prompt.id,
+                success=True,
+                image_path=str(target_path),
+                thumbnail_path=thumbnail_path,
+                generation_time=time.time() - start_time,
+                metadata={
+                    "original_prompt": prompt.prompt,
+                    "style": prompt.style,
+                    "dimensions": f"{prompt.width}x{prompt.height}",
+                    "steps": prompt.steps,
+                    "guidance": prompt.guidance,
+                    "seed_used": result.seed_used,
+                    "model_used": result.model_used
+                }
+            )
 
         except Exception as e:
             logger.error(f"Exception during image generation for prompt {prompt.id}: {e}")
@@ -672,7 +677,19 @@ class BatchImageGenerator:
                     }
                 )
 
-            def _run_batch_body():
+            def _run_batch_body(session_held: bool = False):
+                # When session_held, run_batch's thread owns the batch-level gpu_session.
+                # The gpu_session reentrancy flag is THREAD-LOCAL, so executor worker
+                # threads must adopt it — otherwise the per-image / in-generator
+                # gpu_session tries to claim the gate the batch already holds and every
+                # image fails instantly with GpuBusyError ("GPU is busy...").
+                def _gen_one(prompt):
+                    if session_held:
+                        from backend.services.gpu_resource_policy import adopt_gpu_session
+                        with adopt_gpu_session():
+                            return self._generate_single_image(batch_id, prompt, output_dir, batch_status)
+                    return self._generate_single_image(batch_id, prompt, output_dir, batch_status)
+
                 try:
                     # Director / storyboard pass (if requested). Does NOT raise. Disables auto_enhance on success.
                     try:
@@ -702,10 +719,7 @@ class BatchImageGenerator:
                                     break
 
                                 prompt = request.prompts[prompt_index]
-                                future = executor.submit(
-                                    self._generate_single_image,
-                                    batch_id, prompt, output_dir, batch_status
-                                )
+                                future = executor.submit(_gen_one, prompt)
                                 pending_futures.append(future)
                                 prompt_index += 1
 
@@ -881,7 +895,7 @@ class BatchImageGenerator:
                         slot_id=slot_id,
                         lease_seconds=1800,
                     ):
-                        _run_batch_body()
+                        _run_batch_body(session_held=True)
                 except GpuBusyError as e:
                     self._fail_batch_gpu_busy(
                         batch_id,
