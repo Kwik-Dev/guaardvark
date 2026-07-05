@@ -459,19 +459,10 @@ class BatchImageGenerator:
                 from backend.services.gpu_resource_policy import gpu_session
                 from backend.services.job_operation_gate import GpuBusyError
                 from backend.services.job_types import JobKind
-                try:
-                    ram_est = self.image_generator._ram_estimate_gb(gen_request.model or "auto") if hasattr(self.image_generator, "_ram_estimate_gb") else 10.0
-                    with gpu_session(JobKind.VIDEO_RENDER, f"batch_img_{prompt.id}",
-                                     on_busy="raise", evict_ollama=True, vram_estimate_mb=8000,
-                                     ram_estimate_gb=ram_est, require_fit=True, cross_process=True):
-                        result = self.image_generator.generate_image(gen_request)
-                except GpuBusyError:
-                    return BatchImageResult(
-                        prompt_id=prompt.id,
-                        success=False,
-                        generation_time=time.time() - start_time,
-                        error="GPU is busy with another render right now — try again in a moment.",
-                    )
+                # Direct call (no per-prompt strict gpu_session/require_fit) to restore working
+                # generation for zimage-turbo etc. (as in pre-0fa/bf commits and backups).
+                # Outer run_batch may still gate if needed; per-item was causing busy errors.
+                result = self.image_generator.generate_image(gen_request)
                 image_ext = Path(result.image_path).suffix or ".png"
                 # Bates-stamped filename: ImageGen_04-02-2026_001.png
                 from backend.services.output_registration import bates_name
@@ -867,6 +858,8 @@ class BatchImageGenerator:
                     f"(vram~{vram_mb}MB ram~{ram_gb}GB)"
                 )
                 try:
+                    # Relax require_fit for batch image to allow generation with zimage-turbo etc.
+                    # (strict fit was added in recent OOM guard but broke working models per user report).
                     with gpu_session(
                         JobKind.VIDEO_RENDER,
                         batch_id,
@@ -877,7 +870,7 @@ class BatchImageGenerator:
                         cross_process=True,
                         vram_estimate_mb=vram_mb,
                         ram_estimate_gb=ram_gb,
-                        require_fit=True,
+                        require_fit=False,
                         slot_id=slot_id,
                         lease_seconds=1800,
                     ):
