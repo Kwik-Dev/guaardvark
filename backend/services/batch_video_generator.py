@@ -421,7 +421,8 @@ class BatchVideoGenerator:
                                  keyframe_model: Optional[str] = None,
                                  loras: Optional[list] = None,
                                  lora_strength: float = 0.25,
-                                 keep_warm: bool = False) -> Optional[str]:
+                                 keep_warm: bool = False,
+                                 training_resolution: Optional[int] = None) -> Optional[str]:
         """Cinematic mode: render a keyframe still for ``prompt``, then evict it from VRAM
         so the I2V animator can load (the music-video FLUX->i2v handoff — the i2v nodes
         don't ask ComfyUI to make room, so without this they OOM on a still-full card).
@@ -441,7 +442,21 @@ class BatchVideoGenerator:
             # Render the keyframe LARGER than the clip (long edge ~1024, /16-aligned) so
             # the start frame is sharp — Wan downscales it when conditioning, and a
             # 480p-native still came out soft. Keep the clip's aspect ratio.
-            _long = 1024
+            # Robustness improvement: honor GUAARDVARK_KEYFRAME_LONG (or subject's
+            # training_settings resolution scaled up) so LoRAs trained at non-default
+            # res produce appropriately sharp seeds. Default remains 1024 for 16 GB cards.
+            import os
+            _long = int(os.environ.get("GUAARDVARK_KEYFRAME_LONG", "1024"))
+            # Respect training_resolution (from subject's lora_training_settings) by
+            # ensuring the keyframe is at least ~1.33x the trained res (sharper seed
+            # for the I2V conditioner). Keeps 1024 floor/ceiling for VRAM sanity.
+            if training_resolution:
+                try:
+                    _min_from_train = max(512, int(int(training_resolution) * 4 / 3))
+                    _long = max(_long, _min_from_train)
+                except Exception:
+                    pass
+            _long = max(512, (_long // 16) * 16)
             _ar = (float(width) / float(height)) if height else 1.0
             if width >= height:
                 w, h = _long, int(round(_long / _ar))
@@ -552,6 +567,7 @@ class BatchVideoGenerator:
             cast_lora_paths: list[str] = []
             cast_lock_prefix = ""
             cast_lora_strength = batch_request.lora_strength
+            cast_training_res: int = 768  # representative from subjects; used for keyframe sizing
             # Q1: an explicitly-picked approved reference still (metadata.keyframe_sample_id)
             # is animated directly as the I2V start frame — that exact 1024-class character
             # image is what makes the clip match the high-quality "Generate Character" stills.
@@ -571,6 +587,13 @@ class BatchVideoGenerator:
                         subs = [_db.session.get(Subject, int(sid)) for sid in batch_request.subject_ids]
                         cast_lora_paths, cast_lock_prefix = subjects_to_lock(
                             [s for s in subs if s], include_bible=True)
+                        # Compute representative training res from cast subjects so
+                        # _generate_keyframe_still can produce appropriately scaled seeds.
+                        from backend.services.lora_training_settings import settings_for_subject
+                        cast_training_res = max(
+                            (settings_for_subject(s)["resolution"] for s in subs if s),
+                            default=768
+                        )
                         # Character LoRAs are SDXL → SDXL keyframe strength (~0.25).
                         # Treat the dataclass default (1.0) as "unset" so the model-aware
                         # default applies; any other value is an explicit operator override.
@@ -676,6 +699,7 @@ class BatchVideoGenerator:
                                     keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
                                     loras=(cast_lora_paths or None),
                                     lora_strength=cast_lora_strength,
+                                    training_resolution=cast_training_res,
                                 )
                                 if kf:
                                     meta["image_path"] = kf
@@ -769,6 +793,7 @@ class BatchVideoGenerator:
                             keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
                             loras=(cast_lora_paths or None), lora_strength=cast_lora_strength,
                             keep_warm=True,  # hold the still model across ALL keyframes
+                            training_resolution=cast_training_res,
                         )
                         if _kf:
                             precomputed_keyframes[_it.id] = _kf

@@ -76,14 +76,16 @@ MODEL_SETTINGS = {
     },
     "zimage-turbo": {
         # CFG-distilled turbo model: very few steps, near-zero guidance.
-        "guidance_range": (1.0, 2.0),
-        "recommended_guidance": 1.0,
+        # Guidance control is disabled in the Batch UI (and forced low in backend)
+        # because the model is CFG-distilled and does not use the guidance scale.
+        "guidance_range": (0.0, 1.0),
+        "recommended_guidance": 0.0,
         "min_dimensions": (512, 512),
         "recommended_dimensions": (1024, 1024),
         "steps_range": (6, 12),
         "recommended_steps": 8,
         "best_for": ["versatile", "photorealism", "faces", "anatomy", "text", "high_res"],
-        "warnings": ["Guidance not used by turbo models"],
+        "warnings": [],  # Guidance is intentionally not used; UI disables the control and backend forces low value. Dynamic check below will warn on misuse.
         "max_dimensions": (1536, 1536)
     }
 }
@@ -179,6 +181,10 @@ class SettingsValidator:
         # Add model-specific warnings
         for warning in model_config.get("warnings", []):
             warnings.append(f"{model}: {warning}")
+
+        # For zimage-turbo the guidance warning is intentionally omitted from the static list
+        # (see MODEL_SETTINGS) because the Batch UI disables the control and backend forces
+        # a neutral value. We still warn via the dynamic check below if a high value is supplied.
 
         # Check for common issues
         if "turbo" in model.lower() and guidance > 1.0:

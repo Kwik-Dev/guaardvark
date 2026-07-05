@@ -139,6 +139,60 @@ export const optimizeIndex = async () => {
   }
 };
 
+export const pauseIndexing = async () => {
+  const endpoint = `${BASE_URL}/index/pause`;
+  try {
+    const response = await fetch(endpoint, { method: "POST" });
+    const data = await handleResponse(response);
+    if (typeof data === "object" && data !== null && data.error)
+      throw new Error(data.error);
+    return data;
+  } catch (err) {
+    console.error("settingsService: Error pausing indexing:", err.message);
+    throw err;
+  }
+};
+
+export const resumeIndexing = async () => {
+  const endpoint = `${BASE_URL}/index/resume`;
+  try {
+    const response = await fetch(endpoint, { method: "POST" });
+    const data = await handleResponse(response);
+    if (typeof data === "object" && data !== null && data.error)
+      throw new Error(data.error);
+    return data;
+  } catch (err) {
+    console.error("settingsService: Error resuming indexing:", err.message);
+    throw err;
+  }
+};
+
+export const getIndexingPaused = async () => {
+  const endpoint = `${BASE_URL}/index/paused`;
+  try {
+    const response = await fetch(endpoint);
+    const data = await handleResponse(response);
+    return data?.paused === true;
+  } catch (err) {
+    console.error("settingsService: Error checking indexing paused state:", err.message);
+    return false;
+  }
+};
+
+export const resumePendingIndexing = async () => {
+  const endpoint = `${BASE_URL}/index/resume-pending`;
+  try {
+    const response = await fetch(endpoint, { method: "POST" });
+    const data = await handleResponse(response);
+    if (typeof data === "object" && data !== null && data.error)
+      throw new Error(data.error);
+    return data;
+  } catch (err) {
+    console.error("settingsService: Error resuming pending indexing:", err.message);
+    throw err;
+  }
+};
+
 export const runSelfTest = async (options = {}) => {
   const endpoint = `${BASE_URL}/meta/selftest`;
   try {

@@ -87,13 +87,39 @@ def chat(
 
     full_message = parse_file_mentions(full_message)
 
+    # Headless project analysis support: detect leading absolute path in message
+    # (for "guaardvark --non-interactive chat '/path' analyze this project")
+    # Set project context so backend gets project_root for GUAARDVARK.md etc.
+    project_root = None
+    import re
+    from pathlib import Path
+    from llx.utils import populate_project_context, find_project_root
+    from llx.working_memory import empty_working_memory
+    path_match = re.match(r"^['\"]?(\/[^\s'\"]+)['\"]?\s*(.*)$", full_message)
+    if path_match:
+        candidate = path_match.group(1)
+        if Path(candidate).is_dir():
+            try:
+                os.chdir(Path(candidate).expanduser().resolve())
+            except:
+                pass
+            rest = path_match.group(2).strip() or "analyze this project"
+            full_message = rest
+            project_root = str(find_project_root())
+            # Populate for local context if needed
+            try:
+                mem = empty_working_memory()
+                populate_project_context(mem, Path(project_root))
+            except:
+                pass
+
     if stream:
-        _chat_streaming(session_id, full_message, no_rag, server, json_out, project_id=project)
+        _chat_streaming(session_id, full_message, no_rag, server, json_out, project_id=project, project_root=project_root)
     else:
-        _chat_sync(session_id, full_message, no_rag, server, json_out, project_id=project)
+        _chat_sync(session_id, full_message, no_rag, server, json_out, project_id=project, project_root=project_root)
 
 
-def _chat_sync(session_id: str, message: str, no_rag: bool, server: str | None, json_out: bool, project_id: int | None = None):
+def _chat_sync(session_id: str, message: str, no_rag: bool, server: str | None, json_out: bool, project_id: int | None = None, project_root: str | None = None):
     """Send chat via synchronous /api/enhanced-chat endpoint."""
     try:
         client = get_client(server)
@@ -106,6 +132,18 @@ def _chat_sync(session_id: str, message: str, no_rag: bool, server: str | None, 
         }
         if project_id:
             body["project_id"] = project_id
+        if project_root:
+            body["project_root"] = project_root
+            # Build rich context like REPL for external project analysis
+            try:
+                from llx.utils import populate_project_context, build_cli_context as build_ctx
+                from llx.working_memory import empty_working_memory
+                mem = empty_working_memory()
+                populate_project_context(mem, Path(project_root))
+                body["context"] = build_ctx("", mem)
+                body["cli_working_memory"] = mem
+            except Exception:
+                pass
 
         # Show spinner in interactive mode
         if not json_out and not output.is_pipe():
@@ -198,7 +236,7 @@ def _chat_export(session_id: str, server: str | None, output_file: Path | None, 
         raise typer.Exit(1)
 
 
-def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | None, json_out: bool, project_id: int | None = None):
+def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | None, json_out: bool, project_id: int | None = None, project_root: str | None = None):
     """Send chat via /api/chat/unified with Socket.IO streaming."""
     import signal
 
@@ -258,6 +296,17 @@ def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | N
         }
         if project_id:
             body["project_id"] = project_id
+        if project_root:
+            body["project_root"] = project_root
+            try:
+                from llx.utils import populate_project_context, build_cli_context as build_ctx
+                from llx.working_memory import empty_working_memory
+                mem = empty_working_memory()
+                populate_project_context(mem, Path(project_root))
+                body["options"]["context"] = build_ctx("", mem)
+                body["options"]["cli_working_memory"] = mem
+            except Exception:
+                pass
         client.post("/api/chat/unified", json=body)
 
         # Stream output

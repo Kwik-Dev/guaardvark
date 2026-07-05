@@ -64,6 +64,7 @@ class AnimationGenerator:
         """Main entry point: generate an animation from a request."""
         result = AnimationResult()
         start_time = time.time()
+        temp_frame_paths: List[str] = []
 
         try:
             from backend.services.offline_image_generator import (
@@ -102,6 +103,7 @@ class AnimationGenerator:
                 style=request.style,
                 model=request.model,
                 seed=request.seed,
+                keep_pipeline_loaded=True,  # keep across frames to avoid reload churn
             )
 
             frame1_result = generator.generate_image(frame1_request)
@@ -114,6 +116,9 @@ class AnimationGenerator:
             current_frame = Image.open(frame1_result.image_path).convert("RGB")
             frames.append(current_frame.copy())
             base_seed = frame1_result.seed_used or 42
+            temp_frame_paths: List[str] = []
+            if frame1_result.image_path:
+                temp_frame_paths.append(frame1_result.image_path)
 
             logger.info(f"Frame 1 generated in {frame1_result.generation_time:.1f}s")
 
@@ -145,6 +150,7 @@ class AnimationGenerator:
                     guidance_scale=request.guidance_scale,
                     seed=base_seed + i,
                     model=request.model,
+                    keep_pipeline_loaded=True,
                 )
 
                 if not frame_result.success or not frame_result.image_path:
@@ -153,6 +159,8 @@ class AnimationGenerator:
                     frames.append(current_frame.copy())
                     continue
 
+                if frame_result.image_path:
+                    temp_frame_paths.append(frame_result.image_path)
                 current_frame = Image.open(frame_result.image_path).convert("RGB")
                 frames.append(current_frame.copy())
                 logger.info(f"Frame {i+1}/{request.num_frames} generated in {frame_result.generation_time:.1f}s")
@@ -206,6 +214,37 @@ class AnimationGenerator:
             logger.error(f"Animation generation failed: {e}", exc_info=True)
             result.error = str(e)
             result.generation_time = time.time() - start_time
+        finally:
+            # Always aggressive cleanup after animation (success or fail) to prevent resource buildup
+            # when user mixes images -> video/anim -> images in chat.
+            try:
+                if 'generator' in locals() and generator is not None:
+                    if hasattr(generator, '_unload_pipeline'):
+                        generator._unload_pipeline()
+                import gc
+                import torch
+                for _ in range(3):
+                    gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    if hasattr(torch.cuda, "ipc_collect"):
+                        torch.cuda.ipc_collect()
+                try:
+                    import ctypes
+                    ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception:
+                    pass
+                # Clean temp frame images
+                for tp in temp_frame_paths:
+                    try:
+                        if tp and os.path.exists(tp):
+                            os.unlink(tp)
+                    except Exception:
+                        pass
+                logger.info("AnimationGenerator: post-animation aggressive unload + cache prune done")
+            except Exception as e:
+                logger.warning(f"Animation post-cleanup warning: {e}")
 
         return result
 

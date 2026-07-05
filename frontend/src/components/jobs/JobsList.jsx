@@ -43,6 +43,7 @@ import {
   clearJobHistory,
   JOB_STATUSES,
 } from "../../api/jobsService";
+import * as apiService from "../../api";
 import { Button } from "@mui/material";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 
@@ -91,6 +92,8 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
 
   const [clearMenuAnchorEl, setClearMenuAnchorEl] = useState(null);
   const isClearMenuOpen = Boolean(clearMenuAnchorEl);
+
+  const [indexingPaused, setIndexingPaused] = useState(false);
 
   const handleClearHistory = async (kindsToClear) => {
     setLoading(true);
@@ -160,6 +163,20 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
     else refreshHistory();
     refreshSummary();
   }, [tab, refreshActive, refreshHistory, refreshSummary]);
+
+  // Fetch global indexing pause state to integrate with job list
+  const fetchIndexingPauseState = useCallback(async () => {
+    try {
+      const paused = await apiService.getIndexingPaused();
+      setIndexingPaused(!!paused);
+    } catch (e) {
+      // non fatal
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchIndexingPauseState();
+  }, [fetchIndexingPauseState]);
 
   // Live updates from the canonical jobs:* socket channel (Phase 4).
   // unifiedJobs is a Map<job.id, jobDict>; fold its entries into activeRows
@@ -258,6 +275,25 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
             >
               <RefreshIcon fontSize="small" />
             </IconButton>
+            {/* Integrate with the global indexing pause + add 'resume all pending' */}
+            {indexingPaused && <Chip label="Indexing Paused" color="warning" size="small" />}
+            <Button
+              size="small"
+              variant="outlined"
+              color="success"
+              onClick={async () => {
+                try {
+                  const res = await apiService.resumePendingIndexing();
+                  alert(res?.message || "Resume pending indexing started");
+                  await refreshActive();
+                } catch (e) {
+                  alert("Failed to resume pending indexing: " + (e.message || e));
+                }
+              }}
+              disabled={loading}
+            >
+              Resume All Pending Indexing
+            </Button>
           </Stack>
         </Paper>
 
@@ -456,6 +492,28 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
                 >
                   Cancel job
                 </Button>
+              )}
+              {/* Resume/retry for pending or failed indexing-related jobs */}
+              {(["pending", "failed", "paused"].includes(selected.status)) && (
+                (selected.kind?.includes("index") || selected.label?.toLowerCase().includes("index") || (selected.metadata?.process_type === "indexing")) && (
+                  <Button
+                    variant="outlined"
+                    color="success"
+                    fullWidth
+                    onClick={async () => {
+                      try {
+                        const res = await apiService.resumePendingIndexing();
+                        alert(res?.message || "Resume pending indexing triggered (will re-queue matching docs)");
+                        await refreshActive();
+                        setSelected(null);
+                      } catch (e) {
+                        alert("Resume failed: " + (e.message || e));
+                      }
+                    }}
+                  >
+                    Resume / Re-index
+                  </Button>
+                )
               )}
             </Stack>
           )}

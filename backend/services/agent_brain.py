@@ -203,10 +203,56 @@ class AgentBrain:
         # so we don't immediately abort ourselves.
         clear_abort_flag(session_id)
 
+        # === Direct slash / direct_tool bypass (e.g. /imagine) ===
+        # Must short-circuit BEFORE any LLM or tier routing. This avoids the
+        # chat model being involved at all (prevents the Ollama EOF / reload
+        # storms seen when image gen evicts the LLM and then continuation tries
+        # to speak). The legacy direct path does correct history + emits.
+        try:
+            from backend.services.slash_command_executor import resolve_slash_direct_tool
+            tool_name, params = resolve_slash_direct_tool(options)
+            if tool_name and getattr(self.state, 'tool_registry', None):
+                tool = self.state.tool_registry.get_tool(tool_name)
+                if tool:
+                    logger.info(f"[AGENT_BRAIN] Direct slash/direct-tool: {tool_name} (bypassing LLM)")
+                    try:
+                        from backend.services.unified_chat_engine import UnifiedChatEngine
+                        from backend.utils.llm_service import get_llm_for_startup
+                        # LLM instance only for engine construction; direct exec does not call it
+                        llm = None
+                        try:
+                            llm = get_llm_for_startup()
+                        except Exception:
+                            pass  # some directs don't need it
+                        temp_engine = UnifiedChatEngine(
+                            tool_registry=self.state.tool_registry,
+                            llm_instance=llm or object()  # dummy if none
+                        )
+                        if app:
+                            temp_engine.app = app
+                        rid = str(uuid.uuid4())
+                        display = message or f"/{ (options or {}).get('slash_command', tool_name) }"
+                        # Execute with the caller's emit_fn so UI sees tool_call/result/image/complete
+                        return temp_engine._run_direct_tool_execution(
+                            tool_name, params, session_id, emit_fn, rid, display, options or {}
+                        )
+                    except Exception as de:
+                        logger.warning(f"[AGENT_BRAIN] Direct tool exec via temp engine failed for {tool_name}: {de} — will fall through")
+        except Exception as _de:
+            logger.debug(f"[AGENT_BRAIN] Direct tool precheck skipped: {_de}")
+
         # Agent screen gate — when nobody is actively watching the virtual
         # screen, vision models should behave like any other model (ReACT +
         # tools) instead of clicking through Firefox for every request.
         _screen_active = bool(options and options.get("agent_screen_active", False))
+
+        # For pure image generation requests (draw/create/generate image etc.),
+        # force the standard tool-calling path (LLM must output generate_image tool call)
+        # so that the selected /imagemodel is respected via injection, and behavior
+        # is consistent with direct /imagine. Skip gemma-direct even if screen active.
+        msg_l = (message or "").lower()
+        pure_image_kw = ["generate image", "draw", "make a picture", "picture of", "image of", "create image", "generate a photo", "visualize", "make an image"]
+        force_standard_image = any(kw in msg_l for kw in pure_image_kw) and "screen" not in msg_l and "click" not in msg_l
 
         try:
             # -- Gemma4 direct path: no chains, no routing, no bloated prompts --
@@ -218,7 +264,8 @@ class AgentBrain:
             if (self.state.model_caps.is_vision_model
                     and "gemma4" in self.state.active_model.lower()
                     and not force_tier
-                    and _screen_active):
+                    and _screen_active
+                    and not force_standard_image):
                 logger.debug(
                     f"[EMIT-HANDOFF][BRAIN] entering _gemma4_direct session={session_id} "
                     f"emit_fn_id={id(emit_fn)} threadlocal_get? (will log inside ACS if used)"

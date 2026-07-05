@@ -199,6 +199,14 @@ ICON_OFFLINE  = "○"
 ICON_BULLET   = "›"
 ICON_SPINNER  = "dots"
 
+# Local coding icons (new)
+ICON_READ     = "◉"
+ICON_EDIT     = "✎"
+ICON_RUN      = "▶"
+ICON_TODO     = "☑"
+ICON_GIT      = "⎇"
+ICON_DIFF     = "≠"
+
 
 # ── Console Factory ────────────────────────────────────────────
 

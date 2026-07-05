@@ -18,6 +18,7 @@ from llx.theme import make_console
 
 
 def launch(
+    project: str | None = typer.Argument(None, help="Optional project folder to cd into and analyze (drag & drop support)"),
     model: str = typer.Option(None, "--model", "-m", help="Model to use"),
     config_only: bool = typer.Option(False, "--config", help="Configure only, don't start"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve all prompts"),
@@ -27,8 +28,10 @@ def launch(
 ):
     """Launch Guaardvark with Ollama integration.
 
+    Supports project folders (drag & drop): guaardvark /path/to/website "analyze and suggest CSS improvements"
+
     First launch runs an onboarding wizard. Subsequent launches start
-    services and open the REPL.
+    services and open the REPL (auto-loads GUAARDVARK.md, explores build.py/CSS, etc.).
 
     Lite mode (default): instant start with SQLite, no external dependencies.
     Full mode: PostgreSQL, Redis, Celery, web UI at localhost:5175.
@@ -67,7 +70,18 @@ def launch(
     else:
         _start_lite_mode(console, port)
 
-    # 4. Launch REPL
+    # 4. Handle project path (drag folder support)
+    if project:
+        from pathlib import Path
+        p = Path(project).expanduser().resolve()
+        if p.exists() and p.is_dir():
+            import os
+            os.chdir(p)
+            console.print(f"[llx.success]Switched to project: {p}[/llx.success]")
+        else:
+            console.print(f"[llx.warning]Project path not found or not dir: {project}[/llx.warning]")
+
+    # 5. Launch REPL (will auto-detect GUAARDVARK.md + populate context)
     from llx.repl import launch_repl
     launch_repl()
 

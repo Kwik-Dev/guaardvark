@@ -150,6 +150,56 @@ class LlxClient:
                 "Is the server running? Try: ./start.sh"
             )
 
+    # --- Agent Tool integration (leverages the rich existing backend tool system) ---
+    def list_tools(self) -> dict:
+        """List all registered agent tools (names, descriptions, parameters)."""
+        return self.get("/api/tools")
+
+    def get_tool_schema(self, name: str) -> dict:
+        return self.get(f"/api/tools/{name}")
+
+    def execute_tool(self, tool_name: str, parameters: dict | None = None) -> dict:
+        """Execute a backend tool directly via the registry (subject to guards)."""
+        return self.post("/api/tools/execute", json={
+            "tool_name": tool_name,
+            "parameters": parameters or {}
+        })
+
+    def direct_tool(self, tool_name: str | None = None, params: dict | None = None,
+                    slash_command: str | None = None, slash_args: str = "", **extra) -> dict:
+        """Low-level direct tool via unified chat path (used for slash commands like imagine)."""
+        body = {
+            "tool": tool_name,
+            "params": params or {},
+            "slash_command": slash_command,
+            "slash_args": slash_args,
+            **extra,
+        }
+        return self.post("/api/chat/unified/direct-tool", json=body)
+
+    # --- Code intelligence (mirrors frontend/src/api/codeIntelligenceService.js) ---
+    def analyze_code(self, file_path, language="text", content=None, custom_prompt=None, rules_cutoff=False):
+        """Use backend code intelligence for analysis (same as GUI editor)."""
+        payload = {
+            "filePath": file_path,
+            "language": language,
+            "content": content or "",
+            "customPrompt": custom_prompt,
+            "rulesCutoff": rules_cutoff,
+        }
+        return self.post("/code-intelligence/analyze", json=payload)
+
+    def edit_code_intelligent(self, original_code, edit_instructions, language="javascript", file_path="untitled", rules_cutoff=False):
+        """Intelligent edit via backend (matches frontend codeIntelligenceService)."""
+        payload = {
+            "originalCode": original_code,
+            "editInstructions": edit_instructions,
+            "language": language,
+            "filePath": file_path,
+            "rulesCutoff": rules_cutoff,
+        }
+        return self.post("/code-intelligence/edit", json=payload)
+
 
 def get_client(server: str | None = None) -> LlxClient:
     return LlxClient(server_url=server)

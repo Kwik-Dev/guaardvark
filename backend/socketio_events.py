@@ -587,6 +587,33 @@ def _handle_chat_send_local(payload):
     def _run():
         try:
             logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] BACKEND THREAD START session={session_id}")
+
+            # Direct tool / slash intercept ( /imagine etc ) — do this BEFORE routing
+            # to brain or legacy. Guarantees bypass for slash commands in socket path too.
+            try:
+                from backend.services.slash_command_executor import resolve_slash_direct_tool
+                from backend.services.unified_chat_engine import UnifiedChatEngine
+                from backend.utils.llm_service import get_llm_for_startup
+                from backend.tools.tool_registry_init import initialize_all_tools
+                d_tool, d_params = resolve_slash_direct_tool(options)
+                if d_tool:
+                    logger.info(f"[SOCKET-BRIDGE] Direct slash/direct intercept for {d_tool} before router")
+                    reg = initialize_all_tools()
+                    llm = None
+                    try:
+                        llm = get_llm_for_startup()
+                    except Exception:
+                        pass
+                    eng = UnifiedChatEngine(registry=reg, llm_instance=llm or object())
+                    eng.app = app
+                    rid = str(uuid.uuid4())
+                    disp = message or f"/{options.get('slash_command', d_tool)}"
+                    with app.app_context():
+                        eng._run_direct_tool_execution(d_tool, d_params, session_id, emit_fn, rid, disp, options)
+                    return  # direct path handled
+            except Exception as _dir_e:
+                logger.debug(f"Direct intercept (bridge) skipped: {_dir_e}")
+
             if use_agent_brain:
                 agent_brain.process(
                     session_id=session_id, message=message,

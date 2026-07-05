@@ -50,6 +50,16 @@ def run_lora_smoke_test(
         free_comfyui_vram()
         if Path(out_path).is_file() and Path(out_path).stat().st_size > 0:
             log.info("lora smoke test ok for subject %s → %s", subject_id, out_path)
+            # Wire the new observability starter (non-fatal).
+            try:
+                from backend.services.video_consistency_metrics import score_smoke_vs_refs
+                # We don't have the original ref list here easily; pass [] so it degrades gracefully.
+                # Callers that do (lora_trainer_tasks) can enhance later.
+                m = score_smoke_vs_refs([], out_path)
+                if m.get("identity", {}).get("score"):
+                    log.info("smoke identity baseline score: %s", m["identity"]["score"])
+            except Exception:
+                pass
             return {"ok": True, "path": out_path}
         return {"ok": False, "error": "smoke image missing after generation"}
     except Exception as e:

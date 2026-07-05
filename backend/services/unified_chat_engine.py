@@ -14,7 +14,10 @@ import time
 import uuid
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed as futures_completed
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable
+
+logger = logging.getLogger(__name__)
 
 from backend.utils.llm_debug_logger import (
     log_system_prompt, log_user_message, log_llm_response,
@@ -445,12 +448,19 @@ def inject_chat_image_model(
     params: Dict[str, Any],
     options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Ensure generate_image / edit_image receive the persisted chat model when omitted."""
+    """Ensure generate_image / edit_image receive the persisted chat model (force the selected /imagemodel for chat calls, even if LLM provides 'auto' or other)."""
     if tool_name not in ("generate_image", "edit_image"):
         return params
     out = dict(params or {})
-    if not out.get("model"):
-        out["model"] = resolve_chat_image_model(out, options)
+    try:
+        from backend.utils.settings_utils import get_chat_image_model
+        chat_selected = get_chat_image_model()
+    except Exception:
+        chat_selected = None
+    current = (out.get("model") or "").strip()
+    if not current or current.lower() == "auto":
+        out["model"] = chat_selected or resolve_chat_image_model(out, options)
+    # else keep what was provided (LLM specified a specific one)
     return out
 
 
@@ -715,13 +725,27 @@ class SemanticToolSelector:
 
             # 1. Try to load from persistent cache
             cached_data = {}
+            cached_model = None
             if os.path.exists(TOOL_EMBEDDING_CACHE):
                 try:
                     with open(TOOL_EMBEDDING_CACHE, "r") as f:
-                        cached_data = json.load(f)
-                    logger.info(f"Loaded {len(cached_data)} tool embeddings from cache")
+                        raw = json.load(f)
+                    if isinstance(raw, dict):
+                        cached_model = raw.get("_meta", {}).get("model")
+                        cached_data = {k: v for k, v in raw.items() if k != "_meta"}
+                    else:
+                        cached_data = raw
+                    if cached_model and cached_model != self._embedding_model:
+                        logger.info(
+                            f"Embedding model changed ({cached_model} -> {self._embedding_model}); "
+                            "invalidating tool embedding cache"
+                        )
+                        cached_data = {}
+                    else:
+                        logger.info(f"Loaded {len(cached_data)} tool embeddings from cache (model={cached_model or 'unknown'})")
                 except Exception as e:
                     logger.warning(f"Failed to load tool embedding cache: {e}")
+                    cached_data = {}
 
             all_tool_names = registry.list_tools()
             embeddings: Dict[str, List[float]] = {}
@@ -756,8 +780,10 @@ class SemanticToolSelector:
             if needs_update:
                 try:
                     os.makedirs(os.path.dirname(TOOL_EMBEDDING_CACHE), exist_ok=True)
+                    to_save = dict(cached_data)
+                    to_save["_meta"] = {"model": self._embedding_model, "saved_at": time.time()}
                     with open(TOOL_EMBEDDING_CACHE, "w") as f:
-                        json.dump(cached_data, f)
+                        json.dump(to_save, f)
                     logger.info("Saved tool embeddings to persistent cache")
                 except Exception as e:
                     logger.warning(f"Failed to save tool embedding cache: {e}")
@@ -829,10 +855,18 @@ class SemanticToolSelector:
                 return
 
             cached_data: Dict[str, Dict[str, Any]] = {}
+            cached_model = None
             if os.path.exists(TOOL_EMBEDDING_CACHE):
                 try:
                     with open(TOOL_EMBEDDING_CACHE, "r") as f:
-                        cached_data = json.load(f)
+                        raw = json.load(f)
+                    if isinstance(raw, dict):
+                        cached_model = raw.get("_meta", {}).get("model")
+                        cached_data = {k: v for k, v in raw.items() if k != "_meta"}
+                    else:
+                        cached_data = raw
+                    if cached_model and cached_model != self._embedding_model:
+                        cached_data = {}
                 except Exception:
                     pass
 
@@ -889,9 +923,12 @@ class SemanticToolSelector:
                 continue
             tool_vec = np.array(self._tool_embeddings[name], dtype=float)
             if tool_vec.shape != msg_vec.shape:
-                raise ValueError(
-                    f"embedding dim mismatch: message {msg_vec.shape} vs tool '{name}' {tool_vec.shape}"
+                # Skip tools embedded with incompatible model (cache from old embedding model)
+                # This prevents the noisy fallback warning when embedding model was changed.
+                logger.debug(
+                    f"Skipping tool '{name}' in semantic selection (dim mismatch: msg {msg_vec.shape} vs tool {tool_vec.shape})"
                 )
+                continue
             tool_norm = np.linalg.norm(tool_vec)
             if tool_norm == 0:
                 scores[name] = 0.0
@@ -1008,18 +1045,48 @@ class UnifiedChatEngine:
             clear_abort_flag(session_id)
 
     def _format_interface_context(self, options: Dict[str, Any]) -> str:
-        """Return caller-supplied context for injection into the active turn."""
+        """Return caller-supplied context for injection into the active turn.
+
+        Also automatically loads project-specific instructions from GUAARDVARK.md
+        (or .guaardvark.md) if a project_root is provided in options. This makes
+        the feature work consistently across CLI, frontend, and any interface.
+        """
         if not isinstance(options, dict):
             return ""
+
+        parts = []
+
+        # Caller-provided context (from CLI working memory, etc.)
         context = options.get("context")
-        if not isinstance(context, str):
+        if isinstance(context, str) and context.strip():
+            c = context.strip()
+            if len(c) > 6000:
+                c = c[:5997] + "..."
+            parts.append(f"Interface-provided context:\n{c}")
+
+        # Auto-load GUAARDVARK.md for project-specific rules / analysis instructions
+        # This enables the "drag folder + analyze site + suggest CSS" flow and
+        # makes GUAARDVARK.md work in both CLI and GUI chats.
+        project_root = options.get("project_root") or options.get("projectRoot")
+        if project_root:
+            try:
+                root = Path(project_root).expanduser().resolve()
+                for md_name in ("GUAARDVARK.md", ".guaardvark.md"):
+                    md_path = root / md_name
+                    if md_path.exists() and md_path.is_file():
+                        content = md_path.read_text(encoding="utf-8", errors="replace").strip()
+                        if content:
+                            header = f"Project instructions from {md_name} (loaded from {root}):\n"
+                            if len(content) > 8000:
+                                content = content[:7997] + "..."
+                            parts.append(header + content)
+                            break  # prefer GUAARDVARK.md
+            except Exception as e:
+                logger.debug(f"Could not load GUAARDVARK.md from {project_root}: {e}")
+
+        if not parts:
             return ""
-        context = context.strip()
-        if not context:
-            return ""
-        if len(context) > 6000:
-            context = context[:5997] + "..."
-        return f"Interface-provided context:\n{context}"
+        return "\n\n".join(parts)
 
     def _inject_attached_image(self, tool_name: str, params: dict) -> dict:
         """Forward the user's most-recently-attached chat image into edit_image when
@@ -1087,6 +1154,15 @@ class UnifiedChatEngine:
         edit_result = self._try_image_edit_direct(message, session_id, emit_fn, request_id, options)
         if edit_result is not None:
             return edit_result
+
+        # Natural language image generation (e.g. "generate an image of an ostrich",
+        # "draw a cat", "picture of a sunset") → direct generate_image. Mirrors the
+        # reliable _try_image_edit_direct path so small models never get a chance to
+        # describe instead of calling the tool, and the selected /imagemodel is forced
+        # via inject_chat_image_model inside the runner.
+        gen_result = self._try_image_generate_direct(message, session_id, emit_fn, request_id, options)
+        if gen_result is not None:
+            return gen_result
 
         # Resolve the per-request "thinking" preference for thinking-capable models
         # (gemma4:12b, qwen3, deepseek-r1, ...). Precedence: explicit per-chat override
@@ -1398,11 +1474,26 @@ class UnifiedChatEngine:
                         "after the other model unloads."
                     )
                 elif "EOF" in error_str or "status code: -1" in error_str:
-                    friendly_error = (
-                        "Ollama dropped the connection — usually the chat model was evicted for a "
-                        "GPU image job and is still reloading, or another Ollama job is contending "
-                        "for VRAM. Wait a few seconds and try again."
+                    # Softer message when we just successfully generated media (the image/video
+                    # event was already emitted to the UI). The continuation LLM call hit a cold
+                    # model; the backoff recovery tried, but the user can keep chatting.
+                    has_media = bool(generated_images) or any(
+                        (s.get("tool_calls") or []) for s in steps if any(
+                            (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", "")) in ("generate_image", "generate_animation", "edit_image")
+                            for tc in (s.get("tool_calls") or [])
+                        )
                     )
+                    if has_media:
+                        friendly_error = (
+                            "Chat model is still reloading after the media generation (normal on tight GPU). "
+                            "The generated image/video should already be visible above. You can continue the conversation now."
+                        )
+                    else:
+                        friendly_error = (
+                            "Ollama dropped the connection — usually the chat model was evicted for a "
+                            "GPU image job and is still reloading, or another Ollama job is contending "
+                            "for VRAM. Wait a few seconds and try again."
+                        )
                 elif "connection" in error_str.lower() or "refused" in error_str.lower():
                     friendly_error = "Cannot connect to Ollama. Is the Ollama service running?"
                 else:
@@ -1646,15 +1737,11 @@ class UnifiedChatEngine:
             GPU_HEAVY_TOOLS = {"generate_image", "generate_animation", "edit_image"}
             if GPU_HEAVY_TOOLS.intersection(t_name for _, t_name, _ in tool_jobs):
                 try:
-                    import requests as _req
+                    from backend.services.gpu_resource_policy import evict_ollama_models
+                    evict_ollama_models()
                     _evict_model = getattr(self.llm, "model", None)
                     if _evict_model:
-                        _req.post(
-                            "http://127.0.0.1:11434/api/generate",
-                            json={"model": _evict_model, "prompt": "", "keep_alive": 0, "options": {"num_ctx": 1}},
-                            timeout=15,
-                        )
-                        logger.info(f"Evicted Ollama model '{_evict_model}' from VRAM before image generation")
+                        logger.info(f"Evicted Ollama model '{_evict_model}' from VRAM before GPU-heavy tool")
                 except Exception as _evict_err:
                     logger.warning(f"Failed to evict Ollama model from VRAM: {_evict_err}")
 
@@ -1940,6 +2027,30 @@ class UnifiedChatEngine:
                         "You MUST call web_search before answering. Do NOT answer from memory.\n\n"
                     )
 
+            # Short-circuit for image generation tools: after successful image tool, do not
+            # append the "Latest tool results" that would trigger another LLM call (which
+            # would hit the evicted model). The image is already emitted via chat:image.
+            # This prevents the "LLM call failed" after GPU image job.
+            _heavy_image = {"generate_image", "generate_animation", "edit_image"}
+            last_tool_was_image_success = any(
+                (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) in _heavy_image
+                and (tc.get("success") if isinstance(tc, dict) else True)
+                for s in steps[-1:] for tc in (s.get("tool_calls") or [])
+            )
+            if last_tool_was_image_success:
+                # Use the tool output or simple message as final; image is displayed inline.
+                accumulated_response = "Here's the generated image."
+                break
+
+            # For animation/video too, ensure resources released aggressively before possible continuation or next user turn
+            if any((tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) in ("generate_animation", "generate_video") for s in steps[-1:] for tc in (s.get("tool_calls") or [])):
+                try:
+                    from backend.services.offline_video_generator import force_clear_gpu_memory
+                    force_clear_gpu_memory()
+                    logger.info("[UNIFIED] Post-animation/video force GPU clear")
+                except Exception:
+                    pass
+
             ollama_messages.append({
                 "role": "user",
                 "content": (
@@ -1952,6 +2063,20 @@ class UnifiedChatEngine:
                     "Otherwise, call another tool. Do not repeat tool calls that already ran."
                 )
             })
+
+            # Proactive warmup for the chat LLM right after a GPU-heavy tool (image/video gen).
+            # The eviction + gpu_session unloads the chat model to make room. Starting the
+            # reload here (while the user sees the generated media) gives Ollama time to
+            # finish loading before the next _call_llm_streaming in the next iteration.
+            # Non-blocking best-effort; the backoff recovery in _call_llm_streaming is the
+            # safety net.
+            _heavy = {"generate_image", "generate_animation", "edit_image"}
+            if any((tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) in _heavy
+                   for s in steps[-1:] for tc in (s.get("tool_calls") or [])):
+                try:
+                    self._warmup_chat_llm_async(session_id)
+                except Exception:
+                    pass
 
         # 6b. Escalation "always" mode — replace local response with Claude
         # NOTE: This modifies accumulated_response BEFORE chat:complete emits it.
@@ -2153,6 +2278,9 @@ class UnifiedChatEngine:
         """Execute a registry tool directly with standard chat event emission."""
         params = inject_chat_image_model(tool_name, params, options)
         logger.info("Direct tool: %s params=%s", tool_name, {k: str(v)[:60] for k, v in params.items()})
+        if tool_name == "generate_image":
+            m = params.get("model", "auto")
+            logger.info(f"Direct /imagine (or generate_image) will use image model: {m} (respects /imagemodel selection)")
         self._save_message(session_id, "user", user_message)
         emit_fn("chat:tool_call", {"tool": tool_name, "params": params, "iteration": 1})
         try:
@@ -2201,6 +2329,18 @@ class UnifiedChatEngine:
                 "type": "image",
                 "alt": "Generated image" if tool_name == "generate_image" else "Result",
             })
+            # Remember for follow-up natural language edits ("make the ostrich wear sunglasses")
+            # so _try_image_edit_direct can pick it up via _SESSION_LAST_EDIT even without a fresh attachment.
+            if tool_name == "generate_image":
+                try:
+                    from backend.config import OUTPUT_DIR
+                    _fn = (result.metadata or {}).get("filename")
+                    if _fn:
+                        _local = os.path.join(OUTPUT_DIR, "generated_images", _fn)
+                        if os.path.exists(_local):
+                            _SESSION_LAST_EDIT[session_id] = _local
+                except Exception:
+                    pass
 
         if tool_name == "generate_image":
             prompt_val = params.get("prompt") or (result.metadata or {}).get("prompt")
@@ -2247,10 +2387,19 @@ class UnifiedChatEngine:
             complete_payload["pending_image_edit"] = _SESSION_PENDING_IMAGE_EDIT[session_id]
 
         emit_fn("chat:complete", complete_payload)
-        self._save_message(
-            session_id, "assistant", response,
-            extra_data={"generatedImages": generated_images} if generated_images else None,
-        )
+        extra_data = {"generatedImages": generated_images} if generated_images else None
+        # Also drain any agent thinking steps (for full persistence across refreshes)
+        # even on direct paths. Matches the main engine save block.
+        try:
+            from backend.services.agent_control_service import get_agent_control_service
+            agent_steps = get_agent_control_service().drain_thinking_steps()
+            if agent_steps:
+                if extra_data is None:
+                    extra_data = {}
+                extra_data["agentThinkingSteps"] = agent_steps
+        except Exception:
+            pass
+        self._save_message(session_id, "assistant", response, extra_data=extra_data)
         return {
             "success": result.success,
             "response": response,
@@ -2435,11 +2584,61 @@ class UnifiedChatEngine:
         if generated_images:
             complete_payload["generated_images"] = generated_images
         emit_fn("chat:complete", complete_payload)
-        self._save_message(session_id, "assistant", response,
-                           extra_data={"generatedImages": generated_images} if generated_images else None)
+        extra_data = {"generatedImages": generated_images} if generated_images else None
+        try:
+            from backend.services.agent_control_service import get_agent_control_service
+            agent_steps = get_agent_control_service().drain_thinking_steps()
+            if agent_steps:
+                if extra_data is None:
+                    extra_data = {}
+                extra_data["agentThinkingSteps"] = agent_steps
+        except Exception:
+            pass
+        self._save_message(session_id, "assistant", response, extra_data=extra_data)
         return {"success": True, "response": response, "iterations": 1, "steps": [],
                 "request_id": request_id, "session_id": session_id,
                 "generated_images": generated_images}
+
+    def _try_image_generate_direct(self, message: str, session_id: str,
+                                   emit_fn: Callable, request_id: str,
+                                   options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Natural language request for a brand new image (generate/draw/create/make an image...)
+        → call generate_image DIRECTLY (bypass LLM tool selection).
+
+        This is the generate-side counterpart to _try_image_edit_direct. It makes
+        "generate an image of an ostrich" (and similar) as reliable as the edit
+        natural-language path the user just verified. Avoids the LLM describing
+        instead of calling the tool, and guarantees the /imagemodel selection is
+        respected (inject_chat_image_model is called inside _run_direct...).
+        """
+        if not message or not message.strip():
+            return None
+        msg_l = (message or "").lower()
+
+        # Bail on obvious describe/analyze queries even if they mention "image of"
+        if re.search(r'\b(what|describe|tell me|analyze|explain|caption|see|look at|is this|what is)\b', msg_l):
+            return None
+
+        # Match strong generation intent using the same keyword spirit as TOOL_CONTEXT
+        # but conservatively to avoid hijacking non-requests.
+        keywords, _ = TOOL_CONTEXT_KEYWORDS.get("image", ([], []))
+        has_image_kw = any(kw in msg_l for kw in keywords)
+        has_gen_verb = bool(re.search(
+            r'\b(generate|draw|make|create|render|visuali[sz]e)\b',
+            msg_l
+        ))
+        if not (has_image_kw or has_gen_verb):
+            return None
+        if not self.registry.get_tool("generate_image"):
+            return None
+
+        prompt = message.strip()
+        logger.info("Image-gen direct (natural lang): generate_image(prompt=%r)", prompt[:80])
+        # Delegate everything (user save, tool_call emit, model injection via /imagemodel,
+        # gpu lease, execute, chat:image, complete, assistant save) to the shared runner.
+        return self._run_direct_tool_execution(
+            "generate_image", {"prompt": prompt}, session_id, emit_fn, request_id, message, options
+        )
 
     def _native_tool_calls_to_response(self, native_calls, llm_response: str):
         """Convert Ollama-native message.tool_calls into a ToolCallResponse.
@@ -2543,6 +2742,23 @@ class UnifiedChatEngine:
         _use_cloud = _llm_provider.is_mistral_active()
         if _use_cloud:
             model_name = _llm_provider.get_mistral_model()
+
+        # Prioritize LLM load via orchestrator. This helps prevent image/video
+        # jobs from evicting the chat model mid-analysis (the cause of the
+        # "Ollama EOF (runner dropped)" errors the user saw when analyzing
+        # external project folders like dat4.net).
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator, ModelType
+            orch = get_orchestrator()
+            orch.request_model(
+                slot_id=f"ollama:{model_name}",
+                vram_estimate_mb=8192,
+                priority=90,
+                model_type=ModelType.OLLAMA_LLM,
+            )
+        except Exception as _oerr:
+            logger.debug(f"Orchestrator pre-load for LLM skipped: {_oerr}")
+
         accumulated = []
         accumulated_thinking = []
         input_tokens = 0
@@ -2785,8 +3001,8 @@ class UnifiedChatEngine:
             # always transient: the model is still loading, or a VRAM swap (e.g. a
             # model switch that briefly double-loaded two models on a tight GPU)
             # OOM'd the runner. If nothing has been streamed to the user yet, let the
-            # runner settle and retry ONCE (non-streamed, mirroring the serialization
-            # retry above). Guard on _chat_kwargs (unset on the cloud path).
+            # runner settle and retry ONCE (mirrors the working backup from 2026-07-02).
+            # Guard on _chat_kwargs (unset on the cloud path).
             _retry_kwargs = locals().get("_chat_kwargs")
             is_eof = ("EOF" in error_str) or ("status code: -1" in error_str)
             if is_eof and not accumulated and _retry_kwargs:
@@ -2796,27 +3012,7 @@ class UnifiedChatEngine:
                 )
                 try:
                     import time as _time
-                    _time.sleep(5.0)
-                    # After GPU image jobs evict the chat model, stream retry often
-                    # fails until the runner has the weights resident — pin with a
-                    # one-token generate before the streaming retry.
-                    if not _use_cloud:
-                        try:
-                            import requests
-                            from backend.config import OLLAMA_BASE_URL, get_chat_keep_alive
-                            requests.post(
-                                f"{OLLAMA_BASE_URL}/api/generate",
-                                json={
-                                    "model": model_name,
-                                    "prompt": "ok",
-                                    "stream": False,
-                                    "options": {"num_predict": 1},
-                                    "keep_alive": get_chat_keep_alive(),
-                                },
-                                timeout=(10.0, 120.0),
-                            )
-                        except Exception as _wu:
-                            logger.warning("EOF retry warmup ping failed (continuing): %s", _wu)
+                    _time.sleep(3.0)
                     stream = ollama.chat(**_retry_kwargs)
                     for chunk in stream:
                         if is_aborted(session_id):
@@ -2850,6 +3046,41 @@ class UnifiedChatEngine:
 
             logger.error(f"Ollama streaming failed: {e}", exc_info=True)
             raise
+
+    def _warmup_chat_llm_async(self, session_id: str) -> None:
+        """Fire-and-forget warmup of the chat Ollama model (used after GPU-heavy tools).
+
+        Starts the model load as soon as an image gen finishes so the next ReAct
+        continuation or final-answer call has a better chance of hitting a ready model.
+        Uses the same keep_alive policy as normal chat. Never blocks the main flow.
+        """
+        def _do_warmup():
+            try:
+                import time, requests
+                from backend.config import OLLAMA_BASE_URL, get_chat_keep_alive
+                model = getattr(self.llm, "model", None)
+                if not model:
+                    return
+                # Small delay to let the just-finished gpu_session fully release VRAM
+                time.sleep(1.5)
+                requests.post(
+                    f"{OLLAMA_BASE_URL}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": " ",
+                        "stream": False,
+                        "options": {"num_predict": 1},
+                        "keep_alive": get_chat_keep_alive(),
+                    },
+                    timeout=(8.0, 90.0),
+                )
+                logger.debug(f"Warmup ping sent for chat model {model} (post GPU tool)")
+            except Exception as e:
+                logger.debug(f"Async chat LLM warmup skipped: {e}")
+
+        import threading
+        t = threading.Thread(target=_do_warmup, daemon=True, name=f"chat-warmup-{session_id[:8]}")
+        t.start()
 
     def _compact_history(self, messages: List[Dict], context_window: int) -> List[Dict]:
         """Compact old messages when approaching context window limit."""

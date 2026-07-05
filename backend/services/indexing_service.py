@@ -2157,6 +2157,25 @@ def get_index_for_project(project_id: Optional[str], base_dir: str):
         return None, None
 
 
+def is_indexing_paused() -> bool:
+    """Runtime check for the user-facing 'Pause Indexing' toggle in Settings.
+    When true, new indexing work (embedding/vectorization) should be skipped
+    to reduce machine/GPU load. Pending documents stay PENDING.
+    """
+    try:
+        from backend.models import SystemSetting
+        # Use a fresh query to avoid stale sessions in Celery workers
+        row = SystemSetting.query.get("indexing_paused")
+        if row:
+            val = str(getattr(row, "value", "") or "").strip().lower()
+            return val in ("true", "1", "yes", "on")
+        return False
+    except Exception as e:
+        # Never crash indexing path over a settings read
+        logger.debug(f"is_indexing_paused check failed (non-fatal): {e}")
+        return False
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.DEBUG,

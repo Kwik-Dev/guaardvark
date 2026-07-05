@@ -32,6 +32,7 @@ from llx.theme import (
 )
 from llx.working_memory import (
     apply_attachments,
+    apply_todos,
     apply_user_intent,
     build_cli_context,
     empty_working_memory,
@@ -40,6 +41,12 @@ from llx.working_memory import (
     record_recommendation_summary,
     should_demote_rag,
 )
+from llx.local_tools import get_git_info, list_dir
+from llx.todo import TodoStore
+import re
+from pathlib import Path
+
+from llx.utils import find_project_root, load_guaardvark_instructions, populate_project_context
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -69,7 +76,7 @@ def _format_age(timestamp: float) -> str:
 
 def _build_prompt(ctx: ContextSnapshot, state: dict) -> HTML:
     """Build the prompt string as prompt_toolkit HTML."""
-    parts = ["<b>guaardvark</b>"]
+    parts = ["<b>agent</b>"]  # stripped prefix for more natural direct chat feel, like this Grok session
 
     # Online / offline / model info
     online = ctx.is_online()
@@ -94,16 +101,68 @@ def _build_prompt(ctx: ContextSnapshot, state: dict) -> HTML:
     if state.get("agent_mode"):
         parts.append(" <style color='#e17055'>[agent]</style>")
 
+    # Local coding state (like Cursor / Claude Code prompt)
+    mem = normalize_working_memory(state.get("working_memory"))
+    git = mem.get("git") or {}
+    if git.get("branch"):
+        dirty = "*" if git.get("dirty") else ""
+        parts.append(f" <style color='#a29bfe'>{git['branch']}{dirty}</style>")
+    todos = mem.get("todos") or []
+    open_t = sum(1 for t in todos if not t.get("done"))
+    if open_t > 0:
+        parts.append(f" <style color='#fdcb6e'>({open_t} todo{'s' if open_t != 1 else ''})</style>")
+
+    # Tools available (from last /tools)
+    tool_count = len(state.get("_tool_names", [])) or len(state.get("working_memory", {}).get("_tool_names", []))
+    if tool_count:
+        parts.append(f" <style color='#81ecec'>({tool_count} tools)</style>")
+
+    # Last tool used (agentic feel)
+    recent = mem.get("recent_tools") or []
+    if recent:
+        last = recent[-1].get("tool", "")
+        if last:
+            parts.append(f" <style color='#a5d8ff'>[{last}]</style>")
+
+    # CWD (short) + project hint
+    cwd = mem.get("cwd") or str(Path.cwd())
+    proj_name = mem.get("project_name")
+    try:
+        short = Path(cwd).name or cwd
+    except Exception:
+        short = cwd
+    if proj_name and proj_name != short:
+        parts.append(f" <style color='#888888'>[{proj_name} @ {short}]</style>")
+    else:
+        parts.append(f" <style color='#888888'>[{short}]</style>")
+
     parts.append(" <b>&gt;</b> ")
     return HTML("".join(parts))
 
 
-def _dynamic_completions(command: str, sub_text: str):
-    """Provide dynamic completions for certain commands."""
-    if command == "theme":
-        prefix = sub_text.strip().lower()
-        return [n for n in THEMES if n.startswith(prefix)] if prefix else list(THEMES.keys())
-    return None
+def _make_dynamic_completions(state_ref):
+    """Factory for dynamic completions that can see live state (e.g. tool list after /tools)."""
+    def _dynamic_completions(command: str, sub_text: str):
+        """Provide dynamic completions for certain commands."""
+        if command == "theme":
+            prefix = sub_text.strip().lower()
+            return [n for n in THEMES if n.startswith(prefix)] if prefix else list(THEMES.keys())
+        # Tool name completion (populated after /tools call)
+        if command in ("tool", "tools"):
+            tools = state_ref.get("_available_tools") or state_ref.get("_tool_names") or []
+            if tools:
+                prefix = sub_text.strip().lower()
+                matches = [n for n in tools if n.lower().startswith(prefix)]
+                if matches:
+                    return matches[:20]
+            # fallback common coding agent tools
+            common = ["read_code", "edit_code", "search_code", "list_files", "execute_python",
+                      "grep_search", "save_memory", "search_memory", "get_repository_map",
+                      "verify_change", "agent_task_execute", "list_code_files", "read_file"]
+            prefix = sub_text.strip().lower()
+            return [n for n in common if n.startswith(prefix)] if prefix else common[:10]
+        return None
+    return _dynamic_completions
 
 
 # ── Chat handler ──────────────────────────────────────────────
@@ -124,6 +183,37 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
 
     # Freshen context in background
     ctx.refresh_async()
+
+    # Refresh local git/cwd snapshot into working memory for every chat turn
+    mem = normalize_working_memory(state.get("working_memory"))
+    if state.get("cwd"):
+        mem["cwd"] = str(state["cwd"])
+    mem["git"] = get_git_info(Path(mem.get("cwd") or Path.cwd()))
+    # sync open todos
+    if state.get("_todo_store"):
+        apply_todos(mem, state["_todo_store"].all())
+    state["working_memory"] = mem
+
+    # If the message starts with an absolute path (common for "drag folder" then query),
+    # treat it as project_root for this turn (so backend loads GUAARDVARK.md etc.)
+    path_match = re.match(r"^['\"]?(\/[^\s'\"]+)['\"]?\s*(.*)$", message)
+    if path_match:
+        candidate = path_match.group(1)
+        if Path(candidate).is_dir():
+            mem["project_root"] = candidate
+            state["cwd"] = Path(candidate)
+            rest = path_match.group(2).strip()
+            if rest:
+                message = rest  # strip the path from the query sent to LLM
+            else:
+                message = "analyze this project"
+            # re-populate local context for the new root
+            try:
+                from llx.utils import populate_project_context
+                populate_project_context(mem, Path(candidate))
+            except Exception:
+                pass
+            state["working_memory"] = mem
 
     if agent_mode:
         message = f"[AGENT MODE: You are an autonomous agent. Use your tools to fulfill this request.]\n\n{message}"
@@ -177,6 +267,9 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
 
         try:
             client = get_client(server)
+            # Include project_root so backend can auto-load GUAARDVARK.md and project context
+            # (makes analysis + instructions consistent with GUI)
+            proj_root = memory.get("project_root") or state.get("cwd")
             client.post("/api/chat/unified", json={
                 "session_id": session_id,
                 "message": message,
@@ -185,6 +278,7 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
                     "context": context_block,
                     "agent_screen_active": screen_active,
                     "cli_working_memory": memory,
+                    "project_root": str(proj_root) if proj_root else None,
                 },
             })
         except (LlxConnectionError, LlxError, Exception) as e:
@@ -245,14 +339,36 @@ def launch_repl():
         pass
 
     # Shared state dict
+    initial_cwd = Path.cwd()
+    initial_mem = empty_working_memory()
+    initial_mem["cwd"] = str(initial_cwd)
+    initial_mem["git"] = get_git_info(initial_cwd)
+
+    # Auto detect project root and load GUAARDVARK.md + explore (for dragged folders / website projects)
+    # Leverages backend architecture (code tools, memory, unified context) when connected.
+    try:
+        proj_root = find_project_root(initial_cwd)
+        if proj_root != initial_cwd:
+            initial_mem["cwd"] = str(proj_root)
+            initial_cwd = proj_root
+        populate_project_context(initial_mem, proj_root)
+        if initial_mem.get("guaardvark_instructions"):
+            console.print(f"[llx.dim]Loaded GUAARDVARK.md from {proj_root.name}[/llx.dim]")
+    except Exception:
+        pass
+
     state = {
         "session_id": str(uuid.uuid4()),
         "server": server,
         "message_count": 0,
         "agent_mode": False,
         "lite_mode": _lite_mode,
-        "working_memory": empty_working_memory(),
+        "working_memory": initial_mem,
+        "cwd": initial_cwd,
+        "_todo_store": TodoStore(),  # session todos
     }
+    # seed working memory todos from store if any
+    apply_todos(initial_mem, state["_todo_store"].all())
 
     # Create context snapshot and start background population
     ctx = ContextSnapshot(server)
@@ -274,8 +390,9 @@ def launch_repl():
     # Create slash router
     router = SlashRouter(state)
 
-    # Create completer with dynamic theme completions
-    completer = make_completer(get_dynamic=_dynamic_completions)
+    # Create completer with dynamic completions that can see tool list etc.
+    dynamic_getter = _make_dynamic_completions(state)
+    completer = make_completer(get_dynamic=dynamic_getter)
 
     # Brief pause to let background context populate
     time.sleep(0.3)
@@ -358,7 +475,13 @@ def launch_repl():
             if pending:
                 state["session_id"] = pending["id"]
                 state["message_count"] = pending.get("message_count", 0)
-                state["working_memory"] = normalize_working_memory(pending.get("working_memory"))
+                mem = normalize_working_memory(pending.get("working_memory"))
+                # Preserve or refresh local cwd/git if not present in old session
+                if not mem.get("cwd"):
+                    mem["cwd"] = str(state.get("cwd", Path.cwd()))
+                if not mem.get("git") or not mem["git"].get("branch"):
+                    mem["git"] = get_git_info(Path(mem["cwd"]))
+                state["working_memory"] = mem
                 state.pop("pending_resume", None)
                 console.print(
                     f"[llx.success]Resumed session {pending['id'][:8]}...[/llx.success]"

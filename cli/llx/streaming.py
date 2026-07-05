@@ -316,7 +316,7 @@ class ChatRenderer:
             self._live = None
 
         # Reset terminal title
-        _set_title("guaardvark")
+        _set_title("agent")
 
         self._print_thinking_trail()
 
@@ -331,6 +331,14 @@ class ChatRenderer:
                 lines = out_text.splitlines()
                 if len(lines) > 10:
                     out_text = "...\n" + "\n".join(lines[-10:])
+                # Pretty diff if it looks like one
+                if tool in ("edit", "edit_code", "apply") or out_text.lstrip().startswith("--- ") or "diff --git" in out_text[:200]:
+                    try:
+                        from rich.syntax import Syntax
+                        self._console.print(Syntax(out_text, "diff", line_numbers=False))
+                        continue
+                    except Exception:
+                        pass
                 self._console.print(f"[dim][{tool} output]\n{out_text}[/dim]")
 
         # Print final accumulated text as rich Markdown with llama prefix
@@ -444,7 +452,7 @@ class ChatRenderer:
             except Exception:
                 pass
 
-        _set_title("guaardvark — awaiting approval")
+        _set_title("agent — awaiting approval")
 
         import typer
         self._console.print()
@@ -549,7 +557,7 @@ class ChatRenderer:
             while not self._spinner_stop.is_set():
                 f = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
                 status = self._live_status or "thinking"
-                _set_title(f"{f} guaardvark — {status}...")
+                _set_title(f"{f} agent — {status}...")
                 # Update inline display
                 if self._live is not None and self._thinking:
                     self._live.update(Text(f" {f} ", style="bold cyan"))
@@ -600,6 +608,6 @@ class ChatRenderer:
         parts.append(Text(streaming_text))
 
         # Update title bar with progress
-        _set_title(f"{_ICON_LLAMA} guaardvark — responding...")
+        _set_title(f"{_ICON_LLAMA} agent — responding...")
 
         self._live.update(Group(*parts))

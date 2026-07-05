@@ -4,7 +4,7 @@ import typer
 from llx import __version__
 from llx import output
 from llx.global_opts import set_global_opts
-from llx.commands.system import health, status, init, doctor, start, stop, models_app
+from llx.commands.system import health, status, doctor, start, stop, models_app
 from llx.commands.chat import chat
 from llx.commands.search import search
 from llx.commands.dashboard import dashboard
@@ -35,9 +35,31 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 
+# Top-level analyze and init for headless / natural use (e.g. guaardvark analyze /path )
+# These delegate to the REPL logic but run non-interactively when --non-interactive or no REPL needed.
+def _run_analyze(project: str = None, **opts):
+    from llx.slash import SlashRouter
+    from llx.working_memory import empty_working_memory, normalize_working_memory
+    state = {"server": None, "session_id": "headless", "cwd": None, "working_memory": empty_working_memory()}
+    router = SlashRouter(state)
+    args = [project] if project else []
+    router.dispatch("analyze " + " ".join(args) if args else "analyze")
+    # For headless, the cmd prints; if more output needed, enhance.
+
+app.command("analyze")(_run_analyze)
+
+def _run_init(**opts):
+    from llx.slash import SlashRouter
+    from llx.working_memory import empty_working_memory
+    state = {"server": None, "session_id": "headless", "cwd": None, "working_memory": empty_working_memory()}
+    router = SlashRouter(state)
+    router.dispatch("init")
+
+app.command("init")(_run_init)
+
 app.command("health")(health)
 app.command("status")(status)
-app.command("init")(init)
+# app.command("init")(init)  # overridden by project init below for GUAARDVARK/agentic use
 app.command("doctor")(doctor)
 app.command("start")(start)
 app.command("stop")(stop)
@@ -76,6 +98,8 @@ def version_callback(value: bool):
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
+    project: str = typer.Argument(None, help="Optional project folder (for drag/folder style)"),
+    query: str = typer.Argument(None, help="Optional natural language query for analysis etc."),
     version: bool = typer.Option(False, "--version", "-v", callback=version_callback, is_eager=True),
     json_out: bool = typer.Option(False, "--json", "-j", help="Output as JSON (for scripting)"),
     server: str | None = typer.Option(None, "--server", "-s", help="Override server URL"),
@@ -94,6 +118,34 @@ def main(
         from llx.theme import set_active_theme, THEMES
         if theme in THEMES:
             set_active_theme(theme)
+
+    # Support direct natural language + project: guaardvark /path "analyze ..."
+    # or guaardvark "analyze the current dir"
+    if project or query:
+        from pathlib import Path
+        proj_path = None
+        q = None
+        if project and Path(project).expanduser().is_dir():
+            proj_path = project
+            q = query
+        elif project:
+            q = " ".join([project] + ([query] if query else []))
+        else:
+            q = query
+        if proj_path:
+            try:
+                os.chdir(Path(proj_path).expanduser().resolve())
+            except Exception:
+                pass
+            print(f"[project context loaded for {proj_path}]")
+        if q:
+            from llx.commands.chat import chat as chat_cmd
+            try:
+                chat_cmd(message=q, json_out=json_out)
+            except SystemExit:
+                pass
+            return
+
     if ctx.invoked_subcommand is None:
         if non_interactive:
             if json_out:

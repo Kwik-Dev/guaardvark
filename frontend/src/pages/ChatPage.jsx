@@ -826,6 +826,7 @@ const ChatPage = () => {
               filename: fileData.filename,
               user_instructions: `Using uploaded code files as reference, ${originalMessage}`,
               project_id: projectId || 1,
+              // project_root forwarded if present for GUAARDVARK.md etc. (analysis flows)
               signal,
             });
 
@@ -1278,12 +1279,22 @@ const ChatPage = () => {
       // Lean on useAgentRouter (backend → AgentBrain arch for routing decision using memory/STA/flags).
       // No more local hardcoded patterns (see detectFileGeneration simplification + plan).
       let fileDetection = null;
-      if (useAgentRouting) {
+
+      // For direct tool calls (e.g. /imagine from slashCommandHandlers using direct_tool),
+      // bypass file generation detection entirely. These are handled specially later
+      // via direct_tool options in the unified send. Otherwise, /imagine inputText
+      // can lead to null fileDetection and crash on .isCSVRequest.
+      if (voiceOptions?.direct_tool) {
+        fileDetection = { isCSVRequest: false, isCodeRequest: false };
+      } else if (useAgentRouting) {
         try {
           fileDetection = await detectFileGenerationWithAgent(inputText);
         } catch (err) {
           console.warn("AGENT_ROUTER: detection failed (falling to unified brain path):", err);
         }
+      }
+      if (!fileDetection) {
+        fileDetection = { isCSVRequest: false, isCodeRequest: false };
       }
       // If no high-conf agent/file from router, fall through to normal unified chat (which hits AgentBrain).
       // detectFileGeneration now neutral (no regex).
@@ -1368,7 +1379,7 @@ const ChatPage = () => {
         return; // Don't continue with normal chat for agent loop requests
       }
 
-      if (fileDetection.isCSVRequest || fileDetection.isCodeRequest) {
+      if (fileDetection && (fileDetection.isCSVRequest || fileDetection.isCodeRequest)) {
 
         const continuityMarker = preserveContextDuringFileGeneration(sessionId, inputText, fileDetection);
 
@@ -1632,12 +1643,22 @@ const ChatPage = () => {
             }
           }
 
-          const _ackResult = await (serviceToUse || unifiedChatService).sendMessage(sessionId, modifiedInputText, {
+          // Support for project folder analysis (e.g. "analyze /path/to/site and suggest CSS improvements")
+          // Send project_root so backend auto-loads GUAARDVARK.md and injects rich context.
+          // This makes the feature (project analysis, build.py review, CSS suggestions, initiative)
+          // work in GUI chat as well as CLI.
+          let sendOptions = {
             use_rag: true,
             chat_mode: chatMode,
             project_id: projectId,
             ...directToolOptions,
-          }, imageBase64, isVoice);
+          };
+          // Heuristic: if message mentions an absolute path, treat as project_root for context loading
+          const pathMatch = modifiedInputText.match(/(\/[^\s'"]+\/[^\s'"]*)/);
+          if (pathMatch && (modifiedInputText.toLowerCase().includes('analyze') || modifiedInputText.toLowerCase().includes('suggest') || modifiedInputText.toLowerCase().includes('review'))) {
+            sendOptions.project_root = pathMatch[1];
+          }
+          const _ackResult = await (serviceToUse || unifiedChatService).sendMessage(sessionId, modifiedInputText, sendOptions, imageBase64, isVoice);
           console.debug(`[SOCKET-CHAT] POST-SEND ack (normal) session=${sessionId}`);
         } catch (unifiedError) {
           console.error("UNIFIED_CHAT: Failed to send:", unifiedError);

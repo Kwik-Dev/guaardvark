@@ -7,6 +7,7 @@ belong to the chat session, not the agent's durable memory.
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,12 @@ def empty_working_memory() -> dict[str, Any]:
         "recent_files": [],
         "last_recommendation": None,
         "pending_edit_target": None,
+        # New for agentic CLI parity
+        "cwd": None,
+        "git": {"branch": "", "dirty": False, "sha": ""},
+        "todos": [],           # list of {"id", "text", "done", ...}
+        "last_edit": None,
+        "last_run": None,
     }
 
 
@@ -42,6 +49,10 @@ def normalize_working_memory(value: Any) -> dict[str, Any]:
                 memory[key] = value[key]
     if not isinstance(memory.get("recent_files"), list):
         memory["recent_files"] = []
+    if not isinstance(memory.get("todos"), list):
+        memory["todos"] = []
+    if not isinstance(memory.get("git"), dict):
+        memory["git"] = {"branch": "", "dirty": False, "sha": ""}
     return memory
 
 
@@ -100,7 +111,44 @@ def build_cli_context(runtime_context: str, memory: dict[str, Any]) -> str:
     recommendation = memory.get("last_recommendation") or {}
     edit_target = memory.get("pending_edit_target")
 
+    cwd = memory.get("cwd")
+    git = memory.get("git") or {}
+    todos = [t for t in (memory.get("todos") or []) if not t.get("done")]
+    recent_tools = memory.get("recent_tools") or []
+    avail_tools = memory.get("_available_tools") or []
+    gua = memory.get("guaardvark_instructions") or ""
+    proj = memory.get("project_summary") or ""
+    proj_root = memory.get("project_root")
+    skill_instr = memory.get("skill_instructions") or ""
+    loaded_skills = memory.get("loaded_skills") or []
+
     lines = ["[CLI Working Context]"]
+    if proj_root:
+        lines.append(f"Project root: {proj_root}")
+    if proj:
+        lines.append(f"Project: {proj}")
+    if gua:
+        lines.append("Project instructions (GUAARDVARK.md): present and loaded")
+        lines.append(gua[:1500] + ("..." if len(gua) > 1500 else ""))
+    if skill_instr or loaded_skills:
+        lines.append("Loaded skills / dynamic instructions:")
+        if loaded_skills:
+            lines.append("  Files: " + ", ".join(loaded_skills[:5]))
+        if skill_instr:
+            lines.append(skill_instr[:1200] + ("..." if len(skill_instr) > 1200 else ""))
+    if cwd:
+        lines.append(f"CWD: {cwd}")
+    if git.get("branch"):
+        d = " (dirty)" if git.get("dirty") else ""
+        lines.append(f"Git: {git['branch']}{d}")
+    if todos:
+        lines.append(f"Open todos ({len(todos)}): " + "; ".join(t.get("text", "")[:60] for t in todos[:5]))
+    if recent_tools:
+        last = recent_tools[-1]
+        lines.append(f"Last tool: {last.get('tool')} (recent: {len(recent_tools)})")
+    if avail_tools:
+        lines.append(f"Available tools: {len(avail_tools)} (use /tools or /tool)")
+
     if active:
         lines.append(f"Active file: {active}")
         lines.append("When the user says 'the file' or 'this file', resolve it to Active file unless they name another file.")
@@ -203,3 +251,31 @@ def _compact_summary(text: str) -> str:
     if len(summary) > 1200:
         summary = summary[:1197] + "..."
     return summary
+
+
+# ── Todo helpers (used by repl + slash; compatible with TodoStore) ─────────
+
+def apply_todos(memory: dict[str, Any], todos: list[dict[str, Any]]) -> None:
+    if not isinstance(todos, list):
+        return
+    memory["todos"] = [dict(t) for t in todos]
+
+
+def record_last_edit(memory: dict[str, Any], path: str, summary: str | None = None) -> None:
+    memory["last_edit"] = {"path": path, "summary": summary or "", "ts": time.time()}
+
+
+def record_last_run(memory: dict[str, Any], cmd: str, exit_code: int) -> None:
+    memory["last_run"] = {"cmd": cmd, "exit_code": exit_code, "ts": time.time()}
+
+
+def record_tool_use(memory: dict[str, Any], tool_name: str, params: dict | None = None, result_summary: str | None = None) -> None:
+    """Track recent backend tool uses for context and UX (like agent thinking trail)."""
+    if "recent_tools" not in memory or not isinstance(memory.get("recent_tools"), list):
+        memory["recent_tools"] = []
+    entry = {"tool": tool_name, "ts": time.time()}
+    if params:
+        entry["params"] = {k: str(v)[:80] for k, v in (params or {}).items()}
+    if result_summary:
+        entry["result"] = result_summary[:120]
+    memory["recent_tools"] = (memory["recent_tools"] + [entry])[-5:]  # keep last 5

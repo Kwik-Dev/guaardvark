@@ -265,6 +265,13 @@ class BatchImageGenerator:
 
     def _cleanup_gpu_memory(self):
         try:
+            import psutil
+            proc = psutil.Process()
+            rss_before = proc.memory_info().rss / (1024**3)
+        except Exception:
+            rss_before = 0.0
+
+        try:
             if self.image_generator and hasattr(self.image_generator, "_unload_pipeline"):
                 self.image_generator._unload_pipeline()
             try:
@@ -275,8 +282,22 @@ class BatchImageGenerator:
             import gc
             import torch
             gc.collect()
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            import psutil
+            proc = psutil.Process()
+            rss_after = proc.memory_info().rss / (1024**3)
+            if rss_before > 0:
+                logger.info(f"Batch cleanup: RSS {rss_before:.1f}GB -> {rss_after:.1f}GB")
         except Exception:
             pass
 
@@ -435,9 +456,22 @@ class BatchImageGenerator:
                     keep_pipeline_loaded=True,
                 )
 
-                result = self.image_generator.generate_image(gen_request)
-
-            if result.success and result.image_path:
+                from backend.services.gpu_resource_policy import gpu_session
+                from backend.services.job_operation_gate import GpuBusyError
+                from backend.services.job_types import JobKind
+                try:
+                    ram_est = self.image_generator._ram_estimate_gb(gen_request.model or "auto") if hasattr(self.image_generator, "_ram_estimate_gb") else 10.0
+                    with gpu_session(JobKind.VIDEO_RENDER, f"batch_img_{prompt.id}",
+                                     on_busy="raise", evict_ollama=True, vram_estimate_mb=8000,
+                                     ram_estimate_gb=ram_est, require_fit=True, cross_process=True):
+                        result = self.image_generator.generate_image(gen_request)
+                except GpuBusyError:
+                    return BatchImageResult(
+                        prompt_id=prompt.id,
+                        success=False,
+                        generation_time=time.time() - start_time,
+                        error="GPU is busy with another render right now — try again in a moment.",
+                    )
                 image_ext = Path(result.image_path).suffix or ".png"
                 # Bates-stamped filename: ImageGen_04-02-2026_001.png
                 from backend.services.output_registration import bates_name

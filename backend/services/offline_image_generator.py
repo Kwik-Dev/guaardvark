@@ -931,11 +931,23 @@ Negative Prompt: {negative_prompt}""",
 
         with self._generation_lock:
             self._notify_vision_pipeline("start")
+            # Central gpu_session for *all* direct calls (chat tool, batch, API, edits via img2img).
+            # Provides GPU lease + evict + GlobalLoadGate RAM/swap admission using our real estimates.
+            # Reentrant-safe; chat tool may outer-wrap.
+            from backend.services.gpu_resource_policy import gpu_session
+            from backend.services.job_operation_gate import GpuBusyError
+            from backend.services.job_types import JobKind
+            import uuid as _uuid_local
+            ram_est = self._ram_estimate_gb(request.model or "auto")
+            vram_est = self._vram_estimate_mb(request.model or "auto")
             try:
-                # Auto-router: pick the best downloaded model for this prompt.
-                if request.model in (None, "", "auto"):
-                    request.model = self._auto_select_model(request.prompt, request.style)
-                    # Crisp typography: few-step TURBO models (Z-Image-Turbo, SDXL-Turbo)
+                with gpu_session(JobKind.VIDEO_RENDER, f"gen_{_uuid_local.uuid4().hex[:8]}",
+                                 on_busy="raise", evict_ollama=True,
+                                 vram_estimate_mb=vram_est, ram_estimate_gb=ram_est,
+                                 require_fit=True, cross_process=True):
+                    # Auto-router: pick the best downloaded model for this prompt.
+                    if request.model in (None, "", "auto"):
+                        request.model = self._auto_select_model(request.prompt, request.style)
                     # render type soft and drop characters. For text/logo intent, prefer
                     # non-turbo SDXL base (native 1024, full CFG steps) when it's downloaded.
                     if (
@@ -947,8 +959,8 @@ Negative Prompt: {negative_prompt}""",
                             logger.info(f"Text intent: routing {request.model} -> sd-xl for crisper type")
                         request.model = "sd-xl"
 
-                model_id = self.available_models.get(request.model, self.default_model)
-                logger.info(f"Using model: {request.model} -> {model_id}")
+                    model_id = self.available_models.get(request.model, self.default_model)
+                    logger.info(f"Using model: {request.model} -> {model_id}")
 
                 family = self._model_family(model_id)
                 is_sdxl = family == 'sdxl'
@@ -1005,6 +1017,16 @@ Negative Prompt: {negative_prompt}""",
                     else:
                         result.error = f"Failed to load model {request.model} ({model_id})"
                         return result
+
+                # Best-effort VRAM hygiene after successful load for this job.
+                # Helps the chat LLM reload faster on the next turn.
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
                 text_mode = self._has_text_intent(request.prompt)
                 if text_mode:
@@ -1209,6 +1231,15 @@ Negative Prompt: {negative_prompt}""",
                 result.success = True
                 result.image_path = str(image_path)
                 result.prompt_used = enhanced_prompt
+
+                # Extra hygiene: release what we can so the chat LLM can reload promptly.
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                except Exception:
+                    pass
                 result.negative_prompt_used = combined_negative
                 result.model_used = self._current_model
                 result.generation_time = time.time() - start_time
@@ -1251,9 +1282,19 @@ Negative Prompt: {negative_prompt}""",
         return result
 
     def _unload_pipeline(self):
-        """Fully unload the pipeline and return RAM/VRAM to the pool."""
+        """Fully unload the pipeline and return RAM/VRAM to the pool.
+        Aggressive host RAM release for heavy offloaded models (Z-Image etc).
+        Called after every chat gen (keep=False) and at batch end.
+        """
         if self._pipeline is None:
             return
+
+        try:
+            import psutil
+            proc = psutil.Process()
+            rss_before = proc.memory_info().rss / (1024**3)
+        except Exception:
+            rss_before = 0.0
 
         pipeline = self._pipeline
         self._pipeline = None
@@ -1262,6 +1303,17 @@ Negative Prompt: {negative_prompt}""",
         self._current_model = None
         self._compile_unet_orig = None
         self._compile_vae_orig = None
+
+        # Explicitly break references to submodules (weights stay in CPU tensors until all refs gone)
+        for attr in ("unet", "vae", "text_encoder", "text_encoder_2", "tokenizer", "tokenizer_2",
+                     "scheduler", "transformer", "safety_checker", "feature_extractor"):
+            try:
+                if hasattr(pipeline, attr):
+                    obj = getattr(pipeline, attr)
+                    setattr(pipeline, attr, None)
+                    del obj
+            except Exception:
+                pass
 
         try:
             # Accelerate CPU-offload hooks retain large CPU weight copies until removed.
@@ -1285,19 +1337,40 @@ Negative Prompt: {negative_prompt}""",
 
         import gc
         gc.collect()
+        gc.collect()  # second pass often helps release more
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
             try:
+                torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
             except Exception:
                 pass
-        logger.info("SD pipeline unloaded; hooks cleared, gc run, CUDA cache cleared")
+
+        # More aggressive: return memory to OS (glibc)
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+        try:
+            import psutil
+            proc = psutil.Process()
+            rss_after = proc.memory_info().rss / (1024**3)
+            if rss_before > 0:
+                logger.info(f"SD pipeline unloaded; RSS {rss_before:.1f}GB -> {rss_after:.1f}GB (delta {rss_before-rss_after:+.1f}GB); hooks/gc/CUDA cleared + malloc_trim")
+            else:
+                logger.info("SD pipeline unloaded; hooks cleared, gc run, CUDA cache cleared")
+        except Exception:
+            logger.info("SD pipeline unloaded; hooks cleared, gc run, CUDA cache cleared")
 
     def generate_image_from_image(
         self, prompt: str, init_image, strength: float = 0.20,
         negative_prompt: str = "", width: int = 512, height: int = 512,
         num_inference_steps: int = 20, guidance_scale: float = 7.5,
-        seed: int = None, model: str = "sd-1.5"
+        seed: int = None, model: str = "sd-1.5",
+        keep_pipeline_loaded: bool = False
     ) -> ImageGenerationResult:
         """Generate an image using img2img — takes an existing PIL Image and
         produces a variation guided by the prompt and strength parameter.
@@ -1440,7 +1513,8 @@ Negative Prompt: {negative_prompt}""",
                 result.generation_time = time.time() - start_time
             finally:
                 self._notify_vision_pipeline("stop")
-                self._unload_pipeline()
+                if not keep_pipeline_loaded:
+                    self._unload_pipeline()
 
         return result
 

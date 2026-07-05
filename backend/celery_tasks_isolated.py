@@ -332,6 +332,21 @@ def index_document_task(document_id, process_id=None):
     if process_id is None:
         process_id = f"indexing_{document_id}"
 
+    # Respect global pause toggle from Settings (prevents heavy embedding work when user wants machine relief)
+    try:
+        from backend.services.indexing_service import is_indexing_paused  # will add below if missing
+    except Exception:
+        def is_indexing_paused(): return False
+    if is_indexing_paused():
+        logger.info(f"Indexing is paused (per Settings); skipping document {document_id}")
+        try:
+            # update_document_status is defined in this module
+            if 'update_document_status' in globals():
+                globals()['update_document_status'](document_id, "PENDING", "Skipped while indexing paused")
+        except Exception:
+            pass
+        return {"skipped": True, "reason": "indexing_paused", "document_id": document_id}
+
     logger.info(f"Starting isolated indexing task for document {document_id} with process ID: {process_id}")
 
     # Get progress system for updates

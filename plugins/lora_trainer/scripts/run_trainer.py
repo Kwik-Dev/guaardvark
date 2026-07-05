@@ -200,9 +200,13 @@ def _do_train(cmd):
         _eprint(f"[run_trainer] saved lora to {output_path} (kohya format, {len(state_dict)} keys)")
         
     except _torch.cuda.OutOfMemoryError as e:
-        return {"ok": False, "error": f"OOM during training: {e}"}
+        # Include the step at failure so the caller / UI can report "failed at step 312/800"
+        # and users know whether a partial checkpoint might exist or how far it got.
+        cur_step = step + 1 if 'step' in dir() else 'unknown'
+        return {"ok": False, "error": f"OOM during training at step {cur_step}/{steps}: {e}"}
     except Exception as e:
-        return {"ok": False, "error": f"training failed: {e}\n{traceback.format_exc()}"}
+        cur_step = step + 1 if 'step' in dir() else 'unknown'
+        return {"ok": False, "error": f"training failed at step {cur_step}: {e}\n{traceback.format_exc()}"}
         
     return {"ok": True, "lora_path": output_path, "lora_version": 1}
 

@@ -64,6 +64,9 @@ class UnifiedChatService {
         ...(thinkPref !== undefined ? { think: thinkPref } : {}),
       },
       project_id: options.project_id,
+      // Support project_root so backend auto-loads GUAARDVARK.md and rich project context.
+      // Enables consistent project analysis (build.py review, CSS suggestions, etc.) across CLI and GUI.
+      project_root: options.project_root || options.projectRoot,
       is_voice_message: isVoiceMessage,
     };
     if (imageBase64) {

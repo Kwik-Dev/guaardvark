@@ -34,6 +34,11 @@ class TestSimpleSlashArgs:
             payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1].get("json")
             assert payload["query"] == "hello world"
 
+    def test_local_coding_commands_do_not_crash(self, router):
+        # Dispatch several new local commands; they should succeed or show usage without backend
+        for line in ["/pwd", "/ls .", "/todo list", "/grep foo ."]:
+            router.dispatch(line)
+
     def test_search_passes_resolved_limit_not_optioninfo(self, router):
         with patch("llx.commands.search.get_client") as mock_get, patch(
             "llx.commands.search.output.print_markdown"

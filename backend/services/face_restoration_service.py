@@ -59,6 +59,10 @@ class FaceRestorationService:
         self._upsampler = None
         self._import_error = gfpgan_import_error
 
+        # Cache face model presence to avoid repeated load attempts + error spam when the .pth is missing
+        self._face_model_checked = False
+        self._face_model_ok = False
+
         self.service_available = self._check_runtime_availability()
 
         self.gfpgan_model_version = "1.4"
@@ -84,13 +88,21 @@ class FaceRestorationService:
         if self._gfpgan is not None:
             return True
 
+        # One-time presence check to avoid log spam + repeated failed loads on missing model file
+        if not self._face_model_checked:
+            self._face_model_checked = True
+            model_path_gfpgan = self.models_dir / f"GFPGANv{self.gfpgan_model_version}.pth"
+            model_path_esrgan = self.models_dir / "RealESRGAN_x2plus.pth"
+            self._face_model_ok = model_path_gfpgan.exists() and model_path_esrgan.exists()
+            if not self._face_model_ok:
+                logger.warning("Face restoration models missing (GFPGAN/RealESRGAN); skipping to avoid repeated errors. Place files in data/models/face_restoration/ if desired.")
+                return False
+
         try:
             logger.info("Loading GFPGAN model...")
 
             model_path_esrgan = self.models_dir / "RealESRGAN_x2plus.pth"
-
-            if not model_path_esrgan.exists():
-                logger.info("RealESRGAN model not found, GFPGAN will download it automatically")
+            model_path_gfpgan = self.models_dir / f"GFPGANv{self.gfpgan_model_version}.pth"
 
             model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
             self._upsampler = RealESRGANer(
@@ -103,8 +115,6 @@ class FaceRestorationService:
                 half=True if self._device == "cuda" else False,
                 device=self._device
             )
-
-            model_path_gfpgan = self.models_dir / f"GFPGANv{self.gfpgan_model_version}.pth"
 
             self._gfpgan = GFPGANer(
                 model_path=str(model_path_gfpgan),

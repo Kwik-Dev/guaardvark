@@ -33,6 +33,43 @@ except ImportError as e:
 indexing_bp = Blueprint("indexing", __name__, url_prefix="/api/index")
 
 
+# --- Pause/Resume Indexing Support (defined early for use in triggers) ---
+
+def _get_indexing_paused_setting():
+    """Helper to read the pause flag from SystemSetting."""
+    try:
+        from backend.models import SystemSetting, db
+        row = db.session.get(SystemSetting, "indexing_paused")
+        if row:
+            val = str(row.value or "").strip().lower()
+            return val in ("true", "1", "yes", "on")
+        return False
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Could not read indexing_paused setting: {e}")
+        return False
+
+def _set_indexing_paused(paused: bool):
+    """Helper to write the pause flag."""
+    try:
+        from backend.models import SystemSetting, db
+        key = "indexing_paused"
+        row = db.session.get(SystemSetting, key)
+        if not row:
+            row = SystemSetting(key=key)
+            db.session.add(row)
+        row.value = "true" if paused else "false"
+        db.session.commit()
+        logging.getLogger(__name__).info(f"Set indexing_paused={paused}")
+        return True
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Failed to set indexing_paused: {e}")
+        try:
+            db.session.rollback()
+        except:
+            pass
+        return False
+
+
 @indexing_bp.route("/<int:document_id>", methods=["POST"])
 @ensure_db_session_cleanup
 def trigger_document_indexing(document_id):
@@ -67,6 +104,10 @@ def trigger_document_indexing(document_id):
         if not document:
             logger.warning(f"API Indexing: Document with ID {document_id} not found.")
             return jsonify({"error": f"Document with ID {document_id} not found."}), 404
+
+        if _get_indexing_paused_setting():
+            logger.info(f"Indexing paused; refusing trigger for doc {document_id}")
+            return jsonify({"error": "Indexing is paused. Use the pause toggle in Settings to resume.", "paused": True}), 423
 
         file_path = document.path
         filename = document.filename or os.path.basename(file_path)  # Fallback filename
@@ -217,6 +258,10 @@ def trigger_bulk_indexing():
         if not folder_ids and not document_ids:
             return jsonify({"error": "No folder_ids or document_ids provided."}), 400
 
+        if _get_indexing_paused_setting():
+            logger.info("Indexing paused; refusing bulk indexing request")
+            return jsonify({"error": "Indexing is paused. Resume in Settings before bulk operations.", "paused": True}), 423
+
         # Collect all document IDs from folders recursively
         all_doc_ids = set(document_ids)
         for fid in folder_ids:
@@ -311,3 +356,91 @@ def trigger_bulk_indexing():
     except Exception as e:
         logger.error(f"API Bulk Indexing: Unexpected error: {e}", exc_info=True)
         return jsonify({"error": f"Failed to trigger bulk indexing: {e}"}), 500
+
+
+# (pause helpers defined at top of file)
+
+@indexing_bp.route("/resume-pending", methods=["POST"])
+@ensure_db_session_cleanup
+def resume_pending_indexing():
+    """Resume/re-queue all documents that are PENDING or ERROR for indexing.
+    Respects the pause flag (will error if still paused).
+    Creates a bulk job and dispatches tasks.
+    """
+    logger = current_app.logger if current_app else logging.getLogger(__name__)
+    if _get_indexing_paused_setting():
+        return jsonify({"error": "Indexing is still paused. Resume first.", "paused": True}), 423
+
+    if add_file_to_index is None or update_document_status is None or db is None or DBDocument is None:
+        return jsonify({"error": "Indexing service unavailable."}), 500
+
+    try:
+        # Find candidates
+        candidates = DBDocument.query.filter(
+            DBDocument.index_status.in_(["PENDING", "ERROR"])
+        ).all()
+
+        if not candidates:
+            return jsonify({"message": "No pending or errored documents to resume.", "dispatched": 0}), 200
+
+        doc_ids = [d.id for d in candidates]
+
+        # Reuse bulk logic style: create parent job, dispatch
+        progress_system = get_unified_progress()
+        job_id = progress_system.create_process(
+            ProcessType.INDEXING,
+            f"Resume pending indexing for {len(doc_ids)} documents"
+        )
+        progress_system.update_process(job_id, 0, "Resuming pending indexing")
+
+        try:
+            from backend.celery_tasks_isolated import index_document_task
+        except ImportError as e:
+            logger.error(f"Failed to import Celery task: {e}")
+            return jsonify({"error": "Indexing service unavailable"}), 500
+
+        dispatched = 0
+        for doc_id in doc_ids:
+            doc = db.session.get(DBDocument, doc_id)
+            if not doc:
+                continue
+            update_document_status(doc.id, "INDEXING")
+            index_document_task.apply_async((doc.id, job_id), queue='indexing')
+            dispatched += 1
+
+        logger.info(f"Resume pending: dispatched {dispatched} indexing tasks under job {job_id}")
+
+        return jsonify({
+            "message": f"Resumed indexing for {dispatched} pending/error documents.",
+            "job_id": job_id,
+            "dispatched": dispatched,
+            "total_candidates": len(doc_ids),
+        }), 202
+
+    except Exception as e:
+        logger.error(f"API resume-pending: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to resume pending: {e}"}), 500
+
+
+# --- Pause / Resume controls for indexing (to relieve system load during heavy embedding) ---
+
+@indexing_bp.route("/pause", methods=["POST"])
+@ensure_db_session_cleanup
+def pause_indexing():
+    """Pause future indexing work (new document indexing will be skipped or rejected)."""
+    success = _set_indexing_paused(True)
+    return jsonify({"success": success, "paused": True, "message": "Indexing paused." if success else "Failed."})
+
+@indexing_bp.route("/resume", methods=["POST"])
+@ensure_db_session_cleanup
+def resume_indexing():
+    """Resume indexing."""
+    success = _set_indexing_paused(False)
+    return jsonify({"success": success, "paused": False, "message": "Indexing resumed." if success else "Failed."})
+
+@indexing_bp.route("/paused", methods=["GET"])
+@ensure_db_session_cleanup
+def get_indexing_paused():
+    """Current pause state."""
+    paused = _get_indexing_paused_setting()
+    return jsonify({"paused": paused})

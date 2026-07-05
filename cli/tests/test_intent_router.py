@@ -33,3 +33,11 @@ class TestResolveReplLine:
 
     def test_slash_passthrough(self):
         assert resolve_repl_line("/agents list") is None
+
+    def test_local_coding_intents(self):
+        assert resolve_repl_line("read repl.py") == ("read", ["repl.py"])
+        assert resolve_repl_line("grep TODO in cli") == ("grep", ["TODO in cli"])
+        assert resolve_repl_line("ls cli/llx") == ("ls", ["cli/llx"])
+        assert resolve_repl_line("edit foo.py fix the bug") == ("edit", ["foo.py fix the bug"])
+        assert resolve_repl_line("run pytest") == ("run", ["pytest"])
+        assert resolve_repl_line("todo add write tests") == ("todo", ["add write tests"])

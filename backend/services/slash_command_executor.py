@@ -56,6 +56,7 @@ def resolve_slash_direct_tool(
         prompt = params.get("prompt") or args
         if not prompt:
             return None, {}
+        logger.info(f"Resolved /imagine direct: model={model} (from /imagemodel or options)")
         return mapped, {"prompt": prompt, "model": model}
     if slash == "websearch":
         query = params.get("query") or args

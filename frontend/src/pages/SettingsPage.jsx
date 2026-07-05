@@ -237,6 +237,7 @@ const SettingsPage = () => {
 
   const [isPurging, setIsPurging] = useState(false);
   const [purgeModalOpen, setPurgeModalOpen] = useState(false);
+  const [indexingPaused, setIndexingPaused] = useState(false);
 
   const [themeModalOpen, setThemeModalOpen] = useState(false);
   const [voiceSettingsModalOpen, setVoiceSettingsModalOpen] = useState(false);
@@ -777,6 +778,16 @@ const SettingsPage = () => {
       }
     };
     fetchEmbeddingModel();
+  }, []);
+
+  // Fetch paused state on mount (and can refresh)
+  useEffect(() => {
+    (async () => {
+      try {
+        const p = await apiService.getIndexingPaused();
+        setIndexingPaused(!!p);
+      } catch (_) {}
+    })();
   }, []);
 
   // Fetch GPU resources and embedding model list
@@ -3147,10 +3158,54 @@ const SettingsPage = () => {
                 <Button variant="outlined" size="small" color="error" onClick={handleClearChatHistoryClick} disabled={isLoading}>Clear All Chat History</Button>
               </SettingsRow>
               <SettingsRow label="Index">
-                <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
                   <Button variant="outlined" size="small" onClick={handleOpenPurgeModal} disabled={isLoading}>Purge</Button>
                   <Button variant="outlined" size="small" color="error" onClick={() => handleActionClick(apiService.resetIndexStorage, [], "Reset index? All indexed knowledge will be lost.", "Resetting...", "Index reset.", "Failed")} disabled={isLoading}>Reset</Button>
                   <Button variant="outlined" size="small" onClick={() => handleActionClick(apiService.optimizeIndex, [], null, "Optimizing...", "Index optimized.", "Failed")} disabled={isLoading}>Optimize</Button>
+                  {/* Pause indexing to relieve system/GPU load during heavy embedding batches */}
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    color={indexingPaused ? "success" : "warning"}
+                    onClick={async () => {
+                      try {
+                        if (indexingPaused) {
+                          await apiService.resumeIndexing();
+                          setIndexingPaused(false);
+                          showMessage("Indexing resumed", "success");
+                        } else {
+                          await apiService.pauseIndexing();
+                          setIndexingPaused(true);
+                          showMessage("Indexing paused (new work will be skipped)", "warning");
+                        }
+                      } catch (e) {
+                        showMessage("Failed to toggle indexing pause: " + (e.message || e), "error");
+                      }
+                    }}
+                    disabled={isLoading}
+                  >
+                    {indexingPaused ? "Resume Indexing" : "Pause Indexing"}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    color="success"
+                    onClick={async () => {
+                      try {
+                        const res = await apiService.resumePendingIndexing();
+                        showMessage(res?.message || "Resume pending started", "success");
+                        setIndexingPaused(false); // in case
+                      } catch (e) {
+                        showMessage("Failed to resume pending: " + (e.message || e), "error");
+                      }
+                    }}
+                    disabled={isLoading}
+                  >
+                    Resume All Pending
+                  </Button>
+                  {indexingPaused && (
+                    <Chip size="small" color="warning" label="Paused" />
+                  )}
                 </Box>
               </SettingsRow>
           </SettingsCardWrapper>

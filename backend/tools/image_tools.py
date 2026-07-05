@@ -140,8 +140,10 @@ class ImageGeneratorTool(BaseTool):
             from backend.services.job_operation_gate import GpuBusyError
             from backend.services.job_types import JobKind
             try:
+                ram_est = generator._ram_estimate_gb(request.model or "auto") if hasattr(generator, "_ram_estimate_gb") else 10.0
                 with gpu_session(JobKind.VIDEO_RENDER, f"chat_imggen_{uuid.uuid4().hex[:8]}",
                                  on_busy="raise", evict_ollama=True, vram_estimate_mb=11000,
+                                 ram_estimate_gb=ram_est,
                                  require_fit=True, cross_process=True):
                     result = generator.generate_image(request)
             except GpuBusyError:
@@ -149,6 +151,18 @@ class ImageGeneratorTool(BaseTool):
                     success=False,
                     error="GPU is busy with another render right now — try again in a moment.",
                 )
+            finally:
+                # Extra hygiene for chat path (generator should have done for keep=False, but ensure)
+                try:
+                    if hasattr(generator, "_unload_pipeline"):
+                        generator._unload_pipeline()
+                    import gc
+                    gc.collect()
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
             if result.success and result.image_path and os.path.exists(result.image_path):
                 # Copy generated image to the served output directory
@@ -161,6 +175,13 @@ class ImageGeneratorTool(BaseTool):
                 output_path = os.path.join(output_dir, filename)
 
                 shutil.copy2(result.image_path, output_path)
+
+                # Release the temp from generator cache to help RAM (the copy is the persisted one)
+                try:
+                    if os.path.exists(result.image_path):
+                        os.unlink(result.image_path)
+                except Exception:
+                    pass
 
                 image_url = f"/api/outputs/generated_images/{filename}"
                 return ToolResult(
@@ -286,7 +307,23 @@ class AnimationGeneratorTool(BaseTool):
                 use_vision_steering=vision_steering,
             )
 
-            result = anim_gen.generate(request)
+            from backend.services.gpu_resource_policy import gpu_session
+            from backend.services.job_operation_gate import GpuBusyError
+            from backend.services.job_types import JobKind
+            from backend.services.offline_image_generator import get_image_generator
+            try:
+                # Use the image gen's ram estimate for the animation (reuses SD pipeline)
+                img_gen = get_image_generator()
+                ram_est = img_gen._ram_estimate_gb(request.model) if hasattr(img_gen, "_ram_estimate_gb") else 6.0
+                with gpu_session(JobKind.VIDEO_RENDER, f"chat_anim_{uuid.uuid4().hex[:8]}",
+                                 on_busy="raise", evict_ollama=True, vram_estimate_mb=8000,
+                                 ram_estimate_gb=ram_est, require_fit=True, cross_process=True):
+                    result = anim_gen.generate(request)
+            except GpuBusyError:
+                return ToolResult(
+                    success=False,
+                    error="GPU is busy with another render right now — try again in a moment.",
+                )
 
             if result.success:
                 output_lines = [

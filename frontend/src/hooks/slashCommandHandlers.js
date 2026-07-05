@@ -277,8 +277,10 @@ async function handleImageModel(args, { addMessage }) {
 }
 
 // ============================================================
-// /imagine <prompt> — direct generate_image tool (no LLM rewrite)
+// /imagine <prompt> — direct generate_image tool (bypass LLM for explicit command to avoid eviction issues during the turn; uses selected /imagemodel)
 // ============================================================
+// Restored direct path per investigation (git f5ad8c8 introduced guaranteed eviction for chat image to fix OOM; direct avoids LLM call for /imagine itself).
+// The model from /imagemodel is passed explicitly so chat uses the selected one.
 
 async function handleImagine(args, { addMessage, onSendMessage }) {
   if (!args) {

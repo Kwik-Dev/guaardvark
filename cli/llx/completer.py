@@ -93,6 +93,44 @@ class SlashCompleter(Completer):
                             start_position=-len(sub_prefix) if sub_prefix else 0,
                         )
 
+        # Local path completion for coding commands
+        if cmd in {"ls", "read", "grep", "edit", "cd", "diff", "run"}:
+            try:
+                from pathlib import Path
+                base = Path.cwd()
+                prefix_path = Path(sub_prefix or ".")
+                # simple: list siblings of the dir being typed
+                search_dir = (base / prefix_path).parent if not (base / prefix_path).is_dir() else (base / prefix_path)
+                search_dir = search_dir.resolve()
+                if search_dir.exists() and search_dir.is_dir():
+                    for entry in sorted(search_dir.iterdir(), key=lambda p: p.name):
+                        if entry.name.startswith(".") and not sub_prefix.startswith("."):
+                            continue
+                        name = entry.name + ("/" if entry.is_dir() else "")
+                        if name.lower().startswith(sub_prefix.lower().rsplit("/", 1)[-1] if "/" in sub_prefix else sub_prefix.lower()):
+                            yield Completion(
+                                name,
+                                start_position=-len(sub_prefix.rsplit("/", 1)[-1]) if "/" in sub_prefix else -len(sub_prefix),
+                            )
+            except Exception:
+                pass
+
+        # Dynamic backend tool name completion for /tool and /tools
+        if cmd in {"tool", "tools"}:
+            try:
+                # Try to get cached tool names from state if slash router put them there
+                # Fallback to a few common high-value ones
+                tool_names = None
+                # We can't easily reach router state here; provide useful defaults + common ones
+                common_tools = ["read_code", "edit_code", "search_code", "list_files", "execute_python",
+                                "grep_search", "save_memory", "search_memory", "list_code_files",
+                                "get_repository_map", "verify_change", "agent_task_execute"]
+                for name in common_tools:
+                    if name.lower().startswith(sub_prefix.lower()):
+                        yield Completion(name, start_position=-len(sub_prefix) if sub_prefix else 0)
+            except Exception:
+                pass
+
 
 # ---------------------------------------------------------------------------
 # Factory

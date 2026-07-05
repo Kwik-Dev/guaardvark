@@ -1,4 +1,8 @@
-"""Resolve REPL input to CLI commands before falling through to chat LLM."""
+"""Resolve REPL input to CLI commands before falling through to chat LLM.
+
+Extended with many natural-language shortcuts for local agentic actions so the
+REPL feels like Claude Code / Cline / Cursor / Grok when doing software work.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,26 @@ _NL_INTENT_RULES: list[tuple[re.Pattern[str], str, list[str] | None]] = [
     (re.compile(r"^(?:system\s+)?status\s*$", re.I), "status", []),
     (re.compile(r"^health(?:\s+check)?\s*$", re.I), "health", []),
     (re.compile(r"^(?:run|execute)\s+agent\s+(.+)$", re.I), "agents", None),
+
+    # Local coding actions (new in this improvement)
+    (re.compile(r"^(?:ls|list(?:\s+files?)?|dir)\s*(.*)$", re.I), "ls", None),
+    (re.compile(r"^(?:cd|chdir)\s+(.+)$", re.I), "cd", None),
+    (re.compile(r"^pwd\s*$", re.I), "pwd", []),
+    (re.compile(r"^(?:cat|read|show|view)\s+(?:file\s+)?(.+)$", re.I), "read", None),
+    (re.compile(r"^(?:grep|search|find)\s+(.+)$", re.I), "grep", None),
+    (re.compile(r"^(?:edit|fix|update|implement|change)\s+(.+)$", re.I), "edit", None),
+    (re.compile(r"^(?:run|exec|execute|sh)\s+(.+)$", re.I), "run", None),
+    (re.compile(r"^(?:test|pytest|check)\s*(.*)$", re.I), "test", None),
+    (re.compile(r"^(?:todo|task|tasks?)\s*(.*)$", re.I), "todo", None),
+    (re.compile(r"^(?:context|status|state|where am i)\s*$", re.I), "context", []),
+    (re.compile(r"^(?:suggest|what tools?|recommend tools?)\s*$", re.I), "suggest", []),
+    (re.compile(r"^(?:init|initialize|setup project|create guaardvark)\s*$", re.I), "init", []),
+    (re.compile(r"^(?:analyze|review|inspect)\s+(?:the\s+)?(?:site|project|folder|css|styling|build)\s*(.*)$", re.I), "analyze", None),
+    (re.compile(r"^(?:suggest|improve)\s+(?:css|styling|style)\s*(.*)$", re.I), "analyze", None),
+
+    # Load skill / dynamic instructions (like loading this session's skill files)
+    (re.compile(r"^(?:load|use|apply)\s+(?:the\s+)?skill\s+(.+?)(?:\s+(?:file|md|instructions?))?\s*$", re.I), "load", None),
+    (re.compile(r"^(?:load|read)\s+(?:skill|instructions?)\s+(.+)$", re.I), "load", None),
 ]
 
 
@@ -34,8 +58,15 @@ def resolve_repl_line(line: str) -> tuple[str, list[str]] | None:
             continue
         if fixed_args is not None:
             return cmd, list(fixed_args)
-        tail = match.group(1).strip()
-        return cmd, ["run", tail]
+        tail = (match.group(1) or "").strip()
+        if cmd in ("ls", "read", "grep", "edit", "run", "test", "cd", "todo"):
+            # pass the whole tail as single arg string; slash handler will shlex if needed
+            return cmd, [tail] if tail else []
+        if cmd == "analyze":
+            return "analyze", [tail] if tail else []
+        if cmd == "load":
+            return "load", [tail] if tail else []
+        return cmd, ["run", tail] if tail else []
 
     try:
         parts = shlex.split(raw)

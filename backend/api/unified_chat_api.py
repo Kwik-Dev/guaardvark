@@ -81,7 +81,16 @@ def unified_chat():
     is_voice_message = bool(data.get("is_voice_message", False))
     request_id = str(uuid.uuid4())
     project_id = data.get("project_id")
+    # Support project_root for loading GUAARDVARK.md and project-specific context.
+    # This enables consistent "analyze dragged folder" experience in CLI and GUI.
+    project_root = data.get("project_root") or data.get("projectRoot") or options.get("project_root")
+    if project_root:
+        options["project_root"] = str(project_root)
     options = _merge_session_mode_options(session_id, options)
+
+    # Also forward to direct-tool for slash commands etc.
+    if project_root and "project_root" not in options:
+        options["project_root"] = str(project_root)
 
     # Abort any still-running generation on this session — a new message from
     # the user means "stop what you're doing and listen to this instead."
@@ -227,6 +236,34 @@ def unified_chat():
                 f"[EMIT-HANDOFF][UNIFIED_API] set_chat_emit_fn called for session={session_id} "
                 f"thread={threading.get_ident()} emit_fn_id={id(emit_fn)} use_agent_brain={use_agent_brain}"
             )
+
+            # Direct tool / slash intercept ( /imagine etc ) — do this BEFORE routing
+            # to brain or legacy. This guarantees the bypass even when AgentBrain
+            # is the sole router. Avoids LLM involvement and the associated eviction EOFs.
+            try:
+                from backend.services.slash_command_executor import resolve_slash_direct_tool
+                from backend.services.unified_chat_engine import UnifiedChatEngine
+                from backend.utils.llm_service import get_llm_for_startup
+                from backend.tools.tool_registry_init import initialize_all_tools
+                d_tool, d_params = resolve_slash_direct_tool(options)
+                if d_tool:
+                    logger.info(f"[UNIFIED_API] Direct slash/direct intercept for {d_tool} before router")
+                    reg = initialize_all_tools()
+                    llm = None
+                    try:
+                        llm = get_llm_for_startup()
+                    except Exception:
+                        pass
+                    eng = UnifiedChatEngine(registry=reg, llm_instance=llm or object())
+                    eng.app = app
+                    rid = str(uuid.uuid4())
+                    disp = message or f"/{options.get('slash_command', d_tool)}"
+                    with app.app_context():
+                        eng._run_direct_tool_execution(d_tool, d_params, session_id, emit_fn, rid, disp, options)
+                    return  # done, direct path emitted everything
+            except Exception as _dir_e:
+                logger.debug(f"Direct intercept pre-check skipped or failed (will route normally): {_dir_e}")
+
             if use_agent_brain and agent_brain:
                 logger.debug(
                     f"[EMIT-HANDOFF][UNIFIED_API] dispatching to AgentBrain.process session={session_id} "
@@ -332,11 +369,19 @@ def direct_tool_sync():
         "slash_command": data.get("slash_command"),
         "slash_args": data.get("slash_args") or "",
     }
+    # Forward project_root for GUAARDVARK.md etc. in direct tool calls too
+    if data.get("project_root"):
+        options["project_root"] = str(data.get("project_root"))
     tool_name, params = resolve_slash_direct_tool(options)
     if not tool_name:
         return jsonify({"success": False, "error": "tool or slash_command required"}), 400
 
     session_id = data.get("session_id") or "cli_direct"
+
+    # Forward project_root for GUAARDVARK.md loading in direct-tool path too
+    if project_root:
+        # ensure in the later call
+        pass
 
     try:
         from backend.tools.tool_registry_init import initialize_all_tools
