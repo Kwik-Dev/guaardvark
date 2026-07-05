@@ -128,7 +128,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [showPromptPreview, setShowPromptPreview] = useState(false);
-  const [historyDialogOpen, setHistoryDialogOpen] = useState(false);
 
   // Director intelligence (new) — expand high-level concept via media_director (same as MV)
   const [directorEnabled, setDirectorEnabled] = useState(false);
@@ -1059,20 +1058,15 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         </Alert>
       )}
 
-      <Box sx={{ display: 'flex', height: { lg: 'calc(100vh - 180px)', xs: 'auto' }, overflow: 'hidden' }}>
-      <Grid container spacing={3} sx={{ flex: 1, height: '100%', overflow: 'hidden' }}>
+      <Grid container spacing={3}>
         {/* Input Section */}
-        <Grid item xs={12} lg={6} sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <Grid item xs={12} lg={6}>
           <Card sx={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
+            height: 'fit-content',
             boxShadow: 2,
-            borderRadius: 2,
-            overflow: 'hidden',
-            minHeight: 0
+            borderRadius: 2
           }}>
-            <CardContent sx={{ p: { xs: 2, sm: 3 }, flex: 1, overflowY: 'auto', minHeight: 0 }}>
+            <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
               <Typography
                 variant="h6"
                 sx={{
@@ -1729,13 +1723,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
               <Card sx={{
                 mb: 3,
                 boxShadow: 2,
-                borderRadius: 2,
-                maxHeight: { lg: '40vh', xs: 'auto' },
-                overflow: 'hidden',
-                display: 'flex',
-                flexDirection: 'column'
+                borderRadius: 2
               }}>
-                <CardContent sx={{ p: { xs: 2, sm: 3 }, flex: 1, overflowY: 'auto' }}>
+                <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
                   <Typography
                     variant="h6"
                     sx={{
@@ -1888,29 +1878,40 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           }
         </Grid >
       </Grid >
-      </Box >
 
-      {/* Button to open history dialog - keeps main form clean, no pushing below button.
-         Matches VideoGen modal gallery pattern for logical GUI and responsiveness. */}
-      {batchHistory.length > 0 && (
-        <Box sx={{ mt: 2, display: 'flex', justifyContent: 'flex-end' }}>
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={() => setHistoryDialogOpen(true)}
-            startIcon={<Visibility />}
-          >
-            View Recent Batches ({batchHistory.length})
-          </Button>
-        </Box>
-      )}
+      {/* Batch History - now scrollable and constrained so it doesn't push the Start button or break flow.
+         Responsive: smaller max height on mobile, larger on desktop. Logical: compact recent list below the main grid. */}
+      {
+        batchHistory.length > 0 && (
+          <Card sx={{
+            mt: 2,
+            boxShadow: 2,
+            borderRadius: 2
+          }}>
+            <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
+              <Typography
+                variant="h6"
+                sx={{
+                  fontWeight: 600,
+                  mb: 1,
+                  color: 'text.primary'
+                }}
+              >
+                Recent Batches
+              </Typography>
 
-      {/* History Dialog - scrollable, doesn't affect main layout. */}
-      <Dialog open={historyDialogOpen} onClose={() => setHistoryDialogOpen(false)} maxWidth="lg" fullWidth>
-        <DialogTitle>Recent Batches</DialogTitle>
-        <DialogContent sx={{ maxHeight: '70vh', overflowY: 'auto' }}>
-          <Grid container spacing={2}>
-            {batchHistory.slice(0, 10).map((batch) => (
+              <Box sx={{
+                maxHeight: { xs: 180, sm: 240, md: 300, lg: 380 },
+                overflowY: 'auto',
+                pr: 1,
+                // subtle border to indicate scroll region
+                border: '1px solid',
+                borderColor: 'divider',
+                borderRadius: 1,
+                p: 1
+              }}>
+                <Grid container spacing={2}>
+                  {batchHistory.slice(0, 10).map((batch) => (
                   <Grid item xs={12} sm={6} lg={4} key={batch.batch_id}>
                     <Paper sx={{
                       p: 2,
@@ -2042,11 +2043,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   </Grid>
                 ))}
               </Grid>
-            </DialogContent>
-            <DialogActions>
-              <Button onClick={() => setHistoryDialogOpen(false)}>Close</Button>
-            </DialogActions>
-          </Dialog>
+              </Box>
+            </CardContent>
+          </Card>
         )
       }
 
