@@ -114,7 +114,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const imageListCols = isXs ? 2 : isSm ? 3 : 4;
 
   // State management
-  const [inputMode, setInputMode] = useState('bulk'); // 'bulk', 'csv', or 'blueprint'
+  const [inputMode, setInputMode] = useState('single'); // 'single' (default, whole text as one prompt), 'bulk', 'csv', or 'blueprint'
   const [batchItems, setBatchItems] = useState(''); // Bulk textarea input like FileGenerationPage
   const [lookAndFeel, setLookAndFeel] = useState(''); // Style/aesthetic to apply to all prompts
   const [csvFile, setCsvFile] = useState(null);
@@ -289,22 +289,32 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
   // Analyze prompt when it changes (debounced)
   useEffect(() => {
-    const firstPrompt = batchItems.split('\n').find(line => line.trim());
-    if (!firstPrompt || !autoEnhance) {
+    let promptForAnalysis = '';
+    if (inputMode === 'single') {
+      promptForAnalysis = (batchItems || '').trim();
+    } else {
+      promptForAnalysis = batchItems.split('\n').find(line => line.trim()) || '';
+    }
+    if (!promptForAnalysis || !autoEnhance) {
       setContentDetection(null);
       return;
     }
 
     const timeoutId = setTimeout(() => {
-      analyzeCurrentPrompt(firstPrompt.trim());
+      analyzeCurrentPrompt(promptForAnalysis.trim());
     }, 500); // Debounce 500ms
 
     return () => clearTimeout(timeoutId);
-  }, [batchItems, autoEnhance, analyzeCurrentPrompt]);
+  }, [batchItems, autoEnhance, analyzeCurrentPrompt, inputMode]);
 
   // NEW: Director expand (uses /batch-image/expand-concept; populates batchItems with plan shots for review/launch)
   const handleDirectorExpand = async () => {
-    const idea = (batchItems || lookAndFeel || '').split('\n').find(l => l.trim()) || lookAndFeel;
+    let idea = '';
+    if (inputMode === 'single') {
+      idea = (batchItems || lookAndFeel || '').trim();
+    } else {
+      idea = (batchItems || lookAndFeel || '').split('\n').find(l => l.trim()) || lookAndFeel;
+    }
     if (!idea) {
       setError('Enter a high-level concept or look & feel first');
       return;
@@ -330,6 +340,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (shots.length) {
         const lines = shots.map(s => (s.prompt || '').trim()).filter(Boolean);
         setBatchItems(lines.join('\n'));
+        setInputMode('bulk'); // Director produces multiple -> switch to bulk
         setSuccess(`Director expanded to ${lines.length} coherent shots (review & launch)`);
       } else {
         setError('Director returned no shots');
@@ -732,8 +743,46 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         setError('Please select a CSV file for upload');
         setLoading(false);
         return;
+      } else if (inputMode === 'single') {
+        // Single prompt: entire text (with newlines/paragraphs) as ONE prompt.
+        // Quantity duplicates the exact same prompt text.
+        const singlePrompt = (batchItems || '').trim();
+        if (!singlePrompt) {
+          setError('Please provide a prompt');
+          setLoading(false);
+          return;
+        }
+        let effectivePrompt = singlePrompt;
+        if (lookAndFeel && lookAndFeel.trim()) {
+          effectivePrompt = `${singlePrompt}, ${lookAndFeel.trim()}`;
+        }
+        let promptsToGenerate = [effectivePrompt];
+        if (quantity > 1) {
+          promptsToGenerate = Array(quantity).fill(effectivePrompt);
+        }
+        debugLog('Batch image single-prompt prepared', { promptCount: promptsToGenerate.length, quantity });
+
+        response = await fetch(`${API_BASE}/batch-image/generate/prompts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompts: promptsToGenerate,
+            ...params,
+            // Cast characters: backend resolves these to LoRA paths + trigger.
+            subject_ids: castSubjectIds,
+            // Quality enhancement parameters
+            content_preset: selectedPreset === 'auto' ? null : selectedPreset,
+            auto_enhance: autoEnhance,
+            enhance_anatomy: enhanceAnatomy,
+            enhance_faces: enhanceFaces,
+            enhance_hands: enhanceHands,
+            // Director (shared intelligent pipeline with MusicVideo / chat)
+            director_mode: !!directorEnabled,
+            director_guidance: directorGuidance || undefined
+          })
+        });
       } else {
-        // Bulk input
+        // Bulk input (one per line)
         const validPrompts = parseBatchItems();
         if (validPrompts.length === 0) {
           setError('Please provide at least one prompt or topic');
@@ -741,7 +790,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           return;
         }
 
-        // Duplicate prompts based on quantity
+        // Duplicate prompts based on quantity (with numbering for bulk)
         let promptsToGenerate = validPrompts;
         if (quantity > 1) {
           promptsToGenerate = [];
@@ -1109,6 +1158,18 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 </Typography>
                 <Box sx={{ display: 'flex', gap: 1 }}>
                   <Button
+                    variant={inputMode === 'single' ? 'contained' : 'outlined'}
+                    onClick={() => setInputMode('single')}
+                    size="small"
+                    sx={{
+                      flex: 1,
+                      textTransform: 'none',
+                      fontWeight: inputMode === 'single' ? 600 : 400
+                    }}
+                  >
+                    Single Prompt
+                  </Button>
+                  <Button
                     variant={inputMode === 'bulk' ? 'contained' : 'outlined'}
                     onClick={() => setInputMode('bulk')}
                     size="small"
@@ -1147,23 +1208,59 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 </Box>
               </Box>
 
-              {/* Bulk Input */}
-              {inputMode === 'bulk' && (
-                <Box>
+              {/* Cast (optional) - for single prompt and bulk */}
+              {(inputMode === 'single' || inputMode === 'bulk') && (
+                <Box sx={{ mb: 2 }}>
                   <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>
                     Cast (optional)
                   </Typography>
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
                     Pick a trained character to render consistently — its LoRA and trigger word are applied automatically.
                   </Typography>
-                  <Box sx={{ mb: 2 }}>
-                    <CharacterPicker
-                      value={castSubjectIds}
-                      onChange={setCastSubjectIds}
-                      onlyTrained
-                    />
-                  </Box>
+                  <CharacterPicker
+                    value={castSubjectIds}
+                    onChange={setCastSubjectIds}
+                    onlyTrained
+                  />
+                </Box>
+              )}
 
+              {/* Single Prompt Input (default) */}
+              {inputMode === 'single' && (
+                <Box>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>
+                    Single Prompt
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                    Paste full prompt text (paragraphs and line breaks preserved as one prompt).
+                    Use "Number of Images per Prompt" below for multiples from this exact prompt.
+                  </Typography>
+                  <TextField
+                    fullWidth
+                    multiline
+                    rows={8}
+                    placeholder="Paste your complete prompt here, including paragraphs if needed. The entire text will be used as a single prompt for image generation.&#10;&#10;Example: A detailed scene description with multiple sentences and line breaks all for one image concept..."
+                    value={batchItems}
+                    onChange={handleBatchItemsChange}
+                    variant="outlined"
+                    sx={{
+                      mb: 2,
+                      '& .MuiOutlinedInput-root': {
+                        borderRadius: 1,
+                        fontFamily: 'monospace',
+                        fontSize: '0.9rem'
+                      }
+                    }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                    Whole text = 1 prompt. Quantity duplicates it exactly for multiple images.
+                  </Typography>
+                </Box>
+              )}
+
+              {/* Bulk Input */}
+              {inputMode === 'bulk' && (
+                <Box>
                   <Typography variant="subtitle2" sx={{ mb: 2, fontWeight: 500 }}>
                     Image Topics/Prompts
                   </Typography>
@@ -1186,7 +1283,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   />
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                     <Typography variant="caption" color="text.secondary">
-                      {parseBatchItems().length} prompts ready for generation
+                      {parseBatchItems().length} prompts ready for generation (bulk mode)
                     </Typography>
                     <Button
                       variant="text"
@@ -1215,48 +1312,48 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                     Tip: Each line becomes a separate image prompt
                   </Typography>
+                </Box>
+              )}
 
-                  {/* Look & Feel Field */}
-                  <Box sx={{ mt: 3 }}>
-                    <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>
-                      Look & Feel (Optional)
+              {/* Look & Feel (shared for single + bulk) */}
+              {(inputMode === 'single' || inputMode === 'bulk') && (
+                <Box sx={{ mt: 3 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>
+                    Look & Feel (Optional)
+                  </Typography>
+                  <TextField
+                    fullWidth
+                    multiline
+                    rows={3}
+                    placeholder="Describe the visual style to apply to the prompt(s):&#10;&#10;Examples:&#10;• In shades of blue, no text, darker colors&#10;• Minimalist black and white, clean lines&#10;• Professional infographic style, flat design&#10;• Photorealistic, dramatic lighting"
+                    value={lookAndFeel}
+                    onChange={(e) => setLookAndFeel(e.target.value)}
+                    variant="outlined"
+                    sx={{
+                      mb: 1,
+                      '& .MuiOutlinedInput-root': {
+                        borderRadius: 1
+                      }
+                    }}
+                  />
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Typography variant="caption" color="text.secondary">
+                      {inputMode === 'single' ? 'Style will be appended to your single prompt' : `This style will be applied to all ${parseBatchItems().length} prompts above`}
                     </Typography>
-                    <TextField
-                      fullWidth
-                      multiline
-                      rows={3}
-                      placeholder="Describe the visual style to apply to all topics above:&#10;&#10;Examples:&#10;• In shades of blue, no text, darker colors&#10;• Minimalist black and white, clean lines&#10;• Professional infographic style, flat design&#10;• Photorealistic, dramatic lighting"
-                      value={lookAndFeel}
-                      onChange={(e) => setLookAndFeel(e.target.value)}
+                    <Button
                       variant="outlined"
+                      size="small"
+                      onClick={() => setShowPromptPreview(true)}
                       sx={{
-                        mb: 1,
-                        '& .MuiOutlinedInput-root': {
-                          borderRadius: 1
-                        }
+                        textTransform: 'none',
+                        fontSize: '0.75rem',
+                        minWidth: 'auto',
+                        px: 1.5,
+                        py: 0.5
                       }}
-                    />
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" color="text.secondary">
-                        This style will be applied to all {parseBatchItems().length} prompts above
-                      </Typography>
-                      {parseBatchItems().length > 0 && (
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          onClick={() => setShowPromptPreview(true)}
-                          sx={{
-                            textTransform: 'none',
-                            fontSize: '0.75rem',
-                            minWidth: 'auto',
-                            px: 1.5,
-                            py: 0.5
-                          }}
-                        >
-                          Preview Prompts
-                        </Button>
-                      )}
-                    </Box>
+                    >
+                      Preview Prompts
+                    </Button>
                   </Box>
                 </Box>
               )}
@@ -1949,30 +2046,54 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         fullWidth
       >
         <DialogTitle>
-          Preview Generated Prompts ({parseBatchItems().length})
+          Preview Generated Prompts ({inputMode === 'single' ? 1 : parseBatchItems().length}{inputMode === 'single' && quantity > 1 ? ` × ${quantity}` : ''})
         </DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             These are the final prompts that will be sent to the image generator:
           </Typography>
           <Box sx={{ maxHeight: 400, overflow: 'auto' }}>
-            {parseBatchItems().map((prompt, index) => (
-              <Paper
-                key={index}
-                variant="outlined"
-                sx={{
-                  p: 2,
-                  mb: 1,
-                  backgroundColor: 'background.default',
-                  border: '1px solid',
-                  borderColor: 'divider'
-                }}
-              >
-                <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                  <strong>{index + 1}.</strong> {sanitizeText(prompt)}
-                </Typography>
-              </Paper>
-            ))}
+            {inputMode === 'single' ? (
+              (() => {
+                const single = (batchItems || '').trim();
+                const items = quantity > 1 ? Array(quantity).fill(single) : [single];
+                return items.map((prompt, index) => (
+                  <Paper
+                    key={index}
+                    variant="outlined"
+                    sx={{
+                      p: 2,
+                      mb: 1,
+                      backgroundColor: 'background.default',
+                      border: '1px solid',
+                      borderColor: 'divider'
+                    }}
+                  >
+                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                      <strong>{index + 1}.</strong> {sanitizeText(prompt)}
+                    </Typography>
+                  </Paper>
+                ));
+              })()
+            ) : (
+              parseBatchItems().map((prompt, index) => (
+                <Paper
+                  key={index}
+                  variant="outlined"
+                  sx={{
+                    p: 2,
+                    mb: 1,
+                    backgroundColor: 'background.default',
+                    border: '1px solid',
+                    borderColor: 'divider'
+                  }}
+                >
+                  <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                    <strong>{index + 1}.</strong> {sanitizeText(prompt)}
+                  </Typography>
+                </Paper>
+              ))
+            )}
           </Box>
         </DialogContent>
         <DialogActions>
