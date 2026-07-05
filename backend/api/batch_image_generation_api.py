@@ -165,26 +165,10 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     params['style'] = data.get('style', 'realistic')
     params['width'] = int(data.get('width', 512))
     params['height'] = int(data.get('height', 512))
-    raw_steps = int(data.get('steps', 20))
-    params['steps'] = min(max(raw_steps, 10), 50)  # 10-50 steps
-
-    # zimage-turbo specific: very low step count (CFG distilled)
-    if 'zimage-turbo' in str(params.get('model', '')).lower():
-        if not (6 <= params['steps'] <= 12):
-            logger.info(f"zimage-turbo: clamping steps {params['steps']} -> 8")
-            params['steps'] = 8
+    params['steps'] = min(max(int(data.get('steps', 20)), 10), 50)  # 10-50 steps
 
     # Guidance scale - will be validated by SettingsValidator
     guidance = float(data.get('guidance', 7.5))
-
-    # zimage-turbo (and other turbos) do not use guidance scale (CFG-distilled model).
-    # The Batch UI disables the control; we force the recommended neutral value here.
-    if 'zimage-turbo' in str(params.get('model', '')).lower():
-        turbo_recommended = 0.0
-        if guidance != turbo_recommended:
-            logger.debug(f"zimage-turbo: forcing guidance {guidance} -> {turbo_recommended} (guidance is not used)")
-        guidance = turbo_recommended
-        params['guidance'] = guidance
 
     # Use SettingsValidator for comprehensive validation
     if service_available and settings_validator_available and get_settings_validator:
@@ -211,10 +195,6 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
 
             # Log warnings
             for warning in validation_result.warnings:
-                # Suppress noisy "guidance not used" for zimage-turbo (UI disables + we force neutral value)
-                if 'zimage-turbo' in str(params.get('model', '')).lower() and 'guidance' in warning.lower():
-                    logger.debug(f"Suppressed zimage-turbo guidance warning: {warning}")
-                    continue
                 logger.warning(f"Settings validation warning: {warning}")
 
             # Log errors

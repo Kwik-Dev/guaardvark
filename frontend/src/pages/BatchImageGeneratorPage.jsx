@@ -114,7 +114,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const imageListCols = isXs ? 2 : isSm ? 3 : 4;
 
   // State management
-  const [inputMode, setInputMode] = useState('single'); // 'single' (default, whole text = 1 prompt), 'bulk' (one per line), 'csv', or 'blueprint'
+  const [inputMode, setInputMode] = useState('bulk'); // 'bulk', 'csv', or 'blueprint'
   const [batchItems, setBatchItems] = useState(''); // Bulk textarea input like FileGenerationPage
   const [lookAndFeel, setLookAndFeel] = useState(''); // Style/aesthetic to apply to all prompts
   const [csvFile, setCsvFile] = useState(null);
@@ -275,7 +275,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             setParams(prev => ({
               ...prev,
               steps: preset.recommended_steps || prev.steps,
-              guidance: prev.model === 'zimage-turbo' ? 0.0 : (preset.recommended_guidance || prev.guidance)
+              guidance: preset.recommended_guidance || prev.guidance
             }));
           }
         }
@@ -289,32 +289,22 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
   // Analyze prompt when it changes (debounced)
   useEffect(() => {
-    let promptForAnalysis = '';
-    if (inputMode === 'single') {
-      promptForAnalysis = (batchItems || '').trim();
-    } else {
-      promptForAnalysis = batchItems.split('\n').find(line => line.trim()) || '';
-    }
-    if (!promptForAnalysis || !autoEnhance) {
+    const firstPrompt = batchItems.split('\n').find(line => line.trim());
+    if (!firstPrompt || !autoEnhance) {
       setContentDetection(null);
       return;
     }
 
     const timeoutId = setTimeout(() => {
-      analyzeCurrentPrompt(promptForAnalysis.trim());
+      analyzeCurrentPrompt(firstPrompt.trim());
     }, 500); // Debounce 500ms
 
     return () => clearTimeout(timeoutId);
-  }, [batchItems, autoEnhance, analyzeCurrentPrompt, inputMode]);
+  }, [batchItems, autoEnhance, analyzeCurrentPrompt]);
 
   // NEW: Director expand (uses /batch-image/expand-concept; populates batchItems with plan shots for review/launch)
   const handleDirectorExpand = async () => {
-    let idea = '';
-    if (inputMode === 'single') {
-      idea = (batchItems || lookAndFeel || '').trim();
-    } else {
-      idea = (batchItems || lookAndFeel || '').split('\n').find(l => l.trim()) || lookAndFeel;
-    }
+    const idea = (batchItems || lookAndFeel || '').split('\n').find(l => l.trim()) || lookAndFeel;
     if (!idea) {
       setError('Enter a high-level concept or look & feel first');
       return;
@@ -340,7 +330,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (shots.length) {
         const lines = shots.map(s => (s.prompt || '').trim()).filter(Boolean);
         setBatchItems(lines.join('\n'));
-        setInputMode('bulk');  // Director produces multiple prompts -> bulk mode
         setSuccess(`Director expanded to ${lines.length} coherent shots (review & launch)`);
       } else {
         setError('Director returned no shots');
@@ -402,7 +391,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       setParams(prev => ({
         ...prev,
         steps: preset.recommended_steps || prev.steps,
-        guidance: prev.model === 'zimage-turbo' ? 0.0 : (preset.recommended_guidance || prev.guidance),
+        guidance: preset.recommended_guidance || prev.guidance,
         width: preset.recommended_dimensions?.[0] || prev.width,
         height: preset.recommended_dimensions?.[1] || prev.height
       }));
@@ -623,7 +612,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         ...prev,
         quality_preset: presetValue,
         steps: preset.steps,
-        guidance: prev.model === 'zimage-turbo' ? 0.0 : preset.guidance
+        guidance: preset.guidance
       }));
     }
   };
@@ -643,16 +632,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       } else {
         newParams.width = 512;
         newParams.height = 512;
-      }
-
-      // For zimage-turbo (CFG-distilled), guidance is not used effectively.
-      // Disable the control in UI and force a low/neutral value. Also clamp steps.
-      if (modelValue === 'zimage-turbo') {
-        newParams.guidance = 0.0;  // neutral for CFG-distilled turbo
-        // Turbo likes very few steps
-        if (newParams.steps > 12 || newParams.steps < 6) {
-          newParams.steps = 8;
-        }
       }
 
       return newParams;
@@ -753,42 +732,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         setError('Please select a CSV file for upload');
         setLoading(false);
         return;
-      } else if (inputMode === 'single') {
-        // Single prompt mode (default): entire textarea (paragraphs/line breaks preserved) = ONE prompt.
-        // Use Quantity to generate multiple images from the exact same prompt text.
-        let singlePrompt = (batchItems || '').trim();
-        if (!singlePrompt) {
-          setError('Please provide a prompt');
-          setLoading(false);
-          return;
-        }
-        if (lookAndFeel && lookAndFeel.trim()) {
-          singlePrompt = `${singlePrompt}, ${lookAndFeel.trim()}`;
-        }
-        let promptsToGenerate = [singlePrompt];
-        if (quantity > 1) {
-          promptsToGenerate = Array(quantity).fill(singlePrompt);
-        }
-        debugLog('Batch image single-prompt prepared', { promptCount: promptsToGenerate.length, quantity });
-
-        response = await fetch(`${API_BASE}/batch-image/generate/prompts`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompts: promptsToGenerate,
-            ...params,
-            subject_ids: castSubjectIds,
-            content_preset: selectedPreset === 'auto' ? null : selectedPreset,
-            auto_enhance: autoEnhance,
-            enhance_anatomy: enhanceAnatomy,
-            enhance_faces: enhanceFaces,
-            enhance_hands: enhanceHands,
-            director_mode: !!directorEnabled,
-            director_guidance: directorGuidance || undefined
-          })
-        });
       } else {
-        // Bulk input (one prompt per line)
+        // Bulk input
         const validPrompts = parseBatchItems();
         if (validPrompts.length === 0) {
           setError('Please provide at least one prompt or topic');
@@ -796,7 +741,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           return;
         }
 
-        // Duplicate prompts based on quantity (appends numbering for bulk)
+        // Duplicate prompts based on quantity
         let promptsToGenerate = validPrompts;
         if (quantity > 1) {
           promptsToGenerate = [];
@@ -1164,18 +1109,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 </Typography>
                 <Box sx={{ display: 'flex', gap: 1 }}>
                   <Button
-                    variant={inputMode === 'single' ? 'contained' : 'outlined'}
-                    onClick={() => setInputMode('single')}
-                    size="small"
-                    sx={{
-                      flex: 1,
-                      textTransform: 'none',
-                      fontWeight: inputMode === 'single' ? 600 : 400
-                    }}
-                  >
-                    Single Prompt
-                  </Button>
-                  <Button
                     variant={inputMode === 'bulk' ? 'contained' : 'outlined'}
                     onClick={() => setInputMode('bulk')}
                     size="small"
@@ -1214,57 +1147,23 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 </Box>
               </Box>
 
-              {/* Cast (optional) - available for all input methods (single prompt or bulk topics) */}
-              <Box sx={{ mb: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>
-                  Cast (optional)
-                </Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                  Pick a trained character to render consistently — its LoRA and trigger word are applied automatically.
-                </Typography>
-                <CharacterPicker
-                  value={castSubjectIds}
-                  onChange={setCastSubjectIds}
-                  onlyTrained
-                />
-              </Box>
-
-              {/* Single Prompt Input (new default: entire text = 1 prompt, line breaks preserved) */}
-              {inputMode === 'single' && (
-                <Box>
-                  <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>
-                    Single Prompt
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                    Paste full prompt text (paragraphs and line breaks are kept as part of the prompt).
-                    Use "Number of Images per Prompt" below to generate multiple images from this one prompt.
-                  </Typography>
-                  <TextField
-                    fullWidth
-                    multiline
-                    rows={8}
-                    placeholder="Paste your complete prompt here. This entire block (including newlines and paragraphs) will be treated as a single prompt for the image(s).&#10;&#10;Example: A cinematic scene of an ostrich in the desert at golden hour, wearing stylish sunglasses, highly detailed feathers, dramatic lighting, photorealistic..."
-                    value={batchItems}
-                    onChange={handleBatchItemsChange}
-                    variant="outlined"
-                    sx={{
-                      mb: 2,
-                      '& .MuiOutlinedInput-root': {
-                        borderRadius: 1,
-                        fontFamily: 'monospace',
-                        fontSize: '0.9rem'
-                      }
-                    }}
-                  />
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                    The whole text above is ONE prompt. Quantity duplicates it for multiple images (exact prompt text).
-                  </Typography>
-                </Box>
-              )}
-
               {/* Bulk Input */}
               {inputMode === 'bulk' && (
                 <Box>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>
+                    Cast (optional)
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                    Pick a trained character to render consistently — its LoRA and trigger word are applied automatically.
+                  </Typography>
+                  <Box sx={{ mb: 2 }}>
+                    <CharacterPicker
+                      value={castSubjectIds}
+                      onChange={setCastSubjectIds}
+                      onlyTrained
+                    />
+                  </Box>
+
                   <Typography variant="subtitle2" sx={{ mb: 2, fontWeight: 500 }}>
                     Image Topics/Prompts
                   </Typography>
@@ -1287,7 +1186,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   />
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                     <Typography variant="caption" color="text.secondary">
-                      {inputMode === 'single' ? '1 prompt (whole text)' : `${parseBatchItems().length} prompts`} ready for generation
+                      {parseBatchItems().length} prompts ready for generation
                     </Typography>
                     <Button
                       variant="text"
@@ -1625,10 +1524,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                         </Grid>
 
                         <Grid item xs={12}>
-                          <Typography gutterBottom>
-                            Guidance Scale: {params.guidance}
-                            {params.model === 'zimage-turbo' && ' (disabled — not used by turbo models)'}
-                          </Typography>
+                          <Typography gutterBottom>Guidance Scale: {params.guidance}</Typography>
                           <Slider
                             value={params.guidance}
                             onChange={(e, value) => setParams({ ...params, guidance: value })}
@@ -1636,13 +1532,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             max={20}
                             step={0.5}
                             marks
-                            disabled={params.model === 'zimage-turbo'}
                           />
-                          {params.model === 'zimage-turbo' && (
-                            <Typography variant="caption" color="text.secondary">
-                              zimage-turbo is CFG-distilled; guidance has little to no effect. Steps are auto-limited to ~6-12.
-                            </Typography>
-                          )}
                         </Grid>
 
                         <Grid item xs={12}>
@@ -1879,12 +1769,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         </Grid >
       </Grid >
 
-      {/* Batch History - now scrollable and constrained so it doesn't push the Start button or break flow.
-         Responsive: smaller max height on mobile, larger on desktop. Logical: compact recent list below the main grid. */}
+      {/* Batch History */}
       {
         batchHistory.length > 0 && (
           <Card sx={{
-            mt: 2,
+            mt: 3,
             boxShadow: 2,
             borderRadius: 2
           }}>
@@ -1893,25 +1782,15 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 variant="h6"
                 sx={{
                   fontWeight: 600,
-                  mb: 1,
+                  mb: 2,
                   color: 'text.primary'
                 }}
               >
                 Recent Batches
               </Typography>
 
-              <Box sx={{
-                maxHeight: { xs: 180, sm: 240, md: 300, lg: 380 },
-                overflowY: 'auto',
-                pr: 1,
-                // subtle border to indicate scroll region
-                border: '1px solid',
-                borderColor: 'divider',
-                borderRadius: 1,
-                p: 1
-              }}>
-                <Grid container spacing={2}>
-                  {batchHistory.slice(0, 10).map((batch) => (
+              <Grid container spacing={2}>
+                {batchHistory.slice(0, 10).map((batch) => (
                   <Grid item xs={12} sm={6} lg={4} key={batch.batch_id}>
                     <Paper sx={{
                       p: 2,
@@ -2043,7 +1922,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   </Grid>
                 ))}
               </Grid>
-              </Box>
             </CardContent>
           </Card>
         )
@@ -2071,54 +1949,30 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         fullWidth
       >
         <DialogTitle>
-          Preview Generated Prompts ({inputMode === 'single' ? 1 : parseBatchItems().length}{inputMode === 'single' && quantity > 1 ? ` × ${quantity}` : ''})
+          Preview Generated Prompts ({parseBatchItems().length})
         </DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             These are the final prompts that will be sent to the image generator:
           </Typography>
           <Box sx={{ maxHeight: 400, overflow: 'auto' }}>
-            {inputMode === 'single' ? (
-              (() => {
-                const single = (batchItems || '').trim();
-                const items = quantity > 1 ? Array(quantity).fill(single) : [single];
-                return items.map((prompt, index) => (
-                  <Paper
-                    key={index}
-                    variant="outlined"
-                    sx={{
-                      p: 2,
-                      mb: 1,
-                      backgroundColor: 'background.default',
-                      border: '1px solid',
-                      borderColor: 'divider'
-                    }}
-                  >
-                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                      <strong>{index + 1}.</strong> {sanitizeText(prompt)}
-                    </Typography>
-                  </Paper>
-                ));
-              })()
-            ) : (
-              parseBatchItems().map((prompt, index) => (
-                <Paper
-                  key={index}
-                  variant="outlined"
-                  sx={{
-                    p: 2,
-                    mb: 1,
-                    backgroundColor: 'background.default',
-                    border: '1px solid',
-                    borderColor: 'divider'
-                  }}
-                >
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                    <strong>{index + 1}.</strong> {sanitizeText(prompt)}
-                  </Typography>
-                </Paper>
-              ))
-            )}
+            {parseBatchItems().map((prompt, index) => (
+              <Paper
+                key={index}
+                variant="outlined"
+                sx={{
+                  p: 2,
+                  mb: 1,
+                  backgroundColor: 'background.default',
+                  border: '1px solid',
+                  borderColor: 'divider'
+                }}
+              >
+                <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                  <strong>{index + 1}.</strong> {sanitizeText(prompt)}
+                </Typography>
+              </Paper>
+            ))}
           </Box>
         </DialogContent>
         <DialogActions>
