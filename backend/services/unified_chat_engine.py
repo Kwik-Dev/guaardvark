@@ -2283,9 +2283,11 @@ class UnifiedChatEngine:
             logger.info(f"Direct /imagine (or generate_image) will use image model: {m} (respects /imagemodel selection)")
         self._save_message(session_id, "user", user_message)
         emit_fn("chat:tool_call", {"tool": tool_name, "params": params, "iteration": 1})
+        _t0 = time.time()
         try:
             result = self.registry.execute_tool(tool_name, **params)
         except Exception as exc:
+            _dur_ms = int((time.time() - _t0) * 1000)
             text = f"{tool_name} failed: {exc}"
             emit_fn("chat:tool_result", {
                 "tool": tool_name,
@@ -2295,7 +2297,22 @@ class UnifiedChatEngine:
                 "response": text, "iterations": 1, "steps": [],
                 "session_id": session_id, "request_id": request_id,
             })
-            self._save_message(session_id, "assistant", text)
+            # Persist the tool-call step so the "thinking steps" card survives a hard
+            # refresh (the /history endpoint maps extra_data["steps"] → toolCalls +
+            # isUnifiedChat). Without this, a failed direct generate_image/edit_image
+            # card vanishes on reload.
+            _err_steps = [{
+                "iteration": 1,
+                "thoughts": "",
+                "tool_calls": [{
+                    "tool_name": tool_name,
+                    "params": params,
+                    "success": False,
+                    "duration_ms": _dur_ms,
+                    "output_preview": str(exc)[:2000],
+                }],
+            }]
+            self._save_message(session_id, "assistant", text, extra_data={"steps": _err_steps})
             if tool_name == "generate_image" and params.get("prompt"):
                 _SESSION_PENDING_IMAGE_PROMPT[session_id] = params["prompt"]
             if tool_name == "edit_image" and params.get("instruction") and params.get("image"):
@@ -2387,15 +2404,37 @@ class UnifiedChatEngine:
             complete_payload["pending_image_edit"] = _SESSION_PENDING_IMAGE_EDIT[session_id]
 
         emit_fn("chat:complete", complete_payload)
+        _dur_ms = int((time.time() - _t0) * 1000)
         extra_data = {"generatedImages": generated_images} if generated_images else None
+        # Persist the tool-call step (params + result) so the ToolCallCard "thinking
+        # step" survives a hard refresh. The /history endpoint maps extra_data["steps"]
+        # → toolCalls + isUnifiedChat=True, exactly like the main ReACT loop. Without
+        # this the direct fast-path saved only generatedImages, so the params/result
+        # card vanished on reload (live-only). output_preview mirrors the live
+        # chat:tool_result payload ([:2000]) so persisted == live.
+        _direct_step = {
+            "iteration": 1,
+            "thoughts": "",
+            "tool_calls": [{
+                "tool_name": tool_name,
+                "params": params,
+                "success": bool(result.success),
+                "duration_ms": _dur_ms,
+                "output_preview": (
+                    str(result.output)[:2000] if result.success
+                    else (result.error or "")[:2000]
+                ),
+            }],
+        }
+        if extra_data is None:
+            extra_data = {}
+        extra_data["steps"] = [_direct_step]
         # Also drain any agent thinking steps (for full persistence across refreshes)
         # even on direct paths. Matches the main engine save block.
         try:
             from backend.services.agent_control_service import get_agent_control_service
             agent_steps = get_agent_control_service().drain_thinking_steps()
             if agent_steps:
-                if extra_data is None:
-                    extra_data = {}
                 extra_data["agentThinkingSteps"] = agent_steps
         except Exception:
             pass
@@ -2434,6 +2473,7 @@ class UnifiedChatEngine:
 
             # Execute the tool
             emit_fn("chat:tool_call", {"tool": tool_name, "params": params, "iteration": 1})
+            _t0 = time.time()
             try:
                 result = self.registry.execute_tool(tool_name, **params)
             except Exception as e:
@@ -2442,7 +2482,19 @@ class UnifiedChatEngine:
                     "response": result_text, "iterations": 1, "steps": [],
                     "session_id": session_id, "request_id": request_id,
                 })
-                self._save_message(session_id, "assistant", result_text)
+                # Persist the tool-call step so the card survives a hard refresh
+                # (/history maps extra_data["steps"] → toolCalls + isUnifiedChat).
+                self._save_message(session_id, "assistant", result_text, extra_data={"steps": [{
+                    "iteration": 1,
+                    "thoughts": "",
+                    "tool_calls": [{
+                        "tool_name": tool_name,
+                        "params": params,
+                        "success": False,
+                        "duration_ms": int((time.time() - _t0) * 1000),
+                        "output_preview": str(e)[:2000],
+                    }],
+                }]})
                 return {"success": False, "error": str(e), "request_id": request_id}
 
             emit_fn("chat:tool_result", {
@@ -2470,7 +2522,22 @@ class UnifiedChatEngine:
                 "response": response, "iterations": 1, "steps": [],
                 "session_id": session_id, "request_id": request_id,
             })
-            self._save_message(session_id, "assistant", response)
+            # Persist the tool-call step (params + result) so the ToolCallCard survives
+            # a hard refresh — same rationale as _run_direct_tool_execution.
+            self._save_message(session_id, "assistant", response, extra_data={"steps": [{
+                "iteration": 1,
+                "thoughts": "",
+                "tool_calls": [{
+                    "tool_name": tool_name,
+                    "params": params,
+                    "success": bool(result.success),
+                    "duration_ms": int((time.time() - _t0) * 1000),
+                    "output_preview": (
+                        str(result.output)[:2000] if result.success
+                        else (result.error or "")[:2000]
+                    ),
+                }],
+            }]})
             return {
                 "success": True, "response": response, "iterations": 1,
                 "steps": [], "request_id": request_id, "session_id": session_id,
@@ -2532,6 +2599,7 @@ class UnifiedChatEngine:
                                    "params": {"instruction": instruction}, "iteration": 1})
         # VRAM eviction is now owned by edit_image's gpu_session (it evicts Ollama UNDER the
         # held GPU lease, after the refine above), so no separate pre-evict here.
+        _t0 = time.time()
         try:
             edit_params = inject_chat_image_model(
                 "edit_image",
@@ -2543,7 +2611,18 @@ class UnifiedChatEngine:
             text = f"Image edit failed: {e}"
             emit_fn("chat:complete", {"response": text, "iterations": 1, "steps": [],
                                       "session_id": session_id, "request_id": request_id})
-            self._save_message(session_id, "assistant", text)
+            # Persist the tool-call step so the card survives a hard refresh.
+            self._save_message(session_id, "assistant", text, extra_data={"steps": [{
+                "iteration": 1,
+                "thoughts": "",
+                "tool_calls": [{
+                    "tool_name": "edit_image",
+                    "params": {"instruction": instruction},
+                    "success": False,
+                    "duration_ms": int((time.time() - _t0) * 1000),
+                    "output_preview": str(e)[:2000],
+                }],
+            }]})
             return {"success": False, "error": str(e), "request_id": request_id, "session_id": session_id}
         emit_fn("chat:tool_result", {
             "tool": "edit_image",
@@ -2585,12 +2664,28 @@ class UnifiedChatEngine:
             complete_payload["generated_images"] = generated_images
         emit_fn("chat:complete", complete_payload)
         extra_data = {"generatedImages": generated_images} if generated_images else None
+        # Persist the tool-call step (params + result) so the ToolCallCard survives a
+        # hard refresh — /history maps extra_data["steps"] → toolCalls + isUnifiedChat.
+        if extra_data is None:
+            extra_data = {}
+        extra_data["steps"] = [{
+            "iteration": 1,
+            "thoughts": "",
+            "tool_calls": [{
+                "tool_name": "edit_image",
+                "params": {"instruction": instruction},
+                "success": bool(result.success),
+                "duration_ms": int((time.time() - _t0) * 1000),
+                "output_preview": (
+                    str(result.output)[:2000] if result.success
+                    else (result.error or "")[:2000]
+                ),
+            }],
+        }]
         try:
             from backend.services.agent_control_service import get_agent_control_service
             agent_steps = get_agent_control_service().drain_thinking_steps()
             if agent_steps:
-                if extra_data is None:
-                    extra_data = {}
                 extra_data["agentThinkingSteps"] = agent_steps
         except Exception:
             pass
