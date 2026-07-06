@@ -116,14 +116,40 @@ def _verbatim_prompts_enabled() -> bool:
     OFF by default (keeps cinematic enrichment). Sources, in order:
       * env VERBATIM_PROMPTS=1/true/yes/on — restart-proof, wins (good for a live demo), then
       * the runtime SystemSetting 'verbatim_prompts' (toggle in Settings, no restart).
-    Any error → False (enrichment stays on)."""
+    Any error → False (enrichment stays on).
+
+    NOTE: this runs during image/video generation, which the unified chat engine executes
+    in ThreadPoolExecutor worker threads that do NOT inherit the request's Flask app
+    context. A DB read without an app context raises "working outside of application
+    context"; if we let that fall through to the bare except we'd silently return False
+    and IGNORE the Settings toggle (the bug: verbatim ON, prompt still rewritten). So when
+    no context is active we push the app singleton's context for the read — mirroring the
+    pattern unified_chat_engine._save_message uses for the same reason."""
     import os
     if os.environ.get("VERBATIM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on"):
         return True
     try:
+        from flask import has_app_context
         from backend.models import SystemSetting, db
-        row = db.session.query(SystemSetting).filter_by(key="verbatim_prompts").first()
-        return bool(row and str(row.value).lower() == "true")
+
+        def _read() -> bool:
+            row = db.session.query(SystemSetting).filter_by(key="verbatim_prompts").first()
+            return bool(row and str(row.value).lower() == "true")
+
+        if has_app_context():
+            return _read()
+
+        # No active app context (chat tool worker thread / Celery task) — push the
+        # app singleton's context so the DB-backed toggle is actually honored instead
+        # of silently defaulting to OFF.
+        try:
+            from backend.app import app as _flask_app
+        except Exception:
+            _flask_app = None
+        if _flask_app is not None:
+            with _flask_app.app_context():
+                return _read()
+        return False
     except Exception:
         return False
 
