@@ -701,6 +701,7 @@ User Context: {str(context)}"""
                 "type": "agent_result",
                 "agent_used": agent.id,
                 "final_answer": result.final_answer,
+                "error": result.error,
                 "steps": [
                     {
                         "iteration": s.iteration,
@@ -748,6 +749,7 @@ User Context: {str(context)}"""
             return {
                 "type": "agent_result",
                 "final_answer": result.final_answer,
+                "error": result.error,
                 "steps": [
                     {
                         "iteration": s.iteration,

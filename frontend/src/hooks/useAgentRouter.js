@@ -6,6 +6,7 @@
 
 import { useState, useCallback } from "react";
 import { routeMessage, routeAndExecute } from "../api/toolsService";
+import { useAppStore } from "../stores/useAppStore";
 
 /**
  * Route types from the backend
@@ -126,6 +127,38 @@ export function useAgentRouter() {
   }, []);
 
   /**
+   * Legacy /tools/route-and-execute agent loops for browser/desktop automation
+   * use AgentExecutor + browser_* tools — NOT the virtual-screen ACS loop.
+   * Those must go through unified chat (Gemma4 direct when screen is active).
+   */
+  const isScreenAutomationRoute = useCallback((routeDecision) => {
+    if (!routeDecision) return false;
+    const reasoning = (routeDecision.reasoning || "").toLowerCase();
+    return (
+      reasoning.includes("browser_automation") ||
+      reasoning.includes("desktop_automation")
+    );
+  }, []);
+
+  /**
+   * Whether this route should use the legacy /tools/route-and-execute path.
+   * Screen automation and agent-screen sessions need unified chat instead.
+   */
+  const shouldUseLegacyAgentLoop = useCallback((routeDecision, sessionId) => {
+    if (!routeDecision || routeDecision.route_type !== RouteType.AGENT_LOOP) {
+      return false;
+    }
+    const store = useAppStore.getState();
+    const inAgentScreenContext =
+      store.getSessionMode?.(sessionId) === "agent" ||
+      store.agentScreenOpen === true;
+    if (inAgentScreenContext || isScreenAutomationRoute(routeDecision)) {
+      return false;
+    }
+    return true;
+  }, [isScreenAutomationRoute]);
+
+  /**
    * Check if a route decision is high confidence
    * @param {Object} routeDecision - Route decision from backend
    * @param {number} threshold - Confidence threshold (default 0.7)
@@ -187,6 +220,8 @@ export function useAgentRouter() {
     isFileGenerationRoute,
     isToolRoute,
     isAgentLoopRoute,
+    isScreenAutomationRoute,
+    shouldUseLegacyAgentLoop,
     isHighConfidence,
     toDetectionFormat,
     RouteType,

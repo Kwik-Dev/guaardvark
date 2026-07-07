@@ -548,6 +548,15 @@ const ChatPage = () => {
       if (routeDecision && agentRouter.isHighConfidence(routeDecision, 0.6)) {
 
         if (agentRouter.isAgentLoopRoute(routeDecision)) {
+          // Screen/desktop automation and agent-screen sessions must use unified
+          // chat (Gemma4 direct → ACS), not legacy route-and-execute.
+          if (!agentRouter.shouldUseLegacyAgentLoop(routeDecision, sessionId)) {
+            debugLog(
+              "[ChatPage] Agent loop route deferred to unified chat:",
+              routeDecision.reasoning,
+            );
+            return null;
+          }
           return {
             isAgentLoopRequest: true,
             isCSVRequest: false,
@@ -1337,7 +1346,17 @@ const ChatPage = () => {
             ? result.result
             : result?.result || result;
 
-          let content = agentResult?.final_answer || result?.error || "Agent execution completed";
+          let content =
+            agentResult?.final_answer ||
+            agentResult?.error ||
+            result?.error;
+          if (!content) {
+            if (agentResult?.success === false) {
+              content = "Agent execution failed (no response from the model).";
+            } else {
+              content = "Agent execution completed with no response.";
+            }
+          }
           const screenshotUrls = agentResult?.screenshot_urls || [];
           for (const url of screenshotUrls) {
             content += `\n\n![Screenshot](${url})`;

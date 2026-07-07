@@ -512,10 +512,13 @@ def route_and_execute():
 
         # Propagate error status from agent/tool execution
         is_error = result.get("type") == "error"
+        if not is_error and result.get("type") == "agent_result" and result.get("success") is False:
+            is_error = True
+        agent_error = result.get("error") if result.get("type") == "agent_result" else None
         return jsonify({
             "success": not is_error,
             "result": result,
-            **({"error": result.get("error")} if is_error else {})
+            **({"error": result.get("error") or agent_error} if is_error else {})
         }), 500 if is_error else 200
 
     except Exception as e:
