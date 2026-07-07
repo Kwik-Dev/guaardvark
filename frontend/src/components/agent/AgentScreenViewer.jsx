@@ -20,6 +20,11 @@ import KeyboardIcon from '@mui/icons-material/Keyboard';
 import KeyboardOutlinedIcon from '@mui/icons-material/KeyboardOutlined';
 import axios from 'axios';
 import { useAppStore } from '../../stores/useAppStore';
+import {
+  startDisplay,
+  armDisplayIdle,
+  cancelDisplayIdle,
+} from '../../api/agentDisplayService';
 
 const API_BASE = '/api';
 const STORAGE_KEY = 'guaardvark_agent_screen_state';
@@ -108,6 +113,8 @@ export default function AgentScreenViewer({ open, onClose }) {
   const toggleKbdForwarding = useAppStore((s) => s.toggleKeyboardForwarding);
 
   const [captureError, setCaptureError] = useState(null);
+  const [displayStarting, setDisplayStarting] = useState(false);
+  const [displayReady, setDisplayReady] = useState(false);
   const consecutiveFailures = useRef(0);
 
   const captureFrame = useCallback(async () => {
@@ -115,7 +122,7 @@ export default function AgentScreenViewer({ open, onClose }) {
       const response = await fetch(`${API_BASE}/agent-control/capture/raw`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ quality: 60 }),
+        body: JSON.stringify({ quality: 60, auto_start: true }),
       });
       if (response.ok) {
         const blob = await response.blob();
@@ -145,15 +152,52 @@ export default function AgentScreenViewer({ open, onClose }) {
     }
   }, []);
 
+  // Start display on open; arm idle shutdown on close.
   useEffect(() => {
-    if (open && streaming && !collapsed && !popupWindow) {
+    if (!open) {
+      setDisplayReady(false);
+      setDisplayStarting(false);
+      armDisplayIdle().catch(() => {});
+      return undefined;
+    }
+
+    let cancelled = false;
+    cancelDisplayIdle().catch(() => {});
+    setDisplayStarting(true);
+    setDisplayReady(false);
+    setCaptureError(null);
+
+    startDisplay()
+      .then((result) => {
+        if (cancelled) return;
+        if (result?.success || result?.display_running) {
+          setDisplayReady(true);
+          setCaptureError(null);
+        } else {
+          setCaptureError(result?.error || 'Failed to start agent display');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setCaptureError('Failed to start agent display');
+      })
+      .finally(() => {
+        if (!cancelled) setDisplayStarting(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open && displayReady && streaming && !collapsed && !popupWindow) {
       captureFrame();
       intervalRef.current = setInterval(captureFrame, 1000 / fps);
       return () => clearInterval(intervalRef.current);
-    } else {
-      if (intervalRef.current) clearInterval(intervalRef.current);
     }
-  }, [open, streaming, collapsed, fps, captureFrame, popupWindow]);
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    return undefined;
+  }, [open, displayReady, streaming, collapsed, fps, captureFrame, popupWindow]);
 
   useEffect(() => {
     return () => {
@@ -252,7 +296,6 @@ export default function AgentScreenViewer({ open, onClose }) {
     const scaleY = 1000 / rect.height;
     const x = Math.round((e.clientX - rect.left) * scaleX);
     const y = Math.round((e.clientY - rect.top) * scaleY);
-    // Clamp to display bounds
     const cx = Math.max(0, Math.min(1000, x));
     const cy = Math.max(0, Math.min(1000, y));
     axios.post(`${API_BASE}/agent-control/learn/input`, {
@@ -275,7 +318,7 @@ export default function AgentScreenViewer({ open, onClose }) {
       try {
         const res = await fetch(`${API_BASE}/agent-control/capture/raw`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ quality: 70 }),
+          body: JSON.stringify({ quality: 70, auto_start: true }),
         });
         if (res.ok) { const blob = await res.blob(); const url = URL.createObjectURL(blob); if (img.src) URL.revokeObjectURL(img.src); img.src = url; }
       } catch {
@@ -389,7 +432,9 @@ export default function AgentScreenViewer({ open, onClose }) {
                 }}
               />
             ) : (
-              <Typography variant="caption" color={captureError ? 'error.main' : 'grey.600'}>{captureError || (streaming ? 'Connecting...' : 'Paused')}</Typography>
+              <Typography variant="caption" color={captureError ? 'error.main' : 'grey.600'}>
+                {captureError || (displayStarting ? 'Starting agent display…' : streaming ? 'Connecting...' : 'Paused')}
+              </Typography>
             )}
           </Box>
 

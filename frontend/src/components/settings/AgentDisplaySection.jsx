@@ -132,7 +132,7 @@ const AgentDisplaySection = ({ showMessage }) => {
     setControlAction('stop');
     showMessage?.('Stopping agent display…', 'info');
     try {
-      const result = await stopDisplay();
+      const result = await stopDisplay({ force: true });
       if (result.success) {
         showMessage?.('Agent display stopped.', 'success');
       } else {
@@ -150,7 +150,7 @@ const AgentDisplaySection = ({ showMessage }) => {
     setControlAction('restart');
     showMessage?.('Restarting agent display…', 'info');
     try {
-      await stopDisplay().catch(() => {}); // tolerate stop failures (might already be down)
+      await stopDisplay({ force: true }).catch(() => {}); // tolerate stop failures (might already be down)
       const startResult = await startDisplay();
       if (startResult.success) {
         showMessage?.('Agent display restarted.', 'success');

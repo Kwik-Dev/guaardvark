@@ -77,7 +77,11 @@ import VoiceSettingsModal from "../components/modals/VoiceSettingsModal";
 import SettingsRow from "../components/settings/SettingsRow";
 import SettingsCardWrapper from "../components/settings/SettingsCardWrapper";
 import { SOCKET_URL } from "../api/apiClient";
+import { SUPPORT_LINKS } from "../config/constants";
 import SchoolIcon from "@mui/icons-material/School";
+import CoffeeIcon from "@mui/icons-material/Coffee";
+import StarIcon from "@mui/icons-material/Star";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import { useNavigate } from "react-router-dom";
 import {
   getBranding,
@@ -3353,6 +3357,66 @@ const SettingsPage = () => {
                 Record demonstrations on the virtual display, then watch the agent learn to replicate them with graduated autonomy.
               </Typography>
             </SettingsRow>
+          </SettingsCardWrapper>
+
+          {/* Support / Donate + GitHub links */}
+          <SettingsCardWrapper title="Support the Project" icon={<CoffeeIcon sx={{ fontSize: 18 }} />}>
+            <Typography variant="body2" sx={{ mb: 1, color: "text.secondary" }}>
+              Guaardvark is built with love by a solo developer. If it's useful to you:
+            </Typography>
+            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<StarIcon sx={{ fontSize: 14 }} />}
+                onClick={() => window.open(SUPPORT_LINKS.githubRepo, "_blank", "noopener,noreferrer")}
+                sx={{ fontSize: "0.75rem", textTransform: "none" }}
+              >
+                Star on GitHub
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<OpenInNewIcon sx={{ fontSize: 14 }} />}
+                onClick={() => window.open(SUPPORT_LINKS.githubRepo, "_blank", "noopener,noreferrer")}
+                sx={{ fontSize: "0.75rem", textTransform: "none" }}
+              >
+                Repo
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => window.open(SUPPORT_LINKS.githubSponsors, "_blank", "noopener,noreferrer")}
+                sx={{ fontSize: "0.75rem", textTransform: "none" }}
+              >
+                GitHub Sponsors
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<CoffeeIcon sx={{ fontSize: 14 }} />}
+                onClick={() => window.open(SUPPORT_LINKS.buyMeACoffee, "_blank", "noopener,noreferrer")}
+                sx={{ fontSize: "0.75rem", textTransform: "none" }}
+              >
+                Buy Me a Coffee
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => window.open(SUPPORT_LINKS.koFi, "_blank", "noopener,noreferrer")}
+                sx={{ fontSize: "0.75rem", textTransform: "none" }}
+              >
+                Ko-fi
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => window.open(SUPPORT_LINKS.paypal, "_blank", "noopener,noreferrer")}
+                sx={{ fontSize: "0.75rem", textTransform: "none" }}
+              >
+                PayPal
+              </Button>
+            </Box>
           </SettingsCardWrapper>
         </Box>
       </Box>

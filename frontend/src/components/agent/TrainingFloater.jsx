@@ -29,6 +29,11 @@ import axios from 'axios';
 import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../../stores/useAppStore';
+import {
+  startDisplay,
+  armDisplayIdle,
+  cancelDisplayIdle,
+} from '../../api/agentDisplayService';
 
 const API_BASE = '/api/agent-control/learn';
 const STORAGE_KEY = 'guaardvark_training_floater_state';
@@ -101,6 +106,17 @@ export default function TrainingFloater({ open, onClose, _onNavigateAway }) {
   useEffect(() => {
     saveState({ collapsed, x: position.x, y: position.y, w: size.w, h: size.h });
   }, [collapsed, position, size]);
+
+  // Start display on open; arm idle shutdown on close.
+  useEffect(() => {
+    if (!open) {
+      armDisplayIdle().catch(() => {});
+      return undefined;
+    }
+    cancelDisplayIdle().catch(() => {});
+    startDisplay().catch(() => {});
+    return undefined;
+  }, [open]);
 
   // --- Drag handlers ---
   const handleHeaderMouseDown = useCallback((e) => {

@@ -500,6 +500,28 @@ def recall_debug():
 # filtering, or de-dup behaviour land in exactly one place.
 
 
+def _app_context():
+    """Context manager guaranteeing a Flask app context for db.session.
+
+    The recall helpers are called from background threads (agent loop,
+    agent_brain narration, social outreach) that never push a request
+    context — without one, every db.session query raises "Working outside
+    of application context" and the agent silently loses all lessons and
+    belief updates. Same defensive pattern as agent_control_service's
+    belief writer; stacking inside a live context is harmless.
+
+    Must wrap the *formatting* too, not just the SELECT: the access-count
+    commit expires ORM attributes, so reading row.content after the context
+    pops would raise DetachedInstanceError.
+    """
+    from flask import has_app_context
+    from contextlib import nullcontext
+    if has_app_context():
+        return nullcontext()
+    from backend.app import app as _flask_app
+    return _flask_app.app_context()
+
+
 def _query_memories(
     sources=None,
     types=None,
@@ -687,6 +709,29 @@ def get_memories_for_context(
 
     Returns a formatted string, or empty string if no memories exist.
     """
+    with _app_context():
+        return _get_memories_for_context_inner(
+            limit=limit,
+            max_tokens=max_tokens,
+            query=query,
+            session_id=session_id,
+            project_id=project_id,
+            user_id=user_id,
+            workspace_root=workspace_root,
+            cli_working_memory=cli_working_memory,
+        )
+
+
+def _get_memories_for_context_inner(
+    limit: int = 20,
+    max_tokens: int = 500,
+    query: str = None,
+    session_id: str = None,
+    project_id=None,
+    user_id: str = None,
+    workspace_root: str = None,
+    cli_working_memory: dict | None = None,
+) -> str:
     memories = _query_memories(
         limit=limit,
         query=query,
@@ -843,6 +888,27 @@ def get_lessons_for_agent_prompt(
     Returns the full block including its section header, or empty string when
     there are no rows to show.
     """
+    with _app_context():
+        return _get_lessons_for_agent_prompt_inner(
+            max_rows=max_rows,
+            max_chars=max_chars,
+            include_belief_updates=include_belief_updates,
+            belief_limit=belief_limit,
+            session_id=session_id,
+            project_id=project_id,
+            workspace_root=workspace_root,
+        )
+
+
+def _get_lessons_for_agent_prompt_inner(
+    max_rows: int = 6,
+    max_chars: int = 2500,
+    include_belief_updates: bool = True,
+    belief_limit: int = 4,
+    session_id: str = None,
+    project_id=None,
+    workspace_root: str = None,
+) -> str:
     lesson_rows = _query_memories(
         sources=["lesson_summary", "manual"],
         limit=max_rows,

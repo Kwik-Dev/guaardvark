@@ -74,6 +74,7 @@ def _submit_post_via_servo(subreddit: str, title: str, link_url: str) -> tuple[b
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
+    from backend.utils.agent_display_utils import start_agent_display_if_needed
 
     submit_url = f"https://www.reddit.com/r/{subreddit}/submit"
 
@@ -81,8 +82,10 @@ def _submit_post_via_servo(subreddit: str, title: str, link_url: str) -> tuple[b
     if service.is_active:
         return False, "agent_busy"
 
-    # Display guard — same reason as reddit_outreach.post_comment_via_servo:
-    # without it, a missing Xvfb makes the Celery task retry forever.
+    if not start_agent_display_if_needed():
+        logger.warning("display not available for self_share: start failed")
+        return False, "display_unavailable"
+
     try:
         screen = LocalScreenBackend()
     except Exception as e:

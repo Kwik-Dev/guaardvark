@@ -418,6 +418,7 @@ def post_comment_via_servo(permalink: str, comment_text: str) -> tuple[bool, str
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
+    from backend.utils.agent_display_utils import start_agent_display_if_needed
 
     # www.reddit.com — modern UI; vision model finds the comment box visually.
     target_url = permalink if permalink.startswith("https://www.reddit.com") else permalink.replace("https://reddit.com", "https://www.reddit.com").replace("https://old.reddit.com", "https://www.reddit.com")
@@ -426,10 +427,10 @@ def post_comment_via_servo(permalink: str, comment_text: str) -> tuple[bool, str
     if service.is_active:
         return False, "agent_busy"
 
-    # The agent display (Xvfb on :99) might not be running — happens during
-    # CI, headless deploys, or right after a host reboot if start.sh hasn't
-    # finished the display step yet. Without this guard, mss / xdotool throw
-    # at construction time and the Celery task gets retried forever.
+    if not start_agent_display_if_needed():
+        logger.warning("display not available for outreach: start failed")
+        return False, "display_unavailable"
+
     try:
         screen = LocalScreenBackend()
     except Exception as e:

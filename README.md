@@ -465,7 +465,7 @@ Service Layer (many modules; plugin sidecars for heavy GPU work)
     |
 +---+---+---+---+---+
 v   v   v   v   v   v
-PostgreSQL  Redis  Ollama  Agent Display (:99 + XFCE + x11vnc)  ComfyUI / Audio Foundry (plugins)
+PostgreSQL  Redis  Ollama  Agent Display (:99, on-demand)  ComfyUI / Audio Foundry (plugins)
             Celery
 ```
 

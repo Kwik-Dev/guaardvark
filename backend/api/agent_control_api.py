@@ -1154,9 +1154,16 @@ def capture_raw():
 
     try:
         from backend.services.local_screen_backend import LocalScreenBackend
+        from backend.utils.agent_display_utils import start_agent_display_if_needed
         from io import BytesIO
 
         data = request.get_json() or {}
+        if data.get("auto_start") and not _probe_display_socket(99):
+            if not start_agent_display_if_needed():
+                _capture_error_cache["error"] = "Agent display not running"
+                _capture_error_cache["expires"] = now + 5
+                return jsonify({"success": False, "error": "Agent display not running"}), 503
+
         try:
             quality = int(data.get("quality", 70))
         except (TypeError, ValueError):
@@ -1422,8 +1429,8 @@ def _probe_command_version(cmd: str) -> str | None:
 
 def _probe_display_socket(display_num: int = 99) -> bool:
     """True if /tmp/.X11-unix/X<n> exists — the cheap way to know Xvfb is up."""
-    import os
-    return os.path.exists(f"/tmp/.X11-unix/X{display_num}")
+    from backend.utils.agent_display_utils import probe_display_socket
+    return probe_display_socket(display_num)
 
 
 @agent_control_bp.route("/display-status", methods=["GET"])
@@ -1651,36 +1658,8 @@ def _run_display_script(action: str, timeout: int = 60) -> dict:
     structured result. Used by both start-display and stop-display so the
     error shape stays consistent.
     """
-    import os
-    import subprocess
-    from backend.config import GUAARDVARK_ROOT
-
-    script = os.path.join(GUAARDVARK_ROOT, "scripts", "start_agent_display.sh")
-    if not os.path.exists(script):
-        return {
-            "success": False,
-            "error": f"start_agent_display.sh missing at {script} — re-pull the repo",
-            "returncode": -1,
-        }
-
-    try:
-        result = subprocess.run(
-            ["bash", script, action],
-            capture_output=True, text=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "error": f"{action} timed out after {timeout}s",
-            "returncode": -1,
-        }
-
-    return {
-        "success": result.returncode == 0,
-        "returncode": result.returncode,
-        "stdout_tail": (result.stdout or "")[-500:],
-        "stderr_tail": (result.stderr or "")[-500:],
-    }
+    from backend.utils.agent_display_utils import run_display_script
+    return run_display_script(action, timeout=timeout)
 
 
 @agent_control_bp.route("/start-display", methods=["POST"])
@@ -1691,18 +1670,16 @@ def start_display():
     Returns 200 on success with a `display_running` flag, 500 on script
     failure with stderr_tail for debugging.
     """
-    result = _run_display_script("start", timeout=60)
-    # Probe the live socket regardless of script returncode — sometimes
-    # the script reports stale errors but :99 is up. Truth lives in /tmp.
-    result["display_running"] = _probe_display_socket(99)
+    from backend.utils.agent_display_utils import start_agent_display_if_needed
 
-    if result["success"] or result["display_running"]:
+    running = start_agent_display_if_needed()
+    if running:
         return jsonify({
             "success": True,
-            "display_running": result["display_running"],
+            "display_running": True,
             "message": "Agent display is up on :99.",
-            "stdout_tail": result.get("stdout_tail", ""),
         })
+    result = _run_display_script("start", timeout=60)
     return jsonify({
         "success": False,
         "error": f"start_agent_display.sh start failed (exit {result.get('returncode')})",
@@ -1716,21 +1693,62 @@ def stop_display():
     """Tear the agent display down. Idempotent — stop is a no-op if
     nothing's running.
     """
-    result = _run_display_script("stop", timeout=30)
-    result["display_running"] = _probe_display_socket(99)
+    from backend.utils.agent_display_utils import stop_agent_display
 
-    # We trust the post-stop socket probe: if the socket is gone, it's
-    # stopped, regardless of what the script's returncode said.
-    if not result["display_running"]:
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get("force", False))
+    result = stop_agent_display(force=force)
+
+    if result.get("blocked"):
+        return jsonify({
+            "success": False,
+            "blocked": True,
+            "error": result.get("error"),
+            "display_running": result.get("display_running", True),
+        }), 409
+
+    if not result.get("display_running", True):
         return jsonify({
             "success": True,
             "display_running": False,
             "message": "Agent display stopped.",
             "stdout_tail": result.get("stdout_tail", ""),
         })
+
     return jsonify({
         "success": False,
         "error": "Stop ran but :99 socket is still alive — something is keeping it up",
         "stderr_tail": result.get("stderr_tail", ""),
         "stdout_tail": result.get("stdout_tail", ""),
     }), 500
+
+
+@agent_control_bp.route("/display-idle-arm", methods=["POST"])
+def display_idle_arm():
+    """Arm idle shutdown after the viewer/training UI closes (default 5 min)."""
+    from backend.utils.agent_display_utils import (
+        DEFAULT_IDLE_SHUTDOWN_SECONDS,
+        arm_display_idle_shutdown,
+        get_idle_shutdown_deadline,
+    )
+
+    data = request.get_json(silent=True) or {}
+    seconds = int(data.get("seconds", DEFAULT_IDLE_SHUTDOWN_SECONDS))
+    seconds = max(60, min(3600, seconds))
+    deadline = arm_display_idle_shutdown(seconds=seconds)
+    return jsonify({
+        "success": True,
+        "armed": True,
+        "seconds": seconds,
+        "deadline": deadline,
+        "idle_deadline": get_idle_shutdown_deadline(),
+    })
+
+
+@agent_control_bp.route("/display-idle-disarm", methods=["POST"])
+def display_idle_disarm():
+    """Cancel a pending idle shutdown (viewer/training reopened)."""
+    from backend.utils.agent_display_utils import cancel_display_idle_shutdown
+
+    cancel_display_idle_shutdown()
+    return jsonify({"success": True, "armed": False})

@@ -26,12 +26,37 @@ export async function startDisplay() {
   return handleResponse(response);
 }
 
-export async function stopDisplay() {
+export async function stopDisplay({ force = false } = {}) {
   const response = await fetch(`${ROOT}/stop-display`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force }),
+  });
+  return handleResponse(response);
+}
+
+export async function armDisplayIdle(seconds = 300) {
+  const response = await fetch(`${ROOT}/display-idle-arm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seconds }),
+  });
+  return handleResponse(response);
+}
+
+export async function cancelDisplayIdle() {
+  const response = await fetch(`${ROOT}/display-idle-disarm`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
   });
   return handleResponse(response);
 }
 
-export default { getDisplayStatus, installDisplay, startDisplay, stopDisplay };
+export default {
+  getDisplayStatus,
+  installDisplay,
+  startDisplay,
+  stopDisplay,
+  armDisplayIdle,
+  cancelDisplayIdle,
+};

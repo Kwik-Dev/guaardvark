@@ -507,6 +507,9 @@ class ServoController:
         # --- PASS 1: ANCHOR PASS ---
         # Get the macro-region (bounding box) on the full screen.
         # Asking explicitly for 'box_2d' normalized to 1000.
+        # Reset raw-response telemetry so a failed run doesn't inherit the
+        # previous target's model output in the servo log.
+        self._last_raw_response = ""
         prompt_pass1 = (
             f"Detect the {target}. Reply with ONLY a JSON list "
             f'[{{"box_2d": [y1, x1, y2, x2], "label": "{target}"}}] '
@@ -524,6 +527,12 @@ class ServoController:
             logger.error(f"Anchor pass failed: {result1.error}")
             self._last_failure_reason = "vision_call_failed"
             return None
+
+        # Record the anchor response verbatim — the servo log's raw_response
+        # field was always empty on the vision path, which made aim drift
+        # (e.g. clicks pulled toward screen center) impossible to attribute
+        # to model output vs. parsing vs. coordinate translation.
+        self._last_raw_response = f"anchor: {result1.description}"
 
         # Parse Anchor (accepts point or box, but box is better for ROI)
         anchor_coords = self._parse_detection_response(result1.description)
@@ -565,6 +574,11 @@ class ServoController:
         )
         
         if result2.success and result2.description:
+            self._last_raw_response = (
+                f"anchor: {result1.description} | "
+                f"crop: ({left},{top})-({right},{bottom}) | "
+                f"refine: {result2.description}"
+            )
             refinement = self._parse_detection_response(result2.description)
             if refinement:
                 lx, ly = refinement

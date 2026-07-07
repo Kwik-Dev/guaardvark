@@ -129,9 +129,17 @@ class BrowserNavigateTool(BaseTool):
         import time
 
         from backend.utils.agent_display_utils import (
-            is_firefox_on_agent_display, wait_for_firefox_on_display
+            is_firefox_on_agent_display,
+            start_agent_display_if_needed,
+            wait_for_firefox_on_display,
         )
         from backend.services.local_screen_backend import LocalScreenBackend
+
+        if not start_agent_display_if_needed():
+            return ToolResult(
+                success=False,
+                error="Agent display not running — open Agent Screen to start it",
+            )
 
         screen = LocalScreenBackend()
 

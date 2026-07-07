@@ -794,7 +794,7 @@ First run:
 7. Builds frontend
 8. Starts Flask, Celery workers, and Vite dev server
 9. Runs health checks
-10. Auto-starts the agent's virtual display (`:99`) with XFCE if `xfce4` is installed
+10. Agent virtual display (`:99`) starts **on demand** when you open Agent Screen or when agent tools need it — not at boot (5-minute idle shutdown after the viewer closes)
 
 ### Subsequent Runs
 ```bash

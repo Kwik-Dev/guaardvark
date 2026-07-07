@@ -2348,8 +2348,9 @@ start_plugin() {
     fi
 }
 
-# Always start the agent virtual display — it's a core feature, not plugin-dependent
-ensure_agent_display
+# Agent virtual display (:99 + x11vnc) starts on demand — when the user opens
+# Agent Screen in the UI, when agent tools need it, or when a display-dependent
+# plugin (vision_pipeline) is started. Not started at boot to save RAM/VNC cost.
 
 PLUGINS_STARTED=0
 

@@ -5,11 +5,13 @@
 <title>Guaardvark Vision Trainer</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
+  html, body {
     font-family: Arial, sans-serif;
     background: #f0f0f0;
-    width: 1280px;
-    height: 720px;
+    width: 1000px;
+    height: 1000px;
+    max-width: 1000px;
+    max-height: 1000px;
     overflow: hidden;
     position: relative;
   }
@@ -24,7 +26,6 @@
   }
   .score { color: #4caf50; font-weight: bold; }
   .misses { color: #f44336; font-weight: bold; }
-  .failed { color: #ff9800; font-weight: bold; }
 
   .target {
     position: absolute;
@@ -41,10 +42,6 @@
     background: #4caf50 !important;
     animation: pulse 0.3s ease-out;
   }
-  .target.miss {
-    background: #f44336 !important;
-    animation: pulse 0.3s ease-out;
-  }
 
   .click-marker {
     position: absolute;
@@ -52,10 +49,7 @@
     height: 16px;
     pointer-events: none;
     z-index: 9999;
-    opacity: 1;
-    transition: opacity 3s ease-out;
   }
-  .click-marker.fading { opacity: 0; }
   .click-marker::before, .click-marker::after {
     content: '';
     position: absolute;
@@ -79,6 +73,14 @@
     0% { box-shadow: 0 0 0 0 rgba(76,175,80,0.7); }
     100% { box-shadow: 0 0 0 20px rgba(76,175,80,0); }
   }
+
+  #arena {
+    position: relative;
+    width: 100%;
+    height: calc(1000px - 28px);
+    max-height: calc(1000px - 28px);
+    overflow: hidden;
+  }
 </style>
 </head>
 <body>
@@ -86,26 +88,35 @@
 <div id="header">
   <span>Vision Trainer</span>
   <span>
-    Hits: <span class="score" id="hits">0</span> |
+    Click: <span class="score" id="clicks">0</span> |
     Miss: <span class="misses" id="misses">0</span> |
-    Failed: <span class="failed" id="failed">0</span> |
     Accuracy: <span id="accuracy">0%</span>
   </span>
 </div>
 
-<div id="arena" style="position:relative;width:100%;height:calc(100% - 28px)"></div>
+<div id="arena"></div>
 
 <script>
-  var hits = 0, misses = 0, failed = 0;
-  var targetMisses = 0;
+  // Agent virtual display is 1000×1000 (Xvfb default; Gemma4 box_2d grid).
+  var ARENA_PAD = 40;
+
+  var clicks = 0, misses = 0;
   var lastX = -999, lastY = -999;
+  var arena = document.getElementById('arena');
+
+  function arenaPoint(e) {
+    var rect = arena.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  }
 
   function stats() {
-    document.getElementById('hits').textContent = hits;
+    document.getElementById('clicks').textContent = clicks;
     document.getElementById('misses').textContent = misses;
-    document.getElementById('failed').textContent = failed;
-    var t = hits + misses;
-    document.getElementById('accuracy').textContent = t > 0 ? Math.round(hits / t * 100) + '%' : '0%';
+    var t = clicks + misses;
+    document.getElementById('accuracy').textContent = t > 0 ? Math.round(clicks / t * 100) + '%' : '0%';
   }
 
   function marker(x, y, hit) {
@@ -113,22 +124,25 @@
     m.className = 'click-marker' + (hit ? ' was-hit' : '');
     m.style.left = (x - 8) + 'px';
     m.style.top = (y - 8) + 'px';
-    document.getElementById('arena').appendChild(m);
-    setTimeout(function() { m.classList.add('fading'); }, 4000);
-    setTimeout(function() { if (m.parentNode) m.remove(); }, 6000);
+    arena.appendChild(m);
   }
 
   function spawn() {
-    var arena = document.getElementById('arena');
-    targetMisses = 0;
     var size = 70 + Math.random() * 30;
     var colors = ['#f44336','#e91e63','#9c27b0','#673ab7','#3f51b5','#2196f3','#00bcd4','#009688','#4caf50','#ff9800'];
     var color = colors[Math.floor(Math.random() * colors.length)];
 
+    var arenaW = arena.clientWidth;
+    var arenaH = arena.clientHeight;
+    var minX = ARENA_PAD;
+    var minY = ARENA_PAD;
+    var maxX = Math.max(minX, arenaW - size - ARENA_PAD);
+    var maxY = Math.max(minY, arenaH - size - ARENA_PAD);
+
     var x, y, tries = 0;
     do {
-      x = 80 + Math.random() * (1100 - size);
-      y = 40 + Math.random() * (580 - size);
+      x = minX + Math.random() * (maxX - minX);
+      y = minY + Math.random() * (maxY - minY);
       tries++;
     } while (tries < 30 && Math.sqrt(Math.pow(x + size/2 - lastX, 2) + Math.pow(y + size/2 - lastY, 2)) < 250);
     lastX = Math.round(x + size/2);
@@ -140,31 +154,25 @@
     dot.textContent = Math.floor(Math.random() * 9) + 1;
 
     dot.addEventListener('click', function(e) {
-      hits++;
+      e.stopPropagation();
+      clicks++;
       dot.classList.add('hit');
-      marker(e.clientX, e.clientY - 28, true);
+      var p = arenaPoint(e);
+      marker(p.x, p.y, true);
       stats();
-      setTimeout(function() { if (dot.parentNode) dot.remove(); setTimeout(spawn, 1000); }, 300);
+      dot.remove();
+      spawn();
     });
 
     arena.appendChild(dot);
   }
 
-  document.getElementById('arena').addEventListener('click', function(e) {
+  arena.addEventListener('click', function(e) {
     if (e.target === this) {
       misses++;
-      targetMisses++;
-      marker(e.clientX, e.clientY - 28, false);
+      var p = arenaPoint(e);
+      marker(p.x, p.y, false);
       stats();
-      if (targetMisses >= 3) {
-        failed++;
-        var dot = this.querySelector('.target');
-        if (dot) {
-          dot.classList.add('miss');
-          setTimeout(function() { if (dot.parentNode) dot.remove(); setTimeout(spawn, 1000); }, 300);
-        }
-        stats();
-      }
     }
   });
 

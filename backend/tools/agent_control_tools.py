@@ -37,7 +37,13 @@ def _prune_old_screenshots(directory: str, max_keep: int = MAX_SCREENSHOTS):
 
 
 def _ensure_agent_display():
-    """Set DISPLAY to the agent's virtual display for pyautogui/mss operations."""
+    """Start the virtual display if needed and set DISPLAY for mss/xdotool."""
+    from backend.utils.agent_display_utils import start_agent_display_if_needed
+    if not start_agent_display_if_needed():
+        raise RuntimeError(
+            "Agent virtual display is not running. Open Agent Screen in the sidebar "
+            "or run: bash scripts/start_agent_display.sh start"
+        )
     os.environ["DISPLAY"] = AGENT_DISPLAY
 
 

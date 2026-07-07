@@ -129,6 +129,7 @@ def post_youtube_comment_via_servo(
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
+    from backend.utils.agent_display_utils import start_agent_display_if_needed
 
     normalized = _normalize_youtube_url(target_url)
     if not normalized:
@@ -138,6 +139,9 @@ def post_youtube_comment_via_servo(
     service = get_agent_control_service()
     if service.is_active:
         return False, "agent_busy"
+    if not start_agent_display_if_needed():
+        logger.warning("display not available for outreach: start failed")
+        return False, "display_unavailable"
     try:
         screen = LocalScreenBackend()
     except Exception as e:
@@ -222,6 +226,7 @@ def post_youtube_reply_via_servo(
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
+    from backend.utils.agent_display_utils import start_agent_display_if_needed
 
     normalized = _normalize_youtube_url(target_url)
     if not normalized:
@@ -235,6 +240,9 @@ def post_youtube_reply_via_servo(
     service = get_agent_control_service()
     if service.is_active:
         return False, "agent_busy"
+    if not start_agent_display_if_needed():
+        logger.warning("display not available for outreach: start failed")
+        return False, "display_unavailable"
     try:
         screen = LocalScreenBackend()
     except Exception as e:

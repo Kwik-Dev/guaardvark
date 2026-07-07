@@ -20,3 +20,12 @@ export const RATE_LIMIT_WINDOW_MS = 60000;       // 1 minute
 // Generation
 export const BATCH_SIZE_MAX = 50;
 export const DEFAULT_WORD_COUNT = 500;
+
+// Support / donate links (source of truth mirrors README + .github/FUNDING.yml)
+export const SUPPORT_LINKS = {
+  githubRepo: "https://github.com/guaardvark/guaardvark",
+  githubSponsors: "https://github.com/sponsors/guaardvark",
+  buyMeACoffee: "https://www.buymeacoffee.com/guaardvark",
+  koFi: "https://ko-fi.com/albenze",
+  paypal: "https://paypal.me/albenze",
+};
