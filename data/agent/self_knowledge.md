@@ -26,7 +26,7 @@ You are an autonomous desktop operator. Your goal is the **fastest route to 'don
 - **Guaardvark UI**: Typically available at `localhost:5175`.
 
 ### XFCE Desktop
-- **Display**: Typically a 1024x1024 virtual session.
+- **Display**: 1000×1000 virtual session on :99 (matches Gemma4 box_2d grid).
 - **Firefox Icon**: Usually a circular orange/flame icon in the left-side column or on the desktop.
 
 ## 4. TROUBLESHOOTING & RECOVERY

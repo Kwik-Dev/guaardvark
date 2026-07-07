@@ -56,13 +56,16 @@ def ollama_tuning(gpu: dict[str, Any]) -> dict[str, Any]:
 
     FLASH_ATTENTION is suppressed when no GPU is present or VRAM is unreported
     (the degraded path below), since it only helps on a real GPU.
+
+    KV_CACHE_TYPE stays f16 (Ollama default) — q8_0 quantization degrades
+    Gemma4 box_2d spatial outputs; May-2026 working aim used full-precision KV.
     """
     vendor = (gpu or {}).get("vendor", "none")
     vram = (gpu or {}).get("vram_mb") or 0
     if vendor not in ("nvidia", "amd") or vram <= 0:
         return {
             "NUM_PARALLEL": 1,
-            "KV_CACHE_TYPE": "q8_0",
+            "KV_CACHE_TYPE": "f16",
             "FLASH_ATTENTION": 0,
             "MAX_LOADED_MODELS": 1,
             "KEEP_ALIVE": "15m",
@@ -81,7 +84,7 @@ def ollama_tuning(gpu: dict[str, Any]) -> dict[str, Any]:
     vulkan = 0 if vendor == "nvidia" else 1
     return {
         "NUM_PARALLEL": num_parallel,
-        "KV_CACHE_TYPE": "q8_0",
+        "KV_CACHE_TYPE": "f16",
         "FLASH_ATTENTION": 1,
         "MAX_LOADED_MODELS": max_loaded,
         "KEEP_ALIVE": "15m",

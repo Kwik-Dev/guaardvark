@@ -2583,10 +2583,10 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         from backend.utils.vision_analyzer import VisionAnalyzer
 
         analyzer = VisionAnalyzer()
-        # Use a dedicated verification model (prefers qwen3-vl instruct — a far more
-        # reliable UI/text reader than the gemma4 brain) so screen gates stop
-        # false-negativing visible results. Resolved once per call (not per poll).
-        verify_model = analyzer.get_verify_model()
+        # Same model that sees and decides also verifies gates — no qwen3-vl
+        # middleman (avoids MAX_LOADED_MODELS=1 swap thrash; see trust-the-model-
+        # native-format.md). Resolved once per call (not per poll).
+        verify_model = analyzer.default_model
         deadline = _time.monotonic() + timeout_s
         polls = 0
         last_err = None

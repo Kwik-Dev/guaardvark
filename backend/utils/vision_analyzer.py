@@ -103,39 +103,6 @@ class VisionAnalyzer:
             pass
         return "moondream:latest"  # Final fallback
 
-    # Models preferred specifically for yes/no screen VERIFICATION (UI/text reading).
-    # qwen3-vl instruct variants read UI screens far more reliably than the gemma4
-    # unified brain. Kept SEPARATE from the servo/clicking vision model (which is
-    # calibrated per-model in servo_knowledge_store) so verification accuracy
-    # improves without disturbing click-coordinate behavior.
-    _VERIFY_MODEL_PRIORITY = [
-        "qwen3-vl:4b-instruct",
-        "qwen3-vl:8b",
-        "qwen3-vl:2b-instruct",
-    ]
-
-    def get_verify_model(self) -> str:
-        """Best available model for yes/no screen-verification gates. Prefers a
-        qwen3-vl instruct VLM (strong UI/text reader) if installed; otherwise
-        falls back to the configured default vision model. Cached per instance."""
-        cached = getattr(self, "_verify_model", None)
-        if cached:
-            return cached
-        chosen = self.default_model
-        try:
-            tags_resp = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
-            if tags_resp.status_code == 200:
-                available = {m["name"] for m in tags_resp.json().get("models", [])}
-                for m in self._VERIFY_MODEL_PRIORITY:
-                    if m in available:
-                        chosen = m
-                        break
-        except Exception as e:
-            logger.debug(f"[VISION] verify-model detection error: {e}")
-        self._verify_model = chosen
-        logger.info(f"[VISION] verify model: {chosen}")
-        return chosen
-
     def text_query(self, prompt: str, model: str = None, think: bool = False) -> VisionResult:
         """
         Query a text LLM (no image) for reasoning/decision-making.

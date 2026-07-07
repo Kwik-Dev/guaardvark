@@ -53,7 +53,7 @@ def test_ollama_tuning_16gb_is_single_slot():
     t = hp.ollama_tuning({"vendor": "nvidia", "vram_mb": 16311})
     assert t["NUM_PARALLEL"] == 1
     assert t["MAX_LOADED_MODELS"] == 1
-    assert t["KV_CACHE_TYPE"] == "q8_0"
+    assert t["KV_CACHE_TYPE"] == "f16"
     assert t["FLASH_ATTENTION"] == 1
     assert t["KEEP_ALIVE"] == "15m"
 
@@ -62,7 +62,7 @@ def test_ollama_tuning_24gb_allows_two_slots():
     t = hp.ollama_tuning({"vendor": "nvidia", "vram_mb": 24564})
     assert t["NUM_PARALLEL"] == 2
     assert t["MAX_LOADED_MODELS"] == 2
-    assert t["KV_CACHE_TYPE"] == "q8_0"  # constant must hold on the high-VRAM branch too
+    assert t["KV_CACHE_TYPE"] == "f16"  # constant must hold on the high-VRAM branch too
 
 
 def test_ollama_tuning_nvidia_forces_cuda_over_vulkan():

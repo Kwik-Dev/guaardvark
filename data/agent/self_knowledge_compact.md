@@ -8,7 +8,7 @@
 4. **OBSERVATION-GATED VERIFICATION**: Actions may result in "Silent Fails" where the system reports success but the environment has not reached the expected state. Always verify results against fresh visual observations.
 
 ## SCREEN & INPUT (HYPOTHESES)
-- Display: Typically a 1024x1024 virtual session.
+- Display: 1000×1000 virtual session on :99 (matches Gemma4 box_2d grid).
 - Taskbar: Usually located at the bottom edge.
 - Focus: Elements marked "(focused)" in the DOM are likely ready for input. Otherwise, a click may be required to acquire focus.
 - Interaction: If the observed world contradicts this knowledge, prioritize the observed world.
