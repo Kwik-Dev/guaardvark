@@ -1062,8 +1062,16 @@ class AgentControlService:
                             f"[AGENT][STEP {iteration+1}][DOM] target not in DOM snapshot: {target!r} (proceeding via vision)"
                         )
 
-                    # For generic area targets (desktop, empty space), click center-screen
-                    if re.search(r'(?:desktop|empty|blank|background|open area|center|middle)\s*(?:area|space|screen)?', target, re.IGNORECASE):
+                    # For generic area targets (desktop, empty space), click center-screen.
+                    # Anchored to the WHOLE target string: a loose substring match here
+                    # used to hijack concrete element targets like "large purple circle
+                    # center" — blind-clicking screen midpoint with success:True and
+                    # never invoking the servo (2026-07-07 vision-trainer incident).
+                    if re.fullmatch(
+                        r'(?:the\s+)?(?:desktop|empty|blank|background|open\s+area|center|middle)'
+                        r'(?:\s+(?:area|space|screen|of\s+(?:the\s+)?screen))?',
+                        target.strip(), re.IGNORECASE,
+                    ):
                         sw, sh = screen.screen_size()
                         cx, cy = sw // 2, sh // 2
                         screen.click(cx, cy, button=button)
