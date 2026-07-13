@@ -306,7 +306,8 @@ class BatchImageGenerator:
         if not model_key or model_key in ("auto", ""):
             gen = self.image_generator
             if gen:
-                for preferred in ("zimage-turbo", "sd-xl", gen.default_model):
+                # Match offline auto-router: zimage first on consumer cards
+                for preferred in ("zimage-turbo", "krea2-turbo", "sd-xl", gen.default_model):
                     if preferred and gen.available_models.get(preferred):
                         if gen._is_model_downloaded(gen.available_models[preferred]):
                             return preferred
@@ -460,9 +461,11 @@ class BatchImageGenerator:
                 from backend.services.job_operation_gate import GpuBusyError
                 from backend.services.job_types import JobKind
                 try:
+                    vram_est = self.image_generator._vram_estimate_mb(gen_request.model or "auto")
                     ram_est = self.image_generator._ram_estimate_gb(gen_request.model or "auto") if hasattr(self.image_generator, "_ram_estimate_gb") else 10.0
                     with gpu_session(JobKind.VIDEO_RENDER, f"batch_img_{prompt.id}",
-                                     on_busy="raise", evict_ollama=True, vram_estimate_mb=8000,
+                                     on_busy="raise", evict_ollama=True, free_comfyui=True,
+                                     vram_estimate_mb=vram_est,
                                      ram_estimate_gb=ram_est, require_fit=True, cross_process=True):
                         result = self.image_generator.generate_image(gen_request)
                 except GpuBusyError:
@@ -887,7 +890,7 @@ class BatchImageGenerator:
                         on_busy="wait",
                         wait_timeout=120.0,
                         evict_ollama=True,
-                        free_comfyui=False,
+                        free_comfyui=True,
                         cross_process=True,
                         vram_estimate_mb=vram_mb,
                         ram_estimate_gb=ram_gb,

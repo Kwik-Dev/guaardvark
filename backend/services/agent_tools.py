@@ -6,12 +6,35 @@ Provides tool definition, registry, and execution patterns for agent capabilitie
 
 import logging
 import difflib
+import json
 import types
 from dataclasses import dataclass, field
 from typing import Dict, Any, Callable, Optional, List, Union, Generator
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_list_param(value: Any) -> list:
+    """Coerce tool list parameters from JSON arrays or comma-separated strings."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        return [part.strip() for part in stripped.split(",") if part.strip()]
+    return [value]
 
 
 @dataclass
@@ -372,12 +395,13 @@ class ToolRegistry:
                     else:
                         v_str = str(value).lower().strip()
                         coerced[name] = v_str in ("true", "yes", "1", "on", "t")
-                elif target_type in ("dict", "object", "list", "array"):
-                    if isinstance(value, (dict, list)):
+                elif target_type in ("dict", "object"):
+                    if isinstance(value, dict):
                         coerced[name] = value
                     else:
-                        import json
                         coerced[name] = json.loads(value)
+                elif target_type in ("list", "array"):
+                    coerced[name] = _coerce_list_param(value)
                 else:
                     coerced[name] = str(value)
             except (ValueError, TypeError, Exception) as e:

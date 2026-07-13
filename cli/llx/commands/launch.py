@@ -89,6 +89,8 @@ def launch(
 def _start_lite_mode(console, port: int):
     """Start the embedded lite server in a background thread."""
     from llx.lite_server import create_lite_app
+    from llx.config import load_config, save_config
+    from llx.launch_config import load_launch_config, save_launch_config
 
     app = create_lite_app()
 
@@ -103,11 +105,19 @@ def _start_lite_mode(console, port: int):
 
     # Wait for server to be ready
     import httpx
+    server_url = f"http://127.0.0.1:{port}"
     for _ in range(20):
         try:
-            resp = httpx.get(f"http://127.0.0.1:{port}/api/health", timeout=1)
+            resp = httpx.get(f"{server_url}/api/health", timeout=1)
             if resp.status_code == 200:
                 console.print(f"[llx.success]Lite server ready[/llx.success] [llx.dim]port {port}[/llx.dim]")
+                cfg = load_launch_config()
+                cfg["server_url"] = server_url
+                cfg["mode"] = "lite"
+                save_launch_config(cfg)
+                llx_cfg = load_config()
+                llx_cfg["server"] = server_url
+                save_config(llx_cfg)
                 return
         except Exception:
             time.sleep(0.25)

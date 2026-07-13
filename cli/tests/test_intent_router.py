@@ -41,3 +41,18 @@ class TestResolveReplLine:
         assert resolve_repl_line("edit foo.py fix the bug") == ("edit", ["foo.py fix the bug"])
         assert resolve_repl_line("run pytest") == ("run", ["pytest"])
         assert resolve_repl_line("todo add write tests") == ("todo", ["add write tests"])
+
+    def test_image_generation_intents(self):
+        assert resolve_repl_line("generate an image of the batmobile") == (
+            "imagine",
+            ["the batmobile"],
+        )
+        assert resolve_repl_line("create a picture of a sunset") == (
+            "imagine",
+            ["a sunset"],
+        )
+        assert resolve_repl_line("generate a video of waves") == (
+            "video",
+            ["waves"],
+        )
+        assert resolve_repl_line("generate csv report") == ("generate", ["csv", "report"])

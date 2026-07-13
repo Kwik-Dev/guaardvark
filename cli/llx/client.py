@@ -55,7 +55,7 @@ class LlxClient:
         except httpx.ConnectError:
             raise LlxConnectionError(
                 f"Cannot connect to Guaardvark at {self.server_url}. "
-                "Is the server running? Try: ./start.sh"
+                "Is the server running? Try: guaardvark (auto-start) or guaardvark start --full"
             )
         except httpx.TimeoutException:
             raise LlxError(
@@ -94,7 +94,7 @@ class LlxClient:
             except httpx.ConnectError:
                 raise LlxConnectionError(
                     f"Cannot connect to Guaardvark at {self.server_url}. "
-                    "Is the server running? Try: ./start.sh"
+                    "Is the server running? Try: guaardvark (auto-start) or guaardvark start --full"
                 )
 
     def upload_with_progress(self, path: str, file_path: Path, console=None, **extra_fields) -> dict:
@@ -133,7 +133,7 @@ class LlxClient:
                 except httpx.ConnectError:
                     raise LlxConnectionError(
                         f"Cannot connect to Guaardvark at {self.server_url}. "
-                        "Is the server running? Try: ./start.sh"
+                        "Is the server running? Try: guaardvark (auto-start) or guaardvark start --full"
                     )
 
     def download(self, path: str, dest: Path) -> Path:
@@ -147,7 +147,7 @@ class LlxClient:
         except httpx.ConnectError:
             raise LlxConnectionError(
                 f"Cannot connect to Guaardvark at {self.server_url}. "
-                "Is the server running? Try: ./start.sh"
+                "Is the server running? Try: guaardvark (auto-start) or guaardvark start --full"
             )
 
     # --- Agent Tool integration (leverages the rich existing backend tool system) ---

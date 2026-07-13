@@ -26,14 +26,34 @@ def has_text_intent(prompt: str) -> bool:
       - Text "FOO BAR" on the wall
       - The word "HELLO" floating in the air
       - Logo with the letters "ACME"
+
+    Does NOT trigger on casual scare-quotes around a single ordinary word
+    (e.g. "no pointy 'crow' styling") — those were false-positives that
+    re-routed photoreal batches off Z-Image onto SDXL with turbo settings
+    and skipped realistic style enhancement, producing artwork instead of photos.
     """
     if not prompt:
         return False
-    # Quoted literal: "HULK", 'OPEN', curly quotes "SALE". Concatenate the quote
-    # chars so neither quote type breaks the string literal.
-    quotes = '"“”‘’' + "'"
-    if re.search('[' + quotes + '].{1,60}?[' + quotes + ']', prompt):
+
+    # Double quotes (ASCII + curly) almost always mean literal on-image text.
+    if re.search(r'["“”].{1,60}?["“”]', prompt):
         return True
+
+    # Single quotes: only count deliberate rendered-text, not scare-quotes.
+    # - Multi-word: 'OPEN 24 HOURS', 'ACME Corp'
+    # - All-caps short token: 'HULK', 'SALE', 'OPEN' (logo/sign style)
+    # - NOT: 'crow', 'it', 'real' (lowercase emphasis)
+    single_q = r"['‘’]"
+    for m in re.finditer(single_q + r"([^'‘’]{1,60}?)" + single_q, prompt):
+        inner = (m.group(1) or "").strip()
+        if not inner:
+            continue
+        if re.search(r"\s", inner):
+            return True  # multi-word quoted phrase
+        letters = re.sub(r"[^A-Za-z]", "", inner)
+        if len(letters) >= 2 and letters.isupper():
+            return True  # ALL-CAPS token → likely on-image text
+
     p = prompt.lower()
     keywords = (
         'text ', 'text:', 'the word', 'the words', 'says ', 'saying ', 'reads ',

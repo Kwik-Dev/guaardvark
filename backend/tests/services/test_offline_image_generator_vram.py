@@ -47,6 +47,63 @@ def test_estimate_zimage(gen):
     assert gen._vram_estimate_mb("Tongyi-MAI/Z-Image-Turbo") == 11000
 
 
+def test_estimate_krea2_hf_id_model_offload_peak(gen, monkeypatch):
+    # High-VRAM path: model CPU offload, ~14GB peak (2026-07-11 measurement)
+    monkeypatch.setattr(gen, "_cuda_total_vram_gb", lambda: 24.0)
+    monkeypatch.setattr(gen, "_force_sequential_offload", False)
+    assert gen._vram_estimate_mb("krea/Krea-2-Turbo") == 14000
+
+
+def test_estimate_krea2_catalog_key_sequential_16gb(gen, monkeypatch):
+    # Consumer cards use sequential offload — lower admission estimate so
+    # require_fit (estimate+1GB margin) still admits on a 16GB card.
+    monkeypatch.setattr(gen, "_cuda_total_vram_gb", lambda: 16.0)
+    monkeypatch.setattr(gen, "_force_sequential_offload", False)
+    assert gen._vram_estimate_mb("krea2-turbo") == 10000
+
+
+def test_model_family_krea2_catalog_key(gen):
+    assert gen._model_family("krea2-turbo") == "krea2"
+    assert gen._model_family("krea2-raw") == "krea2"
+
+
+def test_krea2_variant_raw_vs_turbo(gen):
+    assert gen._krea2_variant("krea2-raw") == "raw"
+    assert gen._krea2_variant("krea/Krea-2-Raw") == "raw"
+    assert gen._krea2_variant("krea2-turbo") == "turbo"
+
+
+def test_krea2_raw_uses_negative_prompt(gen):
+    assert gen._skip_negative_prompt("krea2", "krea2-raw", 3.5) is False
+    assert gen._skip_negative_prompt("krea2", "krea2-turbo", 0.0) is True
+
+
+def test_apply_family_sampling_krea2_raw(gen):
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(prompt="test", model="krea2-raw")
+    gen._apply_family_sampling(req, "krea2")
+    assert req.num_inference_steps == 52
+    assert req.guidance_scale == 3.5
+
+
+def test_apply_family_sampling_krea2_turbo(gen):
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(prompt="test", model="krea2-turbo")
+    gen._apply_family_sampling(req, "krea2")
+    assert req.num_inference_steps == 8
+    assert req.guidance_scale == 0.0
+
+
+def test_ram_estimate_krea2(gen):
+    assert gen._ram_estimate_gb("krea2-turbo") == 24.0
+
+
+def test_auto_vram_uses_offload_turbo_default(gen, monkeypatch):
+    # Consumer auto-router prefers zimage → 11GB estimate
+    monkeypatch.setattr(gen, "_prefer_krea2_for_auto", lambda: False)
+    assert gen._vram_estimate_mb("auto") == 11000
+
+
 def test_estimate_sdxl(gen):
     assert gen._vram_estimate_mb("stabilityai/stable-diffusion-xl-base-1.0") == 8000
 

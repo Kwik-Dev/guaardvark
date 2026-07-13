@@ -87,6 +87,28 @@ MODEL_SETTINGS = {
         "best_for": ["versatile", "photorealism", "faces", "anatomy", "text", "high_res"],
         "warnings": [],  # Guidance is intentionally not used; UI disables the control and backend forces low value. Dynamic check below will warn on misuse.
         "max_dimensions": (1536, 1536)
+    },
+    "krea2-turbo": {
+        "guidance_range": (0.0, 0.0),
+        "recommended_guidance": 0.0,
+        "min_dimensions": (512, 512),
+        "recommended_dimensions": (1024, 1024),
+        "steps_range": (6, 12),
+        "recommended_steps": 8,
+        "best_for": ["aesthetic", "photorealism", "creative", "high_res", "versatile"],
+        "warnings": [],
+        "max_dimensions": (1536, 1536)
+    },
+    "krea2-raw": {
+        "guidance_range": (2.5, 5.0),
+        "recommended_guidance": 3.5,
+        "min_dimensions": (512, 512),
+        "recommended_dimensions": (1024, 1024),
+        "steps_range": (40, 60),
+        "recommended_steps": 52,
+        "best_for": ["creative", "photorealism", "versatile", "high_res", "mature", "fine_tune_base"],
+        "warnings": ["Slower than Turbo (~52 steps). Less safety post-training than Turbo."],
+        "max_dimensions": (1536, 1536)
     }
 }
 

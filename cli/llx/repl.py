@@ -374,20 +374,30 @@ def launch_repl():
     ctx = ContextSnapshot(server)
     ctx.refresh_async()
 
-    # Auto-start lite server if backend is offline and config says to
-    if not ctx.is_online():
+    # Auto-start backend if offline (full stack mode; lite uses embedded server via launch --lite)
+    if not ctx.is_online() and not _lite_mode:
+        try:
+            from llx.backend_bootstrap import ensure_backend_running
+
+            ensure_backend_running(console, quiet=True)
+            time.sleep(0.5)
+            ctx.refresh_async()
+            server = get_server_url()
+            state["server"] = server
+        except Exception as e:
+            console.print(f"[llx.warning]Could not auto-start backend: {e}[/llx.warning]")
+            console.print("[llx.dim]Try: guaardvark start --backend-only or ./start.sh[/llx.dim]")
+    elif not ctx.is_online() and _lite_mode:
         try:
             from llx.launch_config import load_launch_config
             lcfg = load_launch_config()
-            if lcfg.get("auto_start_services") and lcfg.get("mode") == "lite":
+            if lcfg.get("auto_start_services"):
                 from llx.commands.launch import _start_lite_mode
                 _start_lite_mode(console, port=5002)
                 time.sleep(0.5)
                 ctx.refresh_async()
-        except Exception:
-            pass
-
-    # Create slash router
+        except Exception as e:
+            console.print(f"[llx.warning]Could not start lite server: {e}[/llx.warning]")
     router = SlashRouter(state)
 
     # Create completer with dynamic completions that can see tool list etc.

@@ -15,7 +15,7 @@
     "default_auto_start": false,
     "service_url": "http://127.0.0.1:8207",
     "timeout": 300,
-    "fallback_enabled": false,
+    "fallback_enabled": true,
     "output_dir": "data/outputs/videos",
     "mlt_projects_dir": "data/outputs/videos/mlt-projects",
     "renders_dir": "data/outputs/videos/editor-renders"

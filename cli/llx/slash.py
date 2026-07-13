@@ -10,68 +10,13 @@ from pathlib import Path
 from typing import Callable
 
 import click
+import typer
 
 from llx import output
 from llx.command_catalog import COMMAND_META, COMMAND_TREE
+from llx.lite_mode import lite_mode_block_message
 from llx.theme import make_console, THEMES, set_active_theme, get_active_theme_name
-
-
-def _is_required_typer_param(param: inspect.Parameter) -> bool:
-    """True when a Typer-wrapped function param must be supplied by the caller."""
-    if param.default is inspect.Parameter.empty:
-        return True
-    cls_name = param.default.__class__.__name__
-    if cls_name == "ArgumentInfo":
-        default = param.default.default
-        return default is inspect.Parameter.empty or default is ...
-    return False
-
-
-def _resolve_typer_default(param: inspect.Parameter):
-    """Return the real default for a Typer-wrapped param, or None if required."""
-    if param.default is inspect.Parameter.empty:
-        return None
-    cls_name = param.default.__class__.__name__
-    if cls_name in ("OptionInfo", "ArgumentInfo"):
-        default = param.default.default
-        if default is inspect.Parameter.empty or default is ...:
-            return None
-        return default
-    return param.default
-
-
-def _build_simple_command_kwargs(sig: inspect.Signature, args: list[str], injected: dict) -> dict | None:
-    """Build kwargs for a direct Typer command call from slash args."""
-    kwargs = dict(injected)
-    required_positional = [
-        p for p in sig.parameters.values()
-        if _is_required_typer_param(p) and p.name not in kwargs
-    ]
-
-    if required_positional:
-        if not args:
-            return None
-        # First required positional consumes the rest of the line (e.g. search query).
-        kwargs[required_positional[0].name] = " ".join(args)
-
-    for p in sig.parameters.values():
-        if p.name in kwargs:
-            continue
-        resolved = _resolve_typer_default(p)
-        if resolved is not None:
-            kwargs[p.name] = resolved
-
-    return kwargs
-    """Build a one-line usage hint for a simple Typer-backed slash command."""
-    sig = inspect.signature(func)
-    required = [
-        p.name for p in sig.parameters.values()
-        if _is_required_typer_param(p) and p.name not in ("server", "json_out")
-    ]
-    if required:
-        placeholders = " ".join(f"<{n}>" for n in required)
-        return f"Usage: /{name} {placeholders}"
-    return f"Usage: /{name}"
+from llx.typer_utils import build_typer_kwargs, format_command_usage
 
 
 def _subapp_usage(name: str) -> str:
@@ -152,6 +97,15 @@ class SlashRouter:
             # Only /quit and /exit return False
             if result is False:
                 return False
+        except (click.ClickException, click.exceptions.Exit) as e:
+            code = getattr(e, "exit_code", 1)
+            if code not in (0, None):
+                msg = str(e).strip()
+                if msg:
+                    self._console.print(f"[llx.error]{msg}[/llx.error]")
+        except SystemExit as e:
+            if e.code not in (0, None):
+                self._console.print(f"[llx.error]Command failed (exit {e.code})[/llx.error]")
         except Exception as e:
             self._console.print(f"[llx.error]Error in /{cmd}: {e}[/llx.error]")
 
@@ -279,9 +233,9 @@ class SlashRouter:
             if "json_out" in sig.parameters:
                 injected["json_out"] = False
 
-            kwargs = _build_simple_command_kwargs(sig, args, injected)
+            kwargs = build_typer_kwargs(sig, args, injected)
             if kwargs is None:
-                self._console.print(f"[llx.error]{_simple_command_usage(name, func)}[/llx.error]")
+                self._console.print(f"[llx.error]{format_command_usage(name, func)}[/llx.error]")
                 return
 
             try:
@@ -289,6 +243,10 @@ class SlashRouter:
             except SystemExit as e:
                 if e.code not in (0, None):
                     self._console.print(f"[llx.error]Command failed (exit {e.code})[/llx.error]")
+            except (click.exceptions.Exit, typer.Exit) as e:
+                code = getattr(e, "exit_code", 1)
+                if code not in (0, None):
+                    self._console.print(f"[llx.error]Command failed (exit {code})[/llx.error]")
             except Exception as e:
                 msg = str(e).strip()
                 if msg:
@@ -297,20 +255,35 @@ class SlashRouter:
         self._commands[name] = handler
 
     def _register_subapp(self, name: str, typer_app):
-        """Register a Typer sub-app without mutating process argv."""
+        """Register a Typer sub-app, invoking the sub-typer directly (not root app)."""
         def handler(args: list[str]):
+            from typer.main import get_command
+
             from llx.global_opts import set_global_opts
-            from llx.main import app
 
             if not args:
                 self._console.print(f"[llx.dim]{_subapp_usage(name)}[/llx.dim]")
                 return
 
+            blocked = lite_mode_block_message(name)
+            if blocked:
+                self._console.print(f"[llx.error]{blocked}[/llx.error]")
+                return
+
             server = self._state.get("server")
             set_global_opts(server=server, json_out=False)
 
+            if name == "generate" and args and args[0] == "image" and len(args) > 1:
+                self._console.print(
+                    "[llx.dim]Hint: use /imagine for image prompts, not /generate image[/llx.dim]"
+                )
+
             try:
-                app(args=[name, *args], standalone_mode=False)
+                get_command(typer_app)(
+                    args=args,
+                    standalone_mode=False,
+                    prog_name=f"guaardvark {name}",
+                )
             except SystemExit as e:
                 if e.code not in (0, None):
                     self._console.print(f"[llx.error]Command failed (exit {e.code})[/llx.error]")

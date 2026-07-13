@@ -2,7 +2,9 @@
 Memory Tools — Allows the agent to manage its own long-term memory.
 """
 
+import json
 import logging
+from typing import Any, Dict, List, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.models import db, AgentMemory, AgentMemoryAudit

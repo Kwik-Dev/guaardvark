@@ -6,7 +6,6 @@ import pytest
 
 from llx.slash import SlashRouter
 
-
 @pytest.fixture
 def router():
     state = {
@@ -59,8 +58,12 @@ class TestSubappSlashArgs:
             router.dispatch("/agents")
             mock_app.assert_not_called()
 
-    def test_agents_list_calls_typer(self, router):
-        with patch("llx.main.app") as mock_app:
-            router.dispatch("/agents list")
-            mock_app.assert_called_once()
-            assert mock_app.call_args.kwargs["args"] == ["agents", "list"]
+    def test_agents_list_calls_subtyper(self, router):
+        with patch("typer.main.get_command") as mock_get_command:
+            click_cmd = MagicMock()
+            mock_get_command.return_value = click_cmd
+            with patch("llx.lite_mode.is_lite_mode", return_value=False):
+                router.dispatch("/agents list")
+            mock_get_command.assert_called_once()
+            click_cmd.assert_called_once()
+            assert click_cmd.call_args.kwargs["args"] == ["list"]

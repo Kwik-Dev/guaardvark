@@ -21,7 +21,7 @@ class _FakeClient:
             return {"data": {"text_model": "gemma4:e4b"}}
         if endpoint == "/api/health/celery":
             return {"status": "up", "workers": ["w1"]}
-        if endpoint == "/api/system/metrics":
+        if endpoint == "/api/meta/metrics":
             return {"data": {"gpu_mem": 12.0, "cpu_percent": 18.0}}
         if endpoint == "/api/model/list":
             return {"data": {"models": [{"name": "gemma4:e4b", "id": "gemma4:e4b"}]}}

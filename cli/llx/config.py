@@ -13,7 +13,7 @@ ENV_API_KEY = "GUAARDVARK_API_KEY"
 ENV_API_KEY_ALT = "LLX_API_KEY"
 
 DEFAULT_CONFIG = {
-    "server": "http://localhost:5002",
+    "server": "http://localhost:5000",
     "api_key": None,
     "default_output": "table",
     "chat_session_history": 50,
@@ -52,6 +52,19 @@ def save_config(config: dict):
 RUNTIME_FILE = Path.home() / ".guaardvark" / "runtime.json"
 
 
+def _health_check_port(port: int, timeout: float = 1.5) -> bool:
+    """Return True if /api/health responds with status ok on the given port."""
+    try:
+        import httpx
+
+        resp = httpx.get(f"http://127.0.0.1:{port}/api/health", timeout=timeout)
+        if resp.status_code != 200:
+            return False
+        return resp.json().get("status") == "ok"
+    except Exception:
+        return False
+
+
 def _discover_runtime_server() -> str | None:
     """Auto-discover the running Guaardvark backend from runtime state file."""
     if not RUNTIME_FILE.exists():
@@ -60,19 +73,23 @@ def _discover_runtime_server() -> str | None:
         with open(RUNTIME_FILE) as f:
             runtime = json.load(f)
         port = runtime.get("backend_port")
-        pid = runtime.get("backend_pid", 0)
         if not port:
             return None
-        # Verify the process is actually running
+        port = int(port)
+        # Prefer a live health probe — stale PIDs are common after restarts.
+        if _health_check_port(port):
+            return f"http://localhost:{port}"
+        pid = runtime.get("backend_pid", 0)
         if pid and pid > 0:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
                 return None
             except PermissionError:
-                pass  # Process exists but we can't signal it — that's fine
-        return f"http://localhost:{port}"
-    except (json.JSONDecodeError, OSError, KeyError):
+                pass
+            return f"http://localhost:{port}"
+        return None
+    except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError):
         return None
 
 
@@ -80,7 +97,8 @@ def get_server_url() -> str:
     """Get the server URL. Resolution order:
     1. GUAARDVARK_SERVER / LLX_SERVER env var
     2. Auto-discovery from ~/.guaardvark/runtime.json (written by start.sh)
-    3. ~/.llx/config.json user config
+    3. FLASK_PORT from repo .env via backend_bootstrap
+    4. ~/.llx/config.json user config
     """
     url = os.environ.get(ENV_SERVER) or os.environ.get(ENV_SERVER_ALT)
     if url:
@@ -88,6 +106,15 @@ def get_server_url() -> str:
     discovered = _discover_runtime_server()
     if discovered:
         return discovered
+    try:
+        from llx.backend_bootstrap import read_flask_port_from_env, resolve_guaardvark_root
+
+        root = resolve_guaardvark_root()
+        env_port = read_flask_port_from_env(root)
+        if env_port is not None and _health_check_port(env_port):
+            return f"http://localhost:{env_port}"
+    except Exception:
+        pass
     return load_config()["server"]
 
 

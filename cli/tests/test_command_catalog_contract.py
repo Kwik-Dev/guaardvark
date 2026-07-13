@@ -26,20 +26,25 @@ def test_catalog_commands_are_registered_in_router():
 
 def test_router_subapp_dispatch_does_not_mutate_sys_argv():
     import sys
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
 
     router = _make_router()
     original = list(sys.argv)
-    with patch("llx.main.app") as mock_app:
+    with patch("typer.main.get_command") as mock_get_command:
+        mock_get_command.return_value = MagicMock()
         router.dispatch("/models list")
-        mock_app.assert_called_once()
+        mock_get_command.assert_called_once()
     assert sys.argv == original
 
 
 def test_router_quality_subapp_dispatches():
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
 
     router = _make_router()
-    with patch("llx.main.app") as mock_app:
+    with patch("typer.main.get_command") as mock_get_command:
+        click_cmd = MagicMock()
+        mock_get_command.return_value = click_cmd
         router.dispatch("/quality scorecard --json")
-        mock_app.assert_called_once()
+        mock_get_command.assert_called_once()
+        click_cmd.assert_called_once()
+        assert click_cmd.call_args.kwargs["args"] == ["scorecard", "--json"]

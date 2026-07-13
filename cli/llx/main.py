@@ -4,7 +4,7 @@ import typer
 from llx import __version__
 from llx import output
 from llx.global_opts import set_global_opts
-from llx.commands.system import health, status, doctor, start, stop, models_app
+from llx.commands.system import health, status, doctor, start, stop, init as setup_wizard, models_app
 from llx.commands.chat import chat
 from llx.commands.search import search
 from llx.commands.dashboard import dashboard
@@ -57,6 +57,38 @@ def _run_init(**opts):
 
 app.command("init")(_run_init)
 
+
+def _maybe_bootstrap_backend() -> None:
+    """Start the real backend when offline (skip in explicit lite launch mode)."""
+    try:
+        from llx.launch_config import _config_path, load_launch_config
+
+        if _config_path().exists() and load_launch_config().get("mode") == "lite":
+            return
+    except Exception:
+        pass
+
+    try:
+        from llx.backend_bootstrap import ensure_backend_running, is_backend_healthy
+        from llx.config import get_server_url
+        from llx.theme import make_console
+
+        server = get_server_url()
+        if is_backend_healthy(server):
+            return
+        ensure_backend_running(make_console())
+    except Exception as e:
+        console = None
+        try:
+            from llx.theme import make_console
+            console = make_console()
+        except Exception:
+            pass
+        if console:
+            console.print(f"[llx.warning]Could not auto-start backend: {e}[/llx.warning]")
+            console.print("[llx.dim]Try: guaardvark start --backend-only or ./start.sh[/llx.dim]")
+
+
 app.command("health")(health)
 app.command("status")(status)
 # app.command("init")(init)  # overridden by project init below for GUAARDVARK/agentic use
@@ -67,6 +99,35 @@ app.command("chat")(chat)
 app.command("search")(search)
 app.command("dashboard")(dashboard)
 app.command("launch")(launch)
+
+
+def ask(
+    message: str = typer.Argument(..., help="Natural language message to send to chat"),
+    server: str | None = typer.Option(None, "--server", "-s"),
+    json_out: bool = typer.Option(False, "--json", "-j"),
+    no_rag: bool = typer.Option(False, "--no-rag"),
+    stream: bool = typer.Option(False, "--stream"),
+):
+    """Send a one-shot chat message (replaces bare guaardvark \"query\" syntax)."""
+    from llx.global_opts import get_global_json as _gj, get_global_server as _gs
+
+    chat(
+        message=message,
+        server=server or _gs(),
+        json_out=json_out or _gj(),
+        no_rag=no_rag,
+        stream=stream,
+        resume=False,
+        session=None,
+        list_sessions=False,
+        export=False,
+        output_file=None,
+        project=None,
+    )
+
+
+app.command("ask")(ask)
+app.command("setup")(setup_wizard)
 
 app.add_typer(models_app, name="models")
 app.add_typer(files_app, name="files")
@@ -98,8 +159,6 @@ def version_callback(value: bool):
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    project: str = typer.Argument(None, help="Optional project folder (for drag/folder style)"),
-    query: str = typer.Argument(None, help="Optional natural language query for analysis etc."),
     version: bool = typer.Option(False, "--version", "-v", callback=version_callback, is_eager=True),
     json_out: bool = typer.Option(False, "--json", "-j", help="Output as JSON (for scripting)"),
     server: str | None = typer.Option(None, "--server", "-s", help="Override server URL"),
@@ -119,33 +178,6 @@ def main(
         if theme in THEMES:
             set_active_theme(theme)
 
-    # Support direct natural language + project: guaardvark /path "analyze ..."
-    # or guaardvark "analyze the current dir"
-    if project or query:
-        from pathlib import Path
-        proj_path = None
-        q = None
-        if project and Path(project).expanduser().is_dir():
-            proj_path = project
-            q = query
-        elif project:
-            q = " ".join([project] + ([query] if query else []))
-        else:
-            q = query
-        if proj_path:
-            try:
-                os.chdir(Path(proj_path).expanduser().resolve())
-            except Exception:
-                pass
-            print(f"[project context loaded for {proj_path}]")
-        if q:
-            from llx.commands.chat import chat as chat_cmd
-            try:
-                chat_cmd(message=q, json_out=json_out)
-            except SystemExit:
-                pass
-            return
-
     if ctx.invoked_subcommand is None:
         if non_interactive:
             if json_out:
@@ -162,6 +194,8 @@ def main(
             else:
                 typer.echo("No command provided in non-interactive mode. Use --help for usage.", err=True)
             raise typer.Exit(2)
+
+        _maybe_bootstrap_backend()
         from llx.repl import launch_repl
         launch_repl()
 

@@ -21,6 +21,9 @@ import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import axios from "axios";
 
+const modelMatchesDownload = (model, currentModel) =>
+  !!currentModel && (currentModel === model.path || currentModel === model.id);
+
 const ImageModelsModal = ({ open, onClose, showMessage }) => {
   const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -89,20 +92,21 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
     return () => clearInterval(interval);
   }, [open, downloadStatus.is_downloading, fetchDownloadStatus]);
 
-  const handleDownload = async (model_path) => {
+  const handleDownload = async (model) => {
+    const modelRef = model.path || model.id;
     try {
-      const res = await axios.post("/api/batch-image/models/download", { model_path });
+      const res = await axios.post("/api/batch-image/models/download", { model_path: modelRef });
       if (res.data.success) {
-        const model = models.find((m) => m.path === model_path);
-        showMessage?.(`Started downloading ${model?.name || model_path}...`, "info");
+        const startedPath = res.data.data?.model_path || modelRef;
+        showMessage?.(`Started downloading ${model.name || model.id}...`, "info");
         setDownloadStatus({
           is_downloading: true,
-          current_model: model_path,
+          current_model: startedPath,
           progress: 0,
           status: "starting",
           speed_mbps: 0,
           downloaded_gb: 0,
-          total_gb: model?.size_gb || 0,
+          total_gb: model.size_gb || 0,
         });
       } else {
         showMessage?.(res.data.error || "Failed to start download", "error");
@@ -111,7 +115,7 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
       if (err.response?.status === 409) {
         showMessage?.("A download is already in progress.", "warning");
       } else {
-        showMessage?.(err.message || "Error starting download", "error");
+        showMessage?.(err.response?.data?.error || err.message || "Error starting download", "error");
       }
     }
   };
@@ -136,7 +140,7 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
         ) : (
           <List disablePadding>
             {models.map((model) => {
-              const isThis = isDownloading && currentModel === model.path;
+              const isThis = isDownloading && modelMatchesDownload(model, currentModel);
               return (
                 <ListItem key={model.id} divider sx={{ py: 1.5 }}>
                   <ListItemIcon>
@@ -148,12 +152,26 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
                         <Typography variant="body1" fontWeight={500}>
                           {model.name || model.id}
                         </Typography>
+                        {model.recommended && (
+                          <Chip label="Recommended" size="small" color="primary" variant="outlined" />
+                        )}
                         {model.size_gb > 0 && (
                           <Chip label={`${model.size_gb} GB`} size="small" variant="outlined" />
                         )}
                       </Box>
                     }
-                    secondary={model.path}
+                    secondary={
+                      <>
+                        {model.description && (
+                          <Typography variant="body2" color="text.secondary" component="span" display="block">
+                            {model.description}
+                          </Typography>
+                        )}
+                        <Typography variant="caption" color="text.disabled" component="span" display="block">
+                          {model.path}
+                        </Typography>
+                      </>
+                    }
                   />
 
                   <Box sx={{ ml: 2, minWidth: 120, textAlign: "right" }}>
@@ -186,7 +204,7 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
                         variant="outlined"
                         size="small"
                         startIcon={<CloudDownloadIcon />}
-                        onClick={() => handleDownload(model.path)}
+                        onClick={() => handleDownload(model)}
                         disabled={isDownloading}
                       >
                         Install

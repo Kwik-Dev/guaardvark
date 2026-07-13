@@ -75,7 +75,7 @@ mcp>=1.27.0
 
 # Image Generation Dependencies
 diffusers>=0.38.0
-transformers>=4.50.3,<5.0  # ComfyUI needs >=4.50.3, diffusers incompatible with 5.x
+transformers>=5.2.0,<6.0  # Krea2/Qwen3-VL needs 5.2+ (rope_parameters); was <5.0 for legacy ComfyUI pin
 accelerate==1.2.1
 safetensors>=0.4.0
 Pillow>=12.2.0

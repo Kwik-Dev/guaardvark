@@ -19,6 +19,21 @@ _NL_INTENT_RULES: list[tuple[re.Pattern[str], str, list[str] | None]] = [
     (re.compile(r"^health(?:\s+check)?\s*$", re.I), "health", []),
     (re.compile(r"^(?:run|execute)\s+agent\s+(.+)$", re.I), "agents", None),
 
+    # Image / video generation (must precede generic COMMAND_TREE "generate" fallback)
+    (
+        re.compile(
+            r"^(?:generate|create|make|draw)\s+(?:an?\s+)?(?:image|picture|photo)\s+(?:of\s+)?(.+)$",
+            re.I,
+        ),
+        "imagine",
+        None,
+    ),
+    (
+        re.compile(r"^(?:generate|create|make)\s+(?:an?\s+)?video\s+(?:of\s+)?(.+)$", re.I),
+        "video",
+        None,
+    ),
+
     # Local coding actions (new in this improvement)
     (re.compile(r"^(?:ls|list(?:\s+files?)?|dir)\s*(.*)$", re.I), "ls", None),
     (re.compile(r"^(?:cd|chdir)\s+(.+)$", re.I), "cd", None),
@@ -66,6 +81,8 @@ def resolve_repl_line(line: str) -> tuple[str, list[str]] | None:
             return "analyze", [tail] if tail else []
         if cmd == "load":
             return "load", [tail] if tail else []
+        if cmd in ("imagine", "video"):
+            return cmd, [tail] if tail else []
         return cmd, ["run", tail] if tail else []
 
     try:

@@ -66,6 +66,22 @@ class ModelRecommender:
                 "speed": 4,
                 "best_for": ["faces", "portraits", "people", "photorealism",
                              "anatomy", "versatile", "high_res", "text"]
+            },
+            "krea2-turbo": {
+                "face_quality": 5,
+                "anatomy": 5,
+                "photorealism": 5,
+                "speed": 5,
+                "best_for": ["aesthetic", "creative", "photorealism", "versatile",
+                             "high_res", "landscapes", "product_photo"]
+            },
+            "krea2-raw": {
+                "face_quality": 5,
+                "anatomy": 5,
+                "photorealism": 5,
+                "speed": 2,
+                "best_for": ["creative", "photorealism", "versatile", "high_res",
+                             "mature", "cinematic"]
             }
         }
 

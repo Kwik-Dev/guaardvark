@@ -31,8 +31,24 @@ def _find_project_root(path: str) -> str:
 
 def start(
     path: str | None = typer.Option(None, "--path", "-p", help="Project path (default: GUAARDVARK_ROOT or cwd)"),
+    backend_only: bool = typer.Option(
+        False,
+        "--backend-only",
+        help="Start Postgres, Redis, and Flask only (no Celery/Vite/plugins)",
+    ),
 ):
-    """Start Guaardvark services (Flask, Celery, Vite)."""
+    """Start Guaardvark services."""
+    if backend_only:
+        from llx.backend_bootstrap import ensure_backend_running
+        from llx.theme import make_console
+
+        try:
+            ensure_backend_running(make_console())
+        except RuntimeError as e:
+            output.print_error(str(e))
+            raise typer.Exit(1)
+        raise typer.Exit(0)
+
     target = path or os.environ.get("GUAARDVARK_ROOT") or os.getcwd()
     target = _find_project_root(target)
     start_script = os.path.join(target, "start.sh")
@@ -41,6 +57,61 @@ def start(
         raise typer.Exit(1)
     result = subprocess.run([start_script], cwd=target)
     raise typer.Exit(result.returncode)
+
+
+def _doctor_cli_check() -> None:
+    """Validate CLI-side config and backend reachability."""
+    from pathlib import Path
+
+    from llx.backend_bootstrap import is_backend_healthy
+    from llx.config import CONFIG_FILE, get_server_url
+    from llx.launch_config import _config_path as launch_cfg_path, load_launch_config
+    from llx.lite_mode import is_lite_mode
+
+    checks: list[tuple[str, bool, str]] = []
+
+    llx_cfg = CONFIG_FILE
+    checks.append(("~/.llx/config.json", llx_cfg.is_file(), str(llx_cfg)))
+
+    launch_path = launch_cfg_path()
+    launch_exists = launch_path.is_file()
+    checks.append(("~/.guaardvark/config.json", launch_exists, str(launch_path)))
+
+    mode = "full"
+    if launch_exists:
+        mode = load_launch_config().get("mode", "lite")
+    checks.append(("launch mode", True, mode))
+
+    server = get_server_url()
+    healthy = is_backend_healthy(server)
+    checks.append(("backend health", healthy, server))
+
+    root = os.environ.get("GUAARDVARK_ROOT") or os.getcwd()
+    root_ok = Path(root, "start.sh").is_file()
+    checks.append(("install root (start.sh)", root_ok, root))
+
+    if is_lite_mode():
+        checks.append(
+            (
+                "lite/full note",
+                True,
+                "lite mode — full-stack slash commands (files, jobs, rag, …) need launch --full",
+            )
+        )
+
+    console.print("[llx.brand]CLI Doctor[/llx.brand]\n")
+    all_ok = True
+    for label, ok, detail in checks:
+        icon = ICON_ONLINE if ok else ICON_OFFLINE
+        style = "llx.status.online" if ok else "llx.status.offline"
+        console.print(f"  [{style}]{icon}[/{style}] [llx.kv.key]{label}:[/llx.kv.key] {detail}")
+        if label not in ("lite/full note", "launch mode") and not ok:
+            all_ok = False
+
+    if not all_ok:
+        console.print("\n[llx.warning]Some checks failed. Try: guaardvark start --backend-only[/llx.warning]")
+        raise typer.Exit(1)
+    console.print("\n[llx.success]CLI checks passed.[/llx.success]")
 
 
 def stop(
@@ -60,8 +131,13 @@ def stop(
 def doctor(
     path: str | None = typer.Option(None, "--path", "-p", help="Project path (default: GUAARDVARK_ROOT or cwd)"),
     repair: bool = typer.Option(False, "--repair", "-r", help="Run repair instead of check"),
+    cli_check: bool = typer.Option(False, "--cli", help="Validate CLI config, ports, and mode (no system-manager)"),
 ):
     """Run environment health check (or repair) via system-manager."""
+    if cli_check:
+        _doctor_cli_check()
+        raise typer.Exit(0)
+
     target = path or os.environ.get("GUAARDVARK_ROOT") or os.getcwd()
     target = _find_project_root(target)
     manager_script = os.path.join(target, "scripts", "system-manager", "system-manager")
@@ -112,7 +188,7 @@ def status(
         celery_data = client.get("/api/health/celery")
 
         try:
-            metrics_data = client.get("/api/system/metrics")
+            metrics_data = client.get("/api/meta/metrics")
         except LlxError:
             metrics_data = {}
 

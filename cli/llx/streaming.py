@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Callable
 
-from llx.config import get_server_url
+from llx.config import get_api_key, get_server_url
 from llx.working_memory import approval_target_mismatch, extract_approval_targets
 
 
@@ -34,6 +34,13 @@ class LlxStreamer:
         self._approval_data: dict | None = None
         self._approval_lock = threading.Lock()
         self._session_id: str | None = None
+
+    def _connect_headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        api_key = get_api_key()
+        if api_key:
+            headers["X-API-Key"] = api_key
+        return headers
 
     def stream_chat(
         self,
@@ -107,7 +114,11 @@ class LlxStreamer:
             self._done.set()
 
         try:
-            self.sio.connect(self.server_url, transports=["polling", "websocket"])
+            self.sio.connect(
+                self.server_url,
+                transports=["polling", "websocket"],
+                headers=self._connect_headers(),
+            )
             self._connected = True
             self.sio.emit("chat:join", {"session_id": session_id})
         except Exception as e:
@@ -221,7 +232,11 @@ class LlxStreamer:
                 self._done.set()
 
         try:
-            self.sio.connect(self.server_url, transports=["polling", "websocket"])
+            self.sio.connect(
+                self.server_url,
+                transports=["polling", "websocket"],
+                headers=self._connect_headers(),
+            )
             self._connected = True
             self.sio.emit("subscribe", {"job_id": job_id})
         except Exception as e:

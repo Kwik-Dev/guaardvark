@@ -40,6 +40,11 @@ from backend.services.memory_contract import (
     utcnow,
     validate_lesson_payload,
 )
+from backend.utils.memory_audit_log import (
+    log_memory_failed,
+    log_memory_rejected,
+    log_memory_saved,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +148,7 @@ def add_memory(
     """
     body = (content or "").strip()
     if not body:
+        log_memory_rejected("empty content", source, content or "")
         return None
     memory_type = normalize_memory_type(memory_type)
     source = normalize_memory_source(source)
@@ -154,6 +160,7 @@ def add_memory(
         lesson_payload = _parse_lesson_content(body, memory_type, source)
     except ValueError as err:
         logger.warning(f"Rejected invalid lesson memory: {err}")
+        log_memory_rejected(str(err), source, body)
         return None
     extra_data = metadata if isinstance(metadata, dict) else {}
     if lesson_payload:
@@ -180,10 +187,12 @@ def add_memory(
         _write_memory_audit("create", mem_id, after=memory.to_dict(), actor=source)
         db.session.commit()
         logger.info(f"Memory saved: {mem_id} ({memory.type}) from {memory.source}")
+        log_memory_saved(mem_id, memory.type, memory.source, body)
         return memory
     except Exception as e:
         db.session.rollback()
         logger.error(f"Failed to save memory: {e}")
+        log_memory_failed(source, str(e), body)
         return None
 
 

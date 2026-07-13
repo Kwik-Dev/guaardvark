@@ -1751,17 +1751,24 @@ def debug_env():
 @app.route("/health")
 def health_check():
     uptime_seconds = time.time() - start_time if "start_time" in globals() else 0
-    return (
-        jsonify(
-            {
-                "status": "ok",
-                "uptime_seconds": round(uptime_seconds, 2),
-                "version": __version__,
-                "index_loaded": bool(app.config.get("LLAMA_INDEX_INDEX")),
-            }
-        ),
-        200,
-    )
+    started_by = os.environ.get("GUAARDVARK_STARTED_BY")
+    if not started_by:
+        try:
+            runtime_path = os.path.join(os.path.expanduser("~"), ".guaardvark", "runtime.json")
+            if os.path.isfile(runtime_path):
+                with open(runtime_path, encoding="utf-8") as f:
+                    started_by = json.load(f).get("started_by")
+        except Exception:
+            started_by = None
+    payload = {
+        "status": "ok",
+        "uptime_seconds": round(uptime_seconds, 2),
+        "version": __version__,
+        "index_loaded": bool(app.config.get("LLAMA_INDEX_INDEX")),
+    }
+    if started_by:
+        payload["started_by"] = started_by
+    return jsonify(payload), 200
 
 @app.route("/api/health/db")
 def health_db():

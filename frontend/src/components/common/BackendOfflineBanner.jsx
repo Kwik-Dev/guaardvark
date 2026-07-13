@@ -37,7 +37,8 @@ const BackendOfflineBanner = () => {
     >
       <CircularProgress size={14} color="inherit" />
       <Typography variant="body2" sx={{ fontWeight: 600 }}>
-        Backend offline — retrying…
+        Backend offline — retrying… Run <code>guaardvark</code> in a terminal, or{" "}
+        <code>./start.sh</code> for the full stack.
       </Typography>
     </Box>
   );
