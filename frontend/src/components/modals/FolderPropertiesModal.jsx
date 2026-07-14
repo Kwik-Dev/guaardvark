@@ -176,7 +176,9 @@ const FolderPropertiesModal = ({
         // Optimistic event for instant UI remove (parent will also close + refresh)
         try {
           window.dispatchEvent(new CustomEvent('documents-items-removed', { detail: { keys: [`folder-${fid}`], contextKey: 'folder-properties' } }));
-        } catch (_) {}
+        } catch (_) {
+          // Ignore event dispatch failure
+        }
         await onDelete(fid);
       } finally {
         setDeleting(false);

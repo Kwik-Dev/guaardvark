@@ -662,7 +662,7 @@ class UnifiedProgressSystem:
                 logger.debug(f"Process {process_id} already completed before timeout")
                 return
             
-            logger.warning(f"⏰ Process {process_id} timed out - marking as error")
+            logger.warning(f"Process {process_id} timed out - marking as error")
         
         # Call error_process outside the lock to avoid deadlock
         self.error_process(process_id, "Process timed out after 5 minutes")
@@ -674,10 +674,10 @@ class UnifiedProgressSystem:
                 current = self._active_processes[process_id]
                 # Guard: don't clean up if the process was re-created and is still active
                 if current.status not in (ProcessStatus.COMPLETE, ProcessStatus.ERROR, ProcessStatus.CANCELLED):
-                    logger.info(f"⏭️ Skipping cleanup for {process_id} — process is active (status={current.status.value})")
+                    logger.info(f"Skipping cleanup for {process_id} — process is active (status={current.status.value})")
                     return
                 self._active_processes.pop(process_id, None)
-                logger.info(f"🧹 Cleaned up process from memory: {process_id}")
+                logger.info(f"Cleaned up process from memory: {process_id}")
         
         # Clean up all timers associated with this process
         timers_to_remove = []
@@ -696,7 +696,7 @@ class UnifiedProgressSystem:
                 job_dir = progress_dir / process_id
                 if job_dir.exists():
                     shutil.rmtree(job_dir)
-                    logger.info(f"🧹 Cleaned up process files: {process_id}")
+                    logger.info(f"Cleaned up process files: {process_id}")
             except Exception as e:
                 logger.error(f"Failed to clean up process files for {process_id}: {e}")
     

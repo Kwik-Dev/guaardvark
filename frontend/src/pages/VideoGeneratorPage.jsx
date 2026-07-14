@@ -605,7 +605,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     queue,
     fetchBatches,
     startPollingStatus,
-    stopPolling,
     handleDownloadBatch,
     handleCombineFrames,
     handleDeleteBatch,

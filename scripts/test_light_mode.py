@@ -57,7 +57,7 @@ def format_results(light_result, full_result):
     print(f"{'Response Size':<30} {light_size:>10.1f} KB      {full_size:>10.1f} KB      {size_improvement:.1f}x smaller")
 
     print("-"*80)
-    print(f"\n✓ Light mode is {time_improvement:.1f}x faster and uses {size_improvement:.1f}x less bandwidth")
+    print(f"\n Light mode is {time_improvement:.1f}x faster and uses {size_improvement:.1f}x less bandwidth")
     print("="*80 + "\n")
 
 def main():
@@ -103,9 +103,9 @@ def main():
         print(f"Actual fields:   {sorted(actual_fields)}")
 
         if expected_fields == actual_fields:
-            print("✓ Light mode returns exactly the expected fields\n")
+            print("Light mode returns exactly the expected fields\n")
         else:
-            print("⚠ Field mismatch detected!")
+            print("Field mismatch detected!")
             print(f"  Missing: {expected_fields - actual_fields}")
             print(f"  Extra:   {actual_fields - expected_fields}\n")
     else:

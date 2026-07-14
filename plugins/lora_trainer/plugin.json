@@ -2,7 +2,7 @@
   "id": "lora_trainer",
   "name": "LoRA Trainer",
   "version": "0.1.0",
-  "description": "Trains character/environment/prop LoRAs for the Film Crew. v1 ships the wiring with a mock implementation; v1.1 lands real Diffusers training in an isolated torch venv.",
+  "description": "Trains character/environment/prop LoRAs for the Film Crew. Production uses real Diffusers training in venv-torch; mock trainer is pytest-only (NO-MOCKS policy).",
   "author": "Guaardvark",
   "type": "tool",
   "category": "training",

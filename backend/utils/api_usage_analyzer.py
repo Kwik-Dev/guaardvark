@@ -19,7 +19,7 @@ def parse_backend_blueprints():
     log_file = ROOT / 'logs' / 'backend.log'
     
     if not log_file.exists():
-        print(f"❌ Backend log not found: {log_file}")
+        print(f"Backend log not found: {log_file}")
         return blueprints
     
     with open(log_file, 'r') as f:
@@ -45,7 +45,7 @@ def scan_frontend_usage():
     frontend_dir = ROOT / 'frontend' / 'src'
     
     if not frontend_dir.exists():
-        print(f"❌ Frontend directory not found: {frontend_dir}")
+        print(f"Frontend directory not found: {frontend_dir}")
         return api_usage
     
     for filepath in frontend_dir.rglob('*.js*'):
@@ -127,7 +127,7 @@ def print_results(categories, blueprints):
     
     # Frontend Used
     print(f"\n{'=' * 80}")
-    print(f"✅ ACTIVELY USED BY FRONTEND ({len(categories['frontend_used'])} APIs)")
+    print(f"ACTIVELY USED BY FRONTEND ({len(categories['frontend_used'])} APIs)")
     print(f"{'=' * 80}")
     for bp_name, bp_info in sorted(categories['frontend_used'], key=lambda x: x[1]['frontend_calls'], reverse=True):
         print(f"\n{bp_name:30} /api/{bp_info['endpoint']}")
@@ -139,7 +139,7 @@ def print_results(categories, blueprints):
     
     # Internal/Backend
     print(f"\n{'=' * 80}")
-    print(f"⚙️  INTERNAL/BACKEND SERVICES ({len(categories['internal_backend'])} APIs)")
+    print(f"INTERNAL/BACKEND SERVICES ({len(categories['internal_backend'])} APIs)")
     print(f"{'=' * 80}")
     print("These are likely used by Celery, system monitoring, or internal services:\n")
     for bp_name, bp_info in sorted(categories['internal_backend']):
@@ -147,7 +147,7 @@ def print_results(categories, blueprints):
     
     # Test/Debug
     print(f"\n{'=' * 80}")
-    print(f"🧪 TEST/DEBUG APIs ({len(categories['test_debug'])} APIs)")
+    print(f"TEST/DEBUG APIs ({len(categories['test_debug'])} APIs)")
     print(f"{'=' * 80}")
     print("These can likely be archived:\n")
     for bp_name, bp_info in sorted(categories['test_debug']):
@@ -157,7 +157,7 @@ def print_results(categories, blueprints):
     
     # Potentially Unused
     print(f"\n{'=' * 80}")
-    print(f"❓ POTENTIALLY UNUSED ({len(categories['potentially_unused'])} APIs)")
+    print(f"POTENTIALLY UNUSED ({len(categories['potentially_unused'])} APIs)")
     print(f"{'=' * 80}")
     print("Not called from frontend and not obvious internal services:\n")
     for bp_name, bp_info in sorted(categories['potentially_unused']):
@@ -171,10 +171,10 @@ def print_results(categories, blueprints):
     print(f"{'=' * 80}")
     total = len(blueprints)
     print(f"\nTotal Registered APIs: {total}")
-    print(f"  ✅ Used by Frontend: {len(categories['frontend_used'])} ({len(categories['frontend_used'])/total*100:.1f}%)")
-    print(f"  ⚙️  Internal/Backend: {len(categories['internal_backend'])} ({len(categories['internal_backend'])/total*100:.1f}%)")
-    print(f"  🧪 Test/Debug: {len(categories['test_debug'])} ({len(categories['test_debug'])/total*100:.1f}%)")
-    print(f"  ❓ Potentially Unused: {len(categories['potentially_unused'])} ({len(categories['potentially_unused'])/total*100:.1f}%)")
+    print(f"Used by Frontend: {len(categories['frontend_used'])} ({len(categories['frontend_used'])/total*100:.1f}%)")
+    print(f"Internal/Backend: {len(categories['internal_backend'])} ({len(categories['internal_backend'])/total*100:.1f}%)")
+    print(f"Test/Debug: {len(categories['test_debug'])} ({len(categories['test_debug'])/total*100:.1f}%)")
+    print(f"Potentially Unused: {len(categories['potentially_unused'])} ({len(categories['potentially_unused'])/total*100:.1f}%)")
     
     print(f"\n{'=' * 80}")
     print("RECOMMENDED ACTIONS")
@@ -206,14 +206,14 @@ def main():
     # Parse backend blueprints
     blueprints = parse_backend_blueprints()
     if not blueprints:
-        print("❌ No blueprints found. Make sure backend is running and logs exist.")
+        print("No blueprints found. Make sure backend is running and logs exist.")
         return
     
-    print(f"✓ Found {len(blueprints)} registered blueprints")
+    print(f"Found {len(blueprints)} registered blueprints")
     
     # Scan frontend usage
     frontend_usage = scan_frontend_usage()
-    print(f"✓ Found {len(frontend_usage)} unique API endpoints called from frontend")
+    print(f"Found {len(frontend_usage)} unique API endpoints called from frontend")
     
     # Categorize
     categories = categorize_apis(blueprints, frontend_usage)

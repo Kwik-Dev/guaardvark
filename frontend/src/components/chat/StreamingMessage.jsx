@@ -27,8 +27,30 @@ import { debugLog } from "../../utils/debugLog";
 
 const UPLOAD_BASE_URL = BASE_URL + "/uploads";
 
+const formatTime = (timestamp) => {
+  if (!timestamp) return "";
+  try {
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return "";
+    
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    
+    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (isToday) {
+      return timeStr;
+    } else {
+      const dateStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      return `${dateStr}, ${timeStr}`;
+    }
+  } catch (e) {
+    return "";
+  }
+};
+
 const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref) => {
   const [status, setStatus] = useState("idle"); // idle | thinking | streaming | complete | error
+  const [startTime] = useState(() => new Date());
   const [thinkingText, setThinkingText] = useState("");
   // agentThinkingSteps captures the agent loop's per-iteration reasoning
   // streamed via chat:thinking events from agent_control_service. Each entry:
@@ -357,9 +379,19 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
       ? "divider"
       : "warning.main";
 
+  const formattedTime = formatTime(startTime);
+
   return (
     <>
-    <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        width: "100%",
+      }}
+    >
+      <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1, width: "100%" }}>
       <Avatar
         src={logoUrl}
         sx={{
@@ -572,6 +604,21 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
           </Box>
         )}
       </Paper>
+      </Box>
+      {formattedTime && (
+        <Typography
+          variant="caption"
+          sx={{
+            fontSize: "0.65rem",
+            color: "text.secondary",
+            opacity: 0.65,
+            mt: 0.25,
+            ml: "40px",
+          }}
+        >
+          {formattedTime}
+        </Typography>
+      )}
     </Box>
     {lightbox && (
       <ImageLightbox

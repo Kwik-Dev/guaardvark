@@ -13,7 +13,8 @@ Execution model: dependency-aware DAG execution.
 """
 
 import logging
-from typing import Dict, List, Any, Optional, Tuple
+import re
+from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 import json
 
@@ -43,6 +44,7 @@ class OrchestrationPlan:
     subtasks: List[SubTask] = field(default_factory=list)
     current_step_index: int = 0
     status: str = "planning"  # planning | executing | completed | failed
+    final_answer: Optional[str] = None
 
 
 class OrchestratorService:
@@ -55,7 +57,9 @@ class OrchestratorService:
         self.agent_config_manager = get_agent_config_manager()
         self.llm = get_default_llm()
         self._active_plans: Dict[str, OrchestrationPlan] = {}
+        self._session_to_plan_id: Dict[str, str] = {}
         self._all_tools = None  # Lazily initialised once, then reused
+        self._load_plans()
 
     # ------------------------------------------------------------------
     # Public API
@@ -81,10 +85,158 @@ class OrchestratorService:
     # Planning
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _extract_json_object(text: str) -> Optional[str]:
+        """Extract the first brace-balanced JSON object from text."""
+        start = text.find("{")
+        if start < 0:
+            return None
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\" and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        return None
+
+    @staticmethod
+    def _parse_plan_response(content: str) -> Optional[Dict[str, Any]]:
+        """Parse orchestrator plan JSON from raw LLM output with tolerant fallbacks."""
+        if not content or not str(content).strip():
+            return None
+
+        text = str(content).strip()
+        text = re.sub(
+            r"<think>.*?</think>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+
+        if "```json" in text:
+            text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+        elif "```" in text:
+            text = text.split("```", 1)[1].split("```", 1)[0].strip()
+
+        candidates = [text]
+        extracted = OrchestratorService._extract_json_object(text)
+        if extracted and extracted not in candidates:
+            candidates.append(extracted)
+
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                continue
+
+        logger.error(
+            "Failed to parse plan JSON. Raw content preview: %s",
+            text[:500],
+        )
+        return None
+
+    def _normalize_steps(
+        self, steps: List[Dict[str, Any]], enabled_agent_ids: Set[str]
+    ) -> List[SubTask]:
+        """Validate and normalize parsed plan steps into SubTask objects."""
+        fallback_agent = "general_assistant"
+        if fallback_agent not in enabled_agent_ids and enabled_agent_ids:
+            fallback_agent = next(iter(enabled_agent_ids))
+
+        subtasks: List[SubTask] = []
+        for raw in steps:
+            if not isinstance(raw, dict):
+                logger.warning("Skipping non-dict plan step: %r", raw)
+                continue
+
+            step_id = raw.get("id")
+            description = raw.get("description")
+            assigned_agent = raw.get("assigned_agent")
+
+            if step_id is None or not description or not assigned_agent:
+                logger.warning("Skipping incomplete plan step: %r", raw)
+                continue
+
+            try:
+                step_id = int(step_id)
+            except (TypeError, ValueError):
+                logger.warning("Skipping step with invalid id: %r", raw)
+                continue
+
+            assigned_agent = str(assigned_agent).strip()
+            if assigned_agent not in enabled_agent_ids:
+                logger.warning(
+                    "Unknown agent '%s' in plan step %s; remapping to '%s'",
+                    assigned_agent,
+                    step_id,
+                    fallback_agent,
+                )
+                assigned_agent = fallback_agent
+
+            deps_raw = raw.get("dependencies") or []
+            dependencies: List[int] = []
+            if isinstance(deps_raw, list):
+                for dep in deps_raw:
+                    try:
+                        dependencies.append(int(dep))
+                    except (TypeError, ValueError):
+                        continue
+            dependencies = list(dict.fromkeys(dependencies))
+
+            subtasks.append(
+                SubTask(
+                    id=step_id,
+                    description=str(description).strip(),
+                    assigned_agent=assigned_agent,
+                    dependencies=dependencies,
+                )
+            )
+
+        return subtasks
+
+    def _chat_for_plan(self, messages: List[ChatMessage]) -> str:
+        """Call the LLM for plan JSON, preferring constrained JSON decoding."""
+        try:
+            response = self.llm.chat(messages, format="json")
+        except Exception as json_err:
+            if "invalid character" in str(json_err).lower():
+                logger.warning(
+                    "JSON constrained decoding failed, retrying without format constraint: %s",
+                    json_err,
+                )
+                response = self.llm.chat(messages)
+            else:
+                raise
+        return _safe_content(response.message) or ""
+
     def _create_plan(self, request: str) -> OrchestrationPlan:
         """Use the LLM to break the request into an ordered set of sub-tasks."""
         agents = self.agent_config_manager.get_enabled_agents()
-        agents_desc = "\n".join([f"- {a.id}: {a.description}" for a in agents])
+        enabled_agent_ids = {a.id for a in agents}
+        agents_desc = "\n".join(
+            [
+                f"- {a.id}: {a.description} (tools: {', '.join(a.tools)})"
+                for a in agents
+            ]
+        )
 
         system_prompt = f"""You are an Expert Orchestrator. Your goal is to break down a complex user request into a sequence of sub-tasks.
 
@@ -92,25 +244,37 @@ AVAILABLE AGENTS:
 {agents_desc}
 
 RULES:
-1. Analyse the user request.
+1. Analyse the user request carefully. The user's request is the SOLE source of truth
+   for what targets (URLs, files, projects) to analyse. NEVER substitute, invent, or
+   hallucinate paths, URLs, or targets that the user did not mention.
 2. Break it down into logical steps.
-3. Assign each step to the MOST SUITABLE agent from the list.
-4. Define dependencies: list IDs of steps that MUST complete before this step starts.
+3. Assign each step to the MOST SUITABLE agent based on the tools it has.
+4. assigned_agent MUST be one of the listed agent IDs exactly — do not invent new agent names.
+5. Define dependencies: list IDs of steps that MUST complete before this step starts.
    - Independent steps should have an empty dependencies list.
    - Never create circular dependencies.
-5. Output JSON STRICTLY in this format (no markdown, no extra text):
+6. URL AND WEB ROUTING (CRITICAL):
+   - If the user's request contains URLs (http://, https://, www., or domain names like
+     example.com), those steps MUST be assigned to an agent that has web tools
+     (e.g., research_agent has web_search and analyze_website, browser_automation has
+     browser_navigate). NEVER assign URL-based tasks to agents with only filesystem tools.
+   - NEVER convert a URL into a local filesystem path. "www.example.com" means visit
+     that website, NOT look for a folder called "example.com" on disk.
+7. Each step description must reference the EXACT targets from the user's request
+   (e.g., the exact URL, filename, or project name the user specified).
+8. Output JSON STRICTLY in this format (no markdown, no extra text):
 {{
   "steps": [
     {{
       "id": 1,
-      "description": "Research the best Python library for...",
+      "description": "Use web_search/analyze_website to review www.example.com...",
       "assigned_agent": "research_agent",
       "dependencies": []
     }},
     {{
       "id": 2,
-      "description": "Write the code using the library found in step 1...",
-      "assigned_agent": "code_assistant",
+      "description": "Write findings to a file...",
+      "assigned_agent": "general_assistant",
       "dependencies": [1]
     }}
   ]
@@ -123,26 +287,40 @@ RULES:
         ]
 
         try:
-            response = self.llm.chat(messages)
-            content = _safe_content(response.message)
+            content = self._chat_for_plan(messages)
+            plan_data = self._parse_plan_response(content)
 
-            # Strip optional markdown code fence
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
+            if plan_data is None:
+                repair_messages = messages + [
+                    ChatMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=content[:2000],
+                    ),
+                    ChatMessage(
+                        role=MessageRole.USER,
+                        content=(
+                            "Your previous response was not valid JSON. "
+                            "Return ONLY corrected JSON matching the required schema "
+                            'with a "steps" array. No markdown, no commentary.'
+                        ),
+                    ),
+                ]
+                repair_content = self._chat_for_plan(repair_messages)
+                plan_data = self._parse_plan_response(repair_content)
 
-            plan_data = json.loads(content.strip())
+            if plan_data is None:
+                logger.error("Failed to create plan: could not parse LLM JSON response")
+                return OrchestrationPlan(original_request=request)
 
-            subtasks = [
-                SubTask(
-                    id=step["id"],
-                    description=step["description"],
-                    assigned_agent=step["assigned_agent"],
-                    dependencies=step.get("dependencies", []),
-                )
-                for step in plan_data.get("steps", [])
-            ]
+            steps = plan_data.get("steps", [])
+            if not isinstance(steps, list) or not steps:
+                logger.error("Failed to create plan: LLM returned no steps")
+                return OrchestrationPlan(original_request=request)
+
+            subtasks = self._normalize_steps(steps, enabled_agent_ids)
+            if not subtasks:
+                logger.error("Failed to create plan: no valid steps after normalization")
+                return OrchestrationPlan(original_request=request)
 
             return OrchestrationPlan(original_request=request, subtasks=subtasks)
 
@@ -223,7 +401,17 @@ RULES:
         already completed).  Results from completed tasks are forwarded as
         context to every task that listed them as a dependency.
         """
+        if not plan.subtasks:
+            plan.status = "failed"
+            self._save_plans()
+            return {
+                "success": False,
+                "error": "Plan has no steps",
+                "plan": self._serialize_plan(plan),
+            }
+
         plan.status = "executing"
+        self._save_plans()
         context = context or {}
 
         # Map from task_id -> result string for dependency forwarding
@@ -234,6 +422,7 @@ RULES:
             waves = self._topological_sort(plan.subtasks)
         except ValueError as e:
             plan.status = "failed"
+            self._save_plans()
             logger.error(f"Plan dependency error: {e}")
             return {
                 "success": False,
@@ -254,6 +443,7 @@ RULES:
             for subtask in wave:
                 plan.current_step_index = subtask.id
                 subtask.status = "running"
+                self._save_plans()
 
                 # Build dependency context from already-completed prerequisite tasks
                 dependency_context = self._build_dependency_context(
@@ -270,19 +460,22 @@ RULES:
                     prompt=subtask.description,
                     context=context,
                     dependency_context=dependency_context,
+                    original_request=plan.original_request,
                 )
 
                 if result["success"]:
                     subtask.status = "completed"
                     subtask.result = result["final_answer"]
                     completed_results[subtask.id] = subtask.result
-                    logger.info(f"  ✓ Task {subtask.id} completed")
+                    logger.info(f"  Task {subtask.id} completed")
+                    self._save_plans()
                 else:
                     subtask.status = "failed"
                     subtask.error = result.get("error", "Unknown error")
                     plan.status = "failed"
+                    self._save_plans()
                     logger.error(
-                        f"  ✗ Task {subtask.id} failed: {subtask.error}"
+                        f"  Task {subtask.id} failed: {subtask.error}"
                     )
                     return {
                         "success": False,
@@ -304,6 +497,8 @@ RULES:
         final_answer = self._synthesize_final_result(
             plan.original_request, results_history
         )
+        plan.final_answer = final_answer
+        self._save_plans()
 
         return {
             "success": True,
@@ -349,12 +544,15 @@ RULES:
         prompt: str,
         context: Dict[str, Any],
         dependency_context: str = "",
+        original_request: str = "",
     ) -> Dict[str, Any]:
         """
         Delegate a single task to a specific agent.
 
         The dependency_context (results from prerequisite steps) is injected
         into the agent's session context so the LLM can use prior findings.
+        The original_request is included so the agent never loses sight of
+        what the user actually asked for.
         """
         try:
             from backend.services.agent_tools import ToolRegistry
@@ -381,12 +579,17 @@ RULES:
                     f"Agent '{agent_id}' requested tools not in registry: {missing}"
                 )
 
-            # Compose session context: goal + dependency results + caller context
+            # Compose session context: goal + original request + dependency results
             session_parts = [
                 f"[DELEGATED TASK FROM ORCHESTRATOR]",
                 f"Agent: {agent.name}",
                 f"Goal: {prompt}",
             ]
+            if original_request:
+                session_parts.append(
+                    f"\nOriginal user request (use this as the authoritative source "
+                    f"for URLs, targets, and intent): {original_request}"
+                )
             if dependency_context:
                 session_parts.append(
                     f"\nContext from prerequisite steps:\n{dependency_context}"
@@ -440,6 +643,9 @@ RULES:
     def _serialize_plan(self, plan: OrchestrationPlan) -> Dict[str, Any]:
         return {
             "status": plan.status,
+            "original_request": plan.original_request,
+            "current_step_index": plan.current_step_index,
+            "final_answer": plan.final_answer,
             "steps": [
                 {
                     "id": s.id,
@@ -453,6 +659,72 @@ RULES:
                 for s in plan.subtasks
             ],
         }
+
+    def _deserialize_plan(self, data: Dict[str, Any]) -> OrchestrationPlan:
+        subtasks = [
+            SubTask(
+                id=step["id"],
+                description=step["description"],
+                assigned_agent=step["assigned_agent"],
+                dependencies=step.get("dependencies", []),
+                status=step.get("status", "pending"),
+                result=step.get("result"),
+                error=step.get("error")
+            )
+            for step in data.get("steps", [])
+        ]
+        return OrchestrationPlan(
+            original_request=data.get("original_request", ""),
+            subtasks=subtasks,
+            current_step_index=data.get("current_step_index", 0),
+            status=data.get("status", "planning"),
+            final_answer=data.get("final_answer")
+        )
+
+    def _get_persistence_path(self) -> str:
+        from backend.config import SYSTEM_DIR
+        import os
+        os.makedirs(SYSTEM_DIR, exist_ok=True)
+        return os.path.join(SYSTEM_DIR, "orchestrator_plans.json")
+
+    def _load_plans(self):
+        import os
+        path = self._get_persistence_path()
+        if not os.path.exists(path):
+            self._active_plans = {}
+            self._session_to_plan_id = {}
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            plans_data = data.get("plans", {})
+            self._active_plans = {}
+            for plan_id, plan_dict in plans_data.items():
+                self._active_plans[plan_id] = self._deserialize_plan(plan_dict)
+            
+            self._session_to_plan_id = data.get("session_to_plan_id", {})
+            logger.info(f"Loaded {len(self._active_plans)} persistent orchestrator plans.")
+        except Exception as e:
+            logger.error(f"Failed to load persistent plans: {e}", exc_info=True)
+            self._active_plans = {}
+            self._session_to_plan_id = {}
+
+    def _save_plans(self):
+        path = self._get_persistence_path()
+        try:
+            plans_serialized = {
+                plan_id: self._serialize_plan(plan)
+                for plan_id, plan in self._active_plans.items()
+            }
+            data = {
+                "plans": plans_serialized,
+                "session_to_plan_id": self._session_to_plan_id
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save persistent plans: {e}", exc_info=True)
 
 
 # Global singleton

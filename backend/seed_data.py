@@ -148,7 +148,7 @@ def seed_demo_data():
 
 def seed_database():
     """Main seeding function - seeds essential data and optionally demo data."""
-    logger.info("🌱 Starting database seeding...")
+    logger.info("Starting database seeding...")
     
     # Always seed essential system data
     seed_essential_system_data()

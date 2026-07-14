@@ -149,7 +149,7 @@ def main() -> int:
                 print(f"        - {iss}")
         print(f"\nSummary: {len(rows)} subjects | {len(fails)} FAIL | {len(warns)} WARN")
         if fails:
-            print("RESULT: FAIL — training output is not what the status claims. See ❌ above.")
+            print("RESULT: FAIL — training output is not what the status claims. See above.")
         else:
             print("RESULT: OK — every 'trained' subject has a real, owned, fresh LoRA.")
 

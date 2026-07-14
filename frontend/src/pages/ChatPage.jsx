@@ -47,8 +47,8 @@ import StreamingMessage from "../components/chat/StreamingMessage";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import extractSpeakableText from "../utils/extractSpeakableText";
 
-import OrchestratorPlanView from "../components/orchestrator/OrchestratorPlanView";
 import { createPlan } from "../api/orchestratorService";
+import { mergeActivePlanIntoMessages, hydrateOrchestratorFields } from "../utils/orchestratorChat";
 import { debugLog } from "../utils/debugLog";
 
 const USE_AGENT_ROUTING = () => {
@@ -142,8 +142,6 @@ const ChatPage = () => {
 
   const [messages, setMessages] = useState([]);
   const [error, setError] = useState('');
-  const [orchestratorPlan, setOrchestratorPlan] = useState(null);
-  const [orchestratorPlanId, setOrchestratorPlanId] = useState(null);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [previousChatsOpen, setPreviousChatsOpen] = useState(false);
   const [sessionId, _setSessionId] = useState(() => {
@@ -349,6 +347,31 @@ const ChatPage = () => {
       })
     );
   }, []);
+
+  const updateOrchestratorMessage = useCallback((messageId, patch) => {
+    setMessages((prev) =>
+      prev.map((msg) => (msg.id === messageId ? { ...msg, ...patch } : msg))
+    );
+  }, []);
+
+  const handleOrchestratorUpdate = useCallback((messageId, payload) => {
+    if (payload?.plan) {
+      updateOrchestratorMessage(messageId, { orchestratorPlan: payload.plan });
+    }
+    if (payload?.final_answer) {
+      const finalMsgId = `asst_${Date.now()}_final`;
+      setMessages((prev) => [...prev, {
+        id: finalMsgId,
+        role: 'assistant',
+        content: payload.final_answer,
+        timestamp: new Date().toISOString(),
+      }]);
+      recordMessage(sessionId, payload.final_answer, 'assistant', {
+        messageId: finalMsgId,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }, [sessionId, updateOrchestratorMessage]);
 
   // --- Lesson Pearls: Begin/End lesson lifecycle ---
   const activeLessonId = useAppStore((s) => s.activeLessonId);
@@ -665,7 +688,7 @@ const ChatPage = () => {
 
                 return true;
               })
-              .map((msg) => ({
+              .map((msg) => hydrateOrchestratorFields({
                 ...msg,
                 isLocal: false,
                 status: "persisted",
@@ -682,12 +705,20 @@ const ChatPage = () => {
                 // They render via MessageItem + AgentThinkingTrail but are *not* live-streamed steps.
               }));
 
-            const allMessages = [...currentMessages, ...historyMessages];
+            let allMessages = [...currentMessages, ...historyMessages];
             allMessages.sort((a, b) => {
               const timeA = new Date(a.timestamp || 0).getTime();
               const timeB = new Date(b.timestamp || 0).getTime();
               return timeA - timeB;
             });
+
+            if (history.active_plan && history.active_plan_id) {
+              allMessages = mergeActivePlanIntoMessages(
+                allMessages,
+                history.active_plan,
+                history.active_plan_id
+              );
+            }
 
             return allMessages;
           });
@@ -1243,21 +1274,23 @@ const ChatPage = () => {
 
         try {
           const response = await createPlan(planRequest, { projectId, sessionId });
-          if (response.success) {
-            setOrchestratorPlan(response.plan);
-            setOrchestratorPlanId(response.plan_id);
-
-            const assistantId = `asst_${Date.now()}`;
+          if (response.success && response.plan?.steps?.length > 0) {
+            const assistantId = `asst_plan_${response.plan_id}`;
+            const planTimestamp = new Date().toISOString();
             setMessages(prev => [...prev, {
               id: assistantId,
               role: 'assistant',
-              content: 'I have created an orchestration plan for your request. You can review and execute it above.'
+              content: '',
+              timestamp: planTimestamp,
+              orchestratorPlan: response.plan,
+              orchestratorPlanId: response.plan_id,
+              messageType: 'orchestrator_plan',
             }]);
 
-            recordMessage(sessionId, 'I have created an orchestration plan for your request. You can review and execute it above.', 'assistant', {
+            recordMessage(sessionId, 'Orchestration plan', 'assistant', {
               messageId: assistantId,
               userMessageId: userMessageTempId,
-              timestamp: new Date().toISOString()
+              timestamp: planTimestamp,
             });
 
             if (userMessageTempId) {
@@ -2184,31 +2217,11 @@ const ChatPage = () => {
 
       {}
 
-      {orchestratorPlan && (
-        <OrchestratorPlanView
-          plan={orchestratorPlan}
-          planId={orchestratorPlanId}
-          onExecutionComplete={(result) => {
-            if (result.plan) {
-              setOrchestratorPlan(result.plan);
-            }
-            if (result.final_answer) {
-              const finalMsgId = `asst_${Date.now()}_final`;
-              setMessages(prev => [...prev, {
-                id: finalMsgId,
-                role: 'assistant',
-                content: result.final_answer
-              }]);
-              recordMessage(sessionId, result.final_answer, 'assistant', {
-                messageId: finalMsgId,
-                timestamp: new Date().toISOString()
-              });
-            }
-          }}
-        />
-      )}
-
-      <MessageList messages={messages} sessionId={sessionId} />
+      <MessageList
+        messages={messages}
+        sessionId={sessionId}
+        onOrchestratorUpdate={handleOrchestratorUpdate}
+      />
 
       {}
       {(() => {
@@ -2334,8 +2347,16 @@ const ChatPage = () => {
         )}
         onClearMessages={() => setMessages([])}
         onPlanCreated={(plan, planId) => {
-          setOrchestratorPlan(plan);
-          setOrchestratorPlanId(planId);
+          const assistantId = `asst_plan_${planId}`;
+          setMessages((prev) => [...prev, {
+            id: assistantId,
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString(),
+            orchestratorPlan: plan,
+            orchestratorPlanId: planId,
+            messageType: 'orchestrator_plan',
+          }]);
         }}
       />
       <FileGenPopup

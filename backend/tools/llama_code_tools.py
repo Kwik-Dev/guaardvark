@@ -387,4 +387,4 @@ if __name__ == "__main__":
     print(result[:500])
     print()
 
-    print("✓ Code tools ready for ReActAgent integration")
+    print("Code tools ready for ReActAgent integration")

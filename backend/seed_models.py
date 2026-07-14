@@ -35,7 +35,7 @@ def seed_models_from_ollama():
     Dynamically detect and seed models from current Ollama installation.
     NO hardcoded model lists - uses real data only.
     """
-    logger.info("🌱 Seeding models from Ollama API...")
+    logger.info("Seeding models from Ollama API...")
     
     # Get available models from Ollama API (dynamic detection)
     models_data = get_available_ollama_models()
@@ -49,7 +49,7 @@ def seed_models_from_ollama():
         logger.warning(" No models found in Ollama installation")
         return
     
-    logger.info(f"📡 Found {len(models_data)} models in Ollama installation")
+    logger.info(f"Found {len(models_data)} models in Ollama installation")
     
     added_count = 0
     skipped_count = 0
@@ -62,7 +62,7 @@ def seed_models_from_ollama():
             exists = db.session.query(ModelInfo).filter_by(name=model_name).first()
             
             if not exists:
-                logger.info(f"  ➕ Adding model: {model_name}")
+                logger.info(f"  Adding model: {model_name}")
                 
                 # Create model entry with dynamic data from Ollama
                 model_info = ModelInfo(
@@ -97,4 +97,4 @@ def seed_models_from_ollama():
 if __name__ == "__main__":
     with app.app_context():
         seed_models_from_ollama()
-        logger.info("🏁 Seed script finished.")
+        logger.info("Seed script finished.")

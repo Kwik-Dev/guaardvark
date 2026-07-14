@@ -82,21 +82,21 @@ def main():
     try:
         from real_trainer import RealLoraTrainer  # noqa: E402
     except Exception as e:
-        print(f"✗ Could not import RealLoraTrainer: {e}")
+        print(f"Could not import RealLoraTrainer: {e}")
         return 2
 
     if not RealLoraTrainer.is_available():
-        print(f"✗ venv-torch not found at {RealLoraTrainer._VENV_PYTHON}")
+        print(f"venv-torch not found at {RealLoraTrainer._VENV_PYTHON}")
         print("  The trainer's isolated torch venv isn't set up on this machine.")
         return 2
 
     refs_dir = Path(args.refs).expanduser().resolve()
     if not refs_dir.is_dir():
-        print(f"✗ --refs is not a directory: {refs_dir}")
+        print(f"--refs is not a directory: {refs_dir}")
         return 2
     ref_paths = sorted(str(p) for p in refs_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
     if not ref_paths:
-        print(f"✗ No images ({', '.join(sorted(IMAGE_EXTS))}) found in {refs_dir}")
+        print(f"No images ({', '.join(sorted(IMAGE_EXTS))}) found in {refs_dir}")
         return 2
 
     out_dir = Path(args.out).expanduser().resolve()
@@ -135,7 +135,7 @@ def main():
 
     print("\n" + "─" * 64)
     ok = result.get("status") == "ok"
-    print(f"  RESULT      : {'✓ PASS' if ok else '✗ FAIL'}")
+    print(f"RESULT : {'PASS'if ok else 'FAIL'}")
     if ok:
         print(f"  lora_path   : {result.get('lora_path')}")
     else:
@@ -147,7 +147,7 @@ def main():
         print(f"  peak VRAM   : {sampler.peak} MiB  ({headroom:+d} MiB headroom → {fit})")
     print("─" * 64)
     if ok and sampler.peak and sampler.peak >= VRAM_BUDGET_MB:
-        print("  ⚠ Trained but peaked at/over budget — retry with --resolution 640 or 512.")
+        print("Trained but peaked at/over budget — retry with --resolution 640 or 512.")
     return 0 if ok else 1
 
 

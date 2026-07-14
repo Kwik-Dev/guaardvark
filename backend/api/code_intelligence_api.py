@@ -19,24 +19,25 @@ def error_response(msg, code=400):
 def success_response(data):
     return {"success": True, "data": data}
 
-# Mock functions for when dependencies are not available
-def get_llm_instance():
-    return None
+# Optional service imports — None when unavailable (no silent no-op stubs).
+try:
+    from backend.utils.llm_service import get_llm_instance, run_llm_code_prompt
+    _llm_service_available = True
+    logger.info("LLM service is available for code intelligence")
+except ImportError as e:
+    logger.warning(f"LLM service not available for code intelligence: {e}")
+    _llm_service_available = False
+    get_llm_instance = None
+    run_llm_code_prompt = None
 
-def run_llm_code_prompt(*args, **kwargs):
-    return None
-
-def get_code_storage_bridge():
-    return None
-
-class MockEnhancedRAGChunker:
-    pass
-
-EnhancedRAGChunker = MockEnhancedRAGChunker
-
-def mock_send_chat_message_internal(*args, **kwargs):
-    """Mock function that returns None when LLM services are unavailable"""
-    return None
+try:
+    from backend.utils.code_storage_bridge import get_code_storage_bridge
+    _code_storage_bridge_available = True
+    logger.info("Code storage bridge is available for code intelligence")
+except ImportError as e:
+    logger.warning(f"Code storage bridge not available for code intelligence: {e}")
+    _code_storage_bridge_available = False
+    get_code_storage_bridge = None
 
 # Try to import real EnhancedChatManager for code intelligence
 try:
@@ -63,7 +64,7 @@ def send_chat_message_internal(session_id: str, user_message: str, project_id=No
         Dict with 'message' key containing the response, or None if chat unavailable
     """
     if not _chat_manager_available or not get_chat_manager:
-        logger.warning("EnhancedChatManager not available, falling back to mock")
+        logger.warning("EnhancedChatManager not available; code intelligence chat path disabled")
         return None
     
     try:
@@ -1448,17 +1449,13 @@ def health_check():
     try:
         logger.info("Health check called")
 
-        # REAL LLM availability — ask llm_service for an actual configured instance.
-        # (The module-local get_llm_instance is a no-op mock that always returns None,
-        # so the old `get_llm_instance is not None` checked a function object and was
-        # always True.) get_llm_instance() just reads current_app.config — cheap, no
-        # model load — so it's safe on a health ping.
-        try:
-            from backend.utils.llm_service import get_llm_instance as _real_get_llm
-            llm_available = _real_get_llm() is not None
-        except Exception as e:
-            logger.warning(f"LLM availability probe failed: {e}")
-            llm_available = False
+        # LLM availability — reads current_app.config; cheap, no model load.
+        llm_available = False
+        if get_llm_instance is not None:
+            try:
+                llm_available = get_llm_instance() is not None
+            except Exception as e:
+                logger.warning(f"LLM availability probe failed: {e}")
         logger.info(f"LLM available check: {llm_available}")
 
         # REAL chat availability — this module's chat path runs through the enhanced

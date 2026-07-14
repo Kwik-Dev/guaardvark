@@ -790,7 +790,9 @@ const SettingsPage = () => {
       try {
         const p = await apiService.getIndexingPaused();
         setIndexingPaused(!!p);
-      } catch (_) {}
+      } catch (_) {
+        // Ignore errors fetching paused state
+      }
     })();
   }, []);
 

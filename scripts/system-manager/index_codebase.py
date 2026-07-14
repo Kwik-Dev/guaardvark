@@ -192,7 +192,7 @@ class CodeCatalogBuilder:
         return artifacts
 
     def build_catalog(self) -> Dict:
-        print("🔍 Scanning codebase...")
+        print("Scanning codebase...")
 
         print("  Scanning Python files...")
         for py_file in self.root_dir.glob('**/*.py'):
@@ -255,7 +255,7 @@ class CodeCatalogBuilder:
         with open(self.catalog_path, 'w', encoding='utf-8') as f:
             json.dump(catalog, f, indent=2)
 
-        print(f"\n✅ Catalog saved to: {self.catalog_path}")
+        print(f"\n Catalog saved to: {self.catalog_path}")
         print(f"   Total artifacts: {catalog['metadata']['total_artifacts']}")
         print(f"   By type: {dict([(k, len(v)) for k, v in catalog['by_type'].items()])}")
 
@@ -308,7 +308,7 @@ class CodeCatalogBuilder:
 
 def query_catalog(query: str, catalog_path: Path) -> List[Dict]:
     if not catalog_path.exists():
-        print(f"❌ Catalog not found at {catalog_path}")
+        print(f"Catalog not found at {catalog_path}")
         print("   Run: python scripts/index_codebase.py --update-all")
         return []
 
@@ -332,20 +332,20 @@ def query_catalog(query: str, catalog_path: Path) -> List[Dict]:
 
 def print_search_results(results: List[Dict]):
     if not results:
-        print("❌ No results found")
+        print("No results found")
         return
 
-    print(f"\n✅ Found {len(results)} artifact(s):\n")
+    print(f"\n Found {len(results)} artifact(s):\n")
 
     for i, artifact in enumerate(results, 1):
         print(f"{i}. [{artifact['type'].upper()}] {artifact['name']}")
-        print(f"   📁 {artifact['file_path']}:{artifact['line_number']}")
-        print(f"   📝 {artifact['description'][:100]}...")
-        print(f"   🏷️  Status: {artifact['status']}")
+        print(f"{artifact['file_path']}:{artifact['line_number']}")
+        print(f"{artifact['description'][:100]}...")
+        print(f"Status: {artifact['status']}")
         if artifact.get('tags'):
-            print(f"   🔖 Tags: {', '.join(artifact['tags'])}")
+            print(f"Tags: {', '.join(artifact['tags'])}")
         if artifact.get('usage_example'):
-            print(f"   💡 Usage: {artifact['usage_example']}")
+            print(f"Usage: {artifact['usage_example']}")
         print()
 
 if __name__ == '__main__':
@@ -372,7 +372,7 @@ if __name__ == '__main__':
     builder = CodeCatalogBuilder(GUAARDVARK_ROOT)
 
     if args.update_all:
-        print("🚀 Building code catalog...")
+        print("Building code catalog...")
         catalog = builder.build_catalog()
         builder.save_catalog(catalog)
 
@@ -382,13 +382,13 @@ if __name__ == '__main__':
 
     elif args.show_unused:
         if not builder.catalog_path.exists():
-            print("❌ Catalog not found. Run with --update-all first.")
+            print("Catalog not found. Run with --update-all first.")
         else:
             with open(builder.catalog_path, 'r') as f:
                 catalog = json.load(f)
 
             unused = catalog['by_status'].get('unused', [])
-            print(f"\n📦 Found {len(unused)} unused artifacts:\n")
+            print(f"\n Found {len(unused)} unused artifacts:\n")
             for artifact_name in unused:
                 print(f"  • {artifact_name}")
     else:

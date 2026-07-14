@@ -291,7 +291,7 @@ class ThreadPoolManager:
         )
         self._scale_monitor_thread.start()
 
-        logger.info(f"✅ Auto-scaling enabled (check interval: {check_interval}s)")
+        logger.info(f"Auto-scaling enabled (check interval: {check_interval}s)")
 
     def disable_auto_scaling(self):
         """Disable automatic pool sizing."""

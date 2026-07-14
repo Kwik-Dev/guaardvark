@@ -161,7 +161,7 @@ class BlueprintDiscovery:
                     }
                     
                     blueprints.append(blueprint_info)
-                    logger.info(f"✓ Discovered blueprint: {attr_name} ({attr_value.name}) in {module_name} with prefix {blueprint_info['url_prefix']}")
+                    logger.info(f"Discovered blueprint: {attr_name} ({attr_value.name}) in {module_name} with prefix {blueprint_info['url_prefix']}")
                     
             except Exception as e:
                 logger.debug(f"Error inspecting attribute {attr_name} in {module_name}: {e}")

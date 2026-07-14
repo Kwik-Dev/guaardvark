@@ -27,12 +27,34 @@ import AgentResultDisplay from "./AgentResultDisplay";
 import { StatusChip } from "../../utils/familyColors";
 import ToolCallCard from "./ToolCallCard";
 import AgentThinkingTrail from "./AgentThinkingTrail";
+import OrchestratorPlanView from "../orchestrator/OrchestratorPlanView";
 import ImageLightbox from "../images/ImageLightbox";
 import NarrateButton from "../common/NarrateButton";
 
 const UPLOAD_BASE_URL = BASE_URL + "/uploads";
 
-const MessageItem = ({ message, sessionId: sessionIdProp }) => {
+const formatTime = (timestamp) => {
+  if (!timestamp) return "";
+  try {
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return "";
+    
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    
+    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (isToday) {
+      return timeStr;
+    } else {
+      const dateStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      return `${dateStr}, ${timeStr}`;
+    }
+  } catch (e) {
+    return "";
+  }
+};
+
+const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }) => {
   const isUser = message.role === "user";
   // Per-message sessionId takes precedence, fall through to the list-level
   // prop so feedback on assistant turns (which often lack message.sessionId)
@@ -157,127 +179,187 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
     const isThinking = message.agentLoopStatus === "thinking";
     const isComplete = message.agentLoopStatus === "complete";
     const hasError = message.agentLoopStatus === "error";
+    const formattedTime = formatTime(message.timestamp);
 
     return (
       <Box
         sx={{
           display: "flex",
-          justifyContent: "flex-start",
-          flexDirection: "row",
+          flexDirection: "column",
           alignItems: "flex-start",
-          gap: 1,
+          width: "100%",
         }}
       >
-        <Avatar
+        <Box
           sx={{
-            bgcolor: isThinking ? "warning.main" : isComplete ? "success.main" : hasError ? "error.main" : "grey.500",
-            width: 32,
-            height: 32,
-            border: 1,
-            borderColor: "divider",
+            display: "flex",
+            justifyContent: "flex-start",
+            flexDirection: "row",
+            alignItems: "flex-start",
+            gap: 1,
+            width: "100%",
           }}
         >
-          <GuaardvarkLogo
-            size={20}
-            variant={isThinking ? "warning" : isComplete ? "success" : hasError ? "error" : "default"}
-            animate={isThinking}
-          />
-        </Avatar>
-        <Paper
-          elevation={2}
-          sx={{
-            p: 1.5,
-            maxWidth: "85%",
-            bgcolor: "background.paper",
-            borderTopLeftRadius: 4,
-            borderTopRightRadius: 16,
-            borderBottomLeftRadius: 16,
-            borderBottomRightRadius: 16,
-            border: 1,
-            borderColor: isThinking ? "warning.main" : isComplete ? "success.main" : hasError ? "error.main" : "grey.500",
-          }}
-        >
-          {isThinking ? (
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-              <CircularProgress size={16} color="warning" />
-              <Typography variant="body2" color="text.secondary">
-                {message.content || "Agent is reasoning..."}
-              </Typography>
-            </Box>
-          ) : (
-            <>
-              <AgentResultDisplay
-                result={message.agentResult}
-                isLoading={false}
-              />
-              {message.content && !message.agentResult?.final_answer && (
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  {message.content}
+          <Avatar
+            sx={{
+              bgcolor: isThinking ? "warning.main" : isComplete ? "success.main" : hasError ? "error.main" : "grey.500",
+              width: 32,
+              height: 32,
+              border: 1,
+              borderColor: "divider",
+            }}
+          >
+            <GuaardvarkLogo
+              size={20}
+              variant={isThinking ? "warning" : isComplete ? "success" : hasError ? "error" : "default"}
+              animate={isThinking}
+            />
+          </Avatar>
+          <Paper
+            elevation={2}
+            sx={{
+              p: 1.5,
+              maxWidth: "85%",
+              bgcolor: "background.paper",
+              borderTopLeftRadius: 4,
+              borderTopRightRadius: 16,
+              borderBottomLeftRadius: 16,
+              borderBottomRightRadius: 16,
+              border: 1,
+              borderColor: isThinking ? "warning.main" : isComplete ? "success.main" : hasError ? "error.main" : "grey.500",
+            }}
+          >
+            {isThinking ? (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                <CircularProgress size={16} color="warning" />
+                <Typography variant="body2" color="text.secondary">
+                  {message.content || "Agent is reasoning..."}
                 </Typography>
-              )}
-            </>
-          )}
-        </Paper>
+              </Box>
+            ) : (
+              <>
+                <AgentResultDisplay
+                  result={message.agentResult}
+                  isLoading={false}
+                />
+                {message.content && !message.agentResult?.final_answer && (
+                  <Typography variant="body2" sx={{ mt: 1 }}>
+                    {message.content}
+                  </Typography>
+                )}
+              </>
+            )}
+          </Paper>
+        </Box>
+        {formattedTime && (
+          <Typography
+            variant="caption"
+            sx={{
+              fontSize: "0.65rem",
+              color: "text.secondary",
+              opacity: 0.65,
+              mt: 0.25,
+              ml: "40px",
+            }}
+          >
+            {formattedTime}
+          </Typography>
+        )}
       </Box>
     );
   }
 
   // Progress messages (e.g., "Generating image...") — styled like active streaming messages
   if (isProgress) {
+    const formattedTime = formatTime(message.timestamp);
     return (
-      <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
-        <Avatar
-          src={logoUrl}
-          sx={{
-            bgcolor: "warning.main",
-            width: 32,
-            height: 32,
-            border: 1,
-            borderColor: "divider",
-          }}
-        >
-          {!logo && <GuaardvarkLogo size={20} variant="warning" animate />}
-        </Avatar>
-        <Paper
-          elevation={2}
-          sx={{
-            p: 1.5,
-            maxWidth: "85%",
-            bgcolor: "background.paper",
-            borderTopLeftRadius: 4,
-            borderTopRightRadius: 16,
-            borderBottomLeftRadius: 16,
-            borderBottomRightRadius: 16,
-            border: 1,
-            borderColor: "warning.main",
-            minWidth: 200,
-          }}
-        >
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-            <CircularProgress size={14} color="warning" />
-            <Typography variant="body2" color="text.secondary">
-              {message.content || "Processing..."}
-            </Typography>
-          </Box>
-        </Paper>
+      <Box
+        sx={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "flex-start",
+          width: "100%",
+        }}
+      >
+        <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1, width: "100%" }}>
+          <Avatar
+            src={logoUrl}
+            sx={{
+              bgcolor: "warning.main",
+              width: 32,
+              height: 32,
+              border: 1,
+              borderColor: "divider",
+            }}
+          >
+            {!logo && <GuaardvarkLogo size={20} variant="warning" animate />}
+          </Avatar>
+          <Paper
+            elevation={2}
+            sx={{
+              p: 1.5,
+              maxWidth: "85%",
+              bgcolor: "background.paper",
+              borderTopLeftRadius: 4,
+              borderTopRightRadius: 16,
+              borderBottomLeftRadius: 16,
+              borderBottomRightRadius: 16,
+              border: 1,
+              borderColor: "warning.main",
+              minWidth: 200,
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <CircularProgress size={14} color="warning" />
+              <Typography variant="body2" color="text.secondary">
+                {message.content || "Processing..."}
+              </Typography>
+            </Box>
+          </Paper>
+        </Box>
+        {formattedTime && (
+          <Typography
+            variant="caption"
+            sx={{
+              fontSize: "0.65rem",
+              color: "text.secondary",
+              opacity: 0.65,
+              mt: 0.25,
+              ml: "40px",
+            }}
+          >
+            {formattedTime}
+          </Typography>
+        )}
       </Box>
     );
   }
+
+  const formattedTime = formatTime(message.timestamp);
 
   return (
     <>
     <Box
       sx={{
         display: "flex",
-        justifyContent: isUser ? "flex-end" : "flex-start",
-        flexDirection: "row",
-        alignItems: "flex-start",
-        gap: 1,
-        // Reveal the user-message copy affordance on hover (AI messages keep
-        // their always-visible action row below).
-        "&:hover .msg-user-copy": { opacity: 1 },
+        flexDirection: "column",
+        alignItems: isUser ? "flex-end" : "flex-start",
+        width: "100%",
       }}
     >
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: isUser ? "flex-end" : "flex-start",
+          flexDirection: "row",
+          alignItems: "flex-start",
+          gap: 1,
+          width: "100%",
+          // Reveal the user-message copy affordance on hover (AI messages keep
+          // their always-visible action row below).
+          "&:hover .msg-user-copy": { opacity: 1 },
+        }}
+      >
       {/* User messages get a hover-revealed copy button beside the bubble.
           AI messages already carry copy in their action row. */}
       {isUser && (
@@ -461,6 +543,17 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
           </Box>
         )}
 
+        {message.orchestratorPlan && (
+          <Box sx={{ mb: 1, mt: 0.5 }}>
+            <OrchestratorPlanView
+              embedded
+              plan={message.orchestratorPlan}
+              planId={message.orchestratorPlanId}
+              onExecutionComplete={(payload) => onOrchestratorUpdate?.(message.id, payload)}
+            />
+          </Box>
+        )}
+
         {/* Unified chat tool call cards (displayed inline before the response text) */}
         {message.isUnifiedChat && message.toolCalls && message.toolCalls.length > 0 && (
           <Box sx={{ mb: 1 }}>
@@ -513,6 +606,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
           </Box>
         )}
 
+        {(typeof message.content === 'string' ? message.content.trim() : message.content) && (
         <Box
           sx={{
             userSelect: 'text',
@@ -580,6 +674,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
             {typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}
           </ReactMarkdown>
         </Box>
+        )}
         {/* Feedback + narrate for assistant messages */}
         {!isUser && message.content && typeof message.content === 'string' && message.content.length > 10 && (
           <Box sx={{ mt: 0.5, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 0.25 }}>
@@ -647,6 +742,22 @@ const MessageItem = ({ message, sessionId: sessionIdProp }) => {
         )}
       </Paper>
       {/* No avatar for user messages — clean right-aligned bubbles */}
+      </Box>
+      {formattedTime && (
+        <Typography
+          variant="caption"
+          sx={{
+            fontSize: "0.65rem",
+            color: "text.secondary",
+            opacity: 0.65,
+            mt: 0.25,
+            mr: isUser ? "12px" : 0,
+            ml: isUser ? 0 : "40px",
+          }}
+        >
+          {formattedTime}
+        </Typography>
+      )}
     </Box>
     {lightbox && (
       <ImageLightbox
@@ -679,8 +790,12 @@ MessageItem.propTypes = {
     generatedImages: PropTypes.array,
     badge: PropTypes.string,
     source: PropTypes.string,
+    orchestratorPlan: PropTypes.object,
+    orchestratorPlanId: PropTypes.string,
+    messageType: PropTypes.string,
   }).isRequired,
   sessionId: PropTypes.string,
+  onOrchestratorUpdate: PropTypes.func,
 };
 
 export default React.memo(MessageItem);

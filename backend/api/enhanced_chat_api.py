@@ -99,6 +99,15 @@ _active_requests = set()
 _request_cache = {}
 _cache_lock = threading.Lock()
 
+
+class StaticResponseStream:
+    """Adapter wrapping a completed LLM response for stream-compatible callers."""
+
+    def __init__(self, text: str):
+        self.response_gen = [text]
+        self.response = text
+
+
 class EnhancedChatManager:
     """Enhanced chat manager with advanced context and RAG capabilities"""
 
@@ -3276,13 +3285,7 @@ You are analyzing code files. When responding to questions about code:
                                     debug_id=f"vector_store_fallback_{session_id}_{int(time.time())}"
                                 )
 
-                                # Create a mock response stream object
-                                class MockResponseStream:
-                                    def __init__(self, text):
-                                        self.response_gen = [text]
-                                        self.response = text
-
-                                response_stream = MockResponseStream(direct_response)
+                                response_stream = StaticResponseStream(direct_response)
                                 logger.info("Direct LLM with context recovery successful")
                                 break
 
@@ -3300,12 +3303,7 @@ You are analyzing code files. When responding to questions about code:
                                     debug_id=f"minimal_fallback_{session_id}_{int(time.time())}"
                                 )
 
-                                class MockResponseStream:
-                                    def __init__(self, text):
-                                        self.response_gen = [text]
-                                        self.response = text
-
-                                response_stream = MockResponseStream(direct_response)
+                                response_stream = StaticResponseStream(direct_response)
                                 logger.info("Direct LLM minimal recovery successful")
                                 break
 
@@ -3314,12 +3312,7 @@ You are analyzing code files. When responding to questions about code:
                             logger.info("Using emergency fallback response")
                             emergency_response = "I'm experiencing some technical difficulties with my document search capabilities, but I'm still here to help. I can assist with general questions, explanations, and generating content. Please try rephrasing your question or let me know how else I can help you."
 
-                            class MockResponseStream:
-                                def __init__(self, text):
-                                    self.response_gen = [text]
-                                    self.response = text
-
-                            response_stream = MockResponseStream(emergency_response)
+                            response_stream = StaticResponseStream(emergency_response)
                             logger.info("Emergency fallback response used")
                             break
 
@@ -3342,12 +3335,7 @@ You are analyzing code files. When responding to questions about code:
                         debug_id=f"fallback_chat_{session_id}_{int(time.time())}"
                     )
                     
-                    # Create a mock response stream object to maintain compatibility
-                    class DirectResponseStream:
-                        def __init__(self, response_text):
-                            self.response_gen = [response_text]
-                    
-                    response_stream = DirectResponseStream(direct_response)
+                    response_stream = StaticResponseStream(direct_response)
                     logger.info("Direct LLM fallback successful")
                     
                 except Exception as fallback_error:
@@ -4816,7 +4804,8 @@ def get_chat_history(session_id: str):
             if msg.extra_data and isinstance(msg.extra_data, dict):
                 for key in ('imageUrl', 'imageFileName', 'messageType',
                             'relatedImageUrl', 'imageAnalysis', 'analysisDetails',
-                            'generatedImages', 'agentThinkingSteps'):
+                            'generatedImages', 'agentThinkingSteps',
+                            'orchestratorPlan', 'orchestratorPlanId'):
                     if key in msg.extra_data:
                         msg_data[key] = msg.extra_data[key]
                 # Restore tool call steps for unified chat rendering
@@ -4828,13 +4817,25 @@ def get_chat_history(session_id: str):
         # Check if there are more messages
         has_more = total_count > len(messages)
 
+        # Retrieve active orchestrator plan if exists
+        from backend.services.orchestrator_service import get_orchestrator
+        orchestrator = get_orchestrator()
+        active_plan_id = orchestrator._session_to_plan_id.get(session_id)
+        active_plan = None
+        if active_plan_id:
+            plan = orchestrator._active_plans.get(active_plan_id)
+            if plan:
+                active_plan = orchestrator._serialize_plan(plan)
+
         logger.info(f"Retrieved {len(formatted_messages)} messages for session {session_id} (total: {total_count})")
 
         return jsonify({
             "messages": formatted_messages,
             "has_more": has_more,
             "session_id": session_id,
-            "total_count": total_count
+            "total_count": total_count,
+            "active_plan": active_plan,
+            "active_plan_id": active_plan_id
         })
 
     except Exception as e:

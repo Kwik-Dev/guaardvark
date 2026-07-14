@@ -86,14 +86,14 @@ class PluginLoader:
                 self.loaded_plugins[plugin_id] = plugin_instance
 
                 manifest = self.plugin_manifests.get(plugin_id, {})
-                logger.info("✅ Loaded plugin: %s (v%s)",
+                logger.info("Loaded plugin: %s (v%s)",
                           manifest.get('name', plugin_id),
                           manifest.get('version', 'unknown'))
             else:
                 logger.warning("Plugin %s has no init_plugin() function", plugin_id)
 
         except Exception as e:
-            logger.error("❌ Failed to load plugin %s: %s", plugin_id, e, exc_info=True)
+            logger.error("Failed to load plugin %s: %s", plugin_id, e, exc_info=True)
             raise
 
     def load_all_plugins(self):
@@ -130,7 +130,7 @@ class PluginLoader:
                 logger.error("Error shutting down plugin %s: %s", plugin_id, e)
 
 def init_plugins(app: Flask) -> PluginLoader:
-    logger.info("🔌 Initializing plugin system")
+    logger.info("Initializing plugin system")
 
     loader = PluginLoader(app)
     loader.load_all_plugins()

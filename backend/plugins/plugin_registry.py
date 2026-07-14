@@ -73,9 +73,9 @@ class PluginRegistry:
                     self._plugins[metadata.id] = metadata
                     self._plugin_dirs[metadata.id] = item
                     discovered.append(metadata.id)
-                    logger.info(f"✓ Discovered plugin: {metadata.id} ({metadata.name}) v{metadata.version}")
+                    logger.info(f"Discovered plugin: {metadata.id} ({metadata.name}) v{metadata.version}")
                 except Exception as e:
-                    logger.error(f"✗ Failed to load plugin from {item}: {e}", exc_info=True)
+                    logger.error(f"Failed to load plugin from {item}: {e}", exc_info=True)
             else:
                 logger.debug(f"No plugin.json found in {item.name}")
         

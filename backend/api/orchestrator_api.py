@@ -1,9 +1,43 @@
 from flask import Blueprint, request, jsonify, current_app
 from backend.services.orchestrator_service import get_orchestrator
+from datetime import datetime
 import logging
 
 orchestrator_bp = Blueprint('orchestrator', __name__, url_prefix='/api/orchestrator')
 logger = logging.getLogger(__name__)
+
+
+def _save_orchestrator_plan_message(
+    session_id: str,
+    project_id,
+    plan_id: str,
+    serialized_plan: dict,
+) -> None:
+    """Persist an assistant message embedding the orchestrator plan for chat history."""
+    if not session_id:
+        return
+    try:
+        from backend.models import db, LLMMessage
+        from backend.utils.db_utils import safe_db_commit, safe_db_rollback
+
+        message = LLMMessage(
+            session_id=session_id,
+            project_id=project_id,
+            role="assistant",
+            content="Orchestration plan",
+            extra_data={
+                "messageType": "orchestrator_plan",
+                "orchestratorPlan": serialized_plan,
+                "orchestratorPlanId": plan_id,
+            },
+            timestamp=datetime.now(),
+        )
+        db.session.add(message)
+        if not safe_db_commit(f"orchestrator_plan_message_{session_id}"):
+            safe_db_rollback(f"orchestrator_plan_message_{session_id}")
+            logger.error("Failed to persist orchestrator plan message for session %s", session_id)
+    except Exception as e:
+        logger.error("Error saving orchestrator plan message: %s", e, exc_info=True)
 
 @orchestrator_bp.route('/plan', methods=['POST'])
 def create_plan():
@@ -11,6 +45,7 @@ def create_plan():
     Create a new orchestration plan from a user request.
     """
     try:
+        import uuid
         data = request.get_json()
         if not data or 'request' not in data:
             return jsonify({'error': 'Missing "request" field'}), 400
@@ -20,16 +55,36 @@ def create_plan():
         
         orchestrator = get_orchestrator()
         plan = orchestrator._create_plan(user_request)
-        
-        # Store plan in memory (simple version)
-        # In a real app, this should be in the database
-        plan_id = str(id(plan)) # Simple ID for now
+
+        if not plan.subtasks:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to generate a valid plan',
+            }), 422
+
+        # Store plan in memory and save to disk
+        plan_id = f"plan_{uuid.uuid4().hex[:12]}"
         orchestrator._active_plans[plan_id] = plan
+        
+        # Map session ID to plan ID for persistence across page refreshes
+        session_id = context.get('sessionId')
+        if session_id:
+            orchestrator._session_to_plan_id[session_id] = plan_id
+            
+        orchestrator._save_plans()
+
+        serialized = orchestrator._serialize_plan(plan)
+        _save_orchestrator_plan_message(
+            session_id=session_id,
+            project_id=context.get('projectId'),
+            plan_id=plan_id,
+            serialized_plan=serialized,
+        )
         
         return jsonify({
             'success': True,
             'plan_id': plan_id,
-            'plan': orchestrator._serialize_plan(plan)
+            'plan': serialized,
         })
         
     except Exception as e:
@@ -54,6 +109,12 @@ def execute_plan():
         
         if not plan:
             return jsonify({'error': 'Plan not found'}), 404
+
+        if not plan.subtasks:
+            return jsonify({
+                'success': False,
+                'error': 'Plan has no steps',
+            }), 422
             
         # Execute in background? For now, sync for simplicity, but ideally async
         # We can use Celery here later.

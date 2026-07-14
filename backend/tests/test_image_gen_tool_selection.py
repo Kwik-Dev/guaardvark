@@ -1,7 +1,7 @@
 """
 Tests for image generation tool selection.
-Prevents regression: Image gen requests MUST include generate_image tool.
-The LLM should never be left without the tool when the user asks for images.
+Prevents regression: explicit image gen requests MUST include generate_image;
+descriptive mentions of images must NOT force generation.
 """
 import pytest
 
@@ -12,7 +12,6 @@ class TestImageToolSelection:
     def _get_selected_tools(self, message):
         """Helper: run tool selection for a message and return tool names."""
         from backend.services.unified_chat_engine import select_tools_for_context
-        # Simulate a full tool registry with all tool names
         all_tools = [
             "web_search", "analyze_website", "generate_image", "generate_animation",
             "browse_files", "read_file", "write_file", "execute_code",
@@ -26,15 +25,11 @@ class TestImageToolSelection:
         "create an image of a sunset",
         "make a picture of a dog",
         "make an image of a mountain",
-        "photo of a beach",
-        "image of a car",
-        "picture of a house",
-        "visualize a graph",
-        "illustration of a dragon",
         "render image of space",
+        "generate a gif of a bouncing ball",
     ])
-    def test_image_requests_include_generate_image_tool(self, message):
-        """Every image-related message must include generate_image in selected tools."""
+    def test_explicit_image_requests_include_generate_image_tool(self, message):
+        """Explicit create-intent messages must include generate_image."""
         tools = self._get_selected_tools(message)
         assert "generate_image" in tools, (
             f"generate_image NOT selected for: {message!r}. Got: {tools}"
@@ -45,15 +40,22 @@ class TestImageToolSelection:
         "how are you",
         "what's the weather",
         "tell me a joke",
+        "Hi, on the client website there is an image of a duck",
+        "The system prompt mentions generating images but I want to discuss the copy",
+        "What does the image on the homepage show?",
+        "photo of a beach",
+        "image of a car",
+        "picture of a house",
     ])
-    def test_non_image_requests_may_omit_tool(self, message):
-        """Non-image messages don't need generate_image (but may have it via core tools)."""
+    def test_descriptive_messages_do_not_force_generate_image(self, message):
+        """Descriptive / reference messages must not pin generate_image."""
         tools = self._get_selected_tools(message)
-        # Just verify it doesn't crash — non-image messages may or may not have the tool
-        assert isinstance(tools, list)
+        assert "generate_image" not in tools, (
+            f"generate_image wrongly selected for: {message!r}. Got: {tools}"
+        )
 
     def test_system_prompt_contains_image_gen_rule(self):
-        """The system prompt must contain the CRITICAL image gen instruction."""
+        """The system prompt must instruct when to use generate_image."""
         from backend.services.unified_chat_engine import UnifiedChatEngine
 
         engine = UnifiedChatEngine.__new__(UnifiedChatEngine)
@@ -62,9 +64,8 @@ class TestImageToolSelection:
             "You are helpful.",
             "- generate_image(prompt:str) - Generate an image"
         )
-        assert "CRITICAL" in prompt
         assert "generate_image" in prompt
-        assert "CALL THE TOOL" in prompt
+        assert "explicitly" in prompt.lower() or "NEW image" in prompt
 
     def test_voice_mode_appends_voice_instruction(self):
         """When is_voice_message=True, voice instruction should be appended."""
@@ -80,7 +81,7 @@ class TestImageToolSelection:
         assert "spoken" in prompt.lower()
 
     def test_brain_state_prompt_contains_image_gen_rule(self):
-        """BrainState chat prompt must include the shared CRITICAL image rule."""
+        """BrainState chat prompt must include the shared image generation rule."""
         from backend.services.brain_state import BrainState
 
         brain = BrainState.__new__(BrainState)
@@ -92,7 +93,6 @@ class TestImageToolSelection:
             role="chat",
             tool_list="- generate_image(prompt:string) - Generate an image",
         )
-        assert "CRITICAL" in prompt
         assert "generate_image" in prompt
         assert "<prompt>" in prompt
         assert "<param_name>value</param_name>" not in prompt
@@ -112,8 +112,50 @@ class TestImageToolSelection:
         assert "generate_image" in selected
         _SESSION_PENDING_IMAGE_PROMPT.pop(sid, None)
 
+    def test_pin_image_generation_not_on_duck_website_message(self):
+        from backend.services.unified_chat_engine import _pin_image_generation_tools
+
+        all_tools = ["web_search", "generate_image"]
+        selected = _pin_image_generation_tools(
+            "Hi, on the client website there is an image of a duck",
+            [],
+            all_tools,
+        )
+        assert "generate_image" not in selected
+
     def test_try_again_not_agent_control_keyword(self):
         from backend.services.unified_chat_engine import TOOL_CONTEXT_KEYWORDS
 
         keywords = TOOL_CONTEXT_KEYWORDS["agent_control"][0]
         assert "try again" not in keywords
+
+
+class TestUserWantsImageGeneration:
+    @pytest.mark.parametrize("message", [
+        "generate an image of a duck",
+        "draw me a duck",
+        "make a picture of a sunset",
+    ])
+    def test_explicit_requests(self, message):
+        from backend.services.unified_chat_engine import user_wants_image_generation
+        assert user_wants_image_generation(message) is True
+
+    @pytest.mark.parametrize("message", [
+        "Hi, on the client website there is an image of a duck",
+        "What does the image on the homepage show?",
+        "The system prompt mentions generating images but I want to discuss the copy",
+    ])
+    def test_descriptive_rejected(self, message):
+        from backend.services.unified_chat_engine import user_wants_image_generation
+        assert user_wants_image_generation(message) is False
+
+    def test_try_image_generate_direct_skips_duck_website(self):
+        from backend.services.unified_chat_engine import UnifiedChatEngine
+
+        engine = UnifiedChatEngine.__new__(UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        result = engine._try_image_generate_direct(
+            "Hi, on the client website there is an image of a duck",
+            "sess", lambda *a, **k: None, "req", {},
+        )
+        assert result is None

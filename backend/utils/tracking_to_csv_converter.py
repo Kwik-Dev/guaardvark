@@ -229,9 +229,9 @@ if __name__ == '__main__':
     result = convert_tracking_file(tracking_file, output_file, include_inactive)
     
     if result['success']:
-        print(f"✅ Conversion successful: {result['message']}")
-        print(f"📁 Output file: {result['file_path']}")
-        print(f"📊 Statistics: {result['statistics']}")
+        print(f"Conversion successful: {result['message']}")
+        print(f"Output file: {result['file_path']}")
+        print(f"Statistics: {result['statistics']}")
     else:
-        print(f"❌ Conversion failed: {result['error']}")
+        print(f"Conversion failed: {result['error']}")
         sys.exit(1)

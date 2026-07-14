@@ -642,7 +642,7 @@ export const UnifiedProgressProvider = ({ children }) => {
       });
 
       if (cleanedCount > 0) {
-        // console.log(`🧹 Cleaned up ${cleanedCount} old progress processes`);
+        // console.log(`Cleaned up ${cleanedCount} old progress processes`);
         dispatch({ type: ACTIONS.CLEAR_OLD_PROCESSES });
       }
     }, 60000); // Check every 60 seconds

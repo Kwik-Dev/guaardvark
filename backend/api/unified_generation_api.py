@@ -217,26 +217,8 @@ def _handle_single_csv_generation(data: Dict):
 def _handle_bulk_csv_generation(data: Dict):
     """Handle bulk CSV generation using existing bulk generation logic"""
     try:
-        # Use existing bulk generation logic
         from backend.api.bulk_generation_api import generate_bulk_csv
-        
-        # Create a mock request object with the data
-        class MockRequest:
-            def __init__(self, data):
-                self._json = data
-            
-            def get_json(self):
-                return self._json
-        
-        # Temporarily replace request with mock
-        original_request = request
-        try:
-            # This is a simplified approach - in production, you'd want to refactor
-            # the bulk generation logic to be more modular
-            return generate_bulk_csv()
-        finally:
-            pass  # Restore original request if needed
-        
+        return generate_bulk_csv()
     except Exception as e:
         logger.error(f"Error in bulk CSV generation: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -260,18 +242,7 @@ def generate_file():
         if not prompt:
             return jsonify({"error": "prompt is required."}), 400
         
-        # Use existing single file generation logic
         from backend.api.generation_api import direct_generate_and_save_file_route
-        
-        # Create mock request
-        class MockRequest:
-            def __init__(self, data):
-                self._json = data
-            
-            def get_json(self):
-                return self._json
-        
-        # Call existing generation logic
         return direct_generate_and_save_file_route()
         
     except Exception as e:

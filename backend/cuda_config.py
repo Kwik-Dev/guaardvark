@@ -60,33 +60,33 @@ def configure_cuda_optimizations(verbose=True):
     torch.backends.cudnn.benchmark = True
     config_status["optimizations_applied"].append("cuDNN benchmark mode")
     if verbose:
-        print("  ✓ cuDNN benchmark mode enabled")
+        print("cuDNN benchmark mode enabled")
 
     if hasattr(torch.backends.cuda.matmul, 'allow_tf32'):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         config_status["optimizations_applied"].append("TF32 precision")
         if verbose:
-            print("  ✓ TF32 precision enabled for faster matrix operations")
+            print("TF32 precision enabled for faster matrix operations")
 
     torch.set_float32_matmul_precision('high')
     config_status["optimizations_applied"].append("float32 matmul precision: high")
     if verbose:
-        print("  ✓ float32 matmul precision set to 'high' (enables TF32 globally)")
+        print("float32 matmul precision set to 'high' (enables TF32 globally)")
 
     torch.backends.cudnn.enabled = True
     config_status["optimizations_applied"].append("cuDNN enabled")
     if verbose:
-        print("  ✓ cuDNN enabled")
+        print("cuDNN enabled")
 
     # Check bf16 support for Ada Lovelace / Ampere+ GPUs
     compute_cap = torch.cuda.get_device_capability(0)
     if compute_cap[0] >= 8:
         config_status["optimizations_applied"].append(f"bf16 capable (SM {compute_cap[0]}.{compute_cap[1]})")
         if verbose:
-            print(f"  ✓ GPU supports bf16 (compute capability {compute_cap[0]}.{compute_cap[1]})")
+            print(f"GPU supports bf16 (compute capability {compute_cap[0]}.{compute_cap[1]})")
     if verbose:
-        print("  ✓ channels_last (NHWC) recommended for conv-heavy models on Ada Lovelace")
+        print("channels_last (NHWC) recommended for conv-heavy models on Ada Lovelace")
 
     gpu_info = {
         "name": torch.cuda.get_device_name(0),
@@ -112,7 +112,7 @@ def configure_cuda_optimizations(verbose=True):
         print(f"  Persistence Mode: {sys_opt['persistence_mode']}")
         print(f"  Power Limit: {sys_opt['power_limit_w']}W (Default: {sys_opt['default_power_limit_w']}W)")
         if sys_opt['high_performance_mode']:
-            print(f"  ✓ High Performance Mode Detected")
+            print(f"High Performance Mode Detected")
 
     try:
         dummy = torch.zeros(1, device='cuda')
@@ -121,10 +121,10 @@ def configure_cuda_optimizations(verbose=True):
         torch.cuda.synchronize()
         config_status["optimizations_applied"].append("GPU warmup")
         if verbose:
-            print("  ✓ GPU warmed up and ready")
+            print("GPU warmed up and ready")
     except Exception as e:
         if verbose:
-            print(f"  ⚠ GPU warmup warning: {e}")
+            print(f"GPU warmup warning: {e}")
 
     alloc_conf = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', 'Not set')
     if verbose:

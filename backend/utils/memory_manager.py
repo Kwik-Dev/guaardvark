@@ -576,7 +576,7 @@ class MemoryManager:
                 self.db.add(setting)
 
             self.db.commit()
-            logger.info(f"💾 Memory persisted for session {session_id}")
+            logger.info(f"Memory persisted for session {session_id}")
 
         except Exception as e:
             logger.error(f"Failed to persist memory: {e}")
@@ -653,7 +653,7 @@ class MemoryManager:
 
             self.db.commit()
             count = len(old_settings)
-            logger.info(f"🧹 Cleaned up {count} old memory states")
+            logger.info(f"Cleaned up {count} old memory states")
             return count
 
         except Exception as e:

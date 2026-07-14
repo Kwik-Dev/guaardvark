@@ -977,7 +977,7 @@ def submit_feedback():
         feedback_file.parent.mkdir(parents=True, exist_ok=True)
         with open(feedback_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
-        logger.info(f"[FEEDBACK] {'👍' if entry['positive'] else '👎'} task=\"{entry['task'][:60]}\"")
+        logger.info(f"[FEEDBACK] {'positive' if entry['positive'] else 'negative'} task=\"{entry['task'][:60]}\"")
         
         # PERSIST TO DATABASE (Structured storage)
         db_entry_id = None

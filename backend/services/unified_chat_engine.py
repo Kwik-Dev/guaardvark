@@ -160,6 +160,34 @@ DESKTOP_TOOLS = ["app_launch", "app_list", "app_focus", "gui_click", "gui_type",
 WEB_TOOLS = ["analyze_website", "fetch_url"]
 MEDIA_TOOLS = ["media_play", "media_control", "media_volume", "media_status"]
 IMAGE_TOOLS = ["generate_image", "generate_animation"]
+
+# Narrow create-intent phrases for image/video generation — excludes descriptive
+# "image of X on the website" references that falsely triggered direct generate_image.
+IMAGE_GEN_INTENT_KEYWORDS = [
+    "generate image", "generate an image", "create image", "draw", "make a picture",
+    "make an image", "generate a photo", "render image", "animate", "animation", "gif",
+    "moving image", "video of", "make a video", "create a video", "generate video",
+    "generate a gif", "animated", "generate_image", "use the generate_image tool",
+    "/imagine",
+]
+
+_IMAGE_GEN_NEGATIVE_PATTERNS = (
+    r"\bthere is an image\b",
+    r"\bhas an image\b",
+    r"\bon the (client )?website\b",
+    r"\bwhat does the image\b",
+    r"\bwhat is (in|on) the (image|photo|picture)\b",
+    r"\bwhere is the image\b",
+    r"\bfind the image\b",
+    r"\bthe prompt (for|in|says)\b",
+    r"\bnegative prompt\b",
+    r"\breview the prompt\b",
+    r"\bsystem prompt\b",
+    r"\buser prompt\b",
+    r"\bprompt template\b",
+    r"\bdescribe (this|the|that) (image|photo|picture)\b",
+    r"\b(analyze|explain) (this|the|that) (image|photo|picture)\b",
+)
 # For chat context, only expose the tools the LLM should actually call
 # agent_mode_start/stop are internal — the LLM should use agent_task_execute directly
 AGENT_CONTROL_TOOLS = ["agent_task_execute", "agent_screen_capture"]
@@ -244,12 +272,7 @@ TOOL_CONTEXT_KEYWORDS = {
     "web": (["analyze site", "seo analysis", "website analysis"], WEB_TOOLS),
     "media": (["play", "pause", "stop", "music", "song", "volume", "mute", "unmute",
                "next track", "skip", "playing", "louder", "quieter"], MEDIA_TOOLS),
-    "image": (["generate image", "generate an image", "create image", "draw", "make a picture", "make an image",
-               "generate a photo", "visualize", "illustration", "render image", "picture of",
-               "image of", "photo of", "animate", "animation", "gif", "moving image",
-               "video of", "make a video", "create a video", "generate video",
-               "generate a gif", "animated", "generate_image", "use the generate_image tool"],
-              IMAGE_TOOLS),
+    "image": (IMAGE_GEN_INTENT_KEYWORDS, IMAGE_TOOLS),
     "agent_control": (["virtual screen", "virtual display", "virtual computer", "virtual browser",
                        "virtual machine", "agent screen", "agent mode", "agent vision",
                        "on the virtual", "from the virtual", "using the virtual",
@@ -293,6 +316,94 @@ TOOL_CONTEXT_KEYWORDS = {
 }
 
 
+def _has_explicit_image_gen_intent(msg_lower: str) -> bool:
+    """True when the message explicitly asks to create new image/video media."""
+    if any(kw in msg_lower for kw in IMAGE_GEN_INTENT_KEYWORDS):
+        return True
+    if re.search(r"\b(generate|draw|make|create|render|visuali[sz]e)\b", msg_lower):
+        if re.search(r"\b(image|picture|photo|illustration|gif|animation|video)\b", msg_lower):
+            return True
+    return False
+
+
+def user_wants_image_generation(message: str) -> bool:
+    """Strict gate: create new media vs describe/reference existing images or prompts."""
+    if not message or not message.strip():
+        return False
+    msg_lower = message.lower()
+    if not _has_explicit_image_gen_intent(msg_lower):
+        return False
+    for pat in _IMAGE_GEN_NEGATIVE_PATTERNS:
+        if re.search(pat, msg_lower):
+            return False
+    return True
+
+
+def _is_qwen_parser_model(model_name: str) -> bool:
+    m = (model_name or "").lower()
+    return "qwen3.5" in m or "qwen35" in m or "qwen3-5" in m
+
+
+def _ollama_chat_model_loaded(model_name: str) -> bool:
+    """True if model_name appears loaded with VRAM in Ollama /api/ps."""
+    try:
+        import requests
+        from backend.utils.ollama_resource_manager import get_ollama_base_url
+        resp = requests.get(f"{get_ollama_base_url()}/api/ps", timeout=3)
+        if resp.status_code != 200:
+            return False
+        target = (model_name or "").lower()
+        base = target.split(":")[0]
+        for entry in resp.json().get("models", []):
+            name = (entry.get("name") or "").lower()
+            if name == target or name.startswith(base + ":") or name == base:
+                if (entry.get("size_vram") or 0) > 0:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def classify_ollama_eof_kind(model_name: str, error_str: str) -> str:
+    """Classify Ollama EOF errors for retry routing and user messaging."""
+    err = (error_str or "").lower()
+    if "connection" in err or "refused" in err or "disconnected" in err:
+        return "service_down"
+    if "eof" not in err and "status code: -1" not in err:
+        return "unknown"
+    loaded = _ollama_chat_model_loaded(model_name)
+    if _is_qwen_parser_model(model_name) and loaded:
+        return "parser_eof"
+    if not loaded:
+        return "runner_eof"
+    return "parser_eof" if _is_qwen_parser_model(model_name) else "runner_eof"
+
+
+def ollama_eof_user_message(error_str: str, model_name: str, *, has_media: bool = False) -> str:
+    """User-facing message for EOF failures — avoids VRAM blame when parser/model state says otherwise."""
+    kind = classify_ollama_eof_kind(model_name, error_str)
+    if kind == "service_down":
+        return "Cannot connect to Ollama. Is the Ollama service running?"
+    if has_media:
+        return (
+            "Chat model is still reloading after the media generation (normal on tight GPU). "
+            "The generated image/video should already be visible above. You can continue the conversation now."
+        )
+    if kind == "parser_eof":
+        return (
+            "The chat model returned a response but Ollama's tool-call parser aborted the stream "
+            "(known issue with some qwen3.5 builds). Try again or switch chat model in Settings."
+        )
+    if kind == "runner_eof":
+        return (
+            "Ollama dropped the connection while the chat model was loading or being swapped off GPU. "
+            "Wait a few seconds and try again."
+        )
+    return (
+        "Ollama dropped the connection. Wait a few seconds and try again, or switch chat model in Settings."
+    )
+
+
 def select_tools_for_context(message: str, all_tool_names: List[str], max_tools: int = 25) -> List[str]:
     """Select most relevant tools based on message content."""
     # No tools for conversational messages
@@ -305,12 +416,16 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
     keyword_matched = False
     matched_categories = set()
     for category, (keywords, tools) in TOOL_CONTEXT_KEYWORDS.items():
-        if any(kw in msg_lower for kw in keywords):
-            keyword_matched = True
-            matched_categories.add(category)
-            for t in tools:
-                if t in all_tool_names:
-                    selected.add(t)
+        if category == "image":
+            if not user_wants_image_generation(message):
+                continue
+        elif not any(kw in msg_lower for kw in keywords):
+            continue
+        keyword_matched = True
+        matched_categories.add(category)
+        for t in tools:
+            if t in all_tool_names:
+                selected.add(t)
 
     # Priority: if agent_control matched, remove conflicting tools
     # The LLM should use agent_task_execute for virtual screen, not browser/web/desktop tools
@@ -324,6 +439,8 @@ def select_tools_for_context(message: str, all_tool_names: List[str], max_tools:
         excluded_from_padding = set(BROWSER_TOOLS + WEB_TOOLS + DESKTOP_TOOLS)
         # Also exclude agent_mode_start/stop — LLM should not call these directly
         excluded_from_padding.update(["agent_mode_start", "agent_mode_stop", "agent_status"])
+    if not user_wants_image_generation(message):
+        excluded_from_padding.update(IMAGE_TOOLS)
 
     # Only pad with extra tools if keywords actually matched a category
     if keyword_matched and len(selected) < max_tools:
@@ -395,9 +512,8 @@ def _pin_image_generation_tools(
     honestly says it has no image tool. Keyword pin matches the image category in
     TOOL_CONTEXT_KEYWORDS (same phrases select_tools_for_context uses).
     """
-    msg_lower = (message or "").lower()
     keywords, tools = TOOL_CONTEXT_KEYWORDS["image"]
-    should_pin = any(kw in msg_lower for kw in keywords)
+    should_pin = user_wants_image_generation(message)
     if not should_pin and session_id and _SESSION_PENDING_IMAGE_PROMPT.get(session_id):
         if _is_image_retry_message(message):
             should_pin = True
@@ -1474,26 +1590,17 @@ class UnifiedChatEngine:
                         "after the other model unloads."
                     )
                 elif "EOF" in error_str or "status code: -1" in error_str:
-                    # Softer message when we just successfully generated media (the image/video
-                    # event was already emitted to the UI). The continuation LLM call hit a cold
-                    # model; the backoff recovery tried, but the user can keep chatting.
                     has_media = bool(generated_images) or any(
                         (s.get("tool_calls") or []) for s in steps if any(
                             (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", "")) in ("generate_image", "generate_animation", "edit_image")
                             for tc in (s.get("tool_calls") or [])
                         )
                     )
-                    if has_media:
-                        friendly_error = (
-                            "Chat model is still reloading after the media generation (normal on tight GPU). "
-                            "The generated image/video should already be visible above. You can continue the conversation now."
-                        )
-                    else:
-                        friendly_error = (
-                            "Ollama dropped the connection — usually the chat model was evicted for a "
-                            "GPU image job and is still reloading, or another Ollama job is contending "
-                            "for VRAM. Wait a few seconds and try again."
-                        )
+                    friendly_error = ollama_eof_user_message(
+                        error_str,
+                        getattr(self.llm, "model", ""),
+                        has_media=has_media,
+                    )
                 elif "connection" in error_str.lower() or "refused" in error_str.lower():
                     friendly_error = "Cannot connect to Ollama. Is the Ollama service running?"
                 else:
@@ -2708,21 +2815,7 @@ class UnifiedChatEngine:
         """
         if not message or not message.strip():
             return None
-        msg_l = (message or "").lower()
-
-        # Bail on obvious describe/analyze queries even if they mention "image of"
-        if re.search(r'\b(what|describe|tell me|analyze|explain|caption|see|look at|is this|what is)\b', msg_l):
-            return None
-
-        # Match strong generation intent using the same keyword spirit as TOOL_CONTEXT
-        # but conservatively to avoid hijacking non-requests.
-        keywords, _ = TOOL_CONTEXT_KEYWORDS.get("image", ([], []))
-        has_image_kw = any(kw in msg_l for kw in keywords)
-        has_gen_verb = bool(re.search(
-            r'\b(generate|draw|make|create|render|visuali[sz]e)\b',
-            msg_l
-        ))
-        if not (has_image_kw or has_gen_verb):
+        if not user_wants_image_generation(message):
             return None
         if not self.registry.get_tool("generate_image"):
             return None
@@ -3092,49 +3185,108 @@ class UnifiedChatEngine:
                     logger.error(f"Retry also failed: {retry_err}", exc_info=True)
                     raise
 
-            # Ollama runner dropped the connection (EOF / status code: -1). Almost
-            # always transient: the model is still loading, or a VRAM swap (e.g. a
-            # model switch that briefly double-loaded two models on a tight GPU)
-            # OOM'd the runner. If nothing has been streamed to the user yet, let the
-            # runner settle and retry ONCE (mirrors the working backup from 2026-07-02).
-            # Guard on _chat_kwargs (unset on the cloud path).
+            # Ollama EOF / stream drop — classify and retry with parser-aware fallbacks.
             _retry_kwargs = locals().get("_chat_kwargs")
             is_eof = ("EOF" in error_str) or ("status code: -1" in error_str)
             if is_eof and not accumulated and _retry_kwargs:
+                eof_kind = classify_ollama_eof_kind(model_name, error_str)
+                ps_loaded = _ollama_chat_model_loaded(model_name)
                 logger.warning(
-                    f"Ollama EOF (runner dropped — likely model load / VRAM swap); "
-                    f"retrying once after settle: {error_str}"
+                    f"Ollama EOF kind={eof_kind} model={model_name} ps_loaded={ps_loaded} "
+                    f"native_tools={bool(_retry_kwargs.get('tools'))}: {error_str}"
                 )
+
+                def _extract_nostream_response(resp: dict) -> tuple:
+                    msg = resp.get("message", {}) if isinstance(resp, dict) else {}
+                    text = (msg.get("content") or "").strip()
+                    think = (msg.get("thinking") or "").strip()
+                    if is_thinking_model:
+                        text = re.sub(
+                            r'<think>[\s\S]*?</think>\s*', '', text
+                        ).strip()
+                    if not text and think:
+                        text = think
+                    in_tok = resp.get("prompt_eval_count", 0) or 0
+                    out_tok = resp.get("eval_count", 0) or 0
+                    native_tc = msg.get("tool_calls") if isinstance(msg, dict) else None
+                    return text, in_tok, out_tok, native_tc
+
                 try:
-                    import time as _time
-                    _time.sleep(3.0)
-                    stream = ollama.chat(**_retry_kwargs)
-                    for chunk in stream:
-                        if is_aborted(session_id):
-                            break
-                        msg = chunk.get("message", {})
-                        token = msg.get("content", "")
-                        thinking_token = msg.get("thinking", "")
+                    # Retry A: non-streaming (parser may warn but still return body)
+                    ns_kwargs = dict(_retry_kwargs)
+                    ns_kwargs["stream"] = False
+                    resp = ollama.chat(**ns_kwargs)
+                    content, input_tokens, output_tokens, native_tc = _extract_nostream_response(resp)
+                    if _native_active and native_tc:
+                        self._native_pending_tool_calls = native_tc
+                    if content:
+                        logger.info(f"Ollama EOF non-stream retry succeeded (kind={eof_kind})")
+                        if emit_tokens:
+                            emit_fn("chat:token", {"content": content, "session_id": session_id})
+                        return content, input_tokens, output_tokens
+
+                    # Retry B: drop native tools= (force XML path in UCE)
+                    if _retry_kwargs.get("tools"):
+                        nt_kwargs = dict(_retry_kwargs)
+                        nt_kwargs.pop("tools", None)
+                        nt_kwargs["stream"] = False
+                        resp = ollama.chat(**nt_kwargs)
+                        content, input_tokens, output_tokens, native_tc = _extract_nostream_response(resp)
+                        if content:
+                            logger.info("Ollama EOF retry succeeded after dropping tools=")
+                            if emit_tokens:
+                                emit_fn("chat:token", {"content": content, "session_id": session_id})
+                            return content, input_tokens, output_tokens
+
+                    # Retry C: runner reload — model not in VRAM or generic runner drop
+                    if eof_kind == "runner_eof" or not ps_loaded:
+                        import time as _time
+                        try:
+                            import requests
+                            from backend.config import OLLAMA_BASE_URL, get_chat_keep_alive
+                            requests.post(
+                                f"{OLLAMA_BASE_URL}/api/generate",
+                                json={
+                                    "model": model_name,
+                                    "prompt": " ",
+                                    "stream": False,
+                                    "options": {"num_predict": 1, "num_ctx": ctx_window},
+                                    "keep_alive": get_chat_keep_alive(),
+                                },
+                                timeout=(8.0, 90.0),
+                            )
+                        except Exception as warm_err:
+                            logger.debug(f"EOF runner warmup ping skipped: {warm_err}")
+                        _time.sleep(2.0)
+                        stream = ollama.chat(**_retry_kwargs)
+                        for chunk in stream:
+                            if is_aborted(session_id):
+                                break
+                            msg = chunk.get("message", {})
+                            token = msg.get("content", "")
+                            thinking_token = msg.get("thinking", "")
+                            if _native_active:
+                                try:
+                                    _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+                                except Exception:
+                                    _tc = None
+                                if _tc:
+                                    _native_tool_calls_acc.extend(_tc)
+                            if token:
+                                accumulated.append(token)
+                            if thinking_token:
+                                accumulated_thinking.append(thinking_token)
+                            if chunk.get("done"):
+                                input_tokens = chunk.get("prompt_eval_count", 0) or 0
+                                output_tokens = chunk.get("eval_count", 0) or 0
+                        content = "".join(accumulated).strip()
+                        content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
                         if _native_active:
-                            try:
-                                _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
-                            except Exception:
-                                _tc = None
-                            if _tc:
-                                _native_tool_calls_acc.extend(_tc)
-                        if token:
-                            accumulated.append(token)
-                        if thinking_token:
-                            accumulated_thinking.append(thinking_token)
-                        if chunk.get("done"):
-                            input_tokens = chunk.get("prompt_eval_count", 0) or 0
-                            output_tokens = chunk.get("eval_count", 0) or 0
-                    content = "".join(accumulated).strip()
-                    content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
-                    if _native_active:
-                        self._native_pending_tool_calls = _native_tool_calls_acc or None
-                    logger.info("Ollama EOF retry succeeded")
-                    return content, input_tokens, output_tokens
+                            self._native_pending_tool_calls = _native_tool_calls_acc or None
+                        if content:
+                            logger.info(f"Ollama EOF runner reload retry succeeded (kind={eof_kind})")
+                            return content, input_tokens, output_tokens
+
                 except Exception as eof_retry_err:
                     logger.error(f"EOF retry also failed: {eof_retry_err}", exc_info=True)
                     raise

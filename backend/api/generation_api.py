@@ -18,35 +18,8 @@ try:
     )
     from backend.utils.system_coordinator import get_system_coordinator, ProcessType
 except ImportError as e:
-    logger.warning(f"Failed to import secure file operations: {e}")
-    # Fallback functions
-    def secure_write_file(file_path: str, content: str) -> str:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        return file_path
-    
-    def sanitize_generation_params(params):
-        return params
-    
-    def get_secure_file_manager():
-        class DummyManager:
-            def secure_filename(self, filename):
-                return filename
-        return DummyManager()
-    
-    def get_system_coordinator():
-        class DummyCoordinator:
-            def managed_operation(self, *args, **kwargs):
-                class DummyContext:
-                    def __enter__(self):
-                        return "dummy_process_id"
-                    def __exit__(self, *args):
-                        pass
-                return DummyContext()
-        return DummyCoordinator()
-    
-    class ProcessType:
-        FILE_GENERATION = "file_generation"
+    logger.error(f"Failed to import secure file operations (required for generation): {e}")
+    raise
 
 logger = logging.getLogger(__name__)
 

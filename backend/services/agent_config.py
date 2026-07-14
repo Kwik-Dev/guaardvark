@@ -486,6 +486,8 @@ Do NOT call the same tool again. One successful tool call = task complete = set 
         tools=[
             "generate_file",
             "analyze_code",
+            "web_search",
+            "analyze_website",
         ],
         system_prompt="""You are a General Assistant agent that helps with various tasks.
 

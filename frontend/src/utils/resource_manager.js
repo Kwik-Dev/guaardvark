@@ -399,7 +399,7 @@ class FrontendResourceManager {
       // (a ~2MB base64 data URL), so it tripped the text-size cap and fell off the queue.
       // Strip those two fields but keep the rest of voiceOptions (small config).
       if (checkObj.voiceOptions && typeof checkObj.voiceOptions === 'object') {
-        const { imageBase64, imagePreview, ...voRest } = checkObj.voiceOptions;
+        const { imageBase64: _unused_imageBase64, imagePreview: _unused_imagePreview, ...voRest } = checkObj.voiceOptions;
         checkObj.voiceOptions = voRest;
       }
       const messageStr = JSON.stringify(checkObj);

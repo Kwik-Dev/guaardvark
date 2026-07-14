@@ -3124,9 +3124,9 @@ def main():
     try:
         output_path, stats = generator.generate_bulk_csv(tasks, output_filename)
 
-        print(f"\n🎉 Generation complete!")
-        print(f"📁 Output file: {output_path}")
-        print(f"📊 Statistics:")
+        print(f"\n Generation complete!")
+        print(f"Output file: {output_path}")
+        print(f"Statistics:")
         print(f"  - Generated: {stats['generated_count']}/{stats['total_tasks']} items")
         print(f"  - Success rate: {stats['success_rate']:.1f}%")
         print(f"  - Total time: {stats['total_time_seconds']:.1f} seconds")
@@ -3139,7 +3139,7 @@ def main():
                 print(f"  - Most common errors: {stats['error_summary']['most_common_errors'][:3]}")
 
     except Exception as e:
-        print(f"❌ Generation failed: {e}")
+        print(f"Generation failed: {e}")
         if args.verbose:
             import traceback
             traceback.print_exc()

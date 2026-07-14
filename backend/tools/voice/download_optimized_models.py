@@ -82,15 +82,15 @@ def main():
         logger.info(f"\nProcessing: {model_name} - {description}")
         
         if check_model_exists(model_name, models_dir):
-            logger.info(f"✓ Model {model_name} already exists, skipping download")
+            logger.info(f"Model {model_name} already exists, skipping download")
             skipped_count += 1
             continue
             
         if download_model(model_name, models_dir):
-            logger.info(f"✓ Successfully downloaded {model_name}")
+            logger.info(f"Successfully downloaded {model_name}")
             downloaded_count += 1
         else:
-            logger.error(f"✗ Failed to download {model_name}")
+            logger.error(f"Failed to download {model_name}")
             failed_count += 1
     
     # Summary
@@ -101,7 +101,7 @@ def main():
     logger.info(f"Failed: {failed_count}")
     
     if downloaded_count > 0:
-        logger.info(f"\n✓ Successfully downloaded {downloaded_count} models for performance optimization!")
+        logger.info(f"\nSuccessfully downloaded {downloaded_count} models for performance optimization!")
         logger.info("Voice chat performance should be significantly improved.")
     
     if failed_count > 0:
