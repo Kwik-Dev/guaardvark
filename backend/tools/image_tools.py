@@ -67,7 +67,9 @@ class ImageGeneratorTool(BaseTool):
             description=(
                 "Model to use. Default 'auto' — recommended; the system auto-picks the best "
                 "downloaded model for the prompt (usually Z-Image-Turbo or SDXL). "
-                "Only override when the user names a specific model: 'zimage-turbo' (best all-round), "
+                "Only override when the user names a specific model: 'krea2-turbo' (aesthetic 12B fast), "
+                "'krea2-raw' (base 12B, ~52 steps, less restricted), "
+                "'zimage-turbo' (best all-round), "
                 "'sd-xl', 'sdxl-turbo' (fast), 'realistic-vision' (photoreal faces), 'epic-realism'."
             ),
             required=False,
@@ -141,8 +143,9 @@ class ImageGeneratorTool(BaseTool):
             from backend.services.job_types import JobKind
             try:
                 ram_est = generator._ram_estimate_gb(request.model or "auto") if hasattr(generator, "_ram_estimate_gb") else 10.0
+                vram_est = generator._vram_estimate_mb(request.model or "auto") if hasattr(generator, "_vram_estimate_mb") else 11000
                 with gpu_session(JobKind.VIDEO_RENDER, f"chat_imggen_{uuid.uuid4().hex[:8]}",
-                                 on_busy="raise", evict_ollama=True, vram_estimate_mb=11000,
+                                 on_busy="raise", evict_ollama=True, vram_estimate_mb=vram_est,
                                  ram_estimate_gb=ram_est,
                                  require_fit=True, cross_process=True):
                     result = generator.generate_image(request)

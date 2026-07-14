@@ -39,6 +39,15 @@ except Exception:  # ImportError on older diffusers
     ZImageImg2ImgPipeline = None
     zimage_available = False
 
+# Krea 2 Turbo (krea.ai): 12B DiT, CFG-distilled 8-step inference. Ships in
+# diffusers >= 0.39. Import separately so missing support doesn't break SD/SDXL.
+try:
+    from diffusers import Krea2Pipeline
+    krea2_available = True
+except Exception:
+    Krea2Pipeline = None
+    krea2_available = False
+
 try:
     from backend.config import CACHE_DIR
     config_available = True
@@ -108,6 +117,8 @@ class OfflineImageGenerator:
             # Z-Image-Turbo (Tongyi-MAI): 6B, Apache-2.0, ungated. Best prompt
             # adherence per VRAM on a 16 GB card — the preferred all-rounder.
             "zimage-turbo": "Tongyi-MAI/Z-Image-Turbo",
+            "krea2-turbo": "krea/Krea-2-Turbo",
+            "krea2-raw": "krea/Krea-2-Raw",
             "sd-xl": "stabilityai/stable-diffusion-xl-base-1.0",
             "sdxl-turbo": "stabilityai/sdxl-turbo",
             "realistic-vision": "SG161222/Realistic_Vision_V5.1_noVAE",
@@ -122,10 +133,12 @@ class OfflineImageGenerator:
         # Drives the centralized dropdown via get_available_models().
         self.model_meta = {
             "zimage-turbo": {"label": "Z-Image Turbo (Best)", "description": "Strongest prompt adherence + text, fast (~8 steps). Recommended.", "recommended": True, "order": 0},
-            "sd-xl": {"label": "SDXL Base", "description": "High-res 1024, reliable, huge LoRA ecosystem.", "recommended": False, "order": 1},
-            "sdxl-turbo": {"label": "SDXL Turbo (Fast)", "description": "Fast 1024 previews, few steps.", "recommended": False, "order": 2},
-            "realistic-vision": {"label": "Realistic Vision", "description": "Top photoreal faces & portraits.", "recommended": False, "order": 3},
-            "epic-realism": {"label": "Epic Realism", "description": "Cinematic photorealism.", "recommended": False, "order": 4},
+            "krea2-turbo": {"label": "Krea 2 Turbo", "description": "12B aesthetic-first model, native 2K, 8 steps CFG-free. Fast inference.", "recommended": False, "order": 1},
+            "krea2-raw": {"label": "Krea 2 Raw", "description": "Base 12B checkpoint — less post-trained than Turbo (~52 steps, CFG 3.5). Use for mature/creative prompts or LoRA base.", "recommended": False, "order": 2},
+            "sd-xl": {"label": "SDXL Base", "description": "High-res 1024, reliable, huge LoRA ecosystem.", "recommended": False, "order": 3},
+            "sdxl-turbo": {"label": "SDXL Turbo (Fast)", "description": "Fast 1024 previews, few steps.", "recommended": False, "order": 4},
+            "realistic-vision": {"label": "Realistic Vision", "description": "Top photoreal faces & portraits.", "recommended": False, "order": 5},
+            "epic-realism": {"label": "Epic Realism", "description": "Cinematic photorealism.", "recommended": False, "order": 6},
         }
 
         self.anatomy_negative = "deformed body, distorted anatomy, extra limbs, missing limbs, extra arms, missing arms, extra legs, missing legs, fused limbs, disconnected limbs, floating limbs, asymmetrical body, disproportionate limbs, twisted torso, broken spine, impossible pose, malformed body, mutated anatomy, gross proportions, extra heads, conjoined, siamese, bad anatomy, cropped body, out of frame body, duplicate person, clone"
@@ -230,7 +243,11 @@ class OfflineImageGenerator:
         self._img2img_pipeline = None
         self._img2img_family = None
         self._current_model = None
-        
+        # Offload mode of the resident pipeline: None | "sequential" | "model" | "full"
+        self._pipeline_offload_mode = None
+        # One-shot force sequential reload after a mid-inference OOM.
+        self._force_sequential_offload = False
+
         self._device = "cpu"
         if torch.cuda.is_available():
             try:
@@ -259,20 +276,55 @@ class OfflineImageGenerator:
         model_path = self._get_model_path(model_id)
         return model_path.exists() and any(model_path.iterdir())
 
+    def _resolve_model_ref(self, model_ref: str) -> str:
+        """Catalog key (e.g. krea2-turbo) → HF repo id; pass through HF ids and auto."""
+        if not model_ref or model_ref in ("auto", ""):
+            return model_ref
+        return self.available_models.get(model_ref, model_ref)
+
+    def _krea2_variant(self, model_ref: str) -> str:
+        """turbo = CFG-distilled 8-step; raw = base checkpoint ~52 steps / CFG 3.5."""
+        key = (model_ref or "").lower()
+        mid = self._resolve_model_ref(model_ref).lower()
+        if "raw" in key or "krea-2-raw" in mid.replace("_", "-"):
+            return "raw"
+        return "turbo"
+
+    def _skip_negative_prompt(self, family: str, model_ref: str, guidance_scale: float) -> bool:
+        """Turbo/Z-Image-low-CFG skip negatives; Krea Raw uses full CFG negatives."""
+        if family == "krea2":
+            return self._krea2_variant(model_ref) == "turbo"
+        if family == "zimage":
+            return guidance_scale <= 1.0
+        return False
+
     def _model_family(self, model_id: str) -> str:
-        """Map an HF model id to a pipeline family: 'zimage', 'sdxl', or 'sd'.
+        """Map a catalog key or HF model id to a pipeline family.
 
         Drives pipeline class, scheduler, VRAM strategy, and generation params.
         """
-        mid = model_id.lower()
-        if 'z-image' in mid or 'zimage' in mid:
-            return 'zimage'
-        if 'xl' in mid or 'sdxl' in mid:
-            return 'sdxl'
-        return 'sd'
+        key = (model_id or "").lower()
+        mid = self._resolve_model_ref(model_id).lower()
+        if key.startswith("krea2") or (
+            "krea" in mid
+            and (
+                "krea-2" in mid.replace("_", "-")
+                or "krea2" in mid.replace("-", "").replace("/", "")
+            )
+        ):
+            return "krea2"
+        if "z-image" in mid or "zimage" in mid or key.startswith("zimage"):
+            return "zimage"
+        if "xl" in mid or "sdxl" in mid:
+            return "sdxl"
+        return "sd"
 
     def _build_img2img_pipeline(self, family: str):
         """Share weights from the loaded txt2img pipeline for img2img edits."""
+        if family == 'krea2':
+            raise RuntimeError(
+                "Krea 2 does not support img2img editing yet — use kontext or sd-xl"
+            )
         if family == 'zimage':
             if ZImageImg2ImgPipeline is None:
                 raise RuntimeError(
@@ -311,17 +363,41 @@ class OfflineImageGenerator:
     # Measured pipeline footprints per family (bf16 weights + denoise activations),
     # not aspirations. The 2026-06-10 OOM postmortem: a flat 3500MB estimate let the
     # admission check pass while Z-Image actually allocated 9.9GB — straight into a
-    # wall of resident Ollama models (gemma 4.95GB + qwen3-embedding 4.32GB). The
-    # zimage figure is WITH model-cpu-offload enabled.
-    _FAMILY_VRAM_MB = {"zimage": 11000, "sdxl": 8000, "sd": 4000}
+    # wall of resident Ollama models (gemma 4.95GB + qwen3-embedding 4.32GB).
+    # zimage: WITH enable_model_cpu_offload. krea2 model-offload peak ~14GB on 16GB
+    # (2026-07-11); sequential offload is used on consumer cards and peaks lower.
+    _FAMILY_VRAM_MB = {"krea2": 14000, "zimage": 11000, "sdxl": 8000, "sd": 4000}
+    _KREA2_SEQUENTIAL_VRAM_MB = 10000  # layer-by-layer offload on ≤18GB cards
     # CPU-RAM footprint with enable_model_cpu_offload (weights + PyTorch arena).
     # Observed: ~47 GB RSS on 60 GB box during Z-Image batch; gate before load.
-    _FAMILY_RAM_GB = {"zimage": 24.0, "sdxl": 10.0, "sd": 6.0}
+    _FAMILY_RAM_GB = {"krea2": 24.0, "zimage": 24.0, "sdxl": 10.0, "sd": 6.0}
+    # auto-router worst-case: zimage leads on consumer cards; krea2 when absent
+    _OFFLOAD_TURBO_VRAM_MB = 11000
+    # Prefer sequential offload for krea2 on consumer cards (module offload OOMs).
+    _SEQUENTIAL_OFFLOAD_VRAM_GB = 18.0
+
+    def _will_use_sequential_for_krea2(self) -> bool:
+        """True when krea2 loads with sequential CPU offload (≤18GB CUDA cards)."""
+        if self._force_sequential_offload:
+            return True
+        total = self._cuda_total_vram_gb()
+        return total > 0 and total <= self._SEQUENTIAL_OFFLOAD_VRAM_GB
 
     def _vram_estimate_mb(self, model_id: str) -> int:
-        return self._FAMILY_VRAM_MB.get(self._model_family(model_id), 4000)
+        if model_id in (None, "", "auto"):
+            # Auto leads with zimage on consumer GPUs; worst-case is still ~11GB.
+            # On roomy GPUs auto may pick krea2 — use the sequential/model peak.
+            if self._prefer_krea2_for_auto():
+                return self._FAMILY_VRAM_MB["krea2"]
+            return self._OFFLOAD_TURBO_VRAM_MB
+        family = self._model_family(model_id)
+        if family == "krea2" and self._will_use_sequential_for_krea2():
+            return self._KREA2_SEQUENTIAL_VRAM_MB
+        return self._FAMILY_VRAM_MB.get(family, 4000)
 
     def _ram_estimate_gb(self, model_id: str) -> float:
+        if model_id in (None, "", "auto"):
+            return self._FAMILY_RAM_GB["zimage"]
         return self._FAMILY_RAM_GB.get(self._model_family(model_id), 6.0)
 
     def _ensure_vram_for_pipeline(self, model_id: str) -> None:
@@ -365,26 +441,48 @@ class OfflineImageGenerator:
         from backend.utils.prompt_enhancer import has_text_intent
         return has_text_intent(prompt)
 
+    def _cuda_total_vram_gb(self) -> float:
+        """Total device VRAM in GB, or 0 if CUDA is unavailable."""
+        try:
+            if self._device == "cuda" and torch.cuda.is_available():
+                return torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        except Exception:
+            pass
+        return 0.0
+
+    @staticmethod
+    def _is_cuda_oom(exc: BaseException) -> bool:
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+        msg = (str(exc) or "").lower()
+        return "out of memory" in msg and ("cuda" in msg or "cublas" in msg or "cudnn" in msg)
+
+    def _prefer_krea2_for_auto(self) -> bool:
+        """Krea2 is aesthetic-first but ~14GB peak; only auto-lead on roomy GPUs."""
+        return self._cuda_total_vram_gb() >= 20.0
+
     def _auto_select_model(self, prompt: str, style: str = "realistic") -> str:
         """Pick the best DOWNLOADED model for this prompt (chat auto-router).
 
         Intent-ordered preferences, best first; always falls through to a model
-        that actually exists on disk. Z-Image-Turbo leads when present — it has
-        the strongest prompt adherence of anything installed.
+        that actually exists on disk. Z-Image-Turbo leads on ≤16–18GB cards —
+        strongest prompt adherence per VRAM. Krea2 leads only on ≥20GB GPUs.
         """
         detection = self.detect_content_type(prompt)
         p = prompt.lower()
+        lead = "krea2-turbo" if self._prefer_krea2_for_auto() else "zimage-turbo"
+        second = "zimage-turbo" if lead == "krea2-turbo" else "krea2-turbo"
 
         if detection.get("has_face") and detection.get("has_person"):
-            prefs = ["zimage-turbo", "realistic-vision", "epic-realism", "sd-xl"]
+            prefs = [lead, second, "realistic-vision", "epic-realism", "sd-xl"]
         elif detection.get("has_person"):
-            prefs = ["zimage-turbo", "sd-xl", "realistic-vision", "epic-realism"]
+            prefs = [lead, second, "sd-xl", "realistic-vision", "epic-realism"]
         elif any(w in p for w in ("anime", "manga", "cartoon", "illustration", "comic")):
-            prefs = ["zimage-turbo", "sd-xl"]
+            prefs = [lead, second, "sd-xl"]
         elif detection.get("recommended_preset") in ("landscape", "product_photo"):
-            prefs = ["zimage-turbo", "sd-xl", "epic-realism"]
+            prefs = [lead, second, "sd-xl", "epic-realism"]
         else:  # general / complex
-            prefs = ["zimage-turbo", "sd-xl", "realistic-vision", "sd-1.5"]
+            prefs = [lead, second, "sd-xl", "realistic-vision", "sd-1.5"]
 
         for key in prefs:
             model_id = self.available_models.get(key)
@@ -398,21 +496,89 @@ class OfflineImageGenerator:
                 return key
         return "sd-1.5"
 
-    def _download_model(self, model_id: str) -> bool:
+    def _oom_fallback_catalog_key(self, failed_key: str) -> Optional[str]:
+        """Next model to try after a CUDA OOM on failed_key (catalog key or HF id)."""
+        failed_family = self._model_family(failed_key)
+        # Prefer lighter DiT, then SDXL, then classic SD — only if present on disk.
+        candidates = []
+        if failed_family == "krea2":
+            candidates = ["krea2-turbo", "zimage-turbo", "sd-xl", "realistic-vision", "sd-1.5"]
+        elif failed_family == "zimage":
+            candidates = ["sd-xl", "realistic-vision", "sd-1.5"]
+        else:
+            candidates = ["sd-xl", "realistic-vision", "sd-1.5"]
+        failed_resolved = self._resolve_model_ref(failed_key)
+        for key in candidates:
+            mid = self.available_models.get(key)
+            if not mid or mid == failed_resolved or key == failed_key:
+                continue
+            if self._is_model_downloaded(mid):
+                return key
+        return None
+
+    def _apply_family_sampling(self, request: ImageGenerationRequest, family: str) -> None:
+        """Force family-appropriate steps/guidance after model switch or fallback."""
+        if family == "krea2":
+            if self._krea2_variant(request.model or "") == "raw":
+                request.num_inference_steps = 52
+                request.guidance_scale = 3.5
+            else:
+                request.num_inference_steps = 8
+                request.guidance_scale = 0.0
+        elif family == "zimage":
+            request.num_inference_steps = 8
+            request.guidance_scale = 1.0
+        elif family == "sdxl":
+            if request.guidance_scale > 9.0:
+                request.guidance_scale = 7.5
+            elif request.guidance_scale < 4.0:
+                request.guidance_scale = 6.0
+            if request.num_inference_steps < 20:
+                request.num_inference_steps = 25
+        else:
+            if request.guidance_scale < 4.0:
+                request.guidance_scale = 7.5
+            if request.num_inference_steps < 15:
+                request.num_inference_steps = 20
+
+    def _download_model(self, model_id: str) -> tuple[bool, str | None]:
         if not self.service_available:
-            logger.error("Diffusion service not available for model download")
-            return False
+            msg = "Diffusion service not available for model download"
+            logger.error(msg)
+            return False, msg
 
         try:
             model_path = self._get_model_path(model_id)
             logger.info(f"Downloading model {model_id} to {model_path}")
 
             family = self._model_family(model_id)
-            if family == 'zimage':
-                if ZImagePipeline is None:
-                    logger.error("Z-Image requested but ZImagePipeline unavailable (upgrade diffusers >= 0.38)")
-                    return False
-                pipeline_class = ZImagePipeline
+
+            # Large DiT pipelines (Krea2, Z-Image): snapshot only — do not instantiate
+            # during download. from_pretrained() loads weights into RAM and fails on
+            # Krea2 with transformers<5.2 (tokenizer vocab + Qwen3-VL rope_parameters).
+            if family in ('krea2', 'zimage'):
+                if family == 'krea2' and Krea2Pipeline is None:
+                    msg = "Krea 2 requested but Krea2Pipeline unavailable (upgrade diffusers >= 0.39)"
+                    logger.error(msg)
+                    return False, msg
+                if family == 'zimage' and ZImagePipeline is None:
+                    msg = "Z-Image requested but ZImagePipeline unavailable (upgrade diffusers >= 0.38)"
+                    logger.error(msg)
+                    return False, msg
+                from huggingface_hub import snapshot_download
+                logger.info(f"Snapshot-downloading {model_id} (family={family})")
+                snapshot_download(
+                    repo_id=model_id,
+                    local_dir=str(model_path),
+                    local_dir_use_symlinks=False,
+                )
+                if not self._is_model_downloaded(model_id):
+                    msg = f"Snapshot download finished but {model_path} is empty"
+                    logger.error(msg)
+                    return False, msg
+                logger.info(f"Model {model_id} downloaded successfully (snapshot)")
+                return True, None
+
             elif family == 'sdxl':
                 pipeline_class = StableDiffusionXLPipeline
             else:
@@ -447,33 +613,45 @@ class OfflineImageGenerator:
                 torch.cuda.empty_cache()
 
             logger.info(f"Model {model_id} downloaded successfully")
-            return True
+            return True, None
 
         except Exception as e:
-            logger.error(f"Failed to download model {model_id}: {e}")
-            return False
+            logger.exception(f"Failed to download model {model_id}: {e}")
+            return False, str(e)
 
-    def _load_pipeline(self, model_id: str) -> bool:
+    def _load_pipeline(self, model_id: str, *, force_sequential: bool = False) -> bool:
         if not self.service_available:
             return False
 
         try:
-            if self._pipeline and self._current_model == model_id:
+            want_sequential = bool(force_sequential or self._force_sequential_offload)
+            if (
+                self._pipeline
+                and self._current_model == model_id
+                and (not want_sequential or self._pipeline_offload_mode == "sequential")
+            ):
                 return True
 
             if self._pipeline:
-                del self._pipeline
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                self._unload_pipeline()
 
             if not self._is_model_downloaded(model_id):
                 logger.info(f"Model {model_id} not found locally, downloading...")
-                if not self._download_model(model_id):
+                ok, dl_err = self._download_model(model_id)
+                if not ok:
+                    if dl_err:
+                        logger.error(f"Download failed for {model_id}: {dl_err}")
                     return False
 
             model_path = self._get_model_path(model_id)
 
             family = self._model_family(model_id)
-            if family == 'zimage':
+            if family == 'krea2':
+                if Krea2Pipeline is None:
+                    logger.error("Krea 2 requested but Krea2Pipeline unavailable (upgrade diffusers >= 0.39)")
+                    return False
+                pipeline_class = Krea2Pipeline
+            elif family == 'zimage':
                 pipeline_class = ZImagePipeline
             elif family == 'sdxl':
                 pipeline_class = StableDiffusionXLPipeline
@@ -505,31 +683,66 @@ class OfflineImageGenerator:
                 **load_kwargs
             )
 
-            # Z-Image is a flow-matching DiT with its own scheduler — don't force
-            # the DPM solver (that's SD/SDXL UNet tuning and breaks Z-Image).
-            if family != 'zimage':
+            # Flow-matching DiTs ship their own scheduler — don't force DPM (SD/SDXL only).
+            if family not in ('zimage', 'krea2'):
                 self._pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
                     self._pipeline.scheduler.config
                 )
 
-            # Device placement. Z-Image (6B DiT + large text encoder) is too tight
-            # to sit fully resident alongside other models on a 16 GB card, so use
-            # accelerate's model-cpu-offload (whole-module swap, modest speed cost).
-            # SD/SDXL are small enough to keep fully on-GPU for max speed.
-            if family == 'zimage' and self._device == "cuda":
-                try:
-                    self._pipeline.enable_model_cpu_offload()
-                    logger.info("Z-Image: enabled model CPU offload (16 GB VRAM safety)")
-                except Exception as e:
-                    logger.warning(f"Z-Image CPU offload unavailable ({e}); loading fully on GPU")
-                    self._pipeline = self._pipeline.to(self._device)
+            # Z-Image / Krea 2 are flow-matching DiTs too large to sit fully resident
+            # alongside other models on a 16 GB card. Krea2 peaks ~14GB with module
+            # offload alone (2026-07-11 OOM) — use sequential (layer-by-layer) on
+            # consumer cards. Z-Image stays on model offload unless forced sequential.
+            offload_mode = "full"
+            if family in ('zimage', 'krea2') and self._device == "cuda":
+                total_gb = self._cuda_total_vram_gb()
+                use_sequential = (
+                    want_sequential
+                    or (family == "krea2" and total_gb > 0 and total_gb <= self._SEQUENTIAL_OFFLOAD_VRAM_GB)
+                )
+                if use_sequential:
+                    try:
+                        self._pipeline.enable_sequential_cpu_offload()
+                        offload_mode = "sequential"
+                        logger.info(
+                            f"{family}: enabled sequential CPU offload "
+                            f"(VRAM={total_gb:.1f}GB, 16GB-safe path)"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"{family} sequential CPU offload unavailable ({e}); "
+                            f"trying model offload"
+                        )
+                        use_sequential = False
+                if offload_mode != "sequential":
+                    try:
+                        self._pipeline.enable_model_cpu_offload()
+                        offload_mode = "model"
+                        logger.info(f"{family}: enabled model CPU offload (16 GB VRAM safety)")
+                    except Exception as e:
+                        logger.warning(f"{family} CPU offload unavailable ({e}); loading fully on GPU")
+                        self._pipeline = self._pipeline.to(self._device)
+                        offload_mode = "full"
             else:
                 self._pipeline = self._pipeline.to(self._device)
+                offload_mode = "full"
 
-            # channels_last (NHWC) memory format — 10-20% speedup on Ada Lovelace
-            if self._device == "cuda" and hasattr(self._pipeline, 'unet'):
-                self._pipeline.unet = self._pipeline.unet.to(memory_format=torch.channels_last)
-                logger.info("Enabled channels_last (NHWC) memory format for UNet")
+            self._pipeline_offload_mode = offload_mode
+            # Clear one-shot force after a successful sequential (or attempted) load.
+            self._force_sequential_offload = False
+
+            # channels_last speeds full-GPU UNet paths, but calling .to(channels_last)
+            # on accelerate-offloaded DiT transformers can materialize weights on GPU
+            # and defeat offload — skip for sequential/model offload modes.
+            if self._device == "cuda" and offload_mode == "full":
+                if hasattr(self._pipeline, 'unet'):
+                    self._pipeline.unet = self._pipeline.unet.to(memory_format=torch.channels_last)
+                    logger.info("Enabled channels_last (NHWC) memory format for UNet")
+                elif hasattr(self._pipeline, 'transformer'):
+                    self._pipeline.transformer = self._pipeline.transformer.to(
+                        memory_format=torch.channels_last
+                    )
+                    logger.info("Enabled channels_last (NHWC) memory format for transformer")
 
             if hasattr(self._pipeline, "enable_attention_slicing"):
                 self._pipeline.enable_attention_slicing()
@@ -564,6 +777,7 @@ class OfflineImageGenerator:
                 and hasattr(torch, 'compile')
                 and self._device == "cuda"
                 and not self._compile_failed
+                and offload_mode == "full"  # compile + offload hooks do not mix well
             ):
                 try:
                     if hasattr(self._pipeline, 'unet'):
@@ -581,13 +795,17 @@ class OfflineImageGenerator:
                     self._compile_vae_orig = None
 
             self._current_model = model_id
-            logger.info(f"Pipeline loaded successfully with model {model_id}")
+            logger.info(
+                f"Pipeline loaded successfully with model {model_id} "
+                f"(offload={offload_mode})"
+            )
             return True
 
         except Exception as e:
             logger.error(f"Failed to load pipeline with model {model_id}: {e}")
             self._pipeline = None
             self._current_model = None
+            self._pipeline_offload_mode = None
             return False
 
     def _detect_subject_count(self, prompt: str) -> Dict[str, Any]:
@@ -938,43 +1156,61 @@ Negative Prompt: {negative_prompt}""",
             from backend.services.job_operation_gate import GpuBusyError
             from backend.services.job_types import JobKind
             import uuid as _uuid_local
-            ram_est = self._ram_estimate_gb(request.model or "auto")
-            vram_est = self._vram_estimate_mb(request.model or "auto")
+            # Resolve routing before admission so VRAM/RAM estimates match the loaded model.
+            if request.model in (None, "", "auto"):
+                request.model = self._auto_select_model(request.prompt, request.style)
+            if (
+                self._has_text_intent(request.prompt)
+                and "sd-xl" in self.available_models
+                and request.model in (None, "", "auto", "sdxl-turbo")
+            ):
+                if request.model != "sd-xl":
+                    logger.info(f"Text intent: routing {request.model} -> sd-xl for crisper type")
+                request.model = "sd-xl"
+
+            model_id = self.available_models.get(request.model, self.default_model)
+            logger.info(f"Using model: {request.model} -> {model_id}")
+            ram_est = self._ram_estimate_gb(request.model)
+            vram_est = self._vram_estimate_mb(request.model)
+
             try:
                 with gpu_session(JobKind.VIDEO_RENDER, f"gen_{_uuid_local.uuid4().hex[:8]}",
-                                 on_busy="raise", evict_ollama=True,
+                                 on_busy="raise", evict_ollama=True, free_comfyui=True,
                                  vram_estimate_mb=vram_est, ram_estimate_gb=ram_est,
                                  require_fit=True, cross_process=True):
-                    # Auto-router: pick the best downloaded model for this prompt.
-                    if request.model in (None, "", "auto"):
-                        request.model = self._auto_select_model(request.prompt, request.style)
-                    # render type soft and drop characters. For text/logo intent, prefer
-                    # non-turbo SDXL base (native 1024, full CFG steps) when it's downloaded.
-                    if (
-                        self._has_text_intent(request.prompt)
-                        and "sd-xl" in self.available_models
-                        and request.model in (None, "", "auto", "zimage-turbo", "sdxl-turbo")
-                    ):
-                        if request.model != "sd-xl":
-                            logger.info(f"Text intent: routing {request.model} -> sd-xl for crisper type")
-                        request.model = "sd-xl"
-
-                    model_id = self.available_models.get(request.model, self.default_model)
-                    logger.info(f"Using model: {request.model} -> {model_id}")
+                    pass
 
                 family = self._model_family(model_id)
                 is_sdxl = family == 'sdxl'
 
-                # Z-Image-Turbo is CFG-distilled: it wants very few steps and
-                # near-zero guidance. Honour that regardless of incoming request
-                # defaults (which are tuned for SD/SDXL).
-                if family == 'zimage':
-                    request.num_inference_steps = 8
-                    request.guidance_scale = 1.0
+                # Family-appropriate sampling. Batch UI often validates against the
+                # *requested* model (e.g. zimage-turbo → steps=12, guidance=1.0). If
+                # we later land on SDXL (auto-router, load fallback, text reroute),
+                # those turbo params produce soft/painterly "artwork" instead of photos.
+                if family in ('krea2', 'zimage', 'sdxl'):
+                    if is_sdxl and request.guidance_scale > 9.0:
+                        logger.warning(
+                            f"Guidance scale {request.guidance_scale} is too high for SDXL "
+                            f"(causes black images). Auto-correcting to 7.5"
+                        )
+                    elif is_sdxl and request.guidance_scale < 4.0:
+                        logger.warning(
+                            f"Guidance scale {request.guidance_scale} is too low for SDXL. "
+                            f"Auto-correcting to 6.0"
+                        )
+                    elif is_sdxl and request.num_inference_steps < 20:
+                        logger.warning(
+                            f"Steps {request.num_inference_steps} too low for SDXL "
+                            f"(turbo leftovers). Auto-correcting to 25"
+                        )
+                    self._apply_family_sampling(request, family)
+                elif request.guidance_scale > 20.0:
+                    logger.warning(f"Guidance scale {request.guidance_scale} is extremely high. Capping at 15.0")
+                    request.guidance_scale = 15.0
 
                 # Clamp dimensions to safe maximums (prevents CUDA OOM).
                 # SDXL and Z-Image are native high-res; classic SD tops out at 768.
-                max_dim = 1536 if family in ('sdxl', 'zimage') else 768
+                max_dim = 1536 if family in ('sdxl', 'zimage', 'krea2') else 768
                 if request.width > max_dim or request.height > max_dim:
                     logger.warning(f"Resolution {request.width}x{request.height} exceeds safe max {max_dim}x{max_dim}, clamping")
                     request.width = min(request.width, max_dim)
@@ -983,16 +1219,6 @@ Negative Prompt: {negative_prompt}""",
                 request.width = max(request.width, 256)
                 request.height = max(request.height, 256)
                 result.image_size = (request.width, request.height)
-
-                if is_sdxl and request.guidance_scale > 9.0:
-                    logger.warning(f"Guidance scale {request.guidance_scale} is too high for SDXL (causes black images). Auto-correcting to 7.5")
-                    request.guidance_scale = 7.5
-                elif is_sdxl and request.guidance_scale < 4.0:
-                    logger.warning(f"Guidance scale {request.guidance_scale} is too low for SDXL. Auto-correcting to 6.0")
-                    request.guidance_scale = 6.0
-                elif not is_sdxl and request.guidance_scale > 20.0:
-                    logger.warning(f"Guidance scale {request.guidance_scale} is extremely high. Capping at 15.0")
-                    request.guidance_scale = 15.0
 
                 # Make room BEFORE loading — family-aware estimate + Ollama eviction
                 # when the card is too full. Runs after ALL model rerouting so the
@@ -1009,7 +1235,9 @@ Negative Prompt: {negative_prompt}""",
                             f"falling back to default {self.default_model}"
                         )
                         model_id = self.default_model
-                        is_sdxl = 'xl' in model_id.lower() or 'sdxl' in model_id.lower()
+                        family = self._model_family(model_id)
+                        is_sdxl = family == 'sdxl'
+                        self._apply_family_sampling(request, family)
                         self._ensure_vram_for_pipeline(model_id)
                         if not self._load_pipeline(model_id):
                             result.error = f"Failed to load fallback model {self.default_model}"
@@ -1033,20 +1261,27 @@ Negative Prompt: {negative_prompt}""",
                     # Crisp text/logos need a larger canvas — at 512 the type renders
                     # as mush. Bump capable models to 1024 when the request is below it
                     # (within the per-model max already clamped above: 1536 for these).
-                    if family in ("sdxl", "zimage") and request.width < 1024 and request.height < 1024:
+                    if family in ("sdxl", "zimage", "krea2") and request.width < 1024 and request.height < 1024:
                         logger.info(
                             f"Text intent: enlarging canvas {request.width}x{request.height} -> 1024x1024 for legible type"
                         )
                         request.width = 1024
                         request.height = 1024
                         result.image_size = (request.width, request.height)
-                    # On-image text requested: keep the prompt verbatim so the exact
-                    # (quoted) characters dominate. Enhancement boilerplate dilutes
-                    # text tokens and makes the model drop/garble letters.
+                    style_config = self.style_configs.get(
+                        request.style, self.style_configs.get("realistic", {})
+                    )
+                    style_negative = style_config.get("negative_prompt", "") or ""
                     enhanced_prompt = request.prompt
-                    style_negative = ""
+                    if request.style == "realistic":
+                        light_real = "photorealistic, professional photography, natural lighting, sharp focus"
+                        if light_real.lower() not in enhanced_prompt.lower():
+                            enhanced_prompt = f"{enhanced_prompt}, {light_real}"
                     detection = self.detect_content_type(request.prompt)
-                    logger.info("Text-rendering intent detected — skipping enhancement to preserve spelling")
+                    logger.info(
+                        "Text-rendering intent detected — preserving spelling; "
+                        f"still applying style={request.style!r} negatives"
+                    )
                 elif request.auto_enhance:
                     enhanced_prompt, style_negative, detection = self.enhance_prompt_for_quality(
                         prompt=request.prompt,
@@ -1093,81 +1328,185 @@ Negative Prompt: {negative_prompt}""",
                     elif hasattr(self._pipeline, 'disable_vae_tiling'):
                         self._pipeline.disable_vae_tiling()
 
-                if family == 'zimage':
-                    # Z-Image is a bf16 flow-matching DiT. Do NOT wrap in
-                    # torch.autocast — fp16 autocast overflows the transformer to
-                    # NaN and produces a pure-black image. The pipeline manages its
-                    # own dtype. CFG is distilled out (guidance ~1.0), so the
-                    # negative prompt is unused — pass None to skip wasted compute.
-                    output = self._pipeline(
-                        prompt=enhanced_prompt,
-                        negative_prompt=None,
-                        width=request.width,
-                        height=request.height,
-                        num_inference_steps=request.num_inference_steps,
-                        guidance_scale=request.guidance_scale,
-                        generator=generator
-                    )
-                elif self._device == "cuda":
-                    try:
+                def _call_pipeline(pos_prompt: str, neg_prompt: Optional[str]):
+                    """Single forward; raises on OOM / compile failure for recovery."""
+                    if family in ('zimage', 'krea2'):
+                        return self._pipeline(
+                            prompt=pos_prompt,
+                            negative_prompt=neg_prompt,
+                            width=request.width,
+                            height=request.height,
+                            num_inference_steps=request.num_inference_steps,
+                            guidance_scale=request.guidance_scale,
+                            generator=generator,
+                        )
+                    if self._device == "cuda":
                         # Match autocast dtype to the LOADED model dtype. The model is
                         # loaded in bf16 on Ada+ (see _load_pipeline), but autocast's
                         # CUDA default is fp16 — which overflows SDXL's VAE to NaN and
                         # yields a pure-black image. bf16 has fp32-range exponents, so
                         # this keeps SDXL/SD output correct.
-                        _ac_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                        _ac_dtype = (
+                            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                        )
                         with torch.autocast("cuda", dtype=_ac_dtype):
-                            output = self._pipeline(
-                                prompt=enhanced_prompt,
-                                negative_prompt=combined_negative,
+                            return self._pipeline(
+                                prompt=pos_prompt,
+                                negative_prompt=neg_prompt,
                                 width=request.width,
                                 height=request.height,
                                 num_inference_steps=request.num_inference_steps,
                                 guidance_scale=request.guidance_scale,
-                                generator=generator
+                                generator=generator,
                             )
-                    except (AssertionError, RuntimeError) as compile_err:
-                        is_compile_failure = (
-                            (isinstance(compile_err, AssertionError) and not str(compile_err))
-                            or any(kw in str(compile_err).lower() for kw in
-                                   ('triton', 'dynamo', 'inductor', 'cuda graph', 'torch.compile'))
-                        )
-                        has_compiled_modules = (
-                            self._compile_unet_orig is not None or self._compile_vae_orig is not None
-                        )
-                        if is_compile_failure and has_compiled_modules and not self._compile_failed:
-                            logger.warning(
-                                f"torch.compile first-pass failure "
-                                f"({type(compile_err).__name__}: {compile_err or 'no message'}) "
-                                f"— stripping compiled wrappers and retrying in eager mode"
-                            )
-                            if self._compile_unet_orig is not None:
-                                self._pipeline.unet = self._compile_unet_orig
-                            if self._compile_vae_orig is not None:
-                                self._pipeline.vae = self._compile_vae_orig
-                            self._compile_failed = True
-                            with torch.autocast("cuda"):
-                                output = self._pipeline(
-                                    prompt=enhanced_prompt,
-                                    negative_prompt=combined_negative,
-                                    width=request.width,
-                                    height=request.height,
-                                    num_inference_steps=request.num_inference_steps,
-                                    guidance_scale=request.guidance_scale,
-                                    generator=generator
-                                )
-                        else:
-                            raise
-                else:
-                    output = self._pipeline(
-                        prompt=enhanced_prompt,
-                        negative_prompt=combined_negative,
+                    return self._pipeline(
+                        prompt=pos_prompt,
+                        negative_prompt=neg_prompt,
                         width=request.width,
                         height=request.height,
                         num_inference_steps=request.num_inference_steps,
                         guidance_scale=request.guidance_scale,
-                        generator=generator
+                        generator=generator,
                     )
+
+                if family in ('zimage', 'krea2'):
+                    neg = (
+                        None
+                        if self._skip_negative_prompt(
+                            family, request.model or "", request.guidance_scale
+                        )
+                        else combined_negative
+                    )
+                else:
+                    neg = combined_negative
+
+                try:
+                    output = _call_pipeline(enhanced_prompt, neg)
+                except (AssertionError, RuntimeError, torch.cuda.OutOfMemoryError) as infer_err:
+                    # torch.compile recovery (SD/SDXL full-GPU path)
+                    is_compile_failure = (
+                        (isinstance(infer_err, AssertionError) and not str(infer_err))
+                        or any(kw in str(infer_err).lower() for kw in
+                               ('triton', 'dynamo', 'inductor', 'cuda graph', 'torch.compile'))
+                    )
+                    has_compiled_modules = (
+                        self._compile_unet_orig is not None or self._compile_vae_orig is not None
+                    )
+                    if (
+                        is_compile_failure
+                        and has_compiled_modules
+                        and not self._compile_failed
+                        and not self._is_cuda_oom(infer_err)
+                    ):
+                        logger.warning(
+                            f"torch.compile first-pass failure "
+                            f"({type(infer_err).__name__}: {infer_err or 'no message'}) "
+                            f"— stripping compiled wrappers and retrying in eager mode"
+                        )
+                        if self._compile_unet_orig is not None:
+                            self._pipeline.unet = self._compile_unet_orig
+                        if self._compile_vae_orig is not None:
+                            self._pipeline.vae = self._compile_vae_orig
+                        self._compile_failed = True
+                        output = _call_pipeline(enhanced_prompt, neg)
+                    elif self._is_cuda_oom(infer_err):
+                        # 2026-07-11: krea2 model-offload still peaked ~14.3GB on 16GB.
+                        # Recover in-process: sequential offload same model, then
+                        # lighter catalog fallback. Avoid recursive generate_image
+                        # (generation lock is non-reentrant).
+                        failed_label = request.model
+                        logger.error(
+                            f"CUDA OOM during inference with {failed_label} "
+                            f"(offload={self._pipeline_offload_mode}): {infer_err}"
+                        )
+                        try:
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                        self._unload_pipeline()
+
+                        output = None
+                        # Attempt 1: same model with sequential offload if not already.
+                        if family in ('krea2', 'zimage'):
+                            logger.warning(
+                                f"{family} OOM → retrying with sequential CPU offload"
+                            )
+                            self._force_sequential_offload = True
+                            self._ensure_vram_for_pipeline(model_id)
+                            if self._load_pipeline(model_id, force_sequential=True):
+                                try:
+                                    # Rebuild generator after OOM (device state may be dirty)
+                                    if request.seed is not None:
+                                        generator = torch.Generator(device=self._device).manual_seed(
+                                            request.seed
+                                        )
+                                    else:
+                                        seed = result.seed_used or torch.randint(0, 2**32, (1,)).item()
+                                        generator = torch.Generator(device=self._device).manual_seed(seed)
+                                        result.seed_used = seed
+                                    output = _call_pipeline(enhanced_prompt, neg)
+                                    logger.info(
+                                        f"{family} sequential offload retry succeeded after OOM"
+                                    )
+                                except Exception as seq_err:
+                                    if self._is_cuda_oom(seq_err):
+                                        logger.warning(
+                                            f"Sequential offload still OOM for {failed_label}: {seq_err}"
+                                        )
+                                        self._unload_pipeline()
+                                        try:
+                                            if torch.cuda.is_available():
+                                                torch.cuda.empty_cache()
+                                        except Exception:
+                                            pass
+                                    else:
+                                        raise
+
+                        # Attempt 2: lighter model fallback
+                        if output is None:
+                            fb_key = self._oom_fallback_catalog_key(failed_label)
+                            if not fb_key:
+                                raise infer_err
+                            logger.warning(
+                                f"{failed_label} OOM → falling back to '{fb_key}'"
+                            )
+                            request.model = fb_key
+                            model_id = self.available_models.get(fb_key, self.default_model)
+                            family = self._model_family(model_id)
+                            is_sdxl = family == 'sdxl'
+                            self._apply_family_sampling(request, family)
+                            if family in ('zimage', 'krea2'):
+                                neg = (
+                                    None
+                                    if self._skip_negative_prompt(
+                                        family, request.model or "", request.guidance_scale
+                                    )
+                                    else combined_negative
+                                )
+                            else:
+                                neg = combined_negative
+                            max_dim = 1536 if family in ('sdxl', 'zimage', 'krea2') else 768
+                            request.width = min(max(request.width, 256), max_dim)
+                            request.height = min(max(request.height, 256), max_dim)
+                            result.image_size = (request.width, request.height)
+                            self._ensure_vram_for_pipeline(model_id)
+                            if not self._load_pipeline(model_id):
+                                raise RuntimeError(
+                                    f"OOM fallback model '{fb_key}' failed to load"
+                                ) from infer_err
+                            if request.seed is not None:
+                                generator = torch.Generator(device=self._device).manual_seed(
+                                    request.seed
+                                )
+                            else:
+                                seed = result.seed_used or torch.randint(0, 2**32, (1,)).item()
+                                generator = torch.Generator(device=self._device).manual_seed(seed)
+                                result.seed_used = seed
+                            output = _call_pipeline(enhanced_prompt, neg)
+                            logger.info(f"OOM fallback to '{fb_key}' succeeded")
+                    else:
+                        raise
 
 
                 image = output.images[0]
@@ -1301,6 +1640,7 @@ Negative Prompt: {negative_prompt}""",
         self._img2img_pipeline = None
         self._img2img_family = None
         self._current_model = None
+        self._pipeline_offload_mode = None
         self._compile_unet_orig = None
         self._compile_vae_orig = None
 
@@ -1400,6 +1740,13 @@ Negative Prompt: {negative_prompt}""",
                 model_id = self.available_models.get(model, model)
                 family = self._model_family(model_id)
 
+                if family == 'krea2':
+                    result.error = (
+                        f"Model {model} does not support img2img editing yet — "
+                        "use kontext or sd-xl for edits"
+                    )
+                    return result
+
                 if family == 'zimage':
                     num_inference_steps = 8
                     guidance_scale = 1.0
@@ -1409,7 +1756,7 @@ Negative Prompt: {negative_prompt}""",
                     elif guidance_scale < 4.0:
                         guidance_scale = 6.0
 
-                max_dim = 1536 if family in ('sdxl', 'zimage') else 768
+                max_dim = 1536 if family in ('sdxl', 'zimage', 'krea2') else 768
                 width = min(max(int(width), 256), max_dim)
                 height = min(max(int(height), 256), max_dim)
 
@@ -1538,7 +1885,12 @@ Negative Prompt: {negative_prompt}""",
                 "order": meta.get("order", 99),
                 "downloaded": self._is_model_downloaded(model_id),
                 "current": model_id == self._current_model,
-                "size_estimate": "4-7GB" if "xl" not in model_id.lower() else "12-15GB"
+                "size_estimate": (
+                    "28-36GB" if "krea" in model_id.lower()
+                    else "16GB" if "z-image" in model_id.lower() or "zimage" in model_key
+                    else "12-15GB" if "xl" in model_id.lower()
+                    else "4-7GB"
+                )
             }
 
         return models

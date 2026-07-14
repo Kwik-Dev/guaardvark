@@ -637,12 +637,25 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       // Modern high-res models (SDXL family, Z-Image) and 'auto' (router usually
       // lands on one of these) generate native at 1024. The SD1.5-class photoreal
       // finetunes (realistic-vision, epic-realism) are 512-native.
-      if (modelValue.includes('xl') || modelValue === 'zimage-turbo' || modelValue === 'auto') {
+      if (
+        modelValue.includes('xl')
+        || modelValue.startsWith('krea2')
+        || modelValue === 'zimage-turbo'
+        || modelValue === 'auto'
+      ) {
         newParams.width = 1024;
         newParams.height = 1024;
       } else {
         newParams.width = 512;
         newParams.height = 512;
+      }
+
+      if (modelValue === 'krea2-raw') {
+        newParams.steps = 52;
+        newParams.guidance = 3.5;
+      } else if (modelValue === 'krea2-turbo') {
+        newParams.steps = 8;
+        newParams.guidance = 0;
       }
 
       return newParams;

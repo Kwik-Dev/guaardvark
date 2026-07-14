@@ -82,12 +82,30 @@ model_download_lock = threading.Lock()
 # matches offline_image_generator.available_models after the 2026-05-29 cull.
 IMAGE_MODEL_SIZES = {
     "Tongyi-MAI/Z-Image-Turbo": 16.0,
+    "krea/Krea-2-Turbo": 28.0,
+    "krea/Krea-2-Raw": 28.0,
+    "krea2-turbo": 28.0,
+    "krea2-raw": 28.0,
     "stabilityai/stable-diffusion-xl-base-1.0": 6.9,
     "stabilityai/sdxl-turbo": 6.9,
     "SG161222/Realistic_Vision_V5.1_noVAE": 2.1,
     "emilianJR/epiCRealism": 2.1,
     "runwayml/stable-diffusion-v1-5": 4.3,  # hidden fallback
 }
+
+def _resolve_catalog_model(model_ref: str):
+    """Map a catalog key (krea2-turbo, krea2-raw) or HF repo id to (key, hf_id)."""
+    try:
+        from backend.services.offline_image_generator import get_image_generator
+        catalog = get_image_generator().available_models
+    except Exception:
+        return None, None
+    if model_ref in catalog:
+        return model_ref, catalog[model_ref]
+    for key, hf_id in catalog.items():
+        if model_ref == hf_id:
+            return key, hf_id
+    return None, None
 
 def _validate_csv_upload(file):
     """Validate uploaded CSV file."""
@@ -349,15 +367,13 @@ def download_model():
         if not generator.image_generator:
             return error_response("Image generator not initialized", 503)
 
-        # Whitelist: only models in the curated catalog may be downloaded — never an
-        # arbitrary caller-supplied HF repo path.
-        allowed_models = set(getattr(generator.image_generator, "available_models", {}) or {})
-        if model_path not in allowed_models:
+        catalog_key, hf_model_id = _resolve_catalog_model(model_path)
+        if not hf_model_id:
             return error_response(
                 f"Unknown model '{model_path}' — not in the allowed model set", 400
             )
 
-        estimated_size_gb = IMAGE_MODEL_SIZES.get(model_path, 2.5)
+        estimated_size_gb = IMAGE_MODEL_SIZES.get(catalog_key, IMAGE_MODEL_SIZES.get(hf_model_id, 2.5))
 
         with model_download_lock:
             if model_download_status["is_downloading"]:
@@ -365,7 +381,7 @@ def download_model():
 
             model_download_status = {
                 "is_downloading": True,
-                "current_model": model_path,
+                "current_model": hf_model_id,
                 "progress": 0,
                 "status": "starting",
                 "error": None,
@@ -374,7 +390,7 @@ def download_model():
                 "total_gb": estimated_size_gb,
             }
 
-        def download_task(model_path, total_gb):
+        def download_task(hf_model_id, total_gb):
             _start_time = time.time()
             total_bytes = int(total_gb * 1024**3)
 
@@ -398,7 +414,7 @@ def download_model():
                                     except OSError:
                                         pass
                             # Check target model directory for completed files
-                            target_dir = generator.image_generator._get_model_path(model_path)
+                            target_dir = generator.image_generator._get_model_path(hf_model_id)
                             if target_dir.exists():
                                 for f in target_dir.rglob("*"):
                                     if f.is_file():
@@ -425,7 +441,7 @@ def download_model():
                 monitor_thread.start()
 
                 try:
-                    success = generator.image_generator._download_model(model_path)
+                    success, dl_error = generator.image_generator._download_model(hf_model_id)
                 finally:
                     stop_monitor.set()
                     monitor_thread.join(timeout=2)
@@ -441,7 +457,7 @@ def download_model():
                     else:
                         model_download_status.update({
                             "status": "failed",
-                            "error": "Failed to download model",
+                            "error": dl_error or "Failed to download model",
                             "progress": 0,
                         })
             except Exception as e:
@@ -457,13 +473,15 @@ def download_model():
                     model_download_status["is_downloading"] = False
 
         # Start download in background
-        thread = threading.Thread(target=download_task, args=(model_path, estimated_size_gb))
+        thread = threading.Thread(target=download_task, args=(hf_model_id, estimated_size_gb))
         thread.daemon = True
         thread.start()
 
         return success_response({
-            "message": f"Started downloading model {model_path}",
-            "status": "downloading"
+            "message": f"Started downloading model {hf_model_id}",
+            "status": "downloading",
+            "catalog_key": catalog_key,
+            "model_path": hf_model_id,
         })
 
     except Exception as e:
