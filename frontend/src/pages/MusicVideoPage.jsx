@@ -609,7 +609,7 @@ const stageLabel = (mv) => {
 };
 
 const MusicVideoPage = () => {
-  const { gpuBlocked, blockReason } = useJobsGate();
+  const { gpuBusy, gpuSubmitBlocked, blockReason } = useJobsGate({ submitMode: "queue" });
   const { getProcessesByType, activeProcesses } = useUnifiedProgress();
   const [videos, setVideos] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -1188,8 +1188,8 @@ const MusicVideoPage = () => {
               </Collapse>
 
               {error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
-              <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
-              <Button variant="contained" onClick={handleCreate} disabled={busy || gpuBlocked}>
+              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+              <Button variant="contained" onClick={handleCreate} disabled={busy || gpuSubmitBlocked}>
                 {busy ? <CircularProgress size={20} /> : (hasActiveGeneration ? "Add another to queue" : "Create & Analyze")}
               </Button>
               {hasActiveGeneration && (
@@ -1354,7 +1354,7 @@ const MusicVideoPage = () => {
                 <PlanViewer
                   detail={detail}
                   busy={busy}
-                  gpuBlocked={gpuBlocked}
+                  gpuBlocked={gpuBusy}
                   models={models}
                   comfyReady={comfyReady}
                   comfyDisabled={comfyDisabled}
@@ -1453,9 +1453,9 @@ const MusicVideoPage = () => {
                     <br />Estimated full video time after storyboards: <b>{detail.estimate.estimated_human}</b>.
                   </Alert>
                   <Box>
-                    <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
+                    <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
                     <Stack direction="row" spacing={1} alignItems="center">
-                      <Button variant="contained" color="warning" onClick={handleApprove} disabled={busy || gpuBlocked}>
+                      <Button variant="contained" color="warning" onClick={handleApprove} disabled={busy || gpuSubmitBlocked}>
                         {busy ? <CircularProgress size={20} /> : "Approve & Generate Video"}
                       </Button>
                       <Button

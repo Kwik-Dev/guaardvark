@@ -62,8 +62,12 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
     error: null,
   });
 
-  // Real sync registry state (data/interconnector/synced_hashes.json)
-  const [syncStatus, setSyncStatus] = useState({ trackedFiles: 0, lastSyncedAt: null, exists: false });
+  // Master core-files registry (authoritative tally lives on master only)
+  const [syncStatus, setSyncStatus] = useState({
+    masterTrackedFiles: null,
+    masterManifestTimestamp: null,
+    lastApplyAt: null,
+  });
 
   // Preview state
   const [showPreview, setShowPreview] = useState(false);
@@ -128,9 +132,9 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
       const statusData = statusResp?.data || statusResp;
       if (statusData && !statusResp?.error) {
         setSyncStatus({
-          trackedFiles: statusData.tracked_files || 0,
-          lastSyncedAt: statusData.last_synced_at || null,
-          exists: Boolean(statusData.exists),
+          masterTrackedFiles: statusData.master_tracked_files ?? statusData.tracked_files ?? null,
+          masterManifestTimestamp: statusData.master_manifest_timestamp ?? statusData.manifest_timestamp ?? null,
+          lastApplyAt: statusData.last_apply_at ?? statusData.last_synced_at ?? null,
         });
       }
 
@@ -318,10 +322,11 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             Last checked: {updateStatus.lastChecked || "Never"}
           </Typography>
-          {syncStatus.exists && (
+          {syncStatus.masterTrackedFiles != null && (
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-              {syncStatus.trackedFiles} file{syncStatus.trackedFiles !== 1 ? "s" : ""} tracked
-              {syncStatus.lastSyncedAt ? ` · last synced ${formatSyncedAt(syncStatus.lastSyncedAt)}` : ""}
+              Master tracks {syncStatus.masterTrackedFiles} core file
+              {syncStatus.masterTrackedFiles !== 1 ? "s" : ""}
+              {syncStatus.lastApplyAt ? ` · last apply ${formatSyncedAt(syncStatus.lastApplyAt)}` : ""}
             </Typography>
           )}
         </Box>

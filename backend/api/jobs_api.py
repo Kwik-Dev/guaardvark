@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import json
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from flask import Blueprint, current_app, jsonify
 
@@ -28,6 +28,26 @@ logger = logging.getLogger(__name__)
 # Per user direction in plan §8.4 we keep aliases forever for endpoints with
 # any external caller — these callers stay on the old path indefinitely; the
 # new path is additive. No hard cuts.
+
+
+def _read_progress_metadata(metadata_file: Path) -> Optional[Dict[str, Any]]:
+    """Load a progress job metadata.json; skip empty/corrupt files without log spam."""
+    try:
+        raw = metadata_file.read_text(encoding="utf-8")
+        if not raw.strip():
+            logger.debug("Skipping empty progress metadata: %s", metadata_file)
+            return None
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            logger.warning("Skipping non-object progress metadata: %s", metadata_file)
+            return None
+        return data
+    except json.JSONDecodeError as exc:
+        logger.warning("Skipping invalid progress metadata %s: %s", metadata_file, exc)
+        return None
+    except OSError as exc:
+        logger.warning("Could not read progress metadata %s: %s", metadata_file, exc)
+        return None
 
 
 def get_active_celery_tasks() -> Dict[str, Any]:
@@ -162,48 +182,47 @@ def get_active_jobs(output_dir_config: str) -> List[Dict[str, Any]]:
     
     active_jobs = []
     try:
-        # Get active Celery tasks for cross-reference
         active_celery_tasks = get_active_celery_tasks()
-        
-        for job_dir in progress_dir.iterdir():
-            if job_dir.is_dir():
-                metadata_file = job_dir / "metadata.json"
-                if metadata_file.exists():
-                    with open(metadata_file, 'r', encoding='utf-8') as f:
-                        metadata = json.load(f)
-                        
-                        # Skip completed jobs - only return truly active ones
-                        is_complete = metadata.get("is_complete", False)
-                        if is_complete:
-                            continue
-
-                        job_data = {
-                            "id": metadata.get("job_id"),
-                            "job_id": metadata.get("job_id"),
-                            "process_type": metadata.get("process_type", "unknown"),
-                            "status": metadata.get("status", metadata.get("job_status", "UNKNOWN")),
-                            "progress": metadata.get("progress", metadata.get("processed_item_count", 0)),
-                            "total": metadata.get("total_items_expected"),
-                            "start_time": metadata.get("start_time_utc"),
-                            "last_update": metadata.get("last_update_utc"),
-                            "last_update_utc": metadata.get("last_update_utc"),
-                            "timestamp": metadata.get("last_update_utc"),  # For DevToolsPage compatibility
-                            "is_complete": False,  # Always false since we filter completed ones
-                            "message": metadata.get("message", ""),
-                            "description": metadata.get("message", ""),  # For DevToolsPage compatibility
-                            "output_filename": metadata.get("target_output_filename"),
-                            "command": metadata.get("command_label_invoked"),
-                            "model": metadata.get("script_generating_model_name_version"),
-                            "additional_data": metadata.get("additional_data", {})
-                        }
-
-                        active_jobs.append(job_data)
-        
-        return active_jobs
-        
     except Exception as e:
-        logger.error(f"Error reading active jobs: {e}", exc_info=True)
-        return []
+        logger.warning(f"Could not fetch active Celery tasks: {e}")
+        active_celery_tasks = {}
+
+    for job_dir in progress_dir.iterdir():
+        if not job_dir.is_dir():
+            continue
+        metadata_file = job_dir / "metadata.json"
+        if not metadata_file.exists():
+            continue
+        metadata = _read_progress_metadata(metadata_file)
+        if not metadata:
+            continue
+
+        is_complete = metadata.get("is_complete", False)
+        if is_complete:
+            continue
+
+        job_data = {
+            "id": metadata.get("job_id"),
+            "job_id": metadata.get("job_id"),
+            "process_type": metadata.get("process_type", "unknown"),
+            "status": metadata.get("status", metadata.get("job_status", "UNKNOWN")),
+            "progress": metadata.get("progress", metadata.get("processed_item_count", 0)),
+            "total": metadata.get("total_items_expected"),
+            "start_time": metadata.get("start_time_utc"),
+            "last_update": metadata.get("last_update_utc"),
+            "last_update_utc": metadata.get("last_update_utc"),
+            "timestamp": metadata.get("last_update_utc"),
+            "is_complete": False,
+            "message": metadata.get("message", ""),
+            "description": metadata.get("message", ""),
+            "output_filename": metadata.get("target_output_filename"),
+            "command": metadata.get("command_label_invoked"),
+            "model": metadata.get("script_generating_model_name_version"),
+            "additional_data": metadata.get("additional_data", {}),
+        }
+        active_jobs.append(job_data)
+
+    return active_jobs
 
 
 @jobs_bp.route("/active_jobs", methods=["GET"])
@@ -491,8 +510,11 @@ def retry_job_route(job_id):
         if not metadata_file.exists():
             return jsonify({"error": "Job metadata not found."}), 404
 
-        with open(metadata_file, 'r', encoding='utf-8') as f:
-            original_metadata = json.load(f)
+        metadata = _read_progress_metadata(metadata_file)
+        if not metadata:
+            return jsonify({"error": "Job metadata not found or invalid."}), 404
+
+        original_metadata = metadata
 
         # Get linked task for context
         linked_task = None

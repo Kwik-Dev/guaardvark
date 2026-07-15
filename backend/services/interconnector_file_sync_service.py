@@ -305,27 +305,75 @@ class InterconnectorFileSyncService:
                 files_list.extend(scanned)
                 logger.debug(f"[FILE_SYNC] Scanned directory {sync_path}: found {len(scanned)} files")
 
-            if len(files_list) > MAX_FILE_COUNT:
-                logger.warning(f"[FILE_SYNC] Reached max file count limit ({MAX_FILE_COUNT}), truncating results.")
-                files_list = list(islice(files_list, MAX_FILE_COUNT))
-                break
+            # Metadata-only scans (manifest / update check) must see every path.
+            # Truncating at MAX_FILE_COUNT caused permanent phantom "N new" updates:
+            # files synced on disk but beyond the cap never entered local_lookup, so
+            # classify_files kept reporting create forever even after Update Now.
+            if include_content:
+                if len(files_list) > MAX_FILE_COUNT:
+                    logger.warning(f"[FILE_SYNC] Reached max file count limit ({MAX_FILE_COUNT}), truncating results.")
+                    files_list = list(islice(files_list, MAX_FILE_COUNT))
+                    break
 
-            total_bytes = sum(f.get("size", 0) for f in files_list)
-            if total_bytes > MAX_TOTAL_BYTES:
-                logger.warning(f"[FILE_SYNC] Reached max total size limit ({MAX_TOTAL_BYTES} bytes), truncating results.")
-                trimmed = []
-                running = 0
-                for f in files_list:
-                    if running + f.get("size", 0) > MAX_TOTAL_BYTES:
-                        break
-                    trimmed.append(f)
-                    running += f.get("size", 0)
-                files_list = trimmed
-                break
+                total_bytes = sum(f.get("size", 0) for f in files_list)
+                if total_bytes > MAX_TOTAL_BYTES:
+                    logger.warning(f"[FILE_SYNC] Reached max total size limit ({MAX_TOTAL_BYTES} bytes), truncating results.")
+                    trimmed = []
+                    running = 0
+                    for f in files_list:
+                        if running + f.get("size", 0) > MAX_TOTAL_BYTES:
+                            break
+                        trimmed.append(f)
+                        running += f.get("size", 0)
+                    files_list = trimmed
+                    break
         
         logger.info(f"[FILE_SYNC] File scan complete: {len(files_list)} files found, "
                    f"{excluded_count} files excluded")
         return files_list
+
+    def fetch_files_by_paths(
+        self,
+        paths: List[str],
+        include_content: bool = True,
+    ) -> List[Dict]:
+        """Load specific paths (for targeted Update Now pulls — avoids batch caps)."""
+        project_root = self.get_project_root()
+        files_list = []
+        for rel_path in paths:
+            if not rel_path:
+                continue
+            file_path = (project_root / rel_path).resolve()
+            try:
+                file_path.relative_to(project_root)
+            except ValueError:
+                logger.warning(f"[FILE_SYNC] Skipping path outside project root: {rel_path}")
+                continue
+            if not file_path.is_file():
+                logger.warning(f"[FILE_SYNC] Requested path missing on master: {rel_path}")
+                continue
+            if self.should_exclude_file(str(file_path)):
+                logger.warning(f"[FILE_SYNC] Requested path excluded by policy: {rel_path}")
+                continue
+            files_list.extend(
+                self._scan_file(file_path, project_root, since=None, include_content=include_content)
+            )
+        return files_list
+
+    def resolve_local_file(self, relative_path: str) -> Optional[Dict]:
+        """Hash a single local path (fallback when a batch scan omitted it)."""
+        project_root = self.get_project_root()
+        file_path = (project_root / relative_path).resolve()
+        try:
+            file_path.relative_to(project_root)
+        except ValueError:
+            return None
+        if not file_path.is_file() or self.should_exclude_file(str(file_path)):
+            return None
+        scanned = self._scan_file(
+            file_path, project_root, since=None, include_content=False
+        )
+        return scanned[0] if scanned else None
 
     def _scan_file(
         self, 

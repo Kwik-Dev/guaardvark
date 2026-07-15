@@ -644,8 +644,8 @@ export const applyUpdates = async (files = []) => {
 };
 
 /**
- * Get the real per-path sync registry summary (durable synced state).
- * @returns {Promise<Object>} - { tracked_files, last_synced_at, node_name, master_url, exists }
+ * Sync status: on master, the core-files registry summary; on client, master tally + last apply.
+ * @returns {Promise<Object>}
  */
 export const getSyncStatus = async () => {
   try {

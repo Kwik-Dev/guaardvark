@@ -37,7 +37,7 @@ plugins/*/.cache/
 plugins/*/__pycache__/
 data/plugin_state.json
 data/social_outreach/
-# Interconnector per-machine sync state (synced_hashes.json registry + last_core_sync.json)
+# Interconnector runtime state (master core_files_registry.json + client last_core_sync.json)
 data/interconnector/
 data/outreach/
 data/docstore.json

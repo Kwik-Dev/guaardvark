@@ -35,9 +35,8 @@ from backend.models import (
 from backend.services.interconnector_sync_service import get_sync_service
 from backend.services.interconnector_file_sync_service import get_file_sync_service
 from backend.services.interconnector_sync_registry import (
-    SyncRegistry,
-    classify_files,
-    ensure_backfilled,
+    MasterCoreFilesRegistry,
+    classify_against_master,
     AVAILABLE_ACTIONS,
     ACTION_CREATE,
     ACTION_UPDATE,
@@ -61,6 +60,34 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 interconnector_bp = Blueprint("interconnector", __name__, url_prefix="/api/interconnector")
+
+
+def _classify_with_local_resolution(file_sync_service, master_files, local_lookup):
+    """Master manifest vs local disk (with per-path fallback for missed scan paths)."""
+    return classify_against_master(
+        master_files,
+        local_lookup,
+        resolve_local=file_sync_service.resolve_local_file,
+    )
+
+
+def _master_core_registry(project_root) -> MasterCoreFilesRegistry:
+    return MasterCoreFilesRegistry(project_root)
+
+
+def _client_last_apply_summary(project_root) -> Dict[str, Any]:
+    """Best-effort local marker — not authoritative for update detection."""
+    marker_path = Path(project_root) / "data" / "interconnector" / "last_core_sync.json"
+    if not marker_path.exists():
+        return {"last_apply_at": None, "last_apply_count": 0}
+    try:
+        marker = json.loads(marker_path.read_text())
+        return {
+            "last_apply_at": marker.get("timestamp"),
+            "last_apply_count": marker.get("applied", 0),
+        }
+    except Exception:
+        return {"last_apply_at": None, "last_apply_count": 0}
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -2043,24 +2070,32 @@ def pull_files():
 
         include_patterns = request.args.getlist("include_patterns") or None
         exclude_patterns = request.args.getlist("exclude_patterns") or None
-
-        # Get since timestamp if provided (for incremental sync)
-        since_str = request.args.get("since")
-        since = None
-        if since_str:
-            try:
-                since = datetime.fromisoformat(since_str.replace('Z', '+00:00'))
-                logger.debug(f"[SYNC] File pull: Filtering files modified after: {since}")
-            except Exception as e:
-                logger.warning(f"[SYNC] File pull: Could not parse since timestamp '{since_str}': {e}")
+        requested_files = request.args.getlist("file") or request.args.getlist("files") or None
 
         file_sync_service = get_file_sync_service()
-        logger.debug("[SYNC] File pull: Starting file scan")
-        files_list = file_sync_service.scan_files(
-            sync_paths, since, include_content=True,
-            include_patterns=include_patterns,
-            exclude_patterns=exclude_patterns,
-        )
+
+        if requested_files:
+            logger.info(f"[SYNC] File pull: Fetching {len(requested_files)} requested path(s)")
+            files_list = file_sync_service.fetch_files_by_paths(
+                requested_files, include_content=True
+            )
+        else:
+            # Get since timestamp if provided (for incremental sync)
+            since_str = request.args.get("since")
+            since = None
+            if since_str:
+                try:
+                    since = datetime.fromisoformat(since_str.replace('Z', '+00:00'))
+                    logger.debug(f"[SYNC] File pull: Filtering files modified after: {since}")
+                except Exception as e:
+                    logger.warning(f"[SYNC] File pull: Could not parse since timestamp '{since_str}': {e}")
+
+            logger.debug("[SYNC] File pull: Starting file scan")
+            files_list = file_sync_service.scan_files(
+                sync_paths, since, include_content=True,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+            )
         logger.debug(f"[SYNC] File pull: Scan complete, found {len(files_list)} files")
         
         # Pre-send validation: filter out files missing content (prevents CLIENT crash)
@@ -3079,16 +3114,9 @@ def check_for_updates():
         # Build lookup dict of local files
         local_lookup = {f["path"]: f for f in local_files}
 
-        # Consult the REAL registry (data/interconnector/synced_hashes.json) — the
-        # durable per-path record of what this client has actually synced. On an
-        # upgraded/existing client with no registry yet, seed it from the currently-
-        # converged baseline so a converged client shows 0 (not a spurious full list).
-        registry = SyncRegistry(file_sync_service.get_project_root())
-        ensure_backfilled(
-            registry, master_files, local_lookup,
-            node_name=config.get("node_name"), master_url=master_url, master_version=master_timestamp,
+        classified = _classify_with_local_resolution(
+            file_sync_service, master_files, local_lookup
         )
-        classified = classify_files(master_files, local_lookup, registry)
         updates_needed = [c for c in classified if c["action"] in AVAILABLE_ACTIONS]
         new_files = [c for c in updates_needed if c["action"] == ACTION_CREATE]
         modified_files = [c for c in updates_needed if c["action"] == ACTION_UPDATE]
@@ -3178,6 +3206,14 @@ def get_update_manifest():
         # Get most recent modification time
         timestamps = [f.get("modified_at") for f in files_list if f.get("modified_at")]
         latest_timestamp = max(timestamps) if timestamps else datetime.now().isoformat()
+
+        # Master owns the canonical core-files registry — refresh on every manifest build.
+        registry = _master_core_registry(file_sync_service.get_project_root())
+        registry.refresh_from_scan(
+            files_list,
+            node_name=config.get("node_name"),
+            manifest_timestamp=latest_timestamp,
+        )
         
         logger.info(f"[UPDATES] Manifest ready: {len(files_list)} files, latest: {latest_timestamp}")
         
@@ -3185,11 +3221,35 @@ def get_update_manifest():
             "files": files_list,
             "count": len(files_list),
             "timestamp": latest_timestamp,
+            "registry_file_count": len(files_list),
         }, "Manifest retrieved")
         
     except Exception as e:
         logger.error(f"Error getting update manifest: {e}", exc_info=True)
         return error_response(f"Failed to get manifest: {str(e)}", 500)
+
+
+@interconnector_bp.route("/updates/registry", methods=["GET"])
+def get_core_files_registry():
+    """Master endpoint: summary of the canonical core-files registry (no file bodies)."""
+    try:
+        config = _get_config()
+        if not config.get("is_enabled"):
+            return error_response("Interconnector is not enabled", 400)
+        if config.get("node_mode") != "master":
+            return error_response("Core files registry is only available on master nodes", 400)
+
+        api_key = request.headers.get("X-API-Key")
+        is_valid, error_msg = _check_api_key(config, api_key)
+        if not is_valid:
+            return error_response(error_msg or "Invalid or missing API key", 401)
+
+        file_sync_service = get_file_sync_service()
+        registry = _master_core_registry(file_sync_service.get_project_root())
+        return success_response(registry.summary(), "Master core files registry")
+    except Exception as e:
+        logger.error(f"Error getting core files registry: {e}", exc_info=True)
+        return error_response(f"Failed to get registry: {str(e)}", 500)
 
 
 @interconnector_bp.route("/updates/preview", methods=["GET"])
@@ -3241,13 +3301,10 @@ def preview_updates():
         local_lookup = {f["path"]: f for f in local_files}
         master_timestamp = master_data.get("data", {}).get("timestamp")
 
-        # Same registry-aware classification as /updates/check, so preview and check agree.
-        registry = SyncRegistry(file_sync_service.get_project_root())
-        ensure_backfilled(
-            registry, master_files, local_lookup,
-            node_name=config.get("node_name"), master_url=master_url, master_version=master_timestamp,
+        # Same master-authoritative classification as /updates/check.
+        classified = _classify_with_local_resolution(
+            file_sync_service, master_files, local_lookup
         )
-        classified = classify_files(master_files, local_lookup, registry)
 
         # Build detailed preview
         preview_files = []
@@ -3366,14 +3423,10 @@ def apply_updates():
         master_timestamp = master_manifest.get("data", {}).get("timestamp")
         master_hash_lookup = {mf.get("path"): mf.get("hash") for mf in master_files}
 
-        # Step 3: Determine which files need updating — via the SAME registry-aware
-        # classification as /updates/check, so what we apply matches what we showed.
-        registry = SyncRegistry(file_sync_service.get_project_root())
-        ensure_backfilled(
-            registry, master_files, local_lookup,
-            node_name=config.get("node_name"), master_url=master_url, master_version=master_timestamp,
+        # Step 3: Determine which files need updating (master manifest vs local disk).
+        classified = _classify_with_local_resolution(
+            file_sync_service, master_files, local_lookup
         )
-        classified = classify_files(master_files, local_lookup, registry)
         files_to_update = [
             c["path"] for c in classified
             if c["action"] in AVAILABLE_ACTIONS
@@ -3386,13 +3439,14 @@ def apply_updates():
                 "message": "No updates needed - all files are up to date"
             }, "No updates needed")
         
-        # Step 4: Fetch full file contents from master
+        # Step 4: Fetch full file contents from master (targeted pull — not capped batch scan)
         logger.info(f"[UPDATES] Fetching {len(files_to_update)} files from master...")
         
         try:
             pull_response = requests.get(
                 f"{master_url}/api/interconnector/sync/files/pull",
                 headers=headers,
+                params=[("file", path) for path in files_to_update],
                 timeout=120,  # Longer timeout for file transfer
                 verify=False
             )
@@ -3402,6 +3456,13 @@ def apply_updates():
             
             pull_data = pull_response.json()
             all_master_files = pull_data.get("data", {}).get("files", [])
+            pulled_paths = {f.get("path") for f in all_master_files}
+            missing_pull = [p for p in files_to_update if p not in pulled_paths]
+            if missing_pull:
+                logger.warning(
+                    f"[UPDATES] Master pull missing {len(missing_pull)} requested file(s): "
+                    f"{missing_pull[:10]}"
+                )
             
         except Exception as e:
             return error_response(f"Error pulling files: {str(e)}", 502)
@@ -3499,48 +3560,26 @@ def apply_updates():
             except Exception as prune_err:
                 logger.warning("[UPDATES] Migration version prune skipped: %s", prune_err)
 
-        # ── REAL registry update (the source of truth for future "is this an update?") ──
-        # Record into data/interconnector/synced_hashes.json, but ONLY files that GENUINELY
-        # converged on disk: re-hash each written file and compare to the master hash. This
-        # is the no-pretend guarantee — if a file was written but its bytes don't match the
-        # master (e.g. a transfer/encoding bug), we do NOT mark it synced; it will correctly
-        # reappear as an update and we log a visible warning instead of silently looping.
+        # Post-apply convergence check (master manifest is authoritative — no client registry).
         rolled_back = bool(summary.get("rolled_back"))
-        registry_recorded = 0
-        try:
-            if valid_files and success and not rolled_back:
-                project_root = file_sync_service.get_project_root()
-                converged = {}
-                not_converged = []
-                for d in apply_result.get("details", []):
-                    if not (d.get("created") or d.get("updated")):
-                        continue
-                    path = d.get("path")
-                    master_hash = master_hash_lookup.get(path)
-                    if not master_hash:
-                        continue
-                    disk_hash = file_sync_service.get_file_hash(str(project_root / path))
-                    if disk_hash == master_hash:
-                        converged[path] = {"hash": master_hash, "master_version": master_timestamp}
-                    else:
-                        not_converged.append(path)
-                if converged:
-                    registry_recorded = registry.record_synced_bulk(
-                        converged,
-                        node_name=config.get("node_name"),
-                        master_url=master_url,
-                        master_version=master_timestamp,
-                    )
-                if not_converged:
-                    logger.warning(
-                        f"[UPDATES] {len(not_converged)} file(s) were written but do NOT match the "
-                        f"master hash — NOT recorded as synced (they will reappear as updates): "
-                        f"{not_converged[:10]}"
-                    )
-            elif rolled_back:
-                logger.error("[UPDATES] Apply rolled back — registry NOT updated (nothing converged).")
-        except Exception as reg_err:
-            logger.warning(f"[UPDATES] Failed to update sync registry (non-fatal): {reg_err}")
+        if valid_files and success and not rolled_back:
+            project_root = file_sync_service.get_project_root()
+            not_converged = []
+            for d in apply_result.get("details", []):
+                if not (d.get("created") or d.get("updated")):
+                    continue
+                path = d.get("path")
+                master_hash = master_hash_lookup.get(path)
+                if not master_hash:
+                    continue
+                disk_hash = file_sync_service.get_file_hash(str(project_root / path))
+                if disk_hash != master_hash:
+                    not_converged.append(path)
+            if not_converged:
+                logger.warning(
+                    f"[UPDATES] {len(not_converged)} file(s) were written but do NOT match the "
+                    f"master hash — they will reappear as updates: {not_converged[:10]}"
+                )
 
         # Record that the core system files were synced (marks the sync in history so status,
         # last sync time, and incremental logic on clients recognize the files as up-to-date).
@@ -3624,7 +3663,6 @@ def apply_updates():
             "skipped": summary["total_skipped"],
             "errors": summary["total_errors"],
             "rolled_back": rolled_back,
-            "registry_recorded": registry_recorded,
             "backup_path": backup_path,
             "details": details,
             "timestamp": datetime.now().isoformat(),
@@ -3640,22 +3678,51 @@ def apply_updates():
 
 @interconnector_bp.route("/updates/sync-status", methods=["GET"])
 def sync_status():
-    """Client endpoint: summary of the real per-path sync registry.
-
-    Surfaces what the durable registry (data/interconnector/synced_hashes.json) actually
-    knows — tracked file count, last-synced time, the master it synced from — so the UI
-    can show genuine state instead of a client-side clock.
-    """
+    """Sync status: master returns its core-files registry; clients fetch master tally."""
     try:
         config = _get_config()
         if not config.get("is_enabled"):
             return error_response("Interconnector is not enabled", 400)
-        if config.get("node_mode") != "client":
-            return error_response("Sync status is only available on client nodes", 400)
 
         file_sync_service = get_file_sync_service()
-        registry = SyncRegistry(file_sync_service.get_project_root())
-        return success_response(registry.summary(), "Sync status")
+        project_root = file_sync_service.get_project_root()
+
+        if config.get("node_mode") == "master":
+            registry = _master_core_registry(project_root)
+            return success_response(registry.summary(), "Master core files registry")
+
+        if config.get("node_mode") != "client":
+            return error_response("Sync status is only available on master or client nodes", 400)
+
+        master_url = config.get("master_url", "").rstrip("/")
+        master_api_key = config.get("master_api_key", "")
+        master_summary: Dict[str, Any] = {}
+        if master_url:
+            headers = {}
+            if master_api_key:
+                headers["X-API-Key"] = master_api_key
+            try:
+                resp = requests.get(
+                    f"{master_url}/api/interconnector/updates/registry",
+                    headers=headers,
+                    timeout=15,
+                    verify=False,
+                )
+                if resp.status_code == 200:
+                    master_summary = resp.json().get("data", {}) or {}
+            except Exception as e:
+                logger.warning(f"[UPDATES] Could not fetch master registry summary: {e}")
+
+        local_apply = _client_last_apply_summary(project_root)
+        payload = {
+            "role": "client",
+            "master_tracked_files": master_summary.get("tracked_files"),
+            "master_manifest_timestamp": master_summary.get("manifest_timestamp"),
+            "master_last_updated_at": master_summary.get("last_updated_at"),
+            "last_apply_at": local_apply.get("last_apply_at"),
+            "last_apply_count": local_apply.get("last_apply_count"),
+        }
+        return success_response(payload, "Sync status")
     except Exception as e:
         logger.error(f"Error getting sync status: {e}", exc_info=True)
         return error_response(f"Sync status failed: {str(e)}", 500)

@@ -123,67 +123,70 @@ if [ ! -f "$DIFFUSERS_UPGRADE_SENTINEL" ] || [ "$PLUGIN_ROOT/requirements.txt" -
     deactivate
 fi
 
-# Torch wheels that chatterbox-tts (and sometimes kokoro) transitively pull are
-# often built for older GPUs only. On machines with brand-new Blackwell cards
-# (RTX 50-series, compute capability 12.0 / sm_120) the stock wheel from
-# `pip install chatterbox-tts==0.1.7` (torch 2.6 + cu124) produces:
-#   "no kernel image is available for execution on the device"
-# when doing .to("cuda") inside ChatterboxTTS.from_pretrained or KPipeline.
-#
-# The project-wide scripts/install_pytorch.sh already handles this by detecting
-# nvidia-smi compute_cap and forcing the matching index (cu128 for Blackwell).
-# We do the equivalent here for the *isolated* audio venv so it stays working
-# even when the initial -r brings an ancient torch.
-#
-# Strategy (same pattern as the diffusers block):
-#   - after the main requirements install
-#   - detect the local GPU's cap (via nvidia-smi or torch if already importable)
-#   - if the current torch build does not advertise a matching arch (sm_120 etc.)
-#     or is obviously too old, force-reinstall the torch family from the
-#     https://download.pytorch.org/whl/cu128 (or cu129/130) index using --no-deps
-#     so chatterbox's strict "torch==2.6" metadata cannot downgrade us again.
-#   - also ensure nvidia-cufile-cu12 (and friends) are present; some cu* wheels
-#     dlopen them at import time even for pure inference.
-# The sentinel is touched with the detected cap so a future GPU swap retriggers.
-TORCH_COMPAT_SENTINEL="$PLUGIN_VENV/.torch_gpu_compat"
-NEED_TORCH_COMPAT=0
+# Post-install torch: chatterbox pins torch 2.6/cu124; GPU hosts need the
+# hardware_policy channel (cu128 on Blackwell). start.sh used to force torch
+# with --no-deps and only 4 nvidia-* wheels, leaving stale cupti →
+#   cuptiActivityEnableDriverApi undefined symbol
+# Use the same install_pytorch.sh path as setup_venv.sh (full nvidia-* set).
+INSTALL_PYTORCH="$PROJECT_ROOT/scripts/install_pytorch.sh"
+BACKEND_PY="$PROJECT_ROOT/backend/venv/bin/python"
+TORCH_CHANNEL="$("$BACKEND_PY" -m backend.services.hardware_policy torch_channel 2>/dev/null || echo "")"
+
+torch_import_ok() {
+    "$PLUGIN_VENV/bin/python" -c '
+import torch
+if torch.cuda.is_available():
+    torch.zeros(1).cuda()
+else:
+    torch.zeros(1)
+' 2>/dev/null
+}
+
+TORCH_VERIFY_SENTINEL="$PLUGIN_VENV/.torch_import_verified"
+NEED_TORCH_SYNC=0
 if command -v nvidia-smi >/dev/null 2>&1; then
-    CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
-    if [ -n "$CAP" ]; then
-        # sm_120 (and future 12.x) require the newer cu128+ wheels that ship the kernels.
-        MAJOR=${CAP%%.*}
-        if [ "$MAJOR" -ge 12 ]; then
-            # Probe the *current* torch (if importable) to see if it has the arch.
-            if source "$PLUGIN_VENV/bin/activate" 2>/dev/null; then
-                if python -c '
-import torch, sys
-al = torch.cuda.get_arch_list() if hasattr(torch.cuda, "get_arch_list") else []
-if not any("sm_120" in str(a) or "sm_100" in str(a) for a in al):
-    sys.exit(42)  # need upgrade
-' 2>/dev/null; then
-                    :
-                else
-                    NEED_TORCH_COMPAT=1
-                fi
-                deactivate 2>/dev/null || true
-            else
-                NEED_TORCH_COMPAT=1
-            fi
-        fi
+    if ! torch_import_ok; then
+        NEED_TORCH_SYNC=1
     fi
 fi
-if [ "$NEED_TORCH_COMPAT" = "1" ] || [ ! -f "$TORCH_COMPAT_SENTINEL" ]; then
-    echo "Forcing torch upgrade for Blackwell / sm_120 (RTX 50-series) compatibility..."
+if [ "$NEED_TORCH_SYNC" = "1" ] || [ ! -f "$TORCH_VERIFY_SENTINEL" ]; then
+    echo "Syncing audio_foundry venv torch + CUDA companion libs..."
+    if [ -x "$INSTALL_PYTORCH" ]; then
+        TARGET_VENV="$PLUGIN_VENV" GUAARDVARK_TORCH_CHANNEL="$TORCH_CHANNEL" \
+            bash "$INSTALL_PYTORCH" --venv "$PLUGIN_VENV" \
+            || echo "Warning: install_pytorch.sh returned non-zero (continuing to verify)"
+    else
+        echo "Warning: $INSTALL_PYTORCH missing — cannot repair torch/CUDA mismatch"
+    fi
     # shellcheck disable=SC1091
     source "$PLUGIN_VENV/bin/activate"
-    pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -1 || true
-    pip install --upgrade --force-reinstall --no-deps torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 || { echo "Error: torch cu128 install failed"; exit 1; }
-    # Some cu128 wheels dynamically load these at import time even for inference.
-    pip install --upgrade nvidia-cufile-cu12 nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 2>&1 | tail -1 || true
-    # Re-apply our other overrides that the resolver may have fought.
     pip install --upgrade "$DIFFUSERS_REQUIRED" 2>/dev/null || true
-    touch "$TORCH_COMPAT_SENTINEL"
+    pip install --no-deps --force-reinstall 'numpy<2.0,>=1.26.4' 'setuptools<81' 2>/dev/null || true
     deactivate
+    if command -v nvidia-smi >/dev/null 2>&1 && ! torch_import_ok; then
+        echo "Error: audio_foundry venv torch import still failing after install_pytorch."
+        echo "  Run: plugins/audio_foundry/scripts/setup_venv.sh"
+        exit 1
+    fi
+    touch "$TORCH_VERIFY_SENTINEL"
+fi
+
+# Same repair for the ACE-Step sibling venv on GPU hosts.
+MUSIC_TORCH_SENTINEL="$MUSIC_VENV/.torch_import_verified"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if [ ! -f "$MUSIC_TORCH_SENTINEL" ] || ! "$MUSIC_VENV/bin/python" -c 'import torch; torch.zeros(1).cuda() if torch.cuda.is_available() else torch.zeros(1)' 2>/dev/null; then
+        echo "Syncing audio_foundry-music venv torch..."
+        if [ -x "$INSTALL_PYTORCH" ]; then
+            TARGET_VENV="$MUSIC_VENV" GUAARDVARK_TORCH_CHANNEL="$TORCH_CHANNEL" \
+                bash "$INSTALL_PYTORCH" --venv "$MUSIC_VENV" \
+                || echo "Warning: install_pytorch for venv-music returned non-zero"
+        fi
+        if "$MUSIC_VENV/bin/python" -c 'import torch; torch.zeros(1).cuda() if torch.cuda.is_available() else torch.zeros(1)' 2>/dev/null; then
+            touch "$MUSIC_TORCH_SENTINEL"
+        else
+            echo "Warning: venv-music torch import failed — ACE-Step music gen will be unavailable"
+        fi
+    fi
 fi
 
 # Activate the main venv for uvicorn — music venv is invoked on demand via

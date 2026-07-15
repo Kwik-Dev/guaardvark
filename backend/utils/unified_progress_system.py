@@ -18,6 +18,14 @@ import time
 logger = logging.getLogger(__name__)
 
 
+def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    """Write JSON atomically so readers never see a truncated/empty file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 class ProcessStatus(Enum):
     """Process status enumeration"""
     START = "start"
@@ -551,8 +559,7 @@ class UnifiedProgressSystem:
                 "additional_data": event.additional_data
             }
             
-            with open(metadata_file, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, indent=4)
+            _atomic_write_json(metadata_file, metadata)
                 
         except Exception as e:
             logger.error(f"Failed to create file tracking for {process_id}: {e}")
@@ -610,18 +617,18 @@ class UnifiedProgressSystem:
             metadata_file = progress_dir / process_id / "metadata.json"
             
             if metadata_file.exists():
-                with open(metadata_file, "r+", encoding="utf-8") as f:
-                    metadata = json.load(f)
-                    metadata.update({
-                        "status": event.status.value,
-                        "progress": event.progress,
-                        "message": event.message,
-                        "last_update_utc": event.timestamp.isoformat(),
-                        "additional_data": event.additional_data
-                    })
-                    f.seek(0)
-                    json.dump(metadata, f, indent=4)
-                    f.truncate()
+                raw = metadata_file.read_text(encoding="utf-8")
+                metadata = json.loads(raw) if raw.strip() else {}
+            else:
+                metadata = {"job_id": process_id}
+            metadata.update({
+                "status": event.status.value,
+                "progress": event.progress,
+                "message": event.message,
+                "last_update_utc": event.timestamp.isoformat(),
+                "additional_data": event.additional_data
+            })
+            _atomic_write_json(metadata_file, metadata)
                     
         except Exception as e:
             logger.error(f"Failed to update file tracking for {process_id}: {e}")
@@ -636,20 +643,20 @@ class UnifiedProgressSystem:
             metadata_file = progress_dir / process_id / "metadata.json"
             
             if metadata_file.exists():
-                with open(metadata_file, "r+", encoding="utf-8") as f:
-                    metadata = json.load(f)
-                    metadata.update({
-                        "status": event.status.value,
-                        "progress": event.progress,
-                        "message": event.message,
-                        "last_update_utc": event.timestamp.isoformat(),
-                        "is_complete": True,
-                        "completion_time_utc": event.timestamp.isoformat(),
-                        "additional_data": event.additional_data
-                    })
-                    f.seek(0)
-                    json.dump(metadata, f, indent=4)
-                    f.truncate()
+                raw = metadata_file.read_text(encoding="utf-8")
+                metadata = json.loads(raw) if raw.strip() else {}
+            else:
+                metadata = {"job_id": process_id}
+            metadata.update({
+                "status": event.status.value,
+                "progress": event.progress,
+                "message": event.message,
+                "last_update_utc": event.timestamp.isoformat(),
+                "is_complete": True,
+                "completion_time_utc": event.timestamp.isoformat(),
+                "additional_data": event.additional_data
+            })
+            _atomic_write_json(metadata_file, metadata)
                     
         except Exception as e:
             logger.error(f"Failed to finish file tracking for {process_id}: {e}")

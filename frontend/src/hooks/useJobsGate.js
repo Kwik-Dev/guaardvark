@@ -4,10 +4,20 @@ import { getJobsGate } from "../api/jobsService";
 const POLL_MS = 4000;
 
 /**
- * Poll GET /api/jobs/gate so GPU-heavy pages can disable actions while the
- * exclusive GPU slot is held or cooling down.
+ * Poll GET /api/jobs/gate so GPU-heavy pages can reflect GPU occupancy.
+ *
+ * submitMode:
+ *   - "immediate" (default): gpuSubmitBlocked while GPU is held or cooling down.
+ *     Use for ops that need the GPU right now (editor render, inline storyboard gen).
+ *   - "queue": submission is never blocked — the backend stacks jobs and the worker
+ *     waits for the GPU (batch video, Celery-dispatched pipelines). gpuBusy stays
+ *     true for informational banners and for disabling immediate GPU actions.
  */
-export default function useJobsGate({ enabled = true, pollMs = POLL_MS } = {}) {
+export default function useJobsGate({
+  enabled = true,
+  pollMs = POLL_MS,
+  submitMode = "immediate",
+} = {}) {
   const [gate, setGate] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -29,9 +39,13 @@ export default function useJobsGate({ enabled = true, pollMs = POLL_MS } = {}) {
     return () => clearInterval(id);
   }, [enabled, pollMs, refresh]);
 
-  const gpuBlocked = Boolean(
+  const gpuBusy = Boolean(
     gate?.gpu_busy || (gate?.gpu_cooldown_remaining_s ?? 0) > 0
   );
+
+  const gpuSubmitBlocked = submitMode === "queue" ? false : gpuBusy;
+  // Backward compat — existing callers treat gpuBlocked as "disable submit".
+  const gpuBlocked = gpuSubmitBlocked;
 
   const blockReason = useMemo(() => {
     if (!gate) return null;
@@ -48,5 +62,13 @@ export default function useJobsGate({ enabled = true, pollMs = POLL_MS } = {}) {
     return null;
   }, [gate]);
 
-  return { gate, loading, gpuBlocked, blockReason, refresh };
+  return {
+    gate,
+    loading,
+    gpuBusy,
+    gpuSubmitBlocked,
+    gpuBlocked,
+    blockReason,
+    refresh,
+  };
 }

@@ -604,6 +604,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     batches,
     queue,
     fetchBatches,
+    fetchQueue,
     startPollingStatus,
     handleDownloadBatch,
     handleCombineFrames,
@@ -937,6 +938,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       setSuccess(`Batch queued. The worker drains one batch at a time — keep stacking 'em.`);
       startPollingStatus(batchId);
       await fetchBatches();
+      await fetchQueue();
 
       // Reset prompts so the user can immediately compose the next batch.
       // Keep Look & Feel + Negative Prompt — those usually carry across batches.
@@ -1072,7 +1074,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   }, [batchStatus, getProcessesByType, activeProcesses]);
 
   const controlsDisabled = isGenerating;
-  const { gpuBlocked, blockReason } = useJobsGate();
+  const { gpuBusy, blockReason } = useJobsGate({ submitMode: "queue" });
   const castIdentityLocked = selectedSubjectIds.length > 0;
   const keyframeModelOptions = useMemo(() => {
     if (!castIdentityLocked) {
@@ -2256,7 +2258,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
           <Divider />
 
-          <GpuGateBanner gpuBlocked={gpuBlocked} blockReason={blockReason} />
+          <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
 
           {/* Generate Button */}
           <Button
@@ -2264,7 +2266,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
             size="large"
             startIcon={isGenerating ? null : <PlayIcon />}
             onClick={handleGenerate}
-            disabled={controlsDisabled || isGenerating || gpuBlocked || (inputMode === "text" ? parsedPrompts.length === 0 : selectedImages.length === 0)}
+            disabled={controlsDisabled || isGenerating || (inputMode === "text" ? parsedPrompts.length === 0 : selectedImages.length === 0)}
             sx={{ py: 1.5 }}
             fullWidth
           >
