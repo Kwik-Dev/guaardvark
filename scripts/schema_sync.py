@@ -39,6 +39,17 @@ def main():
         app = create_app()
 
         with app.app_context():
+            migrations_dir = os.path.join(backend_dir, "migrations")
+            if not check_only and os.path.isdir(migrations_dir):
+                from backend.utils.migration_utils import prune_stale_migration_versions
+                prune_result = prune_stale_migration_versions(migrations_dir)
+                if prune_result.get("removed"):
+                    print(json.dumps({
+                        "status": "pruned",
+                        "removed": prune_result["removed"],
+                        "heads_after": prune_result.get("heads_after", []),
+                    }), file=sys.stderr)
+
             engine = create_engine(DATABASE_URL)
             inspector = inspect(engine)
             existing_tables = set(inspector.get_table_names())
@@ -67,7 +78,6 @@ def main():
                 status_msg = "Schema synced (missing tables/columns added)"
 
             # Stamp alembic_version to current head
-            migrations_dir = os.path.join(backend_dir, "migrations")
             if os.path.isdir(migrations_dir):
                 cfg = Config(os.path.join(migrations_dir, "alembic.ini"))
                 cfg.set_main_option("script_location", migrations_dir)

@@ -3470,6 +3470,35 @@ def apply_updates():
         
         logger.info(f"[UPDATES] Update complete: {summary}")
 
+        # Master schema is authoritative — delete stale Alembic version modules the
+        # additive-only sync left behind (e.g. pre-v2.6.1 squash chain on clients).
+        if success and not summary.get("rolled_back"):
+            try:
+                master_version_paths = [
+                    f["path"]
+                    for f in all_master_files
+                    if (f.get("path") or "").replace("\\", "/").startswith(
+                        "backend/migrations/versions/"
+                    )
+                    and (f.get("path") or "").endswith(".py")
+                ]
+                if master_version_paths:
+                    from backend.utils.migration_utils import prune_stale_migration_versions
+                    migrations_dir = file_sync_service.get_project_root() / "backend" / "migrations"
+                    if migrations_dir.is_dir():
+                        prune_result = prune_stale_migration_versions(
+                            str(migrations_dir),
+                            authoritative_paths=master_version_paths,
+                        )
+                        if prune_result.get("removed"):
+                            logger.info(
+                                "[UPDATES] Pruned %d stale migration version file(s): %s",
+                                len(prune_result["removed"]),
+                                ", ".join(prune_result["removed"]),
+                            )
+            except Exception as prune_err:
+                logger.warning("[UPDATES] Migration version prune skipped: %s", prune_err)
+
         # ── REAL registry update (the source of truth for future "is this an update?") ──
         # Record into data/interconnector/synced_hashes.json, but ONLY files that GENUINELY
         # converged on disk: re-hash each written file and compare to the master hash. This

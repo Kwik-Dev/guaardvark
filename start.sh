@@ -834,6 +834,67 @@ check_voice_health() {
     return 1
 }
 
+compute_migration_fingerprint() {
+    local fingerprint_inputs=""
+    if [ -f "$BACKEND_DIR/models.py" ]; then
+        fingerprint_inputs+=$(md5sum "$BACKEND_DIR/models.py" 2>/dev/null | cut -d' ' -f1)
+    fi
+    if [ -d "$BACKEND_DIR/migrations/versions" ]; then
+        fingerprint_inputs+=$(find "$BACKEND_DIR/migrations/versions" -name '*.py' 2>/dev/null | LC_ALL=C sort | while read -r f; do md5sum "$f" 2>/dev/null; done | md5sum | cut -d' ' -f1)
+    fi
+    if [ -f "$BACKEND_DIR/migrations/env.py" ]; then
+        fingerprint_inputs+=$(md5sum "$BACKEND_DIR/migrations/env.py" 2>/dev/null | cut -d' ' -f1)
+    fi
+    echo "$fingerprint_inputs" | md5sum | cut -d' ' -f1
+}
+
+save_migration_fingerprint() {
+    local fp_file="$GUAARDVARK_ROOT/pids/.migration_fingerprint"
+    mkdir -p "$GUAARDVARK_ROOT/pids"
+    compute_migration_fingerprint > "$fp_file" 2>/dev/null
+}
+
+migration_fingerprint_matches() {
+    local fp_file="$GUAARDVARK_ROOT/pids/.migration_fingerprint"
+    [ -f "$fp_file" ] || return 1
+    local saved current
+    saved=$(cat "$fp_file" 2>/dev/null)
+    current=$(compute_migration_fingerprint)
+    [ "$saved" = "$current" ]
+}
+
+check_migrations_preflight() {
+    local sync_script="$GUAARDVARK_ROOT/scripts/schema_sync.py"
+
+    if [ -n "$GUAARDVARK_SKIP_MIGRATIONS" ]; then
+        vader_info "Schema check skipped (GUAARDVARK_SKIP_MIGRATIONS set)"
+        return 0
+    fi
+
+    if [ ! -f "$sync_script" ]; then
+        vader_warn "Schema sync script not found — skipping"
+        return 0
+    fi
+
+    if migration_fingerprint_matches; then
+        vader_success "Schema check: up to date (no changes since last check)"
+        return 0
+    fi
+
+    local output exit_code
+    output=$("$VENV_DIR/bin/python" "$sync_script" 2>&1)
+    exit_code=$?
+
+    if [ $exit_code -eq 0 ]; then
+        vader_success "Schema sync: OK"
+        save_migration_fingerprint
+        return 0
+    else
+        vader_error "Schema sync failed: $output"
+        return 1
+    fi
+}
+
 check_ollama_model() {
     if [ "$OLLAMA_AVAILABLE" -eq 0 ]; then
         return 0
@@ -1976,7 +2037,37 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     fi
 fi
 
-# Schema verification is handled unconditionally by backend application on startup.
+# Schema-first approach: models.py is the source of truth; schema_sync.py reconciles
+# tables/columns and stamps Alembic. Prunes stale migration version files left by
+# interconnector sync (additive-only — master squash files never auto-delete on clients).
+SCHEMA_SYNC_SCRIPT="$GUAARDVARK_ROOT/scripts/schema_sync.py"
+
+if [ -n "$GUAARDVARK_SKIP_MIGRATIONS" ]; then
+    vader_info "Database schema sync skipped (GUAARDVARK_SKIP_MIGRATIONS set)"
+elif [ -f "$SCHEMA_SYNC_SCRIPT" ]; then
+    if migration_fingerprint_matches; then
+        vader_success "Database schema: up to date (fingerprint match)"
+    else
+        sync_output=$("$VENV_DIR/bin/python" "$SCHEMA_SYNC_SCRIPT" 2>&1)
+        sync_exit=$?
+        if [ $sync_exit -eq 0 ]; then
+            sync_msg=$(echo "$sync_output" | python3 -c "import sys,json; print(json.load(sys.stdin).get('message','OK'))" 2>/dev/null || echo "OK")
+            vader_success "Database schema: $sync_msg"
+            save_migration_fingerprint
+        else
+            vader_error "Schema sync failed: $sync_output"
+            vader_error "Check $SETUP_LOG for details."
+            deactivate 2>/dev/null || true
+            cd "$SCRIPT_DIR"
+            exit 1
+        fi
+    fi
+else
+    vader_warn "Schema sync script not found — falling back to db.create_all() in app.py"
+fi
+
+# Tell app.py that start.sh already verified schema + stamped Alembic.
+export GUAARDVARK_MIGRATIONS_VERIFIED=1
 
 # Belt-and-suspenders: step 1 already stopped prior servers, but if a healthy backend is
 # somehow still serving this port (started outside start.sh, or a kill that failed), ADOPT

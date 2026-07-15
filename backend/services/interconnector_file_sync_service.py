@@ -831,6 +831,41 @@ class InterconnectorFileSyncService:
                 self._clear_pycache(project_root)
                 logger.info("[FILE_SYNC] Cleared __pycache__ after syncing Python files")
 
+            # Interconnector sync is additive-only; prune migration version files the
+            # master removed (e.g. post-v2.6.1 squash) so Alembic has a single head.
+            if any(
+                (d.get("path") or "").replace("\\", "/").startswith("backend/migrations/")
+                for d in valid_files
+            ):
+                try:
+                    from backend.utils.migration_utils import prune_stale_migration_versions
+                    migrations_dir = project_root / "backend" / "migrations"
+                    version_paths = [
+                        d.get("path")
+                        for d in valid_files
+                        if (d.get("path") or "").replace("\\", "/").startswith(
+                            "backend/migrations/versions/"
+                        )
+                        and (d.get("path") or "").endswith(".py")
+                    ]
+                    if migrations_dir.is_dir():
+                        prune_result = prune_stale_migration_versions(
+                            str(migrations_dir),
+                            authoritative_paths=version_paths or None,
+                        )
+                        if prune_result.get("removed"):
+                            logger.info(
+                                "[FILE_SYNC] Pruned %d stale migration version file(s): %s",
+                                len(prune_result["removed"]),
+                                ", ".join(prune_result["removed"]),
+                            )
+                            result.setdefault("migration_prune", prune_result)
+                except Exception as prune_err:
+                    logger.warning(
+                        "[FILE_SYNC] Migration version prune skipped (non-fatal): %s",
+                        prune_err,
+                    )
+
             return True, result
 
         except Exception as e:

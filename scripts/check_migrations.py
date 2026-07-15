@@ -57,7 +57,7 @@ def main():
         if status == "multiple_heads":
             return output_result("multiple_heads",
                 f"Multiple migration heads: {health.get('heads', [])}",
-                fix="This should not happen -- check backend/migrations/versions/",
+                fix="Run: ./start.sh (or python3 scripts/schema_sync.py) to prune stale versions and re-stamp",
                 details=health)
 
         return output_result("ok",
