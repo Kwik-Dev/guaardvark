@@ -292,6 +292,8 @@ cast_lora_16gb.yaml
 *.log
 debug.log
 grok-transcript.mc
+# Cursor IDE local rules/state (operator machine only — not product code)
+.cursor/
 # Per-machine runtime state written by the app
 data/video_model_download_status.json
 storage/
