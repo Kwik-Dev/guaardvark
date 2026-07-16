@@ -187,10 +187,22 @@ const UpscalingPage = ({ embedded = false }) => {
     }
   }, [serviceAvailable]);
 
+  // Keep GPU Status (Active Model / VRAM / compile) live while jobs run.
+  // Mount-only getHealth() freezes Active Model at "None" for the whole job.
+  const refreshHealth = useCallback(async () => {
+    if (serviceAvailable === false) return;
+    try {
+      const res = await upscalingService.getHealth();
+      setServiceHealth(res.data || res);
+    } catch {
+      // ignore — same silence as fetchJobs; checkService handles hard downtime
+    }
+  }, [serviceAvailable]);
+
   const startPolling = useCallback(() => {
     if (pollingRef.current) return;
     pollingRef.current = setInterval(async () => {
-      await fetchJobs();
+      await Promise.all([fetchJobs(), refreshHealth()]);
       // Stop polling if no active jobs
       setJobs(prev => {
         const hasActive = prev.some(j =>
@@ -203,7 +215,7 @@ const UpscalingPage = ({ embedded = false }) => {
         return prev;
       });
     }, 2000);
-  }, [fetchJobs]);
+  }, [fetchJobs, refreshHealth]);
 
   // --- Drag & Drop ---
   const handleDragOver = useCallback((e) => {
@@ -303,7 +315,7 @@ const UpscalingPage = ({ embedded = false }) => {
     }
     setSelectedFiles([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
-    await fetchJobs();
+    await Promise.all([fetchJobs(), refreshHealth()]);
     startPolling();
     setIsUploading(false);
   };
