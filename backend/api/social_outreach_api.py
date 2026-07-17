@@ -193,14 +193,19 @@ def update_draft(event_id: int):
 @social_outreach_bp.post("/approve/<int:event_id>")
 def approve(event_id: int):
     from backend.models import SocialOutreachLog, db
+    from backend.services.social_outreach.transitions import can_approve
     row = SocialOutreachLog.query.get(event_id)
     if row is None:
         return jsonify({"error": "not found"}), 404
-    
+    if not can_approve(row.status):
+        return jsonify({
+            "error": f"cannot approve from status '{row.status}' (only from drafted)",
+        }), 409
+
     body = request.get_json(silent=True) or {}
     if "draft_text" in body:
         row.draft_text = body["draft_text"]
-        
+
     row.status = "approved"
     db.session.commit()
     return jsonify(row.to_dict())
@@ -209,10 +214,39 @@ def approve(event_id: int):
 @social_outreach_bp.post("/reject/<int:event_id>")
 def reject(event_id: int):
     from backend.models import SocialOutreachLog, db
+    from backend.services.social_outreach.transitions import can_reject
     row = SocialOutreachLog.query.get(event_id)
     if row is None:
         return jsonify({"error": "not found"}), 404
+    if not can_reject(row.status):
+        return jsonify({
+            "error": f"cannot reject from status '{row.status}'",
+        }), 409
     row.status = "rejected"
+    db.session.commit()
+    return jsonify(row.to_dict())
+
+
+@social_outreach_bp.post("/claim/<int:event_id>")
+def claim(event_id: int):
+    """Atomically claim an approved draft for posting (approved → processing).
+
+    Used by the Discord cog (and any non-Celery dispatcher) so overlapping
+    polls cannot double-post the same row.
+    """
+    from datetime import datetime, timezone
+    from backend.models import SocialOutreachLog, db
+    from backend.services.social_outreach.transitions import can_claim
+
+    row = SocialOutreachLog.query.get(event_id)
+    if row is None:
+        return jsonify({"error": "not found"}), 404
+    if not can_claim(row.status):
+        return jsonify({
+            "error": f"cannot claim from status '{row.status}' (only from approved)",
+        }), 409
+    row.status = "processing"
+    row.abort_reason = f"processing_since:{datetime.now(timezone.utc).isoformat()}"
     db.session.commit()
     return jsonify(row.to_dict())
 
@@ -276,6 +310,10 @@ def draft_comment():
 
     would_post = enabled and not supervised and cadence_ok and grade_ok and has_draft
 
+    # Unsupervised auto-post goes through process-approved (single posting path).
+    # Legacy Reddit/self-share loops are draft-only and never servo-post.
+    initial_status = "approved" if would_post else "drafted"
+
     audit_id = audit.log_outreach_event(
         platform=platform,
         action="comment" if mode == "comment" else "share",
@@ -283,7 +321,7 @@ def draft_comment():
         target_thread_id=target_thread_id,
         draft_text=draft_text,
         posted_text=None,
-        status="drafted",
+        status=initial_status,
         grade_score=grade,
         abort_reason=None,
         task_id=task_id,
@@ -674,17 +712,51 @@ def scout_url():
     return jsonify(result)
 
 
+@social_outreach_bp.post("/intent")
+def execute_intent():
+    """Natural-language (or structured) outreach intent → queue recon/draft jobs.
+
+    Body: {
+      text?: "comment on youtube videos regarding Offline AI or ComfyUI",
+      platform?: "youtube"|"reddit",
+      action?: "comment"|"recon"|"draft"|"share",
+      topics?: ["Offline AI", "ComfyUI"],
+      max_candidates?: 5,
+      chain_draft?: true
+    }
+    """
+    body = request.get_json(silent=True) or {}
+    from backend.services.social_outreach.intent import execute_outreach_intent
+
+    result = execute_outreach_intent(
+        text=body.get("text") or "",
+        platform=body.get("platform"),
+        action=body.get("action"),
+        topics=body.get("topics"),
+        max_candidates=body.get("max_candidates"),
+        chain_draft=body.get("chain_draft"),
+        created_by=body.get("created_by") or "api_intent",
+    )
+    status = 200 if result.get("ok") else 400
+    if result.get("error") and "disabled" in (result.get("error") or "").lower():
+        status = 403
+    return jsonify(result), status
+
+
 @social_outreach_bp.post("/run-pass")
 def run_pass():
     """Trigger an outreach pass on demand instead of waiting for the cron.
 
-    Body: {platform: "reddit"|"self_share", subreddit?: "SideProject"}
+    Body: {platform: "reddit"|"self_share"|"youtube"|"recon"|"draft",
+           subreddit?, keyword_profiles?, topics?, chain_draft?}
     Returns a Task-backed job id; the actual run is async on the worker.
     """
     body = request.get_json(silent=True) or {}
     platform = (body.get("platform") or "").strip().lower()
     subreddit = (body.get("subreddit") or "").strip() or None
     link_url = (body.get("link_url") or body.get("share_link") or "").strip() or None
+    profiles = body.get("keyword_profiles") or body.get("topics") or None
+    chain_draft = bool(body.get("chain_draft", False))
 
     try:
         from backend.services.social_outreach.job_service import queue_outreach_run
@@ -694,6 +766,8 @@ def run_pass():
             subreddit=subreddit,
             link_url=link_url,
             batch_size=body.get("batch_size"),
+            keyword_profiles=profiles,
+            chain_draft=chain_draft,
             created_by="outreach_page",
         )
         return jsonify(queued), 202

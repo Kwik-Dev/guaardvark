@@ -17,6 +17,15 @@ _NL_INTENT_RULES: list[tuple[re.Pattern[str], str, list[str] | None]] = [
     (re.compile(r"^agents?\s+list\s*$", re.I), "agents", ["list"]),
     (re.compile(r"^(?:system\s+)?status\s*$", re.I), "status", []),
     (re.compile(r"^health(?:\s+check)?\s*$", re.I), "health", []),
+    (
+        re.compile(
+            r"^(?:outreach\s+)?(?:comment|scout|draft).*(?:youtube|reddit|discord|comfyui|offline\s*ai|local\s*(?:llm|ai)).+$",
+            re.I,
+        ),
+        "outreach",
+        None,
+    ),
+    (re.compile(r"^outreach(?:\s+(.+))?$", re.I), "outreach", None),
     (re.compile(r"^(?:run|execute)\s+agent\s+(.+)$", re.I), "agents", None),
 
     # Image / video generation (must precede generic COMMAND_TREE "generate" fallback)
@@ -73,6 +82,16 @@ def resolve_repl_line(line: str) -> tuple[str, list[str]] | None:
             continue
         if fixed_args is not None:
             return cmd, list(fixed_args)
+        if cmd == "outreach":
+            # Prefer capture group when present; else full raw line is the NL intent.
+            try:
+                captured = (match.group(1) or "").strip()
+            except IndexError:
+                captured = ""
+            payload = captured or raw
+            if payload.lower().startswith("outreach "):
+                payload = payload[9:].strip()
+            return cmd, [payload] if payload else []
         tail = (match.group(1) or "").strip()
         if cmd in ("ls", "read", "grep", "edit", "run", "test", "cd", "todo"):
             # pass the whole tail as single arg string; slash handler will shlex if needed

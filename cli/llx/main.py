@@ -27,6 +27,7 @@ from llx.commands.images import images_app
 from llx.commands.videos import videos_app
 from llx.commands.launch import launch
 from llx.commands.quality import quality_app
+from llx.commands.outreach import outreach_app
 
 app = typer.Typer(
     name="guaardvark",
@@ -148,6 +149,7 @@ app.add_typer(tasks_app, name="tasks")
 app.add_typer(images_app, name="images")
 app.add_typer(videos_app, name="videos")
 app.add_typer(quality_app, name="quality")
+app.add_typer(outreach_app, name="outreach")
 
 
 def version_callback(value: bool):

@@ -35,7 +35,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("Backend Tools", ["tools", "tool"]),
     ("Context & State", ["context", "suggest", "analyze", "init", "load"]),
     ("Multi-Modal Commands", ["imagine", "video", "voice", "ingest", "agent", "web"]),
-    ("Admin Commands", ["jobs", "logs", "backup", "family"]),
+    ("Admin Commands", ["jobs", "outreach", "logs", "backup", "family"]),
     ("Config Commands", ["config", "settings", "theme", "quality"]),
     ("REPL", ["help", "quit", "exit"]),
 ]
@@ -197,6 +197,7 @@ class SlashRouter:
         from llx.commands.videos import videos_app
         from llx.commands.system import models_app
         from llx.commands.quality import quality_app
+        from llx.commands.outreach import outreach_app
 
         subapps = {
             "files": files_app,
@@ -205,6 +206,7 @@ class SlashRouter:
             "agents": agents_app,
             "generate": generate_app,
             "jobs": jobs_app,
+            "outreach": outreach_app,
             "settings": settings_app,
             "index": index_app,
             "backup": backup_app,

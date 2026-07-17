@@ -526,8 +526,9 @@ def test_tick_recon_youtube_round_robins_profiles(app):
     key + the configured profile list."""
     from backend.tasks.social_outreach_tasks import tick_recon_youtube
     profiles = ["ComfyUI tutorial", "Ollama local LLM"]
-    with patch("backend.tasks.social_outreach_tasks._load_targets",
-               return_value={"youtube": {"keyword_profiles": profiles}}), \
+    with patch("backend.services.social_outreach.kill_switch.is_enabled", return_value=True), \
+            patch("backend.tasks.social_outreach_tasks._load_targets",
+                  return_value={"youtube": {"keyword_profiles": profiles}}), \
             patch("backend.tasks.social_outreach_tasks._next_target",
                   return_value="ComfyUI tutorial") as next_target, \
             patch("backend.tasks.social_outreach_tasks._with_app_context",

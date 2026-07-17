@@ -200,15 +200,13 @@ def tick_recon_youtube_replies(self) -> dict:
     that the Content agent drafts a response for, the grader scores, and
     tick_process_approved_drafts dispatches through post_youtube_reply_via_servo.
 
-    Read-only: no servo, no posting. Safe to run on cron — same kill-switch
-    gate as the other recon ticks. Disabled by default in celery_app.py beat
-    schedule.
+    Read-only: no servo, no posting. Same kill-switch gate as other recon
+    ticks. NOT scheduled in celery_app beat until
+    recon._fetch_recent_replies_to_guaardvark is implemented (stub returns []).
+    Fire on demand via /run-pass or hand-seed via
+    recon.enqueue_youtube_reply_candidate(...).
 
-    Reads `youtube.monitored_videos` from social_outreach_targets.json. Until
-    the comment-scrape stub in recon._fetch_recent_replies_to_guaardvark is
-    implemented, this is a clean no-op that just reports "no_replies" for
-    each monitored video. Manual seeding via
-    `recon.enqueue_youtube_reply_candidate(...)` still works end-to-end.
+    Reads `youtube.monitored_videos` from social_outreach_targets.json.
     """
     skipped = _skip_if_kill_switch_off()
     if skipped:
@@ -237,13 +235,19 @@ def tick_self_share(self) -> dict:
 
 @shared_task(name="social_outreach.tick_process_approved_drafts", bind=True)
 def tick_process_approved_drafts(self) -> dict:
-    """Beat tick — process UI-approved drafts for Reddit and YouTube."""
+    """Beat tick — process UI-approved drafts for Reddit and YouTube.
+
+    Cadence is enforced here (same Redis caps as unsupervised would_post).
+    At most one successful post per platform per tick; remaining approved
+    rows stay approved for a later tick.
+    """
     skipped = _skip_if_kill_switch_off()
     if skipped:
         return {"processed": 0, "reason": "kill_switch_off"}
 
     def _run():
         from backend.models import SocialOutreachLog, db
+        from backend.services.social_outreach import kill_switch
         from backend.services.social_outreach.reddit_outreach import post_comment_via_servo as reddit_post_comment, record_post_via_backend
         from backend.services.social_outreach.youtube_outreach import (
             post_youtube_comment_via_servo,
@@ -260,7 +264,7 @@ def tick_process_approved_drafts(self) -> dict:
             .filter(SocialOutreachLog.status == "approved")
             .filter(SocialOutreachLog.platform.in_(("reddit", "youtube")))
             .order_by(SocialOutreachLog.created_at.asc())
-            .limit(5)
+            .limit(20)
             .all()
         )
         
@@ -268,12 +272,32 @@ def tick_process_approved_drafts(self) -> dict:
             return {"processed": 0, "reason": "no_approved_drafts"}
             
         processed = 0
+        skipped_cadence = 0
+        posted_platforms: set[str] = set()
         for row in rows:
+            platform = (row.platform or "").strip().lower()
+            if platform in posted_platforms:
+                # One successful post per platform per tick — leave the rest
+                # approved for the next minute's beat.
+                continue
+
+            cadence_ok, cadence_reason = kill_switch.cadence_allows_post(platform)
+            if not cadence_ok:
+                skipped_cadence += 1
+                logger.info(
+                    "process-approved: cadence block for %s row %s: %s",
+                    platform, row.id, cadence_reason,
+                )
+                continue
+
             # Claim the row up-front so a mid-flight failure (servo crash,
             # record-post HTTP blip) doesn't leave it as "approved" and trigger
-            # a double-post on the next 60s tick. If the post never happens,
-            # the row stays at "processing" and a human deals with it.
+            # a double-post on the next 60s tick. Stamp claim time into
+            # abort_reason so the stuck-processing reaper can age rows
+            # (SocialOutreachLog has no updated_at column).
+            from datetime import datetime, timezone
             row.status = "processing"
+            row.abort_reason = f"processing_since:{datetime.now(timezone.utc).isoformat()}"
             db.session.commit()
 
             if row.action == "comment":
@@ -297,6 +321,7 @@ def tick_process_approved_drafts(self) -> dict:
                 if success:
                     record_post_via_backend(row.id, row.target_url, row.target_thread_id, comment_text, row.task_id)
                     processed += 1
+                    posted_platforms.add(platform)
                 else:
                     from backend.services.social_outreach.audit import mark_draft_aborted
                     mark_draft_aborted(row.id, f"servo: {reason}")
@@ -338,6 +363,7 @@ def tick_process_approved_drafts(self) -> dict:
                         reply_text, row.task_id,
                     )
                     processed += 1
+                    posted_platforms.add(platform)
                 else:
                     # Move the row to "aborted" so it doesn't stay stuck at
                     # "processing" forever. The user can re-approve via UI to
@@ -384,6 +410,7 @@ def tick_process_approved_drafts(self) -> dict:
                         except Exception as e:
                             logger.warning("record-post failed: %s", e)
                         processed += 1
+                        posted_platforms.add(platform)
                     else:
                         # Same recovery path as the comment branch — abort
                         # cleanly so the row isn't stranded at "processing".
@@ -394,5 +421,58 @@ def tick_process_approved_drafts(self) -> dict:
                     # aborted with a clear reason so the user can fix the row.
                     from backend.services.social_outreach.audit import mark_draft_aborted
                     mark_draft_aborted(row.id, "share row missing subreddit or title")
-        return {"processed": processed}
+        return {
+            "processed": processed,
+            "skipped_cadence": skipped_cadence,
+            "posted_platforms": sorted(posted_platforms),
+        }
+    return _with_app_context(_run)
+
+
+# How long a row may sit at status=processing before we abort it (worker kill).
+_STUCK_PROCESSING_SECONDS = 30 * 60
+
+
+@shared_task(name="social_outreach.tick_reap_stuck_processing", bind=True)
+def tick_reap_stuck_processing(self) -> dict:
+    """Abort outreach rows stuck in 'processing' after a worker crash."""
+    def _run():
+        from datetime import datetime, timedelta, timezone
+        from backend.models import SocialOutreachLog
+        from backend.services.social_outreach.audit import mark_draft_aborted
+
+        now = datetime.now(timezone.utc)
+        rows = (
+            SocialOutreachLog.query
+            .filter(SocialOutreachLog.status == "processing")
+            .limit(50)
+            .all()
+        )
+        reaped = 0
+        for row in rows:
+            claimed_at = None
+            reason = row.abort_reason or ""
+            if reason.startswith("processing_since:"):
+                stamp = reason.split(":", 1)[1]
+                try:
+                    claimed_at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    if claimed_at.tzinfo is None:
+                        claimed_at = claimed_at.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    claimed_at = None
+            # Fallback: age by created_at if claim stamp missing (legacy rows).
+            if claimed_at is None:
+                created = row.created_at
+                if created is None:
+                    continue
+                if created.tzinfo is None:
+                    claimed_at = created.replace(tzinfo=timezone.utc)
+                else:
+                    claimed_at = created
+            if now - claimed_at < timedelta(seconds=_STUCK_PROCESSING_SECONDS):
+                continue
+            mark_draft_aborted(row.id, "stuck_processing_reaped")
+            reaped += 1
+        return {"reaped": reaped}
+
     return _with_app_context(_run)

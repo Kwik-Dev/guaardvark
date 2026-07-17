@@ -105,6 +105,63 @@ def _trim_anchor(parent_text: str) -> Optional[str]:
     return cleaned[:MAX_REPLY_ANCHOR_LEN].strip()
 
 
+BIDI_PORT = 9222
+
+
+def _verify_youtube_text_in_dom(comment_text: str) -> tuple[bool, str]:
+    """Return (True, msg) if a needle of comment_text appears in the page DOM."""
+    import json as _json
+    import websocket as _ws2
+
+    needle = (comment_text or "")[:60].strip()
+    if not needle:
+        return False, "empty_needle"
+    try:
+        ws = _ws2.create_connection(
+            f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True,
+        )
+        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
+        if _json.loads(ws.recv()).get("type") != "success":
+            ws.close()
+            return False, "bidi_session_failed"
+        ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
+        ctxs = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
+        if not ctxs:
+            ws.close()
+            return False, "no_browsing_context"
+        ctx_id = ctxs[0]["context"]
+        check_js = (
+            "(() => {"
+            "  const needle = " + _json.dumps(needle) + ";"
+            "  const body = (document.body && document.body.innerText) || '';"
+            "  const found = body.includes(needle);"
+            "  const err = /sign in to|something went wrong|try again/i.test(body);"
+            "  return JSON.stringify({found, err, url: location.href});"
+            "})()"
+        )
+        ws.send(_json.dumps({
+            "id": 3, "method": "script.evaluate",
+            "params": {
+                "expression": check_js,
+                "target": {"context": ctx_id},
+                "awaitPromise": False,
+            },
+        }))
+        v = _json.loads(ws.recv()).get("result", {}).get("result", {}).get("value", "")
+        try:
+            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
+        except Exception:
+            pass
+        ws.close()
+        if not v:
+            return False, "empty_evaluate"
+        d = _json.loads(v)
+        ok = bool(d.get("found")) and not bool(d.get("err"))
+        return ok, f"found={d.get('found')} err={d.get('err')} url={d.get('url')}"
+    except Exception as e:
+        return False, f"verify_exception: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -190,15 +247,12 @@ def post_youtube_comment_via_servo(
     if not ok:
         return False, reason
 
-    # NOTE: A "like the video" step was prototyped here (see git log + the
-    # like_youtube_video recipe in recipes.json). It's disabled because the
-    # vision-driven click on YouTube's thumbs-up is unreliable (the vision
-    # model consistently miscalibrates the coordinates) AND the post-click visual
-    # delta (outline→filled icon, +1 count) is too subtle for the same model
-    # to verify, so we get silent false positives. Re-enable once the click
-    # is DOM-driven via the Firefox CDP debug port (port 9222) — the
-    # placeholder/Cancel verification trick that works for the composer
-    # doesn't translate.
+    # DOM verify — recipe success alone is not enough (false positives when
+    # the submit click missed). Look for a needle of our comment text in the
+    # page via Firefox BiDi, same idea as Reddit's post-submit check.
+    verified, verify_msg = _verify_youtube_text_in_dom(comment_text)
+    if not verified:
+        return False, f"submit_unverified: {verify_msg}"
 
     return True, "ok"
 
@@ -277,5 +331,9 @@ def post_youtube_reply_via_servo(
     ok, reason = _run_recipe_step(service, screen, "send reply", "submit_failed")
     if not ok:
         return False, reason
+
+    verified, verify_msg = _verify_youtube_text_in_dom(reply_text)
+    if not verified:
+        return False, f"submit_unverified: {verify_msg}"
 
     return True, "ok"

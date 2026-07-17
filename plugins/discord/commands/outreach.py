@@ -135,23 +135,57 @@ class OutreachCog(commands.Cog):
             logger.warning("outreach: failed to fetch approved drafts: %s", e)
             return
 
+        posted_this_tick = False
         for row in approved:
+            if posted_this_tick:
+                break
             if row.get("platform") != "discord":
                 continue
-                
+
+            audit_id = row.get("id")
             target_url = row.get("target_url")
-            if not target_url:
+            if not target_url or not audit_id:
                 continue
-                
+
+            # Cadence before claim — leave row approved if blocked.
+            try:
+                status = await self.api._get("/social-outreach/status")
+                cadence = (status.get("cadence") or {}).get("discord") or {}
+                if cadence.get("redis") == "unavailable":
+                    logger.info("outreach: discord cadence redis unavailable, skipping post")
+                    break
+                posts = int(cadence.get("posts_in_24h") or 0)
+                cap = int(cadence.get("daily_cap") or 8)
+                last_ago = cadence.get("last_post_seconds_ago")
+                min_gap = int(cadence.get("min_gap_s") or 1800)
+                if posts >= cap:
+                    logger.info("outreach: discord daily cap hit (%s/%s)", posts, cap)
+                    break
+                if last_ago is not None and int(last_ago) < min_gap:
+                    logger.info("outreach: discord gap not elapsed (%ss < %ss)", last_ago, min_gap)
+                    break
+            except Exception as e:
+                logger.warning("outreach: cadence check failed, skipping: %s", e)
+                break
+
+            # Claim before send so overlapping 60s polls cannot double-reply.
+            try:
+                await self.api._post(f"/social-outreach/claim/{audit_id}")
+            except Exception as e:
+                logger.info("outreach: claim failed for draft %s (race?): %s", audit_id, e)
+                continue
+
             # target_url format: https://discord.com/channels/{guild}/{channel}/{msg.id}
             parts = target_url.split("/")
             if len(parts) < 3:
+                await self.api._post(f"/social-outreach/reject/{audit_id}")
                 continue
-                
+
             try:
                 channel_id = int(parts[-2])
                 msg_id = int(parts[-1])
             except ValueError:
+                await self.api._post(f"/social-outreach/reject/{audit_id}")
                 continue
 
             channel = self.bot.get_channel(channel_id)
@@ -159,6 +193,7 @@ class OutreachCog(commands.Cog):
                 try:
                     channel = await self.bot.fetch_channel(channel_id)
                 except Exception:
+                    await self.api._post(f"/social-outreach/reject/{audit_id}")
                     continue
 
             try:
@@ -166,23 +201,24 @@ class OutreachCog(commands.Cog):
                 draft = row.get("draft_text", "")
                 if draft:
                     await msg.reply(draft, mention_author=False)
-                    
+
                     await self.api._post(
                         "/social-outreach/record-post",
                         json={
-                            "audit_id": row.get("id"),
+                            "audit_id": audit_id,
                             "platform": "discord",
                             "posted_text": draft,
                             "target_url": target_url,
                             "target_thread_id": str(msg_id),
                         },
                     )
+                    posted_this_tick = True
             except discord.NotFound:
-                logger.warning("outreach: msg %s not found, rejecting draft %s", msg_id, row.get("id"))
-                await self.api._post(f"/social-outreach/reject/{row.get('id')}")
+                logger.warning("outreach: msg %s not found, rejecting draft %s", msg_id, audit_id)
+                await self.api._post(f"/social-outreach/reject/{audit_id}")
             except Exception as e:
-                logger.warning("outreach: failed to post approved draft %s: %s", row.get("id"), e)
-                await self.api._post(f"/social-outreach/reject/{row.get('id')}")
+                logger.warning("outreach: failed to post approved draft %s: %s", audit_id, e)
+                await self.api._post(f"/social-outreach/reject/{audit_id}")
 
     @poll_approved_drafts.before_loop
     async def _before_approved_loop(self):

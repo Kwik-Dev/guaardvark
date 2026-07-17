@@ -23,6 +23,8 @@ OUTREACH_TASK_TYPES = {
     "self_share": "social_outreach_share",
     "share": "social_outreach_share",
     "recon": "social_outreach_recon",
+    "youtube": "social_outreach_youtube",
+    "youtube_recon": "social_outreach_youtube",
     "draft": "social_outreach_draft",
     "discord": "social_outreach_discord",
 }
@@ -34,6 +36,8 @@ def queue_outreach_run(
     subreddit: str | None = None,
     link_url: str | None = None,
     batch_size: int | None = None,
+    keyword_profiles: list[str] | None = None,
+    chain_draft: bool = False,
     priority: int = 2,
     created_by: str = "outreach",
 ) -> dict[str, Any]:
@@ -52,9 +56,10 @@ def queue_outreach_run(
     if not kill_switch.is_enabled():
         raise RuntimeError("outreach is disabled (kill switch is off)")
 
-    workflow_config = {
+    workflow_config: dict[str, Any] = {
         "platform": normalized,
         "created_by": created_by,
+        "chain_draft": bool(chain_draft),
     }
     if subreddit:
         workflow_config["subreddit"] = subreddit.strip().lstrip("r/").lstrip("/")
@@ -64,6 +69,10 @@ def queue_outreach_run(
         workflow_config["link_url"] = persona.SITE_URL
     if batch_size is not None:
         workflow_config["batch_size"] = max(1, min(int(batch_size), 25))
+    if keyword_profiles:
+        cleaned = [str(p).strip() for p in keyword_profiles if p and str(p).strip()]
+        if cleaned:
+            workflow_config["keyword_profiles"] = cleaned[:8]
 
     task = Task(
         name=_task_name(normalized, workflow_config),
@@ -115,6 +124,10 @@ def _task_name(platform: str, workflow_config: dict[str, Any]) -> str:
         return f"Outreach Reddit pass{f' for r/{subreddit}' if subreddit else ''}"
     if platform in ("self_share", "share"):
         return "Outreach self-share pass"
+    if platform in ("youtube", "youtube_recon"):
+        profiles = workflow_config.get("keyword_profiles") or []
+        suffix = f" ({', '.join(profiles[:3])})" if profiles else ""
+        return f"Outreach YouTube recon{suffix}"
     if platform == "recon":
         return "Outreach recon pass"
     if platform == "draft":
@@ -127,21 +140,29 @@ def _task_name(platform: str, workflow_config: dict[str, Any]) -> str:
 def _task_description(platform: str, workflow_config: dict[str, Any]) -> str:
     if platform == "reddit":
         subreddit = workflow_config.get("subreddit") or "next target from social_outreach_targets.json"
-        return f"Discover, draft, and maybe post a Reddit Outreach comment for {subreddit}."
+        return f"Discover and draft a Reddit Outreach comment for {subreddit}."
     if platform in ("self_share", "share"):
-        return "Submit a Guaardvark self-share link post through the supervised Outreach pipeline."
+        return "Draft a Guaardvark self-share link post through the supervised Outreach pipeline."
+    if platform in ("youtube", "youtube_recon"):
+        profiles = workflow_config.get("keyword_profiles") or ["configured profiles"]
+        draft = " then draft" if workflow_config.get("chain_draft") else ""
+        return f"Scout YouTube for {profiles}{draft}; leave drafts for human approve."
     if platform == "recon":
         return "Scout the next configured Reddit target and add candidate Outreach rows."
     if platform == "draft":
         return "Draft pending Outreach candidates into reviewable queue rows."
     if platform == "discord":
-        return "Run the Discord Outreach pass if the Discord cog is available."
+        return "Discord Outreach is handled by the Discord plugin cog (Celery path is a noop)."
     return "Run an Outreach pass."
 
 
 def _queued_message(platform: str, workflow_config: dict[str, Any], task_id: int) -> str:
     if platform == "reddit" and workflow_config.get("subreddit"):
         return f"Reddit Outreach pass for r/{workflow_config['subreddit']} added to the Job Queue as task #{task_id}."
+    if platform in ("youtube", "youtube_recon"):
+        profiles = workflow_config.get("keyword_profiles") or []
+        topic = f" ({', '.join(profiles[:3])})" if profiles else ""
+        return f"YouTube Outreach recon{topic} added to the Job Queue as task #{task_id}."
     labels = {
         "reddit": "Reddit Outreach pass",
         "self_share": "Self-share Outreach pass",

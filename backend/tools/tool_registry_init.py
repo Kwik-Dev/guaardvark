@@ -611,6 +611,7 @@ def register_outreach_tools() -> List[str]:
             OutreachApproveDraftTool,
             OutreachRejectDraftTool,
             OutreachRunPassTool,
+            OutreachExecuteIntentTool,
         )
 
         for cls in (
@@ -620,6 +621,7 @@ def register_outreach_tools() -> List[str]:
             OutreachApproveDraftTool,
             OutreachRejectDraftTool,
             OutreachRunPassTool,
+            OutreachExecuteIntentTool,
         ):
             tool = cls()
             register_tool(tool)

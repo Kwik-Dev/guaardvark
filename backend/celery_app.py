@@ -155,15 +155,14 @@ def create_celery_app():
                 'schedule': 300.0,  # every 5 min
                 'options': {'queue': 'default'},
             },
-            # Scout the channel's own videos for new replies left under
-            # Guaardvark's comments. Read-only — emits "candidate" rows that
-            # flow through the same draft/grade/dispatch pipeline as
-            # outreach comments. Slower cadence than recon (hourly) because
-            # replies under a small channel arrive infrequently; tighten if
-            # the channel grows.
-            'social-outreach-youtube-replies-recon': {
-                'task': 'social_outreach.tick_recon_youtube_replies',
-                'schedule': 3600.0,  # 1 hour
+            # YouTube reply-scrape recon is intentionally NOT scheduled until
+            # recon._fetch_recent_replies_to_guaardvark is implemented (stub
+            # returns []). Fire on demand via /run-pass or hand-seed via
+            # recon.enqueue_youtube_reply_candidate.
+            # Reap outreach rows stuck at status=processing after worker kill.
+            'social-outreach-reap-stuck-processing': {
+                'task': 'social_outreach.tick_reap_stuck_processing',
+                'schedule': 300.0,  # every 5 min
                 'options': {'queue': 'default'},
             },
             # Reap memory_state_<session_id> rows from system_setting that
@@ -371,7 +370,8 @@ def create_celery_app():
             tick_reddit_outreach,
             tick_self_share,
             tick_process_approved_drafts,
-            tick_recon_youtube_replies,
+            tick_reap_stuck_processing,
+            tick_recon_youtube_replies,  # on-demand only; not in beat until scrape lands
         )
         logger.info("Social outreach tasks imported successfully")
     except ImportError as e:

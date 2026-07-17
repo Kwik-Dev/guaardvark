@@ -323,10 +323,16 @@ async function handleWebSearch(args, { addMessage, onSendMessage }) {
 }
 
 // ============================================================
-// /outreach [status|reddit|self_share|recon|draft]
+// /outreach [status|reddit|…| freeform NL]
 // ============================================================
 
 async function handleOutreach(args, { addMessage }) {
+  const {
+    fetchStatus,
+    runPass,
+    executeIntent,
+  } = await import("../api/outreachService");
+
   const raw = (args || "").trim();
   const [verbRaw = "status", ...rest] = raw.split(/\s+/).filter(Boolean);
   const verb = verbRaw.toLowerCase().replace("-", "_");
@@ -340,13 +346,14 @@ async function handleOutreach(args, { addMessage }) {
 
   if (!raw || verb === "status") {
     try {
-      const res = await fetch("/api/social-outreach/status");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const data = await fetchStatus();
       const enabled = data.enabled ? "Enabled" : "Disabled";
       const supervised = data.supervised ? "supervised" : "unsupervised";
       const cadence = data.cadence || {};
       const cadenceLines = Object.entries(cadence).map(([platform, value]) => {
+        if (value?.redis === "unavailable") {
+          return `- ${platform}: Redis offline`;
+        }
         const posts = value.posts_in_24h ?? 0;
         const cap = value.daily_cap ?? 0;
         const last = value.last_post_seconds_ago != null
@@ -378,15 +385,28 @@ async function handleOutreach(args, { addMessage }) {
     share: "self_share",
     recon: "recon",
     draft: "draft",
+    youtube: "youtube",
   };
   const platform = platformAliases[verb];
+
+  // Known short verbs → run-pass; anything else is natural-language intent.
   if (!platform) {
-    addMessage({
-      role: "system",
-      content: "Usage: `/outreach [status|reddit [subreddit]|self_share|recon|draft]`",
-      tempId: `outreach-usage-${Date.now()}`,
-      type: "command",
-    });
+    try {
+      const data = await executeIntent({ text: raw, created_by: "slash" });
+      addMessage({
+        role: "system",
+        content: data.message || JSON.stringify(data.plan || data),
+        tempId: `outreach-intent-${Date.now()}`,
+        type: "command",
+      });
+    } catch (err) {
+      addMessage({
+        role: "system",
+        content: `Outreach intent failed: ${err.message}`,
+        tempId: `outreach-intent-err-${Date.now()}`,
+        type: "command",
+      });
+    }
     return { handled: true };
   }
 
@@ -394,17 +414,12 @@ async function handleOutreach(args, { addMessage }) {
   const linkUrl = rest.find((token) => /^https?:\/\//i.test(token));
 
   try {
-    const res = await fetch("/api/social-outreach/run-pass", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        platform,
-        ...(subreddit && platform !== "draft" ? { subreddit } : {}),
-        ...(linkUrl ? { link_url: linkUrl } : {}),
-      }),
+    const data = await runPass({
+      platform,
+      ...(subreddit && platform !== "draft" ? { subreddit } : {}),
+      ...(linkUrl ? { link_url: linkUrl } : {}),
+      ...(platform === "youtube" ? { chain_draft: true, topics: rest.join(" ") || undefined } : {}),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     addMessage({
       role: "system",
       content: data.message || `Outreach job queued as task #${data.task_id}.`,

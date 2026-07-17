@@ -583,6 +583,45 @@ def execute_unified_task(self, task_id: int):
                         update_progress(35, f"Scouting Outreach candidates in r/{subreddit}")
                         from backend.services.social_outreach.recon import RecondAgent
                         output = RecondAgent().scout_reddit(subreddit)
+                elif task_type == 'social_outreach_youtube':
+                    from backend.services.social_outreach.recon import RecondAgent
+                    from backend.tasks.social_outreach_tasks import _load_targets, _next_target
+                    profiles = list(wf.get("keyword_profiles") or [])
+                    if not profiles:
+                        targets = _load_targets()
+                        profiles = list(
+                            (targets.get("youtube") or {}).get("keyword_profiles") or []
+                        )
+                        if profiles:
+                            one = _next_target("youtube_recon", profiles)
+                            profiles = [one] if one else []
+                    if not profiles:
+                        output = {"skipped": True, "reason": "no_targets"}
+                    else:
+                        agent = RecondAgent()
+                        reports = []
+                        for idx, profile in enumerate(profiles):
+                            update_progress(
+                                30 + int(40 * idx / max(len(profiles), 1)),
+                                f"Scouting YouTube: {profile}",
+                            )
+                            reports.append(agent.scout_youtube(
+                                profile,
+                                max_candidates=int(wf.get("batch_size") or 5),
+                            ))
+                        output = {"platform": "youtube", "reports": reports}
+                        if wf.get("chain_draft"):
+                            update_progress(80, "Drafting YouTube candidates")
+                            from backend.services.social_outreach.content_agent import (
+                                ContentAgent,
+                                DEFAULT_BATCH_SIZE,
+                            )
+                            try:
+                                batch_size = int(wf.get("batch_size") or DEFAULT_BATCH_SIZE)
+                            except (TypeError, ValueError):
+                                batch_size = DEFAULT_BATCH_SIZE
+                            draft_report = ContentAgent().draft_batch(batch_size)
+                            output["draft"] = draft_report
                 elif task_type == 'social_outreach_draft':
                     update_progress(35, "Drafting Outreach candidates")
                     from backend.services.social_outreach.content_agent import (

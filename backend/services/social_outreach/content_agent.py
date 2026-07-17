@@ -148,12 +148,27 @@ class ContentAgent:
                     },
                     mode="reply",
                 )
+            elif row.action == "share":
+                result = persona.draft_outreach_text(
+                    platform=row.platform,
+                    context={
+                        "target": payload.get("target")
+                        or payload.get("share_target")
+                        or row.target_url
+                        or "(unspecified)",
+                        "link_url": payload.get("link_url")
+                        or payload.get("share_link")
+                        or persona.SITE_URL,
+                    },
+                    mode="share",
+                    feature_hint=feature_hint,
+                )
             else:
                 thread_context = _build_thread_context(payload)
                 result = persona.draft_outreach_text(
                     platform=row.platform,
                     context={"thread_context": thread_context, "url": row.target_url},
-                    mode="comment" if row.action == "comment" else "share",
+                    mode="comment",
                     feature_hint=feature_hint,
                 )
         except Exception as e:

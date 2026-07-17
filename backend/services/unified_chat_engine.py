@@ -204,7 +204,8 @@ FILE_TOOLS = ["file_bulk_operation", "file_watch"]
 # downstream; these tools are just chat-side handles on the same surfaces the
 # OutreachPage uses.
 OUTREACH_TOOLS = ["outreach_status", "outreach_list_queue", "outreach_draft_post",
-                  "outreach_approve_draft", "outreach_reject_draft", "outreach_run_pass"]
+                  "outreach_approve_draft", "outreach_reject_draft", "outreach_run_pass",
+                  "outreach_execute_intent"]
 # Populated dynamically when an MCP server connects — see
 # backend.services.mcp_native_proxy. Holds names like 'filesystem_list_directory'
 # so the LLM can pick MCP tools by name without going through mcp_execute.
@@ -299,7 +300,10 @@ TOOL_CONTEXT_KEYWORDS = {
                   "self-share", "self share", "outreach pass", "run outreach",
                   "outreach status", "is outreach", "outreach queue",
                   "scout subreddit", "scout reddit", "recon pass",
-                  "subreddit"], OUTREACH_TOOLS),
+                  "subreddit", "youtube", "youtube comment", "comment on youtube",
+                  "comment on some youtube", "youtube videos", "comfyui",
+                  "offline ai", "local llm", "local ai", "video comment",
+                  "scout youtube"], OUTREACH_TOOLS),
     "file": (["bulk file", "rename files", "process all files", "watch file",
               "watch the file", "monitor file", "all files in", "every file in",
               "batch file"], FILE_TOOLS),

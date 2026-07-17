@@ -624,7 +624,6 @@ class RedditOutreachLoop:
 
         recent_done = audit.recent_thread_ids("reddit", hours=168)
 
-        servo_failures = 0
         for thread in threads:
             if report["posted"] + report["aborted"] >= MAX_THREADS_PER_PASS:
                 break
@@ -644,43 +643,10 @@ class RedditOutreachLoop:
                 continue
             report["drafted"] += 1
 
-            if not draft_result.get("would_post"):
-                # supervised, low grade, cadence block, or empty draft —
-                # already logged in audit by /draft-comment endpoint
-                continue
-
-            draft_text = draft_result.get("draft", "").strip()
-            audit_id = draft_result.get("audit_id")
-
-            # Belt-and-suspenders UTM: persona.draft_outreach_text already tags
-            # LLM-generated guaardvark.com links, but a draft may have been
-            # edited via the UI (snippet inserts, hand-typed URLs) since then.
-            # Tagging at the servo boundary catches every URL regardless of
-            # how it got into the text.
-            posted_text = persona.apply_utm_tags(draft_text, platform="reddit", campaign="v253")
-
-            success, reason = post_comment_via_servo(thread.permalink, posted_text)
-            if success:
-                record_post_via_backend(audit_id, thread.permalink, thread.id, posted_text, task_id)
-                report["posted"] += 1
-                # Cadence enforced inside record-post; one post per pass is the cap anyway.
-                break
-            else:
-                servo_failures += 1
-                if audit_id:
-                    audit.mark_draft_aborted(audit_id, f"servo: {reason}")
-                else:
-                    audit.log_outreach_event(
-                        platform="reddit", action="abort",
-                        target_url=thread.permalink,
-                        target_thread_id=thread.id,
-                        status="aborted",
-                        abort_reason=f"servo: {reason}",
-                        task_id=task_id,
-                    )
-                report["aborted"] += 1
-                if servo_failures >= kill_switch.SERVO_FAILURE_ABORT_THRESHOLD:
-                    report["reason"] = "servo_threshold_hit"
-                    break
+            # Draft-only: posting is exclusively via tick_process_approved_drafts
+            # (cadence + claim). When unsupervised, /draft-comment already set
+            # status=approved for would_post drafts so the next beat posts them.
+            if draft_result.get("would_post"):
+                report["queued_for_post"] = report.get("queued_for_post", 0) + 1
 
         return report

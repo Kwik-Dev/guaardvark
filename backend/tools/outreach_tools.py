@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 
 # Shared platform vocabulary so the LLM doesn't invent values like "x.com"
 _KNOWN_PLATFORMS = ("reddit", "discord", "facebook", "twitter", "youtube")
-_KNOWN_RUN_PLATFORMS = ("reddit", "self_share", "recon", "draft")
+_KNOWN_RUN_PLATFORMS = (
+    "reddit", "self_share", "recon", "draft", "youtube", "youtube_recon",
+)
 
 
 def _row_summary(row) -> Dict[str, Any]:
@@ -220,7 +222,12 @@ class OutreachDraftPostTool(BaseTool):
                         _scout_reddit_url, _scout_generic_url,
                     )
                     scouted = None
-                    if "reddit.com" in (target_url or ""):
+                    try:
+                        from urllib.parse import urlparse
+                        _host = (urlparse(target_url or "").hostname or "").lower()
+                    except Exception:
+                        _host = ""
+                    if _host.endswith("reddit.com") or _host == "reddit.com":
                         scouted = _scout_reddit_url(target_url)
                     if scouted is None:
                         result = _scout_generic_url(target_url)
@@ -324,9 +331,15 @@ class OutreachApproveDraftTool(BaseTool):
 
         try:
             from backend.models import SocialOutreachLog, db
+            from backend.services.social_outreach.transitions import can_approve
             row = SocialOutreachLog.query.get(event_id)
             if row is None:
                 return ToolResult(success=False, error=f"draft {event_id} not found")
+            if not can_approve(row.status):
+                return ToolResult(
+                    success=False,
+                    error=f"cannot approve from status '{row.status}' (only from drafted)",
+                )
             if "draft_text" in kwargs and kwargs["draft_text"] is not None:
                 row.draft_text = str(kwargs["draft_text"])
             row.status = "approved"
@@ -364,9 +377,15 @@ class OutreachRejectDraftTool(BaseTool):
 
         try:
             from backend.models import SocialOutreachLog, db
+            from backend.services.social_outreach.transitions import can_reject
             row = SocialOutreachLog.query.get(event_id)
             if row is None:
                 return ToolResult(success=False, error=f"draft {event_id} not found")
+            if not can_reject(row.status):
+                return ToolResult(
+                    success=False,
+                    error=f"cannot reject from status '{row.status}'",
+                )
             row.status = "rejected"
             db.session.commit()
             return ToolResult(
@@ -385,10 +404,11 @@ class OutreachRunPassTool(BaseTool):
     name = "outreach_run_pass"
     description = (
         "Queue an outreach pass without waiting for the cron. platform options: "
-        "'reddit' (engage with a sub — pass subreddit to target one, omit for "
-        "round-robin), 'self_share' (link post to next round-robin sub), "
-        "'recon' (scout candidates only, never posts), 'draft' (LLM-draft any "
-        "candidate rows). Returns the Task/Job Queue id. Cadence + kill switch still apply."
+        "'reddit', 'self_share', 'recon', 'draft', 'youtube' / 'youtube_recon' "
+        "(pass topics or keyword_profile for YouTube scout). For freeform requests "
+        "like 'comment on YouTube videos about Offline AI', prefer "
+        "outreach_execute_intent instead. Cadence + kill switch still apply; "
+        "never auto-posts while supervised."
     )
     requires_approval = True
     parameters = {
@@ -399,6 +419,19 @@ class OutreachRunPassTool(BaseTool):
         "subreddit": ToolParameter(
             name="subreddit", type="string", required=False,
             description="Target subreddit name (without r/) for platform='reddit'",
+        ),
+        "topics": ToolParameter(
+            name="topics", type="string", required=False,
+            description="Comma-separated YouTube keyword topics, e.g. 'Offline AI, ComfyUI'",
+        ),
+        "keyword_profile": ToolParameter(
+            name="keyword_profile", type="string", required=False,
+            description="Single YouTube keyword profile (alias for one topic)",
+        ),
+        "chain_draft": ToolParameter(
+            name="chain_draft", type="bool", required=False,
+            description="After YouTube recon, also draft candidates (default true for youtube)",
+            default=True,
         ),
     }
 
@@ -416,6 +449,18 @@ class OutreachRunPassTool(BaseTool):
             )
 
         subreddit = (kwargs.get("subreddit") or "").strip() or None
+        profiles: list[str] = []
+        topics_raw = kwargs.get("topics")
+        if isinstance(topics_raw, list):
+            profiles.extend(str(t).strip() for t in topics_raw if t)
+        elif isinstance(topics_raw, str) and topics_raw.strip():
+            profiles.extend(p.strip() for p in topics_raw.split(",") if p.strip())
+        kp = (kwargs.get("keyword_profile") or "").strip()
+        if kp:
+            profiles.append(kp)
+        chain_draft = kwargs.get("chain_draft")
+        if chain_draft is None:
+            chain_draft = platform in ("youtube", "youtube_recon")
 
         try:
             from backend.services.social_outreach.job_service import queue_outreach_run
@@ -423,6 +468,8 @@ class OutreachRunPassTool(BaseTool):
             queued = queue_outreach_run(
                 platform,
                 subreddit=subreddit,
+                keyword_profiles=profiles or None,
+                chain_draft=bool(chain_draft),
                 created_by="chat_tool",
             )
 
@@ -440,6 +487,72 @@ class OutreachRunPassTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+class OutreachExecuteIntentTool(BaseTool):
+    """Parse natural-language outreach requests and queue recon/draft work."""
+
+    name = "outreach_execute_intent"
+    description = (
+        "Run a natural-language outreach request end-to-end (scout → draft → queue for "
+        "human approve). Examples: 'comment on some youtube videos regarding Offline AI "
+        "or ComfyUI', 'scout reddit for local LLM threads', 'draft pending outreach "
+        "candidates'. Does NOT post while supervised — user must approve drafts. "
+        "Use this whenever the user describes outreach in plain English."
+    )
+    requires_approval = True
+    parameters = {
+        "text": ToolParameter(
+            name="text", type="string", required=True,
+            description="The user's natural-language outreach request",
+        ),
+        "platform": ToolParameter(
+            name="platform", type="string", required=False,
+            description="Optional override: youtube|reddit|discord",
+        ),
+        "action": ToolParameter(
+            name="action", type="string", required=False,
+            description="Optional override: comment|recon|draft|share|reply",
+        ),
+        "topics": ToolParameter(
+            name="topics", type="string", required=False,
+            description="Optional comma-separated topics override",
+        ),
+    }
+
+    def execute(self, **kwargs) -> ToolResult:
+        text = (kwargs.get("text") or "").strip()
+        if not text:
+            return ToolResult(success=False, error="text is required")
+        topics = None
+        topics_raw = kwargs.get("topics")
+        if isinstance(topics_raw, list):
+            topics = [str(t).strip() for t in topics_raw if t]
+        elif isinstance(topics_raw, str) and topics_raw.strip():
+            topics = [p.strip() for p in topics_raw.split(",") if p.strip()]
+
+        try:
+            from backend.services.social_outreach.intent import execute_outreach_intent
+
+            result = execute_outreach_intent(
+                text=text,
+                platform=kwargs.get("platform"),
+                action=kwargs.get("action"),
+                topics=topics,
+                created_by="chat_tool",
+            )
+            return ToolResult(
+                success=bool(result.get("ok")),
+                output=result,
+                error=None if result.get("ok") else result.get("error"),
+                metadata={
+                    "task_ids": result.get("task_ids") or [],
+                    "plan": result.get("plan"),
+                },
+            )
+        except Exception as e:
+            logger.exception("outreach_execute_intent failed")
+            return ToolResult(success=False, error=str(e))
+
+
 __all__ = [
     "OutreachStatusTool",
     "OutreachListQueueTool",
@@ -447,4 +560,5 @@ __all__ = [
     "OutreachApproveDraftTool",
     "OutreachRejectDraftTool",
     "OutreachRunPassTool",
+    "OutreachExecuteIntentTool",
 ]

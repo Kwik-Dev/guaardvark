@@ -400,26 +400,32 @@ A non-linear video editor built into Guaardvark for assembling generated clips i
 
 ## Outreach System
 
-Supervised AI for social-media engagement. Three-phase pipeline that drafts comments and posts but gates every public action behind explicit user approval.
+Supervised AI for social-media engagement. Production path: **recon → draft → human approve → dispatch** (cadence-gated). Natural language from chat, `/outreach …`, or `llx outreach "…"` queues the same jobs.
 
 ### Three Phases
-1. **Recon** — search for candidate posts/threads (YouTube, Reddit, Discord) matching configured topic targets. Uses web search + light LLM filtering. Outputs candidates to a queue; **never posts**
-2. **Content** — for each candidate, an LLM drafts a comment in the user's voice with persona enforcement. Outputs drafts; **never posts**
-3. **Outreach** — when the user reviews and approves a draft, the screen-control agent navigates to the target page and submits the comment
+1. **Recon** — search for candidate posts/threads (YouTube keyword topics, Reddit subs, Discord channels). Outputs candidates; **never posts**
+2. **Content** — LLM drafts + grades in the user's voice. Outputs `drafted` rows; **never posts**
+3. **Dispatch** — after approve, `tick_process_approved_drafts` posts via servo (Reddit/YouTube) or Discord cog, with Redis cadence (1 successful post/platform/tick)
+
+### Natural language control
+- GUI Chat / slash: `/outreach comment on some youtube videos regarding Offline AI or ComfyUI`
+- CLI: `llx outreach "comment on youtube videos regarding Offline AI or ComfyUI"`
+- Chat tools: `outreach_execute_intent`, `outreach_run_pass` (youtube + topics), approve/reject/status/queue
 
 ### Safety
 - **Kill switch** — single toggle that halts all outreach activity immediately
-- **Dual grader** — drafts get scored by two independent LLMs; low-scoring drafts get rejected before they reach the user
-- **DOM-GUARD** — the posting agent verifies the target element exists in the DOM before clicking (rejects hallucinated post buttons)
-- **Persona enforcement** — central persona.draft_outreach_text ensures drafts sound like the user, not like an AI
-- **UTM tagging** — every guaardvark.com link in an outbound post is tagged so attribution survives
-- **Randomized jitter** — type and click delays vary to avoid robotic patterns
-- **Cadence + dedup** — per-platform cadence limits and content-hash dedup prevent spam
+- **Dual grader** — drafts get scored by two LLMs when available; low-scoring drafts rejected before the queue
+- **Post-submit DOM verify** — Reddit and YouTube posting paths check the comment text appears in the page before recording success
+- **Persona enforcement** — central `persona.draft_outreach_text`
+- **UTM tagging** — every guaardvark.com link in an outbound post is tagged
+- **Randomized jitter** — type and click delays vary
+- **Cadence + dedup** — enforced on the approve→post path (not just unsupervised draft gates)
+- **Status transitions** — approve only from `drafted`; claim `approved→processing` before send
 
 ### Surfaces
-- **Outreach Review page** at `localhost:5175/outreach` — queued drafts with approve/reject/edit controls
-- **Activity feed** — agent-driven outreach work shows up in the unified Jobs/Activity surface
-- **Telemetry** — recon/content/outreach metrics streamed to the dashboard
+- **Outreach Review page** at `/outreach` (port from `VITE_PORT`, default 5173)
+- **Activity feed** — Task-backed outreach jobs as `JobKind.OUTREACH`
+- **CLI** — `llx outreach status|queue|approve|<NL>`
 
 ---
 

@@ -320,7 +320,7 @@ A supervised, auditable framework for drafting and posting authentic comments on
 3. **Draft** — your local LLM composes a reply grounded in the thread context plus citations from your indexed documents (clients, projects, products, examples — whatever you've fed the knowledge base).
 4. **Grade** — every draft is scored against a relevance + quality rubric. Anything below threshold is dropped before it reaches the queue. Generic "great post!" replies don't survive grading.
 5. **Review** — drafts land in a queue. In supervised mode (the default), nothing posts without your approval. Edit, save, approve, reject — your call on each one.
-6. **Post** — approved drafts are posted via the platform's logged-in browser session, using a persona-shaped voice and a vision-driven send. Reddit posting is fully wired and verified end-to-end. Discord/Twitter/Facebook posting is in flight; drafting, queueing, and the supervised review surface already work for all four.
+6. **Post** — approved drafts post via the logged-in browser session (Reddit/YouTube servo) or Discord API, cadence-gated. Natural language from chat (`/outreach …`) or `llx outreach "…"` runs recon+draft; posting still needs approve while supervised. Twitter/Facebook drafting works; auto-post for those platforms is not wired.
 
 **Three layers of safety**:
 

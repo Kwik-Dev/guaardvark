@@ -192,57 +192,12 @@ class SelfShareLoop:
             return report
 
         report["drafted"] += 1
-        if not draft.get("would_post"):
-            return report
-
-        # Reddit share drafts come back as JSON {"title": "...", "body": "..."}
-        # collapsed into draft_text in the audit row. Pull the title for posting.
-        try:
-            payload = json.loads(draft.get("draft", "{}"))
-            title = (payload.get("title") or "").strip()
-        except json.JSONDecodeError:
-            title = (draft.get("draft") or "").strip()
-
-        if not title:
-            report["reason"] = "empty_title"
-            return report
-
-        # Tag the link with UTM before it actually goes into the URL field.
-        # Self-share posts the URL itself as the "content" — it's where ROI
-        # tracking matters most.
-        tagged_link_url = persona.apply_utm_tags(link_url, platform="reddit", campaign="v253")
-
-        success, reason = _submit_post_via_servo(subreddit, title, tagged_link_url)
-        audit_id = draft.get("audit_id")
-
-        if success:
-            try:
-                requests.post(
-                    f"{backend_url()}/social-outreach/record-post",
-                    json={
-                        "audit_id": audit_id,
-                        "platform": "reddit",
-                        "posted_text": f"{title}\n{tagged_link_url}",
-                        "target_url": f"{REDDIT_BASE}/r/{subreddit}",
-                        "target_thread_id": None,
-                        "task_id": task_id,
-                    },
-                    timeout=10,
-                )
-            except Exception as e:
-                logger.warning("record-post failed (post may have gone through): %s", e)
-            report["posted"] += 1
+        # Draft-only: when would_post, /draft-comment already marked the row
+        # approved; tick_process_approved_drafts posts with cadence. Never
+        # servo-post from this loop (avoids dual unsupervised auto-post).
+        if draft.get("would_post"):
+            report["queued_for_post"] = 1
+            report["reason"] = "queued_for_process_approved"
         else:
-            if audit_id:
-                audit.mark_draft_aborted(audit_id, f"servo: {reason}")
-            else:
-                audit.log_outreach_event(
-                    platform="reddit", action="abort",
-                    target_url=f"{REDDIT_BASE}/r/{subreddit}",
-                    status="aborted",
-                    abort_reason=f"servo: {reason}",
-                    task_id=task_id,
-                )
-            report["aborted"] += 1
-
+            report["reason"] = "awaiting_approval_or_gated"
         return report

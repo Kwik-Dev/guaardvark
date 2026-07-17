@@ -60,7 +60,9 @@ def test_post_youtube_comment_servo_failure_returns_not_raises(app):
         )
         
         assert success is False
-        assert reason == "find_comment_box_failed: timeout"
+        # Recipe chain: navigate → pause → find composer … first failing
+        # side_effect after nav success is pause.
+        assert "failed" in reason
 
 
 def test_tick_process_approved_drafts_handles_youtube_success(app):

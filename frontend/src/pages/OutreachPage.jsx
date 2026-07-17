@@ -41,8 +41,9 @@ import SaveIcon from "@mui/icons-material/Save";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import TravelExploreIcon from "@mui/icons-material/TravelExplore";
+import * as outreachApi from "../api/outreachService";
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
+const BASE_URL = outreachApi.getOutreachBaseUrl();
 
 // Per-platform character soft-caps used by the pre-flight panel.
 // Sources: reddit (10000 comment), twitter (280), discord (2000), facebook (~5000),
@@ -98,7 +99,9 @@ function formatGate(passed) {
 const OutreachPage = () => {
   const [status, setStatus] = useState(null);
   const [queue, setQueue] = useState([]);
+  const [approved, setApproved] = useState([]);
   const [selected, setSelected] = useState(null);
+  const [modalError, setModalError] = useState(null);
   const [draft, setDraft] = useState("");
   const [tone, setTone] = useState("default");
   const [platform, setPlatform] = useState("reddit");
@@ -132,8 +135,7 @@ const OutreachPage = () => {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/status`);
-      if (r.ok) setStatus(await r.json());
+      setStatus(await outreachApi.fetchStatus());
     } catch (e) {
       setError(`status fetch failed: ${e.message}`);
     }
@@ -142,15 +144,28 @@ const OutreachPage = () => {
   const fetchQueue = useCallback(async () => {
     setLoadingQueue(true);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/queue`);
-      if (r.ok) {
-        const rows = await r.json();
-        setQueue(Array.isArray(rows) ? rows : []);
-      }
+      const rows = await outreachApi.fetchQueue();
+      const list = Array.isArray(rows) ? rows : [];
+      setQueue(list);
+      setSelected((prev) => {
+        if (!prev) return prev;
+        const still = list.find((r) => r.id === prev.id);
+        if (still) return still;
+        return null;
+      });
     } catch (e) {
       setError(`queue fetch failed: ${e.message}`);
     } finally {
       setLoadingQueue(false);
+    }
+  }, []);
+
+  const fetchApproved = useCallback(async () => {
+    try {
+      const rows = await outreachApi.fetchApproved();
+      setApproved(Array.isArray(rows) ? rows : []);
+    } catch (e) {
+      console.warn(`approved fetch failed: ${e.message}`);
     }
   }, []);
 
@@ -165,14 +180,9 @@ const OutreachPage = () => {
   const fetchHistory = useCallback(async () => {
     setLoadingHistory(true);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/audit?limit=200`);
-      if (r.ok) {
-        const rows = await r.json();
-        setHistory(Array.isArray(rows) ? rows : []);
-      }
+      const rows = await outreachApi.fetchAudit(200);
+      setHistory(Array.isArray(rows) ? rows : []);
     } catch (e) {
-      // Don't surface to setError — history is a "nice to have" view; queue/status
-      // failures are the ones that matter.
       console.warn(`history fetch failed: ${e.message}`);
     } finally {
       setLoadingHistory(false);
@@ -182,8 +192,7 @@ const OutreachPage = () => {
   const fetchSnippets = useCallback(async () => {
     setLoadingSnippets(true);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/snippets`);
-      if (r.ok) setSnippets(await r.json());
+      setSnippets(await outreachApi.fetchSnippets());
     } catch (e) {
       setError(`snippets fetch failed: ${e.message}`);
     } finally {
@@ -194,14 +203,17 @@ const OutreachPage = () => {
   useEffect(() => {
     fetchStatus();
     fetchQueue();
+    fetchApproved();
     fetchSnippets();
     fetchHistory();
-    // Refresh status + queue + history periodically — keeps the dashboard
-    // honest about cadence, incoming drafts, and posts as they ship. 15s
-    // feels like the right pace.
-    const t = setInterval(() => { fetchStatus(); fetchQueue(); fetchHistory(); }, 15000);
+    const t = setInterval(() => {
+      fetchStatus();
+      fetchQueue();
+      fetchApproved();
+      fetchHistory();
+    }, 15000);
     return () => clearInterval(t);
-  }, [fetchStatus, fetchQueue, fetchSnippets, fetchHistory]);
+  }, [fetchStatus, fetchQueue, fetchApproved, fetchSnippets, fetchHistory]);
 
   const selectQueueItem = (row) => {
     setSelected(row);
@@ -222,23 +234,19 @@ const OutreachPage = () => {
   const draftPresent = draft.trim().length > 0;
   const gradeOk = selected && selected.grade_score != null ? selected.grade_score >= 0.7 : null;
 
+  const preflightBlocksApprove = lengthOk === false || gradeOk === false || !draftPresent;
+
   const handleApprove = async () => {
-    if (!selected) return;
+    if (!selected || preflightBlocksApprove) return;
     setBusy(true);
     setError(null); setInfo(null);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/approve/${selected.id}`, { 
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ draft_text: draft })
-      });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await outreachApi.approveDraft(selected.id, draft);
       setInfo(`Approved draft #${selected.id}. Will go out on the next outreach pass.`);
-      // Clear selection so the editor doesn't keep showing the just-approved
-      // draft as a "ghost" after fetchQueue removes it from the list.
       setSelected(null);
       setDraft("");
       await fetchQueue();
+      await fetchApproved();
     } catch (e) {
       setError(`approve failed: ${e.message}`);
     } finally {
@@ -251,8 +259,7 @@ const OutreachPage = () => {
     setBusy(true);
     setError(null); setInfo(null);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/reject/${selected.id}`, { method: "POST" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await outreachApi.rejectDraft(selected.id);
       setInfo(`Rejected draft #${selected.id}.`);
       setSelected(null);
       setDraft("");
@@ -268,26 +275,31 @@ const OutreachPage = () => {
     if (!selected) return;
     setBusy(true);
     setError(null); setInfo(null);
+    const priorId = selected.id;
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/draft-comment`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          platform,
-          thread_context: selected.draft_text
-            ? `(prior draft was: "${selected.draft_text}") — redraft with a different angle.`
-            : "",
-          target_url: selected.target_url,
-          target_thread_id: selected.target_thread_id,
-          tone,
-          mode: "comment",
-        }),
+      const out = await outreachApi.draftComment({
+        platform,
+        thread_context: selected.draft_text
+          ? `(prior draft was: "${selected.draft_text}") — redraft with a different angle.`
+          : "",
+        target_url: selected.target_url,
+        target_thread_id: selected.target_thread_id,
+        tone,
+        mode: "comment",
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const out = await r.json();
       setDraft(out.draft || "");
       setInfo(`Redrafted (grade ${(out.grade ?? 0).toFixed(2)}): ${out.reason || ""}`);
+      try {
+        await outreachApi.rejectDraft(priorId);
+      } catch (_) {
+        /* prior may already be gone */
+      }
       await fetchQueue();
+      if (out.audit_id) {
+        const rows = await outreachApi.fetchQueue();
+        const next = (Array.isArray(rows) ? rows : []).find((r) => r.id === out.audit_id);
+        if (next) selectQueueItem(next);
+      }
     } catch (e) {
       setError(`redraft failed: ${e.message}`);
     } finally {
@@ -300,16 +312,7 @@ const OutreachPage = () => {
     setBusy(true);
     setError(null); setInfo(null);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/drafts/${selected.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ draft_text: draft, platform }),
-      });
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.error || `HTTP ${r.status}`);
-      }
-      const updated = await r.json();
+      const updated = await outreachApi.patchDraft(selected.id, { draft_text: draft, platform });
       setSelected(updated);
       setInfo(`Saved draft #${selected.id}. Still in the queue, not posted.`);
       await fetchQueue();
@@ -483,8 +486,11 @@ const OutreachPage = () => {
     if (!status) return;
     setBusy(true);
     try {
-      const path = status.enabled ? "kill" : "enable";
-      await fetch(`${BASE_URL}/social-outreach/${path}`, { method: "POST" });
+      if (status.enabled) {
+        await outreachApi.killOutreach();
+      } else {
+        await outreachApi.enableOutreach();
+      }
       await fetchStatus();
     } catch (e) {
       setError(`toggle failed: ${e.message}`);
@@ -497,17 +503,28 @@ const OutreachPage = () => {
     if (!status) return;
     setBusy(true);
     try {
-      await fetch(`${BASE_URL}/social-outreach/supervised`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ on: !status.supervised }),
-      });
+      await outreachApi.setSupervised(!status.supervised);
       await fetchStatus();
     } catch (e) {
       setError(`supervised toggle failed: ${e.message}`);
     } finally {
       setBusy(false);
     }
+  };
+
+  const closeNewDraftModal = async () => {
+    if (ndBusy) return;
+    if (ndSeededId) {
+      try {
+        await outreachApi.rejectDraft(ndSeededId);
+      } catch (_) {
+        /* ignore */
+      }
+      setNdSeededId(null);
+      await fetchQueue();
+    }
+    setModalError(null);
+    setNewDraftOpen(false);
   };
 
   const handleFetchMeta = async () => {
@@ -577,8 +594,15 @@ const OutreachPage = () => {
                 key={p}
                 size="small"
                 variant="outlined"
-                label={`${p}: ${c.posts_in_24h ?? 0}/${c.daily_cap ?? 0} today` +
-                  (c.last_post_seconds_ago != null ? ` · last ${Math.floor(c.last_post_seconds_ago / 60)}m ago` : "")}
+                color={c.redis === "unavailable" ? "warning" : "default"}
+                label={
+                  c.redis === "unavailable"
+                    ? `${p}: Redis offline`
+                    : `${p}: ${c.posts_in_24h ?? 0}/${c.daily_cap ?? 0} today` +
+                      (c.last_post_seconds_ago != null
+                        ? ` · last ${Math.floor(c.last_post_seconds_ago / 60)}m ago`
+                        : "")
+                }
               />
             ))}
           </>
@@ -660,8 +684,16 @@ const OutreachPage = () => {
               </Tooltip>
             </Stack>
             <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 1, fontSize: "0.65rem" }}>
-              Discord cog auto-polls every 10 min — no manual trigger needed.
+              Discord cog auto-polls every 10 min — no manual trigger needed. Prefer chat/CLI:
+              /outreach comment on youtube videos regarding …
             </Typography>
+            {approved.length > 0 && (
+              <Alert severity="info" sx={{ mb: 1, py: 0 }}>
+                {approved.length} approved waiting to post
+                {approved.slice(0, 3).map((r) => ` #${r.id}`).join("")}
+                {approved.length > 3 ? "…" : ""}
+              </Alert>
+            )}
             {loadingQueue ? (
               <CircularProgress size={20} />
             ) : queue.length === 0 ? (
@@ -877,11 +909,16 @@ const OutreachPage = () => {
                 variant="contained"
                 color="primary"
                 startIcon={<SendIcon />}
-                disabled={!selected || !draftPresent || busy}
+                disabled={!selected || preflightBlocksApprove || busy}
                 onClick={handleApprove}
               >
                 Approve for posting
               </Button>
+              {preflightBlocksApprove && selected && (
+                <Typography variant="caption" color="warning.main">
+                  Fix pre-flight warnings (length / grade / empty draft) before approving.
+                </Typography>
+              )}
               <Button
                 fullWidth
                 variant="outlined"
@@ -1043,7 +1080,7 @@ const OutreachPage = () => {
       {/* ── New Draft modal ─────────────────────────────────────────── */}
       <Dialog
         open={newDraftOpen}
-        onClose={() => !ndBusy && setNewDraftOpen(false)}
+        onClose={() => { closeNewDraftModal(); }}
         maxWidth="md"
         fullWidth
       >
@@ -1054,6 +1091,11 @@ const OutreachPage = () => {
           </Typography>
         </DialogTitle>
         <DialogContent dividers>
+          {modalError && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setModalError(null)}>
+              {modalError}
+            </Alert>
+          )}
           <Box sx={{
             display: "grid",
             gridTemplateColumns: { xs: "1fr", md: "260px 1fr" },
@@ -1185,7 +1227,7 @@ const OutreachPage = () => {
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setNewDraftOpen(false)} disabled={ndBusy}>
+          <Button onClick={closeNewDraftModal} disabled={ndBusy}>
             Cancel
           </Button>
           <Button

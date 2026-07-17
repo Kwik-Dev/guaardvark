@@ -44,8 +44,8 @@ const BUILT_IN_COMMANDS = [
   },
   {
     name: "/outreach",
-    description: "Show Outreach status or add an Outreach pass to the Job Queue",
-    usage: "/outreach [status|reddit [subreddit]|self_share|recon|draft]",
+    description: "Outreach status, short verbs, or natural-language scout/draft (e.g. YouTube topics)",
+    usage: "/outreach [status|reddit|self_share|recon|draft|youtube| <natural language>]",
     category: "outreach",
     args: "optional",
     handler: "builtin",
