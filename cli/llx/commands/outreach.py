@@ -51,10 +51,14 @@ def outreach_root(
     if json_out:
         output.print_json(data)
         return
-    if not data.get("ok"):
-        output.print_error(data.get("error") or "intent failed")
+    msg = data.get("message") or data.get("error") or str(data)
+    if data.get("refused"):
+        output.print_warning(msg)
         raise typer.Exit(1)
-    console.print(data.get("message") or str(data))
+    if not data.get("ok"):
+        output.print_error(data.get("error") or msg or "intent failed")
+        raise typer.Exit(1)
+    console.print(msg)
 
 
 @outreach_app.command("status")

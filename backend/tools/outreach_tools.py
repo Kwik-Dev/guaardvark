@@ -488,15 +488,17 @@ class OutreachRunPassTool(BaseTool):
 
 
 class OutreachExecuteIntentTool(BaseTool):
-    """Parse natural-language outreach requests and queue recon/draft work."""
+    """Classify natural-language outreach, then dispatch to real tools/ops."""
 
     name = "outreach_execute_intent"
     description = (
-        "Run a natural-language outreach request end-to-end (scout → draft → queue for "
-        "human approve). Examples: 'comment on some youtube videos regarding Offline AI "
-        "or ComfyUI', 'scout reddit for local LLM threads', 'draft pending outreach "
-        "candidates'. Does NOT post while supervised — user must approve drafts. "
-        "Use this whenever the user describes outreach in plain English."
+        "Classify a natural-language outreach request and act: answer status, list the "
+        "draft queue, approve/reject a draft id, or (only when clearly asked) queue a "
+        "scout→draft job with real topics. Never invent YouTube scout jobs for status "
+        "questions or off-topic chat. Examples that scout: 'comment on youtube videos "
+        "regarding Offline AI or ComfyUI'. Examples that do NOT scout: 'what's the "
+        "status of youtube outreach?', jokes. Does NOT post while supervised. "
+        "Prefer structured platform+topics when you already know them."
     )
     requires_approval = True
     parameters = {
@@ -506,7 +508,7 @@ class OutreachExecuteIntentTool(BaseTool):
         ),
         "platform": ToolParameter(
             name="platform", type="string", required=False,
-            description="Optional override: youtube|reddit|discord",
+            description="Optional override: youtube|reddit|discord (with topics skips LLM)",
         ),
         "action": ToolParameter(
             name="action", type="string", required=False,
@@ -514,14 +516,14 @@ class OutreachExecuteIntentTool(BaseTool):
         ),
         "topics": ToolParameter(
             name="topics", type="string", required=False,
-            description="Optional comma-separated topics override",
+            description="Optional comma-separated topics override (with platform skips LLM)",
         ),
     }
 
     def execute(self, **kwargs) -> ToolResult:
         text = (kwargs.get("text") or "").strip()
-        if not text:
-            return ToolResult(success=False, error="text is required")
+        if not text and not (kwargs.get("platform") and kwargs.get("topics")):
+            return ToolResult(success=False, error="text is required (or platform+topics)")
         topics = None
         topics_raw = kwargs.get("topics")
         if isinstance(topics_raw, list):
@@ -539,12 +541,16 @@ class OutreachExecuteIntentTool(BaseTool):
                 topics=topics,
                 created_by="chat_tool",
             )
+            # Refuse is a successful classification with no work — not a tool crash.
+            success = bool(result.get("ok") or result.get("refused"))
             return ToolResult(
-                success=bool(result.get("ok")),
+                success=success,
                 output=result,
-                error=None if result.get("ok") else result.get("error"),
+                error=None if success else result.get("error"),
                 metadata={
                     "task_ids": result.get("task_ids") or [],
+                    "intent": result.get("intent"),
+                    "refused": bool(result.get("refused")),
                     "plan": result.get("plan"),
                 },
             )

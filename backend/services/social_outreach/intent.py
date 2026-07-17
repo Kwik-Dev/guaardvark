@@ -1,132 +1,187 @@
-"""Natural-language outreach intent → structured plan + queued jobs.
+"""Natural-language outreach intent → classify then dispatch.
 
 Single entry used by HTTP /intent, chat tool outreach_execute_intent,
 GUI slash freeform, and `llx outreach`.
+
+Never defaults freeform text to "queue YouTube with local AI".
+LLM classifies; we only queue scout/draft when intent is scout_and_draft
+with real topics and sufficient confidence.
 """
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from backend.services.social_outreach import kill_switch
 from backend.services.social_outreach.job_service import queue_outreach_run
+from backend.services.social_outreach.transitions import can_approve, can_reject
 
+logger = logging.getLogger(__name__)
 
-_SHORT_VERBS = frozenset({
-    "status", "reddit", "self_share", "self-share", "recon", "draft",
-    "enable", "kill", "queue", "approve", "reject", "youtube", "discord",
+_VALID_INTENTS = frozenset({
+    "status",
+    "list_queue",
+    "approve",
+    "reject",
+    "scout_and_draft",
+    "refuse",
 })
+_SCOUT_PLATFORMS = frozenset({"youtube", "reddit", "discord"})
+_SCOUT_ACTIONS = frozenset({
+    "comment", "reply", "recon", "scout", "scout_and_draft", "draft",
+})
+_MIN_SCOUT_CONFIDENCE = 0.7
+
+_CLASSIFY_SYSTEM = """You classify social-outreach operator requests for Guaardvark.
+Return ONLY a JSON object with these keys:
+  intent: one of status | list_queue | approve | reject | scout_and_draft | refuse
+  platform: youtube | reddit | discord | null
+  topics: array of topic strings (empty if none)
+  draft_id: integer or null
+  confidence: number 0.0-1.0
+  reason: short explanation
+
+Hard rules:
+- Questions about state, queue, jobs, drafts, cadence, kill switch → status or list_queue. NEVER scout_and_draft.
+- Off-topic, nonsense, jokes, nursery rhymes → refuse.
+- scout_and_draft ONLY when the user clearly asks to find/engage/comment/scout on a platform AND topics are extractable from their words.
+- If unsure what they want → refuse with a clarifying question in reason. Do NOT invent topics.
+- Never invent platform youtube or topics like "local AI" unless the user said them.
+- approve/reject require a numeric draft_id from the user text when present.
+"""
 
 
-def is_short_verb(token: str) -> bool:
-    return (token or "").strip().lower().replace("-", "_") in {
-        v.replace("-", "_") for v in _SHORT_VERBS
-    }
+ClassifierFn = Callable[[str, str], dict[str, Any]]
 
 
-def parse_outreach_intent(
+def classify_outreach_utterance(
     text: str,
     *,
-    platform: Optional[str] = None,
-    action: Optional[str] = None,
-    topics: Optional[list[str]] = None,
-    max_candidates: Optional[int] = None,
-    chain_draft: Optional[bool] = None,
+    classifier: Optional[ClassifierFn] = None,
 ) -> dict[str, Any]:
-    """Parse freeform text (and optional structured overrides) into a plan."""
-    raw = (text or "").strip()
-    plan: dict[str, Any] = {
-        "raw_text": raw,
-        "platform": (platform or "").strip().lower() or None,
-        "action": (action or "").strip().lower() or None,
-        "topics": [t.strip() for t in (topics or []) if t and str(t).strip()],
-        "max_candidates": max(1, min(int(max_candidates or 5), 25)),
-        "chain_draft": True if chain_draft is None else bool(chain_draft),
-        "subreddit": None,
-    }
-
-    lower = raw.lower()
-
-    if not plan["platform"]:
-        if re.search(r"\byoutube\b|\byoutu\.be\b|\bvideo(s)?\b", lower):
-            plan["platform"] = "youtube"
-        elif re.search(r"\bdiscord\b", lower):
-            plan["platform"] = "discord"
-        elif re.search(r"\breddit\b|\br/\w+", lower):
-            plan["platform"] = "reddit"
-        else:
-            plan["platform"] = "youtube"  # NL comment-on-content default
-
-    if not plan["action"]:
-        if re.search(r"\bshare\b|\blink.?post\b|\bself.?share\b", lower):
-            plan["action"] = "share"
-        elif re.search(r"\breply\b|\breplies\b", lower):
-            plan["action"] = "reply"
-        elif re.search(r"\brecon\b|\bscout\b|\bcandidate", lower):
-            plan["action"] = "recon"
-        elif re.search(r"\bdraft\b", lower) and not re.search(r"\bcomment\b", lower):
-            plan["action"] = "draft"
-        else:
-            plan["action"] = "comment"
-
-    m = re.search(r"\br/([A-Za-z0-9_]+)", raw)
-    if m:
-        plan["subreddit"] = m.group(1)
-
-    if not plan["topics"]:
-        plan["topics"] = _extract_topics(raw)
-
-    if plan["action"] == "recon":
-        plan["chain_draft"] = False if chain_draft is None else bool(chain_draft)
-    elif plan["action"] in ("comment", "reply", "share"):
-        if chain_draft is None:
-            plan["chain_draft"] = True
-
-    return plan
-
-
-def _extract_topics(text: str) -> list[str]:
-    """Pull topic phrases after regarding/about/on … for / or , / and."""
+    """LLM-classify freeform text into a structured intent (no side effects)."""
     raw = (text or "").strip()
     if not raw:
-        return []
+        return {
+            "intent": "refuse",
+            "platform": None,
+            "topics": [],
+            "draft_id": None,
+            "confidence": 1.0,
+            "reason": "Empty request. Ask for status, list the queue, or describe a scout (platform + topics).",
+        }
 
-    # regarding X or Y / about X, Y / on X and Y
-    m = re.search(
-        r"(?:regarding|about|around|on(?:\s+the)?|for)\s+(.+)$",
-        raw,
-        re.IGNORECASE,
-    )
-    chunk = m.group(1).strip() if m else ""
-    if not chunk:
-        # Fallback: quoted phrases
-        quotes = re.findall(r'["“](.+?)["”]', raw)
-        if quotes:
-            return [q.strip() for q in quotes if q.strip()]
-        return []
+    llm = classifier or _default_classifier
+    try:
+        result = llm(_CLASSIFY_SYSTEM, raw) or {}
+    except Exception as e:
+        logger.exception("outreach classify failed")
+        return {
+            "intent": "refuse",
+            "platform": None,
+            "topics": [],
+            "draft_id": None,
+            "confidence": 0.0,
+            "reason": f"Classifier unavailable: {e}",
+        }
 
-    # Strip trailing filler
-    chunk = re.sub(r"\b(please|thanks|thank you)\.?$", "", chunk, flags=re.I).strip()
-    # Drop leading "some youtube videos" style leftovers if parser captured too much
-    chunk = re.sub(
-        r"^(?:some\s+)?(?:youtube\s+)?videos?\s+(?:regarding|about|on)\s+",
-        "",
-        chunk,
-        flags=re.I,
-    ).strip()
+    return _normalize_classification(result, raw_text=raw)
 
-    parts = re.split(r"\s*(?:,|/|\bor\b|\band\b)\s*", chunk, flags=re.I)
-    topics = []
-    for p in parts:
-        t = p.strip(" .;:")
-        if not t or len(t) < 2:
-            continue
-        # Skip pure platform words
-        if t.lower() in ("youtube", "reddit", "discord", "videos", "video", "comments"):
-            continue
-        topics.append(t)
-    return topics[:8]
+
+def _default_classifier(system: str, user: str) -> dict[str, Any]:
+    from backend.services.social_outreach.persona import _ollama_json_chat
+    return _ollama_json_chat(system, user)
+
+
+def _normalize_classification(raw: dict[str, Any], *, raw_text: str) -> dict[str, Any]:
+    intent = str(raw.get("intent") or "refuse").strip().lower()
+    if intent not in _VALID_INTENTS:
+        intent = "refuse"
+
+    platform = raw.get("platform")
+    if platform is not None:
+        platform = str(platform).strip().lower() or None
+        if platform not in _SCOUT_PLATFORMS:
+            platform = None
+
+    topics: list[str] = []
+    for t in raw.get("topics") or []:
+        s = str(t).strip()
+        if s and s.lower() not in ("youtube", "reddit", "discord", "videos", "video"):
+            topics.append(s)
+    topics = topics[:8]
+
+    draft_id = raw.get("draft_id")
+    if draft_id is not None:
+        try:
+            draft_id = int(draft_id)
+        except (TypeError, ValueError):
+            draft_id = None
+    if draft_id is None:
+        m = re.search(r"\b(?:draft|item|id|#)\s*#?\s*(\d+)\b", raw_text, re.I)
+        if m:
+            draft_id = int(m.group(1))
+
+    try:
+        confidence = float(raw.get("confidence") if raw.get("confidence") is not None else 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    reason = str(raw.get("reason") or "").strip() or intent
+
+    return {
+        "intent": intent,
+        "platform": platform,
+        "topics": topics,
+        "draft_id": draft_id,
+        "confidence": confidence,
+        "reason": reason,
+        "raw_text": raw_text,
+    }
+
+
+def _structured_scout_plan(
+    *,
+    text: str,
+    platform: Optional[str],
+    action: Optional[str],
+    topics: Optional[list[str]],
+    max_candidates: Optional[int],
+    chain_draft: Optional[bool],
+) -> Optional[dict[str, Any]]:
+    """When caller already passed platform + topics, skip the LLM."""
+    plat = (platform or "").strip().lower() or None
+    tops = [t.strip() for t in (topics or []) if t and str(t).strip()]
+    act = (action or "").strip().lower() or "comment"
+    if not plat or plat not in _SCOUT_PLATFORMS:
+        return None
+    if not tops:
+        return None
+    if act not in _SCOUT_ACTIONS and act != "share":
+        return None
+    if act == "share":
+        return None  # share is not scout_and_draft; handle separately if needed
+    return {
+        "intent": "scout_and_draft",
+        "platform": plat,
+        "topics": tops[:8],
+        "draft_id": None,
+        "confidence": 1.0,
+        "reason": "structured override (platform + topics)",
+        "raw_text": (text or "").strip(),
+        "max_candidates": max(1, min(int(max_candidates or 5), 25)),
+        "chain_draft": True if chain_draft is None else bool(chain_draft),
+        "subreddit": _extract_subreddit(text or ""),
+        "action": act if act != "scout_and_draft" else "comment",
+    }
+
+
+def _extract_subreddit(text: str) -> Optional[str]:
+    m = re.search(r"\br/([A-Za-z0-9_]+)", text or "")
+    return m.group(1) if m else None
 
 
 def execute_outreach_intent(
@@ -138,10 +193,11 @@ def execute_outreach_intent(
     max_candidates: Optional[int] = None,
     chain_draft: Optional[bool] = None,
     created_by: str = "intent",
+    classifier: Optional[ClassifierFn] = None,
 ) -> dict[str, Any]:
-    """Parse intent and queue Task-backed recon (+ optional draft) jobs."""
-    plan = parse_outreach_intent(
-        text,
+    """Classify (or use structured overrides) then dispatch to real outreach ops."""
+    structured = _structured_scout_plan(
+        text=text,
         platform=platform,
         action=action,
         topics=topics,
@@ -149,80 +205,448 @@ def execute_outreach_intent(
         chain_draft=chain_draft,
     )
 
-    if not kill_switch.is_enabled():
-        return {
-            "ok": False,
-            "error": "outreach is disabled (kill switch is off). Enable it from /outreach or the Outreach page first.",
-            "plan": plan,
-        }
+    if structured:
+        classification = structured
+    else:
+        # Explicit action=draft with no topics → draft pass (structured, no LLM)
+        act = (action or "").strip().lower()
+        if act == "draft" and not (text or "").strip():
+            classification = {
+                "intent": "scout_and_draft",
+                "platform": "reddit",
+                "topics": ["__draft_only__"],
+                "draft_id": None,
+                "confidence": 1.0,
+                "reason": "structured draft pass",
+                "raw_text": "",
+                "max_candidates": max(1, min(int(max_candidates or 5), 25)),
+                "chain_draft": False,
+                "subreddit": None,
+                "action": "draft",
+            }
+        elif act == "share" and (platform or "").strip().lower() in ("reddit", "self_share", "share"):
+            classification = {
+                "intent": "scout_and_draft",
+                "platform": "reddit",
+                "topics": ["__self_share__"],
+                "draft_id": None,
+                "confidence": 1.0,
+                "reason": "structured self_share",
+                "raw_text": (text or "").strip(),
+                "max_candidates": 5,
+                "chain_draft": False,
+                "subreddit": _extract_subreddit(text or ""),
+                "action": "share",
+            }
+        else:
+            classification = classify_outreach_utterance(text, classifier=classifier)
+            classification["max_candidates"] = max(1, min(int(max_candidates or 5), 25))
+            classification["chain_draft"] = True if chain_draft is None else bool(chain_draft)
+            classification["subreddit"] = _extract_subreddit(text or "")
+            # Allow optional platform override from caller without forcing scout
+            if platform and not classification.get("platform"):
+                plat = str(platform).strip().lower()
+                if plat in _SCOUT_PLATFORMS:
+                    classification["platform"] = plat
+            if topics:
+                extra = [t.strip() for t in topics if t and str(t).strip()]
+                if extra and classification.get("intent") == "scout_and_draft":
+                    classification["topics"] = extra[:8]
 
-    plat = plan["platform"]
-    act = plan["action"]
+    intent = classification["intent"]
+
+    if intent == "status":
+        return _dispatch_status(classification)
+    if intent == "list_queue":
+        return _dispatch_list_queue(classification)
+    if intent == "approve":
+        return _dispatch_approve(classification)
+    if intent == "reject":
+        return _dispatch_reject(classification)
+    if intent == "scout_and_draft":
+        return _dispatch_scout(classification, created_by=created_by)
+    return _dispatch_refuse(classification)
+
+
+def _base(classification: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    out = {
+        "ok": False,
+        "intent": classification.get("intent"),
+        "classification": {
+            "intent": classification.get("intent"),
+            "platform": classification.get("platform"),
+            "topics": classification.get("topics") or [],
+            "draft_id": classification.get("draft_id"),
+            "confidence": classification.get("confidence"),
+            "reason": classification.get("reason"),
+        },
+        "plan": {
+            "raw_text": classification.get("raw_text") or "",
+            "platform": classification.get("platform"),
+            "topics": classification.get("topics") or [],
+            "intent": classification.get("intent"),
+        },
+        "queued": [],
+        "task_ids": [],
+        "refused": False,
+    }
+    out.update(extra)
+    return out
+
+
+def _dispatch_refuse(classification: dict[str, Any]) -> dict[str, Any]:
+    reason = classification.get("reason") or "Could not interpret that as an outreach action."
+    return _base(
+        classification,
+        ok=False,
+        refused=True,
+        error=reason,
+        message=f"Outreach: {reason}",
+    )
+
+
+def _dispatch_status(classification: dict[str, Any]) -> dict[str, Any]:
+    enabled = kill_switch.is_enabled()
+    supervised = kill_switch.is_supervised()
+    cadence = kill_switch.cadence_status()
+    recent_jobs = _recent_outreach_tasks(limit=5)
+    queue_counts = _queue_counts(platform=classification.get("platform"))
+
+    lines = [
+        f"**Outreach:** {'Enabled' if enabled else 'Disabled'} "
+        f"({'supervised' if supervised else 'unsupervised'})",
+        "",
+    ]
+    for plat, value in (cadence or {}).items():
+        if value.get("redis") == "unavailable":
+            lines.append(f"- {plat}: Redis offline")
+        else:
+            posts = value.get("posts_in_24h") or 0
+            cap = value.get("daily_cap") or 0
+            lines.append(f"- {plat}: {posts}/{cap} today")
+    lines.append("")
+    lines.append(
+        f"Queue: {queue_counts.get('drafted', 0)} drafted, "
+        f"{queue_counts.get('approved', 0)} approved"
+        + (
+            f" (platform={classification['platform']})"
+            if classification.get("platform")
+            else ""
+        )
+    )
+    if recent_jobs:
+        lines.append("Recent outreach jobs:")
+        for j in recent_jobs:
+            lines.append(
+                f"- task #{j['id']} {j.get('status')} — {j.get('name') or j.get('type')}"
+            )
+
+    return _base(
+        classification,
+        ok=True,
+        message="\n".join(lines),
+        status={
+            "enabled": enabled,
+            "supervised": supervised,
+            "cadence": cadence,
+            "queue_counts": queue_counts,
+            "recent_jobs": recent_jobs,
+        },
+    )
+
+
+def _queue_counts(*, platform: Optional[str] = None) -> dict[str, int]:
+    try:
+        from backend.models import SocialOutreachLog
+        counts: dict[str, int] = {}
+        for status in ("drafted", "approved", "candidate"):
+            q = SocialOutreachLog.query.filter(SocialOutreachLog.status == status)
+            if platform:
+                q = q.filter(SocialOutreachLog.platform == platform)
+            counts[status] = q.count()
+        return counts
+    except Exception:
+        logger.exception("queue_counts failed")
+        return {}
+
+
+def _recent_outreach_tasks(limit: int = 5) -> list[dict[str, Any]]:
+    try:
+        from backend.models import Task
+        rows = (
+            Task.query
+            .filter(Task.type.like("social_outreach%"))
+            .order_by(Task.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "name": r.name,
+                "type": r.type,
+                "status": r.status,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    except Exception:
+        logger.exception("recent_outreach_tasks failed")
+        return []
+
+
+def _dispatch_list_queue(classification: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from backend.models import SocialOutreachLog
+        statuses = ("drafted", "approved")
+        q = SocialOutreachLog.query.filter(SocialOutreachLog.status.in_(statuses))
+        plat = classification.get("platform")
+        if plat:
+            q = q.filter(SocialOutreachLog.platform == plat)
+        rows = q.order_by(SocialOutreachLog.created_at.desc()).limit(15).all()
+        items = []
+        for r in rows:
+            items.append({
+                "id": r.id,
+                "platform": r.platform,
+                "status": r.status,
+                "grade": r.grade_score,
+                "draft": (r.draft_text or "")[:160],
+                "target_url": r.target_url,
+            })
+        if not items:
+            msg = "Outreach queue is empty (no drafted/approved rows)."
+        else:
+            lines = [f"**Outreach queue** ({len(items)} rows):"]
+            for it in items:
+                lines.append(
+                    f"- #{it['id']} [{it['platform']}/{it['status']}] "
+                    f"grade={it['grade']} — {it['draft'] or '(no draft)'}"
+                )
+            msg = "\n".join(lines)
+        return _base(
+            classification,
+            ok=True,
+            message=msg,
+            queue=items,
+        )
+    except Exception as e:
+        logger.exception("list_queue failed")
+        return _base(classification, ok=False, error=str(e), message=str(e))
+
+
+def _dispatch_approve(classification: dict[str, Any]) -> dict[str, Any]:
+    draft_id = classification.get("draft_id")
+    if draft_id is None:
+        return _dispatch_refuse({
+            **classification,
+            "intent": "refuse",
+            "reason": "Approve needs a draft id (e.g. 'approve draft 42').",
+        })
+    try:
+        from backend.models import SocialOutreachLog, db
+        row = SocialOutreachLog.query.get(int(draft_id))
+        if row is None:
+            return _base(
+                classification,
+                ok=False,
+                error=f"draft {draft_id} not found",
+                message=f"Draft #{draft_id} not found.",
+            )
+        if not can_approve(row.status):
+            return _base(
+                classification,
+                ok=False,
+                error=f"cannot approve from status '{row.status}'",
+                message=f"Cannot approve #{draft_id} from status '{row.status}' (only from drafted).",
+            )
+        row.status = "approved"
+        db.session.commit()
+        return _base(
+            classification,
+            ok=True,
+            message=f"Approved draft #{draft_id} (status=approved).",
+            draft={"id": row.id, "status": row.status, "platform": row.platform},
+        )
+    except Exception as e:
+        logger.exception("approve via intent failed")
+        return _base(classification, ok=False, error=str(e), message=str(e))
+
+
+def _dispatch_reject(classification: dict[str, Any]) -> dict[str, Any]:
+    draft_id = classification.get("draft_id")
+    if draft_id is None:
+        return _dispatch_refuse({
+            **classification,
+            "intent": "refuse",
+            "reason": "Reject needs a draft id (e.g. 'reject draft 42').",
+        })
+    try:
+        from backend.models import SocialOutreachLog, db
+        row = SocialOutreachLog.query.get(int(draft_id))
+        if row is None:
+            return _base(
+                classification,
+                ok=False,
+                error=f"draft {draft_id} not found",
+                message=f"Draft #{draft_id} not found.",
+            )
+        if not can_reject(row.status):
+            return _base(
+                classification,
+                ok=False,
+                error=f"cannot reject from status '{row.status}'",
+                message=f"Cannot reject #{draft_id} from status '{row.status}'.",
+            )
+        row.status = "rejected"
+        db.session.commit()
+        return _base(
+            classification,
+            ok=True,
+            message=f"Rejected draft #{draft_id}.",
+            draft={"id": row.id, "status": row.status, "platform": row.platform},
+        )
+    except Exception as e:
+        logger.exception("reject via intent failed")
+        return _base(classification, ok=False, error=str(e), message=str(e))
+
+
+def _dispatch_scout(classification: dict[str, Any], *, created_by: str) -> dict[str, Any]:
+    conf = float(classification.get("confidence") or 0.0)
+    topics = list(classification.get("topics") or [])
+    plat = classification.get("platform")
+    action = (classification.get("action") or "comment").strip().lower()
+
+    # Structured draft-only / self_share sentinels
+    if topics == ["__draft_only__"]:
+        if not kill_switch.is_enabled():
+            return _kill_off(classification)
+        try:
+            queued = [queue_outreach_run("draft", created_by=created_by)]
+        except (ValueError, RuntimeError) as e:
+            return _base(classification, ok=False, error=str(e), message=str(e))
+        return _queued_ok(classification, queued, plat="draft", act="draft")
+
+    if topics == ["__self_share__"] or action == "share":
+        if not kill_switch.is_enabled():
+            return _kill_off(classification)
+        try:
+            queued = [
+                queue_outreach_run(
+                    "self_share",
+                    subreddit=classification.get("subreddit"),
+                    created_by=created_by,
+                )
+            ]
+        except (ValueError, RuntimeError) as e:
+            return _base(classification, ok=False, error=str(e), message=str(e))
+        return _queued_ok(classification, queued, plat="reddit", act="share")
+
+    if conf < _MIN_SCOUT_CONFIDENCE:
+        return _dispatch_refuse({
+            **classification,
+            "intent": "refuse",
+            "reason": (
+                f"Not confident enough to scout (confidence={conf:.2f} < "
+                f"{_MIN_SCOUT_CONFIDENCE}). Say which platform and topics, e.g. "
+                "'comment on youtube regarding Offline AI or ComfyUI'."
+            ),
+        })
+
+    # Drop sentinel / empty
+    topics = [t for t in topics if t and not t.startswith("__")]
+    if not topics:
+        return _dispatch_refuse({
+            **classification,
+            "intent": "refuse",
+            "reason": (
+                "Scout needs real topics. Example: "
+                "'comment on youtube videos regarding Offline AI or ComfyUI'."
+            ),
+        })
+    if plat not in _SCOUT_PLATFORMS:
+        return _dispatch_refuse({
+            **classification,
+            "intent": "refuse",
+            "reason": "Scout needs a platform (youtube, reddit, or discord).",
+        })
+
+    if not kill_switch.is_enabled():
+        return _kill_off(classification)
+
+    max_c = max(1, min(int(classification.get("max_candidates") or 5), 25))
+    chain = bool(classification.get("chain_draft", True))
     queued: list[dict[str, Any]] = []
 
     try:
-        if plat == "youtube" and act in ("comment", "reply", "recon"):
-            profiles = plan["topics"] or ["local AI"]
+        if plat == "youtube":
             queued.append(
                 queue_outreach_run(
                     "youtube",
-                    keyword_profiles=profiles,
-                    batch_size=plan["max_candidates"],
-                    chain_draft=bool(plan["chain_draft"]),
+                    keyword_profiles=topics,
+                    batch_size=max_c,
+                    chain_draft=chain,
                     created_by=created_by,
                 )
             )
-        elif plat == "reddit" and act == "share":
-            queued.append(
-                queue_outreach_run(
-                    "self_share",
-                    subreddit=plan.get("subreddit"),
-                    created_by=created_by,
-                )
-            )
-        elif plat == "reddit" and act in ("comment", "recon"):
+        elif plat == "reddit":
             queued.append(
                 queue_outreach_run(
                     "recon",
-                    subreddit=plan.get("subreddit"),
+                    subreddit=classification.get("subreddit"),
                     created_by=created_by,
                 )
             )
-            if plan["chain_draft"]:
-                queued.append(
-                    queue_outreach_run("draft", created_by=created_by)
-                )
-        elif act == "draft":
+            if chain:
+                queued.append(queue_outreach_run("draft", created_by=created_by))
+        elif plat == "discord":
             queued.append(
-                queue_outreach_run("draft", created_by=created_by)
+                queue_outreach_run("discord", created_by=created_by)
             )
         else:
-            return {
-                "ok": False,
-                "error": (
-                    f"unsupported intent platform={plat!r} action={act!r}. "
-                    "Try YouTube comment topics, Reddit recon/comment, or self-share."
-                ),
-                "plan": plan,
-            }
+            return _dispatch_refuse({
+                **classification,
+                "intent": "refuse",
+                "reason": f"Unsupported scout platform {plat!r}.",
+            })
     except (ValueError, RuntimeError) as e:
-        return {"ok": False, "error": str(e), "plan": plan}
+        return _base(classification, ok=False, error=str(e), message=str(e))
 
-    task_ids = [q.get("task_id") for q in queued if q.get("task_id")]
-    summary = (
-        f"Queued outreach for {plat}/{act}"
-        + (f" topics={plan['topics']}" if plan["topics"] else "")
-        + f" → task(s) {task_ids}. "
-        + ("Drafts will land in the Outreach queue for your approval (supervised)."
-           if kill_switch.is_supervised() or plan["chain_draft"]
-           else "Check the Outreach queue / Activity for progress.")
+    return _queued_ok(classification, queued, plat=plat, act="scout_and_draft", topics=topics)
+
+
+def _kill_off(classification: dict[str, Any]) -> dict[str, Any]:
+    err = (
+        "outreach is disabled (kill switch is off). "
+        "Enable it from /outreach or the Outreach page first."
     )
-    return {
-        "ok": True,
-        "plan": plan,
-        "queued": queued,
-        "task_ids": task_ids,
-        "message": summary,
-        "supervised": kill_switch.is_supervised(),
-        "posts_require_approve": True,  # intent never bypasses approve/cadence
-    }
+    return _base(classification, ok=False, error=err, message=err)
+
+
+def _queued_ok(
+    classification: dict[str, Any],
+    queued: list[dict[str, Any]],
+    *,
+    plat: str,
+    act: str,
+    topics: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    task_ids = [q.get("task_id") for q in queued if q.get("task_id")]
+    topic_part = f" topics={topics}" if topics else ""
+    summary = (
+        f"Queued outreach for {plat}/{act}{topic_part} → task(s) {task_ids}. "
+        + (
+            "Drafts will land in the Outreach queue for your approval (supervised)."
+            if kill_switch.is_supervised() or classification.get("chain_draft")
+            else "Check the Outreach queue / Activity for progress."
+        )
+    )
+    return _base(
+        classification,
+        ok=True,
+        queued=queued,
+        task_ids=task_ids,
+        message=summary,
+        supervised=kill_switch.is_supervised(),
+        posts_require_approve=True,
+    )

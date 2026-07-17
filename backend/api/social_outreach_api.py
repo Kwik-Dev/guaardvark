@@ -714,7 +714,7 @@ def scout_url():
 
 @social_outreach_bp.post("/intent")
 def execute_intent():
-    """Natural-language (or structured) outreach intent → queue recon/draft jobs.
+    """Classify natural-language outreach intent, then dispatch to real ops.
 
     Body: {
       text?: "comment on youtube videos regarding Offline AI or ComfyUI",
@@ -724,6 +724,11 @@ def execute_intent():
       max_candidates?: 5,
       chain_draft?: true
     }
+
+    Freeform text is LLM-classified (status / list_queue / approve / reject /
+    scout_and_draft / refuse). Scout jobs are queued only for scout_and_draft
+    with real topics + confidence. Refuse and status answers do not queue.
+    Explicit platform+topics skip the classifier (structured override).
     """
     body = request.get_json(silent=True) or {}
     from backend.services.social_outreach.intent import execute_outreach_intent
@@ -737,9 +742,17 @@ def execute_intent():
         chain_draft=body.get("chain_draft"),
         created_by=body.get("created_by") or "api_intent",
     )
-    status = 200 if result.get("ok") else 400
-    if result.get("error") and "disabled" in (result.get("error") or "").lower():
+    # Refuse / clarify: HTTP 200 so clients can read message without treating
+    # it as a transport failure. Kill-switch blocks stay 403; other hard
+    # failures (missing draft, bad transition) stay 400.
+    if result.get("ok"):
+        status = 200
+    elif result.get("refused"):
+        status = 200
+    elif result.get("error") and "disabled" in (result.get("error") or "").lower():
         status = 403
+    else:
+        status = 400
     return jsonify(result), status
 
 

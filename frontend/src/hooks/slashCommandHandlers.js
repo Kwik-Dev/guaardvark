@@ -389,13 +389,25 @@ async function handleOutreach(args, { addMessage }) {
   };
   const platform = platformAliases[verb];
 
-  // Known short verbs → run-pass; anything else is natural-language intent.
+  // Known short verbs → run-pass; anything else is classify-then-dispatch.
   if (!platform) {
     try {
       const data = await executeIntent({ text: raw, created_by: "slash" });
+      const intent = data.intent || data.classification?.intent;
+      let content = data.message || data.error || JSON.stringify(data.plan || data);
+      if (data.refused) {
+        content = data.message || data.error || "Outreach: request refused.";
+      } else if (data.ok && Array.isArray(data.task_ids) && data.task_ids.length) {
+        // Keep server message (already says Queued …)
+        content = data.message || content;
+      } else if (data.ok && (intent === "status" || intent === "list_queue")) {
+        content = data.message || content;
+      } else if (!data.ok) {
+        content = data.message || data.error || content;
+      }
       addMessage({
         role: "system",
-        content: data.message || JSON.stringify(data.plan || data),
+        content,
         tempId: `outreach-intent-${Date.now()}`,
         type: "command",
       });
