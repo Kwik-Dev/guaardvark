@@ -1547,7 +1547,13 @@ CREATE TABLE public.subjects (
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     voice_id character varying(128),
     trigger_word character varying(64),
-    cast_required boolean
+    cast_required boolean,
+    training_error text,
+    current_training_job_id character varying(64),
+    last_trained_image_paths json DEFAULT '[]'::json NOT NULL,
+    last_trained_at timestamp without time zone,
+    bible text,
+    training_settings_json json
 );
 
 

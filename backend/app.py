@@ -1248,6 +1248,12 @@ try:
                 ("subjects", "current_training_job_id", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS current_training_job_id VARCHAR(64)"),
                 ("subjects", "last_trained_image_paths", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS last_trained_image_paths JSON NOT NULL DEFAULT '[]'::json"),
                 ("subjects", "last_trained_at", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS last_trained_at TIMESTAMP"),
+                # Cast failure reason + bible/hyperparams — were in models.py but
+                # missing from this reconcile list; stamped/legacy client DBs then
+                # 500'd lora_trainer.reap_stuck_training on subjects.training_error.
+                ("subjects", "training_error", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS training_error TEXT"),
+                ("subjects", "bible", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS bible TEXT"),
+                ("subjects", "training_settings_json", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS training_settings_json JSON"),
                 ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
                 # Local source folder for swarm/agent code runs (added Phase 2).

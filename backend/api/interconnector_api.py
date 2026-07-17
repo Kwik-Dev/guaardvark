@@ -3207,21 +3207,30 @@ def get_update_manifest():
         timestamps = [f.get("modified_at") for f in files_list if f.get("modified_at")]
         latest_timestamp = max(timestamps) if timestamps else datetime.now().isoformat()
 
-        # Master owns the canonical core-files registry — refresh on every manifest build.
-        registry = _master_core_registry(file_sync_service.get_project_root())
-        registry.refresh_from_scan(
-            files_list,
-            node_name=config.get("node_name"),
-            manifest_timestamp=latest_timestamp,
-        )
-        
+        # Master owns the canonical core-files registry — refresh on every
+        # manifest build. Best-effort: clients need the file list even if the
+        # local registry write fails (they compare hashes from this response).
+        registry_file_count = len(files_list)
+        try:
+            registry = _master_core_registry(file_sync_service.get_project_root())
+            registry_file_count = registry.refresh_from_scan(
+                files_list,
+                node_name=config.get("node_name"),
+                manifest_timestamp=latest_timestamp,
+            )
+        except Exception as reg_err:
+            logger.error(
+                f"[UPDATES] Registry refresh failed (manifest still served): {reg_err}",
+                exc_info=True,
+            )
+
         logger.info(f"[UPDATES] Manifest ready: {len(files_list)} files, latest: {latest_timestamp}")
         
         return success_response({
             "files": files_list,
             "count": len(files_list),
             "timestamp": latest_timestamp,
-            "registry_file_count": len(files_list),
+            "registry_file_count": registry_file_count,
         }, "Manifest retrieved")
         
     except Exception as e:

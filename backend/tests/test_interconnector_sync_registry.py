@@ -1,5 +1,6 @@
 """Tests for master-authoritative Interconnector core-files registry."""
 import json
+import threading
 
 import pytest
 
@@ -63,3 +64,31 @@ def test_master_registry_refresh_and_persist(registry, tmp_path):
     assert summary["tracked_files"] == 2
     data = json.loads(reloaded.path.read_text())
     assert data["files"]["scripts/start.sh"]["hash"] == "deadbeef"
+
+
+def test_atomic_write_survives_concurrent_refresh(tmp_path):
+    """Fixed .tmp sibling raced under concurrent workers (ENOENT on replace)."""
+    errors = []
+
+    def worker(i):
+        reg = MasterCoreFilesRegistry(tmp_path)
+        try:
+            reg.refresh_from_scan(
+                [{"path": f"f{i}.py", "hash": f"{i:032x}", "size": i}],
+                node_name=f"w{i}",
+                manifest_timestamp=f"2026-01-0{(i % 9) + 1}",
+            )
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"concurrent registry writes failed: {errors}"
+    assert (tmp_path / "data" / "interconnector" / "core_files_registry.json").exists()
+    # Unique temps must not be left behind after successful replace.
+    leftovers = list((tmp_path / "data" / "interconnector").glob(".core_files_registry.json.*.tmp"))
+    assert leftovers == []

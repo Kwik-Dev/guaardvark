@@ -12,11 +12,17 @@ Storage (master only): data/interconnector/core_files_registry.json
 import json
 import logging
 import os
+import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Serialize registry writes in-process. Concurrent gunicorn/celery workers still
+# need unique temp names (below) so two processes don't share one .tmp path.
+_REGISTRY_WRITE_LOCK = threading.Lock()
 
 REGISTRY_VERSION = 2
 
@@ -72,11 +78,35 @@ class MasterCoreFilesRegistry:
         return self.path.exists()
 
     def _atomic_write(self) -> None:
+        """Atomically persist registry JSON.
+
+        Uses a unique temp file in the same directory (not a fixed ``.tmp``
+        sibling). A fixed name races when two master workers refresh the
+        registry at once: worker A ``os.replace``s the shared tmp away, then
+        worker B's ``os.replace`` raises ``ENOENT`` and the manifest endpoint
+        500s — which is what clients see as Failed to pull files / HTTP 500.
+        """
         self.dir.mkdir(parents=True, exist_ok=True)
         self._data["updated_at"] = datetime.now().isoformat()
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True))
-        os.replace(str(tmp), str(self.path))
+        payload = json.dumps(self._data, indent=2, sort_keys=True)
+        with _REGISTRY_WRITE_LOCK:
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                dir=str(self.dir),
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_name, str(self.path))
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
 
     def refresh_from_scan(
         self,
