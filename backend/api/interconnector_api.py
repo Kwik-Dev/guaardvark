@@ -2071,10 +2071,17 @@ def pull_files():
         include_patterns = request.args.getlist("include_patterns") or None
         exclude_patterns = request.args.getlist("exclude_patterns") or None
         requested_files = request.args.getlist("file") or request.args.getlist("files") or None
+        credentials_only = request.args.get("credentials_only", "").lower() in (
+            "1", "true", "yes",
+        )
 
         file_sync_service = get_file_sync_service()
+        since = None
 
-        if requested_files:
+        if credentials_only:
+            logger.info("[SYNC] File pull: credentials-only request (no file payload)")
+            files_list = []
+        elif requested_files:
             logger.info(f"[SYNC] File pull: Fetching {len(requested_files)} requested path(s)")
             files_list = file_sync_service.fetch_files_by_paths(
                 requested_files, include_content=True
@@ -2082,7 +2089,6 @@ def pull_files():
         else:
             # Get since timestamp if provided (for incremental sync)
             since_str = request.args.get("since")
-            since = None
             if since_str:
                 try:
                     since = datetime.fromisoformat(since_str.replace('Z', '+00:00'))
@@ -2114,6 +2120,9 @@ def pull_files():
             f"({total_size / 1024 / 1024:.2f} MB), excluded {len(invalid_files)} invalid"
         )
 
+        # Curated account credentials (HF_TOKEN etc.) — never the whole .env.
+        portable_env = file_sync_service.read_portable_env_credentials()
+
         return success_response(
             {
                 "files": valid_files,
@@ -2121,6 +2130,8 @@ def pull_files():
                 "paths": sync_paths or file_sync_service.default_sync_paths,
                 "since": since.isoformat() if since else None,
                 "timestamp": datetime.now().isoformat(),
+                "portable_env": portable_env,
+                "portable_env_keys": sorted(portable_env.keys()),
             },
             "Files retrieved for sync"
         )
@@ -2648,7 +2659,23 @@ def trigger_manual_sync():
                         if files_response.status_code == 200:
                             files_data = files_response.json()
                             files_list = files_data.get("data", {}).get("files", [])
+                            portable_env = files_data.get("data", {}).get("portable_env") or {}
                             logger.info(f"[SYNC] File pull: Received {len(files_list)} files from master")
+                            if portable_env:
+                                try:
+                                    cred_result = file_sync_service.merge_portable_env_credentials(
+                                        portable_env
+                                    )
+                                    logger.info(
+                                        "[SYNC] Portable credentials merge: updated=%s added=%s",
+                                        cred_result.get("updated"),
+                                        cred_result.get("added"),
+                                    )
+                                except Exception as cred_err:
+                                    logger.warning(
+                                        "[SYNC] Portable credentials merge failed (non-fatal): %s",
+                                        cred_err,
+                                    )
                             
                             if config.get("require_file_approval", True) and files_list:
                                 # Split: new files auto-apply, modified files need approval
@@ -3442,20 +3469,21 @@ def apply_updates():
             and (not requested_files or c["path"] in requested_files)
         ]
 
-        if not files_to_update:
-            return success_response({
-                "applied": 0,
-                "message": "No updates needed - all files are up to date"
-            }, "No updates needed")
-        
-        # Step 4: Fetch full file contents from master (targeted pull — not capped batch scan)
-        logger.info(f"[UPDATES] Fetching {len(files_to_update)} files from master...")
-        
+        # Step 4: Fetch file contents + portable credentials from master.
+        # Even when code is current we still pull credentials (HF_TOKEN etc.) so a
+        # fresh client can download gated models without a manual .env copy.
+        if files_to_update:
+            logger.info(f"[UPDATES] Fetching {len(files_to_update)} files from master...")
+            pull_params = [("file", path) for path in files_to_update]
+        else:
+            logger.info("[UPDATES] Code current — fetching portable credentials only")
+            pull_params = [("credentials_only", "1")]
+
         try:
             pull_response = requests.get(
                 f"{master_url}/api/interconnector/sync/files/pull",
                 headers=headers,
-                params=[("file", path) for path in files_to_update],
+                params=pull_params,
                 timeout=120,  # Longer timeout for file transfer
                 verify=False
             )
@@ -3465,6 +3493,7 @@ def apply_updates():
             
             pull_data = pull_response.json()
             all_master_files = pull_data.get("data", {}).get("files", [])
+            portable_env = pull_data.get("data", {}).get("portable_env") or {}
             pulled_paths = {f.get("path") for f in all_master_files}
             missing_pull = [p for p in files_to_update if p not in pulled_paths]
             if missing_pull:
@@ -3475,6 +3504,34 @@ def apply_updates():
             
         except Exception as e:
             return error_response(f"Error pulling files: {str(e)}", 502)
+
+        if not files_to_update and not portable_env:
+            return success_response({
+                "applied": 0,
+                "message": "No updates needed - all files are up to date",
+                "portable_env": {"updated": [], "added": [], "skipped": []},
+            }, "No updates needed")
+
+        # Credentials-only path: code already matches master; just merge HF_TOKEN etc.
+        if not files_to_update and portable_env:
+            cred_result = file_sync_service.merge_portable_env_credentials(portable_env)
+            cred_changed = len(cred_result.get("updated", [])) + len(cred_result.get("added", []))
+            return success_response({
+                "applied": 0,
+                "created": 0,
+                "updated": 0,
+                "portable_env": {
+                    "updated": cred_result.get("updated", []),
+                    "added": cred_result.get("added", []),
+                    "skipped": cred_result.get("skipped", []),
+                    "keys_received": sorted(portable_env.keys()),
+                },
+                "message": (
+                    f"Code up to date; merged {cred_changed} portable credential(s) into .env"
+                    if cred_changed else
+                    "No updates needed - all files and portable credentials are up to date"
+                ),
+            }, "Portable credentials synced" if cred_changed else "No updates needed")
         
         # Step 5: Apply updates atomically (filter to files we need, then apply all)
         files_to_apply = [f for f in all_master_files if f.get("path") in files_to_update]
@@ -3498,6 +3555,7 @@ def apply_updates():
         }
         details = []
         backup_path = None
+        portable_env_result: dict = {"updated": [], "added": [], "skipped": []}
 
         if valid_files:
             # remote_wins: the GUI "Update Now" is an authoritative master->client pull, so master
@@ -3531,6 +3589,11 @@ def apply_updates():
                 })
             if asum.get("rolled_back"):
                 logger.error("[UPDATES] Atomic apply failed, rolled back all changes")
+
+        # Merge portable credentials after a successful file apply (same trust
+        # boundary as receiving master code). Skip on rollback.
+        if portable_env and success and not summary.get("rolled_back"):
+            portable_env_result = file_sync_service.merge_portable_env_credentials(portable_env)
         
         # Get backup path for display
         project_root = file_sync_service.get_project_root()
@@ -3674,6 +3737,12 @@ def apply_updates():
             "rolled_back": rolled_back,
             "backup_path": backup_path,
             "details": details,
+            "portable_env": {
+                "updated": portable_env_result.get("updated", []),
+                "added": portable_env_result.get("added", []),
+                "skipped": portable_env_result.get("skipped", []),
+                "keys_received": sorted((portable_env or {}).keys()),
+            },
             "timestamp": datetime.now().isoformat(),
             "history_recorded": True,  # signals that the sync was marked
         }, f"Successfully applied {files_written} updates "

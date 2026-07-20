@@ -18,8 +18,22 @@ from flask import current_app
 logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024
-MAX_TOTAL_BYTES = 30 * 1024 * 1024
-MAX_FILE_COUNT = 1500
+# Inventory grew past the old 1500 / 30 MB caps — blind content pulls were silently
+# truncating the tail of default_sync_paths (plugins/upscaling, gpu_embedding,
+# vite.config.js, index.html, …). Headroom for continued growth.
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_FILE_COUNT = 5000
+
+# Account-level credentials that should ride Interconnector sync so a client can
+# download gated HuggingFace models / talk to Discord / etc. after Update Now.
+# Machine-local keys (DATABASE_URL, SECRET_KEY, Redis URLs, ports) are NEVER
+# included — clients keep their own. Whole `.env` stays excluded from file sync.
+PORTABLE_ENV_KEYS = frozenset({
+    "HF_TOKEN",
+    "HUGGINGFACE_HUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "DISCORD_BOT_TOKEN",
+})
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SENTINEL_DIR = _REPO_ROOT / "data" / "dep_reconciler"
@@ -1167,6 +1181,134 @@ class InterconnectorFileSyncService:
         except Exception as e:
             logger.error(f"Error creating conflict record: {e}")
             return None
+
+    def _env_file_path(self) -> Path:
+        return self.get_project_root() / ".env"
+
+    def read_portable_env_credentials(self) -> Dict[str, str]:
+        """Read allowlisted credential keys from the master's `.env`.
+
+        Returns only keys present with a non-empty value. Never includes
+        machine-local keys (DB URL, SECRET_KEY, Redis, ports).
+        """
+        env_path = self._env_file_path()
+        if not env_path.is_file():
+            logger.info("[FILE_SYNC] No .env on master — portable credentials empty")
+            return {}
+
+        found: Dict[str, str] = {}
+        try:
+            for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key in PORTABLE_ENV_KEYS and value:
+                    found[key] = value
+        except Exception as e:
+            logger.error(f"[FILE_SYNC] Failed reading portable credentials from .env: {e}")
+            return {}
+
+        if found:
+            logger.info(
+                "[FILE_SYNC] Portable credentials ready for sync: %s",
+                ", ".join(sorted(found.keys())),
+            )
+        else:
+            logger.info(
+                "[FILE_SYNC] No portable credentials found in .env "
+                "(looked for %s)",
+                ", ".join(sorted(PORTABLE_ENV_KEYS)),
+            )
+        return found
+
+    def merge_portable_env_credentials(self, credentials: Dict[str, str]) -> Dict[str, Any]:
+        """Merge allowlisted credentials into the local `.env` (create if missing).
+
+        Updates existing keys in place; appends missing ones. Never removes
+        local-only keys. Ignores any key outside PORTABLE_ENV_KEYS.
+        """
+        result: Dict[str, Any] = {
+            "updated": [],
+            "added": [],
+            "skipped": [],
+            "env_path": str(self._env_file_path()),
+        }
+        if not credentials:
+            return result
+
+        safe = {
+            k: v for k, v in credentials.items()
+            if k in PORTABLE_ENV_KEYS and isinstance(v, str) and v.strip()
+        }
+        rejected = [k for k in credentials if k not in safe]
+        if rejected:
+            result["skipped"].extend(rejected)
+            logger.warning(
+                "[FILE_SYNC] Ignoring non-portable or empty credential keys: %s",
+                ", ".join(rejected),
+            )
+        if not safe:
+            return result
+
+        env_path = self._env_file_path()
+        try:
+            existing_text = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
+        except Exception as e:
+            logger.error(f"[FILE_SYNC] Cannot read local .env for credential merge: {e}")
+            result["error"] = str(e)
+            return result
+
+        lines = existing_text.splitlines()
+        present_keys = set()
+        new_lines: List[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.partition("=")[0].strip()
+                if key in safe:
+                    present_keys.add(key)
+                    new_val = safe[key]
+                    old_val = stripped.partition("=")[2].strip().strip('"').strip("'")
+                    if old_val == new_val:
+                        new_lines.append(line)
+                    else:
+                        new_lines.append(f"{key}={new_val}")
+                        result["updated"].append(key)
+                    continue
+            new_lines.append(line)
+
+        for key, value in sorted(safe.items()):
+            if key not in present_keys:
+                if new_lines and new_lines[-1].strip():
+                    new_lines.append("")
+                new_lines.append(f"{key}={value}")
+                result["added"].append(key)
+
+        if not result["updated"] and not result["added"]:
+            logger.info("[FILE_SYNC] Portable credentials already match local .env")
+            return result
+
+        try:
+            # Preserve restrictive perms if file already existed; otherwise 0600.
+            prev_mode = env_path.stat().st_mode if env_path.is_file() else None
+            env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            if prev_mode is not None:
+                os.chmod(env_path, prev_mode & 0o777)
+            else:
+                os.chmod(env_path, 0o600)
+            logger.info(
+                "[FILE_SYNC] Merged portable credentials into .env "
+                "(updated=%s, added=%s)",
+                result["updated"],
+                result["added"],
+            )
+        except Exception as e:
+            logger.error(f"[FILE_SYNC] Failed writing portable credentials to .env: {e}")
+            result["error"] = str(e)
+        return result
 
 
 _file_sync_service = None
