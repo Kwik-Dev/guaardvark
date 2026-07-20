@@ -319,7 +319,10 @@ def tick_process_approved_drafts(self) -> dict:
                     continue
 
                 if success:
-                    record_post_via_backend(row.id, row.target_url, row.target_thread_id, comment_text, row.task_id)
+                    record_post_via_backend(
+                        row.id, row.target_url, row.target_thread_id,
+                        comment_text, row.task_id, platform=row.platform,
+                    )
                     processed += 1
                     posted_platforms.add(platform)
                 else:
@@ -360,7 +363,7 @@ def tick_process_approved_drafts(self) -> dict:
                 if success:
                     record_post_via_backend(
                         row.id, row.target_url, row.target_thread_id,
-                        reply_text, row.task_id,
+                        reply_text, row.task_id, platform=row.platform,
                     )
                     processed += 1
                     posted_platforms.add(platform)

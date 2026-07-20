@@ -4,10 +4,10 @@ and posts it through the servo-driven Firefox on DISPLAY=:99 (which has the
 user's logged-in Reddit session cookies).
 
 Hybrid architecture:
-  • READ via Reddit's public JSON API (no auth needed for discovery — cleaner
-    than screenshot-extracting rules + comments).
-  • WRITE via agent_control_service.execute_task on the real Firefox profile
-    (the only path with the user's login cookies).
+  • READ via Reddit's JSON API, authenticated with cookies from the agent
+    Firefox profile when present (bare datacenter IPs often get 403).
+  • WRITE via BiDi + LocalScreenBackend on the real Firefox profile
+    (the only path with the user's login cookies for posting).
 
 If write fails twice we abort the whole pass — better to skip than thrash.
 """
@@ -15,8 +15,12 @@ If write fails twice we abort the whole pass — better to skip than thrash.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
+import shutil
+import sqlite3
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -30,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 
 REDDIT_USER_AGENT = "guaardvark-outreach/0.1 (by /u/guaardvark) - local AI workstation"
+# Browser UA used when attaching the agent Firefox session cookies. Reddit's
+# datacenter IP block (403 HTML interstitial) often still allows cookie-authed
+# requests that look like a real logged-in browser.
+REDDIT_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+)
 REDDIT_BASE = "https://www.reddit.com"
 HTTP_TIMEOUT = 10
 SUBREDDIT_HOT_LIMIT = 10
@@ -37,6 +47,10 @@ THREAD_COMMENT_LIMIT = 10
 MAX_THREADS_PER_PASS = 2
 SERVO_SETTLE_SECONDS = 4
 BIDI_PORT = 9222
+
+# Cached cookie jar loaded from the agent Firefox profile (refreshed periodically).
+_REDDIT_COOKIE_CACHE: dict = {"jar": None, "loaded_at": 0.0}
+_REDDIT_COOKIE_TTL_S = 120.0
 
 
 def _bidi_scroll_to_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
@@ -249,11 +263,97 @@ class RedditThread:
     created_utc: float
 
 
+def _agent_firefox_cookies_db() -> Optional[str]:
+    """Return path to the agent Firefox cookies.sqlite, or None if missing."""
+    try:
+        from backend.utils.agent_display_utils import get_firefox_profile_path
+        path = os.path.join(get_firefox_profile_path(), "cookies.sqlite")
+    except Exception:
+        return None
+    return path if os.path.isfile(path) else None
+
+
+def _load_reddit_cookies_from_firefox() -> Optional[requests.cookies.RequestsCookieJar]:
+    """Load Reddit cookies from the agent Firefox profile.
+
+    Copies the SQLite DB first so a live Firefox lock doesn't block us.
+    Returns None when the profile has no Reddit session (caller falls back
+    to unauthenticated fetch).
+    """
+    now = time.time()
+    cached = _REDDIT_COOKIE_CACHE.get("jar")
+    if cached is not None and (now - float(_REDDIT_COOKIE_CACHE.get("loaded_at") or 0)) < _REDDIT_COOKIE_TTL_S:
+        return cached
+
+    db_path = _agent_firefox_cookies_db()
+    if not db_path:
+        return None
+
+    tmp_dir = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="reddit_ff_cookies_")
+        tmp_db = os.path.join(tmp_dir, "cookies.sqlite")
+        shutil.copy2(db_path, tmp_db)
+        for suffix in ("-wal", "-shm"):
+            side = db_path + suffix
+            if os.path.isfile(side):
+                try:
+                    shutil.copy2(side, tmp_db + suffix)
+                except OSError:
+                    pass
+
+        conn = sqlite3.connect(tmp_db)
+        try:
+            rows = conn.execute(
+                "SELECT name, value, host FROM moz_cookies "
+                "WHERE host LIKE '%reddit.com%'"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        jar = requests.cookies.RequestsCookieJar()
+        has_session = False
+        for name, value, host in rows:
+            if not name or value is None:
+                continue
+            if name in ("reddit_session", "token_v2"):
+                has_session = True
+            domain = host if host.startswith(".") else host
+            jar.set(name, value, domain=domain, path="/")
+
+        if not has_session:
+            logger.info("agent Firefox profile has Reddit cookies but no session token")
+            _REDDIT_COOKIE_CACHE["jar"] = None
+            _REDDIT_COOKIE_CACHE["loaded_at"] = now
+            return None
+
+        _REDDIT_COOKIE_CACHE["jar"] = jar
+        _REDDIT_COOKIE_CACHE["loaded_at"] = now
+        return jar
+    except Exception as e:
+        logger.warning("failed to load Reddit cookies from Firefox profile: %s", e)
+        return None
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def _http_get_json(url: str, retries: int = 1) -> Optional[dict]:
+    """GET Reddit JSON. Prefer agent-Firefox session cookies when available —
+
+    bare datacenter IPs often get a 403 interstitial; the logged-in cookie jar
+    from DISPLAY=:99's profile clears that for discovery (hot/rules/comments).
+    """
+    cookie_jar = _load_reddit_cookies_from_firefox()
+    headers = {
+        "User-Agent": REDDIT_BROWSER_USER_AGENT if cookie_jar else REDDIT_USER_AGENT,
+        "Accept": "application/json",
+    }
     try:
         resp = requests.get(
             url,
-            headers={"User-Agent": REDDIT_USER_AGENT},
+            headers=headers,
+            cookies=cookie_jar,
             timeout=HTTP_TIMEOUT,
         )
         if resp.status_code == 429:
@@ -264,6 +364,12 @@ def _http_get_json(url: str, retries: int = 1) -> Optional[dict]:
                 return _http_get_json(url, retries=retries - 1)
             logger.warning("reddit JSON 429 on %s — out of retries", url)
             return None
+        # 403 with cookies: invalidate cache once and retry bare (or vice versa)
+        if resp.status_code == 403 and cookie_jar is not None and retries > 0:
+            logger.warning("reddit JSON 403 with session cookies on %s — refreshing jar once", url)
+            _REDDIT_COOKIE_CACHE["jar"] = None
+            _REDDIT_COOKIE_CACHE["loaded_at"] = 0.0
+            return _http_get_json(url, retries=retries - 1)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -385,13 +491,20 @@ def draft_via_backend(thread: RedditThread, comments: list[str], feature_hint: O
         return None
 
 
-def record_post_via_backend(audit_id: Optional[int], permalink: str, thread_id: str, posted_text: str, task_id: Optional[int]) -> None:
+def record_post_via_backend(
+    audit_id: Optional[int],
+    permalink: str,
+    thread_id: str,
+    posted_text: str,
+    task_id: Optional[int],
+    platform: str = "reddit",
+) -> None:
     try:
         requests.post(
             f"{backend_url()}/social-outreach/record-post",
             json={
                 "audit_id": audit_id,
-                "platform": "reddit",
+                "platform": platform or "reddit",
                 "posted_text": posted_text,
                 "target_url": permalink,
                 "target_thread_id": thread_id,

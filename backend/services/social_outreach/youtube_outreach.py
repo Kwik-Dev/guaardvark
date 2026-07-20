@@ -6,29 +6,14 @@ YouTube session cookies).
 Both functions return (success, reason) for audit tracking. They mirror
 reddit_outreach.post_comment_via_servo's contract.
 
-Implementation note (2026-05-13 rewrite):
-  Previous version handed multi-step natural-language instruction blobs to
-  service.execute_task() and relied on the see-think-act loop to figure
-  out the YouTube-specific dance. That had three documented failure modes:
-    • brittle composer-find on a page that scrolls past the fold
-    • vision-clicked submit button that misfired on the '0 Comments' header
-    • autoplay drift to a related video mid-flow
+Implementation note (2026-07-19 rewrite):
+  Recipe-chain posting (navigate_url → find_on_page → vision click) was
+  aborting at focus_youtube_comment_field — Cancel never appeared because
+  the vision click missed the composer, then submit_unverified fired after
+  a false-positive Ctrl+Enter. Mirror Reddit's BiDi path instead:
 
-  This version chains deterministic recipes instead. Each step is one
-  execute_task call whose message hits exactly one recipe in
-  data/agent/recipes.json — no see-think-act lottery. The recipes:
-
-    navigate_url               (case-preserving — task_effective post-fix)
-    pause_youtube_video        (Esc + k — prevents autoplay drift)
-    find_on_page               (Ctrl+F — bypasses YouTube search-bar focus theft)
-    press_escape
-    focus_youtube_comment_field  / focus_youtube_reply_field
-    type_comment_text          / type_reply_text   (but we type the body
-                                                    directly via screen.type_text
-                                                    so newlines and quotes survive)
-    submit_youtube_comment     / submit_youtube_reply  (Ctrl+Enter)
-
-  See memory: youtube-focus-and-comments, agent-recipe-design.
+    BiDi navigate → pause (Esc/k) → BiDi scrollIntoView composer →
+    click coords → type_text → Ctrl+Enter → BiDi DOM verify
 """
 
 from __future__ import annotations
@@ -42,6 +27,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 SERVO_SETTLE_SECONDS = 4
+BIDI_PORT = 9222
 
 # Min length for a parent-comment anchor passed to find_on_page. Too short
 # and find-on-page lands on something unrelated (e.g. matching "the" all
@@ -51,12 +37,7 @@ MAX_REPLY_ANCHOR_LEN = 80
 
 
 def _human_pause(min_s: float = 0.3, max_s: float = 2.0) -> None:
-    """Random sleep to avoid deterministic bot timing fingerprints.
-
-    Don't make this call site-specific — uniform jitter across all servo
-    actions is fine. Cross-platform spam filters look for *constant* delays
-    much more than for specific values.
-    """
+    """Random sleep to avoid deterministic bot timing fingerprints."""
     time.sleep(random.uniform(min_s, max_s))
 
 
@@ -75,13 +56,10 @@ def _normalize_youtube_url(target_url: str) -> Optional[str]:
 def _run_recipe_step(service, screen, chat_message: str, failure_tag: str) -> tuple[bool, str]:
     """Hand chat_message to execute_task. Expect a single recipe to match.
 
-    Returns (True, "ok") on recipe success, (False, "{failure_tag}: {reason}")
-    on failure. The caller decides whether failure is fatal or recoverable.
+    Kept for reply path / tests that still exercise the recipe chain.
     """
     result = service.execute_task(chat_message, screen)
     if not result.success:
-        # The auth interstitial shows up on the navigate step typically;
-        # bubble it as a distinct reason so the caller can short-circuit.
         reason_lc = (result.reason or "").lower()
         if "sign" in reason_lc and ("in" in reason_lc or "-in" in reason_lc):
             return False, "auth_required"
@@ -90,12 +68,7 @@ def _run_recipe_step(service, screen, chat_message: str, failure_tag: str) -> tu
 
 
 def _trim_anchor(parent_text: str) -> Optional[str]:
-    """Pick a distinctive substring of the parent comment to feed find_on_page.
-
-    Strategy: strip leading mentions/whitespace, take the first
-    [MIN_REPLY_ANCHOR_LEN, MAX_REPLY_ANCHOR_LEN] chars that don't contain
-    a double-quote (which would break the find recipe's quoted-arg regex).
-    """
+    """Pick a distinctive substring of the parent comment to feed find_on_page."""
     if not parent_text:
         return None
     cleaned = re.sub(r'^\s*@\S+\s*', '', parent_text).strip()
@@ -105,7 +78,320 @@ def _trim_anchor(parent_text: str) -> Optional[str]:
     return cleaned[:MAX_REPLY_ANCHOR_LEN].strip()
 
 
-BIDI_PORT = 9222
+def _bidi_navigate(url: str, settle_seconds: float = 2.0, nav_timeout: float = 20.0) -> bool:
+    """Direct browser navigation via Firefox BiDi (no address-bar autocomplete)."""
+    import json as _json
+    import websocket as _ws
+
+    try:
+        ws = _ws.create_connection(
+            f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True,
+        )
+    except Exception as e:
+        logger.warning("yt bidi navigate connect failed: %s", e)
+        return False
+
+    try:
+        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
+        if _json.loads(ws.recv()).get("type") != "success":
+            return False
+
+        ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
+        contexts = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
+        if not contexts:
+            return False
+        ctx_id = contexts[0]["context"]
+
+        ws.settimeout(nav_timeout)
+        ws.send(_json.dumps({
+            "id": 3,
+            "method": "browsingContext.navigate",
+            "params": {"context": ctx_id, "url": url, "wait": "complete"},
+        }))
+        nav = _json.loads(ws.recv())
+        if nav.get("type") == "error":
+            logger.warning("yt bidi navigate error: %s", nav.get("message", "")[:200])
+            return False
+
+        time.sleep(settle_seconds)
+        return True
+    except Exception as e:
+        logger.warning("yt bidi navigate exception: %s", e)
+        return False
+    finally:
+        try:
+            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
+        except Exception:
+            pass
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
+def _bidi_scroll_to_yt_composer() -> tuple[bool, str, Optional[tuple[int, int]]]:
+    """Scroll YouTube's top-level 'Add a comment...' composer into view via BiDi.
+
+    Returns (success, info, (cx, cy) viewport center) — same contract as Reddit's
+    _bidi_scroll_to_composer. Prefer #placeholder-area / #contenteditable-root
+    inside ytd-comment-simplebox-renderer (not Reply boxes lower on the page).
+    """
+    import json as _json
+    import websocket as _ws
+
+    try:
+        ws = _ws.create_connection(
+            f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True,
+        )
+    except Exception as e:
+        return False, f"connect failed: {e}", None
+
+    try:
+        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
+        if _json.loads(ws.recv()).get("type") != "success":
+            return False, "session.new failed", None
+
+        ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
+        contexts = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
+        if not contexts:
+            return False, "no contexts", None
+        ctx_id = contexts[0]["context"]
+
+        js = """
+        (() => {
+          const auth = /sign in to|Sign in to YouTube/i.test(
+            (document.body && document.body.innerText) || ''
+          );
+          if (auth) return JSON.stringify({found:false, auth:true});
+
+          const selectors = [
+            'ytd-comments #placeholder-area',
+            'ytd-comment-simplebox-renderer #placeholder-area',
+            'ytd-comment-simplebox-renderer #contenteditable-root',
+            '#simplebox-placeholder',
+            'ytd-comments div[contenteditable="true"]#contenteditable-root',
+          ];
+          let found = null;
+          for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            // Skip reply composers nested under existing comments.
+            if (el.closest('ytd-comment-replies-renderer') ||
+                el.closest('ytd-comment-renderer')) {
+              continue;
+            }
+            found = el;
+            break;
+          }
+          // Fallback: any visible element whose text/placeholder says Add a comment
+          if (!found) {
+            const all = document.querySelectorAll(
+              '#placeholder-area, #simplebox-placeholder, [contenteditable="true"], textarea'
+            );
+            for (const el of all) {
+              if (el.closest('ytd-comment-replies-renderer') ||
+                  el.closest('ytd-comment-renderer')) continue;
+              const t = ((el.innerText || '') + ' ' +
+                         (el.getAttribute('aria-label') || '') + ' ' +
+                         (el.getAttribute('placeholder') || '')).toLowerCase();
+              if (t.includes('add a comment') || t.includes('add a reply')) {
+                if (t.includes('add a reply')) continue;
+                found = el;
+                break;
+              }
+            }
+          }
+          if (!found) {
+            return JSON.stringify({
+              found: false,
+              auth: false,
+              has_comments_header: /\\d+\\s*Comments/i.test(
+                (document.body && document.body.innerText) || ''
+              ),
+            });
+          }
+          found.scrollIntoView({block: 'center', behavior: 'instant'});
+          const r = found.getBoundingClientRect();
+          return JSON.stringify({
+            found: true,
+            auth: false,
+            tag: found.tagName.toLowerCase(),
+            id: found.id || '',
+            x: Math.round(r.x), y: Math.round(r.y),
+            w: Math.round(r.width), h: Math.round(r.height),
+            cx: Math.round(r.x + r.width / 2),
+            cy: Math.round(r.y + r.height / 2),
+          });
+        })()
+        """
+        ws.send(_json.dumps({
+            "id": 3,
+            "method": "script.evaluate",
+            "params": {"expression": js, "target": {"context": ctx_id}, "awaitPromise": False},
+        }))
+        result = _json.loads(ws.recv())
+        value = result.get("result", {}).get("result", {}).get("value", "")
+        if not value:
+            return False, "empty script result", None
+        data = _json.loads(value)
+        if data.get("auth"):
+            return False, "auth_required", None
+        if not data.get("found"):
+            return False, (
+                f"composer not in DOM (comments_header={data.get('has_comments_header')})"
+            ), None
+        time.sleep(0.6)
+        cx, cy = int(data.get("cx", 0)), int(data.get("cy", 0))
+        if cx <= 0 or cy <= 0:
+            return False, f"bad coords ({cx},{cy})", None
+        return True, f"composer at ({cx},{cy}) {data.get('w')}x{data.get('h')} #{data.get('id')}", (cx, cy)
+    except Exception as e:
+        return False, f"exception: {e}", None
+    finally:
+        try:
+            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
+        except Exception:
+            pass
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
+def _bidi_fill_and_submit_comment(comment_text: str) -> tuple[bool, str]:
+    """Expand the top-level composer, insert comment_text, click Comment.
+
+    Pure BiDi/DOM — no vision, no xdotool typing. YouTube's Polymer composer
+    accepts execCommand('insertText') on #contenteditable-root after the
+    placeholder is clicked.
+    """
+    import json as _json
+    import websocket as _ws
+
+    text = (comment_text or "").strip()
+    if not text:
+        return False, "empty_comment"
+
+    try:
+        ws = _ws.create_connection(
+            f"ws://localhost:{BIDI_PORT}/session", timeout=3, suppress_origin=True,
+        )
+    except Exception as e:
+        return False, f"connect failed: {e}"
+
+    try:
+        ws.send(_json.dumps({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))
+        if _json.loads(ws.recv()).get("type") != "success":
+            return False, "session.new failed"
+
+        ws.send(_json.dumps({"id": 2, "method": "browsingContext.getTree", "params": {}}))
+        contexts = _json.loads(ws.recv()).get("result", {}).get("contexts", [])
+        if not contexts:
+            return False, "no contexts"
+        ctx_id = contexts[0]["context"]
+
+        def _eval(expr_id: int, expression: str) -> dict:
+            ws.send(_json.dumps({
+                "id": expr_id, "method": "script.evaluate",
+                "params": {
+                    "expression": expression,
+                    "target": {"context": ctx_id},
+                    "awaitPromise": False,
+                },
+            }))
+            raw = _json.loads(ws.recv())
+            if raw.get("type") == "error":
+                return {"ok": False, "stage": "bidi_error", "msg": raw.get("message", "")[:200]}
+            value = raw.get("result", {}).get("result", {}).get("value", "")
+            if not value:
+                return {"ok": False, "stage": "empty_evaluate"}
+            try:
+                return _json.loads(value)
+            except Exception:
+                return {"ok": False, "stage": "bad_json", "raw": str(value)[:200]}
+
+        open_d = _eval(3, """(() => {
+          const ph = document.querySelector('ytd-comments #placeholder-area')
+            || document.querySelector('#placeholder-area');
+          if (!ph) return JSON.stringify({ok:false, stage:'no_placeholder'});
+          ph.scrollIntoView({block:'center', behavior:'instant'});
+          ph.click();
+          return JSON.stringify({ok:true, stage:'clicked_placeholder'});
+        })()""")
+        if not open_d.get("ok"):
+            return False, f"open_failed: {open_d}"
+
+        time.sleep(0.9)
+
+        # Embed comment via json.dumps so quotes/newlines stay valid JS.
+        js_fill = f"""(() => {{
+          const text = {_json.dumps(text)};
+          const box = document.querySelector('ytd-comment-simplebox-renderer')
+            || document.querySelector('ytd-comments ytd-commentbox');
+          if (!box) return JSON.stringify({{ok:false, stage:'no_simplebox'}});
+
+          let ce = box.querySelector('#contenteditable-root')
+            || document.querySelector('ytd-comments #contenteditable-root');
+          if (!ce) {{
+            const ph = box.querySelector('#placeholder-area')
+              || document.querySelector('#placeholder-area');
+            if (ph) ph.click();
+            ce = box.querySelector('#contenteditable-root')
+              || document.querySelector('ytd-comments #contenteditable-root');
+          }}
+          if (!ce) return JSON.stringify({{ok:false, stage:'no_contenteditable'}});
+
+          ce.focus();
+          try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}}
+          let inserted = false;
+          try {{ inserted = document.execCommand('insertText', false, text); }} catch (e) {{}}
+          if (!inserted || !(ce.innerText || '').trim()) {{
+            ce.textContent = text;
+            ce.dispatchEvent(new InputEvent('input', {{
+              bubbles: true, cancelable: true, inputType: 'insertText', data: text,
+            }}));
+          }}
+          const filled = (ce.innerText || '').trim();
+          if (!filled) return JSON.stringify({{ok:false, stage:'fill_empty'}});
+
+          let btn = box.querySelector('#submit-button button')
+            || box.querySelector('#submit-button yt-button-shape button')
+            || box.querySelector('button[aria-label="Comment"]');
+          if (!btn) {{
+            btn = Array.from(box.querySelectorAll('button')).find(
+              b => /^\\s*Comment\\s*$/i.test((b.innerText || '').trim())
+            );
+          }}
+          if (btn && !btn.disabled) {{
+            btn.click();
+            return JSON.stringify({{
+              ok:true, stage:'clicked_submit', filled_len: filled.length
+            }});
+          }}
+          ce.dispatchEvent(new KeyboardEvent('keydown', {{
+            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+            ctrlKey: true, bubbles: true, cancelable: true,
+          }}));
+          return JSON.stringify({{
+            ok: true, stage: 'ctrl_enter', filled_len: filled.length,
+            btn_disabled: !!(btn && btn.disabled),
+          }});
+        }})()"""
+        fill_d = _eval(4, js_fill)
+        if not fill_d.get("ok"):
+            return False, f"fill_failed: {fill_d}"
+        return True, f"submitted via {fill_d.get('stage')} ({fill_d.get('filled_len')} chars)"
+    except Exception as e:
+        return False, f"exception: {e}"
+    finally:
+        try:
+            ws.send(_json.dumps({"id": 99, "method": "session.end", "params": {}}))
+        except Exception:
+            pass
+        try:
+            ws.close()
+        except Exception:
+            pass
 
 
 def _verify_youtube_text_in_dom(comment_text: str) -> tuple[bool, str]:
@@ -113,7 +399,11 @@ def _verify_youtube_text_in_dom(comment_text: str) -> tuple[bool, str]:
     import json as _json
     import websocket as _ws2
 
-    needle = (comment_text or "")[:60].strip()
+    # Prefer an ASCII-stable needle — curly apostrophes in drafts often diverge
+    # from what the page stores after paste.
+    raw = (comment_text or "").strip()
+    needle = raw[:60]
+    ascii_needle = re.sub(r"[^\x20-\x7E]", " ", raw)[:50].strip()
     if not needle:
         return False, "empty_needle"
     try:
@@ -133,8 +423,9 @@ def _verify_youtube_text_in_dom(comment_text: str) -> tuple[bool, str]:
         check_js = (
             "(() => {"
             "  const needle = " + _json.dumps(needle) + ";"
+            "  const ascii = " + _json.dumps(ascii_needle) + ";"
             "  const body = (document.body && document.body.innerText) || '';"
-            "  const found = body.includes(needle);"
+            "  const found = body.includes(needle) || (ascii && body.includes(ascii));"
             "  const err = /sign in to|something went wrong|try again/i.test(body);"
             "  return JSON.stringify({found, err, url: location.href});"
             "})()"
@@ -179,10 +470,8 @@ def post_youtube_comment_via_servo(
       - "display_unavailable"— Xvfb on :99 isn't reachable
       - "auth_required"      — YouTube sign-in interstitial appeared
       - "navigate_failed: …"
-      - "pause_failed: …"
-      - "find_comments_failed: …"
-      - "focus_composer_failed: …"
-      - "submit_failed: …"
+      - "composer_not_found: …"
+      - "submit_unverified: …"
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
@@ -205,52 +494,51 @@ def post_youtube_comment_via_servo(
         logger.warning("display not available for outreach: %s", e)
         return False, "display_unavailable"
 
-    # Recipe chain. The chat-message strings here are deliberately phrased
-    # to hit exactly one recipe in data/agent/recipes.json — keep them in
-    # sync if the recipe triggers change.
-    #
-    # Iteration history on the middle step:
-    #   v1: find_on_page "Comments" — "Comments" matched in the description
-    #       on many videos, so viewport rarely scrolled to the composer.
-    #   v2: scroll_to_youtube_comments (4× PageDown) — overscrolled past the
-    #       composer on short-comment-count videos (e.g. "2 Comments") and
-    #       landed in empty space below all content.
-    #   v3 (here): find_on_page "Add a comment" — that string is unique to
-    #       the composer placeholder, so the find positions the viewport
-    #       exactly on it. press_escape then closes the find bar, leaving
-    #       the composer in view ready for the click recipe.
-    nav_msg = f"navigate to {target_url.replace('https://', '').replace('http://', '')}"
-    for chat_msg, tag, settle in (
-        (nav_msg,                              "navigate_failed",         SERVO_SETTLE_SECONDS),
-        ("pause the video",                    "pause_failed",            1.0),
-        ('find "Add a comment" on the page',   "find_composer_failed",    1.0),
-        ("press escape",                       "escape_failed",           0.4),
-        ("click the add a comment field",      "focus_composer_failed",   SERVO_SETTLE_SECONDS),
-    ):
-        ok, reason = _run_recipe_step(service, screen, chat_msg, tag)
-        if not ok:
-            logger.warning(
-                "youtube comment chain aborted at %s (task_id=%s): %s",
-                tag, task_id, reason,
-            )
-            return False, reason
-        time.sleep(settle)
+    # 1) BiDi navigate — deterministic, no address-bar autocomplete.
+    if not _bidi_navigate(target_url, settle_seconds=SERVO_SETTLE_SECONDS):
+        return False, "navigate_failed: bidi_navigate returned False"
 
-    # Type body directly via the screen backend — keeps newlines, special
-    # chars, and quote marks intact (the type_comment_text recipe would
-    # work too, but its {1} substitution and trigger-regex argument parsing
-    # mangles anything with embedded quotes).
-    screen.type_text(comment_text)
-    _human_pause()
+    # 2) Close leftover find-bar / overlays so they don't steal focus.
+    screen.hotkey("Escape")
+    time.sleep(0.3)
+    screen.click(500, 720)
+    time.sleep(0.2)
+    # Lazy-load the comments section (placeholder isn't in DOM until scrolled).
+    for _ in range(6):
+        screen.hotkey("Page_Down")
+        time.sleep(0.35)
+    time.sleep(1.0)
 
-    ok, reason = _run_recipe_step(service, screen, "send the comment", "submit_failed")
+    # 3) Confirm composer exists (also surfaces auth_required).
+    scrolled, info, coords = _bidi_scroll_to_yt_composer()
+    logger.warning(
+        "yt bidi scroll-to-composer: success=%s info=%s coords=%s task_id=%s",
+        scrolled, info, coords, task_id,
+    )
+    if info == "auth_required":
+        return False, "auth_required"
+    if not scrolled:
+        for _ in range(4):
+            screen.hotkey("Page_Down")
+            time.sleep(0.4)
+        time.sleep(1.0)
+        scrolled, info, coords = _bidi_scroll_to_yt_composer()
+        if info == "auth_required":
+            return False, "auth_required"
+        if not scrolled:
+            return False, f"composer_not_found: {info}"
+
+    # 4) Fill + submit entirely via BiDi/DOM (xdotool paste was landing off-target).
+    ok, fill_msg = _bidi_fill_and_submit_comment(comment_text)
+    logger.warning("yt bidi fill/submit: ok=%s msg=%s task_id=%s", ok, fill_msg, task_id)
     if not ok:
-        return False, reason
+        return False, f"fill_submit_failed: {fill_msg}"
+    time.sleep(2.5)
 
-    # DOM verify — recipe success alone is not enough (false positives when
-    # the submit click missed). Look for a needle of our comment text in the
-    # page via Firefox BiDi, same idea as Reddit's post-submit check.
     verified, verify_msg = _verify_youtube_text_in_dom(comment_text)
+    if not verified:
+        time.sleep(3.0)
+        verified, verify_msg = _verify_youtube_text_in_dom(comment_text)
     if not verified:
         return False, f"submit_unverified: {verify_msg}"
 
@@ -266,17 +554,8 @@ def post_youtube_reply_via_servo(
     """Navigate to target_url, find the parent comment by text substring,
     open its Reply composer, post reply_text under it.
 
-    The `parent_comment_match_text` is fed to the find_on_page recipe to
-    position the viewport at the right comment. The focus_youtube_reply_field
-    recipe then clicks the topmost visible "Reply" button — which should be
-    the parent's, since we just scrolled to it.
-
-    Returns (success, reason). Reasons on failure mirror the comment path,
-    plus:
-      - "anchor_too_short"  — parent_comment_match_text wasn't distinctive
-                              enough to safely find-on-page
-      - "find_parent_failed: …"
-      - "focus_reply_failed: …"
+    Reply path still uses the recipe chain (parent-comment find is unique to
+    find_on_page). Top-level comments use the BiDi path above.
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
@@ -287,15 +566,14 @@ def post_youtube_reply_via_servo(
         return False, "invalid_url"
     target_url = normalized
 
-    anchor = _trim_anchor(parent_comment_match_text)
+    anchor = _trim_anchor(parent_comment_match_text or "")
     if not anchor:
-        return False, "anchor_too_short"
+        return False, "invalid_parent_anchor"
 
     service = get_agent_control_service()
     if service.is_active:
         return False, "agent_busy"
     if not start_agent_display_if_needed():
-        logger.warning("display not available for outreach: start failed")
         return False, "display_unavailable"
     try:
         screen = LocalScreenBackend()
@@ -303,20 +581,24 @@ def post_youtube_reply_via_servo(
         logger.warning("display not available for outreach: %s", e)
         return False, "display_unavailable"
 
-    nav_msg = f"navigate to {target_url.replace('https://', '').replace('http://', '')}"
-    find_parent_msg = f'find "{anchor}" on the page'
+    if not _bidi_navigate(target_url, settle_seconds=SERVO_SETTLE_SECONDS):
+        return False, "navigate_failed: bidi_navigate returned False"
+
+    screen.hotkey("Escape")
+    time.sleep(0.3)
+
     for chat_msg, tag, settle in (
-        (nav_msg,                "navigate_failed",      SERVO_SETTLE_SECONDS),
-        ("pause the video",      "pause_failed",         1.0),
-        (find_parent_msg,        "find_parent_failed",   1.0),
-        ("press escape",         "escape_failed",        0.4),
-        ("click reply",          "focus_reply_failed",   SERVO_SETTLE_SECONDS),
+        ("pause the video",                              "pause_failed",          1.0),
+        (f'find "{anchor}" on the page',                 "find_parent_failed",    1.0),
+        ("press escape",                                 "escape_failed",         0.4),
+        ("click the reply button under this comment",    "open_reply_failed",     SERVO_SETTLE_SECONDS),
+        ("click the reply comment field",                "focus_reply_failed",    SERVO_SETTLE_SECONDS),
     ):
         ok, reason = _run_recipe_step(service, screen, chat_msg, tag)
         if not ok:
             logger.warning(
-                "youtube reply chain aborted at %s (task_id=%s, anchor=%r): %s",
-                tag, task_id, anchor, reason,
+                "youtube reply chain aborted at %s (task_id=%s): %s",
+                tag, task_id, reason,
             )
             return False, reason
         time.sleep(settle)
@@ -324,11 +606,7 @@ def post_youtube_reply_via_servo(
     screen.type_text(reply_text)
     _human_pause()
 
-    # "send reply" (not "submit the reply") — Gemma4 quirk: when the composer
-    # is already populated, "submit" sometimes resolves to "task done" text
-    # instead of an action, bypassing recipe match. "send" reliably fires.
-    # See memory: youtube-focus-and-comments § Gemma4 quirk.
-    ok, reason = _run_recipe_step(service, screen, "send reply", "submit_failed")
+    ok, reason = _run_recipe_step(service, screen, "send the comment", "submit_failed")
     if not ok:
         return False, reason
 

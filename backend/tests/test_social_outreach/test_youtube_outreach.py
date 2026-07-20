@@ -4,28 +4,28 @@ import pytest
 
 
 def test_post_youtube_comment_auth_required(app):
-    """Returns (False, 'auth_required') when navigation lands on sign-in."""
+    """Returns (False, 'auth_required') when BiDi finds a sign-in wall."""
     from backend.services.social_outreach.youtube_outreach import post_youtube_comment_via_servo
-    
+
     with app.app_context(), \
          patch("backend.services.agent_control_service.get_agent_control_service") as mock_service, \
-         patch("backend.services.local_screen_backend.LocalScreenBackend") as mock_screen:
-        
+         patch("backend.services.local_screen_backend.LocalScreenBackend"), \
+         patch("backend.services.social_outreach.youtube_outreach._bidi_navigate", return_value=True), \
+         patch(
+             "backend.services.social_outreach.youtube_outreach._bidi_scroll_to_yt_composer",
+             return_value=(False, "auth_required", None),
+         ), \
+         patch("backend.services.social_outreach.youtube_outreach.time.sleep"):
+
         service_instance = MagicMock()
         service_instance.is_active = False
         mock_service.return_value = service_instance
-        
-        # Simulate navigation landing on sign-in page
-        nav_result = MagicMock()
-        nav_result.success = False
-        nav_result.reason = "sign in required"
-        service_instance.execute_task.return_value = nav_result
-        
+
         success, reason = post_youtube_comment_via_servo(
             "https://www.youtube.com/watch?v=test123",
-            "test comment"
+            "test comment",
         )
-        
+
         assert success is False
         assert reason == "auth_required"
 
@@ -33,36 +33,28 @@ def test_post_youtube_comment_auth_required(app):
 def test_post_youtube_comment_servo_failure_returns_not_raises(app):
     """On servo failure, returns (False, <reason>) rather than raising."""
     from backend.services.social_outreach.youtube_outreach import post_youtube_comment_via_servo
-    
+
     with app.app_context(), \
          patch("backend.services.agent_control_service.get_agent_control_service") as mock_service, \
-         patch("backend.services.local_screen_backend.LocalScreenBackend") as mock_screen, \
+         patch("backend.services.local_screen_backend.LocalScreenBackend"), \
+         patch("backend.services.social_outreach.youtube_outreach._bidi_navigate", return_value=True), \
+         patch(
+             "backend.services.social_outreach.youtube_outreach._bidi_scroll_to_yt_composer",
+             return_value=(False, "composer not in DOM", None),
+         ), \
          patch("backend.services.social_outreach.youtube_outreach.time.sleep"):
-        
+
         service_instance = MagicMock()
         service_instance.is_active = False
         mock_service.return_value = service_instance
-        
-        # Navigation succeeds
-        nav_result = MagicMock()
-        nav_result.success = True
-        
-        # Find comment box fails
-        find_result = MagicMock()
-        find_result.success = False
-        find_result.reason = "timeout"
-        
-        service_instance.execute_task.side_effect = [nav_result, find_result]
-        
+
         success, reason = post_youtube_comment_via_servo(
             "https://www.youtube.com/watch?v=test123",
-            "test comment"
+            "test comment",
         )
-        
+
         assert success is False
-        # Recipe chain: navigate → pause → find composer … first failing
-        # side_effect after nav success is pause.
-        assert "failed" in reason
+        assert "composer_not_found" in reason
 
 
 def test_tick_process_approved_drafts_handles_youtube_success(app):
