@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 SITE_URL = "https://guaardvark.com"
 GITHUB_URL = "https://github.com/guaardvark/guaardvark"
 GOTHAM_RISING_URL = "https://www.youtube.com/watch?v=8MdtM3HurJo"
+# Guaardvark channel Shorts — cite when a quick demo fits better than the long Gotham piece.
+SHORT_RH0_URL = "https://www.youtube.com/shorts/rh0LJRK_jAM"
+SHORT_YRO_URL = "https://www.youtube.com/shorts/YrOCJnW9SoA"
+MARKETING_VIDEOS = (
+    {"id": "rh0LJRK_jAM", "label": "Channel Short A", "url": SHORT_RH0_URL},
+    {"id": "YrOCJnW9SoA", "label": "Channel Short B", "url": SHORT_YRO_URL},
+    {"id": "8MdtM3HurJo", "label": "Gotham Rising demo", "url": GOTHAM_RISING_URL},
+)
 
 # One-line pitch — kept for the /social-outreach/persona API endpoint and
 # any legacy import that still expects a string here. The CANONICAL pitch
@@ -76,7 +84,8 @@ def _load_pitch_md() -> str:
 FEATURE_BLURBS = {
     "local_ai": "everything runs locally on your hardware — no cloud, no API keys",
     "screen_control": "the agent sees your screen and drives apps via vision + servo, not just chat",
-    "video_gen": "video generation pipeline runs on a single desktop GPU (the Gotham Rising short was made entirely with it)",
+    "video_gen": "video generation pipeline runs on a single desktop GPU (Gotham Rising + channel Shorts were made with it)",
+    "open_source_github": "MIT-licensed on GitHub — clone it, run it locally, no cloud account",
     "upscaling": "image and video upscaling to 4K/8K locally",
     "rag": "RAG over your own documents, indexed locally with LlamaIndex + Postgres",
     "three_tier_brain": "three-tier neural routing — reflexes fire under 100ms, instinct in one LLM call, deliberation only when the problem actually needs it",

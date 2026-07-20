@@ -350,12 +350,15 @@ def draft_comment():
 @social_outreach_bp.get("/snippets")
 def get_snippets():
     """Pre-built copy blocks for the snippet bank in the Drafting zone.
-    Read-only — these are the canonical Guaardvark pitches."""
+    Read-only — these are the canonical Guaardvark pitches + marketing links."""
     return jsonify({
         "pitch": persona.GUAARDVARK_PITCH,
         "site_url": persona.SITE_URL,
         "github_url": persona.GITHUB_URL,
         "gotham_rising_url": persona.GOTHAM_RISING_URL,
+        "short_a_url": persona.SHORT_RH0_URL,
+        "short_b_url": persona.SHORT_YRO_URL,
+        "marketing_videos": list(persona.MARKETING_VIDEOS),
         "feature_blurbs": persona.FEATURE_BLURBS,
         "tones": list(persona.TONE_GUIDES.keys()),
     })

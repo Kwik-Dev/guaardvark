@@ -217,18 +217,30 @@ def tick_recon_youtube_replies(self) -> dict:
 
 @shared_task(name="social_outreach.tick_self_share", bind=True)
 def tick_self_share(self) -> dict:
-    """Beat tick — pick next share sub + URL, submit a link post."""
+    """Beat tick — pick next share sub + URL, draft a supervised link post.
+
+    Rotates `reddit.share_urls` (GitHub, channel Shorts, site) via Redis
+    round-robin so successive ticks market different assets. Falls back to
+    `reddit.default_share_url` then persona.SITE_URL / GITHUB_URL.
+    """
     skipped = _skip_if_kill_switch_off()
     if skipped:
         return skipped
     targets = _load_targets()
-    subs = (targets.get("reddit") or {}).get("share_subs") or []
+    reddit = targets.get("reddit") or {}
+    subs = reddit.get("share_subs") or []
     sub = _next_target("reddit_share", subs)
     if not sub:
         return {"skipped": True, "reason": "no_targets"}
-    # Default link URL — guaardvark.com. Could be parameterized later.
-    from backend.services.social_outreach.persona import SITE_URL
-    link_url = (targets.get("reddit") or {}).get("default_share_url") or SITE_URL
+    from backend.services.social_outreach.persona import GITHUB_URL, SITE_URL
+    share_urls = [
+        u.strip() for u in (reddit.get("share_urls") or [])
+        if isinstance(u, str) and u.strip()
+    ]
+    if share_urls:
+        link_url = _next_target("reddit_share_url", share_urls) or share_urls[0]
+    else:
+        link_url = (reddit.get("default_share_url") or "").strip() or GITHUB_URL or SITE_URL
     from backend.services.social_outreach.self_share import SelfShareLoop
     return _with_app_context(SelfShareLoop().run_one_pass, sub, link_url)
 

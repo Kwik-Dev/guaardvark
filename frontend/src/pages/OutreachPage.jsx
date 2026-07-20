@@ -771,6 +771,12 @@ const OutreachPage = () => {
                 <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.site_url)}>Insert site URL</Button>
                 <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.github_url)}>Insert GitHub</Button>
                 <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.gotham_rising_url)}>Insert Gotham Rising demo</Button>
+                {snippets.short_a_url && (
+                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.short_a_url)}>Insert channel Short A</Button>
+                )}
+                {snippets.short_b_url && (
+                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.short_b_url)}>Insert channel Short B</Button>
+                )}
                 <Divider sx={{ my: 1 }} />
                 <Typography variant="caption" color="text.secondary">Feature blurbs</Typography>
                 {snippets.feature_blurbs && Object.entries(snippets.feature_blurbs).map(([k, v]) => (
