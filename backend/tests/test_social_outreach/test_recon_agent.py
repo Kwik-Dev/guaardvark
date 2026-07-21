@@ -515,7 +515,8 @@ def test_scout_youtube_treats_grader_skipped_as_pass(app):
 def test_tick_recon_youtube_no_targets_returns_skipped():
     """Beat tick with empty keyword_profiles returns skipped without raising."""
     from backend.tasks.social_outreach_tasks import tick_recon_youtube
-    with patch("backend.tasks.social_outreach_tasks._load_targets", return_value={}):
+    with patch("backend.services.social_outreach.kill_switch.is_enabled", return_value=True), \
+            patch("backend.tasks.social_outreach_tasks._load_targets", return_value={}):
         result = tick_recon_youtube.run()
         assert result == {"skipped": True, "reason": "no_targets"}
 

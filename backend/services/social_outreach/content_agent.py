@@ -165,11 +165,17 @@ class ContentAgent:
                 )
             else:
                 thread_context = _build_thread_context(payload)
+                # YouTube outbound comments market the GitHub repo on relevant
+                # videos (Ollama, ComfyUI, voice, coding agents, …). Reddit
+                # comments stay soft-mention unless a caller opts in.
+                is_youtube = (row.platform or "").strip().lower() == "youtube"
                 result = persona.draft_outreach_text(
                     platform=row.platform,
                     context={"thread_context": thread_context, "url": row.target_url},
                     mode="comment",
                     feature_hint=feature_hint,
+                    include_link=is_youtube,
+                    link_url=persona.GITHUB_URL if is_youtube else None,
                 )
         except Exception as e:
             logger.warning("ContentAgent.draft_candidate %s: persona call raised: %s", audit_id, e)

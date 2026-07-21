@@ -422,10 +422,15 @@ const OutreachPage = () => {
     setBusy(true);
     setError(null); setInfo(null);
     try {
+      const body = { platform: passPlatform };
+      // YouTube: scout keyword_profiles then immediately draft (GitHub CTA).
+      if (passPlatform === "youtube") {
+        body.chain_draft = true;
+      }
       const r = await fetch(`${BASE_URL}/social-outreach/run-pass`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform: passPlatform }),
+        body: JSON.stringify(body),
       });
       if (!r.ok) {
         const errBody = await r.json().catch(() => ({}));
@@ -651,9 +656,9 @@ const OutreachPage = () => {
                 </Button>
               </Tooltip>
             </Stack>
-            <Stack direction="row" spacing={0.5} sx={{ mb: 1.25 }}>
+            <Stack direction="row" spacing={0.5} sx={{ mb: 1.25, flexWrap: "wrap" }}>
               <Tooltip title="Add a Reddit outreach pass to the Job Queue (next sub from targets.json) — drafts land here when it's done">
-                <span style={{ flex: 1 }}>
+                <span style={{ flex: 1, minWidth: "30%" }}>
                   <Button
                     fullWidth
                     size="small"
@@ -667,8 +672,23 @@ const OutreachPage = () => {
                   </Button>
                 </span>
               </Tooltip>
+              <Tooltip title="Scout YouTube for videos matching feature keyword profiles (Ollama, ComfyUI, voice, coding agents, …), then draft GitHub-linked comments into this queue">
+                <span style={{ flex: 1, minWidth: "30%" }}>
+                  <Button
+                    fullWidth
+                    size="small"
+                    variant="text"
+                    startIcon={<PlayArrowIcon />}
+                    disabled={busy || !status?.enabled}
+                    onClick={() => handleRunPass("youtube")}
+                    sx={{ textTransform: "none", justifyContent: "flex-start", fontSize: "0.75rem" }}
+                  >
+                    YouTube pass
+                  </Button>
+                </span>
+              </Tooltip>
               <Tooltip title="Add a self-share pass to the Job Queue — submits a link post to the next round-robin sub">
-                <span style={{ flex: 1 }}>
+                <span style={{ flex: 1, minWidth: "30%" }}>
                   <Button
                     fullWidth
                     size="small"
@@ -684,8 +704,8 @@ const OutreachPage = () => {
               </Tooltip>
             </Stack>
             <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 1, fontSize: "0.65rem" }}>
-              Discord cog auto-polls every 10 min — no manual trigger needed. Prefer chat/CLI:
-              /outreach comment on youtube videos regarding …
+              YouTube pass scouts feature categories then drafts comments with the GitHub link for your approval.
+              Chat/CLI also works: /outreach comment on youtube videos regarding Ollama
             </Typography>
             {approved.length > 0 && (
               <Alert severity="info" sx={{ mb: 1, py: 0 }}>

@@ -85,27 +85,42 @@ FEATURE_BLURBS = {
     "local_ai": "everything runs locally on your hardware — no cloud, no API keys",
     "screen_control": "the agent sees your screen and drives apps via vision + servo, not just chat",
     "video_gen": "video generation pipeline runs on a single desktop GPU (Gotham Rising + channel Shorts were made with it)",
+    "comfyui": "ComfyUI-friendly local workflows for image and video gen on one desktop GPU",
+    "stable_diffusion": "local Stable Diffusion / image pipelines without cloud queues",
     "open_source_github": "MIT-licensed on GitHub — clone it, run it locally, no cloud account",
     "upscaling": "image and video upscaling to 4K/8K locally",
     "rag": "RAG over your own documents, indexed locally with LlamaIndex + Postgres",
+    "embeddings": "local embeddings (Ollama / Qwen) for RAG — vectors stay on your machine",
     "three_tier_brain": "three-tier neural routing — reflexes fire under 100ms, instinct in one LLM call, deliberation only when the problem actually needs it",
     "swarms": "parallel Claude/Ollama agents in isolated git worktrees with a real dependency DAG",
+    "coding": "local coding agents with real tools — edit, test, and ship without sending your repo to the cloud",
     "voice": "voice interface so you can talk to it",
+    "voice_cloning": "local voice cloning / TTS (Piper, Bark, RVC-style) — no cloud voice API",
+    "load_balancing": "multi-model / GPU-aware load balancing for local inference",
     "ollama_native": "uses Ollama as the default LLM backend, with a pluggable abstraction so you're not locked in",
     "open_source": "MIT-licensed, self-hostable, no telemetry",
 }
 
 # Words/phrases in a thread that suggest a feature is relevant. Order matters
-# (first match wins).
+# (first match wins) — put specific angles before broad ones.
 RELEVANCE_KEYWORDS = [
-    (r"\b(ollama|local\s*llm|llama\.cpp|self\s*host(ed)?|local\s*ai)\b", "local_ai"),
-    (r"\b(screen\s*control|computer\s*use|browser\s*agent|automate\s*click|gui\s*agent)\b", "screen_control"),
-    (r"\b(comfy\s*ui|comfyui|stable\s*diffusion|video\s*gen|text2video|sora|runway)\b", "video_gen"),
-    (r"\b(upscal(e|ing)|esrgan|4k|8k)\b", "upscaling"),
+    (r"\b(rvc|so[\s-]?vits|voice\s*clon(e|ing)|xtts|openvoice)\b", "voice_cloning"),
+    (r"\b(piper|bark\s*tts|coqui|local\s*tts)\b", "voice_cloning"),
+    (r"\b(whisper|speech[\s-]?to[\s-]?text|stt)\b", "voice"),
+    (r"\b(voice|tts|text[\s-]?to[\s-]?speech)\b", "voice"),
+    (r"\b(embedd(ing|ings)|qwen3?\s*embed|nomic[\s-]?embed|vector\s*embed)\b", "embeddings"),
     (r"\b(rag|retrieval|llamaindex|vector\s*db|chat\s*with\s*docs)\b", "rag"),
+    (r"\b(load\s*balanc|multi[\s-]?gpu|vllm|tensor\s*parallel|model\s*router)\b", "load_balancing"),
+    (r"\b(comfy\s*ui|comfyui)\b", "comfyui"),
+    (r"\b(stable\s*diffusion|automatic1111|a1111|forge\s*ui|sdxl|flux\.1)\b", "stable_diffusion"),
+    (r"\b(video\s*gen|text2video|hunyuan|wan\s*2|sora|runway|offline\s*video)\b", "video_gen"),
+    (r"\b(coding\s*agent|code\s*agent|aider|continue\.dev|local\s*copilot|ai\s*coding)\b", "coding"),
+    (r"\b(screen\s*control|computer\s*use|browser\s*agent|automate\s*click|gui\s*agent|agent\s*tools)\b", "screen_control"),
     (r"\b(swarm|multi[\s-]?agent|parallel\s*agent|crewai|autogen)\b", "swarms"),
-    (r"\b(voice|whisper|tts|speech)\b", "voice"),
+    (r"\b(upscal(e|ing)|esrgan|4k|8k)\b", "upscaling"),
     (r"\b(react\s*loop|tool\s*use|agent\s*router|routing\s*engine)\b", "three_tier_brain"),
+    (r"\b(github\.com|open[\s-]?source|self[\s-]?host(able|ed)?\s*ai\s*workstation)\b", "open_source_github"),
+    (r"\b(ollama|local\s*llm|llama\.cpp|self\s*host(ed)?|local\s*ai|offline\s*ai)\b", "local_ai"),
 ]
 
 # Framing prepended to PITCH.md when generating outward-facing copy. The
@@ -360,6 +375,7 @@ def _build_user_prompt(
     feature_hint: Optional[str],
     tone: Optional[str] = None,
     include_link: bool = False,
+    link_url: Optional[str] = None,
 ) -> str:
     """Compose the user-side prompt for the LLM.
 
@@ -369,14 +385,10 @@ def _build_user_prompt(
     is annotation, not instruction — the model is free to ignore it if
     a different point fits the thread better.
 
-    `include_link=True` flips the "mention is optional" default to
-    "include the guaardvark.com URL where it fits." The grade gate still
-    applies — drafts that need a hard sell to fit the link will come back
-    at low grade, and the caller can decide whether to queue them anyway.
+    `include_link=True` asks for a natural cite of `link_url` (default
+    GitHub for YouTube comments, site otherwise). Low-grade spam still
+    fails the gate.
     """
-    # find_relevant_feature returns None on no match; that's now allowed
-    # to propagate (instead of defaulting to "local_ai" which would falsely
-    # imply local AI is the relevant angle for every off-topic thread).
     feature = feature_hint or find_relevant_feature(thread_context)
     hint_block = ""
     if feature:
@@ -387,13 +399,17 @@ def _build_user_prompt(
     tone_guide = TONE_GUIDES.get((tone or "default").lower(), "").strip()
     tone_block = f"\nTONE OVERRIDE: {tone_guide}\n" if tone_guide else ""
 
+    cite = (link_url or "").strip() or (GITHUB_URL if (platform or "").lower() == "youtube" else SITE_URL)
+
     if include_link:
         closing_line = (
             f"Draft a comment for this thread. Lead with real value about "
-            f"the topic, then include a link to {SITE_URL} where it fits "
+            f"the topic, then include a link to {cite} where it fits "
             f"naturally — one short mention of Guaardvark plus the URL. "
-            f"If you can't make the link feel natural, set grade < 0.7 "
-            f"(the human reviewer would rather hold than ship spam)."
+            f"Prefer the GitHub repo when the viewer might want to try or "
+            f"clone the project. If you can't make the link feel natural, "
+            f"set grade < 0.7 (the human reviewer would rather hold than "
+            f"ship spam)."
         )
     else:
         closing_line = (
@@ -414,6 +430,22 @@ THREAD CONTEXT:
 
 Respond with JSON: {{"draft": "...", "grade": 0.0-1.0, "reason": "..."}}.
 """
+
+
+def _draft_already_has_cta(draft_text: str, link_url: str) -> bool:
+    """True if draft already cites the CTA link or a known Guaardvark surface."""
+    lower = (draft_text or "").lower()
+    if "guaardvark.com" in lower or "github.com/guaardvark" in lower:
+        return True
+    needle = (link_url or "").strip().lower()
+    if needle and needle in lower:
+        return True
+    # Accept short forms / watch vs shorts variants of the same video id.
+    if "youtube.com/" in needle or "youtu.be/" in needle:
+        vid = re.search(r"(?:shorts/|watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})", needle)
+        if vid and vid.group(1).lower() in lower:
+            return True
+    return False
 
 
 def _unpack_reddit_share(result: Dict[str, Any]) -> Tuple[str, str]:
@@ -479,6 +511,7 @@ def draft_outreach_text(
     llm: Optional[Any] = None,
     campaign: str = "v253",
     include_link: bool = False,
+    link_url: Optional[str] = None,
 ) -> dict:
     """Unified entry point for all outreach LLM calls.
 
@@ -489,7 +522,7 @@ def draft_outreach_text(
     - rationale/reason: explanation
 
     Args:
-        platform: "reddit", "discord", "facebook", etc.
+        platform: "reddit", "discord", "facebook", "youtube", etc.
         context: dict with keys depending on mode:
             - comment mode: {"url", "title", "body", "thread_context"}
             - share mode: {"target", "link_url"}
@@ -499,17 +532,17 @@ def draft_outreach_text(
         llm: optional LLM callable (for testing)
         campaign: UTM campaign tag (default "v253")
         include_link: comment-mode only. When True the user prompt asks the
-            persona to include a guaardvark.com URL where it fits naturally
-            (the apply_utm_tags pass then tags it). The grade gate still
-            applies — a forced-feeling link is supposed to grade < 0.7.
+            persona to include ``link_url`` (default GitHub for YouTube,
+            site otherwise) where it fits naturally.
+        link_url: CTA URL when include_link is True.
     """
     if llm is None:
         llm = _ollama_json_chat
     
     if mode == "share":
         target = context.get("target", "(unspecified)")
-        link_url = context.get("link_url", SITE_URL)
-        prompt = _build_share_prompt(platform, target, link_url)
+        share_link = context.get("link_url", SITE_URL)
+        prompt = _build_share_prompt(platform, target, share_link)
         # Use the share-specific system block — the comment-focused one
         # (_compose_outward_facing_system) tells the model to skip when
         # there's "no thread to add value to," which makes it refuse
@@ -521,7 +554,7 @@ def draft_outreach_text(
             draft_text = json.dumps({
                 "title": title,
                 "body": body,
-                "link_url": link_url,
+                "link_url": share_link,
             })
         else:
             draft_text = result.get("draft", "") or result.get("body", "")
@@ -555,6 +588,10 @@ def draft_outreach_text(
             title = context.get("title", "")
             body = context.get("body", "")
             thread_context = f"{title}\n\n{body}"
+
+        cta = (link_url or context.get("link_url") or "").strip()
+        if not cta:
+            cta = GITHUB_URL if (platform or "").lower() == "youtube" else SITE_URL
         
         prompt = _build_user_prompt(
             platform=platform,
@@ -563,6 +600,7 @@ def draft_outreach_text(
             feature_hint=feature_hint,
             tone=tone,
             include_link=include_link,
+            link_url=cta,
         )
         result = llm(_compose_outward_facing_system(), prompt)
         draft_text = result.get("draft", "") or result.get("comment", "")
@@ -573,8 +611,8 @@ def draft_outreach_text(
         # this hardening, so we honor the contract. Skip when the draft is
         # empty (model declined entirely — appending a bare URL would just
         # be a link drop, which is exactly what we don't want).
-        if include_link and draft_text.strip() and "guaardvark.com" not in draft_text.lower():
-            draft_text = draft_text.rstrip() + f"\n\n{SITE_URL}"
+        if include_link and draft_text.strip() and not _draft_already_has_cta(draft_text, cta):
+            draft_text = draft_text.rstrip() + f"\n\n{cta}"
     
     # Apply UTM tags to any guaardvark.com links
     draft_text = apply_utm_tags(draft_text, platform=platform, campaign=campaign)
