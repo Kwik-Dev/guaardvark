@@ -594,6 +594,7 @@ def _dispatch_scout(classification: dict[str, Any], *, created_by: str) -> dict[
                 queue_outreach_run(
                     "recon",
                     subreddit=classification.get("subreddit"),
+                    keyword_profiles=topics or None,
                     created_by=created_by,
                 )
             )
@@ -633,20 +634,24 @@ def _queued_ok(
 ) -> dict[str, Any]:
     task_ids = [q.get("task_id") for q in queued if q.get("task_id")]
     topic_part = f" topics={topics}" if topics else ""
-    summary = (
-        f"Queued outreach for {plat}/{act}{topic_part} → task(s) {task_ids}. "
-        + (
-            "Drafts will land in the Outreach queue for your approval (supervised)."
-            if kill_switch.is_supervised() or classification.get("chain_draft")
-            else "Check the Outreach queue / Activity for progress."
+    supervised = kill_switch.is_supervised()
+    if supervised:
+        post_note = (
+            "Scout/draft only — drafts land in the Outreach queue; "
+            "Approve before anything posts (supervised)."
         )
-    )
+    else:
+        post_note = (
+            "Unsupervised: eligible drafts (grade ≥ 0.7, cadence OK) may "
+            "auto-approve for the ~60s poster. Review the Outreach queue."
+        )
+    summary = f"Queued outreach for {plat}/{act}{topic_part} → task(s) {task_ids}. {post_note}"
     return _base(
         classification,
         ok=True,
         queued=queued,
         task_ids=task_ids,
         message=summary,
-        supervised=kill_switch.is_supervised(),
-        posts_require_approve=True,
+        supervised=supervised,
+        posts_require_approve=supervised,
     )

@@ -231,7 +231,13 @@ def test_draft_batch_processes_oldest_candidates_first(app):
             side_effect=lambda text, **k: text,
         ):
             report = ContentAgent().draft_batch(batch_size=2)
-        assert report == {"considered": 2, "drafted": 2, "rejected": 0, "errors": 0}
+        assert report == {
+        "considered": 2,
+        "drafted": 2,
+        "approved": 0,
+        "rejected": 0,
+        "errors": 0,
+    }
         # Oldest two are drafted, newest is still candidate
         db.session.expire_all()
         statuses = sorted([r.status for r in SocialOutreachLog.query.all()])
@@ -297,3 +303,63 @@ def test_unsupported_action_is_rejected(app):
         updated = SocialOutreachLog.query.get(row.id)
         assert updated.status == "rejected"
         assert "abort" in updated.abort_reason
+
+
+def test_draft_candidate_unsupervised_promotes_to_approved(app):
+    """Parity with /draft-comment would_post: enabled + not supervised +
+    grade OK + cadence OK → approved (not drafted)."""
+    with app.app_context():
+        row = _make_candidate(platform="youtube")
+        with patch(
+            "backend.services.social_outreach.content_agent.persona.draft_outreach_text",
+            return_value={
+                "draft": "Solid Ollama walkthrough — https://github.com/guaardvark/guaardvark",
+                "grade": 0.9,
+            },
+        ), patch(
+            "backend.services.social_outreach.content_agent.persona.apply_utm_tags",
+            side_effect=lambda text, **k: text,
+        ), patch(
+            "backend.services.social_outreach.kill_switch.is_enabled",
+            return_value=True,
+        ), patch(
+            "backend.services.social_outreach.kill_switch.is_supervised",
+            return_value=False,
+        ), patch(
+            "backend.services.social_outreach.kill_switch.cadence_allows_post",
+            return_value=(True, None),
+        ):
+            outcome = ContentAgent().draft_candidate(row.id)
+        assert outcome["status"] == "approved"
+        assert outcome.get("would_post") is True
+        db.session.expire_all()
+        updated = SocialOutreachLog.query.get(row.id)
+        assert updated.status == "approved"
+
+
+def test_draft_candidate_supervised_stays_drafted(app):
+    """Even with kill on + cadence OK, supervised keeps status=drafted."""
+    with app.app_context():
+        row = _make_candidate(platform="youtube")
+        with patch(
+            "backend.services.social_outreach.content_agent.persona.draft_outreach_text",
+            return_value={"draft": "Nice local AI tip.", "grade": 0.88},
+        ), patch(
+            "backend.services.social_outreach.content_agent.persona.apply_utm_tags",
+            side_effect=lambda text, **k: text,
+        ), patch(
+            "backend.services.social_outreach.kill_switch.is_enabled",
+            return_value=True,
+        ), patch(
+            "backend.services.social_outreach.kill_switch.is_supervised",
+            return_value=True,
+        ), patch(
+            "backend.services.social_outreach.kill_switch.cadence_allows_post",
+            return_value=(True, None),
+        ):
+            outcome = ContentAgent().draft_candidate(row.id)
+        assert outcome["status"] == "drafted"
+        assert outcome.get("would_post") is False
+        db.session.expire_all()
+        updated = SocialOutreachLog.query.get(row.id)
+        assert updated.status == "drafted"

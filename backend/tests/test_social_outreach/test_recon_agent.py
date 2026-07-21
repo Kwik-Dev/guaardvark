@@ -243,6 +243,65 @@ def test_scout_reddit_treats_grader_skipped_as_pass(app):
         assert report["skipped_by_llm"] == 0
 
 
+def test_topic_matches_text_helpers():
+    from backend.services.social_outreach.recon import (
+        prefer_subreddit_for_topics,
+        topic_matches_text,
+    )
+
+    assert topic_matches_text("Running ComfyUI offline", ["ComfyUI"]) is True
+    assert topic_matches_text("Cooking pasta recipes", ["ComfyUI"]) is False
+    assert topic_matches_text("anything", None) is True
+    assert topic_matches_text("anything", []) is True
+    assert prefer_subreddit_for_topics(
+        ["LocalLLaMA", "StableDiffusion", "comfyui"],
+        ["ComfyUI workflows"],
+    ) == "comfyui"
+    assert prefer_subreddit_for_topics(["LocalLLaMA"], ["gardening"]) is None
+
+
+def test_scout_reddit_topic_filters_skip_off_topic(app):
+    """NL topic_filters keep on-topic threads and skip others after relevance."""
+    on_topic = RedditThread(
+        id="t1",
+        url="https://www.reddit.com/r/comfyui/comments/t1/x/",
+        permalink="https://www.reddit.com/r/comfyui/comments/t1/x/",
+        subreddit="comfyui",
+        title="Best ComfyUI workflows for SDXL",
+        selftext="Looking for offline tips",
+        score=200,
+        num_comments=10,
+        created_utc=0.0,
+    )
+    off_topic = RedditThread(
+        id="t2",
+        url="https://www.reddit.com/r/comfyui/comments/t2/x/",
+        permalink="https://www.reddit.com/r/comfyui/comments/t2/x/",
+        subreddit="comfyui",
+        title="Anyone tried Ollama locally?",
+        selftext="RAM questions",
+        score=150,
+        num_comments=8,
+        created_utc=0.0,
+    )
+    with app.app_context(), \
+            patch("backend.services.social_outreach.recon.kill_switch.is_enabled", return_value=True), \
+            patch("backend.services.social_outreach.recon.fetch_subreddit_rules", return_value=[]), \
+            patch("backend.services.social_outreach.recon.fetch_hot_threads",
+                  return_value=[on_topic, off_topic]), \
+            patch("backend.services.social_outreach.recon.fetch_thread_comments", return_value=[]), \
+            patch("backend.services.social_outreach.recon.thread_is_relevant",
+                  return_value="local_ai"):
+        report = RecondAgent().scout_reddit(
+            "comfyui",
+            topic_filters=["ComfyUI"],
+        )
+        assert report["candidates"] == 1
+        assert report["skipped_topic"] == 1
+        row = SocialOutreachLog.query.one()
+        assert row.target_thread_id == "t1"
+
+
 def test_dedupe_includes_drafted_and_posted_not_aborted(app):
     """Sanity-check the constant — drafted/approved/posted dedupe in,
     aborted/rejected don't (they're dead-ends and may be retryable)."""
@@ -629,13 +688,19 @@ def test_content_agent_drafts_youtube_candidate_without_crashing(app):
             ), patch(
                 "backend.services.social_outreach.content_agent.external_grader.grade_draft_externally",
                 return_value={"grade": 0.0, "skipped": True, "reason": "no_grader_model_loaded"},
+            ), patch(
+                "backend.services.social_outreach.kill_switch.is_enabled",
+                return_value=True,
+            ), patch(
+                "backend.services.social_outreach.kill_switch.is_supervised",
+                return_value=True,
             ):
             result = ContentAgent().draft_candidate(row.id)
         # The exact status depends on grade thresholds; what we care about is
         # that the call did NOT raise (the BLOCKER would surface as a crash
         # or a JSON-decode failure when _build_thread_context reads the YT
-        # payload). Status should be "drafted" or "rejected", not "missing".
-        assert result["status"] in ("drafted", "rejected")
+        # payload). Supervised → drafted|rejected (not approved).
+        assert result["status"] in ("drafted", "rejected", "approved")
         # The selftext_preview alias should have flowed through to the
         # thread_context that the persona drafter saw — which is the whole
         # point of the alias fix.

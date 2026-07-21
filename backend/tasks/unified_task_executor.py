@@ -572,17 +572,23 @@ def execute_unified_task(self, task_id: int):
                         )
                 elif task_type == 'social_outreach_recon':
                     subreddit = (wf.get('subreddit') or '').strip()
+                    topic_filters = list(wf.get("keyword_profiles") or [])
                     if not subreddit:
                         from backend.tasks.social_outreach_tasks import _load_targets, _next_target
+                        from backend.services.social_outreach.recon import prefer_subreddit_for_topics
                         targets = _load_targets()
                         subs = (targets.get("reddit") or {}).get("outreach_subs") or []
-                        subreddit = _next_target("reddit_recon", subs) or ''
+                        preferred = prefer_subreddit_for_topics(subs, topic_filters)
+                        subreddit = preferred or _next_target("reddit_recon", subs) or ''
                     if not subreddit:
                         output = {"skipped": True, "reason": "no_targets"}
                     else:
                         update_progress(35, f"Scouting Outreach candidates in r/{subreddit}")
                         from backend.services.social_outreach.recon import RecondAgent
-                        output = RecondAgent().scout_reddit(subreddit)
+                        output = RecondAgent().scout_reddit(
+                            subreddit,
+                            topic_filters=topic_filters or None,
+                        )
                 elif task_type == 'social_outreach_youtube':
                     from backend.services.social_outreach.recon import RecondAgent
                     from backend.tasks.social_outreach_tasks import _load_targets, _next_target

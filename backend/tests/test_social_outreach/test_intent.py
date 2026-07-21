@@ -223,3 +223,67 @@ def test_intent_api_refuse_is_http_200(app, client):
     body = resp.get_json()
     assert body["refused"] is True
     assert body["ok"] is False
+
+
+def test_scout_reddit_passes_keyword_profiles_as_topics(app):
+    """NL Reddit scout must forward topics into recon job config."""
+    from backend.services.social_outreach.intent import execute_outreach_intent
+
+    clf = _classifier({
+        "intent": "scout_and_draft",
+        "platform": "reddit",
+        "topics": ["ComfyUI", "Stable Diffusion"],
+        "draft_id": None,
+        "confidence": 0.91,
+        "reason": "user asked to market on reddit about those topics",
+    })
+
+    with app.app_context(), \
+         patch("backend.services.social_outreach.intent.kill_switch.is_enabled", return_value=True), \
+         patch("backend.services.social_outreach.intent.kill_switch.is_supervised", return_value=True), \
+         patch("backend.services.social_outreach.intent.queue_outreach_run") as mock_q:
+
+        mock_q.return_value = {"task_id": 99, "job_id": "task_99", "message": "queued"}
+        result = execute_outreach_intent(
+            "market Guaardvark on reddit about ComfyUI",
+            created_by="test",
+            classifier=clf,
+        )
+        assert result["ok"] is True
+        assert result.get("posts_require_approve") is True
+        # recon + draft (chain_draft default true)
+        assert mock_q.call_count == 2
+        recon_call = mock_q.call_args_list[0]
+        assert recon_call[0][0] == "recon"
+        assert "ComfyUI" in (recon_call[1].get("keyword_profiles") or [])
+        assert "Stable Diffusion" in (recon_call[1].get("keyword_profiles") or [])
+
+
+def test_queued_ok_unsupervised_does_not_claim_posts_require_approve(app):
+    from backend.services.social_outreach.intent import execute_outreach_intent
+
+    clf = _classifier({
+        "intent": "scout_and_draft",
+        "platform": "youtube",
+        "topics": ["Ollama"],
+        "draft_id": None,
+        "confidence": 0.9,
+        "reason": "scout",
+    })
+
+    with app.app_context(), \
+         patch("backend.services.social_outreach.intent.kill_switch.is_enabled", return_value=True), \
+         patch("backend.services.social_outreach.intent.kill_switch.is_supervised", return_value=False), \
+         patch("backend.services.social_outreach.intent.queue_outreach_run") as mock_q:
+        mock_q.return_value = {"task_id": 3, "job_id": "task_3"}
+        result = execute_outreach_intent(
+            "comment on youtube about Ollama",
+            created_by="test",
+            classifier=clf,
+        )
+        assert result["ok"] is True
+        assert result.get("posts_require_approve") is False
+        assert "Unsupervised" in (result.get("message") or "")
+        assert "Approve" not in (result.get("message") or "") or "auto-approve" in (
+            result.get("message") or ""
+        ).lower()

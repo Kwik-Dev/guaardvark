@@ -178,19 +178,26 @@ def mark_drafted_from_candidate(
     draft_text: str,
     grade_score: Optional[float] = None,
     posted_text: Optional[str] = None,
+    status: str = "drafted",
 ) -> bool:
-    """Promote a candidate row to drafted — Content agent writes the real
-    text over the JSON recon payload, replaces score with draft grade.
+    """Promote a candidate row to drafted (or approved) — Content agent writes
+    the real text over the JSON recon payload, replaces score with draft grade.
     `posted_text` is the UTM-tagged version Content prepared so Phase 3
     doesn't have to re-tag at servo time.
+
+    ``status`` is normally ``\"drafted\"``. When unsupervised + grade/cadence
+    allow, Content passes ``\"approved\"`` so tick_process_approved_drafts can
+    post (parity with /draft-comment's would_post path).
     """
+    if status not in ("drafted", "approved"):
+        status = "drafted"
     try:
         from backend.models import SocialOutreachLog
         with _detached_audit_session() as s:
             row = s.get(SocialOutreachLog, audit_id)
             if row is None or row.status != "candidate":
                 return False
-            row.status = "drafted"
+            row.status = status
             row.draft_text = draft_text
             if grade_score is not None:
                 row.grade_score = grade_score

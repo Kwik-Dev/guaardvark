@@ -52,6 +52,56 @@ Same skipped-as-pass behavior as the Content grader: if the relevance model
 is unavailable we fall through to keyword-only behavior."""
 
 
+def topic_matches_text(text: str, topic_filters: Optional[list[str]]) -> bool:
+    """True when no filters are set, or any topic/token appears in ``text``.
+
+    Used so NL phrases like "market on reddit about ComfyUI" actually constrain
+    which hot threads become candidates (after the structural RELEVANCE_KEYWORDS
+    match). Empty/None filters → pass-through (legacy behavior).
+    """
+    if not topic_filters:
+        return True
+    blob = (text or "").lower()
+    if not blob:
+        return False
+    for topic in topic_filters:
+        t = (topic or "").strip().lower()
+        if not t:
+            continue
+        if t in blob:
+            return True
+        for tok in re.split(r"[\s\-/_,]+", t):
+            if len(tok) >= 3 and tok in blob:
+                return True
+    return False
+
+
+def prefer_subreddit_for_topics(
+    subs: list[str],
+    topics: Optional[list[str]],
+) -> Optional[str]:
+    """Pick the first configured sub whose name overlaps an NL topic.
+
+    Falls back to None so callers can use round-robin ``_next_target``.
+    """
+    if not topics or not subs:
+        return None
+    for sub in subs:
+        sl = (sub or "").strip().lower()
+        if not sl:
+            continue
+        for topic in topics:
+            t = (topic or "").strip().lower()
+            if not t:
+                continue
+            if t in sl or sl in t:
+                return sub
+            for tok in re.split(r"[\s\-/_,]+", t):
+                if len(tok) >= 3 and tok in sl:
+                    return sub
+    return None
+
+
 class RecondAgent:
     """One pass = scout one platform/sub, emit up to N candidate rows.
 
@@ -63,6 +113,7 @@ class RecondAgent:
         self,
         subreddit: str,
         max_candidates: int = DEFAULT_CANDIDATES_PER_PASS,
+        topic_filters: Optional[list[str]] = None,
     ) -> dict:
         """Scout one subreddit's hot list, emit candidate rows for relevant threads.
 
@@ -73,6 +124,7 @@ class RecondAgent:
                 "candidates": int,        # rows emitted
                 "skipped_dedupe": int,    # already-touched threads
                 "skipped_irrelevant": int,
+                "skipped_topic": int,     # failed NL topic_filters overlap
                 "reason": Optional[str],  # set when the whole pass is no-op
             }
         """
@@ -83,6 +135,7 @@ class RecondAgent:
             "skipped_dedupe": 0,
             "skipped_irrelevant": 0,
             "skipped_by_llm": 0,
+            "skipped_topic": 0,
             "reason": None,
         }
 
@@ -122,6 +175,13 @@ class RecondAgent:
             feature_hint = thread_is_relevant(thread, comments)
             if feature_hint is None:
                 report["skipped_irrelevant"] += 1
+                continue
+
+            # NL topic filter (optional) — e.g. "ComfyUI" from chat intent.
+            # Structural RELEVANCE_KEYWORDS already passed; this narrows further.
+            blob = f"{thread.title} {thread.selftext or ''}"
+            if not topic_matches_text(blob, topic_filters):
+                report["skipped_topic"] += 1
                 continue
 
             # LLM relevance judge — the keyword match got us here, but it

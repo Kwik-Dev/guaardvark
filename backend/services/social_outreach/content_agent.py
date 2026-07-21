@@ -12,7 +12,10 @@ payload (which Recon populates with title, selftext_preview, top_comments,
 feature_hint). No live Reddit fetch — that was Recon's job.
 
 Doesn't post. Doesn't call the servo. The servo path is Phase 3 (Outreach),
-which already exists in tick_process_approved_drafts.
+which already exists in tick_process_approved_drafts. When unsupervised
+(kill on, not supervised, grade ≥ MIN_GRADE, cadence OK), Content promotes
+straight to ``approved`` — same would_post gate as /draft-comment — so
+YouTube chain-draft matches Reddit unsupervised behavior.
 """
 
 from __future__ import annotations
@@ -256,11 +259,29 @@ class ContentAgent:
         # doesn't have to re-tag at servo time. Goes through the audit
         # helper (detached session) so we don't accidentally flush other
         # caller-pending mutations under celery.
+        #
+        # Unsupervised parity with /draft-comment: when enabled, not
+        # supervised, grade ≥ MIN_GRADE, and cadence allows → approved
+        # so tick_process_approved_drafts can post without a human click.
+        from backend.services.social_outreach import kill_switch
+        enabled = kill_switch.is_enabled()
+        supervised = kill_switch.is_supervised()
+        cadence_ok, cadence_reason = kill_switch.cadence_allows_post(row.platform)
+        would_post = (
+            enabled
+            and not supervised
+            and cadence_ok
+            and grade >= MIN_GRADE
+            and bool((draft_text or "").strip())
+        )
+        promote_status = "approved" if would_post else "drafted"
+
         promoted = audit.mark_drafted_from_candidate(
             audit_id,
             draft_text=stored_draft,
             grade_score=grade,
             posted_text=posted_text,
+            status=promote_status,
         )
         if not promoted:
             # Race: someone else moved it out of "candidate" between fetch
@@ -286,10 +307,19 @@ class ContentAgent:
                 "external_grade": ext.get("grade"),
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),
+                "promoted_status": promote_status,
+                "would_post": would_post,
+                "cadence_block": cadence_reason if not cadence_ok else None,
             },
         )
 
-        return {"status": "drafted", "grade": grade, "reason": None, "external": ext}
+        return {
+            "status": promote_status,
+            "grade": grade,
+            "reason": None,
+            "external": ext,
+            "would_post": would_post,
+        }
 
     def draft_batch(self, batch_size: int = DEFAULT_BATCH_SIZE) -> dict:
         """Walk the oldest N candidate rows and draft each. Returns a summary.
@@ -308,6 +338,7 @@ class ContentAgent:
         report = {
             "considered": len(rows),
             "drafted": 0,
+            "approved": 0,
             "rejected": 0,
             "errors": 0,
         }
@@ -316,6 +347,8 @@ class ContentAgent:
             status = outcome["status"]
             if status == "drafted":
                 report["drafted"] += 1
+            elif status == "approved":
+                report["approved"] += 1
             elif status == "rejected":
                 report["rejected"] += 1
             else:

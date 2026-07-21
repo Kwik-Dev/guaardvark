@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { Link as RouterLink } from "react-router-dom";
 import {
   Alert,
   Box,
@@ -8,6 +9,7 @@ import {
   Dialog,
   DialogActions,
   DialogContent,
+  DialogContentText,
   DialogTitle,
   Divider,
   FormControl,
@@ -43,14 +45,13 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import TravelExploreIcon from "@mui/icons-material/TravelExplore";
 import * as outreachApi from "../api/outreachService";
 
-const BASE_URL = outreachApi.getOutreachBaseUrl();
-
 // Per-platform character soft-caps used by the pre-flight panel.
-// Sources: reddit (10000 comment), twitter (280), discord (2000), facebook (~5000),
-// internal note (no cap — display only).
+// Sources: reddit (10000 comment), youtube (~10000), twitter (280), discord (2000),
+// facebook (~5000), internal note (no cap — display only).
 const PLATFORM_LIMITS = {
   reddit: { max: 10000, label: "Reddit comment" },
   reddit_share: { max: 300, label: "Reddit title" },
+  youtube: { max: 10000, label: "YouTube comment" },
   discord: { max: 2000, label: "Discord message" },
   facebook: { max: 5000, label: "Facebook post" },
   twitter: { max: 280, label: "Tweet" },
@@ -67,15 +68,23 @@ const TONE_OPTIONS = [
 ];
 
 // `auto: true` = the backend has a real posting path for this platform
-// (Reddit servo loop, Discord cog). For the others the queue is the only
-// output today — flagged in the modal so users aren't surprised when an
-// approved Twitter draft never goes anywhere.
+// (Reddit/YouTube servo via tick_process_approved_drafts, Discord cog).
+// For the others the queue is the only output today — flagged in the modal
+// so users aren't surprised when an approved Twitter draft never goes anywhere.
 const PLATFORM_OPTIONS = [
   { value: "reddit", label: "Reddit comment", auto: true },
+  { value: "youtube", label: "YouTube comment", auto: true },
   { value: "discord", label: "Discord message", auto: true },
   { value: "twitter", label: "Twitter / X", auto: false },
   { value: "facebook", label: "Facebook", auto: false },
   { value: "internal", label: "Internal note", auto: false },
+];
+
+const CHAT_EXAMPLES = [
+  "comment on youtube videos about Ollama",
+  "market Guaardvark on reddit about ComfyUI",
+  "/outreach youtube ollama",
+  "/outreach status",
 ];
 
 function countWords(text) {
@@ -111,6 +120,9 @@ const OutreachPage = () => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [info, setInfo] = useState(null);
+  const [passTopics, setPassTopics] = useState("");
+  const [lastTaskId, setLastTaskId] = useState(null);
+  const [killConfirmOpen, setKillConfirmOpen] = useState(false);
 
   // Citation tool
   const [citationUrl, setCitationUrl] = useState("");
@@ -344,23 +356,16 @@ const OutreachPage = () => {
     setNdBusy(true);
     setError(null);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/draft-comment`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          platform: ndPlatform,
-          mode: ndAction === "share" ? "share" : "comment",
-          thread_context: ndContext,
-          target_url: ndUrl || null,
-          target_thread_id: ndThreadId || null,
-          tone,
-          // share-mode needs these — harmless to send for comment mode
-          share_target: ndThreadId || ndUrl || "(unspecified)",
-          share_link: ndUrl || undefined,
-        }),
+      const out = await outreachApi.draftComment({
+        platform: ndPlatform,
+        mode: ndAction === "share" ? "share" : "comment",
+        thread_context: ndContext,
+        target_url: ndUrl || null,
+        target_thread_id: ndThreadId || null,
+        tone,
+        share_target: ndThreadId || ndUrl || "(unspecified)",
+        share_link: ndUrl || undefined,
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const out = await r.json();
       setNdBody(out.draft || "");
       setNdGrade(out.grade != null ? Number(out.grade) : null);
       // /draft-comment also persisted a row. Remember its id so Save PATCHes
@@ -384,27 +389,17 @@ const OutreachPage = () => {
     try {
       // If the LLM seeded this draft, /draft-comment already wrote the row —
       // PATCH it. Otherwise POST a fresh row.
-      const url = ndSeededId
-        ? `${BASE_URL}/social-outreach/drafts/${ndSeededId}`
-        : `${BASE_URL}/social-outreach/drafts`;
-      const method = ndSeededId ? "PATCH" : "POST";
-      const r = await fetch(url, {
-        method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          platform: ndPlatform,
-          action: ndAction,
-          target_url: ndUrl || null,
-          target_thread_id: ndThreadId || null,
-          draft_text: ndBody,
-          ...(ndSeededId ? {} : { grade_score: ndGrade }),
-        }),
-      });
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.error || `HTTP ${r.status}`);
-      }
-      const row = await r.json();
+      const payload = {
+        platform: ndPlatform,
+        action: ndAction,
+        target_url: ndUrl || null,
+        target_thread_id: ndThreadId || null,
+        draft_text: ndBody,
+        ...(ndSeededId ? {} : { grade_score: ndGrade }),
+      };
+      const row = ndSeededId
+        ? await outreachApi.patchDraft(ndSeededId, payload)
+        : await outreachApi.createDraft(payload);
       setNewDraftOpen(false);
       setInfo(`${ndSeededId ? "Updated" : "Created"} draft #${row.id}. It's in the queue waiting for approval.`);
       await fetchQueue();
@@ -427,22 +422,22 @@ const OutreachPage = () => {
       if (passPlatform === "youtube") {
         body.chain_draft = true;
       }
-      const r = await fetch(`${BASE_URL}/social-outreach/run-pass`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.error || `HTTP ${r.status}`);
+      const topicList = passTopics
+        .split(/[,;\n]+/)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      if (topicList.length && (passPlatform === "youtube" || passPlatform === "reddit")) {
+        body.topics = topicList;
       }
-      const out = await r.json();
+      const out = await outreachApi.runPass(body);
+      if (out.task_id != null) setLastTaskId(out.task_id);
       setInfo(out.message || `${passPlatform} pass added to the Job Queue as task #${out.task_id}.`);
       // Pass takes seconds-to-minutes on the worker. Refresh once now and
       // again shortly after so the new draft lands in the visible queue
       // without making the user hit the refresh icon.
       await fetchQueue();
-      setTimeout(() => { fetchQueue(); fetchStatus(); }, 8000);
+      await fetchApproved();
+      setTimeout(() => { fetchQueue(); fetchApproved(); fetchStatus(); }, 8000);
     } catch (e) {
       setError(`run-pass failed: ${e.message}`);
     } finally {
@@ -459,16 +454,7 @@ const OutreachPage = () => {
     setNdScouting(true);
     if (!silent) setError(null);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/scout-url`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      if (!r.ok) {
-        const errBody = await r.json().catch(() => ({}));
-        throw new Error(errBody.error || `HTTP ${r.status}`);
-      }
-      const out = await r.json();
+      const out = await outreachApi.scoutUrl(url);
       // The scout returns thread_context already concatenated. If the user
       // hasn't typed anything in Topic, fill it. Otherwise leave their input
       // alone — surface a hint instead.
@@ -487,8 +473,14 @@ const OutreachPage = () => {
     }
   };
 
-  const handleEnableToggle = async () => {
+  const handleEnableToggle = () => {
     if (!status) return;
+    setKillConfirmOpen(true);
+  };
+
+  const confirmEnableToggle = async () => {
+    if (!status) return;
+    setKillConfirmOpen(false);
     setBusy(true);
     try {
       if (status.enabled) {
@@ -537,13 +529,7 @@ const OutreachPage = () => {
     setCitationLoading(true);
     setCitationMeta(null);
     try {
-      const r = await fetch(`${BASE_URL}/social-outreach/fetch-meta`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: citationUrl.trim() }),
-      });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setCitationMeta(await r.json());
+      setCitationMeta(await outreachApi.fetchMeta(citationUrl.trim()));
     } catch (e) {
       setError(`citation fetch failed: ${e.message}`);
     } finally {
@@ -574,52 +560,72 @@ const OutreachPage = () => {
     // preserved across renders.
     <Box sx={{ p: 2, height: "100%", overflowY: "auto" }}>
       {/* Top status bar */}
-      <Paper sx={{ p: 1.5, mb: 2, display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
-        <Typography variant="h6" sx={{ mr: 2 }}>Outreach</Typography>
-        {status ? (
-          <>
-            <Chip
-              size="small"
-              icon={<PowerSettingsNewIcon />}
-              color={status.enabled ? "success" : "default"}
-              label={status.enabled ? "Enabled" : "Disabled"}
-              onClick={handleEnableToggle}
-              variant="filled"
-            />
-            <Chip
-              size="small"
-              icon={<VisibilityIcon />}
-              color={status.supervised ? "warning" : "default"}
-              label={status.supervised ? "Supervised (queue only)" : "Unsupervised"}
-              onClick={handleSupervisedToggle}
-              variant="outlined"
-            />
-            {status.cadence && Object.entries(status.cadence).map(([p, c]) => (
+      <Paper sx={{ p: 1.5, mb: 2 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
+          <Typography variant="h6" sx={{ mr: 2 }}>Outreach</Typography>
+          {status ? (
+            <>
               <Chip
-                key={p}
                 size="small"
-                variant="outlined"
-                color={c.redis === "unavailable" ? "warning" : "default"}
-                label={
-                  c.redis === "unavailable"
-                    ? `${p}: Redis offline`
-                    : `${p}: ${c.posts_in_24h ?? 0}/${c.daily_cap ?? 0} today` +
-                      (c.last_post_seconds_ago != null
-                        ? ` · last ${Math.floor(c.last_post_seconds_ago / 60)}m ago`
-                        : "")
-                }
+                icon={<PowerSettingsNewIcon />}
+                color={status.enabled ? "success" : "default"}
+                label={status.enabled ? "Enabled" : "Disabled"}
+                onClick={handleEnableToggle}
+                variant="filled"
               />
-            ))}
-          </>
-        ) : (
-          <CircularProgress size={16} />
+              <Chip
+                size="small"
+                icon={<VisibilityIcon />}
+                color={status.supervised ? "warning" : "default"}
+                label={status.supervised ? "Supervised (queue only)" : "Unsupervised"}
+                onClick={handleSupervisedToggle}
+                variant="outlined"
+              />
+              {status.cadence && Object.entries(status.cadence).map(([p, c]) => (
+                <Chip
+                  key={p}
+                  size="small"
+                  variant="outlined"
+                  color={c.redis === "unavailable" ? "warning" : "default"}
+                  label={
+                    c.redis === "unavailable"
+                      ? `${p}: Redis offline`
+                      : `${p}: ${c.posts_in_24h ?? 0}/${c.daily_cap ?? 0} today` +
+                        (c.last_post_seconds_ago != null
+                          ? ` · last ${Math.floor(c.last_post_seconds_ago / 60)}m ago`
+                          : "")
+                  }
+                />
+              ))}
+            </>
+          ) : (
+            <CircularProgress size={16} />
+          )}
+          <Box sx={{ flex: 1 }} />
+          {lastTaskId != null && (
+            <Typography variant="caption" color="text.secondary">
+              Last pass:{" "}
+              <Link component={RouterLink} to="/tasks" underline="hover">
+                Job #{lastTaskId}
+              </Link>
+            </Typography>
+          )}
+          <Tooltip title="Refresh">
+            <IconButton
+              size="small"
+              onClick={() => { fetchStatus(); fetchQueue(); fetchApproved(); fetchHistory(); fetchSnippets(); }}
+            >
+              <RefreshIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
+        {status && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, fontSize: "0.7rem" }}>
+            {status.supervised
+              ? "Supervised: scout/draft runs queue comments here — Approve before anything posts."
+              : "Unsupervised: eligible drafts (grade ≥ 0.7, cadence OK) auto-queue for the ~60s poster. Use with care."}
+          </Typography>
         )}
-        <Box sx={{ flex: 1 }} />
-        <Tooltip title="Refresh">
-          <IconButton size="small" onClick={() => { fetchStatus(); fetchQueue(); }}>
-            <RefreshIcon />
-          </IconButton>
-        </Tooltip>
       </Paper>
 
       {error && (
@@ -656,7 +662,7 @@ const OutreachPage = () => {
                 </Button>
               </Tooltip>
             </Stack>
-            <Stack direction="row" spacing={0.5} sx={{ mb: 1.25, flexWrap: "wrap" }}>
+            <Stack direction="row" spacing={0.5} sx={{ mb: 1, flexWrap: "wrap" }}>
               <Tooltip title="Add a Reddit outreach pass to the Job Queue (next sub from targets.json) — drafts land here when it's done">
                 <span style={{ flex: 1, minWidth: "30%" }}>
                   <Button
@@ -703,17 +709,67 @@ const OutreachPage = () => {
                 </span>
               </Tooltip>
             </Stack>
+            <TextField
+              size="small"
+              fullWidth
+              label="Pass topics (optional)"
+              placeholder="Ollama, ComfyUI, voice cloning"
+              value={passTopics}
+              onChange={(e) => setPassTopics(e.target.value)}
+              helperText="Comma-separated. Used by YouTube keyword scout and Reddit thread filter."
+              sx={{ mb: 1, "& .MuiFormHelperText-root": { fontSize: "0.65rem", mx: 0 } }}
+              inputProps={{ "aria-label": "Pass topics" }}
+            />
             <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 1, fontSize: "0.65rem" }}>
               YouTube pass scouts feature categories then drafts comments with the GitHub link for your approval.
-              Chat/CLI also works: /outreach comment on youtube videos regarding Ollama
             </Typography>
             {approved.length > 0 && (
-              <Alert severity="info" sx={{ mb: 1, py: 0 }}>
-                {approved.length} approved waiting to post
-                {approved.slice(0, 3).map((r) => ` #${r.id}`).join("")}
-                {approved.length > 3 ? "…" : ""}
-              </Alert>
+              <Paper variant="outlined" sx={{ mb: 1, p: 1 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, display: "block", mb: 0.5 }}>
+                  Approved — posting next ({approved.length})
+                </Typography>
+                <List dense disablePadding sx={{ maxHeight: 140, overflowY: "auto" }}>
+                  {approved.map((r) => (
+                    <ListItemButton key={r.id} sx={{ py: 0.25, borderRadius: 1 }} disabled>
+                      <ListItemText
+                        primary={
+                          <Stack direction="row" spacing={0.75} alignItems="center">
+                            <Chip size="small" label={`#${r.id}`} sx={{ height: 16, fontSize: "0.6rem" }} />
+                            <Chip size="small" label={r.platform} sx={{ height: 16, fontSize: "0.6rem" }} />
+                            <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: 140 }}>
+                              {r.target_url || r.target_thread_id || "—"}
+                            </Typography>
+                          </Stack>
+                        }
+                        secondary={
+                          r.created_at
+                            ? new Date(r.created_at).toLocaleString()
+                            : undefined
+                        }
+                        secondaryTypographyProps={{ variant: "caption", fontSize: "0.6rem" }}
+                      />
+                    </ListItemButton>
+                  ))}
+                </List>
+              </Paper>
             )}
+            <Paper variant="outlined" sx={{ mb: 1, p: 1 }}>
+              <Typography variant="caption" sx={{ fontWeight: 600, display: "block", mb: 0.5 }}>
+                Ask in chat
+              </Typography>
+              <Stack spacing={0.25}>
+                {CHAT_EXAMPLES.map((ex) => (
+                  <Typography
+                    key={ex}
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ fontFamily: "monospace", fontSize: "0.65rem" }}
+                  >
+                    {ex}
+                  </Typography>
+                ))}
+              </Stack>
+            </Paper>
             {loadingQueue ? (
               <CircularProgress size={20} />
             ) : queue.length === 0 ? (
@@ -1263,6 +1319,30 @@ const OutreachPage = () => {
             disabled={ndBusy || !ndBody.trim()}
           >
             {ndSeededId ? "Save (update seeded row)" : "Save draft"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={killConfirmOpen} onClose={() => setKillConfirmOpen(false)}>
+        <DialogTitle>
+          {status?.enabled ? "Disable outreach?" : "Enable outreach?"}
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {status?.enabled
+              ? "This turns the kill switch off: scheduled ticks and new passes stop. Approved drafts will not post until you enable again."
+              : "This turns outreach on. Supervised mode still requires Approve before posts go out."}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setKillConfirmOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            color={status?.enabled ? "warning" : "success"}
+            onClick={confirmEnableToggle}
+            autoFocus
+          >
+            {status?.enabled ? "Disable" : "Enable"}
           </Button>
         </DialogActions>
       </Dialog>

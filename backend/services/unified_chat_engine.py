@@ -303,7 +303,12 @@ TOOL_CONTEXT_KEYWORDS = {
                   "subreddit", "youtube", "youtube comment", "comment on youtube",
                   "comment on some youtube", "youtube videos", "comfyui",
                   "offline ai", "local llm", "local ai", "video comment",
-                  "scout youtube"], OUTREACH_TOOLS),
+                  "scout youtube",
+                  # Marketing phrasings Dean (and chat) actually say
+                  "market", "market on youtube", "market on reddit",
+                  "promote", "advertise", "share the github",
+                  "guaardvark on youtube", "guaardvark on reddit",
+                  "post comments on youtube", "github on youtube"], OUTREACH_TOOLS),
     "file": (["bulk file", "rename files", "process all files", "watch file",
               "watch the file", "monitor file", "all files in", "every file in",
               "batch file"], FILE_TOOLS),
