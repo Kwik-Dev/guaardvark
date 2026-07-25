@@ -328,12 +328,15 @@ const CastMemberPage = () => {
   const handleRebuildBible = async () => {
     const refs = subject?.ref_image_paths || [];
     if (!refs.length) {
-      setError('Upload reference photos on Training Data first, then rebuild the bible.');
+      setError('Upload reference photos on Training Data first, then sync identity from photos.');
       return;
     }
     setRebuildingBible(true); setError(null);
     try {
-      const data = await rebuildBibleFromRefs(subjectId, { refresh_captions: true });
+      const data = await rebuildBibleFromRefs(subjectId, {
+        refresh_captions: true,
+        refresh_sample_prompts: true,
+      });
       if (data.subject) setSubject(data.subject);
       if (data.bible != null) {
         setForm((prev) => ({ ...prev, bible: data.bible || '', trigger_word: data.trigger_word || prev.trigger_word }));
@@ -344,7 +347,7 @@ const CastMemberPage = () => {
       setError(
         e.response?.data?.message
         || e.response?.data?.error
-        || 'Rebuild bible from photos failed (is Ollama up?).',
+        || 'Sync identity from photos failed (is Ollama up?).',
       );
     } finally {
       setRebuildingBible(false);
@@ -658,18 +661,26 @@ const CastMemberPage = () => {
               <TextField label="Voice ID (optional)" value={form.voice_id}
                          onChange={(e) => setForm({ ...form, voice_id: e.target.value })} fullWidth
                          helperText="Audio Foundry voice for narration. Leave blank to clear." />
-              <TextField label="Description" value={form.description} multiline rows={3}
-                         onChange={(e) => setForm({ ...form, description: e.target.value })} fullWidth />
+              <TextField
+                label="Description"
+                value={form.description}
+                multiline
+                rows={3}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                fullWidth
+                helperText="Optional brief for FilmCrew / script invent only. Not used for Cast generate when reference photos exist."
+              />
               <Divider sx={{ my: 1 }} />
               <Typography variant="overline" color="text.secondary">Identity bible</Typography>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                Appearance text used for base (no-LoRA) generates. Rebuild from photos so it matches
-                your refs (sunglasses, shaved head, build). Train LoRA does not rewrite this.
+                Appearance from your photos (vision sync). Used for base (no-LoRA) generates.
+                With a trained LoRA, generate uses trigger + short marks only. Train does not rewrite this.
               </Typography>
               {(subject.ref_image_paths || []).length > 0 && !subject.bible_vision_grounded && (
                 <Alert severity="warning" sx={{ mb: 1 }}>
-                  Bible may not match your photos — use <strong>Rebuild bible from photos</strong>
-                  so Generate / captions stop inventing a different look.
+                  {subject.bible_manual_override
+                    ? <>Manual edit — use <strong>Sync identity from photos</strong> to re-ground from refs.</>
+                    : <>Bible may not match your photos — use <strong>Sync identity from photos</strong> so Generate / captions stop inventing a different look.</>}
                 </Alert>
               )}
               <TextField
@@ -679,7 +690,13 @@ const CastMemberPage = () => {
                 multiline
                 rows={5}
                 fullWidth
-                helperText={subject.bible_vision_grounded ? 'Vision-grounded from reference photos' : 'Not yet rebuilt from photos'}
+                helperText={
+                  subject.bible_vision_grounded
+                    ? 'Vision-grounded from reference photos'
+                    : subject.bible_manual_override
+                      ? 'Manual edit — Sync identity from photos to re-ground'
+                      : 'Not yet synced from photos'
+                }
               />
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
                 <Button variant="contained" onClick={handleSave} disabled={saving || !form.name}>
@@ -690,7 +707,7 @@ const CastMemberPage = () => {
                   onClick={handleRebuildBible}
                   disabled={rebuildingBible || busy || !(subject.ref_image_paths || []).length}
                 >
-                  {rebuildingBible ? 'Scanning photos…' : 'Rebuild bible from photos'}
+                  {rebuildingBible ? 'Scanning photos…' : 'Sync identity from photos'}
                 </Button>
                 {savedNote && <Typography variant="caption" color="success.main">Saved</Typography>}
               </Box>
@@ -743,8 +760,8 @@ const CastMemberPage = () => {
           <Divider sx={{ my: 3 }} />
           <Typography variant="subtitle2" gutterBottom>Training hyperparameters</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            Train base must match generate base. Z-Image is the product default; SDXL Legacy
-            is the only fully wired trainer today. Steps blank = auto from image count.
+            Train base must match generate base. Z-Image Turbo is the product default and
+            trains + generates; SDXL Legacy is the older path. Steps blank = auto from image count.
           </Typography>
           <Grid container spacing={2} sx={{ mb: 2, maxWidth: 720 }}>
             <Grid item xs={12} sm={8}>
@@ -928,12 +945,12 @@ const CastMemberPage = () => {
                 {subject.base_model_name ? <> · {subject.base_model_name}</> : null}
                 ). <strong>Re-plan sheet</strong> refreshes angles only (keeps vision bible when
                 refs exist). <strong>Train LoRA</strong> trains weights — it does not rewrite the bible.
-                Use Overview → <strong>Rebuild bible from photos</strong> to rescan appearance.
+                Use Overview → <strong>Sync identity from photos</strong> to rescan appearance.
               </>
             ) : (
               <>
                 <strong>Generate base sheet (no LoRA)</strong> — uses the identity bible in prompts.
-                Rebuild the bible from photos on Overview first if you uploaded refs.
+                Sync identity from photos on Overview first if you uploaded refs.
                 <strong> Train LoRA</strong> trains the adapter; it does not invent or rewrite the bible.
                 <strong> Re-plan sheet</strong> refreshes shot angles (keeps vision bible when refs exist).
               </>
@@ -941,8 +958,10 @@ const CastMemberPage = () => {
           </Typography>
           {(subject.ref_image_paths || []).length > 0 && !subject.bible_vision_grounded && (
             <Alert severity="warning" sx={{ mb: 2 }}>
-              Bible may not match your photos — go to Overview and click{' '}
-              <strong>Rebuild bible from photos</strong> before training or generating.
+              {subject.bible_manual_override
+                ? <>Manual bible edit — go to Overview and <strong>Sync identity from photos</strong> before training or generating.</>
+                : <>Bible may not match your photos — go to Overview and click{' '}
+                  <strong>Sync identity from photos</strong> before training or generating.</>}
             </Alert>
           )}
           {subject.smoke_identity?.ok && (
@@ -985,7 +1004,7 @@ const CastMemberPage = () => {
             <Typography color="text.secondary" sx={{ p: 4, textAlign: 'center' }}>
               {samples.some((s) => s.promoted_to_training)
                 ? <>All generated keepers are on the <b>Training Data</b> tab (promoted after train). Plan or generate a new batch here when you want more variety.</>
-                : <>No reference sheet yet. Click <b>Plan reference sheet</b> to have the Casting Director write a
+                : <>No reference sheet yet. Click <b>Plan reference sheet</b> to plan shot angles (identity from photos / LoRA). The planner will write a
                   frozen identity bible + ~32 varied shot prompts, then <b>Generate images</b>.</>}
             </Typography>
           ) : (
@@ -1098,7 +1117,7 @@ const CastMemberPage = () => {
         <DialogContent>
           <TextField label="Prompt override (optional)" value={regenPrompt}
                      onChange={(e) => setRegenPrompt(e.target.value)} fullWidth multiline rows={4} sx={{ mt: 1 }}
-                     helperText="Tweak the prompt to fix an off-model sample. Leave as-is to just re-roll the seed." />
+                     helperText="This is the frozen shot prompt; Sync identity / Re-plan updates it. Leave as-is to re-roll the seed." />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setRegenTarget(null)}>Cancel</Button>

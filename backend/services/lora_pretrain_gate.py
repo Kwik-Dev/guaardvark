@@ -41,26 +41,90 @@ def is_bare_caption(caption: str, token: str) -> bool:
     return False
 
 
+def _is_ref_path(subject: Subject, image_path: str) -> bool:
+    refs = set(subject.ref_image_paths or [])
+    if image_path in refs:
+        return True
+    try:
+        return "cast_refs" in Path(image_path).parts
+    except Exception:
+        return False
+
+
+def _is_class_anchored(caption: str, token: str, class_token: str = "person") -> bool:
+    """True when caption looks like ``a photo of {token}, {class}…`` (not invent prose)."""
+    t = (caption or "").strip().lower()
+    tok = (token or "").strip().lower()
+    if not t or not tok:
+        return False
+    if t.startswith(f"a photo of {tok}"):
+        return True
+    cls = (class_token or "person").strip().lower()
+    return f"a photo of {tok}, {cls}" in t
+
+
+def _read_sidecar(image_path: str) -> str:
+    sidecar = Path(image_path).with_suffix(".txt")
+    if not sidecar.is_file():
+        return ""
+    try:
+        return sidecar.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _caption_for_path(
     subject: Subject,
     image_path: str,
     sample_by_path: dict[str, SubjectSample],
 ) -> str:
+    """Prefer vision/ref sidecars; never feed invented full Sample.image_prompt into train."""
+    from backend.services.character_identity_prompt import (
+        compose_identity_core,
+        resolve_class_token,
+        short_marks_from_subject,
+    )
+
     token = (subject.trigger_word or "").strip() or subject.name
-    smp = sample_by_path.get(image_path)
-    if smp and smp.image_prompt and smp.image_prompt.strip():
-        cap = smp.image_prompt.strip()
-        if token.lower() not in cap.lower():
-            return f"a photo of {token}, {cap}"
-        return cap
-    sidecar = Path(image_path).with_suffix(".txt")
-    if sidecar.is_file():
-        text = sidecar.read_text(encoding="utf-8").strip()
+    cls = resolve_class_token(subject)
+    marks = short_marks_from_subject(subject)
+    bare = compose_identity_core(token, cls, marks)
+
+    # 1) Reference photos: sidecar first, then class-anchored bare fallback.
+    if _is_ref_path(subject, image_path):
+        text = _read_sidecar(image_path)
         if text:
             if token.lower() not in text.lower():
-                return f"a photo of {token}, {text}"
+                return f"{bare}, {text}" if bare else text
             return text
-    return f"a photo of {token}"
+        return bare
+
+    # 2) Approved generated samples: class-anchored sidecar, else recompose from
+    #    identity core + angle fields — never pass legacy invented image_prompt.
+    smp = sample_by_path.get(image_path)
+    text = _read_sidecar(image_path)
+    if text and _is_class_anchored(text, token, cls):
+        return text
+
+    if smp is not None:
+        try:
+            from backend.services.cast_identity_manager import recompose_sample_prompt
+            return recompose_sample_prompt(
+                smp,
+                trigger=token,
+                class_token=cls,
+                identity_marks=marks,
+                include_bible=False,
+                bible="",
+            )
+        except Exception:
+            pass
+
+    if text:
+        if token.lower() not in text.lower():
+            return f"{bare}, {text}" if bare else text
+        return text
+    return bare
 
 
 def build_training_captions(

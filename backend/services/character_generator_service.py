@@ -235,8 +235,11 @@ def generate_character_sheet(
         except Exception as e:  # noqa: BLE001
             log.warning("generate_character_sheet: vision bible failed: %s", e)
 
-    # Never invent via BibleDesigner when invent_bible=False (trained LoRA path).
-    # Prefer vision when refs exist and bible is empty.
+    # Refs ⇒ never invent appearance via BibleDesigner (identity from photos).
+    if refs:
+        invent_bible = False
+
+    # Prefer vision when refs exist and bible is empty / prefer_vision_bible.
     if not bible and refs and (prefer_vision_bible or not invent_bible):
         _try_vision_bible()
 

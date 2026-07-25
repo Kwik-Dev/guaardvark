@@ -108,6 +108,15 @@ def _serialize(s: Subject) -> dict:
         "bible_vision_grounded": bool(
             (getattr(s, "training_settings_json", None) or {}).get("bible_vision_grounded")
         ),
+        "bible_manual_override": bool(
+            (getattr(s, "training_settings_json", None) or {}).get("bible_manual_override")
+        ),
+        "bible_identity_marks": (
+            (getattr(s, "training_settings_json", None) or {}).get("bible_identity_marks") or ""
+        ),
+        "class_token": (
+            (getattr(s, "training_settings_json", None) or {}).get("class_token") or None
+        ),
     }
 
 
@@ -240,11 +249,15 @@ def update_subject(subject_id):
     if "trigger_word" in body:
         s.trigger_word = (body["trigger_word"] or "").strip() or None
     if "bible" in body:
-        # Editable identity bible (Overview). Manual edits clear the vision flag
-        # only when the text changes from the stored vision bible — keep flag if
-        # user is polishing the same grounded text.
+        # Manual Overview edit: mark as operator override so UI warns to re-sync.
         new_bible = (body["bible"] or "").strip() or None
+        old = (s.bible or "").strip() or None
         s.bible = new_bible
+        if new_bible != old:
+            cfg = dict(s.training_settings_json or {})
+            cfg["bible_vision_grounded"] = False
+            cfg["bible_manual_override"] = True
+            s.training_settings_json = cfg
     if "training_settings" in body:
         from backend.services.lora_training_settings import normalize_training_settings
         s.training_settings_json = normalize_training_settings(body["training_settings"])
@@ -431,11 +444,32 @@ def upload_subject_refs(subject_id):
         except Exception as e:
             caption_summary = {"error": str(e)[:200]}
 
+    # Auto-sync identity when we have enough refs and are not yet vision-grounded.
+    identity_sync = {}
+    refs_now = list(s.ref_image_paths or [])
+    if len(refs_now) >= 3:
+        try:
+            from backend.services.cast_identity_manager import (
+                ensure_vision_identity,
+                subject_is_vision_grounded,
+            )
+            if not subject_is_vision_grounded(s):
+                identity_sync = ensure_vision_identity(s)
+                db.session.refresh(s)
+            else:
+                # Already grounded: still refresh captions for new uploads only
+                # (ensure_subject_image_captions above). Full vision re-scan is
+                # operator-driven via Sync identity from photos.
+                identity_sync = {"ok": True, "synced": False, "skipped": "already_grounded"}
+        except Exception as e:  # noqa: BLE001
+            identity_sync = {"ok": False, "error": str(e)[:200]}
+
     return jsonify({
         "subject": _serialize(s),
         "saved": saved_paths,
         "skipped": skipped,
         "captions": caption_summary,
+        "identity_sync": identity_sync,
     })
 
 
@@ -455,11 +489,10 @@ def upload_subject_refs(subject_id):
 
 @bp.post("/subjects/<int:subject_id>/bible/from-refs")
 def rebuild_bible_from_refs(subject_id: int):
-    """Vision-rescan reference photos and rewrite Subject.bible to match pixels.
+    """Sync identity from photos (Cast Identity Manager).
 
-    This is the correct "rescan images → rewrite bible" action — Train LoRA does
-    not rewrite the bible. Also refreshes .txt caption sidecars with short
-    vision-derived identity marks (not invented prose).
+    Vision-rescan refs → rewrite bible/marks → refresh captions → recompose
+    sheet sample prompts. Train LoRA does not rewrite the bible.
     """
     s = db.session.get(Subject, subject_id)
     if s is None:
@@ -467,31 +500,26 @@ def rebuild_bible_from_refs(subject_id: int):
     if not (s.ref_image_paths or []):
         return jsonify({"error": "no_refs", "message": "Upload reference photos first."}), 400
 
-    from backend.services.plugin_bridge import PluginUnavailable, ensure_plugins_for_stage
-    try:
-        ensure_plugins_for_stage("cast", "planning", job_critical=True)
-    except PluginUnavailable as e:
-        return jsonify({"error": f"Ollama could not be started for vision bible: {e}"}), 503
-
-    from backend.services.character_bible_from_refs import (
-        persist_bible_on_subject,
-        rebuild_bible_from_refs as _rebuild,
-    )
     body = request.get_json(silent=True) or {}
-    refresh = body.get("refresh_captions", True)
-    result = _rebuild(
-        list(s.ref_image_paths or []),
-        name=s.name or "",
-        trigger_word=s.trigger_word or None,
+    from backend.services.cast_identity_manager import sync_identity_from_refs
+    result = sync_identity_from_refs(
+        subject_id,
+        refresh_captions=bool(body.get("refresh_captions", True)),
+        refresh_sample_prompts=bool(body.get("refresh_sample_prompts", True)),
     )
     if not result.get("ok"):
-        return jsonify({"error": result.get("error") or "bible_rebuild_failed", **result}), 502
-    persist_bible_on_subject(s, result, refresh_captions=bool(refresh))
+        status = 503 if result.get("error") == "ollama_unavailable" else 502
+        if result.get("error") == "no_refs":
+            status = 400
+        return jsonify(result), status
     db.session.refresh(s)
-    return jsonify({"subject": _serialize(s), **{k: result.get(k) for k in (
-        "bible", "trigger_word", "tags", "marks", "sources_used",
-        "captions_refreshed", "vision_grounded",
-    )}})
+    return jsonify({
+        "subject": _serialize(s),
+        **{k: result.get(k) for k in (
+            "bible", "trigger_word", "tags", "marks", "class_token",
+            "sources_used", "captions_refreshed", "samples_updated", "vision_grounded",
+        )},
+    })
 
 
 @bp.post("/subjects/<int:subject_id>/plan")
@@ -521,8 +549,24 @@ def plan_character(subject_id: int):
             "error": f"Ollama/ComfyUI could not be started for Cast: {e}",
         }), 503
 
-    from backend.services.character_generator_service import generate_character_sheet
     refs = list(s.ref_image_paths or [])
+    if refs:
+        from backend.services.cast_identity_manager import ensure_vision_identity
+        sync = ensure_vision_identity(s)
+        if not sync.get("ok"):
+            status = 503 if sync.get("error") == "ollama_unavailable" else 502
+            return jsonify({
+                "error": sync.get("error") or "identity_sync_failed",
+                "message": sync.get("message") or "Vision identity sync failed before plan.",
+                **{k: sync.get(k) for k in ("tags", "sources_used") if sync.get(k)},
+            }), status
+        db.session.refresh(s)
+
+    from backend.services.character_generator_service import generate_character_sheet
+    from backend.services.character_identity_prompt import (
+        resolve_class_token,
+        short_marks_from_subject,
+    )
     plan = generate_character_sheet(
         name=s.name,
         kind=s.kind,
@@ -532,9 +576,11 @@ def plan_character(subject_id: int):
         existing_bible=s.bible or None,
         ref_image_paths=refs,
         prefer_vision_bible=bool(refs),
-        include_bible_in_prompts=True,
-        # Refs present: angles only — do not invent a new look from name/description.
+        include_bible_in_prompts=not bool(s.lora_path),
+        # Refs present: never invent a look from name/description.
         invent_bible=not bool(refs),
+        class_token=resolve_class_token(s),
+        identity_marks=short_marks_from_subject(s),
     )
 
     if plan.get("error"):
@@ -731,6 +777,20 @@ def dispatch_train(subject_id: int):
     merged = dict(s.training_settings_json or {})
     merged.update(train_cfg)
     s.training_settings_json = merged
+
+    # Vision-ground identity before captions/train when refs exist and ungrounded.
+    refs = list(s.ref_image_paths or [])
+    if refs:
+        from backend.services.cast_identity_manager import ensure_vision_identity
+        sync = ensure_vision_identity(s)
+        if not sync.get("ok"):
+            status = 503 if sync.get("error") == "ollama_unavailable" else 502
+            return jsonify({
+                "error": sync.get("error") or "identity_sync_failed",
+                "message": sync.get("message")
+                or "Vision identity sync failed — fix Ollama/refs before training.",
+            }), status
+        db.session.refresh(s)
 
     # Caption any refs still missing rich .txt sidecars before the Celery train task.
     try:

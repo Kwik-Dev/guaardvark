@@ -98,27 +98,49 @@ def _dedup(seq: Iterable[str]) -> list[str]:
     return out
 
 
-def subjects_to_lock(subjects: Iterable, *, include_bible: bool = True) -> tuple[list[str], str]:
+def subjects_to_lock(
+    subjects: Iterable,
+    *,
+    include_bible: bool = True,
+    include_marks: bool = True,
+) -> tuple[list[str], str]:
     """Given trained cast Subject objects (anything with ``.lora_path``, ``.trigger_word`` /
     ``.name``, and optionally ``.bible``), return ``(lora_paths, lock_prefix)``.
 
     Only subjects that actually have a ``lora_path`` contribute — an untrained subject can't lock
-    anything. ``lock_prefix`` is ``"trigger1, trigger2, bible1, bible2"`` (triggers first so they
-    bind the LoRA, then the verbatim bibles that pin constant features like hair length). Both
-    lists are de-duplicated in order. A LoRA only locks identity when its trigger token is
-    actually present in the prompt, so the triggers go INTO the prompt, not just the loader chain.
+    anything.
+
+    When a subject has ``lora_path``, the lock is ``trigger`` + optional short vision
+    marks only — full bible paragraphs fight the adapter at keyframe time. ``include_bible``
+    is ignored for LoRA subjects (kept for API compat / no-LoRA callers should not pass
+    lora subjects). Short marks come from ``training_settings_json.bible_identity_marks``.
     """
+    from backend.services.character_identity_prompt import (
+        compose_identity_core,
+        resolve_class_token,
+        short_marks_from_subject,
+    )
+
     lora_paths: list[str] = []
-    triggers: list[str] = []
-    bibles: list[str] = []
+    lock_parts: list[str] = []
     for subj in subjects or []:
-        if getattr(subj, "lora_path", None):
-            lora_paths.append(subj.lora_path)
-            triggers.append((getattr(subj, "trigger_word", None) or getattr(subj, "name", None) or "").strip())
-            if include_bible and getattr(subj, "bible", None):
-                bibles.append(subj.bible.strip())
-    lock = ", ".join([*_dedup(triggers), *_dedup(bibles)])
-    return _dedup(lora_paths), lock
+        if not getattr(subj, "lora_path", None):
+            continue
+        lora_paths.append(subj.lora_path)
+        trigger = (
+            getattr(subj, "trigger_word", None) or getattr(subj, "name", None) or ""
+        ).strip()
+        marks = short_marks_from_subject(subj) if include_marks else ""
+        cls = resolve_class_token(subj)
+        # Prefer class-anchored core so FilmCrew/chat match Cast generate shape.
+        core = compose_identity_core(trigger, cls, marks if include_marks else "")
+        if core:
+            lock_parts.append(core)
+        elif trigger:
+            lock_parts.append(trigger)
+        # Full bible deliberately omitted when LoRA is present (include_bible no-op).
+        _ = include_bible  # API compat; do not append bible for LoRA subjects
+    return _dedup(lora_paths), ", ".join(_dedup(lock_parts))
 
 
 def apply_lock(base_prompt: str, lock_prefix: str) -> str:

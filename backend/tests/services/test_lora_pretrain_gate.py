@@ -36,6 +36,12 @@ def test_validate_cast_training_passes_with_trigger_and_framing(app):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             paths = [_write_image(tmp, f"img{i}.png") for i in range(4)]
+            # Ref captions live in sidecars (vision), not invented sample.image_prompt.
+            for i, p in enumerate(paths):
+                Path(p).with_suffix(".txt").write_text(
+                    f"a photo of hero_token, person, full body shot {i}\n",
+                    encoding="utf-8",
+                )
             s = Subject(
                 name="Hero",
                 kind="character",
@@ -43,17 +49,6 @@ def test_validate_cast_training_passes_with_trigger_and_framing(app):
                 ref_image_paths=paths,
             )
             db.session.add(s)
-            db.session.commit()
-
-            for i, p in enumerate(paths):
-                db.session.add(SubjectSample(
-                    subject_id=s.id,
-                    index=i,
-                    image_path=p,
-                    image_prompt=f"hero_token, full body shot {i}",
-                    approved=True,
-                    status="done",
-                ))
             db.session.commit()
 
             gate = validate_cast_training(s, paths)
@@ -77,11 +72,15 @@ def test_validate_cast_training_fails_on_too_few_images(app):
             assert any("at least" in f.lower() for f in gate["failures"])
 
 
-def test_build_training_captions_uses_sample_prompt(app):
+def test_build_training_captions_prefers_ref_sidecar_over_stale_sample_prompt(app):
     with app.app_context():
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             p = _write_image(tmp, "one.png")
+            Path(p).with_suffix(".txt").write_text(
+                "a photo of tok, man, shaved head, sunglasses\n",
+                encoding="utf-8",
+            )
             s = Subject(name="Hero", kind="character", trigger_word="tok", ref_image_paths=[p])
             db.session.add(s)
             db.session.commit()
@@ -89,14 +88,56 @@ def test_build_training_captions_uses_sample_prompt(app):
                 subject_id=s.id,
                 index=0,
                 image_path=p,
-                image_prompt="tok in neon alley, three-quarter view",
+                image_prompt="tok, long auburn hair, invented body, neon alley",
                 approved=True,
                 status="done",
             ))
             db.session.commit()
 
             caps = build_training_captions(s, [p])
-            assert caps[0] == "tok in neon alley, three-quarter view"
+            assert "auburn" not in caps[0].lower()
+            assert "shaved head" in caps[0].lower()
+            assert "a photo of tok" in caps[0].lower()
+
+
+def test_build_training_captions_recomposes_generated_sample_not_invented_prompt(app):
+    with app.app_context():
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            # Generated sample path — NOT in ref_image_paths
+            p = _write_image(tmp, "sample_0.png")
+            s = Subject(
+                name="Hero",
+                kind="character",
+                trigger_word="tok",
+                ref_image_paths=[],
+                training_settings_json={
+                    "class_token": "man",
+                    "bible_identity_marks": "shaved head",
+                },
+            )
+            db.session.add(s)
+            db.session.commit()
+            db.session.add(SubjectSample(
+                subject_id=s.id,
+                index=0,
+                image_path=p,
+                angle="face-forward",
+                framing="close-up",
+                expression="neutral",
+                lighting="soft",
+                scene="stadium",
+                image_prompt="tok, long auburn hair, cartoon bear, stadium",
+                approved=True,
+                status="done",
+            ))
+            db.session.commit()
+
+            caps = build_training_captions(s, [p])
+            assert "auburn" not in caps[0].lower()
+            assert "cartoon bear" not in caps[0].lower()
+            assert "a photo of tok" in caps[0].lower()
+            assert "man" in caps[0].lower()
 
 
 def test_is_bare_caption_and_coverage_warns(app):

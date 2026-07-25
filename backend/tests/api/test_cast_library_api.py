@@ -140,6 +140,28 @@ def test_patch_unknown_subject_404(client):
     assert resp.status_code == 404
 
 
+def test_patch_bible_clears_vision_grounded_sets_manual_override(client):
+    from backend.models import db, Subject
+    subj = client.post("/api/cast-library/subjects", json={
+        "kind": "character", "name": "Dean", "bible": "vision look",
+    }).get_json()
+    s = db.session.get(Subject, subj["id"])
+    s.training_settings_json = {
+        "bible_vision_grounded": True,
+        "bible_identity_marks": "shaved head",
+    }
+    db.session.commit()
+
+    patch = client.patch(f"/api/cast-library/subjects/{subj['id']}", json={
+        "bible": "manual rewrite with different hair",
+    })
+    assert patch.status_code == 200
+    data = patch.get_json()
+    assert data["bible_vision_grounded"] is False
+    assert data["bible_manual_override"] is True
+    assert data["bible"] == "manual rewrite with different hair"
+
+
 # --- upload-refs ---------------------------------------------------------
 
 def _png_bytes() -> bytes:

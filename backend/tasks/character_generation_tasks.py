@@ -299,8 +299,24 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
     # --- 1. LLM planning (GPU-free) -----------------------------------------
     # With trained LoRA: reuse stored bible, never invent a new look, and compose
     # prompts as trigger+variation only (identity from adapter).
-    # Without LoRA but with refs: vision-ground bible if empty before composing.
+    # With refs: Cast Identity Manager syncs vision bible before sheet compose;
+    # never call BibleDesigner when refs exist.
     refs = list(subject.ref_image_paths or [])
+    if refs:
+        from backend.services.cast_identity_manager import ensure_vision_identity
+        sync = ensure_vision_identity(subject)
+        if not sync.get("ok"):
+            msg = sync.get("message") or sync.get("error") or "identity_sync_failed"
+            log.error("generate_samples: identity sync failed for %s: %s", subject_id, msg)
+            if job_id:
+                try:
+                    from backend.utils.unified_progress_system import get_unified_progress
+                    get_unified_progress().error_process(job_id, msg)
+                except Exception:
+                    pass
+            return {"error": msg}
+        db.session.refresh(subject)
+
     from backend.services.character_identity_prompt import (
         resolve_class_token,
         short_marks_from_subject,
@@ -321,7 +337,7 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
         ref_image_paths=refs,
         prefer_vision_bible=bool(refs),
         include_bible_in_prompts=not bool(use_lora),
-        invent_bible=not bool(use_lora),
+        invent_bible=not bool(refs or use_lora),
         class_token=class_tok,
         identity_marks=id_marks,
     )
@@ -578,9 +594,21 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
                         )
                     row.status = "done"
                     done_count += 1
-                    # Textfile caption sidecar for SimpleTuner caption_strategy="textfile".
+                    # Textfile caption: identity-core + variation (not invented bible dump).
                     try:
-                        cap = (row.image_prompt or subject.name or "").strip()
+                        from backend.services.cast_identity_manager import (
+                            recompose_sample_prompt,
+                        )
+                        cap = recompose_sample_prompt(
+                            row,
+                            trigger=(subject.trigger_word or subject.name or "").strip(),
+                            class_token=class_tok,
+                            identity_marks=id_marks,
+                            include_bible=False,
+                            bible="",
+                        ).strip()
+                        if not cap:
+                            cap = (row.image_prompt or subject.name or "").strip()
                         if cap:
                             Path(output_path).with_suffix(".txt").write_text(
                                 cap + "\n", encoding="utf-8"
