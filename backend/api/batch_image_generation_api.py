@@ -162,7 +162,7 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
         "corrected_values": {}
     }
 
-    # Generation settings
+    # Generation settings — absolute safety bounds only (quality sliders own the rest).
     params['max_workers'] = min(max(int(data.get('max_workers', 2)), 1), 4)  # 1-4 workers
     params['preserve_order'] = bool(data.get('preserve_order', True))
     params['generate_thumbnails'] = bool(data.get('generate_thumbnails', True))
@@ -179,14 +179,29 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     model = data.get('model', 'auto')
     params['model'] = model if model in valid_models else 'auto'
 
-    # Default image parameters
+    # Default image parameters — family-aware (stills_defaults), not SD-era 512/20/7.5
+    from backend.services.stills_defaults import resolve_stills_defaults
     params['style'] = data.get('style', 'realistic')
-    params['width'] = int(data.get('width', 512))
-    params['height'] = int(data.get('height', 512))
-    params['steps'] = min(max(int(data.get('steps', 20)), 10), 50)  # 10-50 steps
+    _raw_w = data.get('width', None)
+    _raw_h = data.get('height', None)
+    _raw_steps = data.get('steps', None)
+    _raw_g = data.get('guidance', None)
+    _resolved = resolve_stills_defaults(
+        params['model'],
+        width=int(_raw_w) if _raw_w is not None else None,
+        height=int(_raw_h) if _raw_h is not None else None,
+        steps=int(_raw_steps) if _raw_steps is not None else None,
+        guidance=float(_raw_g) if _raw_g is not None else None,
+        replace_legacy_sd_markers=True,
+    )
+    params['width'] = int(_resolved['width'])
+    params['height'] = int(_resolved['height'])
+    # Absolute step bounds 1–100 — model validator recommends ranges but does not
+    # throttle quality when hard_clamp=False (FLUX / Z-Image / Krea).
+    params['steps'] = min(max(int(_resolved['steps']), 1), 100)
 
     # Guidance scale - will be validated by SettingsValidator
-    guidance = float(data.get('guidance', 7.5))
+    guidance = float(_resolved['guidance'])
 
     # Use SettingsValidator for comprehensive validation
     if service_available and settings_validator_available and get_settings_validator:
@@ -201,7 +216,8 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
                 auto_correct=True
             )
 
-            # Apply corrected values
+            # Start from user guidance; corrected_values may override hard clamps only.
+            params['guidance'] = guidance
             if validation_result.corrected_values:
                 params.update(validation_result.corrected_values)
                 validation_info["corrected_values"] = validation_result.corrected_values
@@ -219,38 +235,50 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
             for error in validation_result.errors:
                 logger.error(f"Settings validation error: {error}")
 
+            # FLUX (and any model with force_max_workers): serialize on the GPU.
+            model_info = validator.get_model_info(params['model'])
+            force_w = model_info.get("force_max_workers")
+            if force_w is not None:
+                if params['max_workers'] > int(force_w):
+                    validation_info["warnings"].append(
+                        f"{params['model']}: max_workers reduced {params['max_workers']}→{force_w} (VRAM safety)"
+                    )
+                params['max_workers'] = min(params['max_workers'], int(force_w))
+
         except Exception as e:
             logger.warning(f"Settings validation failed, using fallback: {e}")
-            # Fallback to original validation logic
-            is_sdxl = 'xl' in params['model'].lower()
+            # Fallback: only hard-correct known SDXL black-image band
+            is_sdxl = 'xl' in params['model'].lower() and 'turbo' not in params['model'].lower()
             if is_sdxl:
                 if guidance > 9.0:
                     logger.warning(f"Guidance {guidance} too high for SDXL, auto-correcting to 7.5")
                     guidance = 7.5
                     params['guidance'] = guidance
-                    validation_info["warnings"].append(f"Guidance auto-corrected to 7.5 for SDXL")
-                elif guidance < 4.0:
-                    guidance = 6.0
-                    params['guidance'] = guidance
+                    validation_info["warnings"].append("Guidance auto-corrected to 7.5 for SDXL")
+                elif guidance < 1.0:
+                    params['guidance'] = 6.0
                 else:
-                    params['guidance'] = min(max(guidance, 4.0), 9.0)
+                    params['guidance'] = guidance
             else:
-                params['guidance'] = min(max(guidance, 1.0), 15.0)
+                params['guidance'] = min(max(guidance, 0.0), 30.0)
+            if 'flux' in params['model'].lower():
+                params['max_workers'] = 1
     else:
         # Fallback validation if service not available
-        is_sdxl = 'xl' in params['model'].lower()
+        is_sdxl = 'xl' in params['model'].lower() and 'turbo' not in params['model'].lower()
         if is_sdxl:
             if guidance > 9.0:
                 logger.warning(f"Guidance {guidance} too high for SDXL, auto-correcting to 7.5")
                 guidance = 7.5
                 params['guidance'] = guidance
-            elif guidance < 4.0:
-                guidance = 6.0
-                params['guidance'] = guidance
+            elif guidance < 1.0:
+                params['guidance'] = 6.0
             else:
-                params['guidance'] = min(max(guidance, 4.0), 9.0)
+                params['guidance'] = guidance
         else:
-            params['guidance'] = min(max(guidance, 1.0), 15.0)
+            params['guidance'] = min(max(guidance, 0.0), 30.0)
+        if 'flux' in str(params.get('model', '')).lower():
+            params['max_workers'] = 1
 
     # Quality enhancement parameters
     params['content_preset'] = data.get('content_preset')  # None = auto-detect
@@ -512,12 +540,20 @@ def validate_settings():
         if not data:
             return error_response("No data provided", 400)
 
-        # Get settings to validate
-        model = data.get('model', 'sd-1.5')
-        guidance = float(data.get('guidance', 7.5))
-        steps = int(data.get('steps', 20))
-        width = int(data.get('width', 512))
-        height = int(data.get('height', 512))
+        # Get settings to validate — family defaults when omitted
+        from backend.services.stills_defaults import resolve_stills_defaults
+        model = data.get('model', 'auto')
+        _r = resolve_stills_defaults(
+            model,
+            width=int(data['width']) if data.get('width') is not None else None,
+            height=int(data['height']) if data.get('height') is not None else None,
+            steps=int(data['steps']) if data.get('steps') is not None else None,
+            guidance=float(data['guidance']) if data.get('guidance') is not None else None,
+        )
+        guidance = float(_r['guidance'])
+        steps = int(_r['steps'])
+        width = int(_r['width'])
+        height = int(_r['height'])
 
         # Use SettingsValidator
         if not settings_validator_available or not get_settings_validator:
@@ -934,6 +970,23 @@ def generate_from_prompts():
         logger.error(f"Error starting prompts batch generation: {e}")
         return error_response(str(e), 500)
 
+@batch_image_bp.route("/queue", methods=["GET"])
+def get_image_batch_queue():
+    """Snapshot of the in-process image batch queue for the UI panel.
+
+    Same idea as /api/batch-video/queue — one worker drains batches in order so
+    the operator can stack jobs without waiting.
+    """
+    try:
+        if not service_available:
+            return error_response("Batch image generation service not available", 503)
+        generator = get_batch_image_generator()
+        return success_response({"queue": generator.list_queue()})
+    except Exception as e:
+        logger.error(f"Failed to get image batch queue: {e}")
+        return error_response(str(e), 500)
+
+
 @batch_image_bp.route("/status/<batch_id>", methods=["GET"])
 def get_batch_generation_status(batch_id: str):
     """Get status of specific batch generation."""
@@ -991,6 +1044,7 @@ def get_batch_generation_status(batch_id: str):
             "output_dir": status.output_dir,
             "estimated_time_remaining": status.estimated_time_remaining,
             "error": status.error,
+            "display_name": getattr(status, "display_name", None) or status.batch_id,
             "progress_percentage": int((status.completed_images / status.total_images) * 100) if status.total_images > 0 else 0
         }
 

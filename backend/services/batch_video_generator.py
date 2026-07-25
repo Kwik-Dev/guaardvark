@@ -423,33 +423,16 @@ class BatchVideoGenerator:
                                  lora_strength: float = 0.25,
                                  keep_warm: bool = False,
                                  training_resolution: Optional[int] = None) -> Optional[str]:
-        """Cinematic mode: render a keyframe still for ``prompt``, then evict it from VRAM
-        so the I2V animator can load (the music-video FLUX->i2v handoff — the i2v nodes
-        don't ask ComfyUI to make room, so without this they OOM on a still-full card).
+        """Cinematic mode: render a keyframe still, then free VRAM for I2V.
 
-        When ``loras`` is given (a cast member's trained character LoRA), this is the
-        ONLY place identity can be locked in: the video models (Wan/CogVideoX) cannot
-        apply a LoRA, so the character must be baked into THIS keyframe, which then
-        seeds image-to-video. Character LoRAs are SDXL, so we force the SDXL keyframe
-        model (the flux branches drop/mismatch an SDXL LoRA — see comfyui_image_generator
-        capability guard).
-
-        Returns the still path on success, or None to fall back to plain text-to-video.
-        Never raises."""
+        Character LoRAs bake identity into THIS still (Wan/Cog cannot apply them).
+        Routing is family-aware via character_still_pipeline — Z-Image LoRAs go
+        offline; SDXL/FLUX go Comfy. Never force SDXL for a Z-Image LoRA.
+        """
         try:
-            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
             from backend.services.gpu_resource_policy import free_comfyui_vram
-            # Render the keyframe LARGER than the clip (long edge ~1024, /16-aligned) so
-            # the start frame is sharp — Wan downscales it when conditioning, and a
-            # 480p-native still came out soft. Keep the clip's aspect ratio.
-            # Robustness improvement: honor GUAARDVARK_KEYFRAME_LONG (or subject's
-            # training_settings resolution scaled up) so LoRAs trained at non-default
-            # res produce appropriately sharp seeds. Default remains 1024 for 16 GB cards.
             import os
             _long = int(os.environ.get("GUAARDVARK_KEYFRAME_LONG", "1024"))
-            # Respect training_resolution (from subject's lora_training_settings) by
-            # ensuring the keyframe is at least ~1.33x the trained res (sharper seed
-            # for the I2V conditioner). Keeps 1024 floor/ceiling for VRAM sanity.
             if training_resolution:
                 try:
                     _min_from_train = max(512, int(int(training_resolution) * 4 / 3))
@@ -464,31 +447,36 @@ class BatchVideoGenerator:
                 w, h = int(round(_long * _ar)), _long
             w = max(256, (w // 16) * 16)
             h = max(256, (h // 16) * 16)
-            # Model selection: with a character LoRA we MUST use SDXL (where the LoRA
-            # actually applies). Without one, FLUX-schnell is the default keyframe model
-            # (high aesthetic, low steps) using the env-baked FLUX_* defaults the
-            # music-video keyframe path relies on. Operator can override a no-LoRA still
-            # via metadata.keyframe_model. If the chosen models aren't present,
-            # generate_image fails and we fall back to plain text-to-video below.
             has_loras = bool(loras)
             if has_loras:
-                model = "sdxl"
+                from backend.services.character_still_pipeline import render_character_still
+                still_res = render_character_still(
+                    prompt,
+                    lora_paths=list(loras),
+                    include_bible=False,
+                    source="video",
+                    width=w,
+                    height=h,
+                    seed=int(seed),
+                    output_path=out_path,
+                    lora_strength=lora_strength,
+                    keep_pipeline=keep_warm,
+                )
+                still = still_res.image_path if still_res.success else None
             else:
+                from backend.services.comfyui_image_generator import ComfyUIImageGenerator
                 model = keyframe_model or "flux-schnell"
-            steps = 8 if "flux" in model.lower() else 30  # flux-schnell is an 8-step model
-            still = ComfyUIImageGenerator(lora_strength=lora_strength).generate_image(
-                prompt=prompt,
-                loras=list(loras) if has_loras else None,
-                output_path=out_path,
-                width=w,
-                height=h,
-                seed=int(seed),
-                steps=steps,
-                model=model,
-            )
-            # Evict the still model BEFORE the animator loads — UNLESS the caller is
-            # batching keyframes (keep_warm): then the still model stays resident across
-            # the whole keyframe pre-pass and is evicted ONCE afterward (warm-model reuse).
+                steps = 8 if "flux" in model.lower() else 30
+                still = ComfyUIImageGenerator(lora_strength=lora_strength).generate_image(
+                    prompt=prompt,
+                    loras=None,
+                    output_path=out_path,
+                    width=w,
+                    height=h,
+                    seed=int(seed),
+                    steps=steps,
+                    model=model,
+                )
             if not keep_warm:
                 try:
                     free_comfyui_vram()
@@ -594,11 +582,22 @@ class BatchVideoGenerator:
                             (settings_for_subject(s)["resolution"] for s in subs if s),
                             default=768
                         )
-                        # Character LoRAs are SDXL → SDXL keyframe strength (~0.25).
-                        # Treat the dataclass default (1.0) as "unset" so the model-aware
-                        # default applies; any other value is an explicit operator override.
+                        # Family-aware strength from first LoRA sidecar (Z-Image ~0.9, SDXL ~0.25).
                         _override = None if batch_request.lora_strength == 1.0 else batch_request.lora_strength
-                        cast_lora_strength = resolve_lora_strength("sdxl", _override)
+                        _strength_model = "zimage-turbo"
+                        if cast_lora_paths:
+                            try:
+                                from backend.services.media_model_registry import resolve_inference_for_loras
+                                _route = resolve_inference_for_loras(cast_lora_paths)
+                                _strength_model = (
+                                    _route.get("offline_model_key")
+                                    or _route.get("comfy_model_tag")
+                                    or _route.get("family")
+                                    or "zimage-turbo"
+                                )
+                            except Exception:
+                                pass
+                        cast_lora_strength = resolve_lora_strength(_strength_model, _override)
                         # Q1: resolve an explicitly-chosen APPROVED still → I2V start frame.
                         # Defends that the sample is approved, on disk, and belongs to one of
                         # the selected subjects before trusting it.
@@ -631,7 +630,21 @@ class BatchVideoGenerator:
             # raises. Storyboard expands ONE concept into N connected shots; it already
             # produces directed prompts, so it's mutually exclusive with the per-prompt
             # director (running both would just re-direct already-directed shots).
+            # Verbatim Prompts: keep the operator's exact text (no director, no style enhance).
+            try:
+                from backend.services.media_director import verbatim_prompts_enabled
+                if verbatim_prompts_enabled():
+                    batch_request.director_mode = False
+                    batch_request.enhance_prompt = False
+                    logger.info(
+                        "Batch %s: verbatim prompts ON — video director/enhance off",
+                        batch_request.batch_id,
+                    )
+            except Exception:
+                pass
             if getattr(batch_request, "storyboard_concept", None):
+                # Storyboard is intentional expansion of a concept into N shots — still
+                # allowed under verbatim for the concept→shots step; per-shot enhance is off.
                 self._apply_storyboard(batch_request)
             elif getattr(batch_request, "director_mode", False):
                 self._apply_director(batch_request)

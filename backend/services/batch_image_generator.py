@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import queue
 import random
 import threading
 import time
@@ -48,12 +49,14 @@ class BatchPrompt:
     prompt: str
     negative_prompt: str = ""
     style: str = "realistic"
-    width: int = 512
-    height: int = 512
-    steps: int = 20
-    guidance: float = 7.5
+    # Defaults align with stills_defaults (modern / auto family). Callers should
+    # still run resolve_stills_defaults when model is known.
+    width: int = 1024
+    height: int = 1024
+    steps: int = 8
+    guidance: float = 1.0
     seed: Optional[int] = None
-    model: str = "sd-1.5"
+    model: str = "auto"
     metadata: Dict[str, Any] = field(default_factory=dict)
     # Character casting: when loras is non-empty the image routes through the
     # LoRA-aware SDXL ComfyUI generator (the only path that actually applies a
@@ -106,7 +109,7 @@ class BatchImageResult:
 @dataclass
 class BatchGenerationStatus:
     batch_id: str
-    status: str  # "pending", "running", "completed", "error", "cancelled"
+    status: str  # "queued", "pending", "running", "completed", "error", "cancelled"
     total_images: int
     completed_images: int
     failed_images: int
@@ -120,8 +123,12 @@ class BatchGenerationStatus:
     face_restoration_weight: float = 0.5
     generate_thumbnails: bool = True
     remove_background: bool = False
+    # Optional UI label (first prompt snippet) for the queue panel
+    display_name: Optional[str] = None
 
 class BatchImageGenerator:
+
+    _ACTIVE_STATUSES = frozenset({"queued", "pending", "running", "processing"})
 
     def __init__(self):
         # Images land directly in data/uploads/Images/ so DocumentsPage sees them
@@ -134,6 +141,12 @@ class BatchImageGenerator:
         self.active_batches: Dict[str, BatchGenerationStatus] = {}
         self.batch_lock = threading.Lock()
         self.executors: Dict[str, ThreadPoolExecutor] = {}
+
+        # Queue plumbing — one batch runs at a time; the rest stack (mirrors video gen).
+        self.batch_queue: "queue.Queue[tuple]" = queue.Queue()
+        self.cancel_events: Dict[str, threading.Event] = {}
+        self.queue_order: List[str] = []
+        self._running_batch_id: Optional[str] = None
 
         self.progress_system = UnifiedProgressSystem() if offline_gen_available else None
         self.system_coordinator = SystemCoordinator() if offline_gen_available else None
@@ -149,6 +162,12 @@ class BatchImageGenerator:
 
         self.service_available = offline_gen_available and config_available
 
+        self._worker_thread = threading.Thread(
+            target=self._queue_worker, daemon=True, name="batch-image-worker"
+        )
+        self._worker_thread.start()
+        logger.info("BatchImageGenerator queue worker started")
+
         logger.info(f"BatchImageGenerator initialized - Service available: {self.service_available}")
 
     def _generate_batch_id(self) -> str:
@@ -163,8 +182,26 @@ class BatchImageGenerator:
         (output_dir / "thumbnails").mkdir(exist_ok=True)
         return output_dir
 
-    def _parse_csv_prompts(self, csv_content: str) -> List[BatchPrompt]:
+    def _parse_csv_prompts(
+        self,
+        csv_content: str,
+        *,
+        form_model: str | None = None,
+        form_width: int | None = None,
+        form_height: int | None = None,
+        form_steps: int | None = None,
+        form_guidance: float | None = None,
+        form_style: str | None = None,
+    ) -> List[BatchPrompt]:
+        """Parse CSV rows into BatchPrompts.
+
+        Empty CSV cells inherit form-level model/size/steps/guidance (the old
+        path ignored the form and hard-coded SD-era 512/20/7.5/sd-1.5).
+        """
+        from backend.services.stills_defaults import resolve_stills_defaults
+
         prompts = []
+        default_model = (form_model or "auto").strip() or "auto"
 
         try:
             if hasattr(csv_content, 'read'):
@@ -181,22 +218,46 @@ class BatchImageGenerator:
                     logger.warning(f"Row {i+1} missing 'prompt' field, skipping")
                     continue
                 
-                prompt_text = row['prompt'].strip() if row['prompt'] else ''
+                from backend.services.image_prompt_sanitize import sanitize_image_prompt
+                prompt_text = sanitize_image_prompt(row['prompt'] if row.get('prompt') else '')
                 if not prompt_text:
                     logger.warning(f"Row {i+1} has empty prompt, skipping")
                     continue
 
                 prompt_id = row.get('id', '').strip() or f"prompt_{i+1}"
+                row_model = (row.get('model') or '').strip() or default_model
+
+                def _cell_int(key: str, form_val: int | None):
+                    raw = (row.get(key) or '').strip()
+                    if raw:
+                        return int(raw)
+                    return form_val
+
+                def _cell_float(key: str, form_val: float | None):
+                    raw = (row.get(key) or '').strip()
+                    if raw:
+                        return float(raw)
+                    return form_val
 
                 try:
-                    width = int(row.get('width', 512)) if row.get('width', '').strip() else 512
-                    height = int(row.get('height', 512)) if row.get('height', '').strip() else 512
-                    steps = int(row.get('steps', 20)) if row.get('steps', '').strip() else 20
-                    guidance = float(row.get('guidance', 7.5)) if row.get('guidance', '').strip() else 7.5
-                    seed = int(row['seed']) if row.get('seed') and row['seed'].strip() else None
-                    
-                    width = (width // 8) * 8
-                    height = (height // 8) * 8
+                    w_in = _cell_int('width', form_width)
+                    h_in = _cell_int('height', form_height)
+                    s_in = _cell_int('steps', form_steps)
+                    g_in = _cell_float('guidance', form_guidance)
+                    seed = int(row['seed']) if row.get('seed') and str(row.get('seed')).strip() else None
+
+                    resolved = resolve_stills_defaults(
+                        row_model,
+                        width=w_in,
+                        height=h_in,
+                        steps=s_in,
+                        guidance=g_in,
+                        replace_legacy_sd_markers=True,
+                    )
+                    width = (int(resolved["width"]) // 8) * 8
+                    height = (int(resolved["height"]) // 8) * 8
+                    steps = int(resolved["steps"])
+                    guidance = float(resolved["guidance"])
                     
                     if width < 64:
                         width = 64
@@ -204,23 +265,26 @@ class BatchImageGenerator:
                         height = 64
                         
                 except (ValueError, TypeError) as e:
-                    logger.warning(f"Row {i+1} has invalid numeric values, using defaults: {e}")
-                    width = 512
-                    height = 512
-                    steps = 20
-                    guidance = 7.5
+                    logger.warning(f"Row {i+1} has invalid numeric values, using family defaults: {e}")
+                    resolved = resolve_stills_defaults(row_model)
+                    width = int(resolved["width"])
+                    height = int(resolved["height"])
+                    steps = int(resolved["steps"])
+                    guidance = float(resolved["guidance"])
                     seed = None
 
+                style = (row.get('style') or '').strip() or (form_style or 'realistic')
                 prompt = BatchPrompt(
                     id=prompt_id,
                     prompt=prompt_text,
                     negative_prompt=row.get('negative_prompt', '').strip() if row.get('negative_prompt') else '',
-                    style=row.get('style', 'realistic').strip() if row.get('style') else 'realistic',
+                    style=style,
                     width=width,
                     height=height,
                     steps=steps,
                     guidance=guidance,
                     seed=seed,
+                    model=row_model,
                     metadata={
                         'row_number': i + 1,
                         'original_row': dict(row)
@@ -324,9 +388,24 @@ class BatchImageGenerator:
         ram_gb = 6.0
         for prompt in request.prompts:
             if prompt.loras:
+                # Cast LoRAs: estimate by family from first LoRA when possible
                 model_key = "sd-xl"
+                try:
+                    from backend.services.media_model_registry import resolve_inference_for_loras
+                    route = resolve_inference_for_loras(list(prompt.loras))
+                    if route.get("family") == "zimage":
+                        model_key = "zimage-turbo"
+                    elif route.get("family") == "flux":
+                        model_key = "flux-dev"
+                except Exception:
+                    pass
             else:
                 model_key = self._resolve_batch_model_key(prompt.model)
+            if self._is_comfy_flux_model(model_key):
+                # Full FLUX-dev fp8 stills: ~12GB+ with T5; serialize workers elsewhere
+                vram_mb = max(vram_mb, 12000)
+                ram_gb = max(ram_gb, 16.0)
+                continue
             catalog_id = gen.available_models.get(model_key, model_key)
             
             # If the model is already loaded (resident), its memory footprint is already
@@ -376,16 +455,76 @@ class BatchImageGenerator:
             except Exception:
                 pass
 
-    def _generate_with_character_lora(self, prompt: BatchPrompt) -> Optional[ImageGenerationResult]:
-        """Generate one image with a cast character's SDXL LoRA via ComfyUI.
+    @staticmethod
+    def _is_comfy_flux_model(model_key: str | None) -> bool:
+        k = (model_key or "").strip().lower()
+        return k in ("flux-dev", "flux", "flux.1-dev", "flux1-dev") or k.startswith("flux-dev")
 
-        Returns an ImageGenerationResult on success (image_path is a temp file
-        the caller relocates), or None to fall back to the normal generator if
-        ComfyUI/ the LoRA path is unavailable."""
+    def _generate_with_comfy_flux(self, prompt: BatchPrompt) -> Optional[ImageGenerationResult]:
+        """Plain FLUX.1-dev stills (no LoRA) via ComfyUI — max-quality batch path."""
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
         except Exception as e:
-            logger.warning(f"Character LoRA path unavailable, falling back: {e}")
+            logger.warning("ComfyUI FLUX path unavailable: %s", e)
+            return ImageGenerationResult(
+                success=False,
+                error=f"ComfyUI FLUX unavailable: {e}",
+                prompt_used=prompt.prompt,
+            )
+
+        width = prompt.width if prompt.width and prompt.width >= 768 else 1024
+        height = prompt.height if prompt.height and prompt.height >= 768 else 1024
+        # Flux Dev ~2.0 MP design range — soft-clamp before Comfy (not 2048²).
+        try:
+            from backend.services.image_resolution_limits import clamp_image_dimensions
+            ow, oh = width, height
+            width, height, warns = clamp_image_dimensions(width, height, "flux")
+            for msg in warns:
+                logger.warning("FLUX batch: %s", msg)
+            if (width, height) != (ow, oh):
+                logger.info("FLUX batch resolution %sx%s → %sx%s", ow, oh, width, height)
+        except Exception as e:
+            logger.debug("FLUX dim clamp skipped: %s", e)
+        steps = int(prompt.steps or 28)
+        # FluxGuidance value (user "guidance" slider); KSampler cfg stays 1.0 inside Comfy.
+        guidance = float(prompt.guidance) if prompt.guidance is not None else 3.5
+
+        import tempfile, os as _os, time as _time
+        out_path = _os.path.join(
+            tempfile.gettempdir(), f"flux_{prompt.id}_{int(_time.time() * 1000)}.png"
+        )
+        try:
+            gen = ComfyUIImageGenerator(model="flux-dev")
+            path = gen.generate_image(
+                prompt=prompt.prompt,
+                loras=[],
+                output_path=out_path,
+                width=width,
+                height=height,
+                negative_prompt=prompt.negative_prompt or None,
+                seed=prompt.seed if prompt.seed is not None else 42,
+                steps=steps,
+                cfg=guidance,
+                model="flux-dev",
+            )
+            return ImageGenerationResult(
+                success=True,
+                image_path=path,
+                prompt_used=prompt.prompt,
+                model_used="flux-dev",
+                image_size=(width, height),
+                seed_used=prompt.seed,
+            )
+        except Exception as e:
+            logger.error("FLUX.1-dev batch generation failed: %s", e)
+            return ImageGenerationResult(
+                success=False, error=str(e), prompt_used=prompt.prompt
+            )
+
+    def _generate_with_character_lora(self, prompt: BatchPrompt) -> Optional[ImageGenerationResult]:
+        """Generate one image with cast character LoRA(s) via character_still_pipeline."""
+        lora_list = list(prompt.loras or [])
+        if not lora_list:
             return None
 
         final_prompt = prompt.prompt
@@ -393,25 +532,43 @@ class BatchImageGenerator:
         if trig and trig.lower() not in final_prompt.lower():
             final_prompt = f"{trig}, {final_prompt}"
 
-        # SDXL LoRAs want ~1024; the page default is 512 (SD1.5-era). Bump small
-        # requests so the character renders at the resolution it was trained on.
         width = prompt.width if prompt.width and prompt.width >= 768 else 1024
         height = prompt.height if prompt.height and prompt.height >= 768 else 1024
 
         import tempfile, os as _os, time as _time
-        out_path = _os.path.join(tempfile.gettempdir(), f"char_{prompt.id}_{int(_time.time()*1000)}.png")
+        out_path = _os.path.join(
+            tempfile.gettempdir(), f"char_{prompt.id}_{int(_time.time() * 1000)}.png"
+        )
+
         try:
-            gen = ComfyUIImageGenerator()
-            path = gen.generate_image(
-                prompt=final_prompt, loras=list(prompt.loras),
-                output_path=out_path, width=width, height=height,
-                negative_prompt=prompt.negative_prompt or None,
-                seed=prompt.seed if prompt.seed is not None else 42,
+            from backend.services.character_still_pipeline import render_character_still
+            still = render_character_still(
+                final_prompt,
+                lora_paths=lora_list,
+                include_bible=False,
+                source="batch",
+                width=width,
+                height=height,
+                steps=prompt.steps,
+                guidance=prompt.guidance,
+                seed=prompt.seed,
+                negative_prompt=prompt.negative_prompt or "",
+                output_path=out_path,
+                style=prompt.style or "realistic",
+                keep_pipeline=True,
             )
+            if not still.success:
+                return ImageGenerationResult(
+                    success=False, error=still.error or "character still failed",
+                    prompt_used=still.prompt_used or final_prompt,
+                )
             return ImageGenerationResult(
-                success=True, image_path=path, prompt_used=final_prompt,
-                model_used="sdxl+lora", image_size=(width, height),
-                seed_used=prompt.seed,
+                success=True,
+                image_path=still.image_path,
+                prompt_used=still.prompt_used or final_prompt,
+                model_used=still.model_used or "character+lora",
+                image_size=(still.width or width, still.height or height),
+                seed_used=still.seed_used if still.seed_used is not None else prompt.seed,
             )
         except Exception as e:
             logger.error(f"Character LoRA generation failed: {e}")
@@ -426,54 +583,63 @@ class BatchImageGenerator:
             face_restoration_weight = getattr(batch_status, 'face_restoration_weight', 0.5)
             remove_background = getattr(batch_status, 'remove_background', False)
 
-            # Character casting: a selected character carries a trained SDXL LoRA.
-            # OfflineImageGenerator can't apply LoRAs, so route through the
-            # verified ComfyUI SDXL+LoRA path instead. Trigger word is prepended
-            # so the token the LoRA learned is present at inference.
+            # Character casting: LoRAs route by sidecar family (Comfy SDXL/FLUX
+            # or offline Z-Image). FLUX.1-dev without LoRA also uses Comfy.
             if getattr(prompt, "loras", None):
                 result = self._generate_with_character_lora(prompt)
+            elif self._is_comfy_flux_model(prompt.model):
+                result = self._generate_with_comfy_flux(prompt)
             else:
                 result = None
 
             if result is None:
-                gen_request = ImageGenerationRequest(
-                    prompt=prompt.prompt,
-                    negative_prompt=prompt.negative_prompt,
+                # Shared stills façade (same sanitize/defaults/enhance policy as chat).
+                # hold_gpu=False: batch-level gpu_session + adopt_gpu_session already held.
+                from backend.services.stills_pipeline import run_stills_pipeline
+                enhance = "offline" if prompt.auto_enhance else "none"
+                stills = run_stills_pipeline(
+                    [prompt.prompt],
+                    model=prompt.model or "auto",
                     width=prompt.width,
                     height=prompt.height,
-                    num_inference_steps=prompt.steps,
-                    guidance_scale=prompt.guidance,
-                    style=prompt.style,
+                    steps=prompt.steps,
+                    guidance=prompt.guidance,
+                    style=prompt.style or "realistic",
+                    negative_prompt=prompt.negative_prompt or "",
                     seed=prompt.seed,
-                    model=prompt.model,
-                    content_preset=prompt.content_preset,
+                    source="batch",
+                    enhance=enhance,
+                    director=False,  # director already applied at batch level
                     auto_enhance=prompt.auto_enhance,
+                    keep_pipeline=True,
+                    output="path",
+                    content_preset=prompt.content_preset,
                     enhance_anatomy=prompt.enhance_anatomy,
                     enhance_faces=prompt.enhance_faces,
                     enhance_hands=prompt.enhance_hands,
                     restore_faces=restore_faces,
                     face_restoration_weight=face_restoration_weight,
                     remove_background=remove_background,
-                    keep_pipeline_loaded=True,
+                    hold_gpu=False,
+                    replace_legacy_sd_markers=True,
                 )
-
-                from backend.services.gpu_resource_policy import gpu_session
-                from backend.services.job_operation_gate import GpuBusyError
-                from backend.services.job_types import JobKind
-                try:
-                    vram_est = self.image_generator._vram_estimate_mb(gen_request.model or "auto")
-                    ram_est = self.image_generator._ram_estimate_gb(gen_request.model or "auto") if hasattr(self.image_generator, "_ram_estimate_gb") else 10.0
-                    with gpu_session(JobKind.VIDEO_RENDER, f"batch_img_{prompt.id}",
-                                     on_busy="raise", evict_ollama=True, free_comfyui=True,
-                                     vram_estimate_mb=vram_est,
-                                     ram_estimate_gb=ram_est, require_fit=True, cross_process=True):
-                        result = self.image_generator.generate_image(gen_request)
-                except GpuBusyError:
-                    return BatchImageResult(
-                        prompt_id=prompt.id,
+                still = stills[0] if stills else None
+                if still and still.success:
+                    result = ImageGenerationResult(
+                        success=True,
+                        image_path=still.image_path,
+                        prompt_used=still.prompt_used,
+                        negative_prompt_used=still.negative_used,
+                        model_used=still.model_used,
+                        generation_time=still.generation_time,
+                        image_size=(still.width, still.height),
+                        seed_used=still.seed_used,
+                    )
+                else:
+                    result = ImageGenerationResult(
                         success=False,
-                        generation_time=time.time() - start_time,
-                        error="GPU is busy with another render right now — try again in a moment.",
+                        error=(still.error if still else "stills pipeline failed"),
+                        prompt_used=prompt.prompt,
                     )
 
             # Shared failure/success handling for BOTH paths. (The old code treated
@@ -599,62 +765,149 @@ class BatchImageGenerator:
             logger.error(f"Failed to save batch metadata: {e}")
 
     def _apply_director(self, request: BatchImageRequest) -> None:
-        """If director_mode or storyboard_concept, rewrite prompts via Media Director (LLM visual storyteller).
-        Mutates in place and disables downstream generic enhance (director already produces full visual prompts).
-        Never raises — falls back silently (original prompts stand).
-        Mirrors batch_video_generator exactly.
+        """If director_mode or storyboard_concept, rewrite prompts via Media Director.
+
+        Mutates in place and disables per-prompt offline auto_enhance (director already
+        produced full visual prompts). Uses stills_policy for the enhance ladder so
+        chat/batch share the same director behavior. Never raises.
         """
         if not MEDIA_DIRECTOR_AVAILABLE:
             return
         try:
+            from backend.services.stills_policy import apply_enhance_to_prompts, resolve_enhance_mode
+
             if getattr(request, "storyboard_concept", None):
                 concept = (request.storyboard_concept or "").strip()
                 n = len(request.prompts)
                 if concept and n > 0:
                     from backend.services.media_director import storyboard_from_concept
-                    res = storyboard_from_concept(concept, n, style=(getattr(request, "look_and_feel", None) or ""), extra_guidance=getattr(request, "director_guidance", None))
+                    res = storyboard_from_concept(
+                        concept, n,
+                        style=(getattr(request, "look_and_feel", None) or ""),
+                        extra_guidance=getattr(request, "director_guidance", None),
+                    )
                     shots = res.get("prompts") or []
                     for i, p in enumerate(request.prompts):
                         if i < len(shots) and shots[i]:
                             p.prompt = shots[i]
+                            p.auto_enhance = False
                     request.auto_enhance = False
-                    logger.info(f"Media Director storyboard expanded {len(shots)} prompts for batch {request.batch_id}")
+                    logger.info(
+                        "Media Director storyboard expanded %s prompts for batch %s",
+                        len(shots), request.batch_id,
+                    )
                     return
-            if getattr(request, "director_mode", False):
-                raw = [bp.prompt for bp in request.prompts if (bp.prompt or "").strip()]
-                if not raw:
-                    return
-                style = getattr(request, "style", "") or ""
-                guidance = getattr(request, "director_guidance", None)
-                directed = media_direct_enhance(raw, style=style, extra_guidance=guidance)
-                idx = 0
-                changed = 0
-                for bp in request.prompts:
-                    if (bp.prompt or "").strip() and idx < len(directed) and directed[idx]:
-                        newp = directed[idx].strip()
-                        if newp and newp != (bp.prompt or "").strip():
-                            bp.prompt = newp
-                            changed += 1
-                        idx += 1
-                request.auto_enhance = False
-                logger.info(f"Media Director enhanced {changed} prompts for batch {request.batch_id}")
+
+            mode = resolve_enhance_mode(
+                director=bool(getattr(request, "director_mode", False)),
+                auto_enhance=getattr(request, "auto_enhance", True),
+            )
+            if mode != "director":
+                return
+
+            raw = [bp.prompt for bp in request.prompts if (bp.prompt or "").strip()]
+            if not raw:
+                return
+            # Prefer stills_policy director path (enhance_prompts); fall back to
+            # media_direct_enhance alias if needed.
+            style = getattr(request, "style", "") or ""
+            guidance = getattr(request, "director_guidance", None)
+            directed = apply_enhance_to_prompts(
+                raw, enhance_mode="director", style=style, extra_guidance=guidance,
+            )
+            if not directed or directed == raw:
+                # Fallback to batch's media_direct_enhance if policy path no-op'd
+                try:
+                    directed = media_direct_enhance(raw, style=style, extra_guidance=guidance)
+                except Exception:
+                    directed = raw
+            idx = 0
+            changed = 0
+            for bp in request.prompts:
+                if (bp.prompt or "").strip() and idx < len(directed) and directed[idx]:
+                    newp = directed[idx].strip()
+                    if newp and newp != (bp.prompt or "").strip():
+                        bp.prompt = newp
+                        changed += 1
+                    bp.auto_enhance = False
+                    idx += 1
+            request.auto_enhance = False
+            logger.info(
+                "Media Director enhanced %s prompts for batch %s (director_mode=%s)",
+                changed, request.batch_id, getattr(request, "director_mode", False),
+            )
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"Director pass skipped for batch image {getattr(request, 'batch_id', '?')} (non-fatal): {e}")
+            logger.warning(
+                "Director pass skipped for batch image %s (non-fatal): %s",
+                getattr(request, "batch_id", "?"), e,
+            )
+
+    def _queue_worker(self) -> None:
+        """Drain one image batch at a time (GPU bouncer — mirrors batch_video)."""
+        while True:
+            try:
+                request, batch_status, output_dir = self.batch_queue.get()
+            except Exception as e:
+                logger.error(f"Image queue worker get() failed: {e}")
+                continue
+
+            batch_id = request.batch_id
+            try:
+                cancel_event = self.cancel_events.get(batch_id)
+                if cancel_event and cancel_event.is_set():
+                    batch_status.status = "cancelled"
+                    batch_status.end_time = datetime.now()
+                    if not batch_status.error:
+                        batch_status.error = "Cancelled before start"
+                    try:
+                        self._save_batch_metadata(batch_status, Path(output_dir))
+                    except Exception:
+                        pass
+                    logger.info(f"Skipped cancelled image batch {batch_id}")
+                    continue
+
+                self._running_batch_id = batch_id
+                self._run_batch_job(request, batch_status, Path(output_dir))
+            except Exception as e:
+                logger.error(f"Image queue worker crashed on batch {batch_id}: {e}")
+                batch_status.status = "error"
+                batch_status.error = str(e)
+                batch_status.end_time = datetime.now()
+                try:
+                    self._save_batch_metadata(batch_status, Path(output_dir))
+                except Exception:
+                    pass
+            finally:
+                self._running_batch_id = None
 
     def start_batch_generation(self, request: BatchImageRequest) -> str:
+        """Enqueue a batch. Returns immediately with status='queued'.
+
+        A single daemon worker drains the queue one batch at a time so concurrent
+        submissions stack rather than contending for the GPU (same model as video gen).
+        """
         if not self.service_available:
             raise RuntimeError("Batch image generation service not available")
 
         batch_id = request.batch_id or self._generate_batch_id()
+        request.batch_id = batch_id
         output_dir = self._create_output_directory(batch_id)
+        request.output_dir = str(output_dir)
+
+        first_prompt = ""
+        for p in request.prompts or []:
+            if (p.prompt or "").strip():
+                first_prompt = p.prompt.strip()[:80]
+                break
 
         batch_status = BatchGenerationStatus(
             batch_id=batch_id,
-            status="pending",
+            status="queued",
             total_images=len(request.prompts),
             completed_images=0,
             failed_images=0,
-            output_dir=str(output_dir)
+            output_dir=str(output_dir),
+            display_name=first_prompt or batch_id,
         )
         
         batch_status.restore_faces = request.restore_faces
@@ -664,6 +917,29 @@ class BatchImageGenerator:
 
         with self.batch_lock:
             self.active_batches[batch_id] = batch_status
+            self.cancel_events[batch_id] = threading.Event()
+            self.queue_order.append(batch_id)
+
+        try:
+            self._save_batch_metadata(batch_status, output_dir)
+        except Exception:
+            pass
+
+        self.batch_queue.put((request, batch_status, str(output_dir)))
+        logger.info(
+            f"Enqueued image batch {batch_id} ({len(request.prompts)} prompts) — "
+            f"queue depth ~{self.batch_queue.qsize()}"
+        )
+        return batch_id
+
+    def _run_batch_job(
+        self,
+        request: BatchImageRequest,
+        batch_status: BatchGenerationStatus,
+        output_dir: Path,
+    ) -> None:
+        """Execute one enqueued batch (called only from the queue worker)."""
+        batch_id = request.batch_id
 
         def run_batch():
             batch_status.status = "running"
@@ -694,6 +970,22 @@ class BatchImageGenerator:
                     return self._generate_single_image(batch_id, prompt, output_dir, batch_status)
 
                 try:
+                    # Verbatim Prompts: force exact user text through (no director rewrite,
+                    # no offline style stuffing / word clip). Must run before director.
+                    try:
+                        from backend.services.media_director import verbatim_prompts_enabled
+                        if verbatim_prompts_enabled():
+                            request.auto_enhance = False
+                            request.director_mode = False
+                            for bp in request.prompts or []:
+                                bp.auto_enhance = False
+                            logger.info(
+                                "Batch %s: verbatim prompts ON — director off, auto_enhance off",
+                                batch_id,
+                            )
+                    except Exception:
+                        pass
+
                     # Director / storyboard pass (if requested). Does NOT raise. Disables auto_enhance on success.
                     try:
                         self._apply_director(request)
@@ -910,11 +1202,12 @@ class BatchImageGenerator:
             else:
                 _run_batch_body()
 
-        thread = threading.Thread(target=run_batch, daemon=True)
-        thread.start()
-
-        logger.info(f"Started batch generation {batch_id} with {len(request.prompts)} prompts")
-        return batch_id
+        # Already on the queue worker thread — run in-process (no nested thread).
+        run_batch()
+        logger.info(
+            f"Finished image batch {batch_id}: status={batch_status.status} "
+            f"ok={batch_status.completed_images} fail={batch_status.failed_images}"
+        )
 
     def get_batch_status(self, batch_id: str) -> Optional[BatchGenerationStatus]:
         with self.batch_lock:
@@ -930,6 +1223,14 @@ class BatchImageGenerator:
                 return False
 
             batch_status.status = "cancelled"
+            batch_status.end_time = datetime.now()
+            if not batch_status.error:
+                batch_status.error = "Cancelled by user"
+
+            # Signal the queue worker to skip if still queued; if running, loop checks status.
+            ev = self.cancel_events.get(batch_id)
+            if ev:
+                ev.set()
 
             if batch_id in self.executors:
                 self.executors[batch_id].shutdown(wait=False)
@@ -937,6 +1238,35 @@ class BatchImageGenerator:
 
             logger.info(f"Cancelled batch generation {batch_id}")
             return True
+
+    def list_queue(self) -> List[Dict[str, Any]]:
+        """Snapshot of the in-process image batch queue for the UI panel."""
+        snapshot = []
+        with self.batch_lock:
+            order = list(self.queue_order)
+            running_id = self._running_batch_id
+
+        position = 0
+        for batch_id in order:
+            with self.batch_lock:
+                status = self.active_batches.get(batch_id)
+            if not status:
+                continue
+            position += 1
+            snapshot.append({
+                "position": position,
+                "batch_id": batch_id,
+                "status": status.status,
+                "total_images": status.total_images,
+                "completed_images": status.completed_images,
+                "failed_images": status.failed_images,
+                "is_running": batch_id == running_id,
+                "start_time": status.start_time.isoformat() if status.start_time else None,
+                "end_time": status.end_time.isoformat() if status.end_time else None,
+                "display_name": status.display_name or batch_id,
+                "error": status.error,
+            })
+        return snapshot
 
     def start_blueprint_batch(self, csv_content: str) -> str:
         batch_id = f"blueprint_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -1401,7 +1731,16 @@ class BatchImageGenerator:
         return all_batches
 
     def create_batch_from_csv(self, csv_content: str, **kwargs) -> BatchImageRequest:
-        prompts = self._parse_csv_prompts(csv_content)
+        # Form-level knobs fill empty CSV cells (model/size/steps/guidance).
+        prompts = self._parse_csv_prompts(
+            csv_content,
+            form_model=kwargs.get("model"),
+            form_width=kwargs.get("width"),
+            form_height=kwargs.get("height"),
+            form_steps=kwargs.get("steps"),
+            form_guidance=kwargs.get("guidance"),
+            form_style=kwargs.get("style"),
+        )
 
         if not prompts:
             raise ValueError("No valid prompts found in CSV")
@@ -1409,14 +1748,16 @@ class BatchImageGenerator:
         batch_id = self._generate_batch_id()
         output_dir = str(self._create_output_directory(batch_id))
 
-        prompt_params = ['model', 'style', 'width', 'height', 'steps', 'guidance',
-                        'content_preset', 'auto_enhance', 'enhance_anatomy',
-                        'enhance_faces', 'enhance_hands', 'loras', 'trigger_word']
-        
-        batch_params = ['max_workers', 'preserve_order', 'generate_thumbnails', 
-                       'save_metadata', 'user_id', 'project_id', 'content_preset',
-                       'auto_enhance', 'enhance_anatomy', 'enhance_faces', 'enhance_hands',
-                       'restore_faces', 'face_restoration_weight', 'remove_background']
+        # Include director knobs so UI director_mode actually reaches _apply_director
+        # (was silently dropped — dead plumbing bug).
+        batch_params = [
+            'max_workers', 'preserve_order', 'generate_thumbnails',
+            'save_metadata', 'user_id', 'project_id', 'content_preset',
+            'auto_enhance', 'enhance_anatomy', 'enhance_faces', 'enhance_hands',
+            'restore_faces', 'face_restoration_weight', 'remove_background',
+            'director_mode', 'director_guidance', 'storyboard_concept',
+            'planning_mode', 'director_model', 'user_treatment',
+        ]
 
         return BatchImageRequest(
             batch_id=batch_id,
@@ -1426,23 +1767,54 @@ class BatchImageGenerator:
         )
 
     def create_batch_from_prompts(self, prompt_list: List[str], **kwargs) -> BatchImageRequest:
+        from backend.services.stills_defaults import resolve_stills_defaults
+
         prompt_params = ['model', 'style', 'width', 'height', 'steps', 'guidance',
                         'content_preset', 'auto_enhance', 'enhance_anatomy',
                         'enhance_faces', 'enhance_hands', 'loras', 'trigger_word']
         
-        batch_params = ['max_workers', 'preserve_order', 'generate_thumbnails', 
-                       'save_metadata', 'user_id', 'project_id', 'content_preset',
-                       'auto_enhance', 'enhance_anatomy', 'enhance_faces', 'enhance_hands',
-                       'restore_faces', 'face_restoration_weight', 'remove_background']
-
-        prompts = [
-            BatchPrompt(
-                id=f"prompt_{i+1}",
-                prompt=prompt.strip(),
-                **{k: v for k, v in kwargs.items() if k in prompt_params}
-            )
-            for i, prompt in enumerate(prompt_list) if prompt.strip()
+        batch_params = [
+            'max_workers', 'preserve_order', 'generate_thumbnails',
+            'save_metadata', 'user_id', 'project_id', 'content_preset',
+            'auto_enhance', 'enhance_anatomy', 'enhance_faces', 'enhance_hands',
+            'restore_faces', 'face_restoration_weight', 'remove_background',
+            'director_mode', 'director_guidance', 'storyboard_concept',
+            'planning_mode', 'director_model', 'user_treatment',
         ]
+
+        model = kwargs.get("model") or "auto"
+        resolved = resolve_stills_defaults(
+            model,
+            width=kwargs.get("width"),
+            height=kwargs.get("height"),
+            steps=kwargs.get("steps"),
+            guidance=kwargs.get("guidance"),
+            replace_legacy_sd_markers=True,
+        )
+        # Apply resolved defaults into kwargs for BatchPrompt construction.
+        filled = dict(kwargs)
+        filled.setdefault("model", model)
+        filled.setdefault("width", resolved["width"])
+        filled.setdefault("height", resolved["height"])
+        filled.setdefault("steps", resolved["steps"])
+        filled.setdefault("guidance", resolved["guidance"])
+        # Prefer resolved family values when caller passed legacy 512/20/7.5.
+        filled["width"] = resolved["width"]
+        filled["height"] = resolved["height"]
+        filled["steps"] = resolved["steps"]
+        filled["guidance"] = resolved["guidance"]
+
+        from backend.services.image_prompt_sanitize import sanitize_image_prompt
+        prompts = []
+        for i, prompt in enumerate(prompt_list):
+            cleaned = sanitize_image_prompt(prompt)
+            if not cleaned:
+                continue
+            prompts.append(BatchPrompt(
+                id=f"prompt_{i+1}",
+                prompt=cleaned,
+                **{k: v for k, v in filled.items() if k in prompt_params}
+            ))
 
         if not prompts:
             raise ValueError("No valid prompts provided")
@@ -1459,7 +1831,10 @@ class BatchImageGenerator:
 
     def get_service_status(self) -> Dict[str, Any]:
         with self.batch_lock:
-            active_batches = len([b for b in self.active_batches.values() if b.status == "running"])
+            active_batches = len([
+                b for b in self.active_batches.values()
+                if b.status in self._ACTIVE_STATUSES
+            ])
 
         image_generator_status = None
         if self.image_generator:

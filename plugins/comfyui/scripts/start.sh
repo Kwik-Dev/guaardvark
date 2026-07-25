@@ -10,9 +10,23 @@ COMFYUI_DIR="$PLUGIN_ROOT/ComfyUI"
 VENV_PYTHON="$PROJECT_ROOT/backend/venv/bin/python"
 PORT=8188
 
-# Check ComfyUI exists
+# Errors go to stderr so plugin_manager can surface them (it used to only
+# show stderr; blank UI failures were start.sh writing only to stdout).
+err() { echo "Error: $*" >&2; }
+
+# Check ComfyUI app tree exists
 if [ ! -f "$COMFYUI_DIR/main.py" ]; then
-    echo "Error: ComfyUI not found at $COMFYUI_DIR/main.py"
+    err "ComfyUI not found at $COMFYUI_DIR/main.py"
+    err "Restore the app tree (preserves models/): bash $SCRIPT_DIR/restore_app.sh"
+    exit 1
+fi
+
+# Incomplete clone/rsync can drop nested package comfy/ldm/models (not the
+# top-level weights tree). Detect early with a clear restore hint.
+if [ ! -f "$COMFYUI_DIR/comfy/ldm/models/autoencoder.py" ]; then
+    err "Incomplete ComfyUI install: missing comfy/ldm/models/autoencoder.py"
+    err "A bad rsync --exclude 'models' can delete nested packages. Fix with:"
+    err "  bash $SCRIPT_DIR/restore_app.sh"
     exit 1
 fi
 
@@ -24,7 +38,7 @@ fi
 
 # Check venv python exists
 if [ ! -f "$VENV_PYTHON" ]; then
-    echo "Error: Python venv not found at $VENV_PYTHON"
+    err "Python venv not found at $VENV_PYTHON"
     exit 1
 fi
 

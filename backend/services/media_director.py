@@ -108,10 +108,10 @@ def _style_clause(style: Optional[str]) -> str:
     return f"\nGlobal visual style/aesthetic to honor: {style}." if style else ""
 
 
-def _verbatim_prompts_enabled() -> bool:
+def verbatim_prompts_enabled() -> bool:
     """True when the operator turned ON 'verbatim prompts' — send the user's EXACT words
-    to the image/video model and SKIP the director-LLM rewrite (no softening, no
-    enrichment). This is the 'no soft limits' switch (your machine, your rules).
+    to the image/video model and SKIP director-LLM rewrite, offline style stuffing, and
+    word-budget truncation. This is the 'no soft limits' switch (your machine, your rules).
 
     OFF by default (keeps cinematic enrichment). Sources, in order:
       * env VERBATIM_PROMPTS=1/true/yes/on — restart-proof, wins (good for a live demo), then
@@ -124,7 +124,13 @@ def _verbatim_prompts_enabled() -> bool:
     context"; if we let that fall through to the bare except we'd silently return False
     and IGNORE the Settings toggle (the bug: verbatim ON, prompt still rewritten). So when
     no context is active we push the app singleton's context for the read — mirroring the
-    pattern unified_chat_engine._save_message uses for the same reason."""
+    pattern unified_chat_engine._save_message uses for the same reason.
+
+    Call sites that MUST honor this (not just media_director.enhance_prompts):
+      * offline_image_generator.generate_image (enhance + 75-word clip)
+      * ImageGeneratorTool / batch image (auto_enhance)
+      * comfyui_video_generator prompt enhance
+    """
     import os
     if os.environ.get("VERBATIM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on"):
         return True
@@ -154,6 +160,10 @@ def _verbatim_prompts_enabled() -> bool:
         return False
 
 
+# Back-compat private alias (older call sites / tests).
+_verbatim_prompts_enabled = verbatim_prompts_enabled
+
+
 def enhance_prompts(
     prompts: List[str],
     *,
@@ -169,7 +179,7 @@ def enhance_prompts(
     """
     if not prompts:
         return []
-    if _verbatim_prompts_enabled():
+    if verbatim_prompts_enabled():
         log.info("media_director: verbatim prompts ON — sending user prompts to the model as-is (no director rewrite)")
         return list(prompts)
     n = len(prompts)
@@ -231,7 +241,7 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
     instr = (instruction or "").strip()
     if not instr:
         return instruction
-    if _verbatim_prompts_enabled():
+    if verbatim_prompts_enabled():
         log.info("media_director: verbatim prompts ON — using edit instruction as-is (no Kontext rewrite)")
         return instruction
     resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)

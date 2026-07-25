@@ -2815,6 +2815,17 @@ class Subject(db.Model):
     updated_at = db.Column(db.DateTime, nullable=False, default=db.func.now(), onupdate=db.func.now())
 
     def to_dict(self) -> dict:
+        base_id = None
+        base_name = None
+        train_ready = None
+        try:
+            from backend.services.media_model_registry import get_profile, subject_base_model_id
+            base_id = subject_base_model_id(self)
+            prof = get_profile(base_id) or {}
+            base_name = prof.get("name")
+            train_ready = bool(prof.get("train_ready"))
+        except Exception:
+            pass
         return {
             "id": self.id,
             "kind": self.kind,
@@ -2832,6 +2843,9 @@ class Subject(db.Model):
             "cast_required": self.cast_required,
             "bible": self.bible,
             "training_settings_json": self.training_settings_json or {},
+            "base_model_id": base_id,
+            "base_model_name": base_name,
+            "train_ready": train_ready,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -2875,6 +2889,12 @@ class SubjectSample(db.Model):
     # Human approval gate: the frontend lets the user mark each sample before
     # sending the approved set to the LoRA trainer.
     approved = db.Column(db.Boolean, nullable=False, default=False)
+    # After a successful real LoRA train that used this sample, it is promoted into
+    # the durable Training Data set (path appended to Subject.ref_image_paths) and
+    # hidden from the Generate Character sheet. Until promotion, the sample is
+    # visible on BOTH tabs so the user can see the pending training pool.
+    promoted_to_training = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    promoted_at = db.Column(db.DateTime, nullable=True)
     # True when the ShotDesigner produced no variation for this slot (placeholder
     # from the top-up loop).  Placeholder samples are generated but flagged so the
     # UI can prompt the user to regen them.
@@ -2906,6 +2926,8 @@ class SubjectSample(db.Model):
             ),
             "status": self.status,
             "approved": self.approved,
+            "promoted_to_training": bool(self.promoted_to_training),
+            "promoted_at": self.promoted_at.isoformat() if self.promoted_at else None,
             "placeholder": self.placeholder,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

@@ -154,6 +154,14 @@ const SettingsPage = () => {
   const [advancedDebug, setAdvancedDebug] = useState(getInitialAdvancedDebug);
   const [llmDebug, setLlmDebugState] = useState(getInitialLlmDebug);
   const [verbatimPrompts, setVerbatimPromptsState] = useState(false);
+  // Media stack (stills / cast LoRA train / max quality) — Ollama-picker style
+  const [mediaModels, setMediaModelsState] = useState({
+    stills_model: "zimage-turbo",
+    cast_train_base: "zimage-turbo",
+    max_quality_model: "flux-dev",
+    train_profiles: [],
+    stills_profiles: [],
+  });
   const [behaviorLearningEnabled, setBehaviorLearningEnabled] = useState(
     getInitialBehaviorLearning,
   );
@@ -963,6 +971,29 @@ const SettingsPage = () => {
       }
     };
     fetchVerbatim();
+  }, []);
+
+  useEffect(() => {
+    const fetchMediaModels = async () => {
+      try {
+        const result = await apiService.getMediaModels();
+        const data = result?.data ?? result;
+        if (data && typeof data === "object" && !data.error) {
+          setMediaModelsState((prev) => ({
+            ...prev,
+            stills_model: data.stills_model || prev.stills_model,
+            cast_train_base: data.cast_train_base || prev.cast_train_base,
+            max_quality_model: data.max_quality_model || prev.max_quality_model,
+            character_lora_strength: data.character_lora_strength || prev.character_lora_strength,
+            train_profiles: data.train_profiles || data.profiles || [],
+            stills_profiles: data.stills_profiles || data.profiles || [],
+          }));
+        }
+      } catch (err) {
+        console.warn("Failed to fetch media models:", err);
+      }
+    };
+    fetchMediaModels();
   }, []);
 
   useEffect(() => {
@@ -3322,6 +3353,151 @@ const SettingsPage = () => {
               <SettingsRow label="Generation" stacked>
                 <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75 }}>
                   <Chip label="Verbatim Prompts (no AI rewrite)" onClick={handleVerbatimPromptsToggle} size="small" color={verbatimPrompts ? "primary" : "default"} variant={verbatimPrompts ? "filled" : "outlined"} />
+                </Box>
+              </SettingsRow>
+              <SettingsRow label="Media models" stacked>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+                  Stills default: Z-Image Turbo. Max quality: FLUX. Cast train base must match LoRA family
+                  (Z-Image trains by default; SDXL Legacy kept for old LoRAs).
+                </Typography>
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25, maxWidth: 420 }}>
+                  <FormControl size="small" fullWidth>
+                    <InputLabel id="media-stills-label">Stills (image gen)</InputLabel>
+                    <Select
+                      labelId="media-stills-label"
+                      label="Stills (image gen)"
+                      value={mediaModels.stills_model || "zimage-turbo"}
+                      onChange={async (e) => {
+                        const v = e.target.value;
+                        setMediaModelsState((p) => ({ ...p, stills_model: v }));
+                        try {
+                          await apiService.setMediaModels({ stills_model: v });
+                          showMessage?.(`Stills model → ${v}`, "success");
+                        } catch (err) {
+                          showMessage?.(err.message || "Failed to save stills model", "error");
+                        }
+                      }}
+                    >
+                      {(mediaModels.stills_profiles?.length
+                        ? mediaModels.stills_profiles
+                        : [
+                            { id: "zimage-turbo", name: "Z-Image Turbo" },
+                            { id: "flux-dev", name: "FLUX.1 Dev" },
+                            { id: "krea2-turbo", name: "Krea 2 Turbo" },
+                            { id: "sdxl-legacy", name: "SDXL (Legacy)" },
+                          ]
+                      ).map((p) => (
+                        <MenuItem key={p.id} value={p.id}>
+                          {p.name || p.id}
+                          {p.recommended ? " ★" : ""}
+                          {p.deprecated ? " (legacy)" : ""}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" fullWidth>
+                    <InputLabel id="media-train-label">Cast LoRA train base</InputLabel>
+                    <Select
+                      labelId="media-train-label"
+                      label="Cast LoRA train base"
+                      value={mediaModels.cast_train_base || "zimage-turbo"}
+                      onChange={async (e) => {
+                        const v = e.target.value;
+                        setMediaModelsState((p) => ({ ...p, cast_train_base: v }));
+                        try {
+                          const res = await apiService.setMediaModels({ cast_train_base: v });
+                          const data = res?.data ?? res;
+                          if (data?.error) throw new Error(data.error.message || data.error);
+                          showMessage?.(`Cast train base → ${v}`, "success");
+                        } catch (err) {
+                          showMessage?.(err.message || "Failed to save train base", "error");
+                        }
+                      }}
+                    >
+                      {(mediaModels.train_profiles?.length
+                        ? mediaModels.train_profiles
+                        : [
+                            { id: "zimage-turbo", name: "Z-Image Turbo", train_ready: true },
+                            { id: "flux-dev", name: "FLUX.1 Dev", train_ready: false },
+                            { id: "sdxl-legacy", name: "SDXL (Legacy)", train_ready: true },
+                          ]
+                      ).map((p) => (
+                        <MenuItem key={p.id} value={p.id}>
+                          {p.name || p.id}
+                          {p.train_ready === false ? " — train soon" : ""}
+                          {p.deprecated ? " (legacy)" : ""}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" fullWidth>
+                    <InputLabel id="media-maxq-label">Max quality stills</InputLabel>
+                    <Select
+                      labelId="media-maxq-label"
+                      label="Max quality stills"
+                      value={mediaModels.max_quality_model || "flux-dev"}
+                      onChange={async (e) => {
+                        const v = e.target.value;
+                        setMediaModelsState((p) => ({ ...p, max_quality_model: v }));
+                        try {
+                          await apiService.setMediaModels({ max_quality_model: v });
+                          showMessage?.(`Max quality → ${v}`, "success");
+                        } catch (err) {
+                          showMessage?.(err.message || "Failed to save max quality model", "error");
+                        }
+                      }}
+                    >
+                      <MenuItem value="flux-dev">FLUX.1 Dev</MenuItem>
+                      <MenuItem value="zimage-turbo">Z-Image Turbo</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                    Character LoRA strength (Cast / Batch / FilmCrew / MusicVideo / VideoGen keyframes).
+                    Video motion models do not reload face LoRAs — identity is baked into the still.
+                  </Typography>
+                  {[
+                    { key: 'zimage', label: 'Z-Image', field: 'character_lora_strength_zimage', def: 0.9 },
+                    { key: 'sdxl', label: 'SDXL', field: 'character_lora_strength_sdxl', def: 0.25 },
+                    { key: 'flux', label: 'FLUX', field: 'character_lora_strength_flux', def: 0.9 },
+                  ].map(({ key, label, field, def }) => (
+                    <TextField
+                      key={key}
+                      size="small"
+                      type="number"
+                      label={`${label} LoRA strength`}
+                      inputProps={{ min: 0, max: 1.5, step: 0.05 }}
+                      value={mediaModels.character_lora_strength?.[key] ?? def}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setMediaModelsState((p) => ({
+                          ...p,
+                          character_lora_strength: {
+                            ...(p.character_lora_strength || {}),
+                            [key]: v,
+                          },
+                        }));
+                      }}
+                      onBlur={async (e) => {
+                        const v = parseFloat(e.target.value);
+                        if (Number.isNaN(v)) return;
+                        try {
+                          const res = await apiService.setMediaModels({ [field]: v });
+                          const data = res?.data ?? res;
+                          if (data?.character_lora_strength) {
+                            setMediaModelsState((p) => ({
+                              ...p,
+                              character_lora_strength: data.character_lora_strength,
+                            }));
+                          }
+                          showMessage?.(`${label} LoRA strength → ${v}`, 'success');
+                        } catch (err) {
+                          showMessage?.(err.message || 'Failed to save LoRA strength', 'error');
+                        }
+                      }}
+                      fullWidth
+                      sx={{ mt: 1 }}
+                    />
+                  ))}
                 </Box>
               </SettingsRow>
               <Box sx={{ borderTop: 1, borderColor: "divider", mt: 2, pt: 2 }}>

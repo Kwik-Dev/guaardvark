@@ -967,11 +967,13 @@ class AgentBrain:
             try:
                 from backend.tools.image_tools import ImageGeneratorTool
                 tool = ImageGeneratorTool()
+                # Same defaults as chat ImageGeneratorTool (1024 + family sampling).
                 result = tool.execute(
                     prompt=prompt,
                     style=action.get("style", "realistic"),
-                    width=int(action.get("width", 512)),
-                    height=int(action.get("height", 512)),
+                    width=int(action.get("width", 1024)),
+                    height=int(action.get("height", 1024)),
+                    model=action.get("model") or "auto",
                 )
 
                 if result.success and result.metadata.get("image_url"):

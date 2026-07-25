@@ -150,6 +150,23 @@ class PluginOperationGate:
             return max(per_plugin, global_remaining)
 
 
+def _combine_script_output(stderr: str | None, stdout: str | None, *, cap: int = 2000) -> str:
+    """Merge stderr + stdout for operator-visible plugin start failures.
+
+    Many plugin start scripts print fatal errors to stdout only; using stderr
+    alone produced blank \"Start script failed:\" messages in the UI.
+    """
+    parts = []
+    for chunk in (stderr or "", stdout or ""):
+        text = (chunk or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    combined = "\n".join(parts).strip()
+    if len(combined) > cap:
+        combined = combined[: cap - 3] + "..."
+    return combined
+
+
 def _run_plugin_script(argv: list, cwd: str, timeout: int) -> dict:
     """Run a plugin script via the sidecar runner if available, else fall back
     to direct subprocess.run.
@@ -681,10 +698,17 @@ class PluginManager:
 
                 if result.get('rc', -1) != 0:
                     self._plugin_status[plugin_id] = PluginStatus.ERROR
-                    stderr = result.get('stderr', '')
-                    logger.error(f"Failed to start plugin {plugin_id}: {stderr}")
+                    # start.sh often prints fatal errors to stdout only (e.g.
+                    # "ComfyUI not found"). Surface both streams so the UI/log
+                    # is never a blank "Start script failed:".
+                    detail = _combine_script_output(
+                        result.get('stderr', ''),
+                        result.get('stdout', ''),
+                        cap=2000,
+                    ) or f"exit code {result.get('rc', -1)}"
+                    logger.error(f"Failed to start plugin {plugin_id}: {detail}")
                     return self._fail_plugin_start(
-                        plugin_id, {'success': False, 'error': f'Start script failed: {stderr}'}
+                        plugin_id, {'success': False, 'error': f'Start script failed: {detail}'}
                     )
 
                 # Wait for service to become healthy (retry loop)

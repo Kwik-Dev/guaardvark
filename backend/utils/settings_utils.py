@@ -109,6 +109,10 @@ ENV_VAR_MAP = {
     "gpu_idle_timeout": "GUAARDVARK_GPU_IDLE_TIMEOUT",
     "agent_routing_enabled": "AGENT_ROUTING_ENABLED",
     "log_agent_actions": "LOG_AGENT_ACTIONS",
+    # Media stack (stills / cast LoRA train base / max quality) — Ollama-selector style
+    "media_stills_model": "GUAARDVARK_STILLS_MODEL",
+    "media_cast_train_base": "GUAARDVARK_CAST_TRAIN_BASE",
+    "media_max_quality_model": "GUAARDVARK_MAX_QUALITY_MODEL",
 }
 
 _BOOL_TRUTHY = {"true", "1", "yes"}

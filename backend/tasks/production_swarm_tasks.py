@@ -444,29 +444,45 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
         if ctx is None:
             return
 
-        if image_generator is None:
-            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-            image_generator = ComfyUIImageGenerator()
-
         shots = ProductionShot.query.filter_by(production_id=prod_id).all()
 
-        # Claim the GPU exclusively around the ComfyUI generate loop. Previously
-        # this stage ran with NO gate claim at all — storyboard image gen could
-        # collide with a video render or LoRA train on the shared 16GB card.
-        # Storyboard gen rides the VIDEO_RENDER exclusivity slot (heavy-GPU
-        # generation bucket). GpuBusyError propagates to _agent_run -> fail_stage.
-        from backend.services.job_operation_gate import get_gate
+        # Claim the GPU exclusively around the still generate loop. Storyboard
+        # gen rides VIDEO_RENDER; Z-Image cast LoRAs go offline via
+        # character_still_pipeline (never force Comfy/SDXL).
         from backend.services.job_types import JobKind
-        gate = get_gate()
         from backend.services.gpu_resource_policy import gpu_session
-        with gpu_session(JobKind.VIDEO_RENDER, f"storyboard_{prod_id}",
-                         evict_ollama=True, vram_estimate_mb=9000):
+        from backend.services.character_still_pipeline import render_character_still
+        with gpu_session(
+            JobKind.VIDEO_RENDER,
+            f"storyboard_{prod_id}",
+            evict_ollama=True,
+            free_comfyui=True,
+            vram_estimate_mb=11000,
+            require_fit=True,
+            cross_process=True,
+        ):
             for i, shot in enumerate(shots):
                 lora_paths, prompt = _shot_loras_and_prompt(shot)
                 output_path = _storyboard_path(prod_id, shot.shot_number or (i + 1))
-                shot.storyboard_image_path = image_generator.generate_image(
-                    prompt=prompt, loras=lora_paths, output_path=output_path,
-                )
+                subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+                if lora_paths or image_generator is None:
+                    still = render_character_still(
+                        prompt,
+                        subjects=subjects,
+                        lora_paths=lora_paths,
+                        include_bible=True,
+                        source="filmcrew",
+                        output_path=output_path,
+                        keep_pipeline=True,
+                    )
+                    if not still.success:
+                        raise RuntimeError(still.error or f"storyboard still failed for shot {shot.shot_number}")
+                    shot.storyboard_image_path = still.image_path
+                else:
+                    # Injected test double (legacy Comfy generator).
+                    shot.storyboard_image_path = image_generator.generate_image(
+                        prompt=prompt, loras=lora_paths, output_path=output_path,
+                    )
 
             db.session.commit()
 
@@ -604,8 +620,15 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             # vram_estimate_mb debits the GPU orchestrator budget so this ~14GB render is
             # VISIBLE to it (it can evict competing in-process models) — without it the
             # render and a resident chat model both think they own the 16GB card.
-            with gpu_session(JobKind.VIDEO_RENDER, render_id, evict_ollama=True, free_comfyui=True,
-                             vram_estimate_mb=14000):
+            with gpu_session(
+                JobKind.VIDEO_RENDER,
+                render_id,
+                evict_ollama=True,
+                free_comfyui=True,
+                vram_estimate_mb=14000,
+                require_fit=True,
+                cross_process=True,
+            ):
                 progress.update_process(job_id, 5, f"Rendering {len(shot_inputs)} shots")
                 res = editor.render(
                     production_id=prod_id,
@@ -648,27 +671,39 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
         logging.warning("Regen storyboard shot called when not awaiting approval")
         return
 
-    if image_generator is None:
-        from backend.services.plugin_bridge import ensure_plugins_for_stage
-        from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-        ensure_plugins_for_stage("film-crew", "storyboard_gen")
-        image_generator = ComfyUIImageGenerator(model="sdxl")  # or from settings if added
-
     lora_paths, base_prompt = _shot_loras_and_prompt(shot)
     prompt = prompt_override if prompt_override else base_prompt
     output_path = _storyboard_path(shot.production_id, shot.shot_number or shot.id)
-    # Same GPU-exclusivity wrap as run_storyboard_artist: a single-shot regen
-    # still loads the image model on the shared GPU. GpuBusyError propagates to
-    # the caller (Celery task / API) rather than colliding with a live render.
-    from backend.services.job_operation_gate import get_gate
     from backend.services.job_types import JobKind
-    gate = get_gate()
     from backend.services.gpu_resource_policy import gpu_session
-    with gpu_session(JobKind.VIDEO_RENDER, f"storyboard_{shot.production_id}",
-                     evict_ollama=True, vram_estimate_mb=9000):
-        shot.storyboard_image_path = image_generator.generate_image(
-            prompt=prompt, loras=lora_paths, output_path=output_path,
-        )
+    from backend.services.character_still_pipeline import render_character_still
+    with gpu_session(
+        JobKind.VIDEO_RENDER,
+        f"storyboard_{shot.production_id}",
+        evict_ollama=True,
+        free_comfyui=True,
+        vram_estimate_mb=11000,
+        require_fit=True,
+        cross_process=True,
+    ):
+        if image_generator is not None:
+            shot.storyboard_image_path = image_generator.generate_image(
+                prompt=prompt, loras=lora_paths, output_path=output_path,
+            )
+        else:
+            subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+            still = render_character_still(
+                prompt,
+                subjects=subjects,
+                lora_paths=lora_paths,
+                include_bible=True,
+                source="filmcrew",
+                output_path=output_path,
+                keep_pipeline=False,
+            )
+            if not still.success:
+                raise RuntimeError(still.error or "storyboard regen failed")
+            shot.storyboard_image_path = still.image_path
         db.session.commit()
 
 def run_regen_shot_plan(shot_id: int, feedback: str, llm=None):

@@ -36,22 +36,28 @@ def _set_pdeathsig():
         pass
 
 class RealLoraTrainer:
-    """Spawns and drives plugins/lora_trainer/scripts/run_trainer.py inside
-    venv-torch. Subprocess is lazily started on first use.
-    
-    Public API matches mock_trainer.train_subject_lora's contract so the
-    selector in lora_trainer_tasks._train_impl can swap them."""
+    """Multi-base LoRA trainer daemon driver.
+
+    - sdxl-legacy → scripts/run_trainer.py + venv-torch (PEFT UNet)
+    - zimage-turbo → scripts/run_zimage_trainer.py + backend/venv (ZImagePipeline)
+
+    Public API matches mock_trainer.train_subject_lora so lora_trainer_tasks can swap.
+    """
 
     _PLUGIN_ROOT = Path(__file__).resolve().parent
+    _REPO_ROOT = _PLUGIN_ROOT.parent.parent
     _RUNNER_SCRIPT = _PLUGIN_ROOT / "scripts" / "run_trainer.py"
+    _ZIMAGE_RUNNER = _PLUGIN_ROOT / "scripts" / "run_zimage_trainer.py"
     _VENV_PYTHON = _PLUGIN_ROOT / "venv-torch" / "bin" / "python"
-    _LOAD_TIMEOUT_S = 900    # SDXL is ~7 GB on first download
+    _BACKEND_PYTHON = _REPO_ROOT / "backend" / "venv" / "bin" / "python"
+    _LOAD_TIMEOUT_S = 900    # first download / cold load
     _TRAIN_TIMEOUT_S = 1800  # 30 min cap per subject
 
     def __init__(self):
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._loaded = False
+        self._active_backend: str | None = None  # "sdxl" | "zimage"
 
     @staticmethod
     def _gpu_env() -> dict:
@@ -72,71 +78,105 @@ class RealLoraTrainer:
         env = dict(os.environ)
         if not env.get("CUDA_VISIBLE_DEVICES"):  # '' or missing → the poisoned case
             env["CUDA_VISIBLE_DEVICES"] = "0"
+        # Reduce VRAM fragmentation on tight 16GB cards — the OOM error message
+        # explicitly recommends this when "reserved but unallocated" is large.
+        env.setdefault(
+            "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
+        )
         return env
 
     @classmethod
     def is_available(cls) -> bool:
-        """True iff venv-torch/bin/python exists AND it can actually see a CUDA GPU.
-        This prevents picking the REAL backend on systems that have the venv
-        but no working NVIDIA driver/CUDA runtime visible to torch (common
-        cause of the "CUDA not available" failure on capable hardware like
-        RTX 4070 Ti SUPER).
+        """True if any real train Python (venv-torch OR backend/venv) sees CUDA.
+
+        Z-Image training uses backend/venv; SDXL uses venv-torch. Either is enough
+        to pick the real backend (the per-base daemon will fail clearly if its own
+        python is missing).
         """
-        if not cls._VENV_PYTHON.exists():
+        pythons = []
+        if cls._VENV_PYTHON.exists():
+            pythons.append(cls._VENV_PYTHON)
+        if cls._BACKEND_PYTHON.exists() and cls._BACKEND_PYTHON not in pythons:
+            pythons.append(cls._BACKEND_PYTHON)
+        if not pythons:
             return False
-        # Probe a few times before giving up. A single reading can be a transient
-        # false-negative — right after a host restart the NVIDIA stack is still
-        # settling, and a fresh torch import can momentarily race driver init or
-        # brief GPU contention while other services spin up. That blip used to
-        # block a real training run (subject 16, 2026-06-25, two failed clicks
-        # while the probe passed seconds later from a shell). The GPU gate already
-        # serializes real contention, so retrying here only filters out the blip;
-        # if CUDA is genuinely unavailable, all attempts fail and we still bail.
+
         attempts = 3
         last = ""
-        for i in range(attempts):
-            try:
-                probe = subprocess.run(
-                    [
-                        str(cls._VENV_PYTHON),
-                        "-c",
-                        "import torch, sys; "
-                        "ok = torch.cuda.is_available() and torch.cuda.device_count() > 0; "
-                        "print('OK' if ok else 'NO'); "
-                        "print(torch.cuda.get_device_name(0) if ok else '', file=sys.stderr)",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=20,  # cold torch+CUDA init after a restart can exceed 8s
-                    env=cls._gpu_env(),  # immune to the worker's CUDA_VISIBLE_DEVICES='' poison
-                )
-                if probe.returncode == 0 and "OK" in probe.stdout:
-                    if i:
-                        logger.info("real_trainer: CUDA probe OK on attempt %d/%d", i + 1, attempts)
-                    return True
-                last = f"stdout={probe.stdout.strip()!r} stderr={probe.stderr.strip()!r}"
-            except Exception as e:
-                last = f"probe crashed: {e}"
-            if i < attempts - 1:
-                time.sleep(2)  # let the driver/contention settle, then retry
+        for py in pythons:
+            for i in range(attempts):
+                try:
+                    probe = subprocess.run(
+                        [
+                            str(py),
+                            "-c",
+                            "import torch, sys; "
+                            "ok = torch.cuda.is_available() and torch.cuda.device_count() > 0; "
+                            "print('OK' if ok else 'NO'); "
+                            "print(torch.cuda.get_device_name(0) if ok else '', file=sys.stderr)",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                        env=cls._gpu_env(),
+                    )
+                    if probe.returncode == 0 and "OK" in probe.stdout:
+                        if i:
+                            logger.info(
+                                "real_trainer: CUDA probe OK (%s) attempt %d/%d",
+                                py, i + 1, attempts,
+                            )
+                        return True
+                    last = f"py={py} stdout={probe.stdout.strip()!r} stderr={probe.stderr.strip()!r}"
+                except Exception as e:
+                    last = f"py={py} probe crashed: {e}"
+                if i < attempts - 1:
+                    time.sleep(2)
         logger.warning(
-            "real_trainer: venv exists but CUDA probe failed after %d attempts: %s",
-            attempts, last,
+            "real_trainer: CUDA probe failed for all train pythons after retries: %s",
+            last,
         )
         return False
 
-    def _ensure_proc(self) -> None:
-        if self._proc is not None and self._proc.poll() is None:
-            return
-
+    def _backend_paths(self, backend: str) -> tuple[Path, Path, str]:
+        """Return (python, runner_script, load_model_id) for a train backend."""
+        if backend == "zimage":
+            py = self._BACKEND_PYTHON if self._BACKEND_PYTHON.exists() else self._VENV_PYTHON
+            if not py.exists():
+                raise RuntimeError(
+                    f"Z-Image trainer needs backend/venv (diffusers ZImagePipeline); "
+                    f"missing {self._BACKEND_PYTHON}"
+                )
+            if not self._ZIMAGE_RUNNER.exists():
+                raise RuntimeError(f"Z-Image trainer script missing: {self._ZIMAGE_RUNNER}")
+            return py, self._ZIMAGE_RUNNER, "Tongyi-MAI/Z-Image-Turbo"
+        # default SDXL
         if not self._VENV_PYTHON.exists():
             raise RuntimeError(f"venv-torch not found at {self._VENV_PYTHON}")
         if not self._RUNNER_SCRIPT.exists():
             raise RuntimeError(f"Trainer script missing at {self._RUNNER_SCRIPT}")
+        return self._VENV_PYTHON, self._RUNNER_SCRIPT, "stabilityai/stable-diffusion-xl-base-1.0"
 
-        logger.info("Spawning LoRA trainer daemon: %s %s", self._VENV_PYTHON, self._RUNNER_SCRIPT)
+    def _ensure_proc(self, backend: str = "sdxl") -> None:
+        """Start (or reuse) the daemon for the requested backend. Switches kill the old one."""
+        if (
+            self._proc is not None
+            and self._proc.poll() is None
+            and self._active_backend == backend
+        ):
+            return
+
+        if self._proc is not None:
+            logger.info(
+                "LoRA trainer switching backend %s → %s; shutting down prior daemon",
+                self._active_backend, backend,
+            )
+            self.shutdown()
+
+        py, runner, _load_id = self._backend_paths(backend)
+        logger.info("Spawning LoRA trainer daemon (%s): %s %s", backend, py, runner)
         self._proc = subprocess.Popen(
-            [str(self._VENV_PYTHON), "-u", str(self._RUNNER_SCRIPT)],
+            [str(py), "-u", str(runner)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -150,6 +190,8 @@ class RealLoraTrainer:
             # Die with the worker so a restart/crash can't orphan a 7GB daemon.
             preexec_fn=_set_pdeathsig,
         )
+        self._active_backend = backend
+        self._loaded = False
 
         def _pump_stderr():
             log_file = self._PLUGIN_ROOT.parent.parent / "logs" / "lora_trainer_daemon.log"
@@ -202,6 +244,15 @@ class RealLoraTrainer:
         except json.JSONDecodeError as e:
             raise RuntimeError(f"LoRA trainer daemon returned non-JSON: {response_line!r} ({e})") from e
 
+    @staticmethod
+    def _resolve_backend(base_model_id: str | None) -> str:
+        mid = (base_model_id or "sdxl-legacy").strip().lower()
+        if mid in ("zimage-turbo", "zimage", "z-image-turbo", "tongyi-mai/z-image-turbo"):
+            return "zimage"
+        if mid in ("flux-dev", "flux"):
+            return "flux"  # not implemented in-daemon yet
+        return "sdxl"
+
     def train_subject_lora(
         self,
         *,
@@ -210,55 +261,66 @@ class RealLoraTrainer:
         ref_image_paths: list[str],
         output_dir: str,
         trigger_word: str | None = None,
-        resolution: int = 768,
+        resolution: int = 512,
         image_prompts: list[str] | None = None,
         rank: int = 16,
         alpha: int = 16,
         learning_rate: float = 1.0e-4,
         steps: int | None = None,
+        base_model_id: str | None = None,
         **_,
     ) -> dict:
-        # resolution is the dominant VRAM lever for SDXL LoRA. Default 768 fits a
-        # 16 GB card alongside the bf16 + gradient-checkpointing the runner already
-        # does; bump to 1024 on a 24 GB+ card for sharper identity. Snap to /64 so
-        # the UNet doesn't choke on an odd size.
+        # resolution is the dominant VRAM lever. Default 512 fits a 16 GB card
+        # with desktop/other CUDA present; run_zimage_trainer also soft-caps.
         resolution = max(512, (int(resolution) // 64) * 64)
         if not ref_image_paths:
             return {"status": "failed", "error": "no reference images provided"}
 
-        # The token the LoRA actually learns. Prefer the explicit rare trigger
-        # (e.g. "sage_harlow"); fall back to the display name. Whatever we train
-        # on here MUST be what generation prompts with — see ComfyUIImageGenerator.
         token = (trigger_word or "").strip() or subject_name
+        backend = self._resolve_backend(base_model_id)
+        if backend == "flux":
+            return {
+                "status": "failed",
+                "error": (
+                    "FLUX character training is registered but not implemented in-process yet. "
+                    "Use base_model_id=zimage-turbo (default product) or sdxl-legacy."
+                ),
+            }
+
+        registry_base = "zimage-turbo" if backend == "zimage" else "sdxl-legacy"
+        train_backend_name = "peft_zimage" if backend == "zimage" else "peft_sdxl"
 
         with self._lock:
             try:
-                self._ensure_proc()
+                self._ensure_proc(backend=backend)
             except Exception as e:
                 return {"status": "failed", "error": str(e)}
-            
-            # Absolute path is mandatory: the daemon subprocess runs with
-            # cwd=plugin root, so a relative output_dir (e.g. "data/training/
-            # loras") would resolve under plugins/lora_trainer/ and the save
-            # would land nowhere / fail. Resolve against the backend cwd here.
+
+            # Absolute path is mandatory: daemon cwd is plugin root.
             target_dir = Path(output_dir).resolve()
             target_dir.mkdir(parents=True, exist_ok=True)
             safe_name = "".join(c if c.isalnum() else "_" for c in subject_name) or "subject"
-            
-            # Find next version
+
             v = 1
             while (target_dir / f"{safe_name}_v{v}.safetensors").exists():
                 v += 1
             output_path = target_dir / f"{safe_name}_v{v}.safetensors"
 
+            _, _, load_model_id = self._backend_paths(backend)
             if not self._loaded:
-                load_resp = self._send({"op": "load", "model_id": "stabilityai/stable-diffusion-xl-base-1.0"}, timeout_s=self._LOAD_TIMEOUT_S)
+                load_resp = self._send(
+                    {"op": "load", "model_id": load_model_id},
+                    timeout_s=self._LOAD_TIMEOUT_S,
+                )
                 if not load_resp.get("ok"):
                     return {"status": "failed", "error": load_resp.get("error", "load failed")}
                 self._loaded = True
 
             if steps is None:
-                steps = min(1500, max(400, len(ref_image_paths) * 100))
+                if backend == "zimage":
+                    steps = min(1200, max(400, len(ref_image_paths) * 80))
+                else:
+                    steps = min(1500, max(400, len(ref_image_paths) * 100))
             prompts = list(image_prompts or [])
             if not prompts:
                 prompts = [f"a photo of {token}"] * len(ref_image_paths)
@@ -270,7 +332,7 @@ class RealLoraTrainer:
                 "params": {
                     "subject_id": subject_id,
                     "subject_name": subject_name,
-                    "ref_image_paths": ref_image_paths,
+                    "ref_image_paths": [str(Path(p).resolve()) for p in ref_image_paths],
                     "output_path": str(output_path),
                     "rank": int(rank),
                     "alpha": int(alpha),
@@ -286,21 +348,51 @@ class RealLoraTrainer:
             if not train_resp.get("ok"):
                 return {"status": "failed", "error": train_resp.get("error", "train failed")}
 
-            sidecar = output_path.with_suffix(".json")
-            sidecar.write_text(json.dumps({
-                "subject_id": subject_id,
-                "subject_name": subject_name,
-                "trigger_word": token,
-                "instance_prompt": f"a photo of {token}",
-                "ref_count": len(ref_image_paths),
-                "mock": False,
-                "steps": steps,
-            }))
+            try:
+                from backend.services.media_model_registry import write_lora_sidecar
+                write_lora_sidecar(
+                    output_path,
+                    subject_id=subject_id,
+                    subject_name=subject_name,
+                    trigger_word=token,
+                    base_model_id=registry_base,
+                    ref_count=len(ref_image_paths),
+                    steps=steps,
+                    mock=False,
+                    extra={
+                        "train_backend": train_backend_name,
+                        "resolution": resolution,
+                        "rank": rank,
+                        "alpha": alpha,
+                    },
+                )
+            except Exception as e:
+                logger.warning("write_lora_sidecar failed (%s); writing minimal sidecar", e)
+                sidecar = output_path.with_suffix(".json")
+                sidecar.write_text(json.dumps({
+                    "subject_id": subject_id,
+                    "subject_name": subject_name,
+                    "trigger_word": token,
+                    "base_model_id": registry_base,
+                    "lora_format": "zimage" if backend == "zimage" else "kohya_sdxl",
+                    "instance_prompt": f"a photo of {token}",
+                    "ref_count": len(ref_image_paths),
+                    "mock": False,
+                    "steps": steps,
+                    "schema_version": 2,
+                }))
+
+            if not output_path.is_file() or output_path.stat().st_size < 1024:
+                return {
+                    "status": "failed",
+                    "error": f"trainer reported ok but LoRA file missing/tiny: {output_path}",
+                }
 
             return {
                 "status": "ok",
                 "lora_path": str(output_path),
-                "lora_version": v
+                "lora_version": v,
+                "base_model_id": registry_base,
             }
 
     def shutdown(self) -> None:
@@ -316,6 +408,7 @@ class RealLoraTrainer:
             self._kill_proc()
         self._proc = None
         self._loaded = False
+        self._active_backend = None
         logger.info("LoRA trainer daemon stopped")
 
     def _kill_proc(self) -> None:

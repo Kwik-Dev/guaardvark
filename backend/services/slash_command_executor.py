@@ -47,13 +47,14 @@ def resolve_slash_direct_tool(
     args = (options.get("slash_args") or options.get("slash_prompt") or "").strip()
     if slash == "imagine":
         from backend.utils.settings_utils import get_chat_image_model
+        from backend.services.image_prompt_sanitize import sanitize_image_prompt
 
         model = (
             params.get("model")
             or options.get("image_model")
             or get_chat_image_model()
         )
-        prompt = params.get("prompt") or args
+        prompt = sanitize_image_prompt(params.get("prompt") or args)
         if not prompt:
             return None, {}
         logger.info(f"Resolved /imagine direct: model={model} (from /imagemodel or options)")

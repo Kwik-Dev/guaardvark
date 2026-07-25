@@ -1254,6 +1254,9 @@ try:
                 ("subjects", "training_error", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS training_error TEXT"),
                 ("subjects", "bible", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS bible TEXT"),
                 ("subjects", "training_settings_json", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS training_settings_json JSON"),
+                # Generated samples graduate into Training Data after successful train.
+                ("subject_samples", "promoted_to_training", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_to_training BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("subject_samples", "promoted_at", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMP"),
                 ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
                 # Local source folder for swarm/agent code runs (added Phase 2).

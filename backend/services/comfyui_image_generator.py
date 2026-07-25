@@ -123,25 +123,54 @@ class ComfyUIImageGenerator:
         effective_model = model or self.model
         ml = (effective_model or "").lower()
 
-        # ── Capability guard (subject-16 model-collapse fix) ──────────────────
-        # Our trained character LoRAs are SDXL (the trainer is a
-        # StableDiffusionXLPipeline — see plugins/lora_trainer/scripts/run_trainer.py).
-        # Branch selection here is by model STRING, which used to let a stray
-        # model name silently drop the LoRA: the flux-schnell branch has NO LoRA
-        # nodes at all, and the flux-DEV branch expects FLUX-format LoRAs (an SDXL
-        # LoRA loaded there is wrong/garbled). So whenever LoRAs are present we
-        # force the verified-correct SDXL LoraLoader chain below — identity must
-        # actually be applied, not dropped. A flux model with NO LoRAs keeps its
-        # branch (plain stylistic stills are unaffected).
-        if lora_names and "flux" in ml and "dev" not in ml:
-            logger.warning(
-                "Keyframe requested model=%r WITH %d LoRA(s); character LoRAs are "
-                "SDXL and flux branches drop/mismatch them — overriding to the SDXL "
-                "LoRA branch so identity is actually applied.",
-                effective_model, len(lora_names),
-            )
-            effective_model = "sdxl"
-            ml = "sdxl"
+        # ── Capability guard (subject-16 + media model registry) ──────────────
+        # Character LoRAs are tied to a base_model_id (sidecar schema v2). Never
+        # force every LoRA onto SDXL — only SDXL-format LoRAs use the SDXL chain.
+        # FLUX LoRAs use flux-dev; mismatched model tags are corrected to the
+        # LoRA's family so identity is applied, not silently dropped.
+        if lora_names:
+            try:
+                from backend.services.media_model_registry import resolve_inference_for_loras
+                # Caller may pass basenames only; resolve_inference needs paths when possible.
+                # Prefer full paths from kwargs stored on self if present.
+                lora_paths = getattr(self, "_last_lora_paths", None) or list(lora_names)
+                info = resolve_inference_for_loras(
+                    [p if ("/" in p or p.endswith(".safetensors")) else p for p in lora_paths]
+                )
+                tag = info.get("comfy_model_tag") or "sdxl"
+                if info.get("family") == "sdxl" and ("flux" in ml or "zimage" in ml or "z-image" in ml):
+                    logger.warning(
+                        "LoRAs are SDXL (base=%s) but model=%r — overriding to sdxl so identity applies.",
+                        info.get("base_model_id"), effective_model,
+                    )
+                    effective_model = "sdxl"
+                    ml = "sdxl"
+                elif info.get("family") == "flux" and "flux" not in ml:
+                    logger.warning(
+                        "LoRAs are FLUX (base=%s) but model=%r — overriding to %s.",
+                        info.get("base_model_id"), effective_model, tag,
+                    )
+                    effective_model = tag
+                    ml = tag
+                elif info.get("family") == "zimage":
+                    # Z-Image LoRAs are not applied via this Comfy SDXL/FLUX graph yet.
+                    logger.warning(
+                        "Z-Image LoRAs cannot use Comfy SDXL/FLUX graph (base=%s); "
+                        "caller should use offline Z-Image path.",
+                        info.get("base_model_id"),
+                    )
+            except Exception as e:
+                # Pre-registry LoRAs / basename-only: fall back to historic SDXL force
+                # when flux-schnell would drop LoRAs entirely.
+                logger.debug("LoRA base resolve failed (%s); using legacy flux→sdxl guard", e)
+                if "flux" in ml and "dev" not in ml:
+                    logger.warning(
+                        "Keyframe model=%r WITH %d LoRA(s); assuming SDXL legacy LoRAs — "
+                        "overriding to sdxl.",
+                        effective_model, len(lora_names),
+                    )
+                    effective_model = "sdxl"
+                    ml = "sdxl"
 
         if "flux" in ml and "dev" in ml:
             # FLUX-dev branch. As of the subject-16 fix this only fires for an
@@ -178,8 +207,15 @@ class ComfyUIImageGenerator:
                     "inputs": {"model": model_src, "lora_name": name, "strength_model": self.lora_strength},
                 }
                 model_src = [nid, 0]
+            # FluxGuidance owns "guidance" (user slider). KSampler cfg stays 1.0
+            # (distilled). Soft floor on steps avoids accidental 1-step garbage;
+            # upper bound is operator-owned (quality slider / batch params).
+            flux_guidance = float(cfg) if cfg is not None and float(cfg) > 0 else FLUX_DEV_GUIDANCE
+            flux_guidance = max(1.0, min(flux_guidance, 10.0))
+            flux_steps = int(steps) if steps else 28
+            flux_steps = max(4, min(flux_steps, 100))
             wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}}
-            wf["guid"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["pos", 0], "guidance": FLUX_DEV_GUIDANCE}}
+            wf["guid"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["pos", 0], "guidance": flux_guidance}}
             # FLUX-dev is CFG-distilled (cfg=1.0) so the negative is inert; an empty
             # encode keeps the KSampler contract valid without fighting the LoRA.
             wf["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["clip", 0]}}
@@ -188,7 +224,7 @@ class ComfyUIImageGenerator:
                 "class_type": "KSampler",
                 "inputs": {
                     "seed": seed,
-                    "steps": max(steps, 20) if steps else 28,  # dev needs real step counts, not schnell's 8
+                    "steps": flux_steps,
                     "cfg": 1.0,
                     "sampler_name": "euler",
                     "scheduler": "simple",
@@ -515,10 +551,30 @@ class ComfyUIImageGenerator:
         effective_model = model or self.model
         # ComfyUI resolves LoRAs by basename within its loras search paths;
         # data/training/loras is registered via extra_model_paths.yaml.
-        lora_names = [os.path.basename(p) for p in (loras or []) if p]
+        lora_paths = [p for p in (loras or []) if p]
+        lora_names = [os.path.basename(p) for p in lora_paths]
+        # Full paths for media_model_registry sidecar lookup in _build_workflow.
+        self._last_lora_paths = lora_paths
 
         # Run preflight (logs warnings for missing; does not raise).
-        self._preflight_loras(loras or [])
+        self._preflight_loras(lora_paths)
+
+        # Align model tag with LoRA base when possible (SDXL vs FLUX).
+        if lora_paths:
+            try:
+                from backend.services.media_model_registry import resolve_inference_for_loras
+                info = resolve_inference_for_loras(lora_paths)
+                if info.get("comfy_model_tag"):
+                    effective_model = info["comfy_model_tag"]
+                if info.get("family") == "zimage":
+                    raise RuntimeError(
+                        "Z-Image character LoRAs must run on the offline Z-Image path, "
+                        "not ComfyUI SDXL/FLUX. (base_model_id=zimage-turbo)"
+                    )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
 
         workflow = self._build_workflow(
             prompt=prompt,

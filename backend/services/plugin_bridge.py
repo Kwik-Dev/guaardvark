@@ -56,6 +56,9 @@ ROUTE_PLUGIN_MAP: Dict[str, List[str]] = {
     "/film-crew": ["comfyui", "video_editor", "ollama"],
     "/music-video": ["comfyui", "video_editor", "ollama"],
     "/music-video/storyboard": ["comfyui"],  # phase for pre-approval thumbnails (analyze needs ollama+video_editor earlier)
+    # Cast Studio: tasks drive ensure (planning→ollama, generate→comfyui). Do not
+    # warm both on nav — that fights 16GB VRAM when the operator only opened /cast.
+    "/cast": [],
     "/swarm": ["swarm"],
     "/settings": [],
     "/plugins": [],
@@ -85,6 +88,16 @@ STAGE_PLUGIN_REQUIREMENTS: dict[str, dict[str, list[str]]] = {
         "awaiting_approval": [],  # user gate
         "rendering": ["comfyui", "video_editor"],      # Editor (i2v + optional compose)
         "complete": [],
+    },
+    # Cast & LoRA Studio — first-class (was borrowing film-crew/storyboard_gen).
+    # planning needs Ollama for bible/shots. generate/regen map lists ComfyUI for
+    # FLUX/SDXL routes; character_generation_tasks skips ensure when Z-Image
+    # offline path is selected. train is reclaim-only (lora_trainer tool).
+    "cast": {
+        "planning": ["ollama"],
+        "generate_samples": ["comfyui"],
+        "regen_sample": ["comfyui"],
+        "train": [],
     },
 }
 
@@ -148,16 +161,31 @@ def plugins_for_stage(context: str, stage: str) -> list[str]:
     return out
 
 
-def ensure_plugins_for_stage(context: str, stage: str, **kwargs) -> None:
+def ensure_plugins_for_stage(
+    context: str,
+    stage: str,
+    *,
+    job_critical: bool = False,
+    **kwargs,
+) -> None:
     """Ensure all plugins for a given pipeline stage/context are running.
     Auto-orchestrated paths pass persist_user_pref=False (see ensure_plugin_running).
     Called from PipelineService dispatch/resume and explicit task sites.
+
+    job_critical=True (Cast Character jobs): transiently start even when the
+    operator previously set user_enabled=False for VRAM — does NOT persist
+    re-enable in the Plugins UI. Music-video / film-crew leave this False.
 
     P3: also triggers GPU model preparation for the stage (enhances gpu_memory_orchestrator
     with phase support; coordinates plugin + model loading for swarms).
     """
     for pid in plugins_for_stage(context, stage):
-        ensure_plugin_running(pid, persist_user_pref=False, **kwargs)
+        ensure_plugin_running(
+            pid,
+            persist_user_pref=False,
+            job_critical=job_critical,
+            **kwargs,
+        )
     try:
         from backend.services.gpu_memory_orchestrator import get_orchestrator
         get_orchestrator().prepare_for_stage(context, stage)
@@ -329,7 +357,13 @@ def _resolve_gpu_conflict(needed: Set[str]) -> List[Dict[str, Any]]:
     return actions
 
 
-def ensure_plugin_running(plugin_id: str, *, enable_if_disabled: bool = True, persist_user_pref: bool = True) -> None:
+def ensure_plugin_running(
+    plugin_id: str,
+    *,
+    enable_if_disabled: bool = True,
+    persist_user_pref: bool = True,
+    job_critical: bool = False,
+) -> None:
     """Make sure ``plugin_id`` is enabled and running. Raises PluginUnavailable otherwise.
 
     DEPRECATED for stage-driven flows (P3): prefer `ensure_plugins_for_stage(context, stage)`
@@ -339,8 +373,11 @@ def ensure_plugin_running(plugin_id: str, *, enable_if_disabled: bool = True, pe
 
     persist_user_pref=False (for auto-orchestrated paths like music-video / film-crew stages):
       - Skips calling enable_plugin (which mutates the persisted user_enabled overlay).
-      - Allows transient auto-start without "sticking" a user preference or overriding a manual disable.
-      - Still honors existing user_enabled=True or manifest defaults for the start decision.
+      - Allows transient auto-start without "sticking" a user preference.
+      - Still honors user_enabled=False veto unless job_critical=True.
+
+    job_critical=True (Cast Character jobs): bypass user-disable veto for a transient
+    start only — never persists user_enabled=True.
     """
     import warnings
     warnings.warn(
@@ -349,7 +386,12 @@ def ensure_plugin_running(plugin_id: str, *, enable_if_disabled: bool = True, pe
         DeprecationWarning,
         stacklevel=2,
     )
-    ok, detail = _try_start_plugin(plugin_id, enable_if_disabled=enable_if_disabled, persist_user_pref=persist_user_pref)
+    ok, detail = _try_start_plugin(
+        plugin_id,
+        enable_if_disabled=enable_if_disabled,
+        persist_user_pref=persist_user_pref,
+        job_critical=job_critical,
+    )
     if not ok:
         raise PluginUnavailable(detail or f"could not start '{plugin_id}'")
     logger.info("plugin_bridge: '%s' running", plugin_id)
@@ -360,37 +402,50 @@ def _try_start_plugin(
     *,
     enable_if_disabled: bool = True,
     persist_user_pref: bool = True,
+    job_critical: bool = False,
 ) -> tuple[bool, Optional[str]]:
     pm = _plugin_manager()
 
     # Explicit-disable veto: if the operator has *explicitly* turned this plugin
     # off (a persisted user_enabled=False, as opposed to merely "never toggled"),
-    # the auto-orchestrator must never enable or start it — not on the persist
-    # path and not on the transient stage path. This survives a backend restart
-    # (the in-memory _user_controlled set does not) and closes the loop where a
-    # route navigation re-enabled an Ollama the user had deliberately disabled.
+    # the auto-orchestrator must never enable or start it on nav/stage paths —
+    # unless job_critical=True (Cast Character), which may transiently start
+    # without persisting re-enable.
     try:
         _user_prefs = pm.state_store.get_user_enabled()
         if _user_prefs.get(plugin_id) is False:
-            return False, f"plugin '{plugin_id}' is user-disabled"
+            if not job_critical:
+                return False, f"plugin '{plugin_id}' is user-disabled"
+            logger.info(
+                "plugin_bridge: job_critical start of %s "
+                "(user_enabled=False, not persisted)",
+                plugin_id,
+            )
     except Exception:
         pass
 
     if not pm.is_effectively_enabled(plugin_id):
-        if not enable_if_disabled:
+        if not enable_if_disabled and not job_critical:
             return False, f"plugin '{plugin_id}' is disabled"
-        if persist_user_pref:
+        if persist_user_pref and not job_critical:
             res = pm.enable_plugin(plugin_id)
             if not res.get("success"):
                 return False, f"could not enable '{plugin_id}': {res.get('error')}"
             logger.info("plugin_bridge: enabled '%s' on demand", plugin_id)
         else:
-            # Auto path (e.g. music-video/film-crew stages): do not mutate persistent user_enabled.
-            # Temporarily flip in-memory config so the start guard inside manager passes (if manifest allows start).
-            meta = pm.registry.get_plugin(plugin_id)
-            if meta and not getattr(meta.config, "enabled", False):
-                meta.config.enabled = True  # transient for this start attempt only
-            logger.info("plugin_bridge: auto-orchestrating start for '%s' (no persistent enable)", plugin_id)
+            # Auto / job_critical path: do not mutate persistent user_enabled.
+            # Temporarily flip in-memory config so the start guard inside manager passes.
+            try:
+                meta = pm.registry.get_plugin(plugin_id)
+                if meta and not getattr(meta.config, "enabled", False):
+                    meta.config.enabled = True  # transient for this start attempt only
+            except Exception:
+                pass
+            logger.info(
+                "plugin_bridge: auto-orchestrating start for '%s' (no persistent enable%s)",
+                plugin_id,
+                ", job_critical" if job_critical else "",
+            )
 
     if _is_running(plugin_id):
         return True, "already running"
@@ -477,9 +532,13 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
         # Re-check GPU conflict before each start (stop may need cooldown settle).
         actions.extend(_resolve_gpu_conflict(needed))
 
-        # Auto paths (music-video/film-crew stages or subpaths) use non-persisting ensure
-        # so manual toggles in PluginsPage are not overridden.
-        persist = not (route.startswith("/music-video") or route.startswith("/film-crew"))
+        # Auto paths (music-video/film-crew/cast stages or subpaths) use non-persisting
+        # ensure so manual toggles in PluginsPage are not overridden.
+        persist = not (
+            route.startswith("/music-video")
+            or route.startswith("/film-crew")
+            or route.startswith("/cast")
+        )
         ok, detail = _try_start_plugin(plugin_id, persist_user_pref=persist)
         if ok and _is_running(plugin_id):
             with _state_lock:

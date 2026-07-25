@@ -26,6 +26,21 @@ def _framing_helpers():
         return detect_framing, FULL
 
 
+def is_bare_caption(caption: str, token: str) -> bool:
+    """True when caption is essentially just ``a photo of {token}`` (no visual traits)."""
+    t = (caption or "").strip().lower().rstrip(".")
+    tok = (token or "").strip().lower()
+    if not t:
+        return True
+    if tok and t in {tok, f"a photo of {tok}", f"photo of {tok}"}:
+        return True
+    if tok and t.startswith(f"a photo of {tok}"):
+        # Allow a short trailing clause; still bare if almost nothing after.
+        rest = t[len(f"a photo of {tok}"):].strip(" ,;-")
+        return len(rest) < 12
+    return False
+
+
 def _caption_for_path(
     subject: Subject,
     image_path: str,
@@ -52,7 +67,7 @@ def build_training_captions(
     subject: Subject,
     train_images: list[str],
 ) -> list[str]:
-    """Per-image captions for the SDXL trainer (parallel to train_images)."""
+    """Per-image captions for the trainer (parallel to train_images)."""
     approved = (
         SubjectSample.query
         .filter_by(subject_id=subject.id, approved=True, status="done")
@@ -60,6 +75,36 @@ def build_training_captions(
     )
     sample_by_path = {s.image_path: s for s in approved if s.image_path}
     return [_caption_for_path(subject, p, sample_by_path) for p in train_images]
+
+
+def caption_coverage_stats(
+    subject: Subject,
+    train_images: list[str] | None = None,
+) -> dict:
+    """Stats for Cast UI / train gate: how many captions are rich vs bare fallback."""
+    paths = train_images
+    if paths is None:
+        paths = list(subject.ref_image_paths or [])
+        approved = (
+            SubjectSample.query
+            .filter_by(subject_id=subject.id, approved=True, status="done")
+            .all()
+        )
+        for smp in approved:
+            if smp.image_path and smp.image_path not in paths:
+                paths.append(smp.image_path)
+    existing = [p for p in (paths or []) if p and Path(p).is_file()]
+    token = (subject.trigger_word or "").strip() or subject.name
+    captions = build_training_captions(subject, existing)
+    bare = sum(1 for c in captions if is_bare_caption(c, token))
+    rich = max(0, len(captions) - bare)
+    return {
+        "images": len(existing),
+        "rich_captions": rich,
+        "bare_captions": bare,
+        "captions": captions,
+        "trigger_word": token,
+    }
 
 
 def validate_cast_training(
@@ -86,11 +131,22 @@ def validate_cast_training(
 
     captions = build_training_captions(subject, existing)
     framing_tally: dict[str, int] = {}
+    bare_count = 0
     for cap in captions:
         fr = detect_framing(cap) or "unknown"
         framing_tally[fr] = framing_tally.get(fr, 0) + 1
         if require_trigger_in_captions and token.lower() not in cap.lower():
             failures.append(f"trigger '{token}' missing from caption for an image")
+        if is_bare_caption(cap, token):
+            bare_count += 1
+
+    rich_count = max(0, len(captions) - bare_count)
+    if n and bare_count > 0.5 * n:
+        warnings.append(
+            f"{bare_count}/{n} captions are bare \"a photo of {token}\" fallbacks — "
+            "VLM captioning should run before train; identity will be weak without "
+            "visual trait text on the uploads"
+        )
 
     full_body = sum(framing_tally.get(f, 0) for f in FULL_BODY_FRAMINGS)
     need_full = max(2, math.ceil(0.15 * n)) if n else 2
@@ -115,4 +171,6 @@ def validate_cast_training(
         "framing": framing_tally,
         "full_body_count": full_body,
         "full_body_recommended": need_full,
+        "bare_captions": bare_count,
+        "rich_captions": rich_count,
     }

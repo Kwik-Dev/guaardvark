@@ -103,6 +103,12 @@ export const generateSamples = async (id, options = {}) => {
   return response.data;
 };
 
+// Cancel an in-flight Generate Character batch (or single-sample regen).
+export const cancelGenerateSamples = async (id) => {
+  const response = await axios.post(`${API_BASE}/cast-library/subjects/${id}/generate/cancel`);
+  return response.data;
+};
+
 export const listSamples = async (id) => {
   const response = await axios.get(`${API_BASE}/cast-library/subjects/${id}/samples`);
   return response.data;
@@ -157,6 +163,7 @@ const productionService = {
   updateCastSubject,
   planCharacter,
   generateSamples,
+  cancelGenerateSamples,
   listSamples,
   regenerateSample,
   approveSamples,

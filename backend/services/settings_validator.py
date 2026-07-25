@@ -75,40 +75,70 @@ MODEL_SETTINGS = {
         "max_dimensions": (768, 768)
     },
     "zimage-turbo": {
-        # CFG-distilled turbo model: very few steps, near-zero guidance.
-        # Guidance control is disabled in the Batch UI (and forced low in backend)
-        # because the model is CFG-distilled and does not use the guidance scale.
+        # CFG-distilled turbo: low guidance. Steps range is *recommended* envelope;
+        # auto_correct only clamps hard OOM/black-image hazards, not quality ambition.
+        "guidance_range": (0.0, 2.0),
+        "recommended_guidance": 0.0,
+        "min_dimensions": (512, 512),
+        "recommended_dimensions": (1024, 1024),
+        "steps_range": (4, 30),
+        "recommended_steps": 8,
+        "best_for": ["versatile", "photorealism", "faces", "anatomy", "text", "high_res"],
+        "warnings": [],
+        # 2K: max side 2688 (for 16:9 packs), area ~2048² — see image_resolution_limits
+        "max_dimensions": (2688, 2688),
+        "max_pixels": 2048 * 2048,
+        "hard_clamp": False,
+    },
+    "flux-dev": {
+        # FLUX.1-dev via Comfy: FluxGuidance (not classic CFG). Default 28/3.5 is
+        # the verified quality point; allow operators to push steps for max quality.
+        "guidance_range": (1.0, 6.0),
+        "recommended_guidance": 3.5,
+        "min_dimensions": (512, 512),
+        "recommended_dimensions": (1024, 1024),
+        "steps_range": (8, 50),
+        "recommended_steps": 28,
+        "best_for": ["max_quality", "prompt_adherence", "photorealism", "text", "high_res"],
+        "warnings": [
+            "Runs through ComfyUI (needs Comfy up + flux1-dev weights).",
+            "Heavy VRAM — batch max_workers forced to 1.",
+            "Flux Dev design range is ~2.0 MP total — not 2048×2048.",
+        ],
+        "max_dimensions": (1920, 1920),
+        "max_pixels": 2_100_000,
+        "hard_clamp": False,
+        "engine": "comfy",
+        "force_max_workers": 1,
+    },
+    "krea2-turbo": {
         "guidance_range": (0.0, 1.0),
         "recommended_guidance": 0.0,
         "min_dimensions": (512, 512),
         "recommended_dimensions": (1024, 1024),
-        "steps_range": (6, 12),
-        "recommended_steps": 8,
-        "best_for": ["versatile", "photorealism", "faces", "anatomy", "text", "high_res"],
-        "warnings": [],  # Guidance is intentionally not used; UI disables the control and backend forces low value. Dynamic check below will warn on misuse.
-        "max_dimensions": (1536, 1536)
-    },
-    "krea2-turbo": {
-        "guidance_range": (0.0, 0.0),
-        "recommended_guidance": 0.0,
-        "min_dimensions": (512, 512),
-        "recommended_dimensions": (1024, 1024),
-        "steps_range": (6, 12),
+        "steps_range": (4, 20),
         "recommended_steps": 8,
         "best_for": ["aesthetic", "photorealism", "creative", "high_res", "versatile"],
-        "warnings": [],
-        "max_dimensions": (1536, 1536)
+        "warnings": ["2K native is supported; high VRAM on 16GB cards."],
+        "max_dimensions": (2688, 2688),
+        "max_pixels": 2048 * 2048,
+        "hard_clamp": False,
     },
     "krea2-raw": {
-        "guidance_range": (2.5, 5.0),
+        "guidance_range": (1.0, 7.0),
         "recommended_guidance": 3.5,
         "min_dimensions": (512, 512),
         "recommended_dimensions": (1024, 1024),
-        "steps_range": (40, 60),
+        "steps_range": (20, 80),
         "recommended_steps": 52,
         "best_for": ["creative", "photorealism", "versatile", "high_res", "mature", "fine_tune_base"],
-        "warnings": ["Slower than Turbo (~52 steps). Less safety post-training than Turbo."],
-        "max_dimensions": (1536, 1536)
+        "warnings": [
+            "Slower than Turbo (~52 steps). Less safety post-training than Turbo.",
+            "2K native is supported; high VRAM on 16GB cards.",
+        ],
+        "max_dimensions": (2688, 2688),
+        "max_pixels": 2048 * 2048,
+        "hard_clamp": False,
     }
 }
 
@@ -152,13 +182,34 @@ class SettingsValidator:
             warnings.append(f"Unknown model '{model}', using SD 1.5 validation rules")
 
         # Validate guidance scale
+        # hard_clamp=False (default for modern models): warn + recommend only —
+        # do not silently throttle quality when the user pushes the slider.
+        # hard_clamp=True (legacy SDXL black-image hazards): auto-correct into range.
+        hard = bool(model_config.get("hard_clamp", True))
         guidance_min, guidance_max = model_config["guidance_range"]
         if guidance < guidance_min or guidance > guidance_max:
-            error_msg = f"Guidance scale {guidance} is outside valid range ({guidance_min}-{guidance_max}) for {model}"
-            if auto_correct:
+            error_msg = (
+                f"Guidance scale {guidance} is outside recommended range "
+                f"({guidance_min}-{guidance_max}) for {model}"
+            )
+            if auto_correct and hard:
                 corrected_guidance = max(guidance_min, min(guidance, guidance_max))
                 corrected_values["guidance"] = corrected_guidance
                 warnings.append(f"{error_msg}. Auto-corrected to {corrected_guidance}")
+            elif auto_correct and not hard:
+                # Absolute safety floor/ceiling only (avoid NaNs / absurd values)
+                abs_lo, abs_hi = 0.0, 30.0
+                if guidance < abs_lo or guidance > abs_hi:
+                    corrected_values["guidance"] = max(abs_lo, min(guidance, abs_hi))
+                    warnings.append(
+                        f"Guidance {guidance} clamped to absolute safety bounds "
+                        f"[{abs_lo}, {abs_hi}]"
+                    )
+                else:
+                    warnings.append(
+                        f"{error_msg}. Left as-is (quality slider owns this); "
+                        f"recommended={model_config['recommended_guidance']}"
+                    )
             else:
                 errors.append(error_msg)
         elif guidance != model_config["recommended_guidance"]:
@@ -167,20 +218,35 @@ class SettingsValidator:
         # Validate steps
         steps_min, steps_max = model_config["steps_range"]
         if steps < steps_min or steps > steps_max:
-            error_msg = f"Steps {steps} is outside recommended range ({steps_min}-{steps_max}) for {model}"
-            if auto_correct:
+            error_msg = (
+                f"Steps {steps} is outside recommended range ({steps_min}-{steps_max}) for {model}"
+            )
+            if auto_correct and hard:
                 corrected_steps = max(steps_min, min(steps, steps_max))
                 corrected_values["steps"] = corrected_steps
                 warnings.append(f"{error_msg}. Auto-corrected to {corrected_steps}")
+            elif auto_correct and not hard:
+                # Absolute safety only: 1–100. Quality presets may go above recommended.
+                abs_lo, abs_hi = 1, 100
+                if steps < abs_lo or steps > abs_hi:
+                    corrected_values["steps"] = max(abs_lo, min(steps, abs_hi))
+                    warnings.append(
+                        f"Steps {steps} clamped to absolute safety bounds [{abs_lo}, {abs_hi}]"
+                    )
+                else:
+                    warnings.append(
+                        f"{error_msg}. Left as-is (quality slider owns this); "
+                        f"recommended={model_config['recommended_steps']}"
+                    )
             else:
                 warnings.append(error_msg)
         elif steps != model_config["recommended_steps"]:
             recommendations.append(f"Recommended steps for {model}: {model_config['recommended_steps']}")
 
-        # Validate dimensions
+        # Validate dimensions (family max side + max area via shared helper)
         min_w, min_h = model_config["min_dimensions"]
         max_w, max_h = model_config.get("max_dimensions", (2048, 2048))
-        
+
         if width < min_w or height < min_h:
             error_msg = f"Dimensions {width}x{height} are below minimum {min_w}x{min_h} for {model}"
             if auto_correct:
@@ -191,9 +257,39 @@ class SettingsValidator:
                 warnings.append(f"{error_msg}. Auto-corrected to {corrected_width}x{corrected_height}")
             else:
                 errors.append(error_msg)
-        elif width > max_w or height > max_h:
-            warning_msg = f"Dimensions {width}x{height} exceed recommended maximum {max_w}x{max_h} for {model}. May cause quality issues or out of memory."
-            warnings.append(warning_msg)
+        else:
+            try:
+                from backend.services.image_resolution_limits import clamp_image_dimensions
+                cw, ch, dim_warns = clamp_image_dimensions(width, height, model)
+                for msg in dim_warns:
+                    warnings.append(msg)
+                # Soft models (hard_clamp=False): only apply area/side clamp when over limit
+                if (cw, ch) != (width, height):
+                    if hard:
+                        corrected_values["width"] = cw
+                        corrected_values["height"] = ch
+                        warnings.append(
+                            f"Dimensions {width}x{height} clamped to {cw}x{ch} for {model}"
+                        )
+                    else:
+                        # Still apply hard safety clamp for absurd sizes (Flux 4MP, etc.)
+                        max_pixels = model_config.get("max_pixels")
+                        over_side = width > max_w or height > max_h
+                        over_area = max_pixels is not None and (width * height) > int(max_pixels)
+                        if over_side or over_area:
+                            corrected_values["width"] = cw
+                            corrected_values["height"] = ch
+                            warnings.append(
+                                f"Dimensions {width}x{height} exceed {model} limits; "
+                                f"clamped to {cw}x{ch}"
+                            )
+            except Exception as e:
+                logger.warning(f"dimension clamp helper failed: {e}")
+                if width > max_w or height > max_h:
+                    warnings.append(
+                        f"Dimensions {width}x{height} exceed recommended maximum "
+                        f"{max_w}x{max_h} for {model}."
+                    )
 
         # Check for recommended dimensions
         rec_w, rec_h = model_config["recommended_dimensions"]

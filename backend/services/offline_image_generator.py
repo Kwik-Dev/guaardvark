@@ -66,10 +66,13 @@ except ImportError as e:
 class ImageGenerationRequest:
     prompt: str
     negative_prompt: str = ""
-    width: int = 512
-    height: int = 512
-    num_inference_steps: int = 20
-    guidance_scale: float = 7.5
+    # Canvas / sampling: prefer resolve_stills_defaults() at call sites. Defaults
+    # here are modern (1024 + zimage-safe steps/CFG) so chat/agent paths that
+    # omit knobs do not inherit SD-era 512/20/7.5.
+    width: int = 1024
+    height: int = 1024
+    num_inference_steps: int = 8
+    guidance_scale: float = 1.0
     style: str = "realistic"
     seed: Optional[int] = None
     model: str = "auto"
@@ -78,12 +81,16 @@ class ImageGenerationRequest:
     enhance_anatomy: bool = True
     enhance_faces: bool = True
     enhance_hands: bool = True
-    restore_faces: bool = True
+    # Opt-in only — face restore is slow and was defaulting True for chat.
+    restore_faces: bool = False
     face_restoration_weight: float = 0.5
     remove_background: bool = False  # post-process with rembg -> transparent RGBA PNG
     # Batch runs set this so we don't reload/unload a 6B pipeline every image —
     # that peak (especially Z-Image CPU offload) was OOM-killing the Flask process.
     keep_pipeline_loaded: bool = False
+    # Character LoRAs (Z-Image / future). Paths to .safetensors + optional strength.
+    loras: Optional[List[str]] = None
+    lora_scale: float = 1.0
 
 @dataclass
 class ImageGenerationResult:
@@ -98,6 +105,29 @@ class ImageGenerationResult:
     seed_used: Optional[int] = None
     error: Optional[str] = None
     metadata: Dict[str, Any] = None
+
+
+def normalize_zimage_lora_state_dict(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Rewrite PEFT-wrapped Z-Image LoRA keys to Diffusers ``load_lora_weights`` form.
+
+    Our early peft_zimage trainer saved keys like
+    ``transformer.base_model.model.layers.*.attention.to_q.lora_A.weight``.
+    ZImagePipeline expects ``transformer.layers.*.attention.to_q.lora_A.weight``
+    (no PEFT ``base_model.model`` wrapper). Without this remap, PEFT raises
+    "Target modules {...} not found in the base model".
+    """
+    out: Dict[str, Any] = {}
+    for key, value in state_dict.items():
+        nk = key
+        if nk.startswith("transformer.base_model.model."):
+            nk = "transformer." + nk[len("transformer.base_model.model.") :]
+        elif nk.startswith("base_model.model."):
+            nk = "transformer." + nk[len("base_model.model.") :]
+        elif ".base_model.model." in nk:
+            nk = nk.replace(".base_model.model.", ".", 1)
+        out[nk] = value
+    return out
+
 
 class OfflineImageGenerator:
 
@@ -117,6 +147,9 @@ class OfflineImageGenerator:
             # Z-Image-Turbo (Tongyi-MAI): 6B, Apache-2.0, ungated. Best prompt
             # adherence per VRAM on a 16 GB card — the preferred all-rounder.
             "zimage-turbo": "Tongyi-MAI/Z-Image-Turbo",
+            # FLUX.1-dev — max-quality stills via ComfyUI (not offline Diffusers).
+            # Value is a sentinel; batch routes to Comfy when model=flux-dev.
+            "flux-dev": "comfy:flux-dev",
             "krea2-turbo": "krea/Krea-2-Turbo",
             "krea2-raw": "krea/Krea-2-Raw",
             "sd-xl": "stabilityai/stable-diffusion-xl-base-1.0",
@@ -129,16 +162,19 @@ class OfflineImageGenerator:
         }
         # Models resolvable internally but NOT shown in menus / list_available_models.
         self.hidden_models = {"sd-1.5"}
+        # Offline Diffusers cannot load these — batch/API must route to ComfyUI.
+        self.comfy_only_models = {"flux-dev"}
         # UI metadata for the visible models (label/description/recommended/order).
         # Drives the centralized dropdown via get_available_models().
         self.model_meta = {
-            "zimage-turbo": {"label": "Z-Image Turbo (Best)", "description": "Strongest prompt adherence + text, fast (~8 steps). Recommended.", "recommended": True, "order": 0},
-            "krea2-turbo": {"label": "Krea 2 Turbo", "description": "12B aesthetic-first model, native 2K, 8 steps CFG-free. Fast inference.", "recommended": False, "order": 1},
-            "krea2-raw": {"label": "Krea 2 Raw", "description": "Base 12B checkpoint — less post-trained than Turbo (~52 steps, CFG 3.5). Use for mature/creative prompts or LoRA base.", "recommended": False, "order": 2},
-            "sd-xl": {"label": "SDXL Base", "description": "High-res 1024, reliable, huge LoRA ecosystem.", "recommended": False, "order": 3},
-            "sdxl-turbo": {"label": "SDXL Turbo (Fast)", "description": "Fast 1024 previews, few steps.", "recommended": False, "order": 4},
-            "realistic-vision": {"label": "Realistic Vision", "description": "Top photoreal faces & portraits.", "recommended": False, "order": 5},
-            "epic-realism": {"label": "Epic Realism", "description": "Cinematic photorealism.", "recommended": False, "order": 6},
+            "zimage-turbo": {"label": "Z-Image Turbo (Best daily)", "description": "Strong prompt adherence + text, fast (~8 steps). Default daily driver.", "recommended": True, "order": 0},
+            "flux-dev": {"label": "FLUX.1 Dev (Max quality)", "description": "Highest ceiling stills via ComfyUI (~28 steps, FluxGuidance). Slower; needs Comfy + flux1-dev weights.", "recommended": False, "order": 1, "engine": "comfy"},
+            "krea2-turbo": {"label": "Krea 2 Turbo", "description": "12B aesthetic-first model, native 2K, 8 steps CFG-free. Fast inference.", "recommended": False, "order": 2},
+            "krea2-raw": {"label": "Krea 2 Raw", "description": "Base 12B checkpoint — less post-trained than Turbo (~52 steps, CFG 3.5). Use for mature/creative prompts or LoRA base.", "recommended": False, "order": 3},
+            "sd-xl": {"label": "SDXL Base", "description": "High-res 1024, reliable, huge LoRA ecosystem.", "recommended": False, "order": 4},
+            "sdxl-turbo": {"label": "SDXL Turbo (Fast)", "description": "Fast 1024 previews, few steps.", "recommended": False, "order": 5},
+            "realistic-vision": {"label": "Realistic Vision", "description": "Top photoreal faces & portraits.", "recommended": False, "order": 6},
+            "epic-realism": {"label": "Epic Realism", "description": "Cinematic photorealism.", "recommended": False, "order": 7},
         }
 
         self.anatomy_negative = "deformed body, distorted anatomy, extra limbs, missing limbs, extra arms, missing arms, extra legs, missing legs, fused limbs, disconnected limbs, floating limbs, asymmetrical body, disproportionate limbs, twisted torso, broken spine, impossible pose, malformed body, mutated anatomy, gross proportions, extra heads, conjoined, siamese, bad anatomy, cropped body, out of frame body, duplicate person, clone"
@@ -247,6 +283,8 @@ class OfflineImageGenerator:
         self._pipeline_offload_mode = None
         # One-shot force sequential reload after a mid-inference OOM.
         self._force_sequential_offload = False
+        # Active character LoRA adapter names loaded on the current pipeline.
+        self._loaded_lora_adapters: List[str] = []
 
         self._device = "cpu"
         if torch.cuda.is_available():
@@ -273,8 +311,37 @@ class OfflineImageGenerator:
         return self.models_dir / model_name
 
     def _is_model_downloaded(self, model_id: str) -> bool:
+        # Comfy-only models (FLUX.1-dev): check ComfyUI unet asset, not HF snapshot.
+        mid = (model_id or "").lower()
+        if mid.startswith("comfy:") or mid == "flux-dev" or "flux1-dev" in mid or mid.endswith("flux-dev"):
+            return self._flux_dev_assets_present()
         model_path = self._get_model_path(model_id)
         return model_path.exists() and any(model_path.iterdir())
+
+    @staticmethod
+    def _flux_dev_assets_present() -> bool:
+        """True when Comfy can run the FLUX-dev stills graph (unet + clip + vae)."""
+        try:
+            from backend.config import COMFYUI_DIR
+            root = Path(COMFYUI_DIR) / "models"
+        except Exception:
+            root = Path("plugins/comfyui/ComfyUI/models")
+        unet = root / "unet" / os.environ.get("GUAARDVARK_FLUX_DEV_UNET", "flux1-dev.safetensors")
+        vae = root / "vae" / os.environ.get("GUAARDVARK_FLUX_VAE", "ae.safetensors")
+        clip = root / "clip" / os.environ.get("GUAARDVARK_FLUX_CLIP", "clip_l.safetensors")
+        # T5 may live as clip/t5xxl_*.safetensors or clip/t5/...
+        t5_name = os.environ.get("GUAARDVARK_FLUX_DEV_T5", "t5xxl_fp16.safetensors")
+        t5_candidates = [
+            root / "clip" / t5_name,
+            root / "clip" / "t5" / t5_name,
+            root / "text_encoders" / t5_name,
+        ]
+        t5_ok = any(p.is_file() and p.stat().st_size > 0 for p in t5_candidates)
+        return all(p.is_file() and p.stat().st_size > 0 for p in (unet, vae, clip)) and t5_ok
+
+    def is_comfy_only_model(self, model_key: str) -> bool:
+        key = (model_key or "").strip().lower()
+        return key in getattr(self, "comfy_only_models", set()) or key.startswith("flux")
 
     def _resolve_model_ref(self, model_ref: str) -> str:
         """Catalog key (e.g. krea2-turbo) → HF repo id; pass through HF ids and auto."""
@@ -315,6 +382,8 @@ class OfflineImageGenerator:
             return "krea2"
         if "z-image" in mid or "zimage" in mid or key.startswith("zimage"):
             return "zimage"
+        if "flux" in mid or key.startswith("flux"):
+            return "flux"
         if "xl" in mid or "sdxl" in mid:
             return "sdxl"
         return "sd"
@@ -391,6 +460,8 @@ class OfflineImageGenerator:
                 return self._FAMILY_VRAM_MB["krea2"]
             return self._OFFLOAD_TURBO_VRAM_MB
         family = self._model_family(model_id)
+        if family == "flux":
+            return 12000
         if family == "krea2" and self._will_use_sequential_for_krea2():
             return self._KREA2_SEQUENTIAL_VRAM_MB
         return self._FAMILY_VRAM_MB.get(family, 4000)
@@ -398,6 +469,8 @@ class OfflineImageGenerator:
     def _ram_estimate_gb(self, model_id: str) -> float:
         if model_id in (None, "", "auto"):
             return self._FAMILY_RAM_GB["zimage"]
+        if self._model_family(model_id) == "flux":
+            return 16.0
         return self._FAMILY_RAM_GB.get(self._model_family(model_id), 6.0)
 
     def _ensure_vram_for_pipeline(self, model_id: str) -> None:
@@ -1023,39 +1096,52 @@ class OfflineImageGenerator:
         return enhanced_prompt, negative_prompt, detection
 
     def _enhance_prompt(self, prompt: str, style: str) -> Tuple[str, str]:
-        if any(keyword in prompt.lower() for keyword in ['elements:', 'style keywords:', 'negative prompt:']):
-            style_config = self.style_configs.get(style, self.style_configs["realistic"])
-            return prompt, style_config['negative_prompt']
+        """Light style packaging only. Prefer generate_image's auto_enhance path for
+        full quality stuffing; this helper must NOT re-run auto_enhance=True when the
+        caller already chose auto_enhance=False (that was a silent re-enhance bug)."""
+        style_config = self.style_configs.get(style, self.style_configs.get("realistic", {}))
+        return prompt, style_config.get("negative_prompt", "") or ""
 
-        enhanced_prompt, negative_prompt, _ = self.enhance_prompt_for_quality(
-            prompt=prompt,
-            style=style,
-            auto_enhance=True
-        )
+    def _optimize_prompt_for_tokens(
+        self, prompt: str, max_tokens: int = 75, family: str = ""
+    ) -> str:
+        """Soft word-budget trim for short CLIP-era encoders only.
 
-        return enhanced_prompt, negative_prompt
+        Classic SD 1.x CLIP is ~77 tokens. Word≈token is a rough proxy used as a
+        last-resort soft limit — NOT a hard model contract. Z-Image / Krea2 use
+        long T5/LLM text encoders (hundreds of tokens); clipping them to 75 words
+        silently deleted the tail of detailed user prompts while Verbatim was ON
+        (and even when OFF, after style stuffing pushed useful content past 75).
 
-    def _optimize_prompt_for_tokens(self, prompt: str, max_tokens: int = 75) -> str:
+        Never invents content; only shortens when a family still benefits from it.
+        """
+        if not prompt:
+            return prompt
+        fam = (family or "").lower()
+        # Long-context text encoders: pass through; the tokenizer handles real limits.
+        if fam in ("zimage", "krea2"):
+            return prompt
+        # SDXL dual-CLIP still ~77 tokens/encoder, but detailed prompts routinely
+        # exceed 75 *words*. Soft-cap higher so tails survive; encoder truncates
+        # the true hard limit.
+        if fam == "sdxl":
+            max_tokens = max(max_tokens, 150)
+
         words = prompt.split()
         if len(words) <= max_tokens:
             return prompt
-        
+
         if any(keyword in prompt.lower() for keyword in ['elements:', 'style keywords:', 'negative prompt:']):
             main_desc = prompt.split('\n')[0].strip()
             return main_desc
-        
-        words = prompt.split()
-        if len(words) > max_tokens:
-            important_keywords = ['high quality', 'detailed', 'professional', 'clean', 'minimal']
-            truncated_words = words[:max_tokens-3]
-            
-            for keyword in important_keywords:
-                if keyword not in ' '.join(truncated_words) and len(truncated_words) < max_tokens:
-                    truncated_words.append(keyword)
-            
-            return ' '.join(truncated_words)
-        
-        return prompt
+
+        # Prefer keeping the user's words; do NOT append quality boilerplate that
+        # would displace even more of their content after the cut.
+        logger.info(
+            "Soft-trimming prompt from %d words to %d (family=%s) — tail may be dropped",
+            len(words), max_tokens, fam or "classic",
+        )
+        return " ".join(words[:max_tokens])
 
     def get_prompt_templates(self) -> Dict[str, Dict[str, Any]]:
         return {
@@ -1168,6 +1254,15 @@ Negative Prompt: {negative_prompt}""",
                     logger.info(f"Text intent: routing {request.model} -> sd-xl for crisper type")
                 request.model = "sd-xl"
 
+            # FLUX.1-dev is Comfy-only — fail loud so batch routes correctly instead
+            # of attempting an HF download of a sentinel "comfy:flux-dev" id.
+            if self.is_comfy_only_model(request.model or ""):
+                result.error = (
+                    f"Model '{request.model}' runs via ComfyUI, not the offline Diffusers "
+                    "pipeline. Use the batch FLUX path (or ComfyUIImageGenerator)."
+                )
+                return result
+
             model_id = self.available_models.get(request.model, self.default_model)
             logger.info(f"Using model: {request.model} -> {model_id}")
             ram_est = self._ram_estimate_gb(request.model)
@@ -1208,16 +1303,19 @@ Negative Prompt: {negative_prompt}""",
                     logger.warning(f"Guidance scale {request.guidance_scale} is extremely high. Capping at 15.0")
                     request.guidance_scale = 15.0
 
-                # Clamp dimensions to safe maximums (prevents CUDA OOM).
-                # SDXL and Z-Image are native high-res; classic SD tops out at 768.
-                max_dim = 1536 if family in ('sdxl', 'zimage', 'krea2') else 768
-                if request.width > max_dim or request.height > max_dim:
-                    logger.warning(f"Resolution {request.width}x{request.height} exceeds safe max {max_dim}x{max_dim}, clamping")
-                    request.width = min(request.width, max_dim)
-                    request.height = min(request.height, max_dim)
-                # Ensure minimum dimensions
-                request.width = max(request.width, 256)
-                request.height = max(request.height, 256)
+                # Family-aware max side + area (Z-Image/Krea → 2K; Flux not offline).
+                from backend.services.image_resolution_limits import clamp_image_dimensions
+                ow, oh = request.width, request.height
+                request.width, request.height, dim_warns = clamp_image_dimensions(
+                    request.width, request.height, family
+                )
+                for msg in dim_warns:
+                    logger.warning(msg)
+                if (request.width, request.height) != (ow, oh):
+                    logger.info(
+                        "Resolution clamped %sx%s → %sx%s (family=%s)",
+                        ow, oh, request.width, request.height, family,
+                    )
                 result.image_size = (request.width, request.height)
 
                 # Make room BEFORE loading — family-aware estimate + Ollama eviction
@@ -1256,8 +1354,27 @@ Negative Prompt: {negative_prompt}""",
                 except Exception:
                     pass
 
+                # Verbatim Prompts (Settings → Generation): user's EXACT text to the
+                # model. Previously this only gated media_director.enhance_prompts —
+                # offline_image_generator still stuffed style/anatomy suffixes AND
+                # hard-clipped to 75 words, so the toggle was effectively placebo.
+                try:
+                    from backend.services.media_director import verbatim_prompts_enabled
+                    verbatim = bool(verbatim_prompts_enabled())
+                except Exception:
+                    verbatim = False
+
                 text_mode = self._has_text_intent(request.prompt)
-                if text_mode:
+                if verbatim:
+                    enhanced_prompt = request.prompt
+                    style_negative = ""
+                    detection = {}
+                    logger.info(
+                        "verbatim prompts ON — using user prompt as-is "
+                        "(no style stuffing, no word-budget clip; len=%d chars)",
+                        len(enhanced_prompt or ""),
+                    )
+                elif text_mode:
                     # Crisp text/logos need a larger canvas — at 512 the type renders
                     # as mush. Bump capable models to 1024 when the request is below it
                     # (within the per-model max already clamped above: 1536 for these).
@@ -1294,12 +1411,19 @@ Negative Prompt: {negative_prompt}""",
                     )
                     logger.info(f"Content detection: {detection.get('recommended_preset')}, enhancements: {len(detection.get('enhancements_applied', []))}")
                 else:
-                    enhanced_prompt, style_negative = self._enhance_prompt(request.prompt, request.style)
+                    # auto_enhance=False: keep the user's positive prompt intact.
+                    # Only attach style negatives (no positive suffix stuffing).
+                    enhanced_prompt, style_negative = self._enhance_prompt(
+                        request.prompt, request.style
+                    )
                     detection = {}
 
-                # Don't token-trim in text mode — the quoted characters must survive intact.
-                if not text_mode:
-                    enhanced_prompt = self._optimize_prompt_for_tokens(enhanced_prompt)
+                # Don't token-trim in text mode or verbatim — user tails must survive.
+                # Family-aware: zimage/krea2 never word-clip; sdxl soft 150; classic 75.
+                if not text_mode and not verbatim:
+                    enhanced_prompt = self._optimize_prompt_for_tokens(
+                        enhanced_prompt, family=family
+                    )
 
                 combined_negative = request.negative_prompt
                 if style_negative:
@@ -1319,6 +1443,13 @@ Negative Prompt: {negative_prompt}""",
                     f"negative={len(combined_negative)}"
                 )
                 logger.info(f"Generating image: {enhanced_prompt[:100]}...")
+
+                # Character LoRAs (Z-Image): load before forward, unload after so the
+                # next request cannot leak identity adapters across subjects.
+                lora_paths = list(getattr(request, "loras", None) or [])
+                lora_scale = float(getattr(request, "lora_scale", 1.0) or 1.0)
+                if lora_paths:
+                    self._apply_loras(family, lora_paths, lora_scale)
 
                 # Dynamic VAE tiling: only at high res to preserve quality at normal sizes
                 if getattr(self, '_vae_tiling_available', False):
@@ -1486,9 +1617,10 @@ Negative Prompt: {negative_prompt}""",
                                 )
                             else:
                                 neg = combined_negative
-                            max_dim = 1536 if family in ('sdxl', 'zimage', 'krea2') else 768
-                            request.width = min(max(request.width, 256), max_dim)
-                            request.height = min(max(request.height, 256), max_dim)
+                            from backend.services.image_resolution_limits import clamp_image_dimensions
+                            request.width, request.height, _ = clamp_image_dimensions(
+                                request.width, request.height, family
+                            )
                             result.image_size = (request.width, request.height)
                             self._ensure_vram_for_pipeline(model_id)
                             if not self._load_pipeline(model_id):
@@ -1607,6 +1739,11 @@ Negative Prompt: {negative_prompt}""",
                 result.error = f"Generation failed: {error_msg}"
                 result.generation_time = time.time() - start_time
             finally:
+                # Always drop character LoRAs so keep_pipeline_loaded cannot leak identity.
+                try:
+                    self._unload_loras()
+                except Exception:
+                    pass
                 self._notify_vision_pipeline("stop")
                 if not getattr(request, "keep_pipeline_loaded", False):
                     # Immediately free VRAM — don't wait for the 300s idle timer.
@@ -1620,6 +1757,102 @@ Negative Prompt: {negative_prompt}""",
 
         return result
 
+    def _apply_loras(self, family: str, lora_paths: List[str], scale: float = 1.0) -> None:
+        """Load character LoRA weights onto the resident pipeline (Z-Image first).
+
+        Anticipated fails:
+          - SDXL LoRA on Z-Image pipeline → raise (caller must route by sidecar)
+          - missing file → skip with warning
+          - pipeline without load_lora_weights → raise
+        """
+        self._unload_loras()
+        if not lora_paths or self._pipeline is None:
+            return
+        if family not in ("zimage",):
+            # SDXL/Flux character LoRAs stay on the Comfy path today.
+            raise RuntimeError(
+                f"Offline LoRA apply is only implemented for Z-Image (got family={family}). "
+                "SDXL/FLUX cast LoRAs must use ComfyUI."
+            )
+        if not hasattr(self._pipeline, "load_lora_weights"):
+            raise RuntimeError("Loaded pipeline cannot load_lora_weights (upgrade diffusers)")
+
+        adapters = []
+        weights = []
+        for i, path in enumerate(lora_paths):
+            p = Path(path)
+            if not p.is_file():
+                logger.warning("LoRA path missing, skipping: %s", path)
+                continue
+            # Reject obvious SDXL kohya keys if sidecar says so
+            try:
+                from backend.services.media_model_registry import read_lora_sidecar
+                meta = read_lora_sidecar(str(p))
+                if meta and meta.get("family") and meta.get("family") != "zimage":
+                    raise RuntimeError(
+                        f"LoRA {p.name} is family={meta.get('family')} but pipeline is Z-Image"
+                    )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+            name = f"cast_{i}"
+            try:
+                # Prefer an in-memory remapped dict so PEFT-prefixed saves
+                # (transformer.base_model.model.*) from early peft_zimage trains
+                # still load. Diffusers accepts a state-dict dict here.
+                from safetensors.torch import load_file as _load_st
+
+                raw = _load_st(str(p), device="cpu")
+                remapped = normalize_zimage_lora_state_dict(raw)
+                n_rewritten = sum(
+                    1 for old_k, new_k in zip(raw.keys(), remapped.keys()) if old_k != new_k
+                )
+                if n_rewritten:
+                    logger.info(
+                        "Z-Image LoRA %s: stripped PEFT base_model.model prefix from "
+                        "%d/%d keys for Diffusers",
+                        p.name,
+                        n_rewritten,
+                        len(remapped),
+                    )
+                self._pipeline.load_lora_weights(remapped, adapter_name=name)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load Z-Image LoRA {p}: {e}") from e
+            adapters.append(name)
+            weights.append(float(scale))
+
+        if not adapters:
+            raise RuntimeError("No valid LoRA files to load")
+        try:
+            if hasattr(self._pipeline, "set_adapters"):
+                self._pipeline.set_adapters(adapters, adapter_weights=weights)
+        except Exception as e:
+            logger.warning("set_adapters failed (%s); adapters loaded with default scale", e)
+        self._loaded_lora_adapters = adapters
+        logger.info("Applied %d Z-Image LoRA(s) scale=%.2f", len(adapters), scale)
+
+    def _unload_loras(self) -> None:
+        """Remove character LoRA adapters from the resident pipeline."""
+        if self._pipeline is None:
+            self._loaded_lora_adapters = []
+            return
+        try:
+            if self._loaded_lora_adapters and hasattr(self._pipeline, "delete_adapters"):
+                try:
+                    self._pipeline.delete_adapters(self._loaded_lora_adapters)
+                except Exception:
+                    for n in self._loaded_lora_adapters:
+                        try:
+                            self._pipeline.delete_adapters([n])
+                        except Exception:
+                            pass
+            elif hasattr(self._pipeline, "unload_lora_weights"):
+                self._pipeline.unload_lora_weights()
+        except Exception as e:
+            logger.debug("unload_loras best-effort: %s", e)
+        self._loaded_lora_adapters = []
+
     def _unload_pipeline(self):
         """Fully unload the pipeline and return RAM/VRAM to the pool.
         Aggressive host RAM release for heavy offloaded models (Z-Image etc).
@@ -1627,6 +1860,11 @@ Negative Prompt: {negative_prompt}""",
         """
         if self._pipeline is None:
             return
+
+        try:
+            self._unload_loras()
+        except Exception:
+            pass
 
         try:
             import psutil
@@ -1643,6 +1881,7 @@ Negative Prompt: {negative_prompt}""",
         self._pipeline_offload_mode = None
         self._compile_unet_orig = None
         self._compile_vae_orig = None
+        self._loaded_lora_adapters = []
 
         # Explicitly break references to submodules (weights stay in CPU tensors until all refs gone)
         for attr in ("unet", "vae", "text_encoder", "text_encoder_2", "tokenizer", "tokenizer_2",
@@ -1756,9 +1995,8 @@ Negative Prompt: {negative_prompt}""",
                     elif guidance_scale < 4.0:
                         guidance_scale = 6.0
 
-                max_dim = 1536 if family in ('sdxl', 'zimage', 'krea2') else 768
-                width = min(max(int(width), 256), max_dim)
-                height = min(max(int(height), 256), max_dim)
+                from backend.services.image_resolution_limits import clamp_image_dimensions
+                width, height, _ = clamp_image_dimensions(int(width), int(height), family)
 
                 # Ensure the base txt2img pipeline is loaded (downloads model if needed)
                 if not self._load_pipeline(model_id):
@@ -1887,10 +2125,14 @@ Negative Prompt: {negative_prompt}""",
                 "current": model_id == self._current_model,
                 "size_estimate": (
                     "28-36GB" if "krea" in model_id.lower()
+                    else "23GB+Comfy" if "flux" in model_key or "flux" in model_id.lower()
                     else "16GB" if "z-image" in model_id.lower() or "zimage" in model_key
                     else "12-15GB" if "xl" in model_id.lower()
                     else "4-7GB"
-                )
+                ),
+                "engine": meta.get("engine") or (
+                    "comfy" if model_key in getattr(self, "comfy_only_models", set()) else "offline"
+                ),
             }
 
         return models

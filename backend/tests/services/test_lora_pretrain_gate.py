@@ -5,7 +5,12 @@ import pytest
 from flask import Flask
 
 from backend.models import db, Subject, SubjectSample
-from backend.services.lora_pretrain_gate import validate_cast_training, build_training_captions
+from backend.services.lora_pretrain_gate import (
+    build_training_captions,
+    caption_coverage_stats,
+    is_bare_caption,
+    validate_cast_training,
+)
 
 
 @pytest.fixture
@@ -92,3 +97,30 @@ def test_build_training_captions_uses_sample_prompt(app):
 
             caps = build_training_captions(s, [p])
             assert caps[0] == "tok in neon alley, three-quarter view"
+
+
+def test_is_bare_caption_and_coverage_warns(app):
+    assert is_bare_caption("a photo of tok", "tok") is True
+    assert is_bare_caption("tok, full body, red jacket, alley", "tok") is False
+
+    with app.app_context():
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            paths = [_write_image(tmp, f"img{i}.png") for i in range(4)]
+            s = Subject(
+                name="Hero",
+                kind="character",
+                trigger_word="tok",
+                ref_image_paths=paths,
+            )
+            db.session.add(s)
+            db.session.commit()
+
+            gate = validate_cast_training(s, paths, min_images=4)
+            assert gate["pass"] is True
+            assert gate["bare_captions"] == 4
+            assert any("bare" in w.lower() for w in gate["warnings"])
+
+            stats = caption_coverage_stats(s, paths)
+            assert stats["bare_captions"] == 4
+            assert stats["rich_captions"] == 0

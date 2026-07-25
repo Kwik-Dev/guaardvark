@@ -2393,6 +2393,11 @@ class UnifiedChatEngine:
     ) -> Dict[str, Any]:
         """Execute a registry tool directly with standard chat event emission."""
         params = inject_chat_image_model(tool_name, params, options)
+        if tool_name == "generate_image" and params.get("prompt"):
+            from backend.services.image_prompt_sanitize import sanitize_image_prompt
+            cleaned = sanitize_image_prompt(params.get("prompt"))
+            if cleaned:
+                params["prompt"] = cleaned
         logger.info("Direct tool: %s params=%s", tool_name, {k: str(v)[:60] for k, v in params.items()})
         if tool_name == "generate_image":
             m = params.get("model", "auto")
@@ -2829,7 +2834,12 @@ class UnifiedChatEngine:
         if not self.registry.get_tool("generate_image"):
             return None
 
-        prompt = message.strip()
+        from backend.services.image_prompt_sanitize import sanitize_image_prompt
+        # Strip "generate an image of…" chrome so the engine gets pure visual text
+        # (CLI intent_router already does this; browser NL path did not).
+        prompt = sanitize_image_prompt(message)
+        if not prompt:
+            return None
         logger.info("Image-gen direct (natural lang): generate_image(prompt=%r)", prompt[:80])
         # Delegate everything (user save, tool_call emit, model injection via /imagemodel,
         # gpu lease, execute, chat:image, complete, assistant save) to the shared runner.

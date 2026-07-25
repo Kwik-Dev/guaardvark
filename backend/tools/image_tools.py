@@ -83,150 +83,140 @@ class ImageGeneratorTool(BaseTool):
     def execute(self, prompt: str, style: str = "realistic",
                 width: int = 1024, height: int = 1024,
                 model: str = "auto", **kwargs) -> ToolResult:
-        # If the LLM guessed dimensions that aren't standard sizes, force 512x512
-        # Standard sizes the user would intentionally pick: 512, 768, 1024, or custom like 1500x300
-        # LLM hallucinated sizes (800, 1080, 1920) get reset to fast defaults
+        """Chat/CLI stills — delegates to the shared stills_pipeline façade."""
+        # Dimension hallucination guard (LLM may invent odd sizes)
         STANDARD_SIZES = {256, 384, 512, 640, 768, 896, 1024, 1280, 1536}
         if width not in STANDARD_SIZES or height not in STANDARD_SIZES:
-            # Check if the prompt itself contains these dimensions (user explicitly asked)
             import re
             dim_pattern = re.compile(rf'(?:^|\D){width}\s*[xX×]\s*{height}(?:\D|$)')
-            if not dim_pattern.search(prompt):
-                logger.info(f"ImageGeneratorTool: LLM guessed {width}x{height}, resetting to 1024x1024 (default)")
+            if not dim_pattern.search(prompt or ""):
+                logger.info(
+                    "ImageGeneratorTool: LLM guessed %sx%s, resetting to 1024x1024",
+                    width, height,
+                )
                 width, height = 1024, 1024
 
-        logger.info(f"ImageGeneratorTool: Generating image {width}x{height} for prompt: {prompt[:80]}...")
+        enhance = kwargs.get("enhance")  # none | offline | director | auto
+        director = bool(kwargs.get("director") or kwargs.get("director_mode"))
+        negative = kwargs.get("negative_prompt") or kwargs.get("negative") or ""
+        seed = kwargs.get("seed")
+        if seed is not None:
+            try:
+                seed = int(seed)
+            except (TypeError, ValueError):
+                seed = None
+
+        logger.info(
+            "ImageGeneratorTool: stills_pipeline %sx%s model=%s enhance=%s director=%s prompt=%r",
+            width, height, model, enhance, director, (prompt or "")[:80],
+        )
 
         try:
-            from backend.config import OUTPUT_DIR
-            from backend.services.offline_image_generator import (
-                get_image_generator, ImageGenerationRequest
-            )
+            subject_ids = kwargs.get("subject_ids") or kwargs.get("cast_subject_ids")
+            if subject_ids and not isinstance(subject_ids, (list, tuple)):
+                subject_ids = [subject_ids]
 
-            generator = get_image_generator()
-
-            # Check if the service is available
-            if not generator.service_available:
-                return ToolResult(
-                    success=False,
-                    error="Image generation service not available. Stable Diffusion dependencies (torch, diffusers) may not be installed or GPU not available.",
+            if subject_ids:
+                from backend.services.character_still_pipeline import render_character_still
+                import tempfile, time as _time
+                out = os.path.join(
+                    tempfile.gettempdir(), f"chat_cast_{int(_time.time() * 1000)}.png"
                 )
-
-            # Shared intelligent pipeline: best-effort Media Director rewrite for richer visual prompts
-            # (uses the same ollama director as MusicVideo / batch-video; falls back silently).
-            try:
-                from backend.services.media_director import enhance_prompts
-                refined_list = enhance_prompts([prompt], style=style)
-                if refined_list and refined_list[0] and refined_list[0].strip() != prompt.strip():
-                    prompt = refined_list[0].strip()
-                    logger.info("ImageGeneratorTool: applied media_director enhance (chat NL pipeline)")
-            except Exception:
-                pass  # never break chat gen
-
-            # Build proper request object
-            request = ImageGenerationRequest(
-                prompt=prompt,
-                negative_prompt="blurry, low quality, distorted, deformed, ugly, bad anatomy",
-                width=width,
-                height=height,
-                num_inference_steps=20,
-                guidance_scale=7.5,
-                style=style,
-                model=model,
-            )
-
-            # Hold the GPU for the whole generation (exclusivity + evict Ollama UNDER the
-            # held lease) so it can't OOM against a resident chat model or a concurrent
-            # render. Friendly "busy" instead of a CUDA OOM on contention.
-            from backend.services.gpu_resource_policy import gpu_session
-            from backend.services.job_operation_gate import GpuBusyError
-            from backend.services.job_types import JobKind
-            try:
-                ram_est = generator._ram_estimate_gb(request.model or "auto") if hasattr(generator, "_ram_estimate_gb") else 10.0
-                vram_est = generator._vram_estimate_mb(request.model or "auto") if hasattr(generator, "_vram_estimate_mb") else 11000
-                with gpu_session(JobKind.VIDEO_RENDER, f"chat_imggen_{uuid.uuid4().hex[:8]}",
-                                 on_busy="raise", evict_ollama=True, vram_estimate_mb=vram_est,
-                                 ram_estimate_gb=ram_est,
-                                 require_fit=True, cross_process=True):
-                    result = generator.generate_image(request)
-            except GpuBusyError:
-                return ToolResult(
-                    success=False,
-                    error="GPU is busy with another render right now — try again in a moment.",
+                still = render_character_still(
+                    prompt,
+                    subject_ids=[int(x) for x in subject_ids],
+                    include_bible=True,
+                    source="chat",
+                    width=width,
+                    height=height,
+                    steps=kwargs.get("steps"),
+                    guidance=kwargs.get("guidance") or kwargs.get("guidance_scale"),
+                    seed=seed,
+                    negative_prompt=negative,
+                    output_path=out,
+                    style=style,
+                    keep_pipeline=False,
                 )
-            finally:
-                # Extra hygiene for chat path (generator should have done for keep=False, but ensure)
-                try:
-                    if hasattr(generator, "_unload_pipeline"):
-                        generator._unload_pipeline()
-                    import gc
-                    gc.collect()
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                results = [still]
+            else:
+                from backend.services.stills_pipeline import run_stills_pipeline
 
-            if result.success and result.image_path and os.path.exists(result.image_path):
-                # Copy generated image to the served output directory
-                output_dir = os.path.join(OUTPUT_DIR, "generated_images")
-                os.makedirs(output_dir, exist_ok=True)
+                results = run_stills_pipeline(
+                    [prompt],
+                    model=model,
+                    width=width,
+                    height=height,
+                    steps=kwargs.get("steps"),
+                    guidance=kwargs.get("guidance") or kwargs.get("guidance_scale"),
+                    style=style,
+                    negative_prompt=negative,
+                    seed=seed,
+                    source="chat",
+                    enhance=enhance,
+                    director=director,
+                    keep_pipeline=False,
+                    output="chat_copy",
+                    restore_faces=bool(kwargs.get("restore_faces", False)),
+                    hold_gpu=True,
+                    replace_legacy_sd_markers=False,
+                )
+            still = results[0] if results else None
+            if not still:
+                return ToolResult(success=False, error="No result from stills pipeline")
 
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                unique_id = uuid.uuid4().hex[:8]
-                filename = f"gen_{timestamp}_{unique_id}.png"
-                output_path = os.path.join(output_dir, filename)
-
-                shutil.copy2(result.image_path, output_path)
-
-                # Release the temp from generator cache to help RAM (the copy is the persisted one)
-                try:
-                    if os.path.exists(result.image_path):
-                        os.unlink(result.image_path)
-                except Exception:
-                    pass
-
-                image_url = f"/api/outputs/generated_images/{filename}"
+            if still.success and still.image_path and (
+                still.image_url or os.path.exists(still.image_path)
+            ):
+                image_url = still.image_url or still.image_path
+                filename = os.path.basename(still.image_path) if still.image_path else ""
                 return ToolResult(
                     success=True,
                     output=(
-                        f"Image generated successfully in {result.generation_time:.1f}s.\n"
+                        f"Image generated successfully in {still.generation_time:.1f}s.\n"
                         f"Image URL: {image_url}\n"
-                        f"Prompt: {prompt}\n"
+                        f"Prompt used: {still.prompt_used}\n"
                         f"Style: {style}\n"
-                        f"Size: {width}x{height}\n"
-                        f"Model: {result.model_used or model}\n"
-                        f"Seed: {result.seed_used}"
+                        f"Size: {still.width}x{still.height}\n"
+                        f"Steps/CFG: {still.steps}/{still.guidance}\n"
+                        f"Enhance: {still.enhance_mode}\n"
+                        f"Model: {still.model_used or model}\n"
+                        f"Seed: {still.seed_used}"
                     ),
                     metadata={
                         "image_url": image_url,
                         "filename": filename,
-                        "prompt": prompt,
-                        "width": width,
-                        "height": height,
-                        "model": result.model_used or model,
-                        "seed": result.seed_used,
-                        "generation_time": result.generation_time,
+                        "prompt": still.prompt_used,
+                        "prompt_used": still.prompt_used,
+                        "negative_used": still.negative_used,
+                        "width": still.width,
+                        "height": still.height,
+                        "steps": still.steps,
+                        "guidance": still.guidance,
+                        "enhance_mode": still.enhance_mode,
+                        "model": still.model_used or model,
+                        "seed": still.seed_used,
+                        "generation_time": still.generation_time,
                     },
                 )
-            else:
-                error_msg = result.error or "Image generation completed but no output file was created."
-                return ToolResult(
-                    success=False,
-                    error=error_msg,
+
+            err = (still.error if still else None) or "Image generation failed."
+            low = err.lower()
+            if "out of memory" in low or "cuda" in low:
+                err = (
+                    "The GPU ran out of memory generating this image. "
+                    "Try a smaller size, a lighter model, or wait for other "
+                    "renders to finish, then try again."
                 )
+            return ToolResult(success=False, error=err)
 
         except ImportError:
             return ToolResult(
                 success=False,
-                error="Image generation pipeline not available. The Stable Diffusion model may not be installed.",
+                error="Image generation pipeline not available. Diffusion models may not be installed.",
             )
         except Exception as e:
             logger.error(f"ImageGeneratorTool error: {e}", exc_info=True)
-            return ToolResult(
-                success=False,
-                error=f"Image generation failed: {str(e)}",
-            )
+            return ToolResult(success=False, error=f"Image generation failed: {e}")
 
 
 class AnimationGeneratorTool(BaseTool):

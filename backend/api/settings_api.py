@@ -108,6 +108,57 @@ def set_chat_image_model_route():
     return success_response({"model": model})
 
 
+@settings_bp.route("/media_models", methods=["GET"])
+def get_media_models():
+    """Stills / cast-train / max-quality model registry + current selections.
+
+    Same philosophy as the Ollama model picker: one registry, Settings chooses
+    defaults, Cast/Image Gen honor them. Z-Image Turbo is the product default;
+    FLUX is max-quality; SDXL is legacy only.
+    """
+    try:
+        from backend.services.media_model_registry import public_settings_payload
+        return success_response(public_settings_payload())
+    except Exception as e:
+        current_app.logger.error(f"Failed to read media models: {e}")
+        return error_response("Failed to read media models", status_code=500)
+
+
+@settings_bp.route("/media_models", methods=["POST"])
+def set_media_models():
+    """Update media model defaults. Body may include any of:
+    stills_model, cast_train_base, max_quality_model,
+    character_lora_strength_zimage / _sdxl / _flux.
+    """
+    if not request.is_json:
+        return error_response("Request must be JSON")
+    data = request.get_json() or {}
+    try:
+        from backend.services import media_model_registry as mmr
+        out = {}
+        if "stills_model" in data and data["stills_model"] is not None:
+            out["stills_model"] = mmr.set_stills_model_setting(str(data["stills_model"]))
+        if "cast_train_base" in data and data["cast_train_base"] is not None:
+            out["cast_train_base"] = mmr.set_cast_train_base_setting(str(data["cast_train_base"]))
+        if "max_quality_model" in data and data["max_quality_model"] is not None:
+            out["max_quality_model"] = mmr.set_max_quality_model_setting(str(data["max_quality_model"]))
+        for fam_key, fam in (
+            ("character_lora_strength_zimage", "zimage"),
+            ("character_lora_strength_sdxl", "sdxl"),
+            ("character_lora_strength_flux", "flux"),
+        ):
+            if fam_key in data and data[fam_key] is not None:
+                out[fam_key] = mmr.set_character_lora_strength(fam, float(data[fam_key]))
+        payload = mmr.public_settings_payload()
+        payload["updated"] = out
+        return success_response(payload)
+    except ValueError as e:
+        return error_response(str(e), status_code=400)
+    except Exception as e:
+        current_app.logger.error(f"Failed to update media models: {e}")
+        return error_response("Failed to update media models", status_code=500)
+
+
 @settings_bp.route("/verbatim_prompts", methods=["POST"])
 def set_verbatim_prompts():
     """Toggle 'verbatim prompts' — when ON, the user's EXACT words go straight to the

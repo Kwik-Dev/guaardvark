@@ -2,7 +2,7 @@
 // Batch Image Generator - Mass image generation with progress tracking
 // Integrates with unified progress system and real-time updates
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   Box,
   Card,
@@ -34,7 +34,9 @@ import {
   DialogContent,
   DialogActions,
   useTheme,
-  useMediaQuery
+  useMediaQuery,
+  Stack,
+  Tooltip,
 } from '@mui/material';
 import {
   ExpandMore,
@@ -43,7 +45,8 @@ import {
   Download,
   GetApp,
   Visibility,
-  Cancel
+  Cancel,
+  Close as CloseIcon,
 } from '@mui/icons-material';
 
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
@@ -51,6 +54,8 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import PageLayout from '../components/layout/PageLayout';
 import CharacterPicker from '../components/filmcrew/CharacterPicker';
 import ImageLightbox from '../components/images/ImageLightbox';
+import GpuGateBanner from '../components/common/GpuGateBanner';
+import useJobsGate from '../hooks/useJobsGate';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -80,7 +85,7 @@ const mapBatchResultsToImages = (batchStatus) => {
     }));
 };
 
-const POLLABLE_STATUSES = new Set(['pending', 'running']);
+const POLLABLE_STATUSES = new Set(['queued', 'pending', 'running']);
 const TERMINAL_BATCH_STATUSES = new Set(['completed', 'error', 'cancelled']);
 
 const debugLog = (...args) => {
@@ -128,6 +133,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [showPromptPreview, setShowPromptPreview] = useState(false);
+  // Live queue panel (mirrors Video Gen) — stacked batches drain one-at-a-time
+  const [queue, setQueue] = useState([]);
+  const { gpuBusy, blockReason } = useJobsGate({ submitMode: 'queue' });
 
   // Director intelligence (new) — expand high-level concept via media_director (same as MV)
   const [directorEnabled, setDirectorEnabled] = useState(false);
@@ -159,10 +167,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     model: 'auto',
     style: 'realistic',
     quality_preset: 'standard',
-    width: 512,
-    height: 512,
-    steps: 20,
-    guidance: 7.5,
+    // Modern family defaults (zimage / auto) — not SD-era 512/20/7.5
+    width: 1024,
+    height: 1024,
+    steps: 8,
+    guidance: 1.0,
     max_workers: 2,
     preserve_order: true,
     generate_thumbnails: true,
@@ -218,37 +227,100 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     })();
   }, []);
 
-  // Quality presets
-  const qualityPresets = [
-    { value: 'fast', label: 'Fast', steps: 15, guidance: 7.0, description: 'Quick generation, good for testing' },
-    { value: 'standard', label: 'Standard', steps: 20, guidance: 7.5, description: 'Balanced quality and speed' },
-    { value: 'high', label: 'High Quality', steps: 30, guidance: 8.0, description: 'High quality, slower generation' },
-    { value: 'professional', label: 'Professional', steps: 25, guidance: 7.5, description: 'Professional quality for final output' }
-  ];
+  // Quality presets — family-aware (zimage/krea turbo-safe + FLUX + SDXL + classic SD)
+  const modelKey = (params.model || 'auto').toLowerCase();
+  const isFlux = modelKey.includes('flux');
+  const isZimage = modelKey.includes('zimage') || modelKey.includes('z-image') || modelKey === 'auto';
+  const isKreaRaw = modelKey.includes('krea') && modelKey.includes('raw');
+  const isKreaTurbo = modelKey.includes('krea') && !isKreaRaw;
+  const isSdxl = modelKey.includes('xl') || modelKey.includes('sdxl');
+  const qualityPresets = isFlux
+    ? [
+        { value: 'flux-fast', label: 'FLUX Fast', steps: 16, guidance: 3.0, description: 'Faster FLUX.1-dev stills' },
+        { value: 'flux-quality', label: 'FLUX Max Quality', steps: 28, guidance: 3.5, description: 'Default max-quality FLUX.1-dev' },
+        { value: 'flux-ultra', label: 'FLUX Ultra', steps: 40, guidance: 4.0, description: 'Highest steps — slow, peak detail' },
+      ]
+    : isZimage
+      ? [
+          { value: 'fast', label: 'Fast', steps: 6, guidance: 1.0, description: 'Quick Z-Image Turbo' },
+          { value: 'standard', label: 'Standard', steps: 8, guidance: 1.0, description: 'Default daily driver' },
+          { value: 'high', label: 'High Quality', steps: 12, guidance: 1.0, description: 'More steps, slower' },
+        ]
+      : isKreaTurbo
+        ? [
+            { value: 'fast', label: 'Fast', steps: 6, guidance: 0.0, description: 'Krea turbo CFG-free' },
+            { value: 'standard', label: 'Standard', steps: 8, guidance: 0.0, description: 'Balanced turbo' },
+            { value: 'high', label: 'High Quality', steps: 12, guidance: 0.0, description: 'More steps' },
+          ]
+        : isKreaRaw
+          ? [
+              { value: 'standard', label: 'Standard', steps: 40, guidance: 3.5, description: 'Krea raw quality' },
+              { value: 'high', label: 'High Quality', steps: 52, guidance: 3.5, description: 'Default raw' },
+              { value: 'ultra', label: 'Ultra', steps: 60, guidance: 3.5, description: 'Slow, peak detail' },
+            ]
+          : isSdxl
+            ? [
+                { value: 'fast', label: 'Fast', steps: 20, guidance: 6.0, description: 'Quick SDXL' },
+                { value: 'standard', label: 'Standard', steps: 25, guidance: 7.0, description: 'Balanced SDXL' },
+                { value: 'high', label: 'High Quality', steps: 35, guidance: 7.5, description: 'Final SDXL' },
+              ]
+            : [
+                { value: 'fast', label: 'Fast', steps: 15, guidance: 7.0, description: 'Quick generation, good for testing' },
+                { value: 'standard', label: 'Standard', steps: 20, guidance: 7.5, description: 'Balanced quality and speed' },
+                { value: 'high', label: 'High Quality', steps: 30, guidance: 8.0, description: 'High quality, slower generation' },
+              ];
 
-  // Dimension presets
-  const dimensionPresets = [
+  // Dimension presets — base + model-family 2K / Flux~2MP packs (filtered below)
+  const dimensionPresetsBase = [
     // SD 1.5 / Standard presets
-    { label: 'Square (512x512)', width: 512, height: 512 },
-    { label: 'Portrait (512x768)', width: 512, height: 768 },
-    { label: 'Landscape (768x512)', width: 768, height: 512 },
-    { label: 'Large Square (768x768)', width: 768, height: 768 },
-    { label: 'HD Portrait (512x1024)', width: 512, height: 1024 },
-    { label: 'HD Landscape (1024x512)', width: 1024, height: 512 },
-    // SDXL presets
-    { label: 'XL Square (1024x1024)', width: 1024, height: 1024 },
-    { label: 'XL Portrait (832x1216)', width: 832, height: 1216 },
-    { label: 'XL Landscape (1216x832)', width: 1216, height: 832 },
-    { label: 'XL Wide (1344x768)', width: 1344, height: 768 },
-    { label: 'XL Tall (768x1344)', width: 768, height: 1344 }
+    { label: 'Square (512x512)', width: 512, height: 512, pack: 'legacy' },
+    { label: 'Portrait (512x768)', width: 512, height: 768, pack: 'legacy' },
+    { label: 'Landscape (768x512)', width: 768, height: 512, pack: 'legacy' },
+    { label: 'Large Square (768x768)', width: 768, height: 768, pack: 'legacy' },
+    { label: 'HD Portrait (512x1024)', width: 512, height: 1024, pack: 'legacy' },
+    { label: 'HD Landscape (1024x512)', width: 1024, height: 512, pack: 'legacy' },
+    // 1K / SDXL-class (default daily driver for modern models)
+    { label: '1K Square (1024x1024)', width: 1024, height: 1024, pack: '1k' },
+    { label: '1K Portrait (832x1216)', width: 832, height: 1216, pack: '1k' },
+    { label: '1K Landscape (1216x832)', width: 1216, height: 832, pack: '1k' },
+    { label: '1K Wide 16:9 (1344x768)', width: 1344, height: 768, pack: '1k' },
+    { label: '1K Tall 9:16 (768x1344)', width: 768, height: 1344, pack: '1k' },
+    // Z-Image / Krea 2K pack (area ≤ ~2048²; long side up to 2688)
+    { label: '2K Square (2048x2048)', width: 2048, height: 2048, pack: '2k' },
+    { label: '2K Landscape 16:9 (2688x1472)', width: 2688, height: 1472, pack: '2k' },
+    { label: '2K Portrait 9:16 (1472x2688)', width: 1472, height: 2688, pack: '2k' },
+    { label: '2K Landscape 3:2 (2496x1664)', width: 2496, height: 1664, pack: '2k' },
+    { label: '2K Portrait 2:3 (1664x2496)', width: 1664, height: 2496, pack: '2k' },
+    // FLUX.1-dev max (~2.0 MP design range — NOT 2048²)
+    { label: 'Flux max square (1408x1408)', width: 1408, height: 1408, pack: 'flux2mp' },
+    { label: 'Flux max 16:9 (1920x1088)', width: 1920, height: 1088, pack: 'flux2mp' },
+    { label: 'Flux max 9:16 (1088x1920)', width: 1088, height: 1920, pack: 'flux2mp' },
+    { label: 'Flux max 3:2 (1728x1152)', width: 1728, height: 1152, pack: 'flux2mp' },
+    { label: 'Flux max 2:3 (1152x1728)', width: 1152, height: 1728, pack: 'flux2mp' },
   ];
 
-  // Load service status and presets on mount
-  useEffect(() => {
-    checkServiceStatus();
-    loadBatchHistory();
-    loadContentPresets();
-  }, []);
+  const dimensionPresetsForModel = (modelValue) => {
+    const m = String(modelValue || 'auto');
+    const isFlux = m.startsWith('flux');
+    const isModernDit =
+      m === 'auto' || m === 'zimage-turbo' || m.startsWith('krea2') || m === 'zimage';
+    const isLegacySd =
+      m === 'realistic-vision' || m === 'epic-realism' || m === 'sd-1.5';
+    return dimensionPresetsBase.filter((p) => {
+      if (p.pack === 'legacy') return isLegacySd || m === 'auto';
+      if (p.pack === '1k') return !isLegacySd || m === 'auto';
+      if (p.pack === '2k') return isModernDit && !isFlux;
+      if (p.pack === 'flux2mp') return isFlux;
+      return true;
+    });
+  };
+
+  const dimensionPresets = useMemo(
+    () => dimensionPresetsForModel(params.model),
+    // params.model only — forModel is pure over modelValue
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [params.model],
+  );
 
   // Analyze current prompt for content detection
   const analyzeCurrentPrompt = useCallback(async (prompt) => {
@@ -409,6 +481,18 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     }
   }, [contentPresets]);
 
+  const fetchQueue = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/batch-image/queue`);
+      if (!response.ok) return;
+      const data = await response.json();
+      const rows = data?.data?.queue ?? data?.queue ?? [];
+      setQueue(Array.isArray(rows) ? rows : []);
+    } catch (err) {
+      console.debug('Failed to load image batch queue:', err);
+    }
+  }, []);
+
   const loadBatchHistory = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/list`);
@@ -434,6 +518,22 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       console.error('Failed to load batch history:', err);
     }
   }, []);
+
+  // Load service status and presets on mount
+  useEffect(() => {
+    checkServiceStatus();
+    loadBatchHistory();
+    loadContentPresets();
+    fetchQueue();
+  }, [fetchQueue, loadBatchHistory]);
+
+  // Refresh queue panel while anything is active
+  useEffect(() => {
+    const active = queue.some((q) => POLLABLE_STATUSES.has(q.status));
+    if (!active && !activeBatch) return undefined;
+    const id = setInterval(() => { fetchQueue(); }, 2500);
+    return () => clearInterval(id);
+  }, [queue, activeBatch, fetchQueue]);
 
   const loadBatchById = useCallback(async (batchId) => {
     try {
@@ -466,6 +566,14 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       }
     } catch (err) {
       setError(`Failed to load batch: ${err.message}`);
+    }
+  }, []);
+
+  const stopPolling = useCallback(() => {
+    pollingBatchIdRef.current = null;
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
     }
   }, []);
 
@@ -503,11 +611,14 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             setGeneratedImages(images);
           }
 
+          fetchQueue();
+
           // Stop polling if batch is complete
           if (['completed', 'error', 'cancelled'].includes(batchStatus.status)) {
             stopPolling();
             setSuccess(`Batch generation ${batchStatus.status}`);
             loadBatchHistory();
+            fetchQueue();
           }
         }
       } catch (err) {
@@ -515,15 +626,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         // Don't stop polling on network errors, just log them
       }
     }, 2000);
-  }, []);
-
-  const stopPolling = useCallback(() => {
-    pollingBatchIdRef.current = null;
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
-  }, []);
+  }, [stopPolling, fetchQueue, loadBatchHistory]);
 
   // Load specific batch if batch_id is in URL params (from ContentLibraryPage)
   useEffect(() => {
@@ -634,13 +737,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       let newParams = { ...prev, model: modelValue };
 
       // Adjust dimensions based on model capabilities.
-      // Modern high-res models (SDXL family, Z-Image) and 'auto' (router usually
-      // lands on one of these) generate native at 1024. The SD1.5-class photoreal
-      // finetunes (realistic-vision, epic-realism) are 512-native.
+      // Modern high-res models (SDXL, Z-Image, FLUX, Krea) and 'auto' → 1024.
+      // SD1.5-class photoreal finetunes (realistic-vision, epic-realism) are 512-native.
       if (
         modelValue.includes('xl')
         || modelValue.startsWith('krea2')
         || modelValue === 'zimage-turbo'
+        || modelValue.startsWith('flux')
         || modelValue === 'auto'
       ) {
         newParams.width = 1024;
@@ -650,12 +753,21 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         newParams.height = 512;
       }
 
+      // Recommended defaults per model — quality sliders remain free to push higher.
       if (modelValue === 'krea2-raw') {
         newParams.steps = 52;
         newParams.guidance = 3.5;
       } else if (modelValue === 'krea2-turbo') {
         newParams.steps = 8;
         newParams.guidance = 0;
+      } else if (modelValue === 'zimage-turbo') {
+        newParams.steps = 8;
+        newParams.guidance = 0;
+      } else if (modelValue === 'flux-dev' || modelValue.startsWith('flux')) {
+        // FLUX.1-dev max-quality defaults (FluxGuidance 3.5, 28 steps)
+        newParams.steps = 28;
+        newParams.guidance = 3.5;
+        newParams.max_workers = 1; // VRAM safety — heavy Comfy graph
       }
 
       return newParams;
@@ -879,30 +991,26 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           return;
         }
 
-        if (inputMode === 'blueprint') {
-          // Blueprint runs in background (avoids timeout for 1000+ rows); poll like CSV/bulk
-          setActiveBatch({
-            batch_id: batchId,
-            status: 'running',
-            total_images: data.data?.total_images ?? 0,
-            completed_images: 0,
-            failed_images: 0,
-            progress_percentage: 0
-          });
-          setSuccess(data.data?.message || 'Blueprint batch started. Results will appear as generation completes.');
-        } else {
-          setActiveBatch({
-            batch_id: batchId,
-            status: 'running',
-            // promptsToGenerate is scoped to the bulk submit branch above and out of scope here;
-            // 0 falls back to indeterminate progress which is fine.
-            total_images: data.data.prompt_count || data.data.total_images || 0,
-            completed_images: 0,
-            failed_images: 0,
-            progress_percentage: 0
-          });
-          setSuccess('Batch generation started successfully');
+        const initialStatus = data.data?.status || 'queued';
+        setActiveBatch({
+          batch_id: batchId,
+          status: initialStatus,
+          total_images: data.data?.prompt_count || data.data?.total_images || 0,
+          completed_images: 0,
+          failed_images: 0,
+          progress_percentage: 0,
+        });
+        setSuccess(
+          inputMode === 'blueprint'
+            ? (data.data?.message || 'Blueprint batch queued. Results appear as generation completes.')
+            : 'Batch queued. Worker drains one batch at a time — keep stacking them.',
+        );
+        // Free the form so the next job can be composed immediately (like Video Gen).
+        if (inputMode === 'single' || inputMode === 'bulk') {
+          setBatchItems('');
         }
+        fetchQueue();
+        loadBatchHistory();
       } else {
         const errorMsg = data.error?.message || data.error || data.message || 'Failed to start generation';
         setError(errorMsg);
@@ -939,6 +1047,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         setSuccess('Batch generation cancelled');
         stopPolling();
         setActiveBatch(prev => prev ? { ...prev, status: 'cancelled' } : null);
+        fetchQueue();
       } else {
         setError(data.error || 'Failed to cancel generation');
       }
@@ -1548,7 +1657,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               value={params.quality_preset}
                               onChange={(e) => handleQualityPresetChange(e.target.value)}
                             >
-                              {qualityPresets.map(option => (
+                              {qualityPresets
+                                .filter((option) => {
+                                  const isFlux = String(params.model || '').startsWith('flux');
+                                  const isFluxPreset = option.value.startsWith('flux');
+                                  return isFlux ? isFluxPreset || option.value === 'standard' : !isFluxPreset;
+                                })
+                                .map(option => (
                                 <MenuItem key={option.value} value={option.value}>
                                   <Box>
                                     <Typography variant="body2">{option.label}</Typography>
@@ -1611,42 +1726,79 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                                 const [width, height] = e.target.value.split('x').map(Number);
                                 setParams({ ...params, width, height });
                               }}
+                              renderValue={(v) => {
+                                const match = dimensionPresets.find(
+                                  (p) => `${p.width}x${p.height}` === v,
+                                );
+                                return match ? match.label : v;
+                              }}
                             >
+                              {!dimensionPresets.some(
+                                (p) => p.width === params.width && p.height === params.height,
+                              ) && (
+                                <MenuItem value={`${params.width}x${params.height}`}>
+                                  Custom ({params.width}x{params.height})
+                                </MenuItem>
+                              )}
                               {dimensionPresets.map(preset => (
                                 <MenuItem key={`${preset.width}x${preset.height}`} value={`${preset.width}x${preset.height}`}>
                                   {preset.label}
                                 </MenuItem>
                               ))}
                             </Select>
+                            {(String(params.model).startsWith('flux')
+                              || params.model === 'zimage-turbo'
+                              || String(params.model).startsWith('krea2'))
+                              && (params.width * params.height > 1024 * 1024) && (
+                              <Typography variant="caption" color="warning.main" sx={{ mt: 0.5, display: 'block' }}>
+                                High-res (&gt;1MP): more VRAM; may OOM on 16GB cards.
+                              </Typography>
+                            )}
                           </FormControl>
                         </Grid>
 
                         <Grid item xs={12}>
-                          <Typography gutterBottom>Steps: {params.steps}</Typography>
+                          <Typography gutterBottom>
+                            Steps: {params.steps}
+                            {String(params.model).startsWith('flux') ? ' (FLUX quality ↑ with more steps)' : ''}
+                          </Typography>
                           <Slider
                             value={params.steps}
                             onChange={(e, value) => setParams({ ...params, steps: value })}
-                            min={10}
-                            max={50}
-                            step={5}
-                            marks
+                            min={1}
+                            max={100}
+                            step={1}
+                            marks={[
+                              { value: 8, label: '8' },
+                              { value: 20, label: '20' },
+                              { value: 28, label: '28' },
+                              { value: 50, label: '50' },
+                              { value: 100, label: '100' },
+                            ]}
                           />
                         </Grid>
 
                         <Grid item xs={12}>
-                          <Typography gutterBottom>Guidance Scale: {params.guidance}</Typography>
+                          <Typography gutterBottom>
+                            {String(params.model).startsWith('flux')
+                              ? `FluxGuidance: ${params.guidance}`
+                              : `Guidance Scale: ${params.guidance}`}
+                          </Typography>
                           <Slider
                             value={params.guidance}
                             onChange={(e, value) => setParams({ ...params, guidance: value })}
-                            min={1}
-                            max={20}
+                            min={0}
+                            max={String(params.model).startsWith('flux') ? 6 : 20}
                             step={0.5}
                             marks
                           />
                         </Grid>
 
                         <Grid item xs={12}>
-                          <Typography gutterBottom>Max Workers: {params.max_workers}</Typography>
+                          <Typography gutterBottom>
+                            Max Workers: {params.max_workers}
+                            {String(params.model).startsWith('flux') ? ' (FLUX forces 1 on server)' : ''}
+                          </Typography>
                           <Slider
                             value={params.max_workers}
                             onChange={(e, value) => setParams({ ...params, max_workers: value })}
@@ -1654,6 +1806,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             max={4}
                             step={1}
                             marks
+                            disabled={String(params.model).startsWith('flux')}
                           />
                         </Grid>
 
@@ -1674,31 +1827,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 </>
               )}
 
-              {/* Action Buttons */}
-              <Box sx={{ mt: 3, display: 'flex', gap: 2 }}>
-                <Button
-                  variant="contained"
-                  onClick={startGeneration}
-                  disabled={loading || (activeBatch && activeBatch.status === 'running')}
-                  startIcon={<PlayArrow />}
-                  fullWidth
-                  size="large"
-                  sx={{
-                    textTransform: 'none',
-                    borderRadius: 1,
-                    py: 1.5,
-                    fontWeight: 600
-                  }}
-                >
-                  {loading ? 'Starting...' : 'Start Generation'}
-                </Button>
-
-                {activeBatch && activeBatch.status === 'running' && (
+              {/* Action Buttons — queue mode: never blocked by an in-flight batch */}
+              <Box sx={{ mt: 3, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+                <Box sx={{ display: 'flex', gap: 2 }}>
                   <Button
-                    variant="outlined"
-                    onClick={cancelGeneration}
-                    startIcon={<Cancel />}
-                    color="error"
+                    variant="contained"
+                    onClick={startGeneration}
+                    disabled={loading}
+                    startIcon={<PlayArrow />}
+                    fullWidth
                     size="large"
                     sx={{
                       textTransform: 'none',
@@ -1707,9 +1845,31 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       fontWeight: 600
                     }}
                   >
-                    Cancel
+                    {loading
+                      ? 'Queuing…'
+                      : (queue.some((q) => POLLABLE_STATUSES.has(q.status))
+                        ? 'Add to Queue'
+                        : 'Start Generation')}
                   </Button>
-                )}
+
+                  {activeBatch && POLLABLE_STATUSES.has(activeBatch.status) && (
+                    <Button
+                      variant="outlined"
+                      onClick={cancelGeneration}
+                      startIcon={<Cancel />}
+                      color="error"
+                      size="large"
+                      sx={{
+                        textTransform: 'none',
+                        borderRadius: 1,
+                        py: 1.5,
+                        fontWeight: 600
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  )}
+                </Box>
               </Box>
             </CardContent>
           </Card>
@@ -1717,6 +1877,102 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
         {/* Progress and Results Section */}
         < Grid item xs={12} lg={6} >
+          {/* Batch Queue panel — live view of stacked jobs (mirrors Video Gen) */}
+          {queue.length > 0 && (
+            <Card sx={{ mb: 3, boxShadow: 2, borderRadius: 2 }}>
+              <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
+                  <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                    Batch Queue
+                  </Typography>
+                  <Chip
+                    label={`${queue.filter((q) => POLLABLE_STATUSES.has(q.status)).length} active`}
+                    size="small"
+                    color="primary"
+                    variant="outlined"
+                  />
+                </Stack>
+                <Stack spacing={1}>
+                  {queue.map((q, idx) => {
+                    const slotTag = `#${idx + 1}`;
+                    const total = q.total_images || 0;
+                    const done = (q.completed_images || 0) + (q.failed_images || 0);
+                    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+                    const chipColor =
+                      q.status === 'running' ? 'primary'
+                        : q.status === 'queued' || q.status === 'pending' ? 'default'
+                          : q.status === 'completed' ? 'success'
+                            : q.status === 'cancelled' ? 'warning'
+                              : q.status === 'error' ? 'error' : 'default';
+                    const cancellable = POLLABLE_STATUSES.has(q.status);
+                    return (
+                      <Box
+                        key={q.batch_id}
+                        sx={{
+                          p: 1.5,
+                          border: '1px solid',
+                          borderColor: q.is_running ? 'primary.main' : 'divider',
+                          borderRadius: 1,
+                          bgcolor: q.is_running ? 'action.hover' : 'transparent',
+                        }}
+                      >
+                        <Stack direction="row" alignItems="center" spacing={1.5}>
+                          <Chip
+                            label={slotTag}
+                            size="small"
+                            variant="outlined"
+                            sx={{ minWidth: 44, fontFamily: 'monospace' }}
+                          />
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Typography variant="body2" noWrap title={q.display_name || q.batch_id}>
+                              {q.display_name || q.batch_id}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {done}/{total} images
+                              {q.failed_images > 0 ? ` (${q.failed_images} failed)` : ''}
+                            </Typography>
+                          </Box>
+                          <Chip label={(q.status || '').toUpperCase()} size="small" color={chipColor} />
+                          {cancellable && (
+                            <Tooltip
+                              title={q.status === 'running' ? 'Cancel running batch' : 'Remove from queue'}
+                              arrow
+                            >
+                              <IconButton
+                                size="small"
+                                onClick={async () => {
+                                  try {
+                                    await fetch(`${API_BASE}/batch-image/cancel/${q.batch_id}`, { method: 'POST' });
+                                    fetchQueue();
+                                    if (activeBatch?.batch_id === q.batch_id) {
+                                      setActiveBatch((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
+                                    }
+                                  } catch (e) {
+                                    setError(`Cancel failed: ${e.message}`);
+                                  }
+                                }}
+                                aria-label="cancel batch"
+                              >
+                                <CloseIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                          )}
+                        </Stack>
+                        {q.status === 'running' && (
+                          <LinearProgress
+                            variant="determinate"
+                            value={pct}
+                            sx={{ mt: 1, height: 4, borderRadius: 2 }}
+                          />
+                        )}
+                      </Box>
+                    );
+                  })}
+                </Stack>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Active Batch Progress */}
           {
             activeBatch && (

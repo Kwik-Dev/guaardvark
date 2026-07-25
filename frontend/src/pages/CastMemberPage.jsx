@@ -16,7 +16,8 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
 import {
   getCastSubject, getCastSubjectDetail, updateCastSubject, planCharacter, generateSamples,
-  listSamples, regenerateSample, approveSamples, deleteSample, trainSubject, cancelTrainSubject,
+  cancelGenerateSamples, listSamples, regenerateSample, approveSamples, deleteSample,
+  trainSubject, cancelTrainSubject,
 } from '../api/productionService';
 import { SubjectThumb } from '../components/filmcrew/CastLibraryView';
 import DragDropImageUpload from '../components/filmcrew/DragDropImageUpload';
@@ -30,6 +31,7 @@ const DEFAULT_TRAINING_SETTINGS = {
   alpha: 16,
   learning_rate: 1e-4,
   steps: '',
+  base_model_id: 'zimage-turbo',
 };
 
 const trainingSettingsFromSubject = (subject) => {
@@ -40,17 +42,52 @@ const trainingSettingsFromSubject = (subject) => {
     alpha: raw.alpha ?? DEFAULT_TRAINING_SETTINGS.alpha,
     learning_rate: raw.learning_rate ?? DEFAULT_TRAINING_SETTINGS.learning_rate,
     steps: raw.steps ?? '',
+    base_model_id:
+      raw.base_model_id || subject?.base_model_id || DEFAULT_TRAINING_SETTINGS.base_model_id,
   };
 };
 
 // A sample is "in flight" while its image is still being produced.
 const isPending = (s) => s.status === 'pending' || s.status === 'generating';
 
+// Generate Character sheet only: promoted samples already live on Training Data.
+const isOnGenerateSheet = (s) => !s.promoted_to_training;
+
 const StatusChip = ({ status }) => {
   const color = status === 'done' ? 'success'
     : status === 'failed' ? 'error'
+    : status === 'cancelled' ? 'default'
     : status === 'generating' ? 'warning' : 'default';
   return <Chip size="small" label={status} color={color} />;
+};
+
+/** Training-lifecycle chip for a generated sample (approved / training / trained). */
+const sampleTrainStatus = (sample, subject) => {
+  if (sample.promoted_to_training) return { label: 'trained', color: 'success' };
+  if (!sample.approved || sample.status !== 'done') return null;
+  if (subject?.training_status === 'training') return { label: 'training', color: 'warning' };
+  return { label: 'approved', color: 'info' };
+};
+
+/** Training-lifecycle chip for a durable ref path on Training Data. */
+const refTrainStatus = (path, subject) => {
+  const last = subject?.last_trained_image_paths || [];
+  if (path && last.includes(path)) return { label: 'trained', color: 'success' };
+  if (subject?.training_status === 'training') return { label: 'training', color: 'warning' };
+  return { label: 'ref', color: 'default' };
+};
+
+const TrainStatusChip = ({ status }) => {
+  if (!status?.label) return null;
+  return (
+    <Chip
+      size="small"
+      label={status.label}
+      color={status.color || 'default'}
+      variant="filled"
+      sx={{ height: 20, fontSize: '0.7rem', '& .MuiChip-label': { px: 0.75 } }}
+    />
+  );
 };
 
 const CastMemberPage = () => {
@@ -72,6 +109,9 @@ const CastMemberPage = () => {
   const [planning, setPlanning] = useState(false);
   const [busy, setBusy] = useState(false);        // generate/train dispatch in flight
   const [polling, setPolling] = useState(false);
+  // True from Generate dispatch until samples settle / cancel — so Cancel is
+  // available even while the worker is still in the LLM planning phase.
+  const [generateActive, setGenerateActive] = useState(false);
   const pollCount = useRef(0);
   const [regenTarget, setRegenTarget] = useState(null); // sample being regenerated
   const [regenPrompt, setRegenPrompt] = useState('');
@@ -134,6 +174,9 @@ const CastMemberPage = () => {
         // If a generation/regeneration is already in flight when we land on the
         // page (e.g. after a refresh), auto-resume polling so finished images
         // appear without a manual reload.
+        if (alive && (rows || []).some(isPending)) {
+          setGenerateActive(true);
+        }
         if (alive && ((rows || []).some(isPending) || s?.training_status === 'training')) {
           pollCount.current = 0;
           setPolling(true);
@@ -157,6 +200,7 @@ const CastMemberPage = () => {
         const [s, rows] = await Promise.all([loadSubject(), loadSamples()]);
         const stillGenerating = (rows || []).some(isPending);
         const stillTraining = s?.training_status === 'training';
+        if (!stillGenerating) setGenerateActive(false);
         if ((!stillGenerating && !stillTraining) || pollCount.current >= POLL_CAP) {
           setPolling(false);
         }
@@ -214,6 +258,7 @@ const CastMemberPage = () => {
     if (subjectMatch) {
       const st = (subjectMatch.status || '').toLowerCase();
       if (['complete', 'end', 'error', 'cancelled', 'failed'].includes(st)) {
+        setGenerateActive(false);
         loadSubject();
         loadSamples();
         setPolling(false);
@@ -249,17 +294,18 @@ const CastMemberPage = () => {
     return () => clearInterval(id);
   }, [subjectId, loadSubject, samples]);
 
-  // Arrow-key / Escape navigation for the enlarged image viewer.
+  // Arrow-key / Escape navigation for the enlarged image viewer (sheet = non-promoted).
+  const sheetLenForKeys = samples.filter(isOnGenerateSheet).length;
   useEffect(() => {
     if (lightboxIdx === null) return undefined;
     const onKey = (e) => {
       if (e.key === 'ArrowLeft') setLightboxIdx((i) => (i > 0 ? i - 1 : i));
-      else if (e.key === 'ArrowRight') setLightboxIdx((i) => (i < samples.length - 1 ? i + 1 : i));
+      else if (e.key === 'ArrowRight') setLightboxIdx((i) => (i < sheetLenForKeys - 1 ? i + 1 : i));
       else if (e.key === 'Escape') setLightboxIdx(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [lightboxIdx, samples.length]);
+  }, [lightboxIdx, sheetLenForKeys]);
 
   const handleSave = async () => {
     setSaving(true); setError(null);
@@ -289,8 +335,10 @@ const CastMemberPage = () => {
     setPlanning(true); setError(null);
     try {
       const data = await planCharacter(subjectId);
-      if (data.bible) setSubject((prev) => prev ? { ...prev, bible: data.bible } : prev);
-      setSamples(data.samples || []);
+      if (data.bible) setSubject((prev) => prev ? { ...prev, bible: data.bible, trigger_word: data.trigger_word || prev.trigger_word } : prev);
+      // Reload full sample list so promoted Training Data keepers stay in state
+      // (plan response only returns the new sheet rows).
+      await loadSamples();
     } catch (e) {
       setError(e.response?.data?.error || 'Planning failed (the LLM may be offline).');
     } finally {
@@ -306,12 +354,14 @@ const CastMemberPage = () => {
       // stay consistent with the trained character (new costumes, angles, etc.).
       const options = { append: true, ...(subject.lora_path ? { use_trained_lora: true } : {}) };
       const res = await generateSamples(subjectId, options);
+      setGenerateActive(true);
       await loadSamples();
       if (res?.job_id) {
         console.debug('[CastMemberPage] generate job', res.job_id);
       }
       startPolling();
     } catch (e) {
+      setGenerateActive(false);
       setError(e.response?.data?.error || 'Failed to start sample generation.');
     } finally {
       setBusy(false);
@@ -325,10 +375,12 @@ const CastMemberPage = () => {
     setError(null);
     try {
       const res = await regenerateSample(subjectId, sid, body);
+      setGenerateActive(true);
       await loadSamples();
       if (res?.job_id) console.debug('[CastMemberPage] regen job', res.job_id);
       startPolling();
     } catch (e) {
+      setGenerateActive(false);
       setError(e.response?.data?.error || 'Failed to regenerate sample.');
     }
   };
@@ -345,8 +397,12 @@ const CastMemberPage = () => {
   const handleDeleteSample = async (sample) => {
     try {
       await deleteSample(subjectId, sample.id);
-      // Keep the lightbox sane if the open image was the one removed.
-      setLightboxIdx((i) => (i === null ? i : Math.max(0, Math.min(i, samples.length - 2))));
+      // Keep the lightbox sane if the open image was the one removed (sheet only).
+      setLightboxIdx((i) => {
+        if (i === null) return i;
+        const sheetLen = samples.filter(isOnGenerateSheet).length;
+        return Math.max(0, Math.min(i, Math.max(0, sheetLen - 2)));
+      });
       await loadSamples();
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to delete sample.');
@@ -354,7 +410,10 @@ const CastMemberPage = () => {
   };
 
   const approveAllDone = async () => {
-    const ids = samples.filter((s) => s.status === 'done').map((s) => s.id);
+    // Only the Generate Character sheet (skip already-promoted Training Data keepers).
+    const ids = samples
+      .filter((s) => s.status === 'done' && !s.promoted_to_training)
+      .map((s) => s.id);
     if (!ids.length) return;
     try {
       await approveSamples(subjectId, ids, true);
@@ -373,6 +432,7 @@ const CastMemberPage = () => {
       alpha: Number(trainingSettings.alpha) || 16,
       learning_rate: Number(trainingSettings.learning_rate) || 1e-4,
       steps: Number.isFinite(steps) && steps > 0 ? steps : null,
+      base_model_id: trainingSettings.base_model_id || subject?.base_model_id || 'zimage-turbo',
     };
   };
 
@@ -401,8 +461,16 @@ const CastMemberPage = () => {
       }
       startPolling();
     } catch (e) {
-      setError(e.response?.data?.error
-        || (e.response?.status === 409 ? 'Already training.' : 'Failed to start training.'));
+      const data = e.response?.data;
+      if (data?.error === 'train_base_not_ready') {
+        setError(data.message || data.train_status_note || 'Train base not ready for this model.');
+      } else {
+        setError(
+          (typeof data?.error === 'string' ? data.error : null)
+          || data?.message
+          || (e.response?.status === 409 ? 'Already training.' : 'Failed to start training.'),
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -421,6 +489,27 @@ const CastMemberPage = () => {
     }
   };
 
+  const handleCancelGenerate = async () => {
+    setBusy(true); setError(null);
+    try {
+      await cancelGenerateSamples(subjectId);
+      setGenerateActive(false);
+      await loadSamples();
+      setPolling(false);
+    } catch (e) {
+      const data = e.response?.data;
+      if (data?.reason === 'not_generating') {
+        setGenerateActive(false);
+        await loadSamples();
+        setPolling(false);
+      } else {
+        setError(data?.reason || data?.error || 'Failed to cancel generation.');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (loading) {
     return <Box sx={{ display: 'flex', justifyContent: 'center', p: 6 }}><CircularProgress /></Box>;
   }
@@ -433,33 +522,58 @@ const CastMemberPage = () => {
     );
   }
 
-  const approvedCount = samples.filter((s) => s.approved).length;
-  const doneCount = samples.filter((s) => s.status === 'done').length;
-  const generatingCount = samples.filter((s) => s.status === 'generating').length;
-  const failedCount = samples.filter((s) => s.status === 'failed').length;
-  const total = samples.length;
-  const active = generatingCount > 0 || polling;
+  // Generate Character sheet excludes samples already promoted into Training Data
+  // after a successful train. Until promotion, approved gens show on BOTH tabs.
+  const sheetSamples = samples.filter(isOnGenerateSheet);
+  const approvedPending = sheetSamples.filter((s) => s.approved && s.status === 'done');
+  const approvedCount = approvedPending.length;
+  const doneCount = sheetSamples.filter((s) => s.status === 'done').length;
+  const generatingCount = sheetSamples.filter((s) => s.status === 'generating').length;
+  const failedCount = sheetSamples.filter((s) => s.status === 'failed').length;
+  const total = sheetSamples.length;
+  const active = generatingCount > 0 || (polling && sheetSamples.some(isPending));
   const refCount = (subject.ref_image_paths || []).length;
-  // Trainable from EITHER uploaded reference images (the primary Step-1 flow) OR
-  // approved generated samples (the no-images fallback) — the backend trains on
-  // the union of both.
+  // Trainable from EITHER uploaded/promoted reference images OR approved samples
+  // still on the generate sheet — backend trains on the union of both.
   const trainable = refCount > 0 || approvedCount > 0;
   const training = subject.training_status === 'training';
 
   // For "images that have been used in training to date" + amend/catch-up vision.
-  // IMPORTANT: This count is ONLY populated for REAL (non-mock) successful training runs.
-  // See backend/tasks/lora_trainer_tasks.py - sidecar "mock": false + file size check.
-  // If it shows N images here, training actually used (and succeeded on) exactly those images.
+  // IMPORTANT: This count is only set after a verified real trainer success
+  // (sidecar + minimum LoRA file size checks in lora_trainer_tasks).
   const lastTrainedPaths = subject.last_trained_image_paths || [];
   const lastTrainedCount = lastTrainedPaths.length;
-  const currentPoolSize = refCount + approvedCount;  // approx size of union used for next train
+  // Pool = durable refs (uploads + promoted gens) + approved gens not yet promoted.
+  // Do not double-count: promoted samples are already folded into ref_image_paths.
+  const currentPoolSize = refCount + approvedCount;
   const hasPendingAmend = lastTrainedCount > 0 && currentPoolSize > lastTrainedCount;
   const trainingStatusLabel = hasPendingAmend && subject.training_status === 'trained'
     ? 'trained (pending amend)'
     : subject.training_status;
 
+  // Approved generated samples still awaiting promotion — shown on Training Data
+  // next to refs so both tabs reflect the live training pool.
+  const pendingPromoteThumbs = approvedPending
+    .filter((s) => s.image_url)
+    .map((s) => ({
+      key: `sample-${s.id}`,
+      src: s.image_url,
+      name: s.angle || `Sample ${s.index + 1}`,
+      status: sampleTrainStatus(s, subject),
+    }));
+
   return (
-    <Box sx={{ p: { xs: 1, sm: 2 } }}>
+    <Box
+      sx={{
+        // AppLayout clips with overflow:hidden — this page must own scrolling
+        // so tall tabs (Training Data → Train LoRA) remain reachable.
+        p: { xs: 1, sm: 2 },
+        height: '100%',
+        minHeight: 0,
+        overflowY: 'auto',
+        boxSizing: 'border-box',
+      }}
+    >
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
         <IconButton onClick={() => navigate('/cast')} aria-label="back to studio"><ArrowBackIcon /></IconButton>
         <Typography variant="h5" sx={{ fontWeight: 600 }}>{subject.name}</Typography>
@@ -470,6 +584,19 @@ const CastMemberPage = () => {
                 subject.training_status === 'failed' ? 'error' :
                 training ? 'warning' : 'default'
               } />
+        <Tooltip
+          title={
+            subject.train_status_note ||
+            'LoRA train/inference base from Settings → Media models. Must match family at generate time.'
+          }
+        >
+          <Chip
+            label={subject.base_model_name || subject.base_model_id || 'base ?'}
+            size="small"
+            color={subject.train_ready === false ? 'warning' : 'primary'}
+            variant="outlined"
+          />
+        </Tooltip>
         {polling && <CircularProgress size={18} sx={{ ml: 1 }} />}
       </Box>
 
@@ -522,10 +649,11 @@ const CastMemberPage = () => {
 
       {/* ── Training Data ──────────────────────────────────────────────────── */}
       {tab === 1 && (
-        <Box sx={{ maxWidth: 1100, mx: 'auto', pb: 3, width: '100%' }}>
+        <Box sx={{ maxWidth: 1100, mx: 'auto', pb: 6, width: '100%' }}>
           {/* Intro and status info stay at top */}
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            Images that will be used for the *next* training run (uploaded refs + any approved generated samples).
+            Images for the *next* training run: uploaded references plus approved generated samples.
+            After a successful train, generated keepers promote here permanently and leave the Generate Character sheet.
             Add new outfits / details then click Train to amend.
           </Typography>
 
@@ -548,7 +676,7 @@ const CastMemberPage = () => {
               <Chip size="small" label="Pending amend / catch-up" color="warning" />
             )}
             {lastTrainedCount === 0 && subject.training_status === 'trained' && (
-              <Chip size="small" label="Trained (mock or no images recorded)" color="default" />
+              <Chip size="small" label="Trained (image list not recorded)" color="default" />
             )}
           </Box>
           <DragDropImageUpload
@@ -556,14 +684,36 @@ const CastMemberPage = () => {
             existingPaths={subject.ref_image_paths || []}
             onUploaded={loadSubject}
             helperText="Uploads immediately to this cast member."
+            extraItems={pendingPromoteThumbs}
+            getPathStatus={(path) => refTrainStatus(path, subject)}
           />
 
           <Divider sx={{ my: 3 }} />
           <Typography variant="subtitle2" gutterBottom>Training hyperparameters</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            SDXL LoRA settings for the next run. Steps left blank auto-scale from image count.
+            Train base must match generate base. Z-Image is the product default; SDXL Legacy
+            is the only fully wired trainer today. Steps blank = auto from image count.
           </Typography>
           <Grid container spacing={2} sx={{ mb: 2, maxWidth: 720 }}>
+            <Grid item xs={12} sm={8}>
+              <TextField
+                select
+                label="Train base"
+                size="small"
+                fullWidth
+                value={trainingSettings.base_model_id || 'zimage-turbo'}
+                onChange={(e) => {
+                  setTrainingSettingsSaved(false);
+                  setTrainingSettings({ ...trainingSettings, base_model_id: e.target.value });
+                }}
+                SelectProps={{ native: true }}
+                helperText="Global default: Settings → Media models"
+              >
+                <option value="zimage-turbo">Z-Image Turbo (default — trains + generates)</option>
+                <option value="flux-dev">FLUX.1 Dev (max quality — train soon)</option>
+                <option value="sdxl-legacy">SDXL Legacy (legacy path)</option>
+              </TextField>
+            </Grid>
             <Grid item xs={6} sm={4}>
               <TextField label="Resolution" type="number" size="small" fullWidth
                 value={trainingSettings.resolution}
@@ -609,12 +759,24 @@ const CastMemberPage = () => {
           <Typography variant="subtitle2" gutterBottom>Train the LoRA</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
             {refCount > 0
-              ? `${refCount} reference image${refCount > 1 ? 's' : ''} ready${approvedCount > 0 ? ` + ${approvedCount} approved generated` : ''}.`
+              ? `${refCount} training-set image${refCount > 1 ? 's' : ''} (uploads + previously trained)${approvedCount > 0 ? ` + ${approvedCount} approved generated pending promotion` : ''}.`
               : approvedCount > 0
-                ? `No uploads yet — will train on ${approvedCount} approved generated sample${approvedCount > 1 ? 's' : ''}.`
+                ? `No uploads yet — will train on ${approvedCount} approved generated sample${approvedCount > 1 ? 's' : ''}; they promote here after train success.`
                 : 'Drop in reference images above (or generate + approve some in the Generate Character tab) to enable training.'}
             {' '}Training incorporates the current set. Add new data (outfits, details) later and Train again to amend/evolve.
           </Typography>
+          {subject.caption_coverage && subject.caption_coverage.images > 0 && (
+            <Typography variant="caption" color={
+              (subject.caption_coverage.bare_captions || 0) > (subject.caption_coverage.images / 2)
+                ? 'warning.main' : 'text.secondary'
+            } sx={{ display: 'block', mb: 1 }}>
+              Captions: {subject.caption_coverage.rich_captions || 0} rich / {subject.caption_coverage.bare_captions || 0} bare
+              of {subject.caption_coverage.images} images
+              {(subject.caption_coverage.bare_captions || 0) > (subject.caption_coverage.images / 2)
+                ? ' — train will VLM-caption bare uploads first'
+                : ''}
+            </Typography>
+          )}
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
             <Button variant="contained" color="secondary" onClick={handleTrain}
                     disabled={busy || training || !trainable}>
@@ -688,24 +850,49 @@ const CastMemberPage = () => {
               {planning ? 'Planning…' : subject.bible ? 'Re-plan sheet' : 'Plan reference sheet'}
             </Button>
             <Button variant="contained" startIcon={<AutoAwesomeIcon />} onClick={handleGenerate}
-                    disabled={busy || planning || !(samples.length || subject.lora_path || subject.bible)}>
-              {subject.lora_path ? 'Generate additional (using trained LoRA)' : 'Generate images'}
+                    disabled={busy || planning || generateActive || sheetSamples.some(isPending)
+                      || !(sheetSamples.length || subject.lora_path || subject.bible || samples.length)}>
+              {subject.lora_path ? 'Generate with trained LoRA' : 'Generate base sheet (no LoRA)'}
             </Button>
-            <Button size="small" onClick={approveAllDone} disabled={!samples.some((s) => s.status === 'done')}>
+            {(generateActive || sheetSamples.some(isPending)) && (
+              <Button variant="outlined" color="error" onClick={handleCancelGenerate} disabled={busy}>
+                Cancel generation
+              </Button>
+            )}
+            <Button size="small" onClick={approveAllDone} disabled={!sheetSamples.some((s) => s.status === 'done')}>
               Approve all generated
             </Button>
             <Box sx={{ flexGrow: 1 }} />
-            <Chip label={`${approvedCount}/${samples.length} approved`} size="small"
+            <Chip label={`${approvedCount}/${total} approved`} size="small"
                   color={approvedCount > 0 ? 'success' : 'default'} variant="outlined" />
           </Box>
 
-          {/* Make the append-vs-replace distinction explicit so users grow the set
-              instead of accidentally wiping it (the data-loss footgun). */}
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
-            <strong>Generate additional</strong> stacks a new batch onto your approved samples (keeps your
-            keepers). <strong>Re-plan sheet</strong> starts a fresh sheet from scratch. Approve the good
-            ones, then <strong>Train LoRA</strong> learns from your references + every approved sample.
+            {subject.lora_path ? (
+              <>
+                <strong>With trained LoRA</strong> — renders through the shared identity pipeline
+                (trigger <code>{subject.trigger_word || subject.name}</code>
+                {subject.base_model_name ? <> · {subject.base_model_name}</> : null}
+                ). Stacks onto approved samples. <strong>Re-plan sheet</strong> starts fresh.
+              </>
+            ) : (
+              <>
+                <strong>Base sheet (no LoRA)</strong> — bible-driven looks only; identity from your
+                uploads appears after <strong>Train LoRA</strong>. Approve keepers, then train.
+                <strong> Re-plan sheet</strong> starts from scratch.
+              </>
+            )}
           </Typography>
+          {subject.smoke_identity?.ok && (
+            <Alert severity={Number(subject.smoke_identity.score) >= 0.75 ? 'success' : 'warning'} sx={{ mb: 2 }}>
+              Post-train smoke identity score:{' '}
+              {subject.smoke_identity.score != null
+                ? Number(subject.smoke_identity.score).toFixed(2)
+                : 'n/a'}{' '}
+              ({subject.smoke_identity.method || 'hist'}
+              {subject.smoke_identity.family ? ` · ${subject.smoke_identity.family}` : ''})
+            </Alert>
+          )}
 
           {/* Progress + honest status — so a planned-but-not-generated sheet doesn't
               read as "stuck", and a real render shows how far along it is. */}
@@ -715,6 +902,8 @@ const CastMemberPage = () => {
                 <Typography variant="caption" color="text.secondary">
                   {active
                     ? `Generating… ${doneCount}/${total} done`
+                    : samples.some((s) => s.status === 'cancelled') && doneCount < total
+                      ? `Cancelled — ${doneCount}/${total} kept${failedCount ? ` · ${failedCount} failed` : ''}.`
                     : doneCount === 0
                       ? `Planned ${total} shots — click "Generate images" to render them.`
                       : doneCount < total
@@ -730,21 +919,32 @@ const CastMemberPage = () => {
             </Box>
           )}
 
-          {!samples.length ? (
+          {!sheetSamples.length ? (
             <Typography color="text.secondary" sx={{ p: 4, textAlign: 'center' }}>
-              No reference sheet yet. Click <b>Plan reference sheet</b> to have the Casting Director write a
-              frozen identity bible + ~32 varied shot prompts, then <b>Generate images</b>.
+              {samples.some((s) => s.promoted_to_training)
+                ? <>All generated keepers are on the <b>Training Data</b> tab (promoted after train). Plan or generate a new batch here when you want more variety.</>
+                : <>No reference sheet yet. Click <b>Plan reference sheet</b> to have the Casting Director write a
+                  frozen identity bible + ~32 varied shot prompts, then <b>Generate images</b>.</>}
             </Typography>
           ) : (
             <Box sx={{ maxHeight: '60vh', overflowY: 'auto', pr: 1, mx: -0.5, px: 0.5 }}>
             <Grid container spacing={2}>
-              {samples.map((s, idx) => (
+              {sheetSamples.map((s, idx) => {
+                const trainSt = sampleTrainStatus(s, subject);
+                return (
                 <Grid item xs={6} sm={4} md={3} lg={2} key={s.id}>
                   <Card variant="outlined">
                     {s.image_url ? (
-                      <CardMedia component="img" height="160" image={s.image_url} alt={s.angle || `sample ${s.index}`}
-                                 onClick={() => setLightboxIdx(idx)}
-                                 sx={{ objectFit: 'cover', cursor: 'zoom-in' }} />
+                      <Box sx={{ position: 'relative' }}>
+                        <CardMedia component="img" height="160" image={s.image_url} alt={s.angle || `sample ${s.index}`}
+                                   onClick={() => setLightboxIdx(idx)}
+                                   sx={{ objectFit: 'cover', cursor: 'zoom-in' }} />
+                        {trainSt && (
+                          <Box sx={{ position: 'absolute', left: 6, bottom: 6 }}>
+                            <TrainStatusChip status={trainSt} />
+                          </Box>
+                        )}
+                      </Box>
                     ) : (
                       <Box sx={{ height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center',
                                  bgcolor: 'action.hover' }}>
@@ -787,7 +987,8 @@ const CastMemberPage = () => {
                     </CardActions>
                   </Card>
                 </Grid>
-              ))}
+                );
+              })}
             </Grid>
             </Box>
           )}
@@ -800,8 +1001,8 @@ const CastMemberPage = () => {
             </Button>
             <Typography variant="caption" color="text.secondary">
               {approvedCount === 0
-                ? 'Approve at least one sample to train.'
-                : `Trains on your ${(subject.ref_image_paths?.length || 0)} reference image${(subject.ref_image_paths?.length || 0) === 1 ? '' : 's'} + ${approvedCount} approved sample${approvedCount > 1 ? 's' : ''}. ~hours on a 16GB GPU; runs in the background.`}
+                ? 'Approve at least one sample to train from this sheet (or train from Training Data if you already have refs).'
+                : `Trains on your ${refCount} training-set image${refCount === 1 ? '' : 's'} + ${approvedCount} approved sample${approvedCount > 1 ? 's' : ''}. On success, approved gens promote to Training Data. ~hours on a 16GB GPU; runs in the background.`}
             </Typography>
           </Box>
         </Box>
@@ -843,26 +1044,27 @@ const CastMemberPage = () => {
         </DialogActions>
       </Dialog>
 
-      {/* Lightbox — click a thumbnail to enlarge; ←/→ or buttons to step, Esc to close. */}
-      {lightboxIdx !== null && samples[lightboxIdx] && (
+      {/* Lightbox — click a thumbnail to enlarge; ←/→ or buttons to step, Esc to close.
+          Indices are into sheetSamples (non-promoted Generate Character set). */}
+      {lightboxIdx !== null && sheetSamples[lightboxIdx] && (
         <Dialog open onClose={() => setLightboxIdx(null)} maxWidth="lg" fullWidth
                 PaperProps={{ sx: { bgcolor: 'grey.900' } }}>
           <DialogContent sx={{ position: 'relative', p: 0, display: 'flex', alignItems: 'center',
                                 justifyContent: 'center', minHeight: '70vh', bgcolor: 'black' }}>
-            {samples[lightboxIdx].image_url ? (
-              <Box component="img" src={samples[lightboxIdx].image_url}
-                   alt={samples[lightboxIdx].angle || `sample ${lightboxIdx + 1}`}
+            {sheetSamples[lightboxIdx].image_url ? (
+              <Box component="img" src={sheetSamples[lightboxIdx].image_url}
+                   alt={sheetSamples[lightboxIdx].angle || `sample ${lightboxIdx + 1}`}
                    sx={{ maxWidth: '100%', maxHeight: '82vh', objectFit: 'contain', display: 'block' }} />
             ) : (
-              <Typography color="grey.500">{samples[lightboxIdx].status}</Typography>
+              <Typography color="grey.500">{sheetSamples[lightboxIdx].status}</Typography>
             )}
             <IconButton onClick={() => setLightboxIdx((i) => Math.max(0, i - 1))} disabled={lightboxIdx === 0}
                         sx={{ position: 'absolute', left: 8, color: 'white', bgcolor: 'rgba(0,0,0,0.45)',
                               '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' } }} aria-label="previous">
               <ChevronLeftIcon />
             </IconButton>
-            <IconButton onClick={() => setLightboxIdx((i) => Math.min(samples.length - 1, i + 1))}
-                        disabled={lightboxIdx === samples.length - 1}
+            <IconButton onClick={() => setLightboxIdx((i) => Math.min(sheetSamples.length - 1, i + 1))}
+                        disabled={lightboxIdx === sheetSamples.length - 1}
                         sx={{ position: 'absolute', right: 8, color: 'white', bgcolor: 'rgba(0,0,0,0.45)',
                               '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' } }} aria-label="next">
               <ChevronRightIcon />
@@ -874,20 +1076,23 @@ const CastMemberPage = () => {
             </IconButton>
           </DialogContent>
           <DialogActions sx={{ justifyContent: 'space-between', bgcolor: 'grey.900' }}>
-            <Tooltip title={samples[lightboxIdx].image_prompt || ''}>
+            <Tooltip title={sheetSamples[lightboxIdx].image_prompt || ''}>
               <Typography variant="caption" color="grey.400" noWrap sx={{ px: 1, maxWidth: '70%' }}>
-                {lightboxIdx + 1}/{samples.length} · {samples[lightboxIdx].angle || `Shot ${lightboxIdx + 1}`}
+                {lightboxIdx + 1}/{sheetSamples.length} · {sheetSamples[lightboxIdx].angle || `Shot ${lightboxIdx + 1}`}
+                {sampleTrainStatus(sheetSamples[lightboxIdx], subject)
+                  ? ` · ${sampleTrainStatus(sheetSamples[lightboxIdx], subject).label}`
+                  : ''}
               </Typography>
             </Tooltip>
             <Box>
               <Button size="small" startIcon={<CloseIcon />} color="inherit"
-                      onClick={() => handleDeleteSample(samples[lightboxIdx])}>
+                      onClick={() => handleDeleteSample(sheetSamples[lightboxIdx])}>
                 Remove
               </Button>
-              <Button size="small" startIcon={samples[lightboxIdx].approved ? <CheckCircleIcon /> : <RadioButtonUncheckedIcon />}
-                      onClick={() => toggleApprove(samples[lightboxIdx])}
-                      color={samples[lightboxIdx].approved ? 'success' : 'inherit'}>
-                {samples[lightboxIdx].approved ? 'Approved' : 'Approve'}
+              <Button size="small" startIcon={sheetSamples[lightboxIdx].approved ? <CheckCircleIcon /> : <RadioButtonUncheckedIcon />}
+                      onClick={() => toggleApprove(sheetSamples[lightboxIdx])}
+                      color={sheetSamples[lightboxIdx].approved ? 'success' : 'inherit'}>
+                {sheetSamples[lightboxIdx].approved ? 'Approved' : 'Approve'}
               </Button>
             </Box>
           </DialogActions>

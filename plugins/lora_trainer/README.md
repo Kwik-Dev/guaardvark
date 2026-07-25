@@ -1,13 +1,30 @@
 # LoRA Trainer Plugin
 
-Trains character, environment, and prop LoRAs for the Film Crew.
+Trains character, environment, and prop LoRAs for the Film Crew / Cast Studio.
+
+## Media model registry (product direction)
+
+Character identity is **not** forever-SDXL. Defaults live in
+`backend/services/media_model_registry.py`:
+
+| Profile | Role | Train ready (today) |
+|---------|------|---------------------|
+| **zimage-turbo** | Product default stills + LoRA base | **Yes** (`run_zimage_trainer.py` + backend/venv) |
+| **flux-dev** | Max-quality stills / character | No — recipe next |
+| **sdxl-legacy** | Legacy path for old LoRAs | **Yes** (`run_trainer.py` + venv-torch) |
+
+Every trained `.safetensors` must ship a schema-v2 sidecar JSON with
+`base_model_id` + `lora_format` so inference never force-routes every LoRA to SDXL.
 
 ## Backends
 
-The plugin selects between two backends:
+The plugin selects between:
 
-- **real** (production) — runs SDXL LoRA training in an isolated `venv-torch/` via subprocess. ~10-15 min per subject on a 24 GB GPU.
-- **mock** (pytest only) — sleeps ~1s, writes a stub safetensors file. **Refused outside pytest** per the NO-MOCKS policy; production must use the real trainer or fail loud.
+- **real Z-Image** (default) — `scripts/run_zimage_trainer.py` via **backend/venv** (needs `ZImagePipeline`). Flow-matching PEFT on the transformer; Kohya/diffusers-compatible save for `load_lora_weights`.
+- **real SDXL (legacy)** — `scripts/run_trainer.py` + `venv-torch/` PEFT UNet.
+- **mock** (pytest only) — refused outside pytest (NO-MOCKS policy).
+
+Optional: set `ZIMAGE_TURBO_TRAIN_ADAPTER=/path/to/ostris_adapter.safetensors` to load a turbo train adapter before PEFT.
 
 Selection priority:
   1. `GUAARDVARK_LORA_BACKEND=real|auto|mock` env var (default: `auto`)

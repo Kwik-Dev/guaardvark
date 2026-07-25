@@ -106,7 +106,12 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
     plugin-sidecar allocations that the in-process registry can't see — so admitting
     against it inherently accounts for every consumer. If estimate + headroom won't fit,
     raise GpuBusyError so the caller gets a clean 'busy, retry' instead of a CUDA OOM or a
-    hung allocation. Probe-unavailable (CPU-only host / no driver) admits — never blocks."""
+    hung allocation. Probe-unavailable (CPU-only host / no driver) admits — never blocks.
+
+    Message distinguishes two cases:
+      * need > total card VRAM → estimate exceeds GPU capacity (not "resident model")
+      * card has free space but still short → another consumer may be resident
+    """
     try:
         from backend.services.gpu_resource_coordinator import get_gpu_coordinator
         info = get_gpu_coordinator().get_available_vram()
@@ -116,14 +121,33 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
     if not info.get("success"):
         return  # no usable GPU probe — do not block
     free = int(info.get("available_mb") or 0)
+    total = int(info.get("total_mb") or 0)
     need = int(estimate_mb) + margin_mb
-    if free < need:
-        from backend.services.job_operation_gate import GpuBusyError
+    if free >= need:
+        return
+    from backend.services.job_operation_gate import GpuBusyError
+    if total > 0 and need > total:
         raise GpuBusyError(
-            f"Not enough free VRAM for {slot}: need ~{need}MB (est {estimate_mb} + "
-            f"{margin_mb} headroom), only {free}MB free after eviction — another model/render "
-            f"is resident. Try again shortly."
+            f"Not enough free VRAM for {slot}: estimate exceeds GPU capacity "
+            f"(~{need}MB needed = est {estimate_mb} + {margin_mb} headroom, "
+            f"card total ~{total}MB, free ~{free}MB). Pick a lighter model "
+            f"(e.g. Wan 2.2 5B on 16GB cards) or lower the estimate."
         )
+    # Free space exists but not enough after eviction — something else is using VRAM
+    # (or the free figure is fragmented). Don't claim capacity overflow when free is
+    # most of the card either.
+    if total > 0 and free >= int(total * 0.85) and need <= total:
+        raise GpuBusyError(
+            f"Not enough free VRAM for {slot}: need ~{need}MB "
+            f"(est {estimate_mb} + {margin_mb} headroom), only {free}MB free "
+            f"on a ~{total}MB card even though the GPU looks mostly idle. "
+            f"The estimate may be high for this hardware — try a lighter model."
+        )
+    raise GpuBusyError(
+        f"Not enough free VRAM for {slot}: need ~{need}MB (est {estimate_mb} + "
+        f"{margin_mb} headroom), only {free}MB free after eviction — another "
+        f"model/render may be resident. Try again shortly."
+    )
 
 
 import threading as _threading

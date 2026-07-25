@@ -80,21 +80,41 @@ def _settings(mv: MusicVideo) -> dict:
     # is reachable, never let keyframe_model stay LoRA-blind (flux-schnell / unset).
     _lora_reachable = bool(s.get("loras") or s.get("lora_paths") or s.get("subject_ids"))
     if s.get("use_lora_consistency") and _lora_reachable:
-        # FORCE the SDXL keyframe model for any character LoRA. This app's trainer
-        # produces SDXL LoRAs, and comfyui_image_generator's capability guard routes
-        # ANY LoRA generation to the SDXL branch regardless of the requested model.
-        # So the keyframe model MUST be "sdxl" — not just so the LoRA binds, but so the
-        # model-aware LoRA strength resolves to SDXL's 0.25. A "flux-dev-lora" pick
-        # (the old promote target, and a frontend option) resolves to 0.9, which then
-        # FRIES the SDXL LoRA on the rerouted SDXL branch → blurry/teal mush keyframes
-        # (the Music-Video storyboards looking far worse than the Generate-Character
-        # tab, which already uses SDXL + 0.25).
-        req_model = s.get("keyframe_model") or ""
+        # Route keyframe model from LoRA sidecar family (Z-Image default train base,
+        # SDXL legacy, or FLUX). Never force SDXL when the cast LoRA is Z-Image —
+        # character_still_pipeline handles offline vs Comfy.
+        req_model = (s.get("keyframe_model") or "").lower()
         if "flux" in req_model and "dev" in req_model:
-            # The user explicitly wants to use a FLUX-dev pipeline (e.g. for a custom Flux LoRA).
             pass
         else:
-            s["keyframe_model"] = "sdxl"
+            try:
+                from backend.services.media_model_registry import (
+                    read_lora_sidecar,
+                    resolve_inference_for_loras,
+                )
+                paths = []
+                for p in (s.get("loras") or s.get("lora_paths") or []):
+                    if isinstance(p, str) and p.strip():
+                        paths.append(p.strip())
+                if not paths and s.get("subject_ids"):
+                    from backend.models import Subject
+                    for sid in s["subject_ids"]:
+                        sub = db.session.get(Subject, int(sid))
+                        if sub and sub.lora_path:
+                            paths.append(sub.lora_path)
+                if paths:
+                    route = resolve_inference_for_loras(paths)
+                    fam = (route.get("family") or "").lower()
+                    if fam == "zimage":
+                        s["keyframe_model"] = route.get("offline_model_key") or "zimage-turbo"
+                    elif fam == "flux":
+                        s["keyframe_model"] = route.get("comfy_model_tag") or "flux-dev"
+                    else:
+                        s["keyframe_model"] = route.get("comfy_model_tag") or "sdxl"
+                else:
+                    s["keyframe_model"] = "zimage-turbo"
+            except Exception:
+                s.setdefault("keyframe_model", "zimage-turbo")
     else:
         s.setdefault("keyframe_model", "flux-schnell")
     # --- Playback / cost tuning (per-video; surfaced in the create form) -------
@@ -709,28 +729,47 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                 kf_steps = s.get("keyframe_steps") or 45
                 kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, clip_prompt)
                 kf_lora_strength = _keyframe_lora_strength(s)
-                vg = get_video_generator()
-                if not getattr(vg, "service_available", True):
-                    try:
-                        vg.service_available = vg._check_comfyui_connection()
-                    except Exception:
-                        vg.service_available = False
-                if not getattr(vg, "service_available", True):
-                    raise RuntimeError(
-                        "ComfyUI unavailable for music-video keyframe/i2v (start it or free VRAM)."
+                if kf_loras:
+                    from backend.services.character_still_pipeline import render_character_still
+                    still = render_character_still(
+                        kf_prompt,
+                        lora_paths=kf_loras,
+                        include_bible=False,
+                        source="musicvideo",
+                        width=s["still_width"],
+                        height=s["still_height"],
+                        steps=kf_steps,
+                        seed=1000 + idx,
+                        output_path=still_path,
+                        lora_strength=kf_lora_strength,
+                        keep_pipeline=False,
                     )
-                img = ComfyUIImageGenerator(
-                    lora_strength=kf_lora_strength,
-                    flux_unet=s.get("flux_unet"),
-                    flux_t5=s.get("flux_t5"),
-                    flux_clip=s.get("flux_clip"),
-                    flux_vae=s.get("flux_vae"),
-                ).generate_image(
-                    prompt=kf_prompt, loras=kf_loras, output_path=still_path,
-                    width=s["still_width"], height=s["still_height"], seed=1000 + idx,
-                    steps=kf_steps,
-                    model=s.get("keyframe_model"),
-                )
+                    if not still.success:
+                        raise RuntimeError(still.error or "music-video keyframe still failed")
+                    img = still.image_path
+                else:
+                    vg = get_video_generator()
+                    if not getattr(vg, "service_available", True):
+                        try:
+                            vg.service_available = vg._check_comfyui_connection()
+                        except Exception:
+                            vg.service_available = False
+                    if not getattr(vg, "service_available", True):
+                        raise RuntimeError(
+                            "ComfyUI unavailable for music-video keyframe/i2v (start it or free VRAM)."
+                        )
+                    img = ComfyUIImageGenerator(
+                        lora_strength=kf_lora_strength,
+                        flux_unet=s.get("flux_unet"),
+                        flux_t5=s.get("flux_t5"),
+                        flux_clip=s.get("flux_clip"),
+                        flux_vae=s.get("flux_vae"),
+                    ).generate_image(
+                        prompt=kf_prompt, loras=kf_loras, output_path=still_path,
+                        width=s["still_width"], height=s["still_height"], seed=1000 + idx,
+                        steps=kf_steps,
+                        model=s.get("keyframe_model"),
+                    )
                 _comfyui_free_vram()
             else:
                 _comfyui_free_vram()
@@ -976,24 +1015,40 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
                 try:
                     kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
                     if kf_loras:
-                        ComfyUIImageGenerator()._preflight_loras(kf_loras)
-                    gen = ComfyUIImageGenerator(
-                        lora_strength=kf_lora_strength,
-                        flux_unet=s.get("flux_unet"),
-                        flux_t5=s.get("flux_t5"),
-                        flux_clip=s.get("flux_clip"),
-                        flux_vae=s.get("flux_vae"),
-                    )
-                    gen.generate_image(
-                        prompt=kf_prompt,
-                        loras=kf_loras,
-                        output_path=still_path,
-                        width=s.get("still_width", 1024),
-                        height=s.get("still_height", 576),
-                        seed=2000 + idx,
-                        steps=s.get("keyframe_steps") or 20,
-                        model=s.get("keyframe_model"),
-                    )
+                        from backend.services.character_still_pipeline import render_character_still
+                        still = render_character_still(
+                            kf_prompt,
+                            lora_paths=kf_loras,
+                            include_bible=False,
+                            source="musicvideo",
+                            width=s.get("still_width", 1024),
+                            height=s.get("still_height", 576),
+                            steps=s.get("keyframe_steps") or 20,
+                            seed=2000 + idx,
+                            output_path=still_path,
+                            lora_strength=kf_lora_strength,
+                            keep_pipeline=True,
+                        )
+                        if not still.success:
+                            raise RuntimeError(still.error or "storyboard still failed")
+                    else:
+                        gen = ComfyUIImageGenerator(
+                            lora_strength=kf_lora_strength,
+                            flux_unet=s.get("flux_unet"),
+                            flux_t5=s.get("flux_t5"),
+                            flux_clip=s.get("flux_clip"),
+                            flux_vae=s.get("flux_vae"),
+                        )
+                        gen.generate_image(
+                            prompt=kf_prompt,
+                            loras=kf_loras,
+                            output_path=still_path,
+                            width=s.get("still_width", 1024),
+                            height=s.get("still_height", 576),
+                            seed=2000 + idx,
+                            steps=s.get("keyframe_steps") or 20,
+                            model=s.get("keyframe_model"),
+                        )
                     c["storyboard_path"] = still_path
                     c["storyboard_variation"] = None
                 except RuntimeError as e:

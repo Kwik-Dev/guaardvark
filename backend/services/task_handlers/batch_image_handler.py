@@ -157,12 +157,21 @@ class BatchImageHandler(BaseTaskHandler):
 
             # Convert to BatchPrompt objects
             batch_prompts = []
-            default_model = config.get("model", "sd-1.5")
+            from backend.services.stills_defaults import resolve_stills_defaults
+            default_model = config.get("model", "auto")
             content_preset = config.get("content_preset")
             auto_enhance = config.get("auto_enhance", True)
             enhance_anatomy = config.get("enhance_anatomy", True)
             enhance_faces = config.get("enhance_faces", True)
             enhance_hands = config.get("enhance_hands", True)
+            form_defaults = resolve_stills_defaults(
+                default_model,
+                width=config.get("width"),
+                height=config.get("height"),
+                steps=config.get("steps"),
+                guidance=config.get("guidance"),
+                replace_legacy_sd_markers=True,
+            )
 
             for i, p in enumerate(raw_prompts):
                 if isinstance(p, str):
@@ -171,6 +180,10 @@ class BatchImageHandler(BaseTaskHandler):
                         id=f"prompt_{i+1}",
                         prompt=p,
                         model=default_model,
+                        width=int(form_defaults["width"]),
+                        height=int(form_defaults["height"]),
+                        steps=int(form_defaults["steps"]),
+                        guidance=float(form_defaults["guidance"]),
                         content_preset=content_preset,
                         auto_enhance=auto_enhance,
                         enhance_anatomy=enhance_anatomy,
@@ -178,18 +191,27 @@ class BatchImageHandler(BaseTaskHandler):
                         enhance_hands=enhance_hands
                     ))
                 elif isinstance(p, dict):
-                    # Full prompt config
+                    # Full prompt config — empty knobs inherit form + family defaults
+                    row_model = p.get("model", default_model)
+                    row_res = resolve_stills_defaults(
+                        row_model,
+                        width=p.get("width", form_defaults["width"]),
+                        height=p.get("height", form_defaults["height"]),
+                        steps=p.get("steps", form_defaults["steps"]),
+                        guidance=p.get("guidance", form_defaults["guidance"]),
+                        replace_legacy_sd_markers=True,
+                    )
                     batch_prompts.append(BatchPrompt(
                         id=p.get("id", f"prompt_{i+1}"),
                         prompt=p.get("prompt", ""),
                         negative_prompt=p.get("negative_prompt", ""),
                         style=p.get("style", "realistic"),
-                        width=p.get("width", 512),
-                        height=p.get("height", 512),
-                        steps=p.get("steps", 20),
-                        guidance=p.get("guidance", 7.5),
+                        width=int(row_res["width"]),
+                        height=int(row_res["height"]),
+                        steps=int(row_res["steps"]),
+                        guidance=float(row_res["guidance"]),
                         seed=p.get("seed"),
-                        model=p.get("model", default_model),
+                        model=row_model,
                         content_preset=p.get("content_preset", content_preset),
                         auto_enhance=p.get("auto_enhance", auto_enhance),
                         enhance_anatomy=p.get("enhance_anatomy", enhance_anatomy),

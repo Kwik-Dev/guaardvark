@@ -58,15 +58,32 @@ _STAGE_LABELS = [
     ("Upscale", "upscaling"),
     ("VAEDecode", "decoding"),
     ("VAEEncode", "encoding latents"),
+    # MoE Wan graphs often use two KSamplerAdvanced nodes; class_type alone
+    # cannot tell HN vs LN — extra workflow label overrides fill that gap.
+    ("KSamplerAdvanced", "denoising"),
     ("KSampler", "denoising"),
     ("Sampler", "denoising"),
     ("TextEncode", "encoding prompt"),
     ("LoraLoader", "loading LoRA"),
     ("CheckpointLoader", "loading model"),
     ("UNETLoader", "loading model"),
+    ("UnetLoaderGGUF", "loading model"),
     ("CLIPLoader", "loading model"),
     ("Loader", "loading model"),
 ]
+
+
+def _free_vram_mb() -> Optional[int]:
+    """Best-effort free VRAM for progress diagnostics. Never raises."""
+    try:
+        from backend.services.gpu_resource_coordinator import get_available_vram
+        info = get_available_vram()
+        if not info.get("success"):
+            return None
+        free = info.get("available_mb") or info.get("free_mb")
+        return int(free) if free is not None else None
+    except Exception:
+        return None
 
 
 def _label_for(class_type: str) -> str:
@@ -99,10 +116,24 @@ class ComfyUIProgressBridge:
         if not ws_progress_enabled():
             return
         # Build node_id -> friendly label map from the workflow we're about to queue.
+        # Wan MoE: two KSamplerAdvanced nodes in step order → high/low noise labels
+        # so UnifiedProgress shows which expert is running (architecture visibility).
         node_labels: Dict[str, str] = {}
         try:
+            sampler_ids = []
             for nid, node in (workflow or {}).items():
-                node_labels[str(nid)] = _label_for(node.get("class_type", ""))
+                ct = node.get("class_type", "") or ""
+                base = _label_for(ct)
+                node_labels[str(nid)] = base
+                if "KSampler" in ct or ct.endswith("Sampler"):
+                    sampler_ids.append(str(nid))
+            if len(sampler_ids) >= 2:
+                # Stable order by node id (workflows use "10" then "11" for HN→LN).
+                sampler_ids.sort(key=lambda x: int(x) if x.isdigit() else x)
+                node_labels[sampler_ids[0]] = "denoising (high noise)"
+                node_labels[sampler_ids[1]] = "denoising (low noise)"
+                for sid in sampler_ids[2:]:
+                    node_labels[sid] = "denoising"
         except Exception:
             pass  # a weird workflow just means generic labels; not worth failing for
 
@@ -170,13 +201,25 @@ class ComfyUIProgressBridge:
                     pct = max(1, min(99, pct))
                     if pct != last_pct:
                         last_pct = pct
+                        msg = f"{stage} {value}/{total}"
+                        free_mb = _free_vram_mb()
+                        add = {"stage": stage, "node": node, **extra}
+                        # Surface offload thrash risk on the UnifiedProgress rail
+                        # (free near zero while denoising ≈ CPU weight thrash).
+                        if free_mb is not None:
+                            add["free_vram_mb"] = free_mb
+                            if free_mb < 512 and "denois" in stage:
+                                msg = (
+                                    f"{msg} — low free VRAM (~{free_mb} MB); "
+                                    "likely CPU offload (slow)"
+                                )
                         emit_progress_event(
                             process_id=process_id,
                             progress=pct,
-                            message=f"{stage} {value}/{total}",
+                            message=msg,
                             status="processing",
                             process_type="video_render",
-                            additional_data={"stage": stage, "node": node, **extra},
+                            additional_data=add,
                         )
 
                 elif mtype == "executing":

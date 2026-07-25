@@ -15,9 +15,8 @@ The Director already receives a "do NOT describe the hero's face" guidance note,
 injection's only real benefit is already captured without giving up render-time's guarantees.
 
 The pieces:
-  * ``resolve_lora_strength(model, override)`` — model-aware default strength (FLUX-dev ~0.9,
-    SDXL rank-16 ~0.25; verified on sage_harlow 2026-06-22), operator override wins. (Extracted
-    from music_video_tasks._keyframe_lora_strength per the long-standing #1489 cleanup.)
+  * ``resolve_lora_strength(model, override)`` — model-aware default strength (Z-Image ~0.9,
+    FLUX-dev ~0.9, SDXL rank-16 ~0.25); operator override or Settings wins.
   * ``subjects_to_lock(subjects, include_bible)`` — Subject objects → (deduped lora_paths,
     "trigger, bible, …" prefix).
   * ``apply_lock(base_prompt, lock_prefix)`` — front-load the lock onto a prompt.
@@ -28,22 +27,63 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 # Model-aware default keyframe/storyboard LoRA strength. SDXL rank-16 character LoRAs sit at
-# ~0.25 (higher fries them); the FLUX-dev route holds identity at ~0.9.
+# ~0.25 (higher fries them); Z-Image and FLUX-dev hold identity near ~0.9.
+DEFAULT_ZIMAGE_STRENGTH = 0.9
 DEFAULT_FLUX_DEV_STRENGTH = 0.9
 DEFAULT_SDXL_STRENGTH = 0.25
 _MIN_STRENGTH, _MAX_STRENGTH = 0.0, 1.5
 
+# SystemSetting keys (optional operator overrides).
+SETTING_STRENGTH_ZIMAGE = "character_lora_strength_zimage"
+SETTING_STRENGTH_SDXL = "character_lora_strength_sdxl"
+SETTING_STRENGTH_FLUX = "character_lora_strength_flux"
+
+
+def _setting_float(key: str) -> Optional[float]:
+    try:
+        from backend.models import SystemSetting
+        row = SystemSetting.query.filter_by(key=key).first()
+        if row is None or row.value in (None, ""):
+            return None
+        return float(row.value)
+    except Exception:
+        return None
+
 
 def resolve_lora_strength(model: Optional[str], override=None) -> float:
-    """Model-aware character-LoRA strength, clamped to [0, 1.5]. ``model`` is the keyframe /
-    storyboard image model name (e.g. 'flux-dev', 'sdxl'); ``override`` (operator setting) wins
-    when not None. FLUX-dev → 0.9, everything else (SDXL et al.) → 0.25."""
+    """Model-aware character-LoRA strength, clamped to [0, 1.5].
+
+    ``model`` is a keyframe/storyboard/offline model name or family tag
+    (e.g. 'zimage-turbo', 'flux-dev', 'sdxl'). Explicit ``override`` wins;
+    else optional Settings per family; else family defaults.
+    """
     kfm = (model or "").lower()
-    default = DEFAULT_FLUX_DEV_STRENGTH if ("flux" in kfm and "dev" in kfm) else DEFAULT_SDXL_STRENGTH
-    try:
-        val = float(override) if override is not None else default
-    except (TypeError, ValueError):
-        val = default
+    if "zimage" in kfm or kfm in ("z-image", "z_image"):
+        family = "zimage"
+        default = DEFAULT_ZIMAGE_STRENGTH
+        setting_key = SETTING_STRENGTH_ZIMAGE
+    elif "flux" in kfm and "dev" in kfm:
+        family = "flux"
+        default = DEFAULT_FLUX_DEV_STRENGTH
+        setting_key = SETTING_STRENGTH_FLUX
+    elif "flux" in kfm:
+        # flux-schnell etc. rarely take cast LoRAs; use FLUX-dev-ish strength if forced
+        family = "flux"
+        default = DEFAULT_FLUX_DEV_STRENGTH
+        setting_key = SETTING_STRENGTH_FLUX
+    else:
+        family = "sdxl"
+        default = DEFAULT_SDXL_STRENGTH
+        setting_key = SETTING_STRENGTH_SDXL
+
+    if override is not None:
+        try:
+            val = float(override)
+        except (TypeError, ValueError):
+            val = default
+    else:
+        from_settings = _setting_float(setting_key)
+        val = from_settings if from_settings is not None else default
     return max(_MIN_STRENGTH, min(_MAX_STRENGTH, val))
 
 

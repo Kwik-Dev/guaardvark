@@ -11,16 +11,37 @@ import axios from "axios";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const DEFAULT_ACCEPT = "image/png,image/jpeg,image/webp,image/gif,image/bmp";
 
+// Small status badge overlaid on a training-pool thumbnail (ref / approved / training / trained).
+function StatusBadge({ status }) {
+  if (!status?.label) return null;
+  return (
+    <Chip
+      size="small"
+      label={status.label}
+      color={status.color || "default"}
+      sx={{
+        position: "absolute",
+        left: 2,
+        bottom: 2,
+        height: 18,
+        fontSize: "0.65rem",
+        maxWidth: "calc(100% - 4px)",
+        "& .MuiChip-label": { px: 0.5, overflow: "hidden", textOverflow: "ellipsis" },
+      }}
+    />
+  );
+}
+
 // An already-uploaded reference image, shown as a real thumbnail (visuals beat
 // filename chips). Served by index from the subject's ref_image_paths; falls back
 // to a filename chip if there's no subject id yet or the image fails to load.
-function ExistingThumb({ subjectId, index, name }) {
+function ExistingThumb({ subjectId, index, name, status }) {
   const [failed, setFailed] = useState(false);
   if (!subjectId || failed) {
     return <Chip icon={<ImageIcon sx={{ fontSize: 16 }} />} label={name} size="small" variant="outlined" />;
   }
   return (
-    <Box sx={{ width: 72, height: 72, borderRadius: 1, overflow: "hidden", border: 1, borderColor: "divider" }}>
+    <Box sx={{ position: "relative", width: 72, height: 72, borderRadius: 1, overflow: "hidden", border: 1, borderColor: "divider" }}>
       <img
         src={`${API_BASE}/cast-library/subjects/${subjectId}/refs/${index}/image`}
         alt={name}
@@ -29,6 +50,28 @@ function ExistingThumb({ subjectId, index, name }) {
         onError={() => setFailed(true)}
         style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
       />
+      <StatusBadge status={status} />
+    </Box>
+  );
+}
+
+// Extra pool thumbnails (e.g. approved generated samples not yet promoted into refs).
+function ExtraThumb({ src, name, status }) {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) {
+    return <Chip icon={<ImageIcon sx={{ fontSize: 16 }} />} label={name || "sample"} size="small" variant="outlined" />;
+  }
+  return (
+    <Box sx={{ position: "relative", width: 72, height: 72, borderRadius: 1, overflow: "hidden", border: 1, borderColor: "divider" }}>
+      <img
+        src={src}
+        alt={name || "sample"}
+        title={name}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+      />
+      <StatusBadge status={status} />
     </Box>
   );
 }
@@ -46,8 +89,22 @@ function ExistingThumb({ subjectId, index, name }) {
  *
  * Either way the parent never types a path.
  */
+/**
+ * @param {object[]} [extraItems] — additional pool thumbs (approved gens not yet in refs).
+ *   Each: { key, src, name, status?: { label, color } }
+ * @param {(path: string, index: number) => ({label, color}|null)} [getPathStatus]
+ *   Status chip for each existing ref path (trained / training / ref).
+ */
 const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
-  { subjectId, existingPaths = [], onUploaded, accept = DEFAULT_ACCEPT, helperText },
+  {
+    subjectId,
+    existingPaths = [],
+    onUploaded,
+    accept = DEFAULT_ACCEPT,
+    helperText,
+    extraItems = [],
+    getPathStatus,
+  },
   ref,
 ) {
   const [staged, setStaged] = useState([]); // [{file, previewUrl}] when no subjectId
@@ -169,7 +226,7 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
     });
   };
 
-  const total = existingPaths.length + staged.length;
+  const poolCount = existingPaths.length + (extraItems?.length || 0) + staged.length;
 
   return (
     <Box>
@@ -211,9 +268,9 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
                 {helperText}
               </Typography>
             )}
-            {total > 0 && (
+            {poolCount > 0 && (
               <Typography variant="caption" sx={{ display: "block", mt: 1 }}>
-                {total} image{total === 1 ? "" : "s"} ready
+                {poolCount} image{poolCount === 1 ? "" : "s"} ready
               </Typography>
             )}
           </>
@@ -274,10 +331,10 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
         </Box>
       )}
 
-      {existingPaths.length > 0 && (
+      {(existingPaths.length > 0 || (extraItems && extraItems.length > 0)) && (
         <Box 
           sx={{ 
-            maxHeight: 180, 
+            maxHeight: 220, 
             overflowY: 'auto', 
             border: '1px solid', 
             borderColor: 'divider', 
@@ -289,26 +346,40 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
           }}
         >
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-            Current references ({existingPaths.length}) — scroll to see all
+            Training set ({existingPaths.length + (extraItems?.length || 0)}) — refs
+            {(extraItems?.length || 0) > 0 ? ` + ${extraItems.length} approved generated` : ''} — scroll to see all
           </Typography>
           <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, justifyContent: 'flex-start' }}>
-            {existingPaths.map((p, idx) => (
-              <Box key={idx} sx={{ position: "relative", display: "inline-flex" }}>
-                <ExistingThumb subjectId={subjectId} index={idx} name={p.split("/").pop()} />
-                {subjectId && (
-                  <IconButton
-                    size="small"
-                    aria-label="delete reference image"
-                    onClick={(e) => { e.stopPropagation(); setConfirmIdx(idx); }}
-                    sx={{
-                      position: "absolute", top: -8, right: -8,
-                      bgcolor: "background.paper",
-                      "&:hover": { bgcolor: "background.paper" },
-                    }}
-                  >
-                    <CloseIcon sx={{ fontSize: 14 }} />
-                  </IconButton>
-                )}
+            {existingPaths.map((p, idx) => {
+              const status = typeof getPathStatus === "function" ? getPathStatus(p, idx) : null;
+              return (
+                <Box key={`ref-${idx}`} sx={{ position: "relative", display: "inline-flex" }}>
+                  <ExistingThumb
+                    subjectId={subjectId}
+                    index={idx}
+                    name={p.split("/").pop()}
+                    status={status}
+                  />
+                  {subjectId && (
+                    <IconButton
+                      size="small"
+                      aria-label="delete reference image"
+                      onClick={(e) => { e.stopPropagation(); setConfirmIdx(idx); }}
+                      sx={{
+                        position: "absolute", top: -8, right: -8,
+                        bgcolor: "background.paper",
+                        "&:hover": { bgcolor: "background.paper" },
+                      }}
+                    >
+                      <CloseIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  )}
+                </Box>
+              );
+            })}
+            {(extraItems || []).map((item) => (
+              <Box key={item.key} sx={{ position: "relative", display: "inline-flex" }}>
+                <ExtraThumb src={item.src} name={item.name} status={item.status} />
               </Box>
             ))}
           </Box>

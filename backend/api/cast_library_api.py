@@ -71,6 +71,16 @@ def _cast_ref_dir(subject_id: int) -> Path:
 
 
 def _serialize(s: Subject) -> dict:
+    try:
+        from backend.services.media_model_registry import (
+            get_profile,
+            subject_base_model_id,
+        )
+        base_id = subject_base_model_id(s)
+        base_prof = get_profile(base_id) or {}
+    except Exception:
+        base_id = "zimage-turbo"
+        base_prof = {}
     return {
         "id": s.id, "kind": s.kind, "name": s.name,
         "description": s.description,
@@ -86,13 +96,65 @@ def _serialize(s: Subject) -> dict:
         "last_trained_at": getattr(s, 'last_trained_at', None).isoformat() if getattr(s, 'last_trained_at', None) else None,
         "bible": getattr(s, 'bible', None),
         "training_settings_json": getattr(s, "training_settings_json", None) or {},
+        # Media model registry — LoRA train/inference base (Z-Image default; SDXL legacy)
+        "base_model_id": base_id,
+        "base_model_name": base_prof.get("name"),
+        "lora_format": base_prof.get("lora_format"),
+        "train_ready": bool(base_prof.get("train_ready")),
+        "train_status_note": base_prof.get("train_status_note"),
+        "caption_coverage": _caption_coverage_for(s),
+        "smoke_identity": ((s.training_settings_json or {}).get("smoke_identity")
+                           if getattr(s, "training_settings_json", None) else None),
     }
+
+
+def _caption_coverage_for(s: Subject) -> dict:
+    try:
+        from backend.services.lora_pretrain_gate import caption_coverage_stats
+        stats = caption_coverage_stats(s)
+        return {
+            "images": stats.get("images", 0),
+            "rich_captions": stats.get("rich_captions", 0),
+            "bare_captions": stats.get("bare_captions", 0),
+        }
+    except Exception:
+        return {"images": 0, "rich_captions": 0, "bare_captions": 0}
 
 
 @bp.get("")
 def list_subjects():
     subjects = Subject.query.order_by(Subject.created_at.desc()).all()
     return jsonify({"subjects": [_serialize(s) for s in subjects]})
+
+
+def _maybe_backfill_promotion(s: Subject) -> Subject:
+    """Graduate samples already recorded in last_trained_image_paths (pre-feature rows).
+
+    Idempotent. Called from read paths so older trained subjects pick up the new
+    Generate-vs-Training Data contract without requiring a retrain.
+    """
+    if s is None or s.training_status != "trained" or not (s.last_trained_image_paths or []):
+        return s
+    try:
+        pending = (
+            SubjectSample.query
+            .filter_by(subject_id=s.id, approved=True, status="done")
+            .filter(SubjectSample.promoted_to_training.is_(False))
+            .count()
+        )
+        if not pending:
+            return s
+        from backend.services.sample_promotion import promote_samples_after_train
+        promo = promote_samples_after_train(s, s.last_trained_image_paths or [])
+        if promo.get("promoted") or promo.get("paths_added"):
+            db.session.commit()
+            return db.session.get(Subject, s.id) or s
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+    return s
 
 
 @bp.get("/subjects/<int:subject_id>")
@@ -106,6 +168,8 @@ def get_subject(subject_id: int):
     s = db.session.get(Subject, subject_id)
     if s is None:
         return jsonify({"error": "not_found"}), 404
+
+    s = _maybe_backfill_promotion(s)
 
     data = {"subject": _serialize(s)}
 
@@ -329,10 +393,26 @@ def upload_subject_refs(subject_id):
     s.ref_image_paths = list(s.ref_image_paths or []) + saved_paths
     db.session.commit()
 
+    # VLM caption new uploads so train is not stuck with bare "a photo of TOKEN".
+    caption_summary = {}
+    if saved_paths:
+        try:
+            from backend.services.character_captioner import ensure_subject_image_captions
+            token = (s.trigger_word or "").strip() or s.name
+            marks = (s.bible or "").strip()
+            if len(marks) > 240:
+                marks = marks[:240].rsplit(",", 1)[0]
+            caption_summary = ensure_subject_image_captions(
+                saved_paths, trigger=token, identity_marks=marks,
+            )
+        except Exception as e:
+            caption_summary = {"error": str(e)[:200]}
+
     return jsonify({
         "subject": _serialize(s),
         "saved": saved_paths,
         "skipped": skipped,
+        "captions": caption_summary,
     })
 
 
@@ -371,6 +451,14 @@ def plan_character(subject_id: int):
     n = int(body.get("n", 32))
     trigger_word = (body.get("trigger_word") or "").strip() or None
 
+    from backend.services.plugin_bridge import PluginUnavailable, ensure_plugins_for_stage
+    try:
+        ensure_plugins_for_stage("cast", "planning", job_critical=True)
+    except PluginUnavailable as e:
+        return jsonify({
+            "error": f"Ollama/ComfyUI could not be started for Cast: {e}",
+        }), 503
+
     from backend.services.character_generator_service import generate_character_sheet
     plan = generate_character_sheet(
         name=s.name,
@@ -393,15 +481,22 @@ def plan_character(subject_id: int):
         s.trigger_word = trigger
     db.session.flush()
 
-    # Idempotent: delete existing samples so a re-plan is a clean slate.
-    SubjectSample.query.filter_by(subject_id=subject_id).delete()
+    # Idempotent: wipe the Generate Character sheet. Keep promoted samples —
+    # they already graduated into Training Data (ref_image_paths) and must not
+    # be deleted by a re-plan of the generation workspace. Index new shots
+    # above any kept promoted rows so sample_<n>.png paths never collide.
+    SubjectSample.query.filter_by(
+        subject_id=subject_id, promoted_to_training=False,
+    ).delete()
     db.session.flush()
+    kept = SubjectSample.query.filter_by(subject_id=subject_id).all()
+    base_index = (max((s.index for s in kept), default=-1)) + 1
 
     rows: list[SubjectSample] = []
     for shot in shots:
         row = SubjectSample(
             subject_id=subject_id,
-            index=shot["index"],
+            index=base_index + shot["index"],
             angle=shot.get("angle") or "",
             framing=shot.get("framing") or "",
             expression=shot.get("expression") or "",
@@ -454,7 +549,36 @@ def dispatch_generate_samples(subject_id: int):
         additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen", "use_trained_lora": use_lora, "append": append},
     )
     task = celery.send_task("character.generate_samples", args=[subject_id, job_id, use_lora, append])
+    # Persist celery id so /generate/cancel can revoke the worker without inspect.
+    try:
+        progress.update_process(
+            job_id, 1, "Queued for generation",
+            additional_data={"celery_task_id": task.id},
+        )
+    except Exception:
+        pass
     return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id, "use_trained_lora": use_lora, "append": append}), 202
+
+
+@bp.post("/subjects/<int:subject_id>/generate/cancel")
+def cancel_generate_samples(subject_id: int):
+    """Cancel an in-flight character sample generation (or single-sample regen).
+
+    Stops the batch cooperatively (marks pending/generating samples cancelled),
+    revokes the Celery task, cancels the unified-progress job, and interrupts
+    ComfyUI so the current sampler does not keep running after Cancel.
+    """
+    from backend.services.character_generation_cancel import cancel_character_generation
+
+    result = cancel_character_generation(subject_id)
+    if not result.get("cancelled"):
+        reason = result.get("reason", "unknown")
+        if reason == "not_found":
+            return jsonify(result), 404
+        if reason == "not_generating":
+            return jsonify(result), 409
+        return jsonify(result), 400
+    return jsonify(result), 200
 
 
 @bp.get("/subjects/<int:subject_id>/samples")
@@ -463,6 +587,8 @@ def list_samples(subject_id: int):
     s = db.session.get(Subject, subject_id)
     if s is None:
         return jsonify({"error": "not_found"}), 404
+
+    _maybe_backfill_promotion(s)
 
     samples = (
         SubjectSample.query
@@ -506,6 +632,48 @@ def dispatch_train(subject_id: int):
         from backend.services.lora_training_settings import normalize_training_settings
         s.training_settings_json = normalize_training_settings(body["training_settings"])
 
+    # Gate on media model registry: Z-Image/FLUX train backends land next;
+    # only train_ready profiles (currently sdxl-legacy PEFT) may dispatch.
+    from backend.services.lora_training_settings import settings_for_subject
+    from backend.services.media_model_registry import assert_train_ready, get_profile
+    train_cfg = settings_for_subject(s)
+    base_id = train_cfg.get("base_model_id")
+    try:
+        assert_train_ready(base_id)
+    except ValueError as e:
+        prof = get_profile(base_id) or {}
+        return jsonify({
+            "error": "train_base_not_ready",
+            "message": str(e),
+            "base_model_id": base_id,
+            "base_model_name": prof.get("name"),
+            "train_ready": False,
+            "train_status_note": prof.get("train_status_note"),
+        }), 400
+
+    # Persist resolved base onto the subject so serialize/UI stay honest.
+    merged = dict(s.training_settings_json or {})
+    merged.update(train_cfg)
+    s.training_settings_json = merged
+
+    # Caption any refs still missing rich .txt sidecars before the Celery train task.
+    try:
+        from backend.services.character_captioner import ensure_subject_image_captions
+        from backend.models import SubjectSample
+        train_images = list(s.ref_image_paths or [])
+        for smp in SubjectSample.query.filter_by(
+            subject_id=s.id, approved=True, status="done"
+        ).all():
+            if smp.image_path and smp.image_path not in train_images:
+                train_images.append(smp.image_path)
+        token = (s.trigger_word or "").strip() or s.name
+        marks = (s.bible or "").strip()
+        if len(marks) > 240:
+            marks = marks[:240].rsplit(",", 1)[0]
+        ensure_subject_image_captions(train_images, trigger=token, identity_marks=marks)
+    except Exception:
+        pass
+
     s.training_status = "training"
     s.training_error = None  # clear any prior failure reason before the new run
     db.session.commit()
@@ -513,7 +681,7 @@ def dispatch_train(subject_id: int):
     from backend.services.lora_train_dispatch import dispatch_lora_train
 
     result = dispatch_lora_train(subject_id)
-    return jsonify({**result, "subject_id": subject_id}), 202
+    return jsonify({**result, "subject_id": subject_id, "base_model_id": base_id}), 202
 
 
 @bp.post("/subjects/<int:subject_id>/train/cancel")
@@ -580,6 +748,13 @@ def dispatch_regen_sample(subject_id: int, sample_id: int):
         "character.regen_sample",
         args=[sample_id, prompt_override, seed, job_id],
     )
+    try:
+        progress.update_process(
+            job_id, 1, "Queued for regen",
+            additional_data={"celery_task_id": task.id},
+        )
+    except Exception:
+        pass
     return jsonify({"task_id": task.id, "job_id": job_id, "sample_id": sample_id}), 202
 
 

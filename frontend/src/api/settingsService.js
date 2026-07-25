@@ -358,6 +358,34 @@ export const getChatImageModel = async () => {
   }
 };
 
+/** Stills / cast-train / max-quality registry (Ollama-picker style for media). */
+export const getMediaModels = async () => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/media_models`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("settingsService: Error getting media models:", err.message);
+    return { error: err.message };
+  }
+};
+
+/**
+ * @param {{ stills_model?: string, cast_train_base?: string, max_quality_model?: string }} patch
+ */
+export const setMediaModels = async (patch) => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/media_models`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch || {}),
+    });
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("settingsService: Error setting media models:", err.message);
+    return { error: err.message };
+  }
+};
+
 export const setChatImageModel = async (model) => {
   try {
     const response = await fetch(`${BASE_URL}/settings/chat_image_model`, {

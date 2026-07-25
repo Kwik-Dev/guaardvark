@@ -385,6 +385,43 @@ class ComfyUIVideoGenerator:
             return cls.MODEL_MIN_VRAM_GB[model]
         return cls._FAMILY_MIN_VRAM_GB.get(cls._model_family(model), 0)
 
+    # Wan UMT5 TE is ~6.4 GB fully resident. On 16–20 GB cards that leaves the
+    # ~10 GB GGUF UNet with ~300 MB usable → CPU offload thrash (~150 s/step).
+    # CLIPLoader supports device="cpu" (same weights/math; encode is slower once,
+    # sample runs at full GPU speed). Above this total we leave TE on GPU.
+    # Override: GUAARDVARK_WAN_CLIP_DEVICE=cpu|default
+    WAN_CLIP_CPU_TOTAL_VRAM_MB = 20 * 1024
+
+    @classmethod
+    def _wan_clip_device(cls, total_vram_mb: Optional[int] = None) -> str:
+        """Where Wan CLIP/UMT5 should load: ``cpu`` on consumer VRAM, else default.
+
+        Quality-preserving residency control (mirrors CogVideoX force_offload):
+        TE on CPU frees the full card for UNet+VAE instead of stacking TE+UNet
+        until Comfy partial-loads the diffusion model. Same fp/quant weights —
+        no model downshift.
+        """
+        override = (os.environ.get("GUAARDVARK_WAN_CLIP_DEVICE") or "").strip().lower()
+        if override in ("cpu", "default"):
+            return override
+
+        total_mb = total_vram_mb
+        if total_mb is None:
+            try:
+                from backend.services.gpu_resource_coordinator import get_available_vram
+                info = get_available_vram()
+                if info.get("success"):
+                    total_mb = int(info.get("total_mb") or 0) or None
+            except Exception:  # noqa: BLE001
+                total_mb = None
+
+        # Unknown probe → prefer CPU (safe on 16 GB; harmless quality-wise on larger).
+        if total_mb is None or total_mb <= 0:
+            return "cpu"
+        if total_mb <= cls.WAN_CLIP_CPU_TOTAL_VRAM_MB:
+            return "cpu"
+        return "default"
+
     def _vram_preflight(self, model: str) -> Optional[str]:
         """Read-only VRAM gate run BEFORE queuing a ComfyUI job, so an
         under-spec card gets an honest message instead of a silent OOM mid-render.
@@ -413,6 +450,7 @@ class ComfyUIVideoGenerator:
             return None
 
         total_mb = info.get("total_mb") or 0
+        free_mb = info.get("available_mb") or info.get("free_mb") or 0
         if total_mb <= 0:
             return None  # unknown total → fail open
         total_gb = total_mb / 1024.0
@@ -429,6 +467,15 @@ class ComfyUIVideoGenerator:
                 f"{model} needs ~{need}g GB VRAM; detected {total_gb:.2f}g GB "
                 f"({total_mb} MB total). "
                 "Try a lighter model or preview resolution."
+            )
+        # Advisory only: free VRAM after callers should already have run
+        # gpu_session reclaim. Low free means another consumer is still resident;
+        # we do not hard-fail (staged TE-on-CPU is the thrash fix, not refuse).
+        if free_mb and free_mb < 2048:
+            logger.warning(
+                "VRAM preflight: only ~%s MB free of %s MB total before queue "
+                "(clip_device=%s). Ensure gpu_session reclaimed Ollama/Comfy.",
+                free_mb, total_mb, self._wan_clip_device(total_mb),
             )
         return None
 
@@ -782,6 +829,7 @@ class ComfyUIVideoGenerator:
             seed = int(time.time() * 1000) % (2**31)
 
         model_files = self.WAN22_MODELS.get(model_key, self.WAN22_MODELS["wan22-14b"])
+        clip_device = self._wan_clip_device()
 
         # Default negative prompt for anatomy quality
         if not negative_prompt:
@@ -793,6 +841,10 @@ class ComfyUIVideoGenerator:
             )
 
         midpoint = num_inference_steps // 2
+        logger.info(
+            "Wan T2V MoE workflow clip_device=%s (TE off-GPU frees UNet residency on 16GB)",
+            clip_device,
+        )
 
         workflow = {
             # ── Model Loading ──────────────────────────────────────────────
@@ -810,13 +862,15 @@ class ComfyUIVideoGenerator:
                     "unet_name": model_files["unet_low"],
                 }
             },
-            # Node 3: Load UMT5 text encoder (Wan clip type)
+            # Node 3: Load UMT5 text encoder (Wan clip type).
+            # device=cpu on ≤20GB cards: same weights, TE never occupies GPU VRAM
+            # so the ~10GB UNet is not forced into CPU offload thrash.
             "3": {
                 "class_type": "CLIPLoader",
                 "inputs": {
                     "clip_name": model_files["clip"],
                     "type": "wan",
-                    "device": "default",
+                    "device": clip_device,
                 }
             },
             # Node 4: Load Wan VAE
@@ -980,6 +1034,7 @@ class ComfyUIVideoGenerator:
             seed = int(time.time() * 1000) % (2**31)
 
         model_files = self.WAN22_MODELS.get(model_key, self.WAN22_MODELS["wan22-14b-i2v"])
+        clip_device = self._wan_clip_device()
 
         if not negative_prompt:
             negative_prompt = (
@@ -990,11 +1045,15 @@ class ComfyUIVideoGenerator:
             )
 
         midpoint = num_inference_steps // 2
+        logger.info(
+            "Wan I2V MoE workflow clip_device=%s (TE off-GPU frees UNet residency on 16GB)",
+            clip_device,
+        )
 
         workflow = {
             "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": model_files["unet_high"]}},
             "2": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": model_files["unet_low"]}},
-            "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": model_files["clip"], "type": "wan", "device": "default"}},
+            "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": model_files["clip"], "type": "wan", "device": clip_device}},
             "4": {"class_type": "VAELoader", "inputs": {"vae_name": model_files["vae"]}},
             "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["3", 0], "text": prompt}},
             "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["3", 0], "text": negative_prompt}},
@@ -1113,6 +1172,7 @@ class ComfyUIVideoGenerator:
         unet = cfg.get("unet") or "wan2.2_ti2v_5B_fp16.safetensors"
         clip = cfg.get("clip") or "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
         vae = cfg.get("vae") or "wan2.2_vae.safetensors"
+        clip_device = self._wan_clip_device()
 
         if not negative_prompt:
             negative_prompt = (
@@ -1130,10 +1190,11 @@ class ComfyUIVideoGenerator:
             "length": num_frames,
             "batch_size": 1,
         }
+        logger.info("Wan TI2V-5B workflow clip_device=%s", clip_device)
 
         workflow = {
             "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
-            "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip, "type": "wan", "device": "default"}},
+            "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip, "type": "wan", "device": clip_device}},
             "4": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
             "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["3", 0], "text": prompt}},
             "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["3", 0], "text": negative_prompt}},
@@ -1706,7 +1767,15 @@ class ComfyUIVideoGenerator:
             )
 
         # ── Prompt enhancement ───────────────────────────────────────
+        # Settings → Verbatim Prompts (or VERBATIM_PROMPTS=1) means exact user text.
+        _verbatim_video = False
         if request.enhance_prompt and request.prompt:
+            try:
+                from backend.services.media_director import verbatim_prompts_enabled
+                _verbatim_video = bool(verbatim_prompts_enabled())
+            except Exception:
+                _verbatim_video = False
+        if request.enhance_prompt and request.prompt and not _verbatim_video:
             try:
                 from backend.utils.prompt_enhancer import enhance_video_prompt, get_default_negative_prompt
                 # Pass model_family for motion-aware hints (wan vs cogvideox)
@@ -1724,6 +1793,8 @@ class ComfyUIVideoGenerator:
                 logger.info(f"Prompt enhanced (style={request.prompt_style}, family={mf}): {request.prompt[:120]}...")
             except Exception as e:
                 logger.warning(f"Prompt enhancement failed, using original prompt: {e}")
+        elif _verbatim_video:
+            logger.info("verbatim prompts ON — skipping video prompt enhancement")
 
         if request.output_dir:
             batch_dir = Path(request.output_dir)

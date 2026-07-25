@@ -5,12 +5,42 @@ import backend.services.plugin_bridge as pb
 from backend.plugins.plugin_base import PluginStatus
 
 
+class _FakeStateStore:
+    def __init__(self):
+        self.prefs = {}
+
+    def get_user_enabled(self):
+        return dict(self.prefs)
+
+
+class _FakeConfig:
+    def __init__(self):
+        self.enabled = False
+
+
+class _FakeMeta:
+    def __init__(self):
+        self.config = _FakeConfig()
+
+
+class _FakeRegistry:
+    def __init__(self):
+        self._plugins = {}
+
+    def get_plugin(self, plugin_id):
+        if plugin_id not in self._plugins:
+            self._plugins[plugin_id] = _FakeMeta()
+        return self._plugins[plugin_id]
+
+
 class _FakePM:
     def __init__(self):
         self.enabled = set()
         self.status = {}
         self.start_calls = []
         self.stop_calls = []
+        self.state_store = _FakeStateStore()
+        self.registry = _FakeRegistry()
 
     def is_effectively_enabled(self, plugin_id):
         return plugin_id in self.enabled
@@ -24,7 +54,13 @@ class _FakePM:
 
     def start_plugin(self, plugin_id):
         self.start_calls.append(plugin_id)
-        if plugin_id == "comfyui" and len(self.start_calls) == 1:
+        # Only the cooldown retry test expects the first comfyui start to gate.
+        # Skip that behavior when the plugin was user-disabled (job_critical path).
+        if (
+            plugin_id == "comfyui"
+            and len([c for c in self.start_calls if c == "comfyui"]) == 1
+            and self.state_store.prefs.get("comfyui") is not False
+        ):
             return {
                 "success": False,
                 "gated": True,
@@ -115,3 +151,37 @@ def test_disabled_flag_skips_prepare(reset_bridge_state, monkeypatch):
     result = pb.prepare_plugins_for_route("/video")
     assert result.get("skipped") is True
     assert reset_bridge_state.start_calls == []
+
+
+def test_cast_stage_plugin_map():
+    assert pb.plugins_for_stage("cast", "planning") == ["ollama"]
+    assert pb.plugins_for_stage("cast", "generate_samples") == ["comfyui"]
+    assert pb.plugins_for_stage("cast", "regen_sample") == ["comfyui"]
+    assert pb.plugins_for_stage("cast", "train") == []
+    assert pb.plugins_for_route("/cast") == []
+    assert pb.plugins_for_route("/cast/22") == []
+
+
+def test_user_disabled_blocks_non_critical_start(reset_bridge_state):
+    fake = reset_bridge_state
+    fake.state_store.prefs["comfyui"] = False
+
+    with pytest.raises(pb.PluginUnavailable, match="user-disabled"):
+        pb.ensure_plugin_running("comfyui", persist_user_pref=False)
+
+    assert "comfyui" not in fake.start_calls
+    assert fake.state_store.prefs["comfyui"] is False
+
+
+def test_job_critical_bypasses_user_disable(reset_bridge_state, monkeypatch):
+    fake = reset_bridge_state
+    fake.state_store.prefs["comfyui"] = False
+    monkeypatch.setattr(pb, "_emit_plugins_status", lambda *a, **k: None)
+
+    pb.ensure_plugins_for_stage("cast", "generate_samples", job_critical=True)
+
+    assert "comfyui" in fake.start_calls
+    assert fake.status["comfyui"] == PluginStatus.RUNNING
+    # Must not stick a user preference re-enable
+    assert fake.state_store.prefs["comfyui"] is False
+    assert "comfyui" not in fake.enabled

@@ -200,6 +200,90 @@ def caption_dataset(
     }
 
 
+def ensure_subject_image_captions(
+    image_paths: list[str],
+    *,
+    trigger: str,
+    identity_marks: str = "",
+    overwrite: bool = False,
+    analyzer=None,
+) -> dict:
+    """Write ``.txt`` sidecars for cast ref/sample images missing rich captions.
+
+    Used by cast upload + train dispatch so in-app LoRA training is not stuck with
+    bare ``"a photo of {token}"`` fallbacks. Skips images that already have a
+    non-bare sidecar unless ``overwrite``. Never raises on a single image failure.
+    """
+    token = (trigger or "").strip()
+    marks = (identity_marks or "").strip()
+    results = []
+    written = skipped = failed = 0
+    framing_tally: dict[str, int] = {}
+    analyzer = analyzer  # lazy inside caption_image if None
+
+    bare_prefixes = (
+        f"a photo of {token}".lower() if token else "",
+        f"photo of {token}".lower() if token else "",
+    )
+
+    def _is_bare(text: str) -> bool:
+        t = (text or "").strip().lower().rstrip(".")
+        if not t:
+            return True
+        if token and t in {f"a photo of {token.lower()}", token.lower()}:
+            return True
+        if token and t.startswith(f"a photo of {token.lower()}") and len(t) < len(token) + 24:
+            return True
+        for bp in bare_prefixes:
+            if bp and t == bp:
+                return True
+        return False
+
+    for path in image_paths or []:
+        p = Path(path)
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
+            continue
+        sidecar = p.with_suffix(".txt")
+        existing = ""
+        if sidecar.is_file():
+            try:
+                existing = sidecar.read_text(encoding="utf-8").strip()
+            except OSError:
+                existing = ""
+        if existing and not _is_bare(existing) and not overwrite:
+            skipped += 1
+            fr = detect_framing(existing)
+            framing_tally[fr or "unknown"] = framing_tally.get(fr or "unknown", 0) + 1
+            results.append({"image": p.name, "caption": existing, "framing": fr, "action": "skipped"})
+            continue
+        try:
+            caption = caption_image(
+                p, trigger=token or p.stem, identity_marks=marks, analyzer=analyzer,
+            )
+            if not caption.strip():
+                caption = compose_caption(token or p.stem, "", marks)
+            sidecar.write_text(caption + "\n", encoding="utf-8")
+            written += 1
+            fr = detect_framing(caption)
+            framing_tally[fr or "unknown"] = framing_tally.get(fr or "unknown", 0) + 1
+            results.append({"image": p.name, "caption": caption, "framing": fr, "action": "written"})
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            log.warning("ensure_subject_image_captions: failed on %s: %s", path, e)
+            results.append({"image": p.name, "error": str(e)[:200], "action": "failed"})
+
+    full_body = sum(framing_tally.get(f, 0) for f in FULL_BODY_FRAMINGS)
+    return {
+        "images": len(results),
+        "written": written,
+        "skipped": skipped,
+        "failed": failed,
+        "framing_tally": framing_tally,
+        "full_body_count": full_body,
+        "results": results,
+    }
+
+
 # Convenience: pull a compact identity-marks line out of a character_profile.md so the manual
 # path doesn't have to hand-type it. Best-effort — returns "" if the file isn't parseable.
 def marks_from_profile(profile_path: str | Path) -> str:

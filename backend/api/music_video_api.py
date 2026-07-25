@@ -586,30 +586,44 @@ def regen_mv_storyboard(mv_id, idx):
     # generate-storyboards path). Model-aware strength so a regen matches the batch.
     kf_lora_strength = _keyframe_lora_strength(s)
     kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
-    if kf_loras:
-        ComfyUIImageGenerator()._preflight_loras(kf_loras)
 
     still_path = str(out_dir / f"storyboard_{idx}.png")
     try:
-        # vram_estimate_mb (~SDXL still) makes single-storyboard regen visible to the orchestrator budget.
         with gpu_session(JobKind.VIDEO_RENDER, f"mv_storyboard_{mv_id}_{idx}", evict_ollama=True,
-                         vram_estimate_mb=10000):
-            ComfyUIImageGenerator(
-                lora_strength=kf_lora_strength,
-                flux_unet=s.get("flux_unet"),
-                flux_t5=s.get("flux_t5"),
-                flux_clip=s.get("flux_clip"),
-                flux_vae=s.get("flux_vae"),
-            ).generate_image(
-                prompt=kf_prompt,
-                loras=kf_loras,
-                output_path=still_path,
-                width=s.get("still_width", 1024),
-                height=s.get("still_height", 576),
-                seed=3000 + int(idx) + variation,
-                steps=s.get("keyframe_steps") or 20,
-                model=s.get("keyframe_model"),
-            )
+                         free_comfyui=True, vram_estimate_mb=11000, require_fit=True):
+            if kf_loras:
+                from backend.services.character_still_pipeline import render_character_still
+                still = render_character_still(
+                    kf_prompt,
+                    lora_paths=kf_loras,
+                    include_bible=False,
+                    source="musicvideo",
+                    width=s.get("still_width", 1024),
+                    height=s.get("still_height", 576),
+                    seed=3000 + int(idx) + variation,
+                    output_path=still_path,
+                    lora_strength=kf_lora_strength,
+                    keep_pipeline=False,
+                )
+                if not still.success:
+                    raise RuntimeError(still.error or "storyboard regen failed")
+            else:
+                ComfyUIImageGenerator(
+                    lora_strength=kf_lora_strength,
+                    flux_unet=s.get("flux_unet"),
+                    flux_t5=s.get("flux_t5"),
+                    flux_clip=s.get("flux_clip"),
+                    flux_vae=s.get("flux_vae"),
+                ).generate_image(
+                    prompt=kf_prompt,
+                    loras=kf_loras,
+                    output_path=still_path,
+                    width=s.get("still_width", 1024),
+                    height=s.get("still_height", 576),
+                    seed=3000 + int(idx) + variation,
+                    steps=s.get("keyframe_steps") or 20,
+                    model=s.get("keyframe_model"),
+                )
             # Free ComfyUI VRAM after the still so any follow-up video work
             # (or other users) gets a clean card.
             free_comfyui_vram()

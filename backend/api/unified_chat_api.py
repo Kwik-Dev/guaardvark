@@ -378,10 +378,20 @@ def direct_tool_sync():
 
     session_id = data.get("session_id") or "cli_direct"
 
-    # Forward project_root for GUAARDVARK.md loading in direct-tool path too
-    if project_root:
-        # ensure in the later call
-        pass
+    # Sanitize image prompts at the API boundary so CLI /imagine and browser
+    # direct-tool share the same pure-visual text (and never hit NameError on
+    # an undefined project_root).
+    if tool_name == "generate_image" and isinstance(params, dict) and params.get("prompt"):
+        try:
+            from backend.services.image_prompt_sanitize import sanitize_image_prompt
+            cleaned = sanitize_image_prompt(params.get("prompt"))
+            if cleaned:
+                params = {**params, "prompt": cleaned}
+        except Exception:
+            pass
+
+    if data.get("project_root"):
+        options["project_root"] = str(data.get("project_root"))
 
     try:
         from backend.tools.tool_registry_init import initialize_all_tools
@@ -399,6 +409,7 @@ def direct_tool_sync():
         with current_app.app_context():
             result = engine._run_direct_tool_execution(
                 tool_name, params, session_id, _noop_emit, str(uuid.uuid4()), display,
+                options,
             )
         return jsonify({"success": result.get("success", False), **result})
     except Exception as exc:

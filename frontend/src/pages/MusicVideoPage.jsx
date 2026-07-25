@@ -266,7 +266,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
       {/* Pipeline / Model summary (the new controls) */}
       <Stack direction="row" spacing={1} sx={{ mb: 1, flexWrap: "wrap" }}>
         {detail.use_lora_consistency ? (
-          <Chip size="small" color="secondary" label="LoRA consistency ON (SDXL + subjects)" />
+          <Chip size="small" color="secondary" label="LoRA consistency ON (cast identity stills)" />
         ) : (
           <Chip size="small" label="LoRA consistency OFF (flexible models)" />
         )}
@@ -701,7 +701,7 @@ const MusicVideoPage = () => {
   const [planningMode, setPlanningMode] = useState("narrative"); // "narrative" | "visual"
 
   // === New: Storyboard / Keyframe + I2V model selection (inspired by VideoGeneratorPage) ===
-  // LoRA consistency: when true, route keyframe through SDXL + LoRAs (required for trained cast/characters).
+  // LoRA consistency: when true, bake cast LoRAs into keyframes via character_still_pipeline.
   // When false, more options for beautiful output (better keyframe models + top-tier I2V like Wan2.2).
   const [useLoraConsistency, setUseLoraConsistency] = useState(false);
   const [keyframeModel, setKeyframeModel] = useState(DEFAULT_KEYFRAME_MODEL);
@@ -1107,7 +1107,7 @@ const MusicVideoPage = () => {
                       id="lora-consistency"
                     />
                     <label htmlFor="lora-consistency" style={{ fontSize: "0.875rem", color: "rgba(255,255,255,0.7)" }}>
-                      Use LoRA consistency pipeline (for trained characters / cast subjects — slower but identity-locked)
+                      Use LoRA consistency (bake cast identity into keyframes — Z-Image/SDXL/FLUX by LoRA family; i2v does not reload face LoRAs)
                     </label>
                   </Stack>
                   <Typography variant="caption" color="text.secondary" sx={{ pl: 2.5, display: "block" }}>

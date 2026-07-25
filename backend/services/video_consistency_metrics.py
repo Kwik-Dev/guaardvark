@@ -52,19 +52,30 @@ def compute_basic_video_stats(video_path: str | Path) -> Dict[str, Any]:
     return stats
 
 
+def _histogram_vec(path: str, bins: int = 16):
+    from PIL import Image
+    import numpy as np
+    img = Image.open(path).convert("RGB").resize((64, 64))
+    arr = np.asarray(img, dtype=np.float32)
+    hist = []
+    for c in range(3):
+        h, _ = np.histogram(arr[:, :, c], bins=bins, range=(0, 256), density=True)
+        hist.append(h)
+    v = np.concatenate(hist)
+    n = float(np.linalg.norm(v)) or 1.0
+    return v / n
+
+
 def score_identity_preservation(
     ref_paths: list[str],
     candidate_path: str,
     *,
-    method: str = "size",  # "size" | "clip" | "face" (face requires optional dep)
+    method: str = "hist",  # "hist" | "size" | "clip" | "face"
 ) -> Dict[str, Any]:
-    """Best-effort identity score between training refs and a generated candidate (smoke or keyframe).
+    """Best-effort identity score between training refs and a generated candidate.
 
-    Current implementation: trivial baseline (file size similarity + count). 
-    Future: embed refs + candidate with a small vision encoder (CLIP ViT or face model)
-    available in the torch or main venv and compute cosine.
-
-    Returns dict with "score" in [0,1] (higher=better) + "method" + "details".
+    Default ``hist``: mean cosine similarity of RGB histograms (cheap, no extra deps
+    beyond PIL/numpy already used elsewhere). Higher is better in [0,1].
     """
     result = {"method": method, "score": 0.5, "details": {}}
     try:
@@ -72,6 +83,33 @@ def score_identity_preservation(
         if not cand.exists():
             result["details"]["error"] = "candidate missing"
             return result
+
+        if method in ("hist", "auto"):
+            import numpy as np
+            try:
+                cand_v = _histogram_vec(str(cand))
+                sims = []
+                for rp in ref_paths:
+                    try:
+                        if Path(rp).is_file():
+                            sims.append(float(np.dot(cand_v, _histogram_vec(rp))))
+                    except Exception:
+                        pass
+                if sims:
+                    score = float(sum(sims) / len(sims))
+                    # Cosine of normalized hist is typically ~0.7–0.99 for same subject.
+                    result["score"] = max(0.0, min(1.0, score))
+                    result["method"] = "hist"
+                    result["details"] = {
+                        "n_refs": len(sims),
+                        "mean_cosine": round(score, 4),
+                        "min_cosine": round(min(sims), 4),
+                        "max_cosine": round(max(sims), 4),
+                    }
+                    return result
+            except Exception as e:
+                logger.debug("hist identity score failed, falling back to size: %s", e)
+                method = "size"
 
         if method == "size":
             sizes = []
@@ -83,15 +121,14 @@ def score_identity_preservation(
             if sizes:
                 avg_ref = sum(sizes) / len(sizes)
                 cand_size = cand.stat().st_size
-                # crude: within 30% of average ref size is "reasonable"
                 ratio = min(cand_size, avg_ref) / max(cand_size, avg_ref) if max(cand_size, avg_ref) else 0
                 result["score"] = max(0.3, min(0.95, ratio))
-                result["details"] = {"avg_ref_size": int(avg_ref), "cand_size": cand_size, "ratio": round(ratio, 3)}
-        # TODO (future): implement real embedding path when a small vision model is guaranteed.
-        # Example skeleton (guarded):
-        # if method == "clip":
-        #     from PIL import Image
-        #     ... load tiny CLIP or use backend vision model ...
+                result["method"] = "size"
+                result["details"] = {
+                    "avg_ref_size": int(avg_ref),
+                    "cand_size": cand_size,
+                    "ratio": round(ratio, 3),
+                }
     except Exception as e:
         logger.debug("identity score computation skipped: %s", e)
         result["details"]["error"] = str(e)[:200]

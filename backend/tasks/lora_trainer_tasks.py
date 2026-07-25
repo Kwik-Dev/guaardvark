@@ -54,6 +54,32 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
         if smp.image_path and smp.image_path not in train_images:
             train_images.append(smp.image_path)
 
+    # Ensure VLM .txt sidecars exist before gate/captions (upload may have skipped
+    # if Ollama was down; train is the second chance).
+    try:
+        from backend.services.character_captioner import ensure_subject_image_captions
+        token = (s.trigger_word or "").strip() or s.name
+        marks = (s.bible or "").strip()
+        if len(marks) > 240:
+            marks = marks[:240].rsplit(",", 1)[0]
+        cap_sum = ensure_subject_image_captions(
+            [p for p in train_images if p], trigger=token, identity_marks=marks,
+        )
+        logger.info(
+            "lora_trainer: caption ensure for subject %s written=%s skipped=%s failed=%s",
+            subject_id, cap_sum.get("written"), cap_sum.get("skipped"), cap_sum.get("failed"),
+        )
+        if job_id and cap_sum.get("written"):
+            try:
+                get_unified_progress().update_process(
+                    job_id, 12,
+                    f"Captioned {cap_sum['written']} training image(s)…",
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning("lora_trainer: caption ensure failed (non-fatal): %s", e)
+
     from backend.services.lora_pretrain_gate import validate_cast_training, build_training_captions
     gate = validate_cast_training(s, train_images)
     if not gate["pass"]:
@@ -71,6 +97,20 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
     image_captions = build_training_captions(s, [p for p in train_images if p])
     from backend.services.lora_training_settings import settings_for_subject
     train_settings = settings_for_subject(s)
+
+    # Multi-base train via media_model_registry (zimage-turbo + sdxl-legacy ready).
+    try:
+        from backend.services.media_model_registry import assert_train_ready
+        train_profile = assert_train_ready(train_settings.get("base_model_id"))
+    except ValueError as e:
+        msg = str(e)
+        logger.error("lora_trainer: train base not ready for subject %s: %s", subject_id, msg)
+        if job_id:
+            try:
+                get_unified_progress().error_process(job_id, msg)
+            except Exception:
+                pass
+        return {"status": "failed", "error": msg, "used_images": train_images}
 
     backend = os.environ.get("GUAARDVARK_LORA_BACKEND", "auto").lower()
     # Mock training is a TEST-ONLY backend. Per the NO-MOCKS-IN-PRODUCTION policy
@@ -113,7 +153,11 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
         from backend.services.job_operation_gate import GpuBusyError
         from backend.services.job_types import JobKind
         from backend.services.gpu_resource_policy import gpu_session
+        from backend.services.plugin_bridge import ensure_plugins_for_stage
         try:
+            # Cast train stage is reclaim-only (empty plugin list) — symmetry hook
+            # for future requirements; lora_trainer is a tool, not a sidecar.
+            ensure_plugins_for_stage("cast", "train")
             # gpu_session = the gate's exclusivity PLUS VRAM reclaim once the slot
             # is won. evict_ollama/free_comfyui are the actual fix for Dean's OOM:
             # ollama keeps a chat model (~6GB) resident and ComfyUI can hold a FLUX,
@@ -129,6 +173,15 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
                     except Exception:
                         pass
                 try:
+                    if job_id:
+                        try:
+                            get_unified_progress().update_process(
+                                job_id, 25,
+                                f"Training {train_profile.get('name')} LoRA "
+                                f"(base={train_profile.get('id')})",
+                            )
+                        except Exception:
+                            pass
                     real_result = _TRAINER.train_subject_lora(
                         subject_id=s.id,
                         subject_name=s.name,
@@ -141,6 +194,7 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
                         alpha=train_settings["alpha"],
                         learning_rate=train_settings["learning_rate"],
                         steps=train_settings["steps"],
+                        base_model_id=train_profile.get("id"),
                     )
                     if isinstance(real_result, dict):
                         real_result.setdefault("used_images", train_images)
@@ -262,35 +316,63 @@ def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -
         from datetime import datetime
         s.last_trained_at = datetime.utcnow()
 
-        # Verify it was actually real training (not mock) before recording the image count.
-        # This ensures "Last trained on N images" is truthful: only real successful
-        # training with the real backend (venv-torch + CUDA) will set the list.
-        # Mock runs (or failed real) will not claim the images as "trained on".
+        # Only record image lists + promote samples after a *verified real* train.
+        # real_trainer writes sidecar mock=false; anything else (or a tiny weights
+        # file) is refused — no promotion, no last_trained_image_paths.
         used_images = result.get("used_images") or []
         is_real_trained = False
         try:
             lora_file = Path(s.lora_path)
             sidecar_path = lora_file.with_suffix(".json")
+            sidecar = {}
             if sidecar_path.exists():
                 with open(sidecar_path) as f:
                     sidecar = json.load(f)
+                # Production real_trainer always writes mock=false. Require that
+                # exact contract so we never promote from a test/stub adapter.
                 is_real_trained = sidecar.get("mock") is False
-            # Extra check: real lora file must not be the tiny mock header (8 bytes)
             if is_real_trained and lora_file.exists():
-                if lora_file.stat().st_size < 100:  # mock header is tiny
+                if lora_file.stat().st_size < 100:
                     is_real_trained = False
-                    logger.warning(f"lora file for {subject_id} looks like mock stub despite sidecar")
-            mock_flag = sidecar.get('mock') if 'sidecar' in locals() and isinstance(sidecar, dict) else 'n/a'
-            logger.info(f"lora train for {subject_id}: sidecar mock={mock_flag}, real_trained={is_real_trained}, size={lora_file.stat().st_size if lora_file.exists() else 0}")
+                    logger.warning(
+                        "lora file for %s is too small to be a real adapter; "
+                        "not recording train set / not promoting samples",
+                        subject_id,
+                    )
+            logger.info(
+                "lora train for %s: real_trained=%s size=%s",
+                subject_id,
+                is_real_trained,
+                lora_file.stat().st_size if lora_file.exists() else 0,
+            )
         except Exception as e:
             logger.warning(f"Failed to read sidecar/lora for real-training verification: {e}")
             is_real_trained = False
 
         if is_real_trained:
             s.last_trained_image_paths = used_images
+            # Graduate approved samples used in this train into durable Training
+            # Data (ref_image_paths + promoted_to_training). Only after verified
+            # real success — never from test/stub adapters.
+            try:
+                from backend.services.sample_promotion import promote_samples_after_train
+                promo = promote_samples_after_train(s, used_images)
+                logger.info(
+                    "lora train for %s: promoted %s sample(s) into Training Data",
+                    subject_id, promo.get("promoted", 0),
+                )
+            except Exception as promo_err:
+                logger.warning(
+                    "lora train for %s: sample promotion failed (non-fatal): %s",
+                    subject_id, promo_err,
+                )
         else:
             s.last_trained_image_paths = []
-            logger.warning(f"lora train for {subject_id} succeeded but was not real (mock or unverifiable); not recording last_trained_image_paths")
+            logger.warning(
+                "lora train for %s reported ok but was not verified-real; "
+                "not recording last_trained_image_paths and not promoting samples",
+                subject_id,
+            )
 
         db.session.commit()
 
@@ -304,6 +386,9 @@ def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -
                 lora_path=s.lora_path,
                 trigger_word=s.trigger_word or s.name,
                 resolution=train_settings.get("resolution", 768),
+                base_model_id=train_settings.get("base_model_id")
+                or (result.get("base_model_id") if isinstance(result, dict) else None),
+                ref_image_paths=list(used_images or [])[:8],
             )
             if smoke.get("ok"):
                 logger.info("lora smoke test passed for subject %s", subject_id)

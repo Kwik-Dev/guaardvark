@@ -176,10 +176,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     lora_strength: 1.0,
   });
 
-  // Cast picker: trained character Subjects whose SDXL LoRA locks identity into a
-  // cinematic keyframe (the video model can't apply a LoRA — identity rides in the
-  // keyframe). Mirrors the MusicVideoPage cast picker. Selecting cast implies the
-  // cinematic-keyframe path on the backend.
+  // Cast picker: trained character Subjects whose LoRA locks identity into a
+  // cinematic keyframe via character_still_pipeline (Z-Image/SDXL/FLUX by sidecar).
+  // Video models don't apply face LoRAs — identity rides in the still.
   const [castSubjects, setCastSubjects] = useState([]);
   const [selectedSubjectIds, setSelectedSubjectIds] = useState([]);
   // Q1: approved reference stills of the (single) selected character, and the one the
@@ -207,7 +206,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [fetaWeight, setFetaWeight] = useState(1.0);
 
   // Cast selection implies cinematic keyframe on the backend — mirror that in the UI.
-  // Character LoRAs are SDXL-trained; backend forces the SDXL keyframe branch.
+  // Character LoRAs route by sidecar family (Z-Image offline / SDXL+FLUX Comfy).
   useEffect(() => {
     if (selectedSubjectIds.length > 0) {
       setCinematicKeyframe(true);
@@ -1585,7 +1584,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   onChange={(e) => setKeyframeModel(e.target.value)}
                   helperText={
                     castIdentityLocked
-                      ? "Character LoRAs train on SDXL — keyframe model is locked to SDXL for identity."
+                      ? "Character LoRA is baked into the keyframe still (family-aware: Z-Image / SDXL / FLUX). Video motion does not reload the face LoRA."
                       : "The still that gets animated — identity and detail quality depend on this choice."
                   }
                   sx={{ mt: 1.5 }}
