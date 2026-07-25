@@ -16,19 +16,22 @@ log = logging.getLogger(__name__)
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 
+# Face-first humans AND costumed/masked characters (cowl, armor, LED eyes, etc.).
+# Prior prompts only asked hair/eyewear/shave → Batman became "shaved, none, 30s".
 _IDENTITY_PROMPT = (
-    "Describe the MAIN person's FIXED identity traits visible in this photo. "
-    "Output ONLY comma-separated tags (no sentences). Cover:\n"
-    "1) head/hair: shaved bald buzz cut short medium long; color if hair visible\n"
-    "2) eyewear: sunglasses / glasses / none\n"
-    "3) facial hair: clean-shaven / stubble / beard / none\n"
-    "4) build/body: slim athletic average heavy — only if body is visible\n"
-    "5) approximate age range (e.g. 30s 40s)\n"
-    "6) skin tone (brief)\n"
-    "7) distinctive marks if any (scar mole tattoo)\n"
-    "8) typical clothing style colors if clear\n"
-    "Describe ONLY what you SEE. Do NOT invent hair if the head is shaved. "
-    "Do NOT invent sunglasses if none are worn. Keep under 40 words."
+    "Describe the MAIN character's FIXED visual identity in this photo. "
+    "Output ONLY comma-separated tags (no sentences, no 'none', no 'n/a'). "
+    "Cover whatever is actually visible — skip categories that do not apply:\n"
+    "A) COSTUME / MASK (if any): cowl hood helmet horns ears mask; cape cloak; "
+    "armor plating suit material; utility belt; gloves gauntlets spiked braces; "
+    "boots; emblem logo; cape color; suit colors; rivets seams texture\n"
+    "B) EYES / FACE OPENING: white glowing LED eyes, eye slits, exposed face, "
+    "skin tone if visible, facial hair if visible\n"
+    "C) HAIR (only if scalp/hair is actually visible — NEVER say shaved/bald for a cowl/helmet)\n"
+    "D) BUILD: slim athletic muscular average heavy — only if body silhouette is clear\n"
+    "E) DISTINCTIVE props/weapons/gadgets if part of the fixed look\n"
+    "Describe ONLY what you SEE. Prefer concrete costume nouns over vague colors. "
+    "Keep under 55 words."
 )
 
 # Tags that contradict common invention failures — used when merging.
@@ -42,6 +45,21 @@ _BUILD_TAGS = re.compile(
     r"\b(slim|lean|athletic|average build|stocky|heavy|overweight|muscular|fit)\b",
     re.I,
 )
+_COSTUME_TAGS = re.compile(
+    r"\b(cowl|hood|helmet|mask|horns?|ears?|cape|cloak|armor|plated?|suit|"
+    r"utility\s*belt|belt|gloves?|gauntlets?|braces?|boots?|emblem|logo|"
+    r"rivets?|spiked?|led\s*eyes?|glowing\s*eyes?|white\s*eyes?|eye\s*slits?|"
+    r"bat[- ]?symbol|chest\s*emblem|bodysuit|catsuit)\b",
+    re.I,
+)
+# Noise the model emits when a category does not apply.
+_NOISE_TAGS = re.compile(
+    r"^(none|n/?a|null|unknown|not\s*visible|not\s*applicable|unspecified|"
+    r"no\s*(hair|glasses|eyewear|facial\s*hair)?|clean[- ]?shaven)$",
+    re.I,
+)
+# When a cowl/helmet/mask is present, hair tags are usually wrong (model says "shaved").
+_HEAD_COVERED = re.compile(r"\b(cowl|hood|helmet|mask|horns?)\b", re.I)
 
 
 def sample_ref_paths(paths: list[str], *, max_n: int = 12) -> list[str]:
@@ -62,11 +80,24 @@ def sample_ref_paths(paths: list[str], *, max_n: int = 12) -> list[str]:
 def _clean_tags(text: str) -> list[str]:
     t = (text or "").strip()
     t = re.sub(r"^```.*?$", "", t, flags=re.MULTILINE).strip().strip('"').strip("'")
-    t = re.sub(r"(?i)^(here('?s)?|the (image|photo|person)|caption)\s*[:\-]?\s*", "", t)
+    t = re.sub(r"(?i)^(here('?s)?|the (image|photo|person|character)|caption)\s*[:\-]?\s*", "", t)
     t = t.replace("\n", ", ")
     parts = [p.strip().strip(".").lower() for p in t.split(",") if p.strip()]
-    # drop empties / ultra-short noise
-    return [p for p in parts if len(p) >= 3]
+    out: list[str] = []
+    for p in parts:
+        if len(p) < 3:
+            continue
+        if _NOISE_TAGS.match(p):
+            continue
+        # Drop lone color-slash piles with no noun ("black/dark gray")
+        if re.fullmatch(r"[\w\s/\-]+", p) and "/" in p and not _COSTUME_TAGS.search(p):
+            # keep if it names a body part / material; else skip pure color lists
+            if not re.search(
+                r"\b(hair|skin|eyes?|suit|cape|armor|boots?|gloves?|belt|cowl)\b", p, re.I
+            ):
+                continue
+        out.append(p)
+    return out
 
 
 def extract_identity_tags(image_path: str, *, analyzer=None) -> list[str]:
@@ -76,7 +107,7 @@ def extract_identity_tags(image_path: str, *, analyzer=None) -> list[str]:
         from backend.utils.vision_analyzer import VisionAnalyzer
         az = analyzer or VisionAnalyzer()
         img = Image.open(str(image_path)).convert("RGB")
-        res = az.analyze(img, _IDENTITY_PROMPT, think=False, temperature=0.1, num_predict=96)
+        res = az.analyze(img, _IDENTITY_PROMPT, think=False, temperature=0.1, num_predict=160)
         if not getattr(res, "success", False):
             log.warning(
                 "bible_from_refs: vision failed on %s: %s",
@@ -90,7 +121,7 @@ def extract_identity_tags(image_path: str, *, analyzer=None) -> list[str]:
 
 
 def merge_identity_tags(tag_lists: list[list[str]], *, min_count: int = 1) -> list[str]:
-    """Frequency-merge tags; prefer high-signal hair/eyewear/build consensus."""
+    """Frequency-merge tags; prefer costume, then hair/eyewear/build consensus."""
     flat: list[str] = []
     for tags in tag_lists:
         flat.extend(tags)
@@ -98,11 +129,13 @@ def merge_identity_tags(tag_lists: list[list[str]], *, min_count: int = 1) -> li
         return []
 
     counts = Counter(flat)
-    # Also count substring families for hair/eyewear/build
     hair_votes: Counter[str] = Counter()
     eye_votes: Counter[str] = Counter()
     build_votes: Counter[str] = Counter()
+    costume_votes: Counter[str] = Counter()
     for t in flat:
+        if _COSTUME_TAGS.search(t):
+            costume_votes[t.lower()] += 1
         hm = _HAIR_TAGS.search(t)
         if hm:
             hair_votes[hm.group(0).lower()] += 1
@@ -113,31 +146,43 @@ def merge_identity_tags(tag_lists: list[list[str]], *, min_count: int = 1) -> li
         if bm:
             build_votes[bm.group(0).lower()] += 1
 
+    head_covered = bool(costume_votes) and any(
+        _HEAD_COVERED.search(t) for t in costume_votes
+    )
+
     chosen: list[str] = []
-    # Force consensus traits first (if any vote)
-    if hair_votes:
+    # Costume first (cowl/armor/belt…) — this is the identity for masked characters
+    for tag, _n in costume_votes.most_common(16):
+        if tag not in chosen:
+            chosen.append(tag)
+
+    if hair_votes and not head_covered:
         chosen.append(hair_votes.most_common(1)[0][0])
-    if eye_votes:
-        # Prefer sunglasses over generic glasses when both appear
+    if eye_votes and not head_covered:
         top_eye = eye_votes.most_common()
         sung = [k for k, _ in top_eye if "sun" in k]
         chosen.append(sung[0] if sung else top_eye[0][0])
     if build_votes:
         chosen.append(build_votes.most_common(1)[0][0])
 
-    # Remaining frequent tags (dedupe against chosen)
     chosen_l = {c.lower() for c in chosen}
     for tag, n in counts.most_common():
         if n < min_count:
             continue
         if tag in chosen_l:
             continue
-        # skip if already covered by hair/eyewear/build consensus
-        if _HAIR_TAGS.search(tag) or _EYEWEAR_TAGS.search(tag) or _BUILD_TAGS.search(tag):
+        if head_covered and _HAIR_TAGS.search(tag):
+            continue  # cowl ≠ shaved head
+        if (
+            _HAIR_TAGS.search(tag)
+            or _EYEWEAR_TAGS.search(tag)
+            or _BUILD_TAGS.search(tag)
+            or _COSTUME_TAGS.search(tag)
+        ):
             continue
         chosen.append(tag)
         chosen_l.add(tag)
-        if len(chosen) >= 24:
+        if len(chosen) >= 28:
             break
     return chosen
 
@@ -146,16 +191,31 @@ def tags_to_bible(tags: list[str], *, name: str = "") -> str:
     """Turn merged tags into one dense identity paragraph for Subject.bible."""
     if not tags:
         return ""
-    # Deduplicate while preserving order
     seen: set[str] = set()
     ordered: list[str] = []
     for t in tags:
-        k = t.lower()
-        if k not in seen:
-            seen.add(k)
-            ordered.append(t)
-    body = ", ".join(ordered)
+        k = t.lower().strip()
+        if not k or k in seen or _NOISE_TAGS.match(k):
+            continue
+        seen.add(k)
+        ordered.append(t.strip())
+    if not ordered:
+        return ""
+
+    costume = [t for t in ordered if _COSTUME_TAGS.search(t)]
+    rest = [t for t in ordered if t not in costume]
     who = (name or "the subject").strip()
+
+    if costume:
+        # Prose that reads as a fixed costumed look, not a tag dump.
+        body = ", ".join(costume + rest)
+        return (
+            f"{who}: costumed figure — {body}. "
+            f"Keep this exact costume and silhouette in every shot — do not invent "
+            f"different armor, cape, belt, gloves, boots, eye style, or colors."
+        )
+
+    body = ", ".join(ordered)
     return (
         f"{who}: {body}. "
         f"Keep this exact appearance in every shot — do not invent different hair, "
@@ -167,11 +227,17 @@ def short_identity_marks(tags: list[str], *, max_chars: int = 200) -> str:
     """Compact marks string for training captions (not a full invented bible)."""
     if not tags:
         return ""
-    # Prefer head/eyewear/build first
     priority = []
     rest = []
     for t in tags:
-        if _HAIR_TAGS.search(t) or _EYEWEAR_TAGS.search(t) or _BUILD_TAGS.search(t):
+        if _NOISE_TAGS.match(t.strip()):
+            continue
+        if (
+            _COSTUME_TAGS.search(t)
+            or _HAIR_TAGS.search(t)
+            or _EYEWEAR_TAGS.search(t)
+            or _BUILD_TAGS.search(t)
+        ):
             priority.append(t)
         else:
             rest.append(t)
