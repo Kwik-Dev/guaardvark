@@ -115,16 +115,46 @@ MODEL_VISION_CONFIGS = {
     },
 }
 
-# Fallback for models not in the config — assumes vision-capable like gemma4
+# Fallback for models not in the config — text-only until proven multimodal.
+# Unknown names previously defaulted has_vision=True, which made VisionAnalyzer
+# send images to whatever was in VRAM (e.g. qwen3.5-uncensored) → Ollama 400
+# "Multimodal data provided, but model does not support multimodal requests."
 _DEFAULT_VISION_CONFIG = {
-    "has_vision": True,
-    "vision_model": None,
+    "has_vision": False,
+    "vision_model": "gemma4:e4b",
     "internal_width": 1000,
     "scale_x": 1.0,
     "scale_y": 1.0,
-    "source": "default_gemma4_shape",
-    "notes": "Unknown model — assume gemma4-style native vision with box_2d at 1000.",
+    "source": "default_text_only_external_eyes",
+    "notes": (
+        "Unknown model — assume text-only; use gemma4:e4b as external eyes. "
+        "Do not send images to this model."
+    ),
 }
+
+# Name heuristics for families known to accept images (when not in MODEL_VISION_CONFIGS).
+_VISION_NAME_MARKERS = (
+    "gemma4",
+    "moondream",
+    "llava",
+    "bakllava",
+    "qwen2.5vl",
+    "qwen2.5-vl",
+    "qwen3-vl",
+    "minicpm-v",
+    "pixtral",
+    "llama3.2-vision",
+)
+
+
+def model_name_looks_vision(model_name: str) -> bool:
+    """True if the Ollama tag looks like a multimodal / vision model."""
+    n = (model_name or "").strip().lower()
+    if not n:
+        return False
+    # Strip org prefix: jaahas/qwen3.5-uncensored:latest → qwen3.5-uncensored:latest
+    short = n.rsplit("/", 1)[-1]
+    return any(m in short for m in _VISION_NAME_MARKERS)
 
 MODEL_ALIASES = {
     "gemma4": "gemma4:e4b",
@@ -163,8 +193,18 @@ def get_vision_config(model_name: str = "") -> Dict[str, Any]:
         if model_name.startswith(f"{key}-") or model_name.startswith(f"{key}:"):
             return config
 
-    logger.info(f"No vision config for '{model_name}', using defaults")
-    return _DEFAULT_VISION_CONFIG
+    # Known multimodal families not yet in MODEL_VISION_CONFIGS (e.g. qwen3-vl:4b).
+    if model_name_looks_vision(model_name):
+        return {
+            **_DEFAULT_VISION_CONFIG,
+            "has_vision": True,
+            "vision_model": None,
+            "source": "name_heuristic_vision",
+            "notes": f"'{model_name}' looks multimodal by name — treat as native vision.",
+        }
+
+    logger.info(f"No vision config for '{model_name}', using text-only defaults")
+    return dict(_DEFAULT_VISION_CONFIG)
 
 
 def _detect_active_model() -> str:

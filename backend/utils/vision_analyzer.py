@@ -73,16 +73,24 @@ class VisionAnalyzer:
             # This prevents loading a second model and blowing up VRAM.
             from backend.services.servo_knowledge_store import get_vision_config
             
+            from backend.services.servo_knowledge_store import model_name_looks_vision
+
             ps_resp = requests.get(f"{self.ollama_url}/api/ps", timeout=3)
-            active_names = []
             if ps_resp.status_code == 200:
                 active_names = [m["name"] for m in ps_resp.json().get("models", [])]
                 for active in active_names:
-                    # Check if this active model is known to have vision
+                    # Only reuse VRAM residents that are actually multimodal.
+                    # Unknown text models must NOT win here (Ollama 400 multimodal).
                     config = get_vision_config(active)
-                    if config.get("has_vision", False):
+                    if config.get("has_vision", False) and model_name_looks_vision(active):
                         logger.info(f"[VISION] Using active vision model from VRAM: {active}")
                         return active
+                if active_names:
+                    logger.info(
+                        "[VISION] Active model(s) %s not multimodal — "
+                        "loading a real vision model instead",
+                        active_names,
+                    )
 
             # 2. Not in VRAM? Check what's available to tag and pick from priority list
             tags_resp = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
@@ -277,9 +285,32 @@ class VisionAnalyzer:
             elapsed_ms = int((time.time() - start) * 1000)
 
             if response.status_code != 200:
+                err_text = response.text[:200]
+                # Text-only model got images — retry once with a known vision model.
+                if (
+                    response.status_code == 400
+                    and "multimodal" in err_text.lower()
+                    and not getattr(self, "_multimodal_retry", False)
+                ):
+                    for fallback in self._VISION_MODEL_PRIORITY:
+                        if fallback == model:
+                            continue
+                        logger.warning(
+                            "[VISION] %s rejected multimodal input — retrying with %s",
+                            model, fallback,
+                        )
+                        self._multimodal_retry = True
+                        try:
+                            return self.analyze(
+                                image, prompt, model=fallback,
+                                num_predict=num_predict, temperature=temperature,
+                                think=think, system=system,
+                            )
+                        finally:
+                            self._multimodal_retry = False
                 return VisionResult(
                     success=False,
-                    error=f"Ollama returned {response.status_code}: {response.text[:200]}",
+                    error=f"Ollama returned {response.status_code}: {err_text}",
                     model_used=model,
                     inference_ms=elapsed_ms,
                 )
