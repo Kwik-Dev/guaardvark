@@ -673,8 +673,9 @@ const CastMemberPage = () => {
               <Divider sx={{ my: 1 }} />
               <Typography variant="overline" color="text.secondary">Identity bible</Typography>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                Appearance from your photos (vision sync). Used for base (no-LoRA) generates.
-                With a trained LoRA, generate uses trigger + short marks only. Train does not rewrite this.
+                Appearance from your photos — vision describes what it sees (human, animal, costume, …)
+                and keeps the consistent details. Used for base (no-LoRA) generates; with a trained LoRA,
+                generate uses trigger + short marks only. Train does not rewrite this.
               </Typography>
               {(subject.ref_image_paths || []).length > 0 && !subject.bible_vision_grounded && (
                 <Alert severity="warning" sx={{ mb: 1 }}>

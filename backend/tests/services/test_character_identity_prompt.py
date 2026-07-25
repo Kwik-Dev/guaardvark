@@ -8,6 +8,7 @@ from backend.services.character_generator_service import _compose_prompt
 from backend.services.character_identity_prompt import (
     compose_identity_core,
     resolve_class_token,
+    sanitize_class_token,
     short_marks_from_subject,
 )
 from backend.services.swarm.agents.character_designer import ShotVariation
@@ -43,6 +44,23 @@ def test_resolve_class_token_from_settings_and_tags():
     assert resolve_class_token(s3) == "woman"
 
     assert resolve_class_token(None) == "person"
+
+
+def test_sanitize_and_resolve_white_wolf():
+    assert sanitize_class_token("White Wolf") == "white wolf"
+    assert sanitize_class_token("a white wolf") == "white wolf"
+    assert compose_identity_core("frost_tok", "white wolf", "amber eyes").startswith(
+        "a photo of frost_tok, white wolf"
+    )
+    s = SimpleNamespace(
+        training_settings_json={"class_token": "white wolf"},
+        description="",
+        bible="",
+    )
+    assert resolve_class_token(s) == "white wolf"
+    assert resolve_class_token(
+        None, bible="A large white wolf with thick fur and amber eyes."
+    ) == "white wolf"
 
 
 def test_short_marks_from_subject():

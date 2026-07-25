@@ -132,7 +132,10 @@ def sync_identity_from_refs(
         persist_bible_on_subject,
         rebuild_bible_from_refs,
     )
-    from backend.services.character_identity_prompt import resolve_class_token
+    from backend.services.character_identity_prompt import (
+        resolve_class_token,
+        sanitize_class_token,
+    )
 
     result = rebuild_bible_from_refs(
         refs,
@@ -153,6 +156,8 @@ def sync_identity_from_refs(
     cfg = dict(subject.training_settings_json or {})
     cfg.pop("bible_manual_override", None)
     cfg["bible_vision_grounded"] = True
+    if result.get("class_token"):
+        cfg["class_token"] = sanitize_class_token(result["class_token"])
     subject.training_settings_json = cfg
     db.session.commit()
 
@@ -165,7 +170,7 @@ def sync_identity_from_refs(
         except Exception as e:  # noqa: BLE001
             log.warning("sync_identity: sample prompt recompose failed: %s", e)
 
-    cls = resolve_class_token(subject, tags=list(result.get("tags") or []))
+    cls = sanitize_class_token(result.get("class_token") or "") or resolve_class_token(subject)
     return {
         "ok": True,
         "bible": subject.bible,
@@ -173,6 +178,8 @@ def sync_identity_from_refs(
         "tags": result.get("tags") or [],
         "marks": result.get("marks") or "",
         "class_token": cls,
+        "method": result.get("method") or "open_consensus",
+        "descriptions_used": result.get("descriptions_used"),
         "sources_used": result.get("sources_used") or [],
         "captions_refreshed": bool(result.get("captions_refreshed")),
         "samples_updated": samples_updated,

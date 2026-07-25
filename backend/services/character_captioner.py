@@ -51,19 +51,20 @@ FRAMING_TAGS = [
 FULL_BODY_FRAMINGS = {"three-quarter view", "full body", "wide shot"}
 
 _VLM_CAPTION_PROMPT = (
-    "You are writing a concise training caption for ONE image of a person. "
+    "You are writing a concise training caption for ONE image of a cast character "
+    "(human, animal, costumed figure, or creature). "
     "Output ONLY comma-separated visual tags (no sentences, no 'the image shows', no name). "
     "Cover, in this order:\n"
     "1) FRAMING — choose EXACTLY ONE: close-up, head and shoulders, upper body, "
     "three-quarter view, full body, wide shot.\n"
-    "2) head/gaze direction and body pose.\n"
-    "3) facial expression.\n"
-    "4) clothing/outfit with its colors.\n"
+    "2) head/gaze direction and body/pose (or animal stance).\n"
+    "3) expression if visible.\n"
+    "4) clothing/outfit OR fur/feathers/scales/armor/costume surface with colors "
+    "(VARIABLE details for this shot — not a full identity dump).\n"
     "5) background/setting.\n"
     "6) lighting.\n"
-    "Describe ONLY these VARIABLE attributes. Do NOT mention identity: no name, no skin tone, "
-    "no freckles, no eye color, no hair color or length, no tattoos, no jewelry. "
-    "Keep it under 30 words. Start with the framing tag."
+    "Describe ONLY these VARIABLE shot attributes. Do NOT invent a different species "
+    "or costume than what is shown. Keep it under 30 words. Start with the framing tag."
 )
 
 
