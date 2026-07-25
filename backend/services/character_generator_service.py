@@ -119,12 +119,15 @@ def _compose_prompt(
     angle: str,
     *,
     include_bible: bool = True,
+    class_token: str = "person",
+    identity_marks: str = "",
 ) -> str:
-    """Compose shot prompt: trigger + optional bible + variation phrases.
+    """Compose shot prompt: identity core + optional bible + variation phrases.
 
-    When ``include_bible=False`` (trained LoRA path), identity comes from the
-    adapter + trigger — dump only angle/scene variation so invented bible prose
-    cannot fight the pixels (sunglasses, shaved head, build).
+    When ``include_bible=False`` (trained LoRA path), use
+    ``a photo of {trigger}, {class}[, short marks]`` + angle/scene — never dump
+    the full bible paragraph (invented prose fights pixels), but always keep a
+    human class anchor so Z-Image cannot invent cartoon animals.
     """
     bits = [
         angle,
@@ -135,7 +138,8 @@ def _compose_prompt(
     ]
     variation = ", ".join(b for b in bits if b)
     if not include_bible or not (bible or "").strip():
-        core = (trigger or "").strip()
+        from backend.services.character_identity_prompt import compose_identity_core
+        core = compose_identity_core(trigger, class_token, identity_marks)
         if is_full_body(angle, v.framing):
             core = f"{_FULL_BODY_LEAD}. {core}".strip()
         return f"{core}. {variation}." if variation else core
@@ -195,6 +199,8 @@ def generate_character_sheet(
     prefer_vision_bible: bool = False,
     include_bible_in_prompts: bool = True,
     invent_bible: bool = True,
+    class_token: str | None = None,
+    identity_marks: str | None = None,
 ) -> dict:
     """Produce {bible, trigger_word, shots:[{index, angle, ..., image_prompt}]}.
 
@@ -204,7 +210,7 @@ def generate_character_sheet(
     When refs exist and ``prefer_vision_bible`` is set, reuse ``existing_bible`` or
     vision-ground from photos instead of BibleDesigner inventing a look.
     When ``include_bible_in_prompts`` is False (LoRA generate), prompts are
-    trigger + variation only.
+    identity core (photo of trigger + class + short marks) + variation.
     """
     llm = llm or _default_llm
     vision_grounded = False
@@ -212,6 +218,7 @@ def generate_character_sheet(
     bible = (existing_bible or "").strip()
     trigger = (trigger_word or "").strip() or _fallback_trigger(name)
     refs = list(ref_image_paths or [])
+    marks = (identity_marks or "").strip()
 
     def _try_vision_bible() -> None:
         nonlocal bible, trigger, vision_grounded, tags
@@ -267,6 +274,16 @@ def generate_character_sheet(
     # ShotDesigner still needs a bible string for angle/scene variety context.
     shot_bible = bible if bible else f"character named {name}"
 
+    from backend.services.character_identity_prompt import resolve_class_token
+    cls = resolve_class_token(
+        class_token=class_token,
+        tags=tags,
+        description=description,
+        bible=bible,
+    )
+    if not marks and tags:
+        marks = ", ".join(tags[:12])[:120]
+
     # 2. batched shots with taxonomy-driven coverage
     slots = _angle_slots(n)
     sagent = ShotDesigner(llm)
@@ -278,7 +295,10 @@ def generate_character_sheet(
         for angle, v in zip(batch, variations):
             idx = len(shots)
             prompt = _compose_prompt(
-                trigger, bible, v, angle, include_bible=include_bible_in_prompts,
+                trigger, bible, v, angle,
+                include_bible=include_bible_in_prompts,
+                class_token=cls,
+                identity_marks=marks,
             )
             shots.append({
                 "index": idx,
@@ -299,5 +319,7 @@ def generate_character_sheet(
         "vision_grounded": vision_grounded,
         "tags": tags,
         "include_bible_in_prompts": include_bible_in_prompts,
+        "class_token": cls,
+        "identity_marks": marks,
     }
     return out

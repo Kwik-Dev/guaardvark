@@ -419,10 +419,14 @@ def upload_subject_refs(subject_id):
     if saved_paths:
         try:
             from backend.services.character_captioner import ensure_subject_image_captions
+            from backend.services.character_identity_prompt import resolve_class_token
             token = (s.trigger_word or "").strip() or s.name
             marks = _identity_marks_for_captions(s)
             caption_summary = ensure_subject_image_captions(
-                saved_paths, trigger=token, identity_marks=marks,
+                saved_paths,
+                trigger=token,
+                identity_marks=marks,
+                class_token=resolve_class_token(s),
             )
         except Exception as e:
             caption_summary = {"error": str(e)[:200]}
@@ -738,9 +742,15 @@ def dispatch_train(subject_id: int):
         ).all():
             if smp.image_path and smp.image_path not in train_images:
                 train_images.append(smp.image_path)
+        from backend.services.character_identity_prompt import resolve_class_token
         token = (s.trigger_word or "").strip() or s.name
         marks = _identity_marks_for_captions(s)
-        ensure_subject_image_captions(train_images, trigger=token, identity_marks=marks)
+        ensure_subject_image_captions(
+            train_images,
+            trigger=token,
+            identity_marks=marks,
+            class_token=resolve_class_token(s),
+        )
     except Exception:
         pass
 

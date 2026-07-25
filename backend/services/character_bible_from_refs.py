@@ -259,10 +259,13 @@ def persist_bible_on_subject(subject, result: dict, *, refresh_captions: bool = 
     if result.get("trigger_word"):
         subject.trigger_word = result["trigger_word"]
     # Flag so UI knows bible was vision-grounded
+    from backend.services.character_identity_prompt import resolve_class_token
     cfg = dict(getattr(subject, "training_settings_json", None) or {})
     cfg["bible_vision_grounded"] = True
     cfg["bible_vision_tags"] = list(result.get("tags") or [])[:32]
     cfg["bible_identity_marks"] = result.get("marks") or ""
+    cls = resolve_class_token(subject, tags=list(result.get("tags") or []))
+    cfg["class_token"] = cls
     subject.training_settings_json = cfg
     db.session.commit()
 
@@ -274,6 +277,7 @@ def persist_bible_on_subject(subject, result: dict, *, refresh_captions: bool = 
                 paths,
                 trigger=(subject.trigger_word or subject.name or "").strip(),
                 identity_marks=result.get("marks") or "",
+                class_token=cls,
                 overwrite=True,
             )
             result["captions_refreshed"] = True

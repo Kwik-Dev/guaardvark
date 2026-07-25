@@ -40,10 +40,14 @@ def test_compose_prompt_lora_mode_omits_bible():
         "Keep this exact appearance."
     )
     with_bible = _compose_prompt("ohxdean", bible, v, "face-forward", include_bible=True)
-    without = _compose_prompt("ohxdean", bible, v, "face-forward", include_bible=False)
+    without = _compose_prompt(
+        "ohxdean", bible, v, "face-forward",
+        include_bible=False, class_token="man", identity_marks="shaved",
+    )
     assert "long brown hair" in with_bible
     assert "heavy overweight" in with_bible
-    assert "ohxdean" in without
+    assert "a photo of ohxdean" in without
+    assert "man" in without
     assert "long brown hair" not in without
     assert "heavy overweight" not in without
     assert "studio backdrop" in without
@@ -53,7 +57,10 @@ def test_compose_prompt_lora_mode_omits_bible():
 def test_compose_prompt_full_body_lora_keeps_lead_without_bible():
     v = ShotVariation(framing="full body", expression="smile", lighting="daylight", scene="park")
     bible = "character with long flowing hair and no sunglasses"
-    prompt = _compose_prompt("tok", bible, v, "full-body front", include_bible=False)
+    prompt = _compose_prompt(
+        "tok", bible, v, "full-body front",
+        include_bible=False, class_token="person",
+    )
     assert "long flowing hair" not in prompt
-    assert "tok" in prompt
+    assert "a photo of tok" in prompt
     assert "park" in prompt

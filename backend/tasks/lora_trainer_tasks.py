@@ -58,14 +58,19 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
     # if Ollama was down; train is the second chance).
     try:
         from backend.services.character_captioner import ensure_subject_image_captions
+        from backend.services.character_identity_prompt import resolve_class_token
         token = (s.trigger_word or "").strip() or s.name
         cfg = dict(s.training_settings_json or {})
         marks = (cfg.get("bible_identity_marks") or "").strip()
         if not marks and cfg.get("bible_vision_tags"):
             marks = ", ".join(cfg["bible_vision_tags"][:12])[:200]
         # Do NOT dump invented full bible into captions — that fights the pixels.
+        # Legacy captions missing "a photo of {token}, man|person" are rewritten.
         cap_sum = ensure_subject_image_captions(
-            [p for p in train_images if p], trigger=token, identity_marks=marks,
+            [p for p in train_images if p],
+            trigger=token,
+            identity_marks=marks,
+            class_token=resolve_class_token(s),
         )
         logger.info(
             "lora_trainer: caption ensure for subject %s written=%s skipped=%s failed=%s",
@@ -391,6 +396,7 @@ def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -
                 base_model_id=train_settings.get("base_model_id")
                 or (result.get("base_model_id") if isinstance(result, dict) else None),
                 ref_image_paths=list(used_images or [])[:8],
+                subject=s,
             )
             if smoke.get("ok"):
                 logger.info("lora smoke test passed for subject %s", subject_id)

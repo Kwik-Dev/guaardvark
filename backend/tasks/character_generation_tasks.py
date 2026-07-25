@@ -301,9 +301,16 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
     # prompts as trigger+variation only (identity from adapter).
     # Without LoRA but with refs: vision-ground bible if empty before composing.
     refs = list(subject.ref_image_paths or [])
+    from backend.services.character_identity_prompt import (
+        resolve_class_token,
+        short_marks_from_subject,
+    )
+    class_tok = resolve_class_token(subject)
+    id_marks = short_marks_from_subject(subject)
     log.info(
-        "Character Generator: planning sheet for subject %s (%s) use_lora=%s refs=%d",
-        subject_id, subject.name, use_lora, len(refs),
+        "Character Generator: planning sheet for subject %s (%s) use_lora=%s refs=%d "
+        "class=%s marks=%r",
+        subject_id, subject.name, use_lora, len(refs), class_tok, id_marks[:80],
     )
     plan = generate_character_sheet(
         name=subject.name,
@@ -315,6 +322,8 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
         prefer_vision_bible=bool(refs),
         include_bible_in_prompts=not bool(use_lora),
         invent_bible=not bool(use_lora),
+        class_token=class_tok,
+        identity_marks=id_marks,
     )
 
     if plan.get("error"):
@@ -519,9 +528,17 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
 
                 width, height = _aspect_for_row(row)
                 try:
+                    prompt_txt = (row.image_prompt or subject.name or "").strip()
+                    log.info(
+                        "Character Generator: render sample %s/%s subject=%s use_lora=%s "
+                        "loras=%s prompt=%r",
+                        idx + 1, total, subject_id, bool(loras_for_gen),
+                        [Path(p).name for p in loras_for_gen],
+                        prompt_txt[:220],
+                    )
                     _render_cast_still(
                         route=route,
-                        prompt=row.image_prompt or subject.name,
+                        prompt=prompt_txt,
                         loras=loras_for_gen,
                         output_path=output_path,
                         seed=seed,

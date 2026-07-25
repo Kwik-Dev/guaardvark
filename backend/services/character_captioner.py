@@ -110,18 +110,37 @@ def detect_framing(caption: str) -> Optional[str]:
     return None
 
 
-def compose_caption(trigger: str, vlm_desc: str, identity_marks: str = "") -> str:
-    """Deterministically assemble the final caption: trigger first (so it binds the identity),
-    the VLM's variable description in the middle, fixed identity marks last. Dedupes the trigger
-    if the VLM echoed it. Never raises."""
+def compose_caption(
+    trigger: str,
+    vlm_desc: str,
+    identity_marks: str = "",
+    *,
+    class_token: str = "person",
+) -> str:
+    """Assemble caption: ``a photo of {trigger}, {class}, <vlm>, <marks>``.
+
+    Human class anchor is required so LoRA training matches infer and Z-Image
+    cannot bind the trigger to cartoon animals. Never raises.
+    """
+    from backend.services.character_identity_prompt import compose_identity_core
+
     trigger = (trigger or "").strip().strip(",")
     body = _clean_vlm(vlm_desc)
-    # Remove an accidental leading trigger from the VLM body to avoid duplication.
-    if trigger and body.lower().startswith(trigger.lower()):
-        body = body[len(trigger):].strip().strip(",").strip()
+    # Strip accidental leading trigger / photo-of prefix from the VLM body.
+    for prefix in (
+        f"a photo of {trigger}",
+        f"photo of {trigger}",
+        trigger,
+    ):
+        if prefix and body.lower().startswith(prefix.lower()):
+            body = body[len(prefix):].strip().strip(",").strip()
     marks = (identity_marks or "").strip().strip(",")
-    parts = [p for p in (trigger, body, marks) if p]
-    return ", ".join(parts)
+    # Marks ride in the identity core; VLM body is the variable middle.
+    core = compose_identity_core(trigger, class_token, "")
+    parts = [p for p in (core, body, marks) if p]
+    # Dedupe if body already contains marks
+    out = ", ".join(parts)
+    return out
 
 
 def caption_image(
@@ -129,11 +148,11 @@ def caption_image(
     *,
     trigger: str,
     identity_marks: str = "",
+    class_token: str = "person",
     analyzer=None,
 ) -> str:
     """Caption a single image. Returns the composed caption string, or a minimal
-    ``"<trigger>, <identity_marks>"`` fallback if the VLM is unavailable (so a sidecar always
-    has at least the trigger + identity marks — never an empty/identity-less caption)."""
+    identity-core fallback if the VLM is unavailable."""
     analyzer = analyzer or _analyzer()
     try:
         # VisionAnalyzer.analyze expects a PIL Image (it base64-encodes internally), not a path.
@@ -141,12 +160,14 @@ def caption_image(
         img = Image.open(str(image_path)).convert("RGB")
         res = analyzer.analyze(img, _VLM_CAPTION_PROMPT, think=False)
         if getattr(res, "success", False) and getattr(res, "description", "").strip():
-            return compose_caption(trigger, res.description, identity_marks)
+            return compose_caption(
+                trigger, res.description, identity_marks, class_token=class_token,
+            )
         log.warning("captioner: VLM failed for %s (%s); using trigger+marks fallback",
                     image_path, getattr(res, "error", "no description"))
     except Exception as e:  # noqa: BLE001 — captioning must never explode a dataset run
         log.warning("captioner: exception on %s (%s); using trigger+marks fallback", image_path, e)
-    return compose_caption(trigger, "", identity_marks)
+    return compose_caption(trigger, "", identity_marks, class_token=class_token)
 
 
 def caption_dataset(
@@ -154,6 +175,7 @@ def caption_dataset(
     *,
     trigger: str,
     identity_marks: str = "",
+    class_token: str = "person",
     overwrite: bool = False,
     dry_run: bool = False,
     analyzer=None,
@@ -180,7 +202,10 @@ def caption_dataset(
             framing_tally[fr or "unknown"] = framing_tally.get(fr or "unknown", 0) + 1
             results.append({"image": img.name, "caption": existing, "framing": fr, "action": "skipped"})
             continue
-        caption = caption_image(img, trigger=trigger, identity_marks=identity_marks, analyzer=analyzer)
+        caption = caption_image(
+            img, trigger=trigger, identity_marks=identity_marks,
+            class_token=class_token, analyzer=analyzer,
+        )
         fr = detect_framing(caption)
         framing_tally[fr or "unknown"] = framing_tally.get(fr or "unknown", 0) + 1
         if not dry_run:
@@ -205,6 +230,7 @@ def ensure_subject_image_captions(
     *,
     trigger: str,
     identity_marks: str = "",
+    class_token: str = "person",
     overwrite: bool = False,
     analyzer=None,
 ) -> dict:
@@ -225,6 +251,7 @@ def ensure_subject_image_captions(
         f"a photo of {token}".lower() if token else "",
         f"photo of {token}".lower() if token else "",
     )
+    _class_re = re.compile(r"\b(man|woman|person|boy|girl)\b", re.I)
 
     def _is_bare(text: str) -> bool:
         t = (text or "").strip().lower().rstrip(".")
@@ -239,6 +266,17 @@ def ensure_subject_image_captions(
                 return True
         return False
 
+    def _missing_class_anchor(text: str) -> bool:
+        """True when caption lacks ``a photo of {token}`` + human class (legacy format)."""
+        t = (text or "").strip().lower()
+        if not t:
+            return True
+        if token and f"a photo of {token.lower()}" not in t:
+            return True
+        # Class should appear early (identity core), not only buried in scene text.
+        head = t[:120]
+        return _class_re.search(head) is None
+
     for path in image_paths or []:
         p = Path(path)
         if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
@@ -250,7 +288,12 @@ def ensure_subject_image_captions(
                 existing = sidecar.read_text(encoding="utf-8").strip()
             except OSError:
                 existing = ""
-        if existing and not _is_bare(existing) and not overwrite:
+        if (
+            existing
+            and not _is_bare(existing)
+            and not _missing_class_anchor(existing)
+            and not overwrite
+        ):
             skipped += 1
             fr = detect_framing(existing)
             framing_tally[fr or "unknown"] = framing_tally.get(fr or "unknown", 0) + 1
@@ -258,10 +301,13 @@ def ensure_subject_image_captions(
             continue
         try:
             caption = caption_image(
-                p, trigger=token or p.stem, identity_marks=marks, analyzer=analyzer,
+                p, trigger=token or p.stem, identity_marks=marks,
+                class_token=class_token, analyzer=analyzer,
             )
             if not caption.strip():
-                caption = compose_caption(token or p.stem, "", marks)
+                caption = compose_caption(
+                    token or p.stem, "", marks, class_token=class_token,
+                )
             sidecar.write_text(caption + "\n", encoding="utf-8")
             written += 1
             fr = detect_framing(caption)
