@@ -105,7 +105,22 @@ def _serialize(s: Subject) -> dict:
         "caption_coverage": _caption_coverage_for(s),
         "smoke_identity": ((s.training_settings_json or {}).get("smoke_identity")
                            if getattr(s, "training_settings_json", None) else None),
+        "bible_vision_grounded": bool(
+            (getattr(s, "training_settings_json", None) or {}).get("bible_vision_grounded")
+        ),
     }
+
+
+def _identity_marks_for_captions(s: Subject) -> str:
+    """Short vision marks for captions — never dump a long invented bible."""
+    cfg = getattr(s, "training_settings_json", None) or {}
+    marks = (cfg.get("bible_identity_marks") or "").strip()
+    if marks:
+        return marks[:200]
+    # If vision-grounded bible exists, take a short prefix of tag-like content
+    if cfg.get("bible_vision_grounded") and cfg.get("bible_vision_tags"):
+        return ", ".join(cfg["bible_vision_tags"][:12])[:200]
+    return ""
 
 
 def _caption_coverage_for(s: Subject) -> dict:
@@ -224,6 +239,12 @@ def update_subject(subject_id):
         s.voice_id = (body["voice_id"] or "").strip() or None
     if "trigger_word" in body:
         s.trigger_word = (body["trigger_word"] or "").strip() or None
+    if "bible" in body:
+        # Editable identity bible (Overview). Manual edits clear the vision flag
+        # only when the text changes from the stored vision bible — keep flag if
+        # user is polishing the same grounded text.
+        new_bible = (body["bible"] or "").strip() or None
+        s.bible = new_bible
     if "training_settings" in body:
         from backend.services.lora_training_settings import normalize_training_settings
         s.training_settings_json = normalize_training_settings(body["training_settings"])
@@ -399,9 +420,7 @@ def upload_subject_refs(subject_id):
         try:
             from backend.services.character_captioner import ensure_subject_image_captions
             token = (s.trigger_word or "").strip() or s.name
-            marks = (s.bible or "").strip()
-            if len(marks) > 240:
-                marks = marks[:240].rsplit(",", 1)[0]
+            marks = _identity_marks_for_captions(s)
             caption_summary = ensure_subject_image_captions(
                 saved_paths, trigger=token, identity_marks=marks,
             )
@@ -430,14 +449,53 @@ def upload_subject_refs(subject_id):
 #                                                 — bulk-approve a set of samples.
 
 
+@bp.post("/subjects/<int:subject_id>/bible/from-refs")
+def rebuild_bible_from_refs(subject_id: int):
+    """Vision-rescan reference photos and rewrite Subject.bible to match pixels.
+
+    This is the correct "rescan images → rewrite bible" action — Train LoRA does
+    not rewrite the bible. Also refreshes .txt caption sidecars with short
+    vision-derived identity marks (not invented prose).
+    """
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "not_found"}), 404
+    if not (s.ref_image_paths or []):
+        return jsonify({"error": "no_refs", "message": "Upload reference photos first."}), 400
+
+    from backend.services.plugin_bridge import PluginUnavailable, ensure_plugins_for_stage
+    try:
+        ensure_plugins_for_stage("cast", "planning", job_critical=True)
+    except PluginUnavailable as e:
+        return jsonify({"error": f"Ollama could not be started for vision bible: {e}"}), 503
+
+    from backend.services.character_bible_from_refs import (
+        persist_bible_on_subject,
+        rebuild_bible_from_refs as _rebuild,
+    )
+    body = request.get_json(silent=True) or {}
+    refresh = body.get("refresh_captions", True)
+    result = _rebuild(
+        list(s.ref_image_paths or []),
+        name=s.name or "",
+        trigger_word=s.trigger_word or None,
+    )
+    if not result.get("ok"):
+        return jsonify({"error": result.get("error") or "bible_rebuild_failed", **result}), 502
+    persist_bible_on_subject(s, result, refresh_captions=bool(refresh))
+    db.session.refresh(s)
+    return jsonify({"subject": _serialize(s), **{k: result.get(k) for k in (
+        "bible", "trigger_word", "tags", "marks", "sources_used",
+        "captions_refreshed", "vision_grounded",
+    )}})
+
+
 @bp.post("/subjects/<int:subject_id>/plan")
 def plan_character(subject_id: int):
     """Run the Casting Director synchronously to produce bible + shot plan.
 
-    Calls generate_character_sheet() (LLM / Ollama, GPU-free), persists the
-    bible and trigger_word on the Subject, deletes any existing SubjectSample
-    rows, inserts one row per shot with status=pending, and returns the full
-    set.  Images are NOT generated here — dispatch /generate next.
+    When reference photos exist, keeps a vision-grounded bible (or builds one)
+    instead of inventing appearance from text. Images are NOT generated here.
 
     Request body (JSON, all optional):
       n            int   — number of reference shots to plan (default 32).
@@ -460,12 +518,19 @@ def plan_character(subject_id: int):
         }), 503
 
     from backend.services.character_generator_service import generate_character_sheet
+    refs = list(s.ref_image_paths or [])
     plan = generate_character_sheet(
         name=s.name,
         kind=s.kind,
         description=s.description or "",
         n=n,
         trigger_word=trigger_word or s.trigger_word or None,
+        existing_bible=s.bible or None,
+        ref_image_paths=refs,
+        prefer_vision_bible=bool(refs),
+        include_bible_in_prompts=True,
+        # Refs present: angles only — do not invent a new look from name/description.
+        invent_bible=not bool(refs),
     )
 
     if plan.get("error"):
@@ -479,6 +544,13 @@ def plan_character(subject_id: int):
     s.bible = bible
     if trigger:
         s.trigger_word = trigger
+    if plan.get("vision_grounded"):
+        cfg = dict(s.training_settings_json or {})
+        cfg["bible_vision_grounded"] = True
+        if plan.get("tags"):
+            cfg["bible_vision_tags"] = plan["tags"][:32]
+            cfg["bible_identity_marks"] = ", ".join(plan["tags"][:12])[:200]
+        s.training_settings_json = cfg
     db.session.flush()
 
     # Idempotent: wipe the Generate Character sheet. Keep promoted samples —
@@ -667,9 +739,7 @@ def dispatch_train(subject_id: int):
             if smp.image_path and smp.image_path not in train_images:
                 train_images.append(smp.image_path)
         token = (s.trigger_word or "").strip() or s.name
-        marks = (s.bible or "").strip()
-        if len(marks) > 240:
-            marks = marks[:240].rsplit(",", 1)[0]
+        marks = _identity_marks_for_captions(s)
         ensure_subject_image_captions(train_images, trigger=token, identity_marks=marks)
     except Exception:
         pass

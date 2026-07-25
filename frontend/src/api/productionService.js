@@ -94,6 +94,15 @@ export const planCharacter = async (id, body = {}) => {
   return response.data;
 };
 
+// Vision-rescan reference photos → rewrite Subject.bible (does NOT train LoRA).
+export const rebuildBibleFromRefs = async (id, body = {}) => {
+  const response = await axios.post(
+    `${API_BASE}/cast-library/subjects/${id}/bible/from-refs`,
+    body,
+  );
+  return response.data;
+};
+
 // Dispatch the FLUX image loop for the whole sheet (ASYNC — returns {task_id}).
 // Pass {use_trained_lora: true} after a successful training to generate additional
 // images that are consistent with the trained LoRA (per user vision for the
@@ -162,6 +171,7 @@ const productionService = {
   getCastSubjectDetail,
   updateCastSubject,
   planCharacter,
+  rebuildBibleFromRefs,
   generateSamples,
   cancelGenerateSamples,
   listSamples,

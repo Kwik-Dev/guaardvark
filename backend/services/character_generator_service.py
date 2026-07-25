@@ -17,8 +17,11 @@ into SubjectSample rows. GPU-free — pure LLM (Ollama).
 """
 from __future__ import annotations
 import hashlib
+import logging
 import math
 import re
+
+log = logging.getLogger(__name__)
 
 from backend.services.swarm.agents.character_designer import (
     BibleDesigner,
@@ -109,11 +112,19 @@ def _soften_face_detail(bible: str) -> str:
     return " ".join(kept).strip() or bible.strip()
 
 
-def _compose_prompt(trigger: str, bible: str, v: ShotVariation, angle: str) -> str:
-    """The load-bearing step: trigger + VERBATIM bible + the shot's variation phrases.
+def _compose_prompt(
+    trigger: str,
+    bible: str,
+    v: ShotVariation,
+    angle: str,
+    *,
+    include_bible: bool = True,
+) -> str:
+    """Compose shot prompt: trigger + optional bible + variation phrases.
 
-    Full-body slots are special-cased: the full-length directive LEADS (so framing isn't drowned
-    by the bible) and the bible's fine facial minutiae are softened. Close-up/medium are unchanged.
+    When ``include_bible=False`` (trained LoRA path), identity comes from the
+    adapter + trigger — dump only angle/scene variation so invented bible prose
+    cannot fight the pixels (sunglasses, shaved head, build).
     """
     bits = [
         angle,
@@ -123,6 +134,11 @@ def _compose_prompt(trigger: str, bible: str, v: ShotVariation, angle: str) -> s
         v.scene,
     ]
     variation = ", ".join(b for b in bits if b)
+    if not include_bible or not (bible or "").strip():
+        core = (trigger or "").strip()
+        if is_full_body(angle, v.framing):
+            core = f"{_FULL_BODY_LEAD}. {core}".strip()
+        return f"{core}. {variation}." if variation else core
     if is_full_body(angle, v.framing):
         identity = _soften_face_detail(bible)
         core = f"{_FULL_BODY_LEAD}. {trigger} {identity}".strip()
@@ -174,25 +190,82 @@ def generate_character_sheet(
     bible_model: str = "gemma4:12b",
     shot_model: str = "gemma4:12b",
     max_batch_retries: int = 2,
+    existing_bible: str | None = None,
+    ref_image_paths: list | None = None,
+    prefer_vision_bible: bool = False,
+    include_bible_in_prompts: bool = True,
+    invent_bible: bool = True,
 ) -> dict:
     """Produce {bible, trigger_word, shots:[{index, angle, ..., image_prompt}]}.
 
     `shots` always has exactly `n` entries (placeholders for any the model couldn't
     fill — these come back with an empty/near-empty prompt and are flagged for regen).
+
+    When refs exist and ``prefer_vision_bible`` is set, reuse ``existing_bible`` or
+    vision-ground from photos instead of BibleDesigner inventing a look.
+    When ``include_bible_in_prompts`` is False (LoRA generate), prompts are
+    trigger + variation only.
     """
     llm = llm or _default_llm
+    vision_grounded = False
+    tags: list[str] = []
+    bible = (existing_bible or "").strip()
+    trigger = (trigger_word or "").strip() or _fallback_trigger(name)
+    refs = list(ref_image_paths or [])
 
-    # 1. bible + trigger (small, reliable; one retry on failure)
-    bagent = BibleDesigner(llm)
-    bagent.model = bible_model
-    binv = bagent.invoke({"name": name, "kind": kind, "description": description, "trigger_word": trigger_word})
-    if binv.status != "ok" or not binv.output or not binv.output.bible:
-        binv = bagent.invoke({"name": name, "kind": kind, "description": description, "trigger_word": trigger_word})
-    if binv.status != "ok" or not binv.output or not binv.output.bible:
-        return {"bible": "", "trigger_word": "", "n_requested": n, "shots": [], "error": f"bible generation failed ({binv.status})"}
+    def _try_vision_bible() -> None:
+        nonlocal bible, trigger, vision_grounded, tags
+        try:
+            from backend.services.character_bible_from_refs import rebuild_bible_from_refs
+            grounded = rebuild_bible_from_refs(
+                refs, name=name, trigger_word=trigger or None,
+            )
+            if grounded.get("ok") and grounded.get("bible"):
+                bible = grounded["bible"].strip()
+                trigger = (grounded.get("trigger_word") or trigger).strip()
+                vision_grounded = True
+                tags = list(grounded.get("tags") or [])
+        except Exception as e:  # noqa: BLE001
+            log.warning("generate_character_sheet: vision bible failed: %s", e)
 
-    bible = binv.output.bible.strip()
-    trigger = (trigger_word or binv.output.trigger_word or _fallback_trigger(name)).strip()
+    # Never invent via BibleDesigner when invent_bible=False (trained LoRA path).
+    # Prefer vision when refs exist and bible is empty.
+    if not bible and refs and (prefer_vision_bible or not invent_bible):
+        _try_vision_bible()
+
+    if invent_bible and not bible:
+        bagent = BibleDesigner(llm)
+        bagent.model = bible_model
+        binv = bagent.invoke({
+            "name": name, "kind": kind, "description": description,
+            "trigger_word": trigger_word,
+        })
+        if binv.status != "ok" or not binv.output or not binv.output.bible:
+            binv = bagent.invoke({
+                "name": name, "kind": kind, "description": description,
+                "trigger_word": trigger_word,
+            })
+        if binv.status != "ok" or not binv.output or not binv.output.bible:
+            return {
+                "bible": "", "trigger_word": "", "n_requested": n, "shots": [],
+                "error": f"bible generation failed ({binv.status})",
+            }
+        bible = binv.output.bible.strip()
+        trigger = (trigger_word or binv.output.trigger_word or _fallback_trigger(name)).strip()
+    elif not bible:
+        return {
+            "bible": "", "trigger_word": trigger, "n_requested": n, "shots": [],
+            "error": (
+                "no bible available (upload refs and Rebuild bible from photos, "
+                "or provide a description)"
+            ),
+        }
+
+    if trigger_word:
+        trigger = trigger_word.strip()
+
+    # ShotDesigner still needs a bible string for angle/scene variety context.
+    shot_bible = bible if bible else f"character named {name}"
 
     # 2. batched shots with taxonomy-driven coverage
     slots = _angle_slots(n)
@@ -201,10 +274,12 @@ def generate_character_sheet(
     shots: list[dict] = []
     for start in range(0, len(slots), batch_size):
         batch = slots[start: start + batch_size]
-        variations = _gen_batch(sagent, bible, batch, max_batch_retries)
+        variations = _gen_batch(sagent, shot_bible, batch, max_batch_retries)
         for angle, v in zip(batch, variations):
             idx = len(shots)
-            prompt = _compose_prompt(trigger, bible, v, angle)
+            prompt = _compose_prompt(
+                trigger, bible, v, angle, include_bible=include_bible_in_prompts,
+            )
             shots.append({
                 "index": idx,
                 "angle": angle,              # authoritative from the taxonomy, not the model
@@ -216,4 +291,13 @@ def generate_character_sheet(
                 "placeholder": not (v.framing or v.expression or v.lighting or v.scene),
             })
 
-    return {"bible": bible, "trigger_word": trigger, "n_requested": n, "shots": shots}
+    out = {
+        "bible": bible,
+        "trigger_word": trigger,
+        "n_requested": n,
+        "shots": shots,
+        "vision_grounded": vision_grounded,
+        "tags": tags,
+        "include_bible_in_prompts": include_bible_in_prompts,
+    }
+    return out

@@ -59,9 +59,11 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
     try:
         from backend.services.character_captioner import ensure_subject_image_captions
         token = (s.trigger_word or "").strip() or s.name
-        marks = (s.bible or "").strip()
-        if len(marks) > 240:
-            marks = marks[:240].rsplit(",", 1)[0]
+        cfg = dict(s.training_settings_json or {})
+        marks = (cfg.get("bible_identity_marks") or "").strip()
+        if not marks and cfg.get("bible_vision_tags"):
+            marks = ", ".join(cfg["bible_vision_tags"][:12])[:200]
+        # Do NOT dump invented full bible into captions — that fights the pixels.
         cap_sum = ensure_subject_image_captions(
             [p for p in train_images if p], trigger=token, identity_marks=marks,
         )

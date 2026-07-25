@@ -15,9 +15,9 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
 import {
-  getCastSubject, getCastSubjectDetail, updateCastSubject, planCharacter, generateSamples,
-  cancelGenerateSamples, listSamples, regenerateSample, approveSamples, deleteSample,
-  trainSubject, cancelTrainSubject,
+  getCastSubject, getCastSubjectDetail, updateCastSubject, planCharacter, rebuildBibleFromRefs,
+  generateSamples, cancelGenerateSamples, listSamples, regenerateSample, approveSamples,
+  deleteSample, trainSubject, cancelTrainSubject,
 } from '../api/productionService';
 import { SubjectThumb } from '../components/filmcrew/CastLibraryView';
 import DragDropImageUpload from '../components/filmcrew/DragDropImageUpload';
@@ -100,9 +100,12 @@ const CastMemberPage = () => {
   const [tab, setTab] = useState(0);
 
   // Overview edit form.
-  const [form, setForm] = useState({ name: '', description: '', trigger_word: '', voice_id: '' });
+  const [form, setForm] = useState({
+    name: '', description: '', trigger_word: '', voice_id: '', bible: '',
+  });
   const [saving, setSaving] = useState(false);
   const [savedNote, setSavedNote] = useState(false);
+  const [rebuildingBible, setRebuildingBible] = useState(false);
 
   // Generate-character state.
   const [samples, setSamples] = useState([]);
@@ -135,6 +138,7 @@ const CastMemberPage = () => {
         setForm({
           name: s.name || '', description: s.description || '',
           trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
+          bible: s.bible || '',
         });
         setTrainingSettings(trainingSettingsFromSubject(s));
       }
@@ -150,6 +154,7 @@ const CastMemberPage = () => {
         setForm({
           name: s.name || '', description: s.description || '',
           trigger_word: s.trigger_word || '', voice_id: s.voice_id || '',
+          bible: s.bible || '',
         });
         setTrainingSettings(trainingSettingsFromSubject(s));
       }
@@ -317,6 +322,32 @@ const CastMemberPage = () => {
       setError(e.response?.data?.error || 'Failed to save changes.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRebuildBible = async () => {
+    const refs = subject?.ref_image_paths || [];
+    if (!refs.length) {
+      setError('Upload reference photos on Training Data first, then rebuild the bible.');
+      return;
+    }
+    setRebuildingBible(true); setError(null);
+    try {
+      const data = await rebuildBibleFromRefs(subjectId, { refresh_captions: true });
+      if (data.subject) setSubject(data.subject);
+      if (data.bible != null) {
+        setForm((prev) => ({ ...prev, bible: data.bible || '', trigger_word: data.trigger_word || prev.trigger_word }));
+      }
+      await loadSubject();
+      setSavedNote(true);
+    } catch (e) {
+      setError(
+        e.response?.data?.message
+        || e.response?.data?.error
+        || 'Rebuild bible from photos failed (is Ollama up?).',
+      );
+    } finally {
+      setRebuildingBible(false);
     }
   };
 
@@ -629,19 +660,40 @@ const CastMemberPage = () => {
                          helperText="Audio Foundry voice for narration. Leave blank to clear." />
               <TextField label="Description" value={form.description} multiline rows={3}
                          onChange={(e) => setForm({ ...form, description: e.target.value })} fullWidth />
-              <Box>
+              <Divider sx={{ my: 1 }} />
+              <Typography variant="overline" color="text.secondary">Identity bible</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                Appearance text used for base (no-LoRA) generates. Rebuild from photos so it matches
+                your refs (sunglasses, shaved head, build). Train LoRA does not rewrite this.
+              </Typography>
+              {(subject.ref_image_paths || []).length > 0 && !subject.bible_vision_grounded && (
+                <Alert severity="warning" sx={{ mb: 1 }}>
+                  Bible may not match your photos — use <strong>Rebuild bible from photos</strong>
+                  so Generate / captions stop inventing a different look.
+                </Alert>
+              )}
+              <TextField
+                label="Identity bible"
+                value={form.bible}
+                onChange={(e) => setForm({ ...form, bible: e.target.value })}
+                multiline
+                rows={5}
+                fullWidth
+                helperText={subject.bible_vision_grounded ? 'Vision-grounded from reference photos' : 'Not yet rebuilt from photos'}
+              />
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
                 <Button variant="contained" onClick={handleSave} disabled={saving || !form.name}>
                   {saving ? 'Saving…' : 'Save changes'}
                 </Button>
-                {savedNote && <Typography variant="caption" color="success.main" sx={{ ml: 2 }}>Saved</Typography>}
+                <Button
+                  variant="outlined"
+                  onClick={handleRebuildBible}
+                  disabled={rebuildingBible || busy || !(subject.ref_image_paths || []).length}
+                >
+                  {rebuildingBible ? 'Scanning photos…' : 'Rebuild bible from photos'}
+                </Button>
+                {savedNote && <Typography variant="caption" color="success.main">Saved</Typography>}
               </Box>
-              {subject.bible && (
-                <Box>
-                  <Divider sx={{ my: 1 }} />
-                  <Typography variant="overline" color="text.secondary">Identity bible (read-only)</Typography>
-                  <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{subject.bible}</Typography>
-                </Box>
-              )}
             </Box>
           </Grid>
         </Grid>
@@ -870,19 +922,29 @@ const CastMemberPage = () => {
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
             {subject.lora_path ? (
               <>
-                <strong>With trained LoRA</strong> — renders through the shared identity pipeline
-                (trigger <code>{subject.trigger_word || subject.name}</code>
+                <strong>Generate with trained LoRA</strong> — trigger + shot variation only
+                (no full bible dump); identity from the adapter
+                (<code>{subject.trigger_word || subject.name}</code>
                 {subject.base_model_name ? <> · {subject.base_model_name}</> : null}
-                ). Stacks onto approved samples. <strong>Re-plan sheet</strong> starts fresh.
+                ). <strong>Re-plan sheet</strong> refreshes angles only (keeps vision bible when
+                refs exist). <strong>Train LoRA</strong> trains weights — it does not rewrite the bible.
+                Use Overview → <strong>Rebuild bible from photos</strong> to rescan appearance.
               </>
             ) : (
               <>
-                <strong>Base sheet (no LoRA)</strong> — bible-driven looks only; identity from your
-                uploads appears after <strong>Train LoRA</strong>. Approve keepers, then train.
-                <strong> Re-plan sheet</strong> starts from scratch.
+                <strong>Generate base sheet (no LoRA)</strong> — uses the identity bible in prompts.
+                Rebuild the bible from photos on Overview first if you uploaded refs.
+                <strong> Train LoRA</strong> trains the adapter; it does not invent or rewrite the bible.
+                <strong> Re-plan sheet</strong> refreshes shot angles (keeps vision bible when refs exist).
               </>
             )}
           </Typography>
+          {(subject.ref_image_paths || []).length > 0 && !subject.bible_vision_grounded && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              Bible may not match your photos — go to Overview and click{' '}
+              <strong>Rebuild bible from photos</strong> before training or generating.
+            </Alert>
+          )}
           {subject.smoke_identity?.ok && (
             <Alert severity={Number(subject.smoke_identity.score) >= 0.75 ? 'success' : 'warning'} sx={{ mb: 2 }}>
               Post-train smoke identity score:{' '}

@@ -297,21 +297,25 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
         return {"error": msg}
 
     # --- 1. LLM planning (GPU-free) -----------------------------------------
-    log.info("Character Generator: planning sheet for subject %s (%s)", subject_id, subject.name)
+    # With trained LoRA: reuse stored bible, never invent a new look, and compose
+    # prompts as trigger+variation only (identity from adapter).
+    # Without LoRA but with refs: vision-ground bible if empty before composing.
+    refs = list(subject.ref_image_paths or [])
+    log.info(
+        "Character Generator: planning sheet for subject %s (%s) use_lora=%s refs=%d",
+        subject_id, subject.name, use_lora, len(refs),
+    )
     plan = generate_character_sheet(
         name=subject.name,
         kind=subject.kind,
         description=subject.description or "",
         trigger_word=subject.trigger_word or None,
+        existing_bible=subject.bible or None,
+        ref_image_paths=refs,
+        prefer_vision_bible=bool(refs),
+        include_bible_in_prompts=not bool(use_lora),
+        invent_bible=not bool(use_lora),
     )
-
-    # Per user vision for the Generate Character tab:
-    # - Initially (no or partial training): bare generations produce the reference sheet for training.
-    # - After training: the same tab / mechanism should be usable to generate *additional* images
-    #   that stay consistent with the trained/evolved character (new outfits, tattoos, environments).
-    # Current impl intentionally uses no loras (this *is* the data that will train the LoRA).
-    # Future: accept flag or check subject.lora_path and pass loras + strength to
-    # image_generator.generate_image when desired for "flesh out using trained identity".
 
     if plan.get("error"):
         log.error("Character Generator: bible generation failed for subject %s: %s",
@@ -329,9 +333,18 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
     shots = plan["shots"]
 
     # --- 2. Persist bible + trigger on Subject --------------------------------
-    subject.bible = bible
+    # LoRA path: do not clobber a good vision bible with empty; still store trigger.
+    if bible:
+        subject.bible = bible
     if trigger:
         subject.trigger_word = trigger
+    if plan.get("vision_grounded"):
+        cfg = dict(subject.training_settings_json or {})
+        cfg["bible_vision_grounded"] = True
+        if plan.get("tags"):
+            cfg["bible_vision_tags"] = plan["tags"][:32]
+            cfg["bible_identity_marks"] = ", ".join(plan["tags"][:12])[:200]
+        subject.training_settings_json = cfg
     db.session.flush()
 
     # --- 3. Prepare the sample set (APPEND by default) -----------------------
