@@ -159,6 +159,96 @@ def _render_cast_still(
     return still.image_path
 
 
+def _verify_angle_relabel_regen(
+    *,
+    row,
+    subject,
+    output_path: str,
+    route: dict,
+    loras: list[str],
+    use_lora: bool,
+    offline_gen=None,
+    comfy_gen=None,
+    analyzer=None,
+) -> dict:
+    """Vision-check still vs planned angle; one regen on mismatch; always relabel final.
+
+    Returns {match, regenerated, planned, observed, model}. Non-fatal on vision errors.
+    """
+    from backend.services.character_angle_verify import (
+        apply_relabel,
+        strengthen_prompt_for_angle,
+        verify_sample_angle,
+    )
+    from backend.models import db
+
+    planned = row.angle or ""
+    result = {
+        "match": True,
+        "regenerated": False,
+        "planned": planned,
+        "observed": None,
+        "model": None,
+    }
+    try:
+        v1 = verify_sample_angle(output_path, planned, analyzer=analyzer)
+    except Exception as e:  # noqa: BLE001
+        log.warning("angle verify skipped (vision error): %s", e)
+        return result
+
+    result["model"] = v1.get("model")
+    result["observed"] = v1.get("observed")
+    result["match"] = bool(v1.get("match", True))
+
+    if v1.get("ok") and not v1.get("match"):
+        log.info(
+            "Character Generator: angle mismatch sample %s planned=%r observed=%r — regen once",
+            row.index, planned, v1.get("observed"),
+        )
+        try:
+            strong = strengthen_prompt_for_angle(row.image_prompt or subject.name, planned)
+            new_seed = random.randint(1, 2 ** 31 - 1)
+            width, height = _aspect_for_row(row)
+            _render_cast_still(
+                route=route,
+                prompt=strong,
+                loras=loras,
+                output_path=output_path,
+                seed=new_seed,
+                width=width,
+                height=height,
+                offline_gen=offline_gen,
+                comfy_gen=comfy_gen,
+                subject=subject,
+                use_lora=use_lora,
+            )
+            row.seed = new_seed
+            # Keep original image_prompt (plan); strengthened text was regen-only.
+            result["regenerated"] = True
+            v2 = verify_sample_angle(output_path, planned, analyzer=analyzer)
+            result["observed"] = v2.get("observed") or result["observed"]
+            result["match"] = bool(v2.get("match", True))
+            result["model"] = v2.get("model") or result["model"]
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "Character Generator: angle regen failed for sample %s: %s — relabeling only",
+                row.index, e,
+            )
+
+    # Honest UI label = what the final pixels show
+    if result.get("observed"):
+        apply_relabel(row, result["observed"])
+        try:
+            db.session.add(row)
+        except Exception:
+            pass
+        log.info(
+            "Character Generator: sample %s angle %r → %r (regen=%s match=%s)",
+            row.index, planned, result["observed"], result["regenerated"], result["match"],
+        )
+    return result
+
+
 # ── task implementations (plain functions for testability) ─────────────────────
 
 def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool = False,
@@ -439,6 +529,23 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
                         )
                         break
                     row.image_path = output_path
+                    # Vision: one regen on angle mismatch, then relabel to observed.
+                    try:
+                        _verify_angle_relabel_regen(
+                            row=row,
+                            subject=subject,
+                            output_path=output_path,
+                            route=route,
+                            loras=loras_for_gen,
+                            use_lora=bool(loras_for_gen),
+                            offline_gen=offline_gen,
+                            comfy_gen=comfy_gen,
+                        )
+                    except Exception as _ve:  # noqa: BLE001
+                        log.warning(
+                            "Character Generator: angle verify failed for sample %d: %s",
+                            row.index, _ve,
+                        )
                     row.status = "done"
                     done_count += 1
                     # Textfile caption sidecar for SimpleTuner caption_strategy="textfile".
@@ -454,8 +561,8 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
                             row.index, _se,
                         )
                     log.info(
-                        "Character Generator: sample %d/%d done (%s)",
-                        row.index + 1, len(sample_rows), output_path,
+                        "Character Generator: sample %d/%d done (%s) angle=%s",
+                        row.index + 1, len(sample_rows), output_path, row.angle,
                     )
                 except Exception as exc:
                     db.session.refresh(row)
@@ -663,8 +770,31 @@ def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int |
                     log.info("regen_sample: sample %s cancelled after render", sample_id)
                 else:
                     row.image_path = output_path
+                    # If user overrode the prompt, temporarily use it for strengthen-on-mismatch.
+                    _orig_prompt = row.image_prompt
+                    if prompt_override:
+                        row.image_prompt = effective_prompt
+                    try:
+                        _verify_angle_relabel_regen(
+                            row=row,
+                            subject=subject,
+                            output_path=output_path,
+                            route=route,
+                            loras=[subject.lora_path] if use_lora else [],
+                            use_lora=use_lora,
+                            offline_gen=offline_gen,
+                            comfy_gen=comfy_gen,
+                        )
+                    except Exception as _ve:  # noqa: BLE001
+                        log.warning("regen_sample: angle verify failed: %s", _ve)
+                    finally:
+                        if prompt_override:
+                            row.image_prompt = _orig_prompt
                     row.status = "done"
-                    log.info("regen_sample: sample %s regenerated → %s", sample_id, output_path)
+                    log.info(
+                        "regen_sample: sample %s regenerated → %s angle=%s",
+                        sample_id, output_path, row.angle,
+                    )
                     if job_id:
                         try:
                             get_unified_progress().update_process(job_id, 90, "Image ready")
