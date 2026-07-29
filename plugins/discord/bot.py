@@ -104,15 +104,8 @@ class GuaardvarkBot(commands.Bot):
         # and start.sh / plugin manager need /health before that finishes.
         await self._start_health_server()
 
-        guild_id = self.config.get("bot", {}).get("guild_id")
-        if guild_id:
-            guild = discord.Object(id=guild_id)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            logger.info("Synced commands to guild %s", guild_id)
-        else:
-            # Defer slow global sync to background; on_ready does fast per-guild sync.
-            asyncio.create_task(self._sync_commands_global())
+        # Slash sync happens in on_ready (guild-fast, then global background).
+        # Doing it here races Discord rate limits and delayed health readiness.
 
         # VIP greeting — fires on every interaction without replacing default handler
         @self.listen("on_interaction")
@@ -129,9 +122,18 @@ class GuaardvarkBot(commands.Bot):
     async def on_ready(self):
         logger.info("Bot is ready! Logged in as %s (ID: %s)", self.user, self.user.id)
         logger.info("Connected to %d guilds", len(self.guilds))
-        # Fast path: sync slash commands into every joined guild so schema
-        # changes (e.g. new /imagine options) appear immediately.
-        if not self.config.get("bot", {}).get("guild_id"):
+
+        guild_id = self.config.get("bot", {}).get("guild_id")
+        if guild_id:
+            try:
+                guild = discord.Object(id=guild_id)
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+                logger.info("Synced commands to guild %s", guild_id)
+            except Exception as e:
+                logger.warning("Guild sync failed for %s: %s", guild_id, e)
+        else:
+            # Fast path first — schema changes appear in joined servers immediately.
             for guild in self.guilds:
                 try:
                     self.tree.copy_global_to(guild=guild)
@@ -139,6 +141,10 @@ class GuaardvarkBot(commands.Bot):
                     logger.info("Synced commands to guild %s (%s)", guild.id, guild.name)
                 except Exception as e:
                     logger.warning("Guild sync failed for %s: %s", guild.id, e)
+            # Global sync after guild sync so they don't race the Discord API.
+            if not getattr(self, "_global_sync_started", False):
+                self._global_sync_started = True
+                asyncio.create_task(self._sync_commands_global())
 
     async def _check_vip_greeting(self, interaction: discord.Interaction):
         """Send one-time DM greeting to VIP users."""
