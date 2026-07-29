@@ -98,6 +98,29 @@ def _dedup(seq: Iterable[str]) -> list[str]:
     return out
 
 
+# Z-Image has a long prompt budget; keep bible useful without drowning the scene.
+DEFAULT_BIBLE_LOCK_MAX_CHARS = 480
+
+
+def bible_for_lock(subject, *, max_chars: int = DEFAULT_BIBLE_LOCK_MAX_CHARS) -> str:
+    """Clean subject.bible for prompt lock: strip name prefix, collapse whitespace, cap length."""
+    raw = (getattr(subject, "bible", None) or "").replace("\n", " ").strip()
+    if not raw:
+        return ""
+    name = (getattr(subject, "name", None) or "").strip()
+    # "Batman 2: The character is …" → drop leading "Name:" label
+    if name and raw.lower().startswith(name.lower()):
+        rest = raw[len(name):].lstrip(" :,-")
+        if rest:
+            raw = rest
+    # Collapse spaces
+    raw = " ".join(raw.split())
+    if len(raw) > max_chars:
+        cut = raw[:max_chars].rsplit(" ", 1)[0].strip()
+        raw = cut or raw[:max_chars]
+    return raw.strip().strip(",")
+
+
 def subjects_to_lock(
     subjects: Iterable,
     *,
@@ -110,10 +133,14 @@ def subjects_to_lock(
     Only subjects that actually have a ``lora_path`` contribute — an untrained subject can't lock
     anything.
 
-    When a subject has ``lora_path``, the lock is ``trigger`` + optional short vision
-    marks only — full bible paragraphs fight the adapter at keyframe time. ``include_bible``
-    is ignored for LoRA subjects (kept for API compat / no-LoRA callers should not pass
-    lora subjects). Short marks come from ``training_settings_json.bible_identity_marks``.
+    Lock shape for LoRA subjects:
+      ``a photo of {trigger}, {class}[, short marks][, vision bible]``
+
+    Short marks come from ``training_settings_json.bible_identity_marks``.
+    When ``include_bible`` is True (default), the stored vision bible is appended so
+    costume detail (armor, cowl, emblem color, …) reaches Batch/Chat/Video — not only
+    the weak one-line marks. Callers that pre-compose the full prompt (Cast sheet) should
+    pass ``include_bible=False`` to avoid doubling.
     """
     from backend.services.character_identity_prompt import (
         compose_identity_core,
@@ -134,18 +161,46 @@ def subjects_to_lock(
         cls = resolve_class_token(subj)
         # Prefer class-anchored core so FilmCrew/chat match Cast generate shape.
         core = compose_identity_core(trigger, cls, marks if include_marks else "")
+        piece_parts: list[str] = []
         if core:
-            lock_parts.append(core)
+            piece_parts.append(core)
         elif trigger:
-            lock_parts.append(trigger)
-        # Full bible deliberately omitted when LoRA is present (include_bible no-op).
-        _ = include_bible  # API compat; do not append bible for LoRA subjects
+            piece_parts.append(trigger)
+        if include_bible:
+            bible_txt = bible_for_lock(subj)
+            if bible_txt:
+                # Avoid repeating the entire core / marks if bible starts the same way.
+                bl = bible_txt.lower()
+                already = " ".join(piece_parts).lower()
+                if bl not in already and not already.endswith(bl[:40]):
+                    piece_parts.append(bible_txt)
+        if piece_parts:
+            lock_parts.append(", ".join(piece_parts))
     return _dedup(lora_paths), ", ".join(_dedup(lock_parts))
 
 
 def apply_lock(base_prompt: str, lock_prefix: str) -> str:
-    """Front-load the identity lock onto a prompt. No-op when ``lock_prefix`` is empty."""
+    """Front-load the identity lock onto a prompt. No-op when ``lock_prefix`` is empty.
+
+    Double-lock guard: if the base already starts with the lock (or the same
+    ``a photo of {trigger}`` core), do not prefix again — FilmCrew / Cast sheet
+    may precompose identity and still pass subjects into the pipeline.
+    """
     base = (base_prompt or "").strip()
     if not lock_prefix:
         return base
-    return f"{lock_prefix}, {base}" if base else lock_prefix
+    lock = lock_prefix.strip()
+    if not lock:
+        return base
+    bl = base.lower()
+    ll = lock.lower()
+    if bl.startswith(ll):
+        return base
+    # Core often begins "a photo of {trigger}"; if already present, skip.
+    if ll.startswith("a photo of ") and bl.startswith("a photo of "):
+        # Same trigger token after "a photo of "
+        lock_rest = ll[len("a photo of "):].split(",", 1)[0].strip()
+        base_rest = bl[len("a photo of "):].split(",", 1)[0].strip()
+        if lock_rest and lock_rest == base_rest:
+            return base
+    return f"{lock}, {base}" if base else lock

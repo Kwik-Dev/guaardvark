@@ -53,15 +53,15 @@ class BatchPrompt:
     # still run resolve_stills_defaults when model is known.
     width: int = 1024
     height: int = 1024
-    steps: int = 8
-    guidance: float = 1.0
+    steps: int = 9
+    guidance: float = 0.0
     seed: Optional[int] = None
     model: str = "auto"
     metadata: Dict[str, Any] = field(default_factory=dict)
-    # Character casting: when loras is non-empty the image routes through the
-    # LoRA-aware SDXL ComfyUI generator (the only path that actually applies a
-    # trained character), and trigger_word is prepended to the prompt.
+    # Character casting: subject_ids preferred (identity core + family routing via
+    # character_still_pipeline). loras kept for path-only / diagnostics.
     loras: List[str] = field(default_factory=list)
+    subject_ids: List[int] = field(default_factory=list)
     trigger_word: str = ""
     content_preset: Optional[str] = None
     auto_enhance: bool = True
@@ -95,6 +95,8 @@ class BatchImageRequest:
     planning_mode: str = "narrative"
     director_model: Optional[str] = None
     user_treatment: Optional[str] = None
+    ui_config: Optional[Dict[str, Any]] = None
+    retry_data: Optional[Dict[str, Any]] = None
 
 @dataclass
 class BatchImageResult:
@@ -125,6 +127,7 @@ class BatchGenerationStatus:
     remove_background: bool = False
     # Optional UI label (first prompt snippet) for the queue panel
     display_name: Optional[str] = None
+    retry_data: Optional[Dict[str, Any]] = None
 
 class BatchImageGenerator:
 
@@ -387,16 +390,26 @@ class BatchImageGenerator:
         vram_mb = 4000
         ram_gb = 6.0
         for prompt in request.prompts:
-            if prompt.loras:
+            if prompt.loras or getattr(prompt, "subject_ids", None):
                 # Cast LoRAs: estimate by family from first LoRA when possible
-                model_key = "sd-xl"
+                model_key = "zimage-turbo"
                 try:
                     from backend.services.media_model_registry import resolve_inference_for_loras
-                    route = resolve_inference_for_loras(list(prompt.loras))
-                    if route.get("family") == "zimage":
-                        model_key = "zimage-turbo"
-                    elif route.get("family") == "flux":
-                        model_key = "flux-dev"
+                    paths = list(prompt.loras or [])
+                    if not paths and getattr(prompt, "subject_ids", None):
+                        from backend.models import Subject, db
+                        for sid in prompt.subject_ids:
+                            s = db.session.get(Subject, int(sid))
+                            if s and s.lora_path:
+                                paths.append(s.lora_path)
+                    if paths:
+                        route = resolve_inference_for_loras(paths)
+                        if route.get("family") == "zimage":
+                            model_key = "zimage-turbo"
+                        elif route.get("family") == "flux":
+                            model_key = "flux-dev"
+                        else:
+                            model_key = "sd-xl"
                 except Exception:
                     pass
             else:
@@ -522,15 +535,18 @@ class BatchImageGenerator:
             )
 
     def _generate_with_character_lora(self, prompt: BatchPrompt) -> Optional[ImageGenerationResult]:
-        """Generate one image with cast character LoRA(s) via character_still_pipeline."""
+        """Generate one image with cast character LoRA(s) via character_still_pipeline.
+
+        Prefer subject_ids so the pipeline applies identity core (trigger + class +
+        short marks) and routes by train base — same contract as Cast generate.
+        """
+        sid_list = [int(x) for x in (prompt.subject_ids or []) if str(x).strip()]
         lora_list = list(prompt.loras or [])
-        if not lora_list:
+        if not sid_list and not lora_list:
             return None
 
-        final_prompt = prompt.prompt
-        trig = (prompt.trigger_word or "").strip()
-        if trig and trig.lower() not in final_prompt.lower():
-            final_prompt = f"{trig}, {final_prompt}"
+        # Scene prompt only — do not bare-prepend trigger; pipeline owns lock.
+        final_prompt = (prompt.prompt or "").strip()
 
         width = prompt.width if prompt.width and prompt.width >= 768 else 1024
         height = prompt.height if prompt.height and prompt.height >= 768 else 1024
@@ -542,10 +558,13 @@ class BatchImageGenerator:
 
         try:
             from backend.services.character_still_pipeline import render_character_still
+            # Always pass both: subject_ids for identity core; lora_paths as
+            # fallback when worker DB resolve fails (paths were resolved at API time).
             still = render_character_still(
                 final_prompt,
-                lora_paths=lora_list,
-                include_bible=False,
+                subject_ids=sid_list or None,
+                lora_paths=lora_list or None,
+                include_bible=True,  # vision bible pins costume (armor, emblem, …)
                 source="batch",
                 width=width,
                 height=height,
@@ -556,6 +575,15 @@ class BatchImageGenerator:
                 output_path=out_path,
                 style=prompt.style or "realistic",
                 keep_pipeline=True,
+            )
+            meta = still.metadata or {}
+            logger.info(
+                "Batch character still: success=%s family=%s strength=%s lock=%r model=%s",
+                still.success,
+                meta.get("family"),
+                meta.get("lora_strength"),
+                (meta.get("lock_prefix") or "")[:120],
+                still.model_used,
             )
             if not still.success:
                 return ImageGenerationResult(
@@ -583,9 +611,9 @@ class BatchImageGenerator:
             face_restoration_weight = getattr(batch_status, 'face_restoration_weight', 0.5)
             remove_background = getattr(batch_status, 'remove_background', False)
 
-            # Character casting: LoRAs route by sidecar family (Comfy SDXL/FLUX
-            # or offline Z-Image). FLUX.1-dev without LoRA also uses Comfy.
-            if getattr(prompt, "loras", None):
+            # Character casting: subject_ids / LoRAs → character_still_pipeline
+            # (Z-Image offline or Comfy SDXL/FLUX by train base).
+            if getattr(prompt, "subject_ids", None) or getattr(prompt, "loras", None):
                 result = self._generate_with_character_lora(prompt)
             elif self._is_comfy_flux_model(prompt.model):
                 result = self._generate_with_comfy_flux(prompt)
@@ -726,12 +754,14 @@ class BatchImageGenerator:
         try:
             metadata = {
                 "batch_id": batch_status.batch_id,
+                "display_name": getattr(batch_status, "display_name", None),
                 "status": batch_status.status,
                 "total_images": batch_status.total_images,
                 "completed_images": batch_status.completed_images,
                 "failed_images": batch_status.failed_images,
                 "start_time": batch_status.start_time.isoformat() if batch_status.start_time else None,
                 "end_time": batch_status.end_time.isoformat() if batch_status.end_time else None,
+                "retry_data": getattr(batch_status, "retry_data", None),
                 "generation_summary": {
                     "total_generation_time": sum(r.generation_time for r in batch_status.results),
                     "successful_images": [r for r in batch_status.results if r.success],
@@ -914,6 +944,27 @@ class BatchImageGenerator:
         batch_status.face_restoration_weight = request.face_restoration_weight
         batch_status.generate_thumbnails = request.generate_thumbnails
         batch_status.remove_background = request.remove_background
+
+        first_p = request.prompts[0] if request.prompts else None
+        prompts_list = [p.prompt for p in (request.prompts or [])]
+        batch_status.retry_data = request.retry_data or {
+            "mode": "text",
+            "prompts": prompts_list,
+            "params": {
+                "model": getattr(first_p, "model", "auto") if first_p else "auto",
+                "style": getattr(first_p, "style", "realistic") if first_p else "realistic",
+                "width": getattr(first_p, "width", 1024) if first_p else 1024,
+                "height": getattr(first_p, "height", 1024) if first_p else 1024,
+                "steps": getattr(first_p, "steps", 9) if first_p else 9,
+                "guidance": getattr(first_p, "guidance", 0.0) if first_p else 0.0,
+                "content_preset": getattr(request, "content_preset", None),
+                "auto_enhance": getattr(request, "auto_enhance", True),
+                "restore_faces": getattr(request, "restore_faces", False),
+                "remove_background": getattr(request, "remove_background", False),
+                "director_mode": getattr(request, "director_mode", False),
+                "ui_config": getattr(request, "ui_config", None),
+            }
+        }
 
         with self.batch_lock:
             self.active_batches[batch_id] = batch_status
@@ -1709,7 +1760,9 @@ class BatchImageGenerator:
                         failed_images=metadata.get("failed_images", 0),
                         start_time=datetime.fromisoformat(metadata["start_time"]) if metadata.get("start_time") else None,
                         end_time=datetime.fromisoformat(metadata["end_time"]) if metadata.get("end_time") else None,
-                        output_dir=str(batch_folder)
+                        output_dir=str(batch_folder),
+                        display_name=metadata.get("display_name"),
+                        retry_data=metadata.get("retry_data"),
                     )
                     
                     completed_batches.append(batch_status)
@@ -1771,7 +1824,8 @@ class BatchImageGenerator:
 
         prompt_params = ['model', 'style', 'width', 'height', 'steps', 'guidance',
                         'content_preset', 'auto_enhance', 'enhance_anatomy',
-                        'enhance_faces', 'enhance_hands', 'loras', 'trigger_word']
+                        'enhance_faces', 'enhance_hands', 'loras', 'subject_ids',
+                        'trigger_word']
         
         batch_params = [
             'max_workers', 'preserve_order', 'generate_thumbnails',

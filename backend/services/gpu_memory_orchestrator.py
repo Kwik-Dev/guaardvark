@@ -56,6 +56,7 @@ class ModelSlot:
     priority: int = 50                  # 0-100, higher = harder to evict
     state: SlotState = SlotState.LOADED
     preloaded_for: Optional[str] = None # Route hint that triggered preload
+    in_use: int = 0                     # Active inference pins; >0 blocks idle/forced yank
 
     def to_dict(self) -> dict:
         return {
@@ -69,6 +70,7 @@ class ModelSlot:
             "priority": self.priority,
             "state": self.state.value,
             "preloaded_for": self.preloaded_for,
+            "in_use": self.in_use,
         }
 
 
@@ -231,6 +233,7 @@ class GPUMemoryOrchestrator:
         priority: int = 50,
         model_type: Optional[ModelType] = None,
         exclusive: bool = False,
+        hard_fit: Optional[bool] = None,
     ) -> ModelSlot:
         """
         Request GPU resources for a model. Evicts other models if needed.
@@ -241,12 +244,21 @@ class GPUMemoryOrchestrator:
             priority: 0-100, higher = harder to evict later
             model_type: Auto-inferred from slot_id prefix if not given
             exclusive: If True, evict ALL other models first
+            hard_fit: If True (default via GUAARDVARK_GPU_HARD_FIT=1), refuse when
+                physical free VRAM is still short after eviction — no "admit anyway".
 
         Returns:
             The ModelSlot for the requested model.
+
+        Raises:
+            RuntimeError: When hard_fit and free VRAM cannot fit the estimate.
         """
         if model_type is None:
             model_type = self._infer_model_type(slot_id)
+        if hard_fit is None:
+            hard_fit = os.environ.get("GUAARDVARK_GPU_HARD_FIT", "1").lower() in (
+                "1", "true", "yes", "on",
+            )
 
         with self._lock:
             # Already loaded?
@@ -275,20 +287,32 @@ class GPUMemoryOrchestrator:
                     safety_margin_mb = max(1024, int(total_mb * pct)) if total_mb else 1024
                     if available - safety_margin_mb < vram_estimate_mb:
                         needed = vram_estimate_mb - (available - safety_margin_mb)
-                        self._evict_until_free(needed, exclude=[slot_id])
+                        freed = self._evict_until_free(needed, exclude=[slot_id])
+                        # Registry empty but card full — force physical SD unload + ollama
+                        if freed < needed:
+                            self._physical_reclaim_untracked(needed)
 
-                    # Post-evict re-probe (vram-gpu-orchestrator rec): after eviction,
-                    # re-query actual available (fragmentation, other processes). Require
-                    # the safety margin before registering the slot. If still short,
-                    # log but admit (best-effort; load may still OOM but we tried).
+                    # Post-evict re-probe: require safety margin before registering.
                     vram2 = self._get_vram_info()
                     if vram2.get("success"):
                         avail2 = vram2["available_mb"]
-                        if avail2 - safety_margin_mb < vram_estimate_mb:
-                            logger.warning(
-                                f"Post-evict still short for {slot_id}: avail={avail2}MB "
-                                f"need~{vram_estimate_mb} margin={safety_margin_mb}MB; admitting anyway"
+                        short = avail2 - safety_margin_mb < vram_estimate_mb
+                        logger.info(
+                            "request_model %s: free=%sMB estimate=%sMB margin=%sMB "
+                            "hard_fit=%s short=%s registry=%s",
+                            slot_id, avail2, vram_estimate_mb, safety_margin_mb,
+                            hard_fit, short, list(self._registry.keys()),
+                        )
+                        if short:
+                            msg = (
+                                f"GPU short for {slot_id}: only {avail2}MB free "
+                                f"(need ~{vram_estimate_mb}MB + {safety_margin_mb}MB margin). "
+                                f"Unload other models or wait for jobs to finish."
                             )
+                            if hard_fit:
+                                logger.error("%s — refusing admit", msg)
+                                raise RuntimeError(msg)
+                            logger.warning("%s — admitting anyway (hard_fit=0)", msg)
 
             # Register the slot
             now = time.time()
@@ -316,6 +340,34 @@ class GPUMemoryOrchestrator:
                 slot.loaded_at = time.time()
                 logger.debug(f"Model {slot_id} marked LOADED")
 
+    def touch(self, slot_id: str) -> None:
+        """Refresh last_used / use_count so idle eviction does not fire mid-batch."""
+        with self._lock:
+            slot = self._registry.get(slot_id)
+            if slot:
+                slot.last_used = time.time()
+                slot.use_count += 1
+
+    def begin_use(self, slot_id: str) -> None:
+        """Pin a slot during active inference — blocks idle and mid-call unload."""
+        with self._lock:
+            slot = self._registry.get(slot_id)
+            if slot:
+                slot.in_use = max(0, int(slot.in_use or 0)) + 1
+                slot.last_used = time.time()
+                slot.use_count += 1
+                logger.debug(f"Model {slot_id} begin_use (in_use={slot.in_use})")
+
+    def end_use(self, slot_id: str) -> None:
+        """Drop one inference pin; refreshes last_used when the pin count hits zero."""
+        with self._lock:
+            slot = self._registry.get(slot_id)
+            if not slot:
+                return
+            slot.in_use = max(0, int(slot.in_use or 0) - 1)
+            slot.last_used = time.time()
+            logger.debug(f"Model {slot_id} end_use (in_use={slot.in_use})")
+
     def release_model(self, slot_id: str):
         """
         Mark a model as no longer in active use. Does NOT unload —
@@ -333,14 +385,18 @@ class GPUMemoryOrchestrator:
             slot = self._registry.get(slot_id)
             if not slot or slot.state == SlotState.UNLOADED:
                 return False
-            # LOADING slot: registration happened but the actual load() never
-            # finished (e.g. audio_foundry got an ImportError mid-load and is
-            # now cleaning up). There's nothing physical on the GPU to release;
-            # just drop from the registry.
+            # LOADING: may still have partially loaded weights (esp. sd/video).
+            # Attempt physical unload for SD/video before dropping the registry entry.
             if slot.state == SlotState.LOADING:
-                slot.state = SlotState.UNLOADED
-                self._registry.pop(slot_id, None)
-                logger.info(f"Cleaned up dangling LOADING slot {slot_id}")
+                if slot.model_type in (ModelType.SD_PIPELINE, ModelType.VIDEO_PIPELINE):
+                    try:
+                        self._unload_model(slot)
+                    except Exception:
+                        pass
+                if slot.slot_id in self._registry:
+                    slot.state = SlotState.UNLOADED
+                    self._registry.pop(slot_id, None)
+                logger.info(f"Cleaned up LOADING slot {slot_id}")
                 return True
             return self._unload_model(slot)
 
@@ -558,8 +614,8 @@ class GPUMemoryOrchestrator:
             0.1 * size_score
         )
 
-    def _evict_until_free(self, needed_mb: int, exclude: List[str] = None):
-        """Evict models until at least needed_mb is free."""
+    def _evict_until_free(self, needed_mb: int, exclude: List[str] = None) -> int:
+        """Evict models until at least needed_mb is free. Returns MB freed (estimate)."""
         exclude = exclude or []
         freed = 0
 
@@ -568,6 +624,7 @@ class GPUMemoryOrchestrator:
             s for s in self._registry.values()
             if s.slot_id not in exclude
             and s.state == SlotState.LOADED
+            and int(getattr(s, "in_use", 0) or 0) == 0
             and self._compute_eviction_score(s) >= 0  # Not in grace period
         ]
         candidates.sort(key=self._compute_eviction_score, reverse=True)
@@ -581,6 +638,38 @@ class GPUMemoryOrchestrator:
 
         if freed < needed_mb:
             logger.warning(f"Could only free {freed}MB of {needed_mb}MB requested")
+        return freed
+
+    def _physical_reclaim_untracked(self, needed_mb: int) -> int:
+        """When registry eviction frees nothing, unload in-process image weights + Ollama.
+
+        Must be called while holding ``self._lock`` (request_model path).
+        """
+        freed = 0
+        logger.warning(
+            "Physical reclaim: registry free insufficient (need %sMB); "
+            "forcing in-process SD unload + Ollama eviction",
+            needed_mb,
+        )
+        # Drop all LOADED/LOADING SD/video slots after physical unload
+        for slot in list(self._registry.values()):
+            if slot.model_type in (ModelType.SD_PIPELINE, ModelType.VIDEO_PIPELINE):
+                mb = slot.vram_mb or 0
+                if self._unload_model(slot):
+                    freed += mb
+        # Always try full image generator unload (even if no registry slot)
+        try:
+            if self._unload_sd_pipeline():
+                freed = max(freed, needed_mb // 2)  # best-effort accounting
+        except Exception as e:
+            logger.warning("physical reclaim SD unload: %s", e)
+        try:
+            from backend.services.gpu_resource_policy import evict_ollama_models
+            # Unlock briefly? Ollama is HTTP — ok under lock for short timeout
+            evict_ollama_models()
+        except Exception as e:
+            logger.warning("physical reclaim ollama: %s", e)
+        return freed
 
     def _evict_all(self, exclude: List[str] = None):
         """Evict all loaded models except excluded ones."""
@@ -601,7 +690,17 @@ class GPUMemoryOrchestrator:
         external HTTP-driven plugin like audio_foundry that owns its own GPU
         lifecycle — are treated as registry-only: the orchestrator just stops
         tracking the slot. The plugin handles the real GPU release on its end.
+
+        Slots with in_use > 0 are refused — yanking mid-inference nulls live
+        pipeline components (Z-Image scheduler.step AttributeError).
         """
+        if int(getattr(slot, "in_use", 0) or 0) > 0:
+            logger.warning(
+                f"Refusing unload of {slot.slot_id}: in_use={slot.in_use} "
+                f"(active inference pin)"
+            )
+            return False
+
         original_state = slot.state
         slot.state = SlotState.UNLOADING
         success = False
@@ -657,13 +756,20 @@ class GPUMemoryOrchestrator:
             return False
 
     def _unload_sd_pipeline(self) -> bool:
-        """Unload the Stable Diffusion pipeline from GPU."""
+        """Unload the offline image pipeline via full teardown (accelerate hooks too).
+
+        Returns False when generation holds the lock (refuse mid-denoise yank).
+        """
         try:
             from backend.services.offline_image_generator import get_image_generator
             gen = get_image_generator()
-            if hasattr(gen, '_pipeline') and gen._pipeline is not None:
+            if hasattr(gen, "_unload_pipeline"):
+                # wait=False: never null scheduler under a live __call__
+                return bool(gen._unload_pipeline(wait=False))
+            # Fallback shallow path if API missing
+            if getattr(gen, "_pipeline", None) is not None:
                 import torch
-                gen._pipeline.to('cpu')
+                gen._pipeline.to("cpu")
                 del gen._pipeline
                 gen._pipeline = None
                 gen._current_model = None
@@ -671,8 +777,7 @@ class GPUMemoryOrchestrator:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                return True
-            return True  # Already unloaded
+            return True
         except Exception as e:
             logger.error(f"Failed to unload SD pipeline: {e}")
             return False
@@ -808,6 +913,9 @@ class GPUMemoryOrchestrator:
         with self._lock:
             for slot in list(self._registry.values()):
                 if slot.state != SlotState.LOADED:
+                    continue
+                # Active inference pin — never idle-evict mid-denoise / mid-batch.
+                if int(getattr(slot, "in_use", 0) or 0) > 0:
                     continue
                 # CPU-only embedding-churn guard.
                 if (not gpu_present

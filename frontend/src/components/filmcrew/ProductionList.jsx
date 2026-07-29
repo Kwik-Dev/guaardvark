@@ -10,11 +10,20 @@ import {
   Box
 } from '@mui/material';
 
-const getStatusColor = (status) => {
-  if (status === 'complete') return 'success';
-  if (status.startsWith('failed')) return 'error';
-  if (['casting', 'awaiting_approval'].includes(status)) return 'warning';
+const getStatusColor = (status, stage) => {
+  if (status === 'complete' || stage === 'complete') return 'success';
+  if (status?.startsWith('failed')) return 'error';
+  if (['casting', 'awaiting_approval'].includes(stage) || ['casting', 'awaiting_approval'].includes(status)) {
+    return 'warning';
+  }
   return 'info';
+};
+
+const chipLabel = (p) => {
+  if (p.status?.startsWith('failed')) {
+    return `failed: ${(p.current_stage || '').replace(/_/g, ' ')}`;
+  }
+  return (p.current_stage || p.status || '').replace(/_/g, ' ');
 };
 
 const ProductionList = ({ productions, selectedId, onSelect }) => {
@@ -36,9 +45,9 @@ const ProductionList = ({ productions, selectedId, onSelect }) => {
                 secondary={
                   <Box component="div" sx={{ display: 'flex', alignItems: 'center', mt: 0.5 }}>
                     <Chip
-                      label={p.current_stage?.replace('_', ' ') || p.status}
+                      label={chipLabel(p)}
                       size="small"
-                      color={getStatusColor(p.current_stage || p.status)}
+                      color={getStatusColor(p.status, p.current_stage)}
                       sx={{ height: 20, fontSize: '0.65rem' }}
                     />
                     <Typography component="span" variant="caption" sx={{ ml: 1 }}>

@@ -5,6 +5,11 @@ Batch Image, FilmCrew / MusicVideo / VideoGen keyframes, chat — should call
 ``render_character_still`` (or ``render_character_stills``) instead of inventing
 its own Comfy/offline + strength + trigger logic.
 
+**Contract:** pass a raw *scene* prompt plus ``subject_ids`` (or ``subjects``).
+This module owns identity lock (``compose_identity_core``), LoRA load, and
+family routing (Z-Image offline vs Comfy SDXL/FLUX). Callers must not pre-apply
+``subjects_to_lock`` / ``apply_lock`` unless they also skip subjects here.
+
 I2V (Wan/Cog) does NOT apply character LoRAs; identity is baked into the still
 this module produces, then animated.
 """
@@ -27,18 +32,40 @@ CharacterSource = Literal[
 
 
 def _subjects_from_ids(subject_ids: Sequence[int] | None) -> list:
+    """Load Subjects by id. Safe from daemon threads / Celery (opens app_context)."""
     if not subject_ids:
         return []
     from backend.models import db, Subject
-    out = []
-    for sid in subject_ids:
-        try:
-            s = db.session.get(Subject, int(sid))
-        except Exception:
-            s = None
-        if s is not None:
-            out.append(s)
-    return out
+
+    def _load() -> list:
+        out = []
+        for sid in subject_ids:
+            try:
+                s = db.session.get(Subject, int(sid))
+            except Exception as e:
+                log.warning("subject_ids resolve failed for %s: %s", sid, e)
+                s = None
+            if s is not None:
+                out.append(s)
+        return out
+
+    try:
+        from flask import has_app_context
+        if has_app_context():
+            return _load()
+    except Exception:
+        pass
+    try:
+        from backend.app import get_or_create_app
+        app = get_or_create_app()
+        with app.app_context():
+            try:
+                return _load()
+            finally:
+                db.session.remove()
+    except Exception as e:
+        log.warning("_subjects_from_ids app_context failed: %s", e)
+        return []
 
 
 def _loras_and_lock(
@@ -119,6 +146,23 @@ def render_character_still(
         # Explicit paths only when caller forces adapters without subject lock.
         paths = [p.strip() for p in lora_paths if (p or "").strip()]
 
+    # Cast was requested but nothing resolved — never silently render generic T2I.
+    cast_requested = bool(subject_ids) or bool(lora_paths) or bool(subjects)
+    if apply_subject_loras and cast_requested and not paths:
+        return StillResult(
+            success=False,
+            error=(
+                "Cast identity failed: no LoRA paths resolved from subject_ids/paths "
+                "(check train status, app context, and lora_path on the subject)."
+            ),
+            prompt_used=base,
+            metadata={
+                "source": source,
+                "subject_ids": list(subject_ids or []),
+                "loras": list(lora_paths or []),
+            },
+        )
+
     final_prompt = apply_lock(base, lock) if lock else base
     if not final_prompt:
         return StillResult(success=False, error="Empty prompt after sanitize", metadata={"source": source})
@@ -130,28 +174,47 @@ def render_character_still(
         "comfy_model_tag": None,
         "base_model_id": "zimage-turbo",
     }
+    path_route: dict[str, Any] | None = None
     if paths:
         try:
-            route = resolve_inference_for_loras(list(paths))
+            path_route = resolve_inference_for_loras(list(paths))
+            route = path_route
         except Exception as e:
-            return StillResult(
-                success=False,
-                error=f"LoRA family resolve failed: {e}",
-                prompt_used=final_prompt,
-                metadata={"source": source, "loras": paths},
-            )
-    elif subjs:
-        # No LoRA (base sheet): route by first subject's train/inference base.
+            if not subjs:
+                return StillResult(
+                    success=False,
+                    error=f"LoRA family resolve failed: {e}",
+                    prompt_used=final_prompt,
+                    metadata={"source": source, "loras": paths},
+                )
+    # Explicit train base on the subject wins (fixes missing LoRA sidecar → false
+    # sdxl-legacy when the character was trained on Z-Image).
+    if subjs:
         try:
-            base_id = subject_base_model_id(subjs[0])
-            profile = get_profile(base_id) or {}
-            route = {
-                "family": profile.get("family") or "zimage",
-                "inference_engine": profile.get("inference_engine") or "offline",
-                "offline_model_key": profile.get("offline_model_key") or "zimage-turbo",
-                "comfy_model_tag": profile.get("comfy_model_tag"),
-                "base_model_id": profile.get("id") or base_id,
-            }
+            raw = getattr(subjs[0], "training_settings_json", None) or {}
+            explicit = None
+            if isinstance(raw, dict):
+                explicit = raw.get("base_model_id") or raw.get("base_model")
+            if explicit:
+                profile = get_profile(str(explicit)) or {}
+                if profile:
+                    route = {
+                        "family": profile.get("family") or "zimage",
+                        "inference_engine": profile.get("inference_engine") or "offline",
+                        "offline_model_key": profile.get("offline_model_key") or "zimage-turbo",
+                        "comfy_model_tag": profile.get("comfy_model_tag"),
+                        "base_model_id": profile.get("id") or explicit,
+                    }
+            elif not path_route:
+                base_id = subject_base_model_id(subjs[0])
+                profile = get_profile(base_id) or {}
+                route = {
+                    "family": profile.get("family") or "zimage",
+                    "inference_engine": profile.get("inference_engine") or "offline",
+                    "offline_model_key": profile.get("offline_model_key") or "zimage-turbo",
+                    "comfy_model_tag": profile.get("comfy_model_tag"),
+                    "base_model_id": profile.get("id") or base_id,
+                }
         except Exception:
             pass
 

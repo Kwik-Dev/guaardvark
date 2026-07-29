@@ -38,15 +38,15 @@ BATES_PREFIXES = {
 
 
 def _today_stamp() -> str:
-    """MM-DD-YYYY format for the Bates stamp."""
-    return datetime.now().strftime("%m-%d-%Y")
+    """MM-DD-YYYY_HHMMSS format for the timestamped Bates stamp."""
+    return datetime.now().strftime("%m-%d-%Y_%H%M%S")
 
 
 def _next_sequence(directory: Path, prefix: str, date_stamp: str) -> int:
-    """Scan directory to find the next available sequence number for today."""
-    pattern = re.compile(rf"^{re.escape(prefix)}_{re.escape(date_stamp)}_(\d{{3}})")
+    """Scan directory to find the next available sequence number."""
+    pattern = re.compile(rf"^{re.escape(prefix)}_.*_(\d{{3}})")
     max_seq = 0
-    if directory.exists():
+    if directory and directory.exists():
         for entry in directory.iterdir():
             match = pattern.match(entry.name)
             if match:

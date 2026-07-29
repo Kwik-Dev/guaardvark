@@ -239,8 +239,27 @@ def _plugin_status(plugin_id: str):
 
 
 def _is_running(plugin_id: str) -> bool:
+    """True if this process thinks the plugin is RUNNING, or the service health
+    endpoint responds (another process may have started it)."""
     from backend.plugins.plugin_base import PluginStatus
-    return _plugin_status(plugin_id) == PluginStatus.RUNNING
+    if _plugin_status(plugin_id) == PluginStatus.RUNNING:
+        return True
+    try:
+        pm = _plugin_manager()
+        meta = pm.registry.get_plugin(plugin_id)
+        if meta and getattr(meta, "type", None) == "service":
+            if pm._check_service_running(meta):
+                # Align local status so subsequent checks stay consistent.
+                try:
+                    pm._plugin_status[plugin_id] = PluginStatus.RUNNING
+                    if not getattr(meta.config, "enabled", False) and pm.is_effectively_enabled(plugin_id):
+                        meta.config.enabled = True
+                except Exception:
+                    pass
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _count_active_video_render_jobs(max_age_s: float = 1800.0) -> int:
@@ -406,6 +425,11 @@ def _try_start_plugin(
 ) -> tuple[bool, Optional[str]]:
     pm = _plugin_manager()
 
+    # Live process (health) counts as running even if this worker's memory is stale
+    # or user_enabled flipped after another process started the service.
+    if _is_running(plugin_id):
+        return True, "already running"
+
     # Explicit-disable veto: if the operator has *explicitly* turned this plugin
     # off (a persisted user_enabled=False, as opposed to merely "never toggled"),
     # the auto-orchestrator must never enable or start it on nav/stage paths —
@@ -421,6 +445,15 @@ def _try_start_plugin(
                 "(user_enabled=False, not persisted)",
                 plugin_id,
             )
+    except Exception:
+        pass
+
+    # Always re-sync in-memory enabled from disk before start decisions.
+    try:
+        if pm.is_effectively_enabled(plugin_id):
+            meta = pm.registry.get_plugin(plugin_id)
+            if meta is not None:
+                meta.config.enabled = True
     except Exception:
         pass
 
@@ -446,9 +479,6 @@ def _try_start_plugin(
                 plugin_id,
                 ", job_critical" if job_critical else "",
             )
-
-    if _is_running(plugin_id):
-        return True, "already running"
 
     last_detail = "unknown error"
     for attempt in range(PLUGIN_START_MAX_RETRIES):

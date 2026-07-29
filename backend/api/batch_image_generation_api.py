@@ -126,25 +126,64 @@ def _validate_csv_upload(file):
     return True, "Valid"
 
 def _apply_character_casting(data: Dict[str, Any], params: Dict[str, Any]) -> None:
-    """Resolve `subject_ids` from the request into LoRA paths + a trigger token,
-    written into params as `loras` / `trigger_word`. Only trained subjects (those
-    with a lora_path) contribute. No-op when nothing is cast."""
+    """Resolve cast `subject_ids` for batch stills.
+
+    Trained subjects (with ``lora_path``) are stored as ``subject_ids`` so
+    ``render_character_still`` can apply identity core (trigger + class + marks)
+    and family routing. Also keeps ``loras`` for diagnostics / legacy.
+    Raises ValueError if every selected id is untrained or missing.
+    """
     subject_ids = data.get("subject_ids") or []
     if not subject_ids:
         return
-    try:
-        from backend.models import Subject, db
-        loras, triggers = [], []
-        for sid in subject_ids:
-            s = db.session.get(Subject, int(sid))
-            if s and s.lora_path:
-                loras.append(s.lora_path)
-                triggers.append((s.trigger_word or s.name or "").strip())
-        if loras:
-            params["loras"] = loras
-            params["trigger_word"] = ", ".join(t for t in triggers if t)
-    except Exception as e:
-        logger.warning(f"Character casting resolution failed (ignoring): {e}")
+    from backend.models import Subject, db
+
+    trained_ids: list[int] = []
+    loras: list[str] = []
+    untrained: list[str] = []
+    missing: list[str] = []
+    for raw in subject_ids:
+        try:
+            sid = int(raw)
+        except (TypeError, ValueError):
+            missing.append(str(raw))
+            continue
+        try:
+            s = db.session.get(Subject, sid)
+        except Exception:
+            s = None
+        if s is None:
+            missing.append(str(sid))
+            continue
+        if not getattr(s, "lora_path", None):
+            untrained.append(getattr(s, "name", None) or str(sid))
+            continue
+        trained_ids.append(sid)
+        loras.append(s.lora_path)
+
+    if not trained_ids:
+        parts = []
+        if untrained:
+            parts.append(
+                "not trained (no LoRA): " + ", ".join(untrained)
+            )
+        if missing:
+            parts.append("not found: " + ", ".join(missing))
+        raise ValueError(
+            "Character cast failed — " + ("; ".join(parts) or "no valid subject_ids")
+        )
+
+    params["subject_ids"] = trained_ids
+    params["loras"] = loras
+    if untrained or missing:
+        # Partial cast: proceed with trained only, surface warning via params.
+        warn = []
+        if untrained:
+            warn.append(f"skipped untrained: {', '.join(untrained)}")
+        if missing:
+            warn.append(f"skipped missing: {', '.join(missing)}")
+        params.setdefault("_cast_warnings", []).extend(warn)
+        logger.warning("Character casting partial: %s", "; ".join(warn))
 
 
 def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -167,6 +206,8 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     params['preserve_order'] = bool(data.get('preserve_order', True))
     params['generate_thumbnails'] = bool(data.get('generate_thumbnails', True))
     params['save_metadata'] = bool(data.get('save_metadata', True))
+    if 'ui_config' in data:
+        params['ui_config'] = data['ui_config']
 
     # Model selection — validate against the canonical catalog (single source of
     # truth) so this can never drift from offline_image_generator.available_models.
@@ -942,9 +983,15 @@ def generate_from_prompts():
         # Parse generation parameters
         params, validation_info = _parse_generation_params(data)
 
-        # Character casting: resolve selected subject_ids -> trained LoRA paths
-        # + trigger word, so the chosen character actually renders.
-        _apply_character_casting(data, params)
+        # Character casting: subject_ids → identity core via render_character_still
+        try:
+            _apply_character_casting(data, params)
+        except ValueError as e:
+            return error_response(str(e), 400)
+
+        cast_warnings = params.pop("_cast_warnings", None) or []
+        if cast_warnings:
+            validation_info.setdefault("warnings", []).extend(cast_warnings)
 
         # Start batch generation
         batch_id = start_batch_from_prompts(validated_prompts, **params)
@@ -953,7 +1000,7 @@ def generate_from_prompts():
             "batch_id": batch_id,
             "message": "Batch generation started",
             "prompt_count": len(validated_prompts),
-            "parameters": params
+            "parameters": {k: v for k, v in params.items() if not str(k).startswith("_")},
         }
         
         # Include validation warnings if any
@@ -966,6 +1013,9 @@ def generate_from_prompts():
 
         return success_response(response_data, status_code=201)
 
+    except ValueError as e:
+        logger.warning(f"Invalid batch image request: {e}")
+        return error_response(str(e), 400)
     except Exception as e:
         logger.error(f"Error starting prompts batch generation: {e}")
         return error_response(str(e), 500)
@@ -1045,6 +1095,7 @@ def get_batch_generation_status(batch_id: str):
             "estimated_time_remaining": status.estimated_time_remaining,
             "error": status.error,
             "display_name": getattr(status, "display_name", None) or status.batch_id,
+            "retry_data": getattr(status, "retry_data", None),
             "progress_percentage": int((status.completed_images / status.total_images) * 100) if status.total_images > 0 else 0
         }
 
@@ -1138,12 +1189,15 @@ def list_batch_generations():
             try:
                 batch_data = {
                     "batch_id": batch.batch_id,
+                    "display_name": getattr(batch, "display_name", None) or batch.batch_id,
                     "status": batch.status,
                     "total_images": batch.total_images,
                     "completed_images": batch.completed_images,
                     "failed_images": batch.failed_images,
                     "start_time": batch.start_time.isoformat() if batch.start_time else None,
                     "end_time": batch.end_time.isoformat() if batch.end_time else None,
+                    "retry_data": getattr(batch, "retry_data", None),
+                    "can_retry": bool(getattr(batch, "retry_data", None)),
                     "progress_percentage": int((batch.completed_images / batch.total_images) * 100) if batch.total_images > 0 else 0
                 }
 

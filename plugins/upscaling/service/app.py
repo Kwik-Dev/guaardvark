@@ -274,6 +274,11 @@ def _run_video_job(
         outscale = scale if scale else float(model_scale)
         out_w = int(in_w * outscale)
         out_h = int(in_h * outscale)
+        # NVENC / H.264 require even dimensions
+        if out_w % 2:
+            out_w += 1
+        if out_h % 2:
+            out_h += 1
 
         tile_size = 400
         if _config.max_tile_size != "auto":

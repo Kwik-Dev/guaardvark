@@ -618,8 +618,17 @@ class PluginManager:
         if not metadata:
             return {'success': False, 'error': f'Plugin not found: {plugin_id}'}
 
-        if not metadata.config.enabled:
-            return {'success': False, 'error': 'Plugin is disabled. Enable it first.'}
+        # Re-sync in-memory enable flag from disk/user prefs. Celery and the API
+        # process do not share memory — UI enable must not leave workers stuck
+        # with metadata.config.enabled=False while disk says True.
+        try:
+            if self.is_effectively_enabled(plugin_id):
+                metadata.config.enabled = True
+            elif not metadata.config.enabled:
+                return {'success': False, 'error': 'Plugin is disabled. Enable it first.'}
+        except Exception:
+            if not metadata.config.enabled:
+                return {'success': False, 'error': 'Plugin is disabled. Enable it first.'}
 
         if self._plugin_status.get(plugin_id) == PluginStatus.RUNNING:
             self._broadcast_plugins_status(f"start:{plugin_id}:already_running")

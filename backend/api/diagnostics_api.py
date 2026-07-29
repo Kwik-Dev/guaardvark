@@ -275,16 +275,23 @@ def get_system_metrics():
         "cpu_percent": None,
         "cpu_temp": None,
         "cpu_mem": None,
+        "cpu_mem_used_gb": None,
+        "cpu_mem_total_gb": None,
         "gpu_percent": None,
         "gpu_temp": None,
         "gpu_mem": None,
+        "gpu_mem_used_gb": None,
+        "gpu_mem_total_gb": None,
         "gpu_tools_available": None,
         "gpu_check_error": None,
     }
     try:
         if psutil:
             metrics["cpu_percent"] = psutil.cpu_percent(interval=None)
-            metrics["cpu_mem"] = psutil.virtual_memory().percent
+            vmem = psutil.virtual_memory()
+            metrics["cpu_mem"] = vmem.percent
+            metrics["cpu_mem_used_gb"] = round(vmem.used / (1024 ** 3), 2)
+            metrics["cpu_mem_total_gb"] = round(vmem.total / (1024 ** 3), 2)
             try:
                 temps = psutil.sensors_temperatures()
                 if temps:
@@ -321,10 +328,12 @@ def get_system_metrics():
                 if len(parts) >= 4:
                     metrics["gpu_temp"] = float(parts[0])
                     metrics["gpu_percent"] = float(parts[1])
-                    used = float(parts[2])
-                    total = float(parts[3])
-                    if total > 0:
-                        metrics["gpu_mem"] = round((used / total) * 100, 2)
+                    used_mb = float(parts[2])
+                    total_mb = float(parts[3])
+                    metrics["gpu_mem_used_gb"] = round(used_mb / 1024.0, 2)
+                    metrics["gpu_mem_total_gb"] = round(total_mb / 1024.0, 2)
+                    if total_mb > 0:
+                        metrics["gpu_mem"] = round((used_mb / total_mb) * 100, 2)
         except Exception as e_gpu:
             gpu_error = f"nvidia-smi error: {e_gpu}"
             logger.debug(f"GPU metrics unavailable via nvidia-smi: {e_gpu}")

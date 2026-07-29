@@ -55,10 +55,14 @@ export const OUTPUT_QUALITY_TIERS = {
 };
 
 export const KEYFRAME_MODEL_OPTIONS = {
-  "flux-schnell": { label: "FLUX.1-schnell", description: "Fast, beautiful stills (default)" },
-  "flux-dev-lora": { label: "FLUX-dev + LoRA", description: "Best identity lock for trained characters" },
+  "from-lora": {
+    label: "Auto (character LoRA base)",
+    description: "Z-Image / SDXL / FLUX from the cast member’s training base",
+  },
+  "flux-schnell": { label: "FLUX.1-schnell", description: "Fast, beautiful stills (default without cast)" },
+  "flux-dev-lora": { label: "FLUX-dev + LoRA", description: "Comfy FLUX stills (non-cast or explicit)" },
   sdxl: { label: "SDXL", description: "High-fidelity stills without LoRA" },
-  "sdxl-lora": { label: "SDXL + LoRA", description: "Legacy identity lock via character LoRAs" },
+  "sdxl-lora": { label: "SDXL + LoRA", description: "Legacy SDXL character path" },
 };
 
 export const DEFAULT_KEYFRAME_MODEL = "flux-schnell";

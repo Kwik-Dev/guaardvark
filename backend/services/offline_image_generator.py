@@ -10,6 +10,10 @@ from datetime import datetime
 import tempfile
 import threading
 
+# Prevent PyTorch VRAM heap fragmentation
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -28,6 +32,11 @@ try:
 except ImportError as e:
     diffusion_available = False
     logger.warning(f"Diffusion dependencies not available: {e}")
+
+try:
+    from diffusers import FlowMatchEulerDiscreteScheduler
+except Exception:
+    FlowMatchEulerDiscreteScheduler = None
 
 # Z-Image (Tongyi-MAI) ships in diffusers >= 0.38. Import separately so an older
 # diffusers that lacks ZImagePipeline doesn't disable the whole diffusion stack.
@@ -67,12 +76,12 @@ class ImageGenerationRequest:
     prompt: str
     negative_prompt: str = ""
     # Canvas / sampling: prefer resolve_stills_defaults() at call sites. Defaults
-    # here are modern (1024 + zimage-safe steps/CFG) so chat/agent paths that
+    # here are modern (1024 + Z-Image HF recipe 9/0) so chat/agent paths that
     # omit knobs do not inherit SD-era 512/20/7.5.
     width: int = 1024
     height: int = 1024
-    num_inference_steps: int = 8
-    guidance_scale: float = 1.0
+    num_inference_steps: int = 9
+    guidance_scale: float = 0.0
     style: str = "realistic"
     seed: Optional[int] = None
     model: str = "auto"
@@ -167,7 +176,7 @@ class OfflineImageGenerator:
         # UI metadata for the visible models (label/description/recommended/order).
         # Drives the centralized dropdown via get_available_models().
         self.model_meta = {
-            "zimage-turbo": {"label": "Z-Image Turbo (Best daily)", "description": "Strong prompt adherence + text, fast (~8 steps). Default daily driver.", "recommended": True, "order": 0},
+            "zimage-turbo": {"label": "Z-Image Turbo (Best daily)", "description": "Strong prompt adherence + text, fast (~9 steps / CFG 0). Default daily driver.", "recommended": True, "order": 0},
             "flux-dev": {"label": "FLUX.1 Dev (Max quality)", "description": "Highest ceiling stills via ComfyUI (~28 steps, FluxGuidance). Slower; needs Comfy + flux1-dev weights.", "recommended": False, "order": 1, "engine": "comfy"},
             "krea2-turbo": {"label": "Krea 2 Turbo", "description": "12B aesthetic-first model, native 2K, 8 steps CFG-free. Fast inference.", "recommended": False, "order": 2},
             "krea2-raw": {"label": "Krea 2 Raw", "description": "Base 12B checkpoint — less post-trained than Turbo (~52 steps, CFG 3.5). Use for mature/creative prompts or LoRA base.", "recommended": False, "order": 3},
@@ -296,7 +305,9 @@ class OfflineImageGenerator:
             except Exception as e:
                 logger.warning(f"CUDA is available but not usable (e.g., PyTorch compatibility issue), falling back to CPU: {e}")
         
-        self._generation_lock = threading.Lock()
+        self._generation_lock = threading.RLock()
+        # One-shot / once-per-process: avoid WARNING spam when xformers is absent.
+        self._xformers_warned = False
 
         self._compile_failed = False
         self._compile_unet_orig = None
@@ -474,37 +485,38 @@ class OfflineImageGenerator:
         return self._FAMILY_RAM_GB.get(self._model_family(model_id), 6.0)
 
     def _ensure_vram_for_pipeline(self, model_id: str) -> None:
-        """Make room on the card BEFORE the pipeline load, not after it OOMs.
+        """Make room on the card BEFORE the pipeline load.
 
-        Two layers, both best-effort (never raises — a wrong guess here should
-        degrade to the old behavior, not block generation):
-          1. If free VRAM minus a safety margin can't fit this family's real
-             footprint, evict resident Ollama models via the canonical
-             gpu_resource_policy reclaim. This is cross-process — it works even
-             though nothing registers ollama:* slots in the orchestrator registry,
-             which is why registry-based eviction alone couldn't save us.
-          2. Register the slot with the orchestrator using the real estimate so
-             its registry eviction + budget math operate on truth, not 3500.
+        Evicts Ollama, books ``sd:pipeline`` with hard_fit (refuse if still short).
+        Raises RuntimeError when the orchestrator refuses admit — callers should
+        surface that as a busy/retry, not CUDA OOM thrash.
         """
         if self._pipeline is not None and self._current_model == model_id:
             return  # already resident — its VRAM is already spent
         estimate_mb = self._vram_estimate_mb(model_id)
-        try:
-            if self._device == "cuda":
-                free_b, total_b = torch.cuda.mem_get_info()
-                free_mb, total_mb = free_b // (1024 * 1024), total_b // (1024 * 1024)
-                margin_mb = max(1024, int(total_mb * 0.10))
-                if free_mb - margin_mb < estimate_mb:
-                    from backend.services.gpu_resource_policy import evict_ollama_models
-                    logger.info(
-                        f"VRAM admission: {free_mb}MB free won't fit {estimate_mb}MB "
-                        f"(+{margin_mb}MB margin) for {model_id} — evicting Ollama models"
-                    )
-                    evict_ollama_models()
-            from backend.services.gpu_memory_orchestrator import get_orchestrator
-            get_orchestrator().request_model("sd:pipeline", vram_estimate_mb=estimate_mb, priority=85)
-        except Exception as e:
-            logger.warning(f"VRAM admission check failed (non-critical, proceeding): {e}")
+        if self._device == "cuda" and torch.cuda.is_available():
+            if self._pipeline is None:
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+            free_b, total_b = torch.cuda.mem_get_info()
+            free_mb, total_mb = free_b // (1024 * 1024), total_b // (1024 * 1024)
+            margin_mb = max(1024, int(total_mb * 0.10))
+            if free_mb - margin_mb < estimate_mb:
+                from backend.services.gpu_resource_policy import evict_ollama_models
+                logger.info(
+                    f"VRAM admission: {free_mb}MB free won't fit {estimate_mb}MB "
+                    f"(+{margin_mb}MB margin) for {model_id} — evicting Ollama models"
+                )
+                evict_ollama_models()
+        from backend.services.gpu_memory_orchestrator import get_orchestrator
+        # hard_fit=True: no "admit anyway" when free stays ~hundreds of MB
+        get_orchestrator().request_model(
+            "sd:pipeline",
+            vram_estimate_mb=estimate_mb,
+            priority=85,
+            hard_fit=True,
+        )
 
     def _has_text_intent(self, prompt: str) -> bool:
         """True if the prompt asks for on-image text — bypass enhancement to keep
@@ -589,6 +601,57 @@ class OfflineImageGenerator:
                 return key
         return None
 
+    def _soft_clamp_family_sampling(self, request: ImageGenerationRequest, family: str) -> None:
+        """Clamp steps/guidance into a safe family envelope without clobbering user presets.
+
+        Used on the primary generate path so Batch UI High / slider values actually run.
+        Hard defaults live in ``_apply_family_sampling`` (fallback / family switch only).
+        """
+        if family == "zimage":
+            # Official HF: 9 steps / guidance 0. Soft envelope matches settings_validator.
+            steps = int(request.num_inference_steps or 0)
+            if steps < 4 or steps > 30:
+                request.num_inference_steps = 9
+            else:
+                request.num_inference_steps = steps
+            try:
+                g = float(request.guidance_scale)
+            except (TypeError, ValueError):
+                g = -1.0
+            if g < 0.0 or g > 2.0:
+                request.guidance_scale = 0.0
+            else:
+                request.guidance_scale = g
+        elif family == "krea2":
+            if self._krea2_variant(request.model or "") == "raw":
+                steps = int(request.num_inference_steps or 0)
+                if steps < 20 or steps > 80:
+                    request.num_inference_steps = 52
+                else:
+                    request.num_inference_steps = steps
+                try:
+                    g = float(request.guidance_scale)
+                except (TypeError, ValueError):
+                    g = -1.0
+                if g < 1.0 or g > 7.0:
+                    request.guidance_scale = 3.5
+                else:
+                    request.guidance_scale = g
+            else:
+                steps = int(request.num_inference_steps or 0)
+                if steps < 4 or steps > 20:
+                    request.num_inference_steps = 8
+                else:
+                    request.num_inference_steps = steps
+                try:
+                    g = float(request.guidance_scale)
+                except (TypeError, ValueError):
+                    g = -1.0
+                if g < 0.0 or g > 1.0:
+                    request.guidance_scale = 0.0
+                else:
+                    request.guidance_scale = g
+
     def _apply_family_sampling(self, request: ImageGenerationRequest, family: str) -> None:
         """Force family-appropriate steps/guidance after model switch or fallback."""
         if family == "krea2":
@@ -599,8 +662,9 @@ class OfflineImageGenerator:
                 request.num_inference_steps = 8
                 request.guidance_scale = 0.0
         elif family == "zimage":
-            request.num_inference_steps = 8
-            request.guidance_scale = 1.0
+            # Official HF recipe (9 steps → 8 DiT forwards, CFG distilled → 0.0)
+            request.num_inference_steps = 9
+            request.guidance_scale = 0.0
         elif family == "sdxl":
             if request.guidance_scale > 9.0:
                 request.guidance_scale = 7.5
@@ -763,15 +827,15 @@ class OfflineImageGenerator:
                 )
 
             # Z-Image / Krea 2 are flow-matching DiTs too large to sit fully resident
-            # alongside other models on a 16 GB card. Krea2 peaks ~14GB with module
-            # offload alone (2026-07-11 OOM) — use sequential (layer-by-layer) on
-            # consumer cards. Z-Image stays on model offload unless forced sequential.
+            # on a 16 GB card. Both use sequential (layer-by-layer) offload by default
+            # on consumer VRAM (≤18GB) so first-pass inference does not OOM and thrash
+            # into a doomed sd-xl fallback. Force sequential still wins when set.
             offload_mode = "full"
             if family in ('zimage', 'krea2') and self._device == "cuda":
                 total_gb = self._cuda_total_vram_gb()
                 use_sequential = (
                     want_sequential
-                    or (family == "krea2" and total_gb > 0 and total_gb <= self._SEQUENTIAL_OFFLOAD_VRAM_GB)
+                    or (total_gb > 0 and total_gb <= self._SEQUENTIAL_OFFLOAD_VRAM_GB)
                 )
                 if use_sequential:
                     try:
@@ -825,7 +889,15 @@ class OfflineImageGenerator:
                     self._pipeline.enable_xformers_memory_efficient_attention()
                     logger.info("Enabled xformers memory efficient attention")
                 except Exception as e:
-                    logger.warning(f"Failed to enable xformers memory efficient attention: {e}")
+                    if not self._xformers_warned:
+                        self._xformers_warned = True
+                        logger.info(
+                            "xformers memory-efficient attention unavailable "
+                            "(using default attention): %s",
+                            e,
+                        )
+                    else:
+                        logger.debug("xformers still unavailable: %s", e)
 
             if hasattr(self._pipeline, "enable_vae_slicing"):
                 self._pipeline.enable_vae_slicing()
@@ -872,6 +944,11 @@ class OfflineImageGenerator:
                 f"Pipeline loaded successfully with model {model_id} "
                 f"(offload={offload_mode})"
             )
+            try:
+                from backend.services.gpu_memory_orchestrator import get_orchestrator
+                get_orchestrator().mark_model_loaded("sd:pipeline")
+            except Exception:
+                pass
             return True
 
         except Exception as e:
@@ -1269,6 +1346,7 @@ Negative Prompt: {negative_prompt}""",
             vram_est = self._vram_estimate_mb(request.model)
 
             try:
+                _sd_pinned = False
                 with gpu_session(JobKind.VIDEO_RENDER, f"gen_{_uuid_local.uuid4().hex[:8]}",
                                  on_busy="raise", evict_ollama=True, free_comfyui=True,
                                  vram_estimate_mb=vram_est, ram_estimate_gb=ram_est,
@@ -1276,24 +1354,27 @@ Negative Prompt: {negative_prompt}""",
                     pass
 
                 family = self._model_family(model_id)
-                is_sdxl = family == 'sdxl'
 
                 # Family-appropriate sampling. Batch UI often validates against the
-                # *requested* model (e.g. zimage-turbo → steps=12, guidance=1.0). If
+                # *requested* model (e.g. zimage-turbo → steps=9, guidance=0.0). If
                 # we later land on SDXL (auto-router, load fallback, text reroute),
                 # those turbo params produce soft/painterly "artwork" instead of photos.
-                if family in ('krea2', 'zimage', 'sdxl'):
-                    if is_sdxl and request.guidance_scale > 9.0:
+                # Turbo/DiT: soft-clamp only so quality presets/sliders are not placebo.
+                # SDXL: hard correct (black-image / turbo-leftover hazards).
+                if family in ('krea2', 'zimage'):
+                    self._soft_clamp_family_sampling(request, family)
+                elif family == 'sdxl':
+                    if request.guidance_scale > 9.0:
                         logger.warning(
                             f"Guidance scale {request.guidance_scale} is too high for SDXL "
                             f"(causes black images). Auto-correcting to 7.5"
                         )
-                    elif is_sdxl and request.guidance_scale < 4.0:
+                    elif request.guidance_scale < 4.0:
                         logger.warning(
                             f"Guidance scale {request.guidance_scale} is too low for SDXL. "
                             f"Auto-correcting to 6.0"
                         )
-                    elif is_sdxl and request.num_inference_steps < 20:
+                    elif request.num_inference_steps < 20:
                         logger.warning(
                             f"Steps {request.num_inference_steps} too low for SDXL "
                             f"(turbo leftovers). Auto-correcting to 25"
@@ -1334,7 +1415,6 @@ Negative Prompt: {negative_prompt}""",
                         )
                         model_id = self.default_model
                         family = self._model_family(model_id)
-                        is_sdxl = family == 'sdxl'
                         self._apply_family_sampling(request, family)
                         self._ensure_vram_for_pipeline(model_id)
                         if not self._load_pipeline(model_id):
@@ -1343,6 +1423,15 @@ Negative Prompt: {negative_prompt}""",
                     else:
                         result.error = f"Failed to load model {request.model} ({model_id})"
                         return result
+
+                # Pin sd:pipeline for the duration of this forward so idle eviction
+                # cannot null scheduler mid-denoise (300s default timeout).
+                try:
+                    from backend.services.gpu_memory_orchestrator import get_orchestrator
+                    get_orchestrator().begin_use("sd:pipeline")
+                    _sd_pinned = True
+                except Exception:
+                    _sd_pinned = False
 
                 # Best-effort VRAM hygiene after successful load for this job.
                 # Helps the chat LLM reload faster on the next turn.
@@ -1462,6 +1551,7 @@ Negative Prompt: {negative_prompt}""",
                 def _call_pipeline(pos_prompt: str, neg_prompt: Optional[str]):
                     """Single forward; raises on OOM / compile failure for recovery."""
                     if family in ('zimage', 'krea2'):
+                        self._ensure_flow_scheduler(family)
                         return self._pipeline(
                             prompt=pos_prompt,
                             negative_prompt=neg_prompt,
@@ -1546,9 +1636,10 @@ Negative Prompt: {negative_prompt}""",
                         # lighter catalog fallback. Avoid recursive generate_image
                         # (generation lock is non-reentrant).
                         failed_label = request.model
+                        prior_offload = self._pipeline_offload_mode
                         logger.error(
                             f"CUDA OOM during inference with {failed_label} "
-                            f"(offload={self._pipeline_offload_mode}): {infer_err}"
+                            f"(offload={prior_offload}): {infer_err}"
                         )
                         try:
                             if torch.cuda.is_available():
@@ -1556,15 +1647,38 @@ Negative Prompt: {negative_prompt}""",
                         except Exception:
                             pass
                         self._unload_pipeline()
+                        try:
+                            if torch.cuda.is_available():
+                                free_b, _ = torch.cuda.mem_get_info()
+                                free_mb = free_b // (1024 * 1024)
+                                if free_mb < 4000:
+                                    logger.error(
+                                        "After OOM unload only %sMB free — refusing "
+                                        "sequential/fallback thrash (wait for GPU or free other jobs)",
+                                        free_mb,
+                                    )
+                                    raise RuntimeError(
+                                        f"GPU still only {free_mb}MB free after OOM unload. "
+                                        f"Wait for other jobs or free VRAM, then retry."
+                                    ) from infer_err
+                        except RuntimeError:
+                            raise
+                        except Exception:
+                            pass
 
                         output = None
                         # Attempt 1: same model with sequential offload if not already.
-                        if family in ('krea2', 'zimage'):
+                        if family in ('krea2', 'zimage') and prior_offload != "sequential":
                             logger.warning(
                                 f"{family} OOM → retrying with sequential CPU offload"
                             )
                             self._force_sequential_offload = True
-                            self._ensure_vram_for_pipeline(model_id)
+                            try:
+                                self._ensure_vram_for_pipeline(model_id)
+                            except RuntimeError as admit_err:
+                                raise RuntimeError(
+                                    f"GPU busy after OOM — cannot reload: {admit_err}"
+                                ) from infer_err
                             if self._load_pipeline(model_id, force_sequential=True):
                                 try:
                                     # Rebuild generator after OOM (device state may be dirty)
@@ -1605,7 +1719,6 @@ Negative Prompt: {negative_prompt}""",
                             request.model = fb_key
                             model_id = self.available_models.get(fb_key, self.default_model)
                             family = self._model_family(model_id)
-                            is_sdxl = family == 'sdxl'
                             self._apply_family_sampling(request, family)
                             if family in ('zimage', 'krea2'):
                                 neg = (
@@ -1622,7 +1735,12 @@ Negative Prompt: {negative_prompt}""",
                                 request.width, request.height, family
                             )
                             result.image_size = (request.width, request.height)
-                            self._ensure_vram_for_pipeline(model_id)
+                            try:
+                                self._ensure_vram_for_pipeline(model_id)
+                            except RuntimeError as admit_err:
+                                raise RuntimeError(
+                                    f"GPU busy — cannot load OOM fallback '{fb_key}': {admit_err}"
+                                ) from infer_err
                             if not self._load_pipeline(model_id):
                                 raise RuntimeError(
                                     f"OOM fallback model '{fb_key}' failed to load"
@@ -1744,6 +1862,12 @@ Negative Prompt: {negative_prompt}""",
                     self._unload_loras()
                 except Exception:
                     pass
+                if _sd_pinned:
+                    try:
+                        from backend.services.gpu_memory_orchestrator import get_orchestrator
+                        get_orchestrator().end_use("sd:pipeline")
+                    except Exception:
+                        pass
                 self._notify_vision_pipeline("stop")
                 if not getattr(request, "keep_pipeline_loaded", False):
                     # Immediately free VRAM — don't wait for the 300s idle timer.
@@ -1853,13 +1977,73 @@ Negative Prompt: {negative_prompt}""",
             logger.debug("unload_loras best-effort: %s", e)
         self._loaded_lora_adapters = []
 
-    def _unload_pipeline(self):
+    def _ensure_flow_scheduler(self, family: str) -> None:
+        """Reattach FlowMatch scheduler if idle eviction nulled it mid-batch.
+
+        Z-Image / Krea2 require FlowMatchEulerDiscreteScheduler. Idle unload used
+        to set pipeline.scheduler = None while __call__ was still running.
+        """
+        if family not in ("zimage", "krea2") or self._pipeline is None:
+            return
+        if getattr(self._pipeline, "scheduler", None) is not None:
+            return
+        if FlowMatchEulerDiscreteScheduler is None:
+            raise RuntimeError(
+                f"{family} pipeline scheduler is None and FlowMatchEulerDiscreteScheduler "
+                "is unavailable — reload the model"
+            )
+        model_id = self._current_model or self.default_model
+        model_path = self._get_model_path(model_id)
+        try:
+            sched = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                str(model_path), subfolder="scheduler"
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not reload scheduler from %s/scheduler (%s); using defaults",
+                model_path,
+                e,
+            )
+            sched = FlowMatchEulerDiscreteScheduler()
+        self._pipeline.scheduler = sched
+        logger.error(
+            "%s pipeline.scheduler was None — reattached %s (likely idle-eviction race)",
+            family,
+            type(sched).__name__,
+        )
+
+    def _unload_pipeline(self, wait: bool = True) -> bool:
         """Fully unload the pipeline and return RAM/VRAM to the pool.
+
         Aggressive host RAM release for heavy offloaded models (Z-Image etc).
         Called after every chat gen (keep=False) and at batch end.
+
+        Args:
+            wait: If True, block on ``_generation_lock`` until free (internal
+                callers already holding the RLock re-enter safely). If False
+                (orchestrator idle eviction), refuse immediately when a
+                generation is in progress so we never null ``scheduler`` under
+                a live ``__call__``.
+
+        Returns:
+            True if unloaded (or already empty), False if refused because busy.
         """
+        acquired = self._generation_lock.acquire(blocking=wait)
+        if not acquired:
+            logger.warning(
+                "Refusing SD pipeline unload: generation lock held "
+                "(would null scheduler mid-denoise)"
+            )
+            return False
+        try:
+            return self._unload_pipeline_unlocked()
+        finally:
+            self._generation_lock.release()
+
+    def _unload_pipeline_unlocked(self) -> bool:
+        """Teardown body; caller must hold ``_generation_lock``."""
         if self._pipeline is None:
-            return
+            return True
 
         try:
             self._unload_loras()
@@ -1943,6 +2127,7 @@ Negative Prompt: {negative_prompt}""",
                 logger.info("SD pipeline unloaded; hooks cleared, gc run, CUDA cache cleared")
         except Exception:
             logger.info("SD pipeline unloaded; hooks cleared, gc run, CUDA cache cleared")
+        return True
 
     def generate_image_from_image(
         self, prompt: str, init_image, strength: float = 0.20,

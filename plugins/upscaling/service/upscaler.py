@@ -46,7 +46,9 @@ def _pre_process(
     precision: str = "bf16",
 ) -> torch.Tensor:
     """Convert HWC uint8 numpy image to NCHW float tensor on device."""
-    tensor = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.0
+    # Copy so frames from ffmpeg/cv2 (often non-writable) are safe for torch.
+    arr = np.array(img, copy=True, dtype=np.uint8)
+    tensor = torch.from_numpy(arr.transpose(2, 0, 1)).float() / 255.0
     tensor = tensor.unsqueeze(0).to(device)
     if precision == "bf16" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         tensor = tensor.bfloat16()

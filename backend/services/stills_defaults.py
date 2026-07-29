@@ -13,9 +13,11 @@ from __future__ import annotations
 from typing import Any
 
 
-# Family sampling + canvas (PoA image gen unification §4)
+# Family sampling + canvas (PoA image gen unification §4).
+# Z-Image Turbo: official HF recipe is num_inference_steps=9 (→ 8 DiT forwards),
+# guidance_scale=0.0 (CFG distilled out).
 _FAMILY_DEFAULTS: dict[str, dict[str, Any]] = {
-    "zimage": {"width": 1024, "height": 1024, "steps": 8, "guidance": 1.0},
+    "zimage": {"width": 1024, "height": 1024, "steps": 9, "guidance": 0.0},
     "krea2-turbo": {"width": 1024, "height": 1024, "steps": 8, "guidance": 0.0},
     "krea2-raw": {"width": 1024, "height": 1024, "steps": 52, "guidance": 3.5},
     "sdxl": {"width": 1024, "height": 1024, "steps": 25, "guidance": 7.0},
@@ -71,10 +73,25 @@ def resolve_stills_defaults(
     family = model_family(model)
     base = dict(_FAMILY_DEFAULTS.get(family) or _FAMILY_DEFAULTS["sd"])
 
+    # Classic "unset" form: all three SD-era placeholders together. Intentional
+    # draft sizes (e.g. 512² with Turbo steps/CFG) must NOT be rewritten.
+    full_legacy_unset = (
+        replace_legacy_sd_markers
+        and family != "sd"
+        and width is not None
+        and height is not None
+        and int(width) == _LEGACY_SIZE
+        and int(height) == _LEGACY_SIZE
+        and steps is not None
+        and int(steps) == _LEGACY_STEPS
+        and guidance is not None
+        and abs(float(guidance) - _LEGACY_GUIDANCE) < 1e-6
+    )
+
     def _pick_size(val: int | None, key: str) -> int:
         if val is None:
             return int(base[key])
-        if replace_legacy_sd_markers and int(val) == _LEGACY_SIZE and family != "sd":
+        if full_legacy_unset and int(val) == _LEGACY_SIZE:
             return int(base[key])
         return int(val)
 
@@ -112,9 +129,9 @@ def family_quality_presets(model: str | None = "auto") -> list[dict[str, Any]]:
     family = model_family(model)
     if family == "zimage":
         return [
-            {"value": "fast", "label": "Fast", "steps": 6, "guidance": 1.0},
-            {"value": "standard", "label": "Standard", "steps": 8, "guidance": 1.0},
-            {"value": "high", "label": "High Quality", "steps": 12, "guidance": 1.0},
+            {"value": "fast", "label": "Fast", "steps": 6, "guidance": 0.0},
+            {"value": "standard", "label": "Standard", "steps": 9, "guidance": 0.0},
+            {"value": "high", "label": "High Quality", "steps": 9, "guidance": 0.0},
         ]
     if family == "krea2-turbo":
         return [

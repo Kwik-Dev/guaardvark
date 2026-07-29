@@ -5,7 +5,9 @@ import {
   Paper,
   Divider,
   CircularProgress,
-  Alert
+  Alert,
+  Button,
+  Stack,
 } from '@mui/material';
 import StageProgress from './StageProgress';
 import CastingPanel from './CastingPanel';
@@ -18,7 +20,11 @@ const ProductionDetail = ({
   approving,
   onCastingConfirmed,
   onRegenerateShot,
-  onApproveStoryboard
+  onApproveStoryboard,
+  onRetry,
+  onDelete,
+  retrying,
+  deleting,
 }) => {
   if (loading) {
     return (
@@ -46,30 +52,81 @@ const ProductionDetail = ({
     );
   }
 
+  const isFailed = Boolean(production.status?.startsWith('failed'));
+  const errText =
+    production.error_blob?.error
+    || production.error_blob?.message
+    || (typeof production.error_blob === 'string' ? production.error_blob : null)
+    || (isFailed ? `Pipeline failed at stage: ${production.current_stage}` : null);
+
   return (
     <Box sx={{ p: 3, height: '100%', overflowY: 'auto' }}>
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-      <Box sx={{ mb: 3 }}>
-        <Typography variant="h4" gutterBottom>{production.name}</Typography>
-        <Typography variant="body2" color="text.secondary">
-          ID: {production.id}
-          {production.created_at ? ` | Created: ${new Date(production.created_at).toLocaleString()}` : ''}
-        </Typography>
+      <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
+        <Box>
+          <Typography variant="h4" gutterBottom>{production.name}</Typography>
+          <Typography variant="body2" color="text.secondary">
+            ID: {production.id}
+            {production.created_at ? ` | Created: ${new Date(production.created_at).toLocaleString()}` : ''}
+          </Typography>
+        </Box>
+        <Stack direction="row" spacing={1}>
+          <Button
+            size="small"
+            variant="outlined"
+            color="error"
+            disabled={deleting}
+            onClick={() => onDelete?.(production.id)}
+          >
+            {deleting ? 'Deleting…' : 'Delete'}
+          </Button>
+        </Stack>
       </Box>
+
+      {isFailed && (
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          action={
+            <Button color="inherit" size="small" disabled={retrying} onClick={() => onRetry?.(production.id)}>
+              {retrying ? 'Retrying…' : 'Retry stage'}
+            </Button>
+          }
+        >
+          <Typography variant="subtitle2" gutterBottom>Production failed</Typography>
+          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+            {errText}
+          </Typography>
+        </Alert>
+      )}
+
+      {!isFailed && production.current_stage === 'screenwriting' && production.status === 'screenwriting' && (
+        <Alert
+          severity="info"
+          sx={{ mb: 2 }}
+          action={
+            <Button color="inherit" size="small" disabled={retrying} onClick={() => onRetry?.(production.id)}>
+              {retrying ? '…' : 'Re-dispatch'}
+            </Button>
+          }
+        >
+          Screenwriting in progress (or stuck). Use Re-dispatch if nothing happens after a few minutes.
+        </Alert>
+      )}
 
       <Paper sx={{ p: 2, mb: 3 }}>
         <Typography variant="h6" gutterBottom>Pipeline Progress</Typography>
-        <StageProgress 
-          currentStage={production.current_stage} 
-          status={production.status} 
+        <StageProgress
+          currentStage={production.current_stage}
+          status={production.status}
           errorBlob={production.error_blob}
         />
       </Paper>
 
       {production.current_stage === 'casting' && (
         <Paper sx={{ p: 2, mb: 3 }}>
-          <CastingPanel 
-            productionId={production.id} 
+          <CastingPanel
+            productionId={production.id}
             onCastingConfirmed={onCastingConfirmed}
           />
         </Paper>

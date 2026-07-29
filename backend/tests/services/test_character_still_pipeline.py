@@ -29,7 +29,12 @@ def test_render_injects_trigger_and_uses_offline_for_zimage(tmp_path, zimage_rou
         lora_path = str(tmp_path / "char.safetensors")
         trigger_word = "hero_tok"
         name = "Hero"
-        bible = "teal highlights"
+        bible = "long invented paragraph about teal highlights"  # must NOT dump full bible
+        training_settings_json = {
+            "base_model_id": "zimage-turbo",
+            "class_token": "man",
+            "bible_identity_marks": "teal highlights, cowl",
+        }
 
     (tmp_path / "char.safetensors").write_bytes(b"x" * 200)
 
@@ -54,7 +59,7 @@ def test_render_injects_trigger_and_uses_offline_for_zimage(tmp_path, zimage_rou
         still = render_character_still(
             "neon alley at night",
             subjects=[Subj()],
-            include_bible=True,
+            include_bible=False,
             source="cast",
             output_path=str(tmp_path / "dest.png"),
             width=512,
@@ -63,7 +68,10 @@ def test_render_injects_trigger_and_uses_offline_for_zimage(tmp_path, zimage_rou
 
         assert still.success is True
         assert "hero_tok" in still.prompt_used
+        assert "a photo of hero_tok" in still.prompt_used
+        assert "man" in still.prompt_used
         assert "teal highlights" in still.prompt_used
+        assert "long invented paragraph" not in still.prompt_used
         assert still.metadata.get("family") == "zimage"
         assert still.metadata.get("engine") == "offline"
         assert abs(still.metadata.get("lora_strength") - 0.9) < 1e-6
@@ -103,3 +111,15 @@ def test_render_without_lora_returns_still_result_type():
         still = render_character_still("a cat", source="chat", apply_subject_loras=False)
         assert isinstance(still, StillResult)
         assert still.success is False
+
+
+def test_cast_requested_but_empty_paths_fails_loudly():
+    """Do not silently render generic T2I when cast was requested but nothing resolved."""
+    still = render_character_still(
+        "batman in the rain",
+        subject_ids=[999999],  # missing — resolve yields no paths
+        lora_paths=[],
+        source="batch",
+    )
+    assert still.success is False
+    assert "no LoRA" in (still.error or "").lower() or "cast" in (still.error or "").lower()

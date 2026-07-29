@@ -24,13 +24,16 @@ def test_resolve_lora_strength_override_wins():
     assert resolve_lora_strength("sdxl", 1.2) == 1.2
 
 
-def test_apply_lock_and_subjects_lora_omits_full_bible():
+def test_apply_lock_and_subjects_lora_includes_bible_when_requested():
     class S:
         def __init__(self):
             self.lora_path = "/tmp/x.safetensors"
             self.trigger_word = "tok"
             self.name = "Hero"
-            self.bible = "long invented paragraph about hazel eyes and auburn hair"
+            self.bible = (
+                "Hero: black armored plating with rivets on chest and shoulders, "
+                "pointed cowl, white LED eyes, utility belt with pouches, black bat emblem"
+            )
             self.training_settings_json = {
                 "class_token": "man",
                 "bible_identity_marks": "shaved head, sunglasses",
@@ -41,7 +44,29 @@ def test_apply_lock_and_subjects_lora_omits_full_bible():
     assert "tok" in lock
     assert "a photo of tok" in lock
     assert "shaved head" in lock
-    # Full bible must not fight the LoRA at render time
-    assert "auburn hair" not in lock
-    assert "long invented paragraph" not in lock
+    # Vision bible must reach Batch/Chat/Video so costume detail sticks
+    assert "armored plating" in lock
+    assert "white LED eyes" in lock
+    assert "Hero:" not in lock  # name label stripped
     assert apply_lock("neon alley", lock).startswith("a photo of tok")
+
+
+def test_subjects_to_lock_can_skip_bible():
+    class S:
+        def __init__(self):
+            self.lora_path = "/tmp/x.safetensors"
+            self.trigger_word = "tok"
+            self.name = "Hero"
+            self.bible = "armored plating with rivets"
+            self.training_settings_json = {"class_token": "man", "bible_identity_marks": "cowl"}
+
+    _, lock = subjects_to_lock([S()], include_bible=False)
+    assert "cowl" in lock
+    assert "armored plating" not in lock
+
+
+def test_apply_lock_skips_double_prefix():
+    lock = "a photo of tok, man, shaved"
+    already = "a photo of tok, man, shaved, neon alley"
+    assert apply_lock(already, lock) == already
+    assert apply_lock("a photo of tok, different scene", lock) == "a photo of tok, different scene"

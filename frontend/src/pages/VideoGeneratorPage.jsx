@@ -81,6 +81,23 @@ import {
   NavigateNext as NextIcon,
 } from "@mui/icons-material";
 
+/** Coerce API/error payloads to a string safe for <Alert> children. */
+function formatUiError(err) {
+  if (err == null || err === "") return "";
+  if (typeof err === "string") return err;
+  if (typeof err === "number" || typeof err === "boolean") return String(err);
+  if (typeof err === "object") {
+    if (typeof err.message === "string" && err.message) return err.message;
+    if (typeof err.error === "string" && err.error) return err.error;
+    if (typeof err.detail === "string" && err.detail) return err.detail;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return "An error occurred";
+    }
+  }
+  return String(err);
+}
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -177,15 +194,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   });
 
   // Cast picker: trained character Subjects whose LoRA locks identity into a
-  // cinematic keyframe via character_still_pipeline (Z-Image/SDXL/FLUX by sidecar).
-  // Video models don't apply face LoRAs — identity rides in the still.
+  // cinematic keyframe via character_still_pipeline (Z-Image/SDXL/FLUX by train base).
+  // Video models don't apply face LoRAs — identity rides in a freshly generated still.
+  // Training images are never used as start frames (keyframes always on-demand).
   const [castSubjects, setCastSubjects] = useState([]);
   const [selectedSubjectIds, setSelectedSubjectIds] = useState([]);
-  // Q1: approved reference stills of the (single) selected character, and the one the
-  // user picked to animate directly as the I2V start frame. Animating that exact
-  // high-quality still is what makes the clip match the "Generate Character" images.
-  const [castSamples, setCastSamples] = useState([]);
-  const [selectedKeyframeSampleId, setSelectedKeyframeSampleId] = useState(null);
   useEffect(() => {
     let alive = true;
     fetch("/api/cast-library")
@@ -205,38 +218,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [fetaEnabled, setFetaEnabled] = useState(false);
   const [fetaWeight, setFetaWeight] = useState(1.0);
 
-  // Cast selection implies cinematic keyframe on the backend — mirror that in the UI.
-  // Character LoRAs route by sidecar family (Z-Image offline / SDXL+FLUX Comfy).
+  // Cast selection implies cinematic keyframe; still model is auto from LoRA family.
   useEffect(() => {
     if (selectedSubjectIds.length > 0) {
       setCinematicKeyframe(true);
-      if (keyframeModel === "flux-schnell" || keyframeModel === "flux-dev-lora") {
-        setKeyframeModel("sdxl-lora");
-      }
+      setKeyframeModel("from-lora");
     }
-  }, [selectedSubjectIds.length, keyframeModel]);
-
-  // Q1: when exactly one trained character is selected, load its APPROVED reference
-  // stills so the user can pick one as the I2V start frame. More than one subject (or
-  // none) clears the picker — a single start frame only makes sense per character.
-  useEffect(() => {
-    if (selectedSubjectIds.length !== 1) {
-      setCastSamples([]);
-      setSelectedKeyframeSampleId(null);
-      return;
-    }
-    let alive = true;
-    const sid = selectedSubjectIds[0];
-    fetch(`/api/cast-library/subjects/${sid}/samples`)
-      .then((r) => (r.ok ? r.json() : { samples: [] }))
-      .then((d) => {
-        if (!alive) return;
-        setCastSamples((d.samples || []).filter((s) => s.approved && s.image_path));
-        setSelectedKeyframeSampleId(null);
-      })
-      .catch(() => { if (alive) setCastSamples([]); });
-    return () => { alive = false; };
-  }, [selectedSubjectIds]);
+  }, [selectedSubjectIds.length]);
 
   // Apply one-click quality & consistency preset when the master switch is enabled.
   useEffect(() => {
@@ -588,12 +576,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       director_guidance: directorGuidance.trim() || null,
       feta_weight: effectiveFeta ? fetaWeight : null,
       metadata: {
-        ...(useKeyframePath ? { keyframe_model: keyframeModel } : {}),
-        // Q1: animate this exact approved still as the I2V start frame (full-quality parity).
-        ...(selectedKeyframeSampleId ? { keyframe_sample_id: selectedKeyframeSampleId } : {}),
+        ...(useKeyframePath
+          ? {
+              keyframe_model:
+                selectedSubjectIds.length > 0 ? "from-lora" : keyframeModel,
+            }
+          : {}),
       },
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, selectedKeyframeSampleId]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode]);
 
   const {
     activeBatchId,
@@ -895,6 +886,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         qualityPreset, durationPreset, motionPreset, aspectRatio, videoSize,
         promptStyle, cinematicKeyframe, fidelityMode, negativePrompt,
         storyboardMode, storyboardShots, lowVramMode, advancedParams,
+        selectedImages,
       };
 
       const body =
@@ -922,13 +914,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
-        setError(errorData.error || `Failed to queue batch: HTTP ${res.status}`);
+        setError(formatUiError(errorData.error || errorData.message) || `Failed to queue batch: HTTP ${res.status}`);
         return;
       }
 
       const data = await res.json();
       if (!data.success) {
-        setError(data.error || "Failed to queue batch");
+        setError(formatUiError(data.error || data.message) || "Failed to queue batch");
         return;
       }
 
@@ -964,6 +956,24 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       const name = data?.data?.metadata?.display_name || batchId.slice(0, 8);
       if (!rd) { setError("This batch didn't store its settings."); return; }
 
+      const restoreImagesFromPaths = (paths) => {
+        if (!Array.isArray(paths) || paths.length === 0) return;
+        const restored = paths.map((p, idx) => {
+          const parts = (p || "").replace(/\\/g, '/').split('/');
+          const filename = parts[parts.length - 1] || `image_${idx}.png`;
+          const match = (p || "").replace(/\\/g, '/').match(/\/image_batches\/([^\/]+)\//);
+          const imgBatchId = match ? match[1] : batchId;
+          return {
+            id: `${imgBatchId}_${filename}`,
+            path: p,
+            thumbnailUrl: `${API_BASE}/batch-image/image/${imgBatchId}/${encodeURIComponent(filename)}?thumbnail=true`,
+            name: filename,
+            batchId: imgBatchId,
+          };
+        });
+        setSelectedImages(restored);
+      };
+
       const cfg = rd.params?.ui_config;
       if (cfg) {
         // Exact round-trip — restore the panel verbatim from the saved snapshot.
@@ -984,12 +994,24 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         if (cfg.storyboardShots) setStoryboardShots(cfg.storyboardShots);
         if (typeof cfg.lowVramMode === "boolean") setLowVramMode(cfg.lowVramMode);
         if (cfg.advancedParams && typeof cfg.advancedParams === "object") setAdvancedParams(cfg.advancedParams);
+
+        if (Array.isArray(cfg.selectedImages) && cfg.selectedImages.length > 0) {
+          setSelectedImages(cfg.selectedImages);
+        } else if (rd.image_paths || rd.params?.image_paths) {
+          restoreImagesFromPaths(rd.image_paths || rd.params?.image_paths);
+        }
+
         setSuccess(`Loaded "${name}" settings into the panel — adjust anything, then Generate.`);
       } else {
         // Older batch (no snapshot): restore the core from the stored params.
         const p = rd.params || {};
-        if (rd.mode === "image" && rd.prompt) setPromptsText(rd.prompt);
-        else if (Array.isArray(rd.prompts)) setPromptsText(rd.prompts.join("\n"));
+        if (rd.mode === "image") {
+          setInputMode("image");
+          if (rd.prompt) setPromptsText(rd.prompt);
+          restoreImagesFromPaths(rd.image_paths || p.image_paths);
+        } else if (Array.isArray(rd.prompts)) {
+          setPromptsText(rd.prompts.join("\n"));
+        }
         if (p.model) setModel(p.model);
         if (typeof p.negative_prompt === "string") setNegativePrompt(p.negative_prompt);
         if (p.prompt_style) setPromptStyle(p.prompt_style);
@@ -1076,12 +1098,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const { gpuBusy, blockReason } = useJobsGate({ submitMode: "queue" });
   const castIdentityLocked = selectedSubjectIds.length > 0;
   const keyframeModelOptions = useMemo(() => {
-    if (!castIdentityLocked) {
-      return Object.entries(KEYFRAME_MODEL_OPTIONS);
+    // With cast: family is auto from the character LoRA (backend ignores manual model).
+    if (castIdentityLocked) {
+      return Object.entries(KEYFRAME_MODEL_OPTIONS).filter(([key]) => key === "from-lora");
     }
-    return Object.entries(KEYFRAME_MODEL_OPTIONS).filter(
-      ([key]) => key === "sdxl" || key === "sdxl-lora"
-    );
+    return Object.entries(KEYFRAME_MODEL_OPTIONS).filter(([key]) => key !== "from-lora");
   }, [castIdentityLocked]);
 
   return (
@@ -1090,13 +1111,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       {/* Error/Success Messages */}
       {error && (
         <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
-          {error}
+          {formatUiError(error)}
         </Alert>
       )}
 
       {success && (
         <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
-          {success}
+          {formatUiError(success) || String(success)}
         </Alert>
       )}
 
@@ -1575,26 +1596,30 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 />
               )}
               <Collapse in={cinematicKeyframe || selectedSubjectIds.length > 0}>
-                <TextField
-                  select
-                  size="small"
-                  fullWidth
-                  label="Keyframe image model"
-                  value={keyframeModel}
-                  onChange={(e) => setKeyframeModel(e.target.value)}
-                  helperText={
-                    castIdentityLocked
-                      ? "Character LoRA is baked into the keyframe still (family-aware: Z-Image / SDXL / FLUX). Video motion does not reload the face LoRA."
-                      : "The still that gets animated — identity and detail quality depend on this choice."
-                  }
-                  sx={{ mt: 1.5 }}
-                >
-                  {keyframeModelOptions.map(([key, cfg]) => (
-                    <MenuItem key={key} value={key}>
-                      {cfg.label} — {cfg.description}
-                    </MenuItem>
-                  ))}
-                </TextField>
+                {castIdentityLocked ? (
+                  <Alert severity="info" sx={{ mt: 1.5 }}>
+                    Keyframe still model is automatic from this character&apos;s training base
+                    (Z-Image / SDXL / FLUX). A new still is generated from your prompt + LoRA,
+                    then animated — training images are never used as start frames.
+                  </Alert>
+                ) : (
+                  <TextField
+                    select
+                    size="small"
+                    fullWidth
+                    label="Keyframe image model"
+                    value={keyframeModel === "from-lora" ? DEFAULT_KEYFRAME_MODEL : keyframeModel}
+                    onChange={(e) => setKeyframeModel(e.target.value)}
+                    helperText="The still that gets animated — identity and detail quality depend on this choice."
+                    sx={{ mt: 1.5 }}
+                  >
+                    {keyframeModelOptions.map(([key, cfg]) => (
+                      <MenuItem key={key} value={key}>
+                        {cfg.label} — {cfg.description}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                )}
               </Collapse>
               <TextField
                 select
@@ -1617,7 +1642,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 helperText={
                   castSubjects.length === 0
                     ? "Train a character in Cast Library to lock identity into every keyframe."
-                    : "Character LoRA is baked into the keyframe still, then animated — best consistency path."
+                    : "LoRA + your prompt invent each keyframe still, then animate. Describe any scene or action."
                 }
                 sx={{ mt: 1.5 }}
               >
@@ -1627,40 +1652,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   </MenuItem>
                 ))}
               </TextField>
-              {selectedSubjectIds.length === 1 && castSamples.length > 0 && (
-                <Box sx={{ mt: 1.5 }}>
-                  <Typography variant="caption" color="text.secondary">
-                    Start frame (optional) — pick an approved reference still to animate it directly at full quality. Leave unset to render a fresh keyframe per shot.
-                  </Typography>
-                  <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mt: 0.75 }}>
-                    {castSamples.map((s) => {
-                      const picked = selectedKeyframeSampleId === s.id;
-                      return (
-                        <Box
-                          key={s.id}
-                          onClick={() => setSelectedKeyframeSampleId(picked ? null : s.id)}
-                          title={s.angle || `Sample ${s.index ?? s.id}`}
-                          sx={{
-                            width: 64,
-                            height: 64,
-                            borderRadius: 1,
-                            overflow: "hidden",
-                            cursor: "pointer",
-                            border: (theme) => `2px solid ${picked ? theme.palette.primary.main : "transparent"}`,
-                            opacity: picked || !selectedKeyframeSampleId ? 1 : 0.55,
-                          }}
-                        >
-                          <img
-                            src={`/api/cast-library/subjects/${selectedSubjectIds[0]}/samples/${s.id}/image`}
-                            alt={s.angle || `sample ${s.id}`}
-                            style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                          />
-                        </Box>
-                      );
-                    })}
-                  </Box>
-                </Box>
-              )}
               {inputMode === "text" && (cinematicKeyframe || selectedSubjectIds.length > 0) && (
                 <Alert severity="info" sx={{ mt: 1.5 }}>
                   Keyframe mode renders a still first, then animates via image-to-video on the backend — much sharper than pure text-to-video.

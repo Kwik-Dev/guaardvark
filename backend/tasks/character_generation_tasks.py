@@ -400,23 +400,45 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
         base_index = (max((s.index for s in kept), default=-1)) + 1
 
     # --- 4. Insert THIS batch's SubjectSample rows (status=pending) ----------
-    for shot in shots:
-        row = SubjectSample(
-            subject_id=subject_id,
-            index=base_index + shot["index"],
-            angle=shot.get("angle") or "",
-            framing=shot.get("framing") or "",
-            expression=shot.get("expression") or "",
-            lighting=shot.get("lighting") or "",
-            scene=shot.get("scene") or "",
-            image_prompt=shot.get("image_prompt") or "",
-            placeholder=bool(shot.get("placeholder", False)),
-            status="pending",
-            approved=False,
-        )
-        db.session.add(row)
+    subject = db.session.get(Subject, subject_id)
+    if subject is None:
+        log.error("generate_samples: Subject %s not found (may have been deleted)", subject_id)
+        db.session.rollback()
+        if job_id:
+            try:
+                from backend.utils.unified_progress_system import get_unified_progress
+                get_unified_progress().error_process(job_id, f"Subject {subject_id} not found")
+            except Exception:
+                pass
+        return {"error": "subject_not_found"}
 
-    db.session.commit()
+    try:
+        for shot in shots:
+            row = SubjectSample(
+                subject_id=subject_id,
+                index=base_index + shot["index"],
+                angle=shot.get("angle") or "",
+                framing=shot.get("framing") or "",
+                expression=shot.get("expression") or "",
+                lighting=shot.get("lighting") or "",
+                scene=shot.get("scene") or "",
+                image_prompt=shot.get("image_prompt") or "",
+                placeholder=bool(shot.get("placeholder", False)),
+                status="pending",
+                approved=False,
+            )
+            db.session.add(row)
+        db.session.commit()
+    except Exception as commit_err:
+        db.session.rollback()
+        log.error("generate_samples: DB error creating SubjectSample rows for subject %s: %s", subject_id, commit_err)
+        if job_id:
+            try:
+                from backend.utils.unified_progress_system import get_unified_progress
+                get_unified_progress().error_process(job_id, f"DB error creating samples: {commit_err}")
+            except Exception:
+                pass
+        return {"error": f"db_commit_failed: {commit_err}"}
     # This batch = ONLY the rows we just created (status=pending), now with PKs.
     # In append mode the kept approved samples are status=done and are deliberately
     # excluded here so the loop never re-renders (and overwrites) the user's keepers.
@@ -511,6 +533,7 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
             free_comfyui=True,
             vram_estimate_mb=int(route.get("vram_estimate_mb") or 11000),
             require_fit=True,
+            cross_process=True,
         ):
             for idx, row in enumerate(sample_rows):
                 # Cooperative cancel: API marks pending/generating → cancelled and/or
@@ -797,6 +820,7 @@ def regen_sample(sample_id: int, prompt_override: str | None = None, seed: int |
             free_comfyui=True,
             vram_estimate_mb=int(route.get("vram_estimate_mb") or 11000),
             require_fit=True,
+            cross_process=True,
         ):
             try:
                 if job_is_cancelled(job_id):

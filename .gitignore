@@ -176,6 +176,12 @@ data/celerybeat-schedule.db*
 # Backup archives — the bare *.BACK rule misses compound extensions like .BACK.zip
 *.BACK.zip
 data/*_backup_*.zip
+data/*-back.zip
+data/data-dir*.zip
+# Orchestrator runtime plans (per-machine state, not application source)
+data/system/orchestrator_plans.json
+# Loose training-knowledge dumps (feedback.jsonl already ignored; catch FUCKED_* etc.)
+data/training/knowledge/*feedback*.jsonl
 # Loose backup/scratch copies of agent knowledge files
 data/agent/backs of agent files in this folder/
 

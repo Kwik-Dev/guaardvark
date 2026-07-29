@@ -418,18 +418,21 @@ def run_cinematographer(prod_id: int, llm=None):
 
 
 def _shot_loras_and_prompt(shot) -> tuple[list[str], str]:
-    """Collect a shot's character LoRA paths and build the generation prompt with each
-    Subject's identity lock prepended — the LoRA only locks identity when the trigger token
-    it was trained on is present at inference.
+    """Collect a shot's character LoRA paths and the raw *scene* prompt.
 
-    Uses the shared cast_lock.subjects_to_lock (one source of truth with music-video). As of
-    the 2026-06-23 cast convergence this now also injects each subject's BIBLE (was trigger-only),
-    giving Film Crew the same trigger+bible lock music-video already had — and it stays correctly
-    PER-SHOT scoped (only the subjects actually in this shot)."""
-    from backend.services.cast_lock import subjects_to_lock, apply_lock
+    Identity lock (trigger + class + short marks) is applied once inside
+    ``render_character_still`` when subjects are passed — do not pre-lock here
+    or the core is doubled.
+    """
+    from backend.services.cast_lock import subjects_to_lock
     subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
-    lora_paths, lock = subjects_to_lock(subjects, include_bible=True)
-    return lora_paths, apply_lock(shot.description, lock)
+    lora_paths, _lock = subjects_to_lock(subjects, include_bible=False)
+    base = (
+        getattr(shot, "image_prompt", None)
+        or getattr(shot, "description", None)
+        or ""
+    ).strip()
+    return lora_paths, base
 
 
 def _storyboard_path(prod_id: int, shot_number: int) -> str:
@@ -469,7 +472,6 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
                     still = render_character_still(
                         prompt,
                         subjects=subjects,
-                        lora_paths=lora_paths,
                         include_bible=True,
                         source="filmcrew",
                         output_path=output_path,
@@ -695,7 +697,6 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
             still = render_character_still(
                 prompt,
                 subjects=subjects,
-                lora_paths=lora_paths,
                 include_bible=True,
                 source="filmcrew",
                 output_path=output_path,

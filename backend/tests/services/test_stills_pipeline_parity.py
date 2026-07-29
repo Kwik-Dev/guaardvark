@@ -19,8 +19,8 @@ def test_sanitize_then_defaults_match_across_surfaces(monkeypatch):
         replace_legacy_sd_markers=True,
     )
     assert chat["width"] == batch["width"] == 1024
-    assert chat["steps"] == batch["steps"] == 8
-    assert chat["guidance"] == batch["guidance"] == 1.0
+    assert chat["steps"] == batch["steps"] == 9
+    assert chat["guidance"] == batch["guidance"] == 0.0
 
     # Verbatim → same enhance mode for chat and batch
     assert resolve_enhance_mode(auto_enhance=True) == "none"

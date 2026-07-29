@@ -552,7 +552,7 @@ def regen_mv_storyboard(mv_id, idx):
 
     s = _settings_for_mv(mv)
     from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-    from backend.tasks.music_video_tasks import _keyframe_loras_and_prompt, _keyframe_lora_strength, _clip_dir
+    from backend.tasks.music_video_tasks import _keyframe_cast_context, _keyframe_lora_strength, _clip_dir
     import copy
 
     clips = copy.deepcopy(mv.clips or [])
@@ -581,11 +581,9 @@ def regen_mv_storyboard(mv_id, idx):
     except (TypeError, ValueError):
         variation = 0
 
-    # Media team audit resume (P1-5/P3-12): shared helper for LoRA+triggers + clamp + preflight
-    # on the regen path (was minimal [] version; now consistent with clip gen and the
-    # generate-storyboards path). Model-aware strength so a regen matches the batch.
+    # Cast: raw scene prompt + subject_ids; identity core applied in render_character_still.
     kf_lora_strength = _keyframe_lora_strength(s)
-    kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
+    kf_loras, kf_sids, kf_prompt = _keyframe_cast_context(mv, s, prompt)
 
     still_path = str(out_dir / f"storyboard_{idx}.png")
     try:
@@ -595,8 +593,9 @@ def regen_mv_storyboard(mv_id, idx):
                 from backend.services.character_still_pipeline import render_character_still
                 still = render_character_still(
                     kf_prompt,
-                    lora_paths=kf_loras,
-                    include_bible=False,
+                    subject_ids=kf_sids or None,
+                    lora_paths=kf_loras or None,
+                    include_bible=True,
                     source="musicvideo",
                     width=s.get("still_width", 1024),
                     height=s.get("still_height", 576),

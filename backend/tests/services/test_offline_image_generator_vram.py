@@ -94,6 +94,38 @@ def test_apply_family_sampling_krea2_turbo(gen):
     assert req.guidance_scale == 0.0
 
 
+def test_apply_family_sampling_zimage_hard_defaults(gen):
+    """Fallback path hard-applies official HF recipe."""
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(
+        prompt="test", model="zimage-turbo", num_inference_steps=3, guidance_scale=5.0
+    )
+    gen._apply_family_sampling(req, "zimage")
+    assert req.num_inference_steps == 9
+    assert req.guidance_scale == 0.0
+
+
+def test_soft_clamp_zimage_preserves_user_steps(gen):
+    """Primary path must not clobber user/preset steps (e.g. High or slider)."""
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(
+        prompt="test", model="zimage-turbo", num_inference_steps=12, guidance_scale=0.0
+    )
+    gen._soft_clamp_family_sampling(req, "zimage")
+    assert req.num_inference_steps == 12
+    assert req.guidance_scale == 0.0
+
+
+def test_soft_clamp_zimage_fixes_out_of_range(gen):
+    from backend.services.offline_image_generator import ImageGenerationRequest
+    req = ImageGenerationRequest(
+        prompt="test", model="zimage-turbo", num_inference_steps=99, guidance_scale=9.0
+    )
+    gen._soft_clamp_family_sampling(req, "zimage")
+    assert req.num_inference_steps == 9
+    assert req.guidance_scale == 0.0
+
+
 def test_ram_estimate_krea2(gen):
     assert gen._ram_estimate_gb("krea2-turbo") == 24.0
 

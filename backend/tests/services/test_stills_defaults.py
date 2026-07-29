@@ -9,8 +9,9 @@ def test_zimage_family_defaults():
     d = resolve_stills_defaults("zimage-turbo")
     assert d["family"] == "zimage"
     assert d["width"] == 1024 and d["height"] == 1024
-    assert d["steps"] == 8
-    assert d["guidance"] == 1.0
+    # Official HF recipe: 9 steps / guidance 0.0
+    assert d["steps"] == 9
+    assert d["guidance"] == 0.0
 
 
 def test_legacy_sd_markers_replaced_for_modern():
@@ -23,8 +24,24 @@ def test_legacy_sd_markers_replaced_for_modern():
         replace_legacy_sd_markers=True,
     )
     assert d["width"] == 1024
-    assert d["steps"] == 8
-    assert d["guidance"] == 1.0
+    assert d["steps"] == 9
+    assert d["guidance"] == 0.0
+
+
+def test_intentional_draft_512_kept_with_turbo_sampling():
+    """Draft sizes must not be rewritten when steps/CFG are modern Turbo values."""
+    d = resolve_stills_defaults(
+        "zimage-turbo",
+        width=512,
+        height=512,
+        steps=9,
+        guidance=0.0,
+        replace_legacy_sd_markers=True,
+    )
+    assert d["width"] == 512
+    assert d["height"] == 512
+    assert d["steps"] == 9
+    assert d["guidance"] == 0.0
 
 
 def test_explicit_overrides_kept_when_not_legacy():
@@ -33,7 +50,7 @@ def test_explicit_overrides_kept_when_not_legacy():
         width=832,
         height=1216,
         steps=12,
-        guidance=1.0,
+        guidance=0.0,
         replace_legacy_sd_markers=True,
     )
     assert d["width"] == 832
@@ -83,5 +100,5 @@ def test_csv_form_merge_via_parse(tmp_path=None):
     assert len(rows) == 1
     assert rows[0].model == "zimage-turbo"
     assert rows[0].width == 1024
-    assert rows[0].steps == 8
-    assert rows[0].guidance == 1.0
+    assert rows[0].steps == 9
+    assert rows[0].guidance == 0.0

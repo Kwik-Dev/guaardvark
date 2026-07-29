@@ -27,6 +27,16 @@ export const createProduction = async (data) => {
   return response.data;
 };
 
+export const deleteProduction = async (id) => {
+  const response = await axios.delete(`${API_BASE}/production/${id}`);
+  return response.data;
+};
+
+export const retryProduction = async (id) => {
+  const response = await axios.post(`${API_BASE}/production/${id}/retry`);
+  return response.data;
+};
+
 export const castSubject = async (productionId, subjectId, data) => {
   const response = await axios.post(`${API_BASE}/production/${productionId}/cast/${subjectId}`, data);
   return response.data;

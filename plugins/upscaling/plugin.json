@@ -11,11 +11,11 @@
   "core": false,
   "dependencies": [],
   "config": {
-    "default_enabled": false,
+    "default_enabled": true,
     "default_auto_start": false,
     "service_url": "http://localhost:8202",
     "timeout": 30,
-    "fallback_enabled": false,
+    "fallback_enabled": true,
     "default_model": "HAT-L_SRx4",
     "precision": "fp16",
     "compile_model": false,

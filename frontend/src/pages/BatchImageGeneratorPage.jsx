@@ -47,6 +47,10 @@ import {
   Visibility,
   Cancel,
   Close as CloseIcon,
+  Settings as SettingsIcon,
+  Refresh as RefreshIcon,
+  Image as ImageIcon,
+  Delete as DeleteIcon,
 } from '@mui/icons-material';
 
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
@@ -127,6 +131,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [quantity, setQuantity] = useState(1); // Number of images to generate
   const [activeBatch, setActiveBatch] = useState(null);
   const [batchHistory, setBatchHistory] = useState([]);
+  const [clearedBatchIds, setClearedBatchIds] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('clearedImageBatchIds') || '[]');
+    } catch (e) {
+      return [];
+    }
+  });
   const [generatedImages, setGeneratedImages] = useState([]);
   const [lightboxImage, setLightboxImage] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -167,11 +178,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     model: 'auto',
     style: 'realistic',
     quality_preset: 'standard',
-    // Modern family defaults (zimage / auto) — not SD-era 512/20/7.5
+    // Modern family defaults (zimage / auto) — HF Turbo recipe 9/0, not SD-era 512/20/7.5
     width: 1024,
     height: 1024,
-    steps: 8,
-    guidance: 1.0,
+    steps: 9,
+    guidance: 0.0,
     max_workers: 2,
     preserve_order: true,
     generate_thumbnails: true,
@@ -242,9 +253,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       ]
     : isZimage
       ? [
-          { value: 'fast', label: 'Fast', steps: 6, guidance: 1.0, description: 'Quick Z-Image Turbo' },
-          { value: 'standard', label: 'Standard', steps: 8, guidance: 1.0, description: 'Default daily driver' },
-          { value: 'high', label: 'High Quality', steps: 12, guidance: 1.0, description: 'More steps, slower' },
+          { value: 'fast', label: 'Fast', steps: 6, guidance: 0.0, description: 'Quick draft' },
+          { value: 'standard', label: 'Standard', steps: 9, guidance: 0.0, description: 'Official Turbo recipe (HF)' },
+          { value: 'high', label: 'High Quality', steps: 9, guidance: 0.0, description: 'Official recipe at 2K canvas' },
         ]
       : isKreaTurbo
         ? [
@@ -307,7 +318,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     const isLegacySd =
       m === 'realistic-vision' || m === 'epic-realism' || m === 'sd-1.5';
     return dimensionPresetsBase.filter((p) => {
-      if (p.pack === 'legacy') return isLegacySd || m === 'auto';
+      // Draft 512/768 sizes available for Turbo/Krea as well as classic SD / auto
+      if (p.pack === 'legacy') return isLegacySd || m === 'auto' || isModernDit;
       if (p.pack === '1k') return !isLegacySd || m === 'auto';
       if (p.pack === '2k') return isModernDit && !isFlux;
       if (p.pack === 'flux2mp') return isFlux;
@@ -497,7 +509,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/list`);
 
-      // Check if response is ok before parsing JSON
       if (!response.ok) {
         console.error(`Failed to load batch history: HTTP ${response.status}`);
         return;
@@ -512,10 +523,53 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       const data = await response.json();
 
       if (data.success) {
-        setBatchHistory(data.data.batches || []);
+        let storedCleared = [];
+        try {
+          storedCleared = JSON.parse(localStorage.getItem('clearedImageBatchIds') || '[]');
+        } catch (e) {
+          storedCleared = [];
+        }
+        const rawBatches = data.data.batches || [];
+        const filtered = rawBatches.filter((b) => !storedCleared.includes(b.batch_id));
+        setBatchHistory(filtered);
       }
     } catch (err) {
       console.error('Failed to load batch history:', err);
+    }
+  }, []);
+
+  const handleClearBatchList = useCallback(() => {
+    const allIds = batchHistory.map((b) => b.batch_id);
+    const updatedCleared = Array.from(new Set([...clearedBatchIds, ...allIds]));
+    setClearedBatchIds(updatedCleared);
+    try {
+      localStorage.setItem('clearedImageBatchIds', JSON.stringify(updatedCleared));
+    } catch (e) {
+      console.error('Failed to save cleared batches to localStorage:', e);
+    }
+    setBatchHistory([]);
+    setSuccess('Cleared batch history list.');
+  }, [batchHistory, clearedBatchIds]);
+
+  const hideBatch = useCallback((batchId) => {
+    const updatedCleared = Array.from(new Set([...clearedBatchIds, batchId]));
+    setClearedBatchIds(updatedCleared);
+    try {
+      localStorage.setItem('clearedImageBatchIds', JSON.stringify(updatedCleared));
+    } catch (e) {
+      console.error('Failed to save cleared batches to localStorage:', e);
+    }
+    setBatchHistory((prev) => prev.filter((b) => b.batch_id !== batchId));
+  }, [clearedBatchIds]);
+
+  const formatImageDate = useCallback((dStr) => {
+    if (!dStr) return '';
+    try {
+      const d = new Date(dStr);
+      if (isNaN(d.getTime())) return dStr;
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch (e) {
+      return dStr;
     }
   }, []);
 
@@ -722,12 +776,29 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const handleQualityPresetChange = (presetValue) => {
     const preset = qualityPresets.find(p => p.value === presetValue);
     if (preset) {
-      setParams(prev => ({
-        ...prev,
-        quality_preset: presetValue,
-        steps: preset.steps,
-        guidance: preset.guidance
-      }));
+      setParams(prev => {
+        const next = {
+          ...prev,
+          quality_preset: presetValue,
+          steps: preset.steps,
+          guidance: preset.guidance,
+        };
+        // Z-Image High = official sampling at 2K (the real quality lever for Turbo).
+        // Leave already-large custom sizes alone.
+        const modelKey = String(prev.model || 'auto').toLowerCase();
+        const zimageFamily =
+          modelKey.includes('zimage')
+          || modelKey.includes('z-image')
+          || modelKey === 'auto';
+        if (zimageFamily && presetValue === 'high') {
+          const area = (prev.width || 0) * (prev.height || 0);
+          if (area <= 1024 * 1024) {
+            next.width = 2048;
+            next.height = 2048;
+          }
+        }
+        return next;
+      });
     }
   };
 
@@ -761,7 +832,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         newParams.steps = 8;
         newParams.guidance = 0;
       } else if (modelValue === 'zimage-turbo') {
-        newParams.steps = 8;
+        newParams.steps = 9;
         newParams.guidance = 0;
       } else if (modelValue === 'flux-dev' || modelValue.startsWith('flux')) {
         // FLUX.1-dev max-quality defaults (FluxGuidance 3.5, 28 steps)
@@ -887,6 +958,22 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         }
         debugLog('Batch image single-prompt prepared', { promptCount: promptsToGenerate.length, quantity });
 
+        const uiConfig = {
+          inputMode,
+          batchItems,
+          lookAndFeel,
+          quantity,
+          params,
+          castSubjectIds,
+          selectedPreset,
+          autoEnhance,
+          enhanceAnatomy,
+          enhanceFaces,
+          enhanceHands,
+          directorEnabled,
+          directorGuidance,
+        };
+
         response = await fetch(`${API_BASE}/batch-image/generate/prompts`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -903,7 +990,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             enhance_hands: enhanceHands,
             // Director (shared intelligent pipeline with MusicVideo / chat)
             director_mode: !!directorEnabled,
-            director_guidance: directorGuidance || undefined
+            director_guidance: directorGuidance || undefined,
+            ui_config: uiConfig,
           })
         });
       } else {
@@ -928,6 +1016,22 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
         debugLog('Batch image prompts prepared', { promptCount: promptsToGenerate.length });
 
+        const uiConfig = {
+          inputMode,
+          batchItems,
+          lookAndFeel,
+          quantity,
+          params,
+          castSubjectIds,
+          selectedPreset,
+          autoEnhance,
+          enhanceAnatomy,
+          enhanceFaces,
+          enhanceHands,
+          directorEnabled,
+          directorGuidance,
+        };
+
         response = await fetch(`${API_BASE}/batch-image/generate/prompts`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -944,7 +1048,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             enhance_hands: enhanceHands,
             // Director (shared intelligent pipeline with MusicVideo / chat)
             director_mode: !!directorEnabled,
-            director_guidance: directorGuidance || undefined
+            director_guidance: directorGuidance || undefined,
+            ui_config: uiConfig,
           })
         });
       }
@@ -1056,6 +1161,59 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     }
   };
 
+  const handleAdjustRetry = async (batchId) => {
+    try {
+      const res = await fetch(`${API_BASE}/batch-image/status/${batchId}?include_results=true`);
+      if (!res.ok) { setError(`Couldn't load settings: HTTP ${res.status}`); return; }
+      const data = await res.json();
+      const statusObj = data?.data || data;
+      const rd = statusObj?.retry_data;
+      const name = statusObj?.display_name || batchId.slice(0, 8);
+
+      if (!rd) { setError("This batch didn't store its settings."); return; }
+
+      const cfg = rd.params?.ui_config;
+      if (cfg) {
+        if (cfg.inputMode) setInputMode(cfg.inputMode);
+        if (typeof cfg.batchItems === 'string') setBatchItems(cfg.batchItems);
+        if (typeof cfg.lookAndFeel === 'string') setLookAndFeel(cfg.lookAndFeel);
+        if (typeof cfg.quantity === 'number') setQuantity(cfg.quantity);
+        if (cfg.params && typeof cfg.params === 'object') {
+          setParams((prev) => ({ ...prev, ...cfg.params }));
+        }
+        if (Array.isArray(cfg.castSubjectIds)) setCastSubjectIds(cfg.castSubjectIds);
+        if (cfg.selectedPreset) setSelectedPreset(cfg.selectedPreset);
+        if (typeof cfg.autoEnhance === 'boolean') setAutoEnhance(cfg.autoEnhance);
+        if (typeof cfg.enhanceAnatomy === 'boolean') setEnhanceAnatomy(cfg.enhanceAnatomy);
+        if (typeof cfg.enhanceFaces === 'boolean') setEnhanceFaces(cfg.enhanceFaces);
+        if (typeof cfg.enhanceHands === 'boolean') setEnhanceHands(cfg.enhanceHands);
+        if (typeof cfg.directorEnabled === 'boolean') setDirectorEnabled(cfg.directorEnabled);
+        if (typeof cfg.directorGuidance === 'string') setDirectorGuidance(cfg.directorGuidance);
+        setSuccess(`Loaded "${name}" settings into control panel — adjust anything, then Start Generation.`);
+      } else if (Array.isArray(rd.prompts)) {
+        setBatchItems(rd.prompts.join('\n'));
+        setInputMode('bulk');
+        if (rd.params) {
+          const p = rd.params;
+          setParams((prev) => ({
+            ...prev,
+            model: p.model || prev.model,
+            style: p.style || prev.style,
+            width: p.width || prev.width,
+            height: p.height || prev.height,
+            steps: p.steps || prev.steps,
+            guidance: p.guidance !== undefined ? p.guidance : prev.guidance,
+          }));
+        }
+        setSuccess(`Loaded "${name}" prompts into panel.`);
+      }
+      setError('');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e) {
+      setError(`Couldn't load settings: ${e.message}`);
+    }
+  };
+
   const downloadResults = async (batchId) => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/download/${batchId}`);
@@ -1159,7 +1317,24 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   }, [lightboxImage, generatedImages, activeBatch?.batch_id, buildBatchImageUrl]);
 
   return (
-    <PageLayout title={embedded ? undefined : "Image Generator"} variant={embedded ? "fullscreen" : "standard"} noPadding={embedded}>
+    <PageLayout
+      title={embedded ? undefined : "Image Generator"}
+      variant={embedded ? "fullscreen" : "standard"}
+      noPadding={embedded}
+      actions={
+        batchHistory.length > 0 ? (
+          <Button
+            size="small"
+            variant="outlined"
+            color="inherit"
+            onClick={handleClearBatchList}
+            sx={{ textTransform: 'none', borderRadius: 1 }}
+          >
+            Clear Batch List
+          </Button>
+        ) : null
+      }
+    >
 
       {/* Error/Success Messages */}
       {error && (
@@ -1337,7 +1512,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     Cast (optional)
                   </Typography>
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                    Pick a trained character to render consistently — its LoRA and trigger word are applied automatically.
+                    Pick a trained character — identity (trigger + class + vision marks) and LoRA are applied automatically.
+                    Write scene/action only; do not re-describe the face or costume.
                   </Typography>
                   <CharacterPicker
                     value={castSubjectIds}
@@ -2021,16 +2197,28 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     />
                   </Box>
 
-                  {activeBatch.status === 'completed' && (
-                    <Button
-                      startIcon={<Download />}
-                      onClick={() => downloadResults(activeBatch.batch_id)}
-                      variant="outlined"
-                      size="small"
-                    >
-                      Download Results
-                    </Button>
-                  )}
+                  <Box sx={{ display: 'flex', gap: 1.5, mt: 1, flexWrap: 'wrap' }}>
+                    {activeBatch.status === 'completed' && (
+                      <Button
+                        startIcon={<Download />}
+                        onClick={() => downloadResults(activeBatch.batch_id)}
+                        variant="outlined"
+                        size="small"
+                      >
+                        Download Results
+                      </Button>
+                    )}
+                    {['completed', 'error', 'cancelled'].includes(activeBatch.status) && (
+                      <Button
+                        startIcon={<SettingsIcon />}
+                        onClick={() => handleAdjustRetry(activeBatch.batch_id)}
+                        variant="outlined"
+                        size="small"
+                      >
+                        Adjust &amp; Retry
+                      </Button>
+                    )}
+                  </Box>
                 </CardContent>
               </Card>
             )
@@ -2132,166 +2320,212 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
               </Card>
             )
           }
-        </Grid >
-      </Grid >
-
-      {/* Batch History */}
-      {
-        batchHistory.length > 0 && (
+          {/* Batch History — Stacked Thumbnail Gallery */}
           <Card sx={{
             mt: 3,
             boxShadow: 2,
             borderRadius: 2
           }}>
             <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
-              <Typography
-                variant="h6"
-                sx={{
-                  fontWeight: 600,
-                  mb: 2,
-                  color: 'text.primary'
-                }}
-              >
-                Recent Batches
-              </Typography>
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+                <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                  Recent Batches
+                </Typography>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  {batchHistory.length > 0 && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="inherit"
+                      onClick={handleClearBatchList}
+                      sx={{ textTransform: 'none', borderRadius: 1 }}
+                    >
+                      Clear Batch List
+                    </Button>
+                  )}
+                  <IconButton size="small" onClick={loadBatchHistory} title="Refresh batches">
+                    <RefreshIcon />
+                  </IconButton>
+                </Stack>
+              </Stack>
 
-              <Grid container spacing={2}>
-                {batchHistory.slice(0, 10).map((batch) => (
-                  <Grid item xs={12} sm={6} lg={4} key={batch.batch_id}>
-                    <Paper sx={{
-                      p: 2,
-                      borderRadius: 1,
-                      border: '1px solid',
-                      borderColor: 'divider',
-                      '&:hover': {
-                        boxShadow: 1
-                      }
-                    }}>
-                      {/* Overlapping thumbnail covers */}
-                      {batch.thumbnail_urls?.length > 0 && (
+              <Box sx={{ maxHeight: 520, overflowY: 'auto', pr: 0.5 }}>
+                <Grid container spacing={2}>
+                  {batchHistory.map((batch) => {
+                    const dateStr = formatImageDate(batch.created_at || batch.start_time || batch.end_time);
+                    const imgCount = batch.completed_images ?? batch.total_images ?? 0;
+                    const rawName = batch.display_name || `Batch ${batch.batch_id.slice(0, 8)}`;
+                    const label = rawName.length > 36 ? rawName.slice(0, 35).trimEnd() + '…' : rawName;
+                    return (
+                      <Grid item xs={12} sm={6} key={batch.batch_id}>
                         <Box
-                          sx={{
-                            mb: 1.5,
-                            height: 48,
-                            position: 'relative',
-                            minWidth: Math.min(batch.thumbnail_urls.length, 4) * 32 + 16,
-                            cursor: batch.status === 'completed' ? 'pointer' : 'default',
-                          }}
                           onClick={() => {
                             if (batch.status === 'completed') {
                               openHistoryBatchGallery(batch, 0);
+                            } else {
+                              loadBatchById(batch.batch_id);
                             }
                           }}
-                          role={batch.status === 'completed' ? 'button' : undefined}
-                          tabIndex={batch.status === 'completed' ? 0 : undefined}
-                          onKeyDown={(e) => {
-                            if (batch.status === 'completed' && (e.key === 'Enter' || e.key === ' ')) {
-                              e.preventDefault();
-                              openHistoryBatchGallery(batch, 0);
-                            }
+                          sx={{
+                            cursor: 'pointer',
+                            position: 'relative',
+                            borderRadius: 2,
+                            p: 1,
+                            bgcolor: 'background.paper',
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            transition: 'transform 0.2s, box-shadow 0.2s',
+                            '&:hover': {
+                              transform: 'translateY(-2px)',
+                              boxShadow: 4,
+                              '& .batch-overlay': { opacity: 1 },
+                              '& .batch-delete': { opacity: 1 },
+                            },
                           }}
-                          aria-label={batch.status === 'completed' ? `Browse images in batch ${batch.batch_id}` : undefined}
                         >
-                          {batch.thumbnail_urls.slice(0, 4).map((url, idx) => (
-                            <Box
-                              key={idx}
-                              component="img"
-                              src={url}
-                              alt=""
-                              onClick={(e) => {
-                                if (batch.status === 'completed') {
-                                  e.stopPropagation();
-                                  openHistoryBatchGallery(batch, idx);
-                                }
-                              }}
-                              sx={{
-                                width: 48,
-                                height: 48,
-                                borderRadius: 1,
-                                objectFit: 'cover',
-                                border: '2px solid',
-                                borderColor: 'background.paper',
-                                position: 'absolute',
-                                left: idx * 32,
-                                zIndex: 4 - idx,
-                                boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-                              }}
-                            />
-                          ))}
-                        </Box>
-                      )}
+                          {/* Stacked thumbnail preview */}
+                          <Box sx={{ position: 'relative', aspectRatio: '4/3', mb: 1 }}>
+                            {imgCount > 2 && (
+                              <Box sx={{
+                                position: 'absolute', top: -6, left: 6, right: -6, bottom: 6,
+                                bgcolor: 'grey.800', borderRadius: 1.5, border: 1, borderColor: 'grey.700',
+                              }} />
+                            )}
+                            {imgCount > 1 && (
+                              <Box sx={{
+                                position: 'absolute', top: -3, left: 3, right: -3, bottom: 3,
+                                bgcolor: 'grey.850', borderRadius: 1.5, border: 1, borderColor: 'grey.700',
+                              }} />
+                            )}
+                            <Box sx={{
+                              position: 'relative', width: '100%', height: '100%',
+                              bgcolor: 'grey.900', borderRadius: 1.5, overflow: 'hidden',
+                              border: 1, borderColor: 'grey.700',
+                            }}>
+                              {imgCount > 0 ? (
+                                <Box
+                                  component="img"
+                                  src={`${API_BASE}/batch-image/preview/${batch.batch_id}`}
+                                  alt="Preview"
+                                  sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                  onError={(e) => { e.target.style.display = 'none'; }}
+                                />
+                              ) : (
+                                <Box sx={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                  <ImageIcon sx={{ fontSize: 36, color: 'grey.600' }} />
+                                </Box>
+                              )}
+                              <Box className="batch-overlay" sx={{
+                                position: 'absolute', inset: 0,
+                                bgcolor: 'rgba(0,0,0,0.4)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                opacity: 0, transition: 'opacity 0.2s',
+                              }}>
+                                <Visibility sx={{ fontSize: 32, color: 'white' }} />
+                              </Box>
+                              <Chip
+                                label={`${imgCount} image${imgCount !== 1 ? 's' : ''}`}
+                                size="small"
+                                sx={{
+                                  position: 'absolute', top: 6, right: 6,
+                                  height: 20, fontSize: '0.65rem',
+                                  bgcolor: 'rgba(0,0,0,0.7)', color: 'white',
+                                  '& .MuiChip-label': { px: 0.75 },
+                                }}
+                              />
+                              {batch.status !== 'completed' && (
+                                <Chip
+                                  label={batch.status}
+                                  size="small"
+                                  color={batch.status === 'error' ? 'error' : batch.status === 'cancelled' ? 'warning' : 'info'}
+                                  sx={{
+                                    position: 'absolute', bottom: 6, left: 6,
+                                    height: 18, fontSize: '0.6rem',
+                                  }}
+                                />
+                              )}
+                              <Tooltip title="Clear batch from list">
+                                <IconButton
+                                  size="small"
+                                  className="batch-delete"
+                                  onClick={(e) => { e.stopPropagation(); hideBatch(batch.batch_id); }}
+                                  sx={{
+                                    position: 'absolute', top: 4, left: 4,
+                                    width: 24, height: 24,
+                                    bgcolor: 'rgba(0,0,0,0.6)', color: 'white',
+                                    opacity: 0, transition: 'opacity 0.2s',
+                                    '&:hover': { bgcolor: 'error.main' },
+                                  }}
+                                >
+                                  <CloseIcon sx={{ fontSize: 16 }} />
+                                </IconButton>
+                              </Tooltip>
+                            </Box>
+                          </Box>
 
-                      <Typography
-                        variant="subtitle2"
-                        sx={{
-                          fontWeight: 600,
-                          mb: 1,
-                          color: batch.folder_id ? 'primary.main' : 'text.primary',
-                          cursor: batch.folder_id ? 'pointer' : 'default',
-                          '&:hover': batch.folder_id ? { textDecoration: 'underline' } : {},
-                        }}
-                        onClick={() => {
-                          if (batch.folder_id) {
-                            navigate('/images');
-                          }
-                        }}
-                      >
-                        {batch.batch_id}
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
-                        Status: {batch.status}
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        Images: {batch.completed_images}/{batch.total_images}
-                      </Typography>
+                          <Box sx={{ pt: 0.5 }}>
+                            <Typography variant="subtitle2" noWrap title={rawName} sx={{ fontWeight: 600 }}>
+                              {label}
+                            </Typography>
+                            {dateStr && (
+                              <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem', display: 'block', mb: 0.5 }}>
+                                {dateStr}
+                              </Typography>
+                            )}
 
-                      {batch.status === 'completed' && (
-                        <Box sx={{ display: 'flex', gap: 1, mt: 1, flexWrap: 'wrap' }}>
-                          <Button
-                            size="small"
-                            startIcon={<Visibility />}
-                            onClick={() => openHistoryBatchGallery(batch, 0)}
-                            sx={{
-                              textTransform: 'none',
-                              borderRadius: 1
-                            }}
-                          >
-                            Browse
-                          </Button>
-                          {batch.folder_id && (
-                            <Button
-                              size="small"
-                              startIcon={<Visibility />}
-                              onClick={() => navigate('/images')}
-                              sx={{
-                                textTransform: 'none',
-                                borderRadius: 1
-                              }}
-                            >
-                              Gallery
-                            </Button>
-                          )}
-                          <Button
-                            size="small"
-                            startIcon={<Download />}
-                            onClick={() => downloadResults(batch.batch_id)}
-                            sx={{
-                              textTransform: 'none',
-                              borderRadius: 1
-                            }}
-                          >
-                            Download
-                          </Button>
+                            <Box sx={{ display: 'flex', gap: 0.5, mt: 1, flexWrap: 'wrap' }}>
+                              {batch.status === 'completed' && (
+                                <>
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    startIcon={<Visibility sx={{ fontSize: 14 }} />}
+                                    onClick={(e) => { e.stopPropagation(); openHistoryBatchGallery(batch, 0); }}
+                                    sx={{ textTransform: 'none', borderRadius: 1, fontSize: '0.75rem', py: 0.2, px: 1 }}
+                                  >
+                                    Browse
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    startIcon={<Download sx={{ fontSize: 14 }} />}
+                                    onClick={(e) => { e.stopPropagation(); downloadResults(batch.batch_id); }}
+                                    sx={{ textTransform: 'none', borderRadius: 1, fontSize: '0.75rem', py: 0.2, px: 1 }}
+                                  >
+                                    Download
+                                  </Button>
+                                </>
+                              )}
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                startIcon={<SettingsIcon sx={{ fontSize: 14 }} />}
+                                onClick={(e) => { e.stopPropagation(); handleAdjustRetry(batch.batch_id); }}
+                                sx={{ textTransform: 'none', borderRadius: 1, fontSize: '0.75rem', py: 0.2, px: 1 }}
+                              >
+                                Adjust &amp; Retry
+                              </Button>
+                            </Box>
+                          </Box>
                         </Box>
-                      )}
-                    </Paper>
-                  </Grid>
-                ))}
-              </Grid>
+                      </Grid>
+                    );
+                  })}
+                </Grid>
+
+                {batchHistory.length === 0 && (
+                  <Box sx={{ textAlign: 'center', py: 4 }}>
+                    <ImageIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
+                    <Typography variant="body2" color="text.secondary">
+                      No image batches found
+                    </Typography>
+                  </Box>
+                )}
+              </Box>
             </CardContent>
           </Card>
-        )
-      }
+        </Grid >
+      </Grid >
 
       {/* Full-screen batch image gallery (prev/next keyboard + arrows) */}
       {lightboxImage && (

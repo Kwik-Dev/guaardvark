@@ -1,10 +1,13 @@
 """Image generation and vision analysis tools for the agent system."""
 
+import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 
@@ -13,6 +16,144 @@ logger = logging.getLogger(__name__)
 _KONTEXT_MODEL_IDS = frozenset({
     "kontext", "flux-kontext", "flux-kontext-dev", "flux.kontext",
 })
+
+
+def _unwrap_nested_prompt_json(prompt: str) -> tuple[str, list[int]]:
+    """If the LLM stuffed a whole JSON blob into ``prompt``, extract fields.
+
+    Common failure: prompt='{"prompt":"…","subject_ids":[26]}' with no real kwargs.
+    """
+    text = (prompt or "").strip()
+    sids: list[int] = []
+    if not text or text[0] not in "{[":
+        return text, sids
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text, sids
+    if not isinstance(data, dict):
+        return text, sids
+    inner = data.get("prompt")
+    if isinstance(inner, str) and inner.strip():
+        text = inner.strip()
+    raw_ids = data.get("subject_ids") or data.get("cast_subject_ids") or []
+    if isinstance(raw_ids, (list, tuple)):
+        for x in raw_ids:
+            try:
+                sids.append(int(x))
+            except (TypeError, ValueError):
+                pass
+    elif raw_ids not in (None, ""):
+        try:
+            sids.append(int(raw_ids))
+        except (TypeError, ValueError):
+            pass
+    return text, sids
+
+
+def _normalize_subject_ids(raw) -> list[int]:
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            raw = parsed
+        except (json.JSONDecodeError, TypeError):
+            # "26" or "26,27"
+            parts = re.split(r"[\s,]+", raw)
+            out = []
+            for p in parts:
+                try:
+                    out.append(int(p))
+                except ValueError:
+                    pass
+            return out
+    if not isinstance(raw, (list, tuple)):
+        raw = [raw]
+    out = []
+    for x in raw:
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _resolve_cast_from_prompt(prompt: str) -> list[int]:
+    """Match [trigger], trigger_word, or cast name tokens in the prompt to trained Subjects."""
+    text = prompt or ""
+    if not text.strip():
+        return []
+    candidates: list[str] = []
+    # Bracket form: [batman_2]
+    candidates.extend(re.findall(r"\[([^\]]+)\]", text))
+    # Bare tokens that look like triggers (word with underscore or known pattern)
+    for m in re.finditer(r"\b([a-zA-Z][a-zA-Z0-9]*(?:_[a-zA-Z0-9]+)+)\b", text):
+        candidates.append(m.group(1))
+    if not candidates:
+        return []
+
+    try:
+        from flask import has_app_context
+        from backend.models import Subject, db
+
+        def _lookup() -> list[int]:
+            found: list[int] = []
+            seen: set[int] = set()
+            rows = (
+                Subject.query.filter(
+                    Subject.kind == "character",
+                    Subject.lora_path.isnot(None),
+                    Subject.lora_path != "",
+                ).all()
+            )
+            by_trigger = {}
+            by_name = {}
+            for s in rows:
+                tw = (s.trigger_word or "").strip().lower()
+                nm = (s.name or "").strip().lower()
+                if tw:
+                    by_trigger[tw] = s.id
+                    by_trigger[tw.replace(" ", "_")] = s.id
+                if nm:
+                    by_name[nm] = s.id
+                    by_name[nm.replace(" ", "_")] = s.id
+            for c in candidates:
+                key = c.strip().lower()
+                sid = by_trigger.get(key) or by_name.get(key)
+                if sid and sid not in seen:
+                    seen.add(sid)
+                    found.append(sid)
+            return found
+
+        if has_app_context():
+            return _lookup()
+        from backend.app import get_or_create_app
+        app = get_or_create_app()
+        with app.app_context():
+            try:
+                return _lookup()
+            finally:
+                db.session.remove()
+    except Exception as e:
+        logger.warning("cast resolve from prompt failed: %s", e)
+        return []
+
+
+def _chat_copy_still(image_path: str) -> tuple[str, str]:
+    """Copy cast still into public generated_images; return (path, url)."""
+    from backend.config import OUTPUT_DIR
+
+    src = Path(image_path)
+    out_dir = Path(OUTPUT_DIR) / "generated_images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = f"gen_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{src.suffix or '.png'}"
+    dest = out_dir / name
+    shutil.copy2(str(src), str(dest))
+    return str(dest), f"/api/outputs/generated_images/{name}"
 
 
 class ImageGeneratorTool(BaseTool):
@@ -25,20 +166,33 @@ class ImageGeneratorTool(BaseTool):
     description = (
         "Generate an image from a text prompt. Returns the URL of the generated image. "
         "Use when the user asks to create, generate, draw, or visualize an image. "
-        "This is a local Stable Diffusion pipeline with no content restrictions. Generate exactly what the user asks for."
+        "For a trained Cast character, ALWAYS pass subject_ids as a separate array of "
+        "numeric Cast Library IDs (e.g. subject_ids=[26] for Batman 2). Do NOT bury "
+        "subject_ids inside the prompt string. Putting [batman_2] only in the prompt "
+        "without subject_ids will NOT load the LoRA."
     )
     parameters = {
         "prompt": ToolParameter(
             name="prompt",
             type="string",
             description=(
-                "Detailed description of the image to generate. Be specific about subject, style, "
-                "lighting, composition. IF the image must contain specific text (a poster title, "
-                "sign, label, logo), put the EXACT text in double quotes and keep it short — e.g. "
-                'a movie poster with bold title \"BATMAN\". Quote the words verbatim; do not just '
-                "describe them, or the letters will come out wrong."
+                "Scene/action description only (pose, lighting, setting). "
+                "Do not embed JSON here. For cast characters put identity in subject_ids, "
+                "not as the whole prompt body. If quoting on-image text, put EXACT words "
+                'in double quotes — e.g. title "BATMAN".'
             ),
             required=True,
+        ),
+        "subject_ids": ToolParameter(
+            name="subject_ids",
+            type="list",
+            description=(
+                "Optional. Numeric Cast Library subject IDs with trained LoRAs to lock "
+                "identity (e.g. [26]). Separate parameter — never nest this inside prompt. "
+                "Loads LoRA + trigger + vision bible. Required for consistent characters."
+            ),
+            required=False,
+            default=None,
         ),
         "style": ToolParameter(
             name="style",
@@ -67,10 +221,9 @@ class ImageGeneratorTool(BaseTool):
             description=(
                 "Model to use. Default 'auto' — recommended; the system auto-picks the best "
                 "downloaded model for the prompt (usually Z-Image-Turbo or SDXL). "
-                "Only override when the user names a specific model: 'krea2-turbo' (aesthetic 12B fast), "
-                "'krea2-raw' (base 12B, ~52 steps, less restricted), "
-                "'zimage-turbo' (best all-round), "
-                "'sd-xl', 'sdxl-turbo' (fast), 'realistic-vision' (photoreal faces), 'epic-realism'."
+                "With subject_ids, base is taken from the character's train family (Z-Image/SDXL/FLUX). "
+                "Only override when the user names a specific model: 'krea2-turbo', 'zimage-turbo', "
+                "'sd-xl', 'sdxl-turbo', 'realistic-vision', 'epic-realism'."
             ),
             required=False,
             default="auto",
@@ -82,12 +235,27 @@ class ImageGeneratorTool(BaseTool):
 
     def execute(self, prompt: str, style: str = "realistic",
                 width: int = 1024, height: int = 1024,
-                model: str = "auto", **kwargs) -> ToolResult:
-        """Chat/CLI stills — delegates to the shared stills_pipeline façade."""
+                model: str = "auto", subject_ids=None, **kwargs) -> ToolResult:
+        """Chat/CLI stills — cast LoRA path when subject_ids resolve; else stills_pipeline."""
+        # Unwrap LLM mistakes: entire JSON stuffed into prompt=
+        prompt, nested_ids = _unwrap_nested_prompt_json(prompt or "")
+        # Explicit kwargs win, then nested JSON, then kwargs aliases
+        sid_list = _normalize_subject_ids(
+            subject_ids
+            if subject_ids is not None
+            else kwargs.get("subject_ids") or kwargs.get("cast_subject_ids")
+        )
+        if nested_ids:
+            for i in nested_ids:
+                if i not in sid_list:
+                    sid_list.append(i)
+        # Auto-resolve [batman_2] / trigger tokens if still empty
+        if not sid_list:
+            sid_list = _resolve_cast_from_prompt(prompt)
+
         # Dimension hallucination guard (LLM may invent odd sizes)
         STANDARD_SIZES = {256, 384, 512, 640, 768, 896, 1024, 1280, 1536}
         if width not in STANDARD_SIZES or height not in STANDARD_SIZES:
-            import re
             dim_pattern = re.compile(rf'(?:^|\D){width}\s*[xX×]\s*{height}(?:\D|$)')
             if not dim_pattern.search(prompt or ""):
                 logger.info(
@@ -107,16 +275,12 @@ class ImageGeneratorTool(BaseTool):
                 seed = None
 
         logger.info(
-            "ImageGeneratorTool: stills_pipeline %sx%s model=%s enhance=%s director=%s prompt=%r",
-            width, height, model, enhance, director, (prompt or "")[:80],
+            "ImageGeneratorTool: %sx%s model=%s subject_ids=%s prompt=%r",
+            width, height, model, sid_list, (prompt or "")[:100],
         )
 
         try:
-            subject_ids = kwargs.get("subject_ids") or kwargs.get("cast_subject_ids")
-            if subject_ids and not isinstance(subject_ids, (list, tuple)):
-                subject_ids = [subject_ids]
-
-            if subject_ids:
+            if sid_list:
                 from backend.services.character_still_pipeline import render_character_still
                 import tempfile, time as _time
                 out = os.path.join(
@@ -124,7 +288,7 @@ class ImageGeneratorTool(BaseTool):
                 )
                 still = render_character_still(
                     prompt,
-                    subject_ids=[int(x) for x in subject_ids],
+                    subject_ids=sid_list,
                     include_bible=True,
                     source="chat",
                     width=width,
@@ -138,6 +302,7 @@ class ImageGeneratorTool(BaseTool):
                     keep_pipeline=False,
                 )
                 results = [still]
+                cast_used = True
             else:
                 from backend.services.stills_pipeline import run_stills_pipeline
 
@@ -160,6 +325,7 @@ class ImageGeneratorTool(BaseTool):
                     hold_gpu=True,
                     replace_legacy_sd_markers=False,
                 )
+                cast_used = False
             still = results[0] if results else None
             if not still:
                 return ToolResult(success=False, error="No result from stills pipeline")
@@ -167,8 +333,30 @@ class ImageGeneratorTool(BaseTool):
             if still.success and still.image_path and (
                 still.image_url or os.path.exists(still.image_path)
             ):
-                image_url = still.image_url or still.image_path
-                filename = os.path.basename(still.image_path) if still.image_path else ""
+                image_url = still.image_url
+                image_path = still.image_path
+                # Cast path writes temp files — promote to public generated_images URL
+                if cast_used and image_path and not image_url:
+                    try:
+                        image_path, image_url = _chat_copy_still(image_path)
+                    except Exception as e:
+                        logger.warning("chat cast copy failed: %s", e)
+                        image_url = image_path
+                image_url = image_url or image_path
+                filename = os.path.basename(image_path) if image_path else ""
+                meta = still.metadata or {}
+                cast_line = ""
+                if cast_used:
+                    cast_line = (
+                        f"\nCast LoRA: ON subject_ids={sid_list} "
+                        f"family={meta.get('family')} strength={meta.get('lora_strength')} "
+                        f"lock={meta.get('lock_prefix')!r}"
+                    )
+                else:
+                    cast_line = (
+                        "\nCast LoRA: OFF (no subject_ids — base model only; "
+                        "pass subject_ids=[id] for trained cast characters)"
+                    )
                 return ToolResult(
                     success=True,
                     output=(
@@ -181,6 +369,7 @@ class ImageGeneratorTool(BaseTool):
                         f"Enhance: {still.enhance_mode}\n"
                         f"Model: {still.model_used or model}\n"
                         f"Seed: {still.seed_used}"
+                        f"{cast_line}"
                     ),
                     metadata={
                         "image_url": image_url,
@@ -196,6 +385,11 @@ class ImageGeneratorTool(BaseTool):
                         "model": still.model_used or model,
                         "seed": still.seed_used,
                         "generation_time": still.generation_time,
+                        "cast_used": cast_used,
+                        "subject_ids": sid_list,
+                        "lock_prefix": meta.get("lock_prefix"),
+                        "lora_strength": meta.get("lora_strength"),
+                        "family": meta.get("family"),
                     },
                 )
 

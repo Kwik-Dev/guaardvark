@@ -23,7 +23,9 @@ import {
   getProduction, 
   createProduction,
   approveStoryboard,
-  regenerateShot
+  regenerateShot,
+  deleteProduction,
+  retryProduction,
 } from '../api/productionService';
 
 const FilmCrewPage = () => {
@@ -33,6 +35,8 @@ const FilmCrewPage = () => {
   const [productionDetail, setProductionDetail] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [approving, setApproving] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [regenPolling, setRegenPolling] = useState(false);
@@ -147,6 +151,40 @@ const FilmCrewPage = () => {
     return result;
   };
 
+  const handleRetry = async (id) => {
+    setRetrying(true);
+    setError(null);
+    try {
+      await retryProduction(id);
+      await fetchDetail(id);
+      await fetchProductions();
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Failed to retry production');
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm('Delete this production? Shots will be removed; cast subjects stay in the library.')) {
+      return;
+    }
+    setDeleting(true);
+    setError(null);
+    try {
+      await deleteProduction(id);
+      if (selectedProdId === id) {
+        setSelectedProdId(null);
+        setProductionDetail(null);
+      }
+      await fetchProductions();
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Failed to delete production');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh', bgcolor: 'background.default' }}>
       <AppBar position="static" color="default" elevation={1}>
@@ -187,9 +225,13 @@ const FilmCrewPage = () => {
                 loading={loadingDetail}
                 error={error}
                 approving={approving}
+                retrying={retrying}
+                deleting={deleting}
                 onCastingConfirmed={() => fetchDetail(selectedProdId)}
                 onRegenerateShot={handleRegen}
                 onApproveStoryboard={handleApprove}
+                onRetry={handleRetry}
+                onDelete={handleDelete}
               />
             </Box>
           </>

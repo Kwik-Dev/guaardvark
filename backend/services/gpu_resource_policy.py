@@ -83,10 +83,17 @@ def reclaim_gpu(*, evict_ollama: bool = False, free_comfyui: bool = False) -> No
 
 # --- Orchestrator budget hooks (opt-in) --------------------------------------
 
-def _orchestrator_request(slot_id: str, vram_estimate_mb: int) -> None:
+def _orchestrator_request(slot_id: str, vram_estimate_mb: int, *, hard_fit: bool = True) -> None:
     try:
         from backend.services.gpu_memory_orchestrator import get_orchestrator
-        get_orchestrator().request_model(slot_id, vram_estimate_mb, priority=95, exclusive=False)
+        get_orchestrator().request_model(
+            slot_id, vram_estimate_mb, priority=95, exclusive=False, hard_fit=hard_fit,
+        )
+    except RuntimeError as e:
+        # Hard-fit refuse → surface as GpuBusyError so callers can retry cleanly
+        from backend.services.job_operation_gate import GpuBusyError
+        log.warning("orchestrator refused %s: %s", slot_id, e)
+        raise GpuBusyError(str(e)) from e
     except Exception as e:  # noqa: BLE001
         log.warning("orchestrator request_model(%s) failed (non-fatal): %s", slot_id, e)
 

@@ -420,14 +420,15 @@ class BatchVideoGenerator:
                                  out_path: str, seed: int,
                                  keyframe_model: Optional[str] = None,
                                  loras: Optional[list] = None,
+                                 subject_ids: Optional[list] = None,
                                  lora_strength: float = 0.25,
                                  keep_warm: bool = False,
-                                 training_resolution: Optional[int] = None) -> Optional[str]:
+                                 training_resolution: Optional[int] = None,
+                                 require_cast: bool = False) -> Optional[str]:
         """Cinematic mode: render a keyframe still, then free VRAM for I2V.
 
         Character LoRAs bake identity into THIS still (Wan/Cog cannot apply them).
-        Routing is family-aware via character_still_pipeline — Z-Image LoRAs go
-        offline; SDXL/FLUX go Comfy. Never force SDXL for a Z-Image LoRA.
+        Prefer subject_ids so identity core + train base match Cast generate.
         """
         try:
             from backend.services.gpu_resource_policy import free_comfyui_vram
@@ -447,13 +448,17 @@ class BatchVideoGenerator:
                 w, h = int(round(_long * _ar)), _long
             w = max(256, (w // 16) * 16)
             h = max(256, (h // 16) * 16)
-            has_loras = bool(loras)
-            if has_loras:
+            sids = [int(x) for x in (subject_ids or []) if str(x).strip()]
+            lora_list = list(loras or [])
+            has_cast = bool(sids or lora_list)
+            if has_cast:
                 from backend.services.character_still_pipeline import render_character_still
+                # Raw scene prompt — pipeline applies identity core when subjects resolve.
                 still_res = render_character_still(
                     prompt,
-                    lora_paths=list(loras),
-                    include_bible=False,
+                    subject_ids=sids or None,
+                    lora_paths=lora_list or None,
+                    include_bible=True,  # vision bible pins costume for keyframes
                     source="video",
                     width=w,
                     height=h,
@@ -462,10 +467,31 @@ class BatchVideoGenerator:
                     lora_strength=lora_strength,
                     keep_pipeline=keep_warm,
                 )
-                still = still_res.image_path if still_res.success else None
+                if not still_res.success:
+                    logger.error(
+                        "Cast keyframe still failed: %s (lock=%r family=%s)",
+                        still_res.error,
+                        (still_res.metadata or {}).get("lock_prefix"),
+                        (still_res.metadata or {}).get("family"),
+                    )
+                    if require_cast:
+                        raise RuntimeError(
+                            still_res.error or "Cast keyframe still failed — refusing T2V fallback"
+                        )
+                    still = None
+                else:
+                    still = still_res.image_path
+                    logger.info(
+                        "Cast keyframe still ok: family=%s strength=%s lock=%r",
+                        (still_res.metadata or {}).get("family"),
+                        (still_res.metadata or {}).get("lora_strength"),
+                        ((still_res.metadata or {}).get("lock_prefix") or "")[:100],
+                    )
             else:
                 from backend.services.comfyui_image_generator import ComfyUIImageGenerator
                 model = keyframe_model or "flux-schnell"
+                if str(model).lower() in ("from-lora", "from_lora", "auto"):
+                    model = "flux-schnell"
                 steps = 8 if "flux" in model.lower() else 30
                 still = ComfyUIImageGenerator(lora_strength=lora_strength).generate_image(
                     prompt=prompt,
@@ -483,7 +509,11 @@ class BatchVideoGenerator:
                 except Exception:
                     pass
             return still if still and Path(still).exists() else None
-        except Exception as e:  # noqa: BLE001 — fall back to T2V, never fail the item here
+        except RuntimeError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            if require_cast:
+                raise
             logger.warning(
                 f"Cinematic keyframe generation failed ({e}); falling back to text-to-video"
             )
@@ -548,9 +578,9 @@ class BatchVideoGenerator:
             batch_dir.mkdir(parents=True, exist_ok=True)
 
             # Resolve cast members (trained character LoRAs) ONCE for the batch.
-            # The video model can't apply a LoRA, so identity is baked into the
-            # cinematic keyframe — selecting cast therefore implies cinematic-keyframe
-            # mode and forces the SDXL keyframe path in _generate_keyframe_still.
+            # The video model can't apply a face LoRA, so identity is baked into the
+            # cinematic keyframe (family-aware via character_still_pipeline: Z-Image
+            # offline / SDXL / FLUX Comfy). Selecting cast implies cinematic-keyframe.
             # Reuses cast_lock (the single source of truth, same as music-video).
             cast_lora_paths: list[str] = []
             cast_lock_prefix = ""
@@ -697,28 +727,42 @@ class BatchVideoGenerator:
                                 meta["cinematic_keyframe"] = True
                                 item_model = self._to_i2v_model(batch_request.model)
                             else:
-                                # Front-load the identity lock (trigger + bible) so the LoRA binds.
-                                kf_prompt = item.prompt
-                                if cast_lock_prefix:
-                                    from backend.services.cast_lock import apply_lock
-                                    kf_prompt = apply_lock(item.prompt, cast_lock_prefix)
+                                # Raw scene prompt + subject_ids — pipeline owns identity lock.
                                 still_path = str(Path(batch_dir) / f"keyframe_{item.id}.png")
-                                kf = self._generate_keyframe_still(
-                                    prompt=kf_prompt,
-                                    width=batch_request.width,
-                                    height=batch_request.height,
-                                    out_path=still_path,
-                                    seed=(batch_request.seed if batch_request.seed is not None else 1000),
-                                    keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
-                                    loras=(cast_lora_paths or None),
-                                    lora_strength=cast_lora_strength,
-                                    training_resolution=cast_training_res,
-                                )
+                                _cast_ids = list(getattr(batch_request, "subject_ids", None) or [])
+                                try:
+                                    kf = self._generate_keyframe_still(
+                                        prompt=item.prompt,
+                                        width=batch_request.width,
+                                        height=batch_request.height,
+                                        out_path=still_path,
+                                        seed=(batch_request.seed if batch_request.seed is not None else 1000),
+                                        keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
+                                        loras=(cast_lora_paths or None),
+                                        subject_ids=_cast_ids or None,
+                                        lora_strength=cast_lora_strength,
+                                        training_resolution=cast_training_res,
+                                        require_cast=bool(_cast_ids or cast_lora_paths),
+                                    )
+                                except RuntimeError as e:
+                                    br = BatchVideoResult(
+                                        item_id=item.id,
+                                        success=False,
+                                        error=str(e),
+                                    )
+                                    return (br, 0, 1, False)
                                 if kf:
                                     meta["image_path"] = kf
                                     meta["cinematic_keyframe"] = True
                                     item_model = self._to_i2v_model(batch_request.model)
-                                # else: keyframe failed -> fall through to plain text-to-video
+                                elif _cast_ids or cast_lora_paths:
+                                    br = BatchVideoResult(
+                                        item_id=item.id,
+                                        success=False,
+                                        error="Cast keyframe still missing — refusing plain T2V",
+                                    )
+                                    return (br, 0, 1, False)
+                                # else: non-cast keyframe failed -> fall through to T2V
 
                         gen_request = VideoGenerationRequest(
                             prompt=item.prompt or "",
@@ -794,20 +838,24 @@ class BatchVideoGenerator:
                             break
                         if getattr(_it, "image_path", None) or not (_it.prompt or "").strip():
                             continue  # brought its own image / no prompt → no keyframe needed
-                        _kf_prompt = _it.prompt
-                        if cast_lock_prefix:
-                            from backend.services.cast_lock import apply_lock
-                            _kf_prompt = apply_lock(_it.prompt, cast_lock_prefix)
-                        _kf = self._generate_keyframe_still(
-                            prompt=_kf_prompt,
-                            width=batch_request.width, height=batch_request.height,
-                            out_path=str(Path(batch_dir) / f"keyframe_{_it.id}.png"),
-                            seed=(batch_request.seed if batch_request.seed is not None else 1000),
-                            keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
-                            loras=(cast_lora_paths or None), lora_strength=cast_lora_strength,
-                            keep_warm=True,  # hold the still model across ALL keyframes
-                            training_resolution=cast_training_res,
-                        )
+                        _cast_ids = list(getattr(batch_request, "subject_ids", None) or [])
+                        try:
+                            _kf = self._generate_keyframe_still(
+                                prompt=_it.prompt,
+                                width=batch_request.width, height=batch_request.height,
+                                out_path=str(Path(batch_dir) / f"keyframe_{_it.id}.png"),
+                                seed=(batch_request.seed if batch_request.seed is not None else 1000),
+                                keyframe_model=(batch_request.metadata or {}).get("keyframe_model"),
+                                loras=(cast_lora_paths or None),
+                                subject_ids=_cast_ids or None,
+                                lora_strength=cast_lora_strength,
+                                keep_warm=True,  # hold the still model across ALL keyframes
+                                training_resolution=cast_training_res,
+                                require_cast=bool(_cast_ids or cast_lora_paths),
+                            )
+                        except RuntimeError as e:
+                            logger.error("Warm keyframe failed for %s: %s", _it.id, e)
+                            _kf = None
                         if _kf:
                             precomputed_keyframes[_it.id] = _kf
                     if precomputed_keyframes:
@@ -1014,6 +1062,9 @@ class BatchVideoGenerator:
                 "face_restore": batch_request.face_restore,
                 "lora_name": batch_request.lora_name,
                 "lora_strength": batch_request.lora_strength,
+                "subject_ids": list(batch_request.subject_ids or []),
+                "cinematic_keyframe": bool(batch_request.cinematic_keyframe),
+                "director_mode": bool(batch_request.director_mode),
                 "metadata": dict(batch_request.metadata or {}),
                 # Exact control-panel snapshot for "Adjust & Retry" (restore the UI verbatim).
                 "ui_config": params.get("ui_config"),
@@ -1511,15 +1562,15 @@ class BatchVideoGenerator:
         videos_dir.mkdir(parents=True, exist_ok=True)
 
         # Each item_dir holds a single rendered video — give it a clean,
-        # predictable name. The collision resolver in register_file applies
-        # if anything ends up registered into the same DB folder twice.
-        # Legacy: f"video_{uuid.uuid4().hex}.mp4" left hex visible in the UI.
-        video_path = videos_dir / "video.mp4"
+        # timestamped name to ensure unique filenames across runs.
+        from datetime import datetime
+        video_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_path = videos_dir / f"video_{video_timestamp}.mp4"
         if video_path.exists():
             # Same item_dir got re-rendered (rare). Add a sequential suffix
             # using the same Files-app convention the resolver uses.
             from backend.utils.filename_resolver import _split_existing_suffix
-            stem, n = _split_existing_suffix("video")
+            stem, n = _split_existing_suffix(f"video_{video_timestamp}")
             while video_path.exists():
                 n += 1
                 video_path = videos_dir / f"{stem} ({n}).mp4"

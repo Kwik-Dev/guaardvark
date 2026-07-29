@@ -165,6 +165,72 @@ def get_production(prod_id):
     })
 
 
+@bp.delete("/<int:prod_id>")
+def delete_production(prod_id):
+    """Delete a production and cascaded shots / join rows. Subjects are kept."""
+    p = db.session.get(Production, prod_id)
+    if p is None:
+        return jsonify({"error": "not_found"}), 404
+    name = p.name
+    db.session.delete(p)
+    db.session.commit()
+    log.info("Deleted production %s (%s)", prod_id, name)
+    return jsonify({"deleted": prod_id, "name": name})
+
+
+@bp.post("/<int:prod_id>/retry")
+def retry_production(prod_id):
+    """Clear failed_* status and re-dispatch the agent for current_stage.
+
+    User-gated stages (casting, awaiting_approval) only clear the failed flag.
+    Non-failed idle stages (e.g. stuck screenwriting) also re-dispatch.
+    """
+    from backend.services.production_service import STAGE_TO_AGENT
+
+    p = db.session.get(Production, prod_id)
+    if p is None:
+        return jsonify({"error": "not_found"}), 404
+
+    stage = p.current_stage or "draft"
+    status = p.status or ""
+    was_failed = status.startswith("failed")
+
+    # Restore active status for this stage
+    p.status = stage
+    p.error_blob = None
+    db.session.commit()
+
+    agent = STAGE_TO_AGENT.get(stage)
+    dispatched = False
+    if agent:
+        try:
+            svc = ProductionService(db.session)
+            svc.dispatch_agent(p.id, agent)
+            dispatched = True
+        except Exception as e:
+            log.warning("Retry dispatch failed for production %s: %s", prod_id, e)
+            return jsonify({
+                "id": p.id,
+                "status": p.status,
+                "current_stage": p.current_stage,
+                "dispatched": False,
+                "warning": str(e),
+            }), 200
+
+    return jsonify({
+        "id": p.id,
+        "status": p.status,
+        "current_stage": p.current_stage,
+        "dispatched": dispatched,
+        "agent": agent,
+        "was_failed": was_failed,
+        "message": (
+            f"Re-dispatched {agent}" if dispatched
+            else f"Cleared failure; stage '{stage}' is user-gated — continue in the UI"
+        ),
+    })
+
+
 @bp.post("/<int:prod_id>/cast/<int:subject_id>")
 def cast_subject(prod_id, subject_id):
     body = request.get_json(silent=True) or {}

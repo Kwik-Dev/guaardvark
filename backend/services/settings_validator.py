@@ -82,7 +82,8 @@ MODEL_SETTINGS = {
         "min_dimensions": (512, 512),
         "recommended_dimensions": (1024, 1024),
         "steps_range": (4, 30),
-        "recommended_steps": 8,
+        # Official HF: num_inference_steps=9 → 8 DiT forwards; guidance_scale=0.0
+        "recommended_steps": 9,
         "best_for": ["versatile", "photorealism", "faces", "anatomy", "text", "high_res"],
         "warnings": [],
         # 2K: max side 2688 (for 16:9 packs), area ~2048² — see image_resolution_limits
@@ -301,8 +302,9 @@ class SettingsValidator:
             warnings.append(f"{model}: {warning}")
 
         # For zimage-turbo the guidance warning is intentionally omitted from the static list
-        # (see MODEL_SETTINGS) because the Batch UI disables the control and backend forces
-        # a neutral value. We still warn via the dynamic check below if a high value is supplied.
+        # (see MODEL_SETTINGS) because Turbo is CFG-distilled (recommended 0.0); the Batch UI
+        # and soft-clamp keep values in [0, 2]. We still warn via the dynamic check below if a
+        # high value is supplied.
 
         # Check for common issues
         if "turbo" in model.lower() and guidance > 1.0:

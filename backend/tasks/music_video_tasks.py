@@ -231,95 +231,47 @@ def _resolve_song_path(mv: MusicVideo) -> str | None:
     return None
 
 
-# Identity features worth pinning against drift — the LoRA holds the face, but hair
-# color/length and eye color are the bits that wander shot-to-shot. We pull ONLY the
-# clauses mentioning these, in PRIORITY ORDER (hair + eyes first — most drift-prone and
-# distinctive), so the anchor stays tiny (fits alongside the scene in SDXL's 77-token
-# budget) instead of dumping the whole ~195-token bible.
-_IDENTITY_TIERS = (
-    ("hair", "bangs"),                              # 1. hair: drifts most, most distinctive
-    ("eyes", "eye ", "eye-"),                        # 2. eye color
-    ("tattoo", "beauty mark", "freckl"),             # 3. distinctive marks
-    ("complexion", "skin", "lips", "jaw", "cheekbone"),  # 4. face/skin if room remains
-)
+def _keyframe_cast_context(
+    mv: MusicVideo, s: dict, base_prompt: str
+) -> tuple[list[str], list[int], str]:
+    """Resolve cast for music-video keyframes.
 
+    Returns ``(lora_paths, subject_ids, scene_prompt)``. Identity lock is applied
+    once inside ``render_character_still`` (identity core — not full bible, not
+    bible-clause anchors). Scene prompt is returned raw.
 
-def _short_identity_phrase(subjects, max_words: int = 28) -> str:
-    """A compact identity anchor (~max_words) drawn from each subject's bible —
-    the highest-value appearance clauses (hair + eyes first), not the whole bible."""
-    import re
-    out: list[str] = []
-    for subj in subjects or []:
-        bible = (getattr(subj, "bible", None) or "").replace("\n", " ").strip()
-        if not bible:
-            continue
-        # Split on SENTENCE boundaries (not commas) so "Her eyes are large, expressive
-        # hazel-green" stays one clause — comma-splitting dropped the eye color.
-        clauses = [c.strip() for c in re.split(r"[.;]", bible) if c.strip()]
-        picked: list[str] = []
-        seen: set[str] = set()
-        for tier in _IDENTITY_TIERS:
-            for c in clauses:
-                if c not in seen and any(k in c.lower() for k in tier):
-                    picked.append(c)
-                    seen.add(c)
-        if picked:
-            words = ", ".join(picked).split()
-            out.append(" ".join(words[:max_words]))
-    return "; ".join(o for o in out if o)
-
-
-def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tuple[list[str], str]:
-    """Resolve the trained LoRA path(s) for the music-video keyframe and prepend
-    each Subject's trigger word to the prompt — mirroring Film Crew's
-    production_swarm_tasks._shot_loras_and_prompt. A LoRA only locks identity
-    when the token it was trained on is actually present at inference, so the
-    trigger words go INTO the prompt, not just the LoraLoader chain.
-
-    Source-of-truth note: the MusicVideo model has NO cast/subject join table
-    (unlike Production → ProductionSubject); the reference lives in settings_json.
-    The MusicVideoPage cast picker writes `subject_ids` there (alongside the
-    `use_lora_consistency` toggle). We honor, in priority order:
-      1. explicit on-disk paths in settings `loras` / `lora_paths` (list[str]);
-      2. `subject_ids` (list[int]) → Subject.lora_path + trigger_word + bible —
-         what the cast picker writes.
-    Returns ([], base_prompt) — i.e. a NO-OP — when LoRA consistency is off or no
-    reference is reachable, so non-cast videos behave exactly as before.
+    Settings: ``use_lora_consistency`` + ``subject_ids`` and/or explicit
+    ``loras`` / ``lora_paths``. Empty paths when consistency is off.
     """
     if not s.get("use_lora_consistency"):
-        return [], base_prompt
-
-    from backend.services.cast_lock import subjects_to_lock, apply_lock
+        return [], [], base_prompt
 
     lora_paths: list[str] = []
+    subject_ids: list[int] = []
 
-    # (1) explicit paths in settings (accept either key name).
     explicit = s.get("loras") or s.get("lora_paths") or []
     if isinstance(explicit, (list, tuple)):
         for p in explicit:
             if isinstance(p, str) and p.strip():
                 lora_paths.append(p.strip())
 
-    # (2) subject_ids → trained Subject LoRAs (the cast seam, shared with Film Crew via
-    # cast_lock.subjects_to_lock — trigger(s) bind the LoRA, verbatim bible(s) pin constant
-    # features like hair length the LoRA under-constrains).
-    lock = ""
-    subjects: list = []
-    subject_ids = s.get("subject_ids") or []
-    if isinstance(subject_ids, (list, tuple)) and subject_ids:
+    raw_ids = s.get("subject_ids") or []
+    if isinstance(raw_ids, (list, tuple)) and raw_ids:
         from backend.models import Subject
-        subjects = [db.session.get(Subject, sid) for sid in subject_ids]
-        # include_bible=False ON PURPOSE: the appearance bible is ~195 tokens, which
-        # ALONE blows past SDXL CLIP's 77-token limit — front-loading it truncates the
-        # per-cut scene/style ("space-punk, sci-fi scenery") clean off the prompt, so
-        # every keyframe collapsed to a plain character portrait. The trained LoRA
-        # already encodes the character strongly (the Generate-Character tab proves it),
-        # so the trigger token is enough to lock identity while leaving the token budget
-        # for the SCENE. (If identity ever drifts we can add back a 1-line short bible.)
-        subj_paths, lock = subjects_to_lock([x for x in subjects if x], include_bible=False)
+        from backend.services.cast_lock import subjects_to_lock
+
+        subjects = []
+        for sid in raw_ids:
+            try:
+                sub = db.session.get(Subject, int(sid))
+            except (TypeError, ValueError):
+                sub = None
+            if sub is not None:
+                subjects.append(sub)
+                subject_ids.append(int(sid))
+        subj_paths, _lock = subjects_to_lock(subjects, include_bible=False)
         lora_paths.extend(subj_paths)
 
-    # De-dupe paths while preserving order.
     seen: set[str] = set()
     lora_paths = [p for p in lora_paths if not (p in seen or seen.add(p))]
 
@@ -330,30 +282,60 @@ def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tup
             "subject_ids → Subject.lora_path) — keyframe will render off-model.",
             mv.id,
         )
-        return [], base_prompt
+        return [], [], base_prompt
 
-    # Trigger token goes at the FRONT (binds the LoRA), then the per-cut scene, then a
-    # SHORT identity anchor — e.g. "sage_harlow, neon space-punk alley, sci-fi cityscape,
-    # shoulder-length wavy black hair with teal highlights, hazel-green eyes". Scene
-    # comes before the anchor so it keeps priority in SDXL's 77-token budget, while the
-    # tiny anchor (hair/eyes/marks only, ~22 words) curbs the drift the bare trigger let
-    # in — without the 195-token full bible that truncated the scene entirely.
-    prompt = apply_lock(base_prompt, lock)
-    anchor = _short_identity_phrase([x for x in subjects if x])
-    if anchor:
-        prompt = f"{prompt}, {anchor}"
-    log.info("music_video %s keyframe: applying %d LoRA(s) %s (bible-lock=%s)",
-             mv.id, len(lora_paths), [os.path.basename(p) for p in lora_paths], bool(lock))
-    return lora_paths, prompt
+    log.info(
+        "music_video %s keyframe: applying %d LoRA(s) %s subject_ids=%s",
+        mv.id,
+        len(lora_paths),
+        [os.path.basename(p) for p in lora_paths],
+        subject_ids,
+    )
+    return lora_paths, subject_ids, (base_prompt or "").strip()
+
+
+def _keyframe_loras_and_prompt(mv: MusicVideo, s: dict, base_prompt: str) -> tuple[list[str], str]:
+    """Compat wrapper: paths + raw scene prompt (lock applied in render_character_still)."""
+    paths, _sids, prompt = _keyframe_cast_context(mv, s, base_prompt)
+    return paths, prompt
 
 
 def _keyframe_lora_strength(s: dict) -> float:
     """Model-aware default keyframe LoRA strength, shared by the clip path AND both
     storyboard endpoints so review thumbnails match the final render. Delegates to the shared
     cast_lock.resolve_lora_strength (one source of truth across all video features); operator
-    override in settings wins."""
+    override in settings wins.
+
+    ``from-lora`` / ``auto`` resolve strength from the first cast LoRA's family
+    (Z-Image ~0.9, SDXL ~0.25), not from the UI label alone.
+    """
     from backend.services.cast_lock import resolve_lora_strength
-    return resolve_lora_strength(s.get("keyframe_model"), s.get("keyframe_lora_strength"))
+
+    model = (s.get("keyframe_model") or "").strip().lower()
+    if model in ("", "from-lora", "auto", "from_lora"):
+        model = "zimage-turbo"
+        try:
+            paths = list(s.get("loras") or s.get("lora_paths") or [])
+            sids = s.get("subject_ids") or []
+            if sids and not paths:
+                from backend.models import Subject
+                for sid in sids:
+                    sub = db.session.get(Subject, int(sid))
+                    if sub and sub.lora_path:
+                        paths.append(sub.lora_path)
+                        break
+            if paths:
+                from backend.services.media_model_registry import resolve_inference_for_loras
+                route = resolve_inference_for_loras(paths[:1])
+                model = (
+                    route.get("offline_model_key")
+                    or route.get("comfy_model_tag")
+                    or route.get("family")
+                    or "zimage-turbo"
+                )
+        except Exception:
+            pass
+    return resolve_lora_strength(model, s.get("keyframe_lora_strength"))
 
 
 @contextmanager
@@ -727,14 +709,15 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                     f"Clip {idx + 1}/{clip_count}: generating keyframe still…",
                 )
                 kf_steps = s.get("keyframe_steps") or 45
-                kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, clip_prompt)
+                kf_loras, kf_sids, kf_prompt = _keyframe_cast_context(mv, s, clip_prompt)
                 kf_lora_strength = _keyframe_lora_strength(s)
                 if kf_loras:
                     from backend.services.character_still_pipeline import render_character_still
                     still = render_character_still(
                         kf_prompt,
-                        lora_paths=kf_loras,
-                        include_bible=False,
+                        subject_ids=kf_sids or None,
+                        lora_paths=kf_loras or None,
+                        include_bible=True,
                         source="musicvideo",
                         width=s["still_width"],
                         height=s["still_height"],
@@ -1013,13 +996,14 @@ def run_storyboard_generator(mv_id: int, force: bool = False):
                 idx = c["index"]
                 still_path = str(out_dir / f"storyboard_{idx}.png")
                 try:
-                    kf_loras, kf_prompt = _keyframe_loras_and_prompt(mv, s, prompt)
+                    kf_loras, kf_sids, kf_prompt = _keyframe_cast_context(mv, s, prompt)
                     if kf_loras:
                         from backend.services.character_still_pipeline import render_character_still
                         still = render_character_still(
                             kf_prompt,
-                            lora_paths=kf_loras,
-                            include_bible=False,
+                            subject_ids=kf_sids or None,
+                            lora_paths=kf_loras or None,
+                            include_bible=True,
                             source="musicvideo",
                             width=s.get("still_width", 1024),
                             height=s.get("still_height", 576),

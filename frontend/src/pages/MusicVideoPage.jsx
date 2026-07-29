@@ -711,9 +711,10 @@ const MusicVideoPage = () => {
     () =>
       useLoraConsistency
         ? [
-            { value: "flux-dev-lora", label: "FLUX-dev + LoRA (recommended identity lock)" },
-            { value: "sdxl-lora", label: "SDXL + LoRA (identity lock for SDXL characters)" },
-            { value: "sdxl", label: "SDXL (no LoRA)" },
+            {
+              value: "from-lora",
+              label: "Auto (character LoRA base — Z-Image / SDXL / FLUX)",
+            },
           ]
         : [
             { value: "flux-schnell", label: "FLUX.1-schnell (fast, beautiful stills) — default" },
@@ -1099,19 +1100,23 @@ const MusicVideoPage = () => {
                         const checked = e.target.checked;
                         setUseLoraConsistency(checked);
                         if (checked) {
-                          setKeyframeModel("flux-dev-lora");
-                        } else if (keyframeModel === "sdxl-lora" || keyframeModel === "flux-dev-lora") {
+                          setKeyframeModel("from-lora");
+                        } else if (
+                          keyframeModel === "from-lora"
+                          || keyframeModel === "sdxl-lora"
+                          || keyframeModel === "flux-dev-lora"
+                        ) {
                           setKeyframeModel(DEFAULT_KEYFRAME_MODEL);
                         }
                       }}
                       id="lora-consistency"
                     />
                     <label htmlFor="lora-consistency" style={{ fontSize: "0.875rem", color: "rgba(255,255,255,0.7)" }}>
-                      Use LoRA consistency (bake cast identity into keyframes — Z-Image/SDXL/FLUX by LoRA family; i2v does not reload face LoRAs)
+                      Use LoRA consistency (bake cast identity into keyframes — Z-Image/SDXL/FLUX by train base; i2v does not reload face LoRAs)
                     </label>
                   </Stack>
                   <Typography variant="caption" color="text.secondary" sx={{ pl: 2.5, display: "block" }}>
-                    Checked = lock a trained character into every cut (LoRA + appearance bible). Pick the cast member(s) below. Unchecked = no identity lock, more beautiful free stills.
+                    Checked = lock a trained character into every cut (LoRA + identity core). Pick cast below; keyframes are generated on demand from each cut prompt. Unchecked = free stills without identity lock.
                   </Typography>
 
                   {useLoraConsistency && (
@@ -1166,24 +1171,27 @@ const MusicVideoPage = () => {
                     ))}
                   </TextField>
 
-                  <TextField
-                    select
-                    size="small"
-                    fullWidth
-                    label="Keyframe / Storyboard Image Model"
-                    value={keyframeModel}
-                    onChange={(e) => setKeyframeModel(e.target.value)}
-                    helperText={
-                      useLoraConsistency
-                        ? "FLUX-dev + LoRA (or SDXL) for identity lock with trained characters."
-                        : "FLUX-schnell for fast beautiful stills; SDXL for higher-fidelity stills without LoRA."
-                    }
-                    sx={{ mt: 1 }}
-                  >
-                    {keyframeModelOptions.map((opt) => (
-                      <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
-                    ))}
-                  </TextField>
+                  {useLoraConsistency || keyframeModelOptions.length <= 1 ? (
+                    <Alert severity="info" sx={{ mt: 1 }}>
+                      Keyframe still model is automatic from the cast character&apos;s training base
+                      (Z-Image / SDXL / FLUX). Storyboard frames are generated on demand from each cut prompt + LoRA.
+                    </Alert>
+                  ) : (
+                    <TextField
+                      select
+                      size="small"
+                      fullWidth
+                      label="Keyframe / Storyboard Image Model"
+                      value={keyframeModel}
+                      onChange={(e) => setKeyframeModel(e.target.value)}
+                      helperText="FLUX-schnell for fast beautiful stills; SDXL for higher-fidelity stills without LoRA."
+                      sx={{ mt: 1 }}
+                    >
+                      {keyframeModelOptions.map((opt) => (
+                        <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
+                      ))}
+                    </TextField>
+                  )}
                 </Stack>
               </Collapse>
 
