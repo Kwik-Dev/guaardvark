@@ -121,6 +121,17 @@ class GuaardvarkBot(commands.Bot):
     async def on_ready(self):
         logger.info("Bot is ready! Logged in as %s (ID: %s)", self.user, self.user.id)
         logger.info("Connected to %d guilds", len(self.guilds))
+        # Fast path: sync slash commands into every joined guild so schema
+        # changes (e.g. new /imagine options) appear immediately. Global sync
+        # still ran in setup_hook for DMs / new servers (can take up to 1h).
+        if not self.config.get("bot", {}).get("guild_id"):
+            for guild in self.guilds:
+                try:
+                    self.tree.copy_global_to(guild=guild)
+                    await self.tree.sync(guild=guild)
+                    logger.info("Synced commands to guild %s (%s)", guild.id, guild.name)
+                except Exception as e:
+                    logger.warning("Guild sync failed for %s: %s", guild.id, e)
 
     async def _check_vip_greeting(self, interaction: discord.Interaction):
         """Send one-time DM greeting to VIP users."""

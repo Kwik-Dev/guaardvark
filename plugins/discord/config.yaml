@@ -12,7 +12,7 @@ security:
   allowed_channels: []
   allow_dms: true
   max_prompt_length: 2000
-  max_image_prompt_length: 500
+  max_image_prompt_length: 2000
 
 rate_limits:
   ask: 10
@@ -32,8 +32,8 @@ voice:
 
 image:
   max_queue_depth: 5
-  default_steps: 20
-  default_size: 512
+  default_steps: 9
+  default_size: 1024
 
 conversation:
   max_history: 50

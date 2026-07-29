@@ -36,10 +36,30 @@ class TestGuaardvarkClient:
             return {"batch_id": "test-123"}
 
         client._post = mock_post
-        await client.generate_image("a cute cat", steps=20, width=512, height=512)
+        await client.generate_image("a cute cat", steps=9, width=1024, height=1024)
         payload = captured_kwargs["json"]
         assert isinstance(payload["prompts"], list)
         assert payload["prompts"] == ["a cute cat"]
+        assert payload["steps"] == 9
+        assert payload["width"] == 1024
+        assert "subject_ids" not in payload
+
+    @pytest.mark.asyncio
+    async def test_generate_image_includes_subject_ids(self):
+        client = GuaardvarkClient()
+        captured_kwargs = {}
+
+        async def mock_post(path, **kwargs):
+            captured_kwargs.update(kwargs)
+            return {"batch_id": "test-123"}
+
+        client._post = mock_post
+        await client.generate_image(
+            "gotham rain", steps=9, width=1024, height=1024, subject_ids=[26]
+        )
+        payload = captured_kwargs["json"]
+        assert payload["subject_ids"] == [26]
+        assert captured_kwargs.get("json") is not None
 
     @pytest.mark.asyncio
     async def test_chat_sends_correct_endpoint(self):
@@ -70,7 +90,7 @@ class TestGuaardvarkClient:
         assert payload["message"] == "hello"
         assert payload["session_id"] == "sess_1"
         assert payload["project_id"] == 42
-        assert payload["use_rag"] is True
+        assert payload["use_rag"] is False
         assert payload["voice_mode"] is False
 
     def test_api_error_attributes(self):

@@ -78,6 +78,47 @@ class TestImagineCommand:
 
         assert image_cog._active_jobs == 0
 
+    @pytest.mark.asyncio
+    async def test_imagine_passes_subject_ids_for_character(
+        self, image_cog, mock_interaction, mock_api_client
+    ):
+        """Picking a Cast character must send subject_ids to the batch API."""
+        with patch("commands.image.asyncio.sleep", new_callable=AsyncMock):
+            await image_cog._handle_imagine(
+                mock_interaction, "walking through Gotham rain", character="26"
+            )
+
+        mock_api_client.generate_image.assert_awaited_once()
+        kwargs = mock_api_client.generate_image.await_args.kwargs
+        assert kwargs.get("subject_ids") == [26]
+        assert kwargs.get("width") == 1024
+        assert kwargs.get("height") == 1024
+        content = mock_interaction.followup.send.call_args.kwargs.get("content", "")
+        assert "Batman 2" in content or "Cast" in content
+
+    @pytest.mark.asyncio
+    async def test_imagine_rejects_unknown_character(
+        self, image_cog, mock_interaction, mock_api_client
+    ):
+        await image_cog._handle_imagine(
+            mock_interaction, "a scene", character="no_such_hero"
+        )
+        mock_api_client.generate_image.assert_not_awaited()
+        content = mock_interaction.followup.send.call_args.kwargs.get("content", "")
+        assert "unknown character" in content.lower()
+
+    @pytest.mark.asyncio
+    async def test_imagine_uses_modern_defaults(
+        self, image_cog, mock_interaction, mock_api_client
+    ):
+        with patch("commands.image.asyncio.sleep", new_callable=AsyncMock):
+            await image_cog._handle_imagine(mock_interaction, "a cute cat")
+
+        kwargs = mock_api_client.generate_image.await_args.kwargs
+        assert kwargs.get("steps") == 9
+        assert kwargs.get("width") == 1024
+        assert kwargs.get("height") == 1024
+
 
 class TestEnhancePromptCommand:
     @pytest.mark.asyncio

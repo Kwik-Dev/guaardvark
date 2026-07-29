@@ -96,6 +96,22 @@ def mock_api_client():
         "filename": "tts_test.wav",
     })
     client.get_voice_audio = AsyncMock(return_value=b"\x00" * 1000)
+    client.list_cast_subjects = AsyncMock(return_value=[
+        {
+            "id": 26,
+            "kind": "character",
+            "name": "Batman 2",
+            "trigger_word": "batman_2",
+            "lora_path": "/data/loras/batman_2.safetensors",
+        },
+        {
+            "id": 99,
+            "kind": "character",
+            "name": "Untrained Extra",
+            "trigger_word": "extra",
+            "lora_path": None,
+        },
+    ])
     return client
 
 
@@ -110,13 +126,13 @@ def sample_config():
             "allowed_channels": [],
             "allow_dms": True,
             "max_prompt_length": 2000,
-            "max_image_prompt_length": 500,
+            "max_image_prompt_length": 2000,
         },
         "rate_limits": {"ask": 10, "imagine": 3, "generate_csv": 2, "search": 15, "enhance_prompt": 10},
         "voice": {
             "enabled": True, "silence_threshold_ms": 1500,
             "max_listen_duration_s": 30, "tts_voice": "ryan", "interrupt_on_speech": True,
         },
-        "image": {"max_queue_depth": 5, "default_steps": 20, "default_size": 512},
+        "image": {"max_queue_depth": 5, "default_steps": 9, "default_size": 1024},
         "conversation": {"max_history": 50},
     }

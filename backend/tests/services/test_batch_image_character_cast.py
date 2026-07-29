@@ -73,3 +73,35 @@ def test_apply_character_casting_stores_subject_ids():
     assert params["subject_ids"] == [7]
     assert params["loras"] == ["/data/lora/bat.safetensors"]
     assert params.get("_cast_warnings")
+
+
+def test_apply_character_casting_auto_resolves_from_prompt():
+    """When subject_ids omitted, resolve [trigger] / names from prompt text."""
+    from backend.api.batch_image_generation_api import _apply_character_casting
+
+    class Subj:
+        def __init__(self, sid, path, name="Batman 2"):
+            self.id = sid
+            self.lora_path = path
+            self.name = name
+            self.trigger_word = "batman_2"
+
+    trained = Subj(26, "/data/lora/bat.safetensors")
+
+    def fake_get(_model, sid):
+        return {26: trained}.get(int(sid))
+
+    params: dict = {}
+    with patch(
+        "backend.tools.image_tools._resolve_cast_from_prompt",
+        return_value=[26],
+    ), patch("backend.models.db") as db:
+        db.session.get.side_effect = fake_get
+        _apply_character_casting(
+            {"prompts": ["[batman_2] standing on a rooftop"]},
+            params,
+        )
+
+    assert params["subject_ids"] == [26]
+    assert params["loras"] == ["/data/lora/bat.safetensors"]
+    assert any("auto-resolved" in w for w in params.get("_cast_warnings", []))

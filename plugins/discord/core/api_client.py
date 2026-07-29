@@ -108,9 +108,39 @@ class GuaardvarkClient:
         })
 
     # --- Image Generation ---
-    async def generate_image(self, prompt: str, steps: int = 20, width: int = 512, height: int = 512) -> dict:
-        """POST /batch-image/generate/prompts"""
-        return await self._post("/batch-image/generate/prompts", json={"prompts": [prompt], "steps": steps, "width": width, "height": height})
+    async def generate_image(
+        self,
+        prompt: str,
+        steps: int = 9,
+        width: int = 1024,
+        height: int = 1024,
+        subject_ids: list = None,
+        guidance: float = None,
+    ) -> dict:
+        """POST /batch-image/generate/prompts
+
+        Optional ``subject_ids`` loads Cast Library LoRAs (identity lock).
+        When omitted, the backend still auto-resolves cast from trigger tokens
+        in the prompt (e.g. ``[batman_2]``).
+        """
+        payload: dict = {
+            "prompts": [prompt],
+            "steps": steps,
+            "width": width,
+            "height": height,
+        }
+        if subject_ids:
+            payload["subject_ids"] = [int(x) for x in subject_ids]
+        if guidance is not None:
+            payload["guidance"] = guidance
+        return await self._post("/batch-image/generate/prompts", json=payload)
+
+    async def list_cast_subjects(self) -> list:
+        """GET /cast-library — return subjects list (trained chars used for /imagine)."""
+        data = await self._get("/cast-library")
+        if isinstance(data, dict):
+            return data.get("subjects") or []
+        return []
 
     async def get_batch_status(self, batch_id: str) -> dict:
         """GET /batch-image/status/<batch_id>"""

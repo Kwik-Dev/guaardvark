@@ -125,15 +125,58 @@ def _validate_csv_upload(file):
 
     return True, "Valid"
 
+def _resolve_subject_ids_from_prompts(prompts: Any) -> list[int]:
+    """Match trigger tokens / [brackets] / cast names in prompt text to trained Subjects.
+
+    Used when the caller (Discord bot, bare API) omits explicit ``subject_ids``.
+    Reuses the same helper as the chat ``generate_image`` tool.
+    """
+    if not prompts:
+        return []
+    try:
+        from backend.tools.image_tools import _resolve_cast_from_prompt
+    except Exception as e:
+        logger.warning("Cast-from-prompt helper unavailable: %s", e)
+        return []
+
+    found: list[int] = []
+    seen: set[int] = set()
+    for item in prompts if isinstance(prompts, list) else [prompts]:
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, dict):
+            text = item.get("prompt") or ""
+        else:
+            continue
+        for sid in _resolve_cast_from_prompt(text or ""):
+            if sid not in seen:
+                seen.add(sid)
+                found.append(sid)
+    return found
+
+
 def _apply_character_casting(data: Dict[str, Any], params: Dict[str, Any]) -> None:
     """Resolve cast `subject_ids` for batch stills.
 
     Trained subjects (with ``lora_path``) are stored as ``subject_ids`` so
     ``render_character_still`` can apply identity core (trigger + class + marks)
     and family routing. Also keeps ``loras`` for diagnostics / legacy.
+
+    When ``subject_ids`` is omitted, auto-resolves from prompt text (trigger words,
+    ``[bracket]`` tokens, cast names) so Discord / bare callers load LoRAs the same
+    way the chat ``generate_image`` tool does.
+
     Raises ValueError if every selected id is untrained or missing.
     """
     subject_ids = data.get("subject_ids") or []
+    auto_resolved = False
+    if not subject_ids:
+        subject_ids = _resolve_subject_ids_from_prompts(data.get("prompts"))
+        auto_resolved = bool(subject_ids)
+        if auto_resolved:
+            logger.info(
+                "Auto-resolved cast subject_ids from prompts: %s", subject_ids
+            )
     if not subject_ids:
         return
     from backend.models import Subject, db
@@ -175,6 +218,10 @@ def _apply_character_casting(data: Dict[str, Any], params: Dict[str, Any]) -> No
 
     params["subject_ids"] = trained_ids
     params["loras"] = loras
+    if auto_resolved:
+        params.setdefault("_cast_warnings", []).append(
+            f"auto-resolved cast from prompt: {trained_ids}"
+        )
     if untrained or missing:
         # Partial cast: proceed with trained only, surface warning via params.
         warn = []
