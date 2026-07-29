@@ -314,6 +314,92 @@ VIDEO_MODEL_REGISTRY = {
         "vram_mb": 14000,
         "type": "flux-edit",
     },
+    # ── LTX-2.3 (Lightricks) — 16GB Ada: distilled FP8 + Gemma FP4 ──────────────
+    # Requires ComfyUI ≥ 0.16.1 (native LTX-2.3). Transformer-only FP8 lives in
+    # diffusion_models/ (Kijai layout). Install click pulls Gemma + text projection
+    # + video VAE so one Ready state is actually runnable.
+    "ltx23-distilled-fp8": {
+        "name": "LTX-2.3 Distilled FP8 (16GB)",
+        "description": "Lightricks LTX-2.3 distilled 22B — FP8 for RTX 40xx 16GB. "
+                       "8 steps, CFG=1. Up to ~10s (161 frames @ 16fps). T2V + I2V. "
+                       "Pulls Gemma FP4 + text projection + video VAE.",
+        "hf_repo": "Kijai/LTX2.3_comfy",
+        "local_subdir": "diffusion_models",
+        "files": [
+            {
+                "src": "diffusion_models/ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors",
+                "dst": "ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors",
+            },
+        ],
+        "requires": ["ltx-gemma-fp4", "ltx-text-projection", "ltx-vae"],
+        "size_gb": 25.2,
+        "vram_mb": 16000,
+        "type": "ltx",
+    },
+    "ltx-gemma-fp4": {
+        "name": "Gemma 3 12B IT (FP4) — LTX text encoder",
+        "description": "Required by LTX-2.3 on 16/24GB. FP4 leaves headroom for the "
+                       "transformer; BF16 Gemma will OOM beside it.",
+        "hf_repo": "Comfy-Org/ltx-2",
+        "local_subdir": "text_encoders",
+        "files": [
+            {
+                "src": "split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+                "dst": "gemma_3_12B_it_fp4_mixed.safetensors",
+            },
+        ],
+        "size_gb": 9.5,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "ltx-text-projection": {
+        "name": "LTX-2.3 Text Projection",
+        "description": "Maps Gemma embeddings into LTX-2.3 transformer space. Required "
+                       "companion for DualCLIPLoader / LTX text encode.",
+        "hf_repo": "Kijai/LTX2.3_comfy",
+        "local_subdir": "text_encoders",
+        "files": [
+            {
+                "src": "text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+                "dst": "ltx-2.3_text_projection_bf16.safetensors",
+            },
+        ],
+        "size_gb": 2.3,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "ltx-vae": {
+        "name": "LTX-2.3 Video VAE",
+        "description": "Video VAE for LTX-2.3 decode. Required for transformer-only "
+                       "checkpoints (VAE is not baked into the FP8 file).",
+        "hf_repo": "Kijai/LTX2.3_comfy",
+        "local_subdir": "vae",
+        "files": [
+            {
+                "src": "vae/LTX23_video_vae_bf16.safetensors",
+                "dst": "LTX23_video_vae_bf16.safetensors",
+            },
+        ],
+        "size_gb": 1.45,
+        "vram_mb": 0,
+        "type": "vae",
+    },
+    "ltx-distilled-lora": {
+        "name": "LTX-2.3 Distilled LoRA v1.1",
+        "description": "Optional — some native templates pair the LoRA with a dev "
+                       "checkpoint. Not required for the distilled FP8 transformer path.",
+        "hf_repo": "Kijai/LTX2.3_comfy",
+        "local_subdir": "loras",
+        "files": [
+            {
+                "src": "loras/ltx-2.3-22b-distilled-1.1_lora-dynamic_fro09_avg_rank_111_bf16.safetensors",
+                "dst": "ltx-2.3-22b-distilled-1.1_lora-dynamic_fro09_avg_rank_111_bf16.safetensors",
+            },
+        ],
+        "size_gb": 2.74,
+        "vram_mb": 0,
+        "type": "lora",
+    },
 }
 
 
@@ -406,6 +492,26 @@ def preflight_video_model(model_id: str) -> tuple[bool, str]:
             )
         return True, ""
 
+    if mtype == "ltx":
+        if not is_model_installed(model_id):
+            return False, (
+                f"{name} is not installed. Open Manage Video Models to download it "
+                f"(and its Gemma / VAE companions) before queuing a batch."
+            )
+        for dep in entry.get("requires", []):
+            if not is_model_installed(dep):
+                dep_name = (VIDEO_MODEL_REGISTRY.get(dep) or {}).get("name") or dep
+                return False, (
+                    f"{name} is missing companion '{dep_name}'. "
+                    f"Open Manage Video Models and Install again (companions auto-pull)."
+                )
+        if not _comfyui_reachable():
+            return False, (
+                f"{name} requires ComfyUI ≥ 0.16.1 with LTX-2.3 support. "
+                f"Start the ComfyUI plugin, then retry."
+            )
+        return True, ""
+
     return True, ""
 
 
@@ -449,6 +555,44 @@ def wan_comfyui_map() -> dict:
     return out
 
 
+def ltx_comfyui_map() -> dict:
+    """Build the ComfyUI LTX-2.3 loader map from the registry (never raises).
+
+    Returns {model_id: {unet, clip, text_projection, vae}} from the same
+    `files[].dst` paths the downloader writes.
+    """
+    out = {}
+    try:
+        for mid, entry in VIDEO_MODEL_REGISTRY.items():
+            if entry.get("type") != "ltx":
+                continue
+            dsts = [f["dst"] for f in entry.get("files", [])]
+            unet = dsts[0] if dsts else None
+            vae = clip = text_projection = None
+            for dep in entry.get("requires", []):
+                dep_entry = VIDEO_MODEL_REGISTRY.get(dep, {})
+                dep_files = dep_entry.get("files", [])
+                dep_dst = dep_files[0]["dst"] if dep_files else (dep_entry.get("check_files") or [None])[0]
+                if not dep_dst:
+                    continue
+                if dep_entry.get("type") == "vae":
+                    vae = dep_dst
+                elif dep == "ltx-text-projection":
+                    text_projection = dep_dst
+                elif dep_entry.get("type") == "encoder":
+                    clip = dep_dst
+            out[mid] = {
+                "type": "ti2v",
+                "unet": unet,
+                "clip": clip,
+                "text_projection": text_projection,
+                "vae": vae,
+            }
+    except Exception as e:
+        logger.error("ltx_comfyui_map() build failed: %s", e, exc_info=True)
+    return out
+
+
 def verify_registry() -> list:
     """Sanity-check the registry is internally complete. Returns a list of
     human-readable problems (empty = healthy). Never raises."""
@@ -467,6 +611,11 @@ def verify_registry() -> list:
                 for k in required:
                     if not m.get(k):
                         problems.append(f"{mid}: ComfyUI map missing '{k}' (companion/file not resolvable)")
+            if entry.get("type") == "ltx":
+                m = ltx_comfyui_map().get(mid, {})
+                for k in ("unet", "clip", "text_projection", "vae"):
+                    if not m.get(k):
+                        problems.append(f"{mid}: LTX ComfyUI map missing '{k}'")
     except Exception as e:
         problems.append(f"verify_registry crashed: {e}")
     return problems

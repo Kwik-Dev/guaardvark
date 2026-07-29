@@ -42,6 +42,7 @@ import {
   QUALITY_PRESETS,
   COGVIDEOX_DURATION_PRESETS,
   WAN_DURATION_PRESETS,
+  LTX_DURATION_PRESETS,
   MOTION_PRESETS,
   OUTPUT_QUALITY_TIERS,
   KEYFRAME_MODEL_OPTIONS,
@@ -55,6 +56,7 @@ import {
   DEFAULT_I2V_MODEL,
   isCogVideoXModel,
   isWanModel,
+  isLtxModel,
   snapDimensions,
 } from "../constants/videoGeneratorPresets";
 import {
@@ -323,7 +325,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       const res = await fetch(`${API_BASE}/batch-video/models`);
       const data = await res.json();
       if (data.success && data.data?.models) {
-        const vids = data.data.models.filter(m => m.type === "cogvideox" || m.type === "wan");
+        const vids = data.data.models.filter(
+          m => m.type === "cogvideox" || m.type === "wan" || m.type === "ltx"
+        );
         const ids = new Set(vids.map(m => m.id));
         if (ids.size > 0) setApiModelIds(ids);
         setAnyModelReady(vids.some(m => m.is_ready));
@@ -392,6 +396,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
   // Get duration presets based on selected model
   const durationPresets = useMemo(() => {
+    if (isLtxModel(model)) return LTX_DURATION_PRESETS;
     if (isWanModel(model)) return WAN_DURATION_PRESETS;
     return COGVIDEOX_DURATION_PRESETS;  // cogvideox (svd retired)
   }, [model]);
@@ -403,6 +408,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // output every time. Pin to the model's native frame and let the user
     // letterbox / crop in post if they need a different aspect.
     if (isCogVideoXModel(model)) {
+      const [nativeW, nativeH] = MODEL_OPTIONS[model].resolution;
+      return { width: nativeW, height: nativeH };
+    }
+    // LTX-2.3: dims must be divisible by 32; default 768×512 is the 16GB-safe native.
+    if (isLtxModel(model)) {
       const [nativeW, nativeH] = MODEL_OPTIONS[model].resolution;
       return { width: nativeW, height: nativeH };
     }
@@ -432,7 +442,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // Compute final params from presets
   const computedParams = useMemo(() => {
     const quality = QUALITY_PRESETS[qualityPreset] || QUALITY_PRESETS.standard;
-    const currentDurationPresets = isWanModel(model) ? WAN_DURATION_PRESETS : COGVIDEOX_DURATION_PRESETS;
+    const currentDurationPresets = isLtxModel(model)
+      ? LTX_DURATION_PRESETS
+      : isWanModel(model)
+        ? WAN_DURATION_PRESETS
+        : COGVIDEOX_DURATION_PRESETS;
     const baseDuration = currentDurationPresets[durationPreset] || currentDurationPresets.short;
     const motion = MOTION_PRESETS[motionPreset] || MOTION_PRESETS.normal;
     const modelConfig = MODEL_OPTIONS[model] || {};
@@ -464,6 +478,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     if (isCogVideoXModel(model) && effectiveSteps < 50 &&
         (advancedParams.num_inference_steps === null || advancedParams.num_inference_steps === undefined)) {
       effectiveSteps = 50;
+    }
+
+    // LTX-2.3 distilled is trained for 8 steps @ CFG=1 — quality presets that
+    // push 30–50 steps waste time and can degrade distilled output.
+    if (isLtxModel(model) &&
+        (advancedParams.num_inference_steps === null || advancedParams.num_inference_steps === undefined)) {
+      effectiveSteps = modelConfig.defaultSteps || 8;
     }
 
     // Low VRAM safe preset for CogVideoX on 16GB GPUs
@@ -2071,7 +2092,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       guidance_scale: Number(e.target.value),
                     })
                   }
-                  helperText={`Default for ${isWanModel(model) ? 'Wan' : 'CogVideoX'}: ${MODEL_DEFAULT_GUIDANCE[MODEL_OPTIONS[model]?.type] ?? 6}. Higher = stricter prompt adherence.`}
+                  helperText={`Default for ${isLtxModel(model) ? 'LTX' : isWanModel(model) ? 'Wan' : 'CogVideoX'}: ${MODEL_DEFAULT_GUIDANCE[MODEL_OPTIONS[model]?.type] ?? 6}. Higher = stricter prompt adherence.`}
                   sx={{
                     width: { xs: '100%', sm: '280px' },
                     '& .MuiFormHelperText-root': {
@@ -2157,7 +2178,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               borderRadius: 1,
               bgcolor: 'action.hover',
             }}>
-              {isWanModel(model) ? (
+              {isLtxModel(model) ? (
+                <Chip
+                  size="small"
+                  color="warning"
+                  label="LTX-2.3"
+                  sx={{ fontWeight: 600 }}
+                />
+              ) : isWanModel(model) ? (
                 <Chip
                   size="small"
                   color="secondary"

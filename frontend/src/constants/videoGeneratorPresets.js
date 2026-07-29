@@ -41,6 +41,13 @@ export const WAN_DURATION_PRESETS = {
   long: { label: "Long", description: "~5 seconds", duration_frames: 81, fps: 16 },
 };
 
+/** LTX-2.3 frame counts must be 8n+1. 161 @ 16fps ≈ 10s (16GB Ada target). */
+export const LTX_DURATION_PRESETS = {
+  short: { label: "Short", description: "~4 seconds", duration_frames: 65, fps: 16 },
+  medium: { label: "Medium", description: "~6 seconds", duration_frames: 97, fps: 16 },
+  long: { label: "Long", description: "~10 seconds", duration_frames: 161, fps: 16 },
+};
+
 export const MOTION_PRESETS = {
   subtle: { label: "🌊 Subtle", description: "Gentle movement", motion_strength: 0.5 },
   normal: { label: "🎯 Normal", description: "Balanced motion", motion_strength: 1.0 },
@@ -67,7 +74,7 @@ export const KEYFRAME_MODEL_OPTIONS = {
 
 export const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
 
-export const MODEL_DEFAULT_GUIDANCE = { wan: 3.5, cogvideox: 6.0 };
+export const MODEL_DEFAULT_GUIDANCE = { wan: 3.5, cogvideox: 6.0, ltx: 1.0 };
 
 export const ASPECT_RATIO_PRESETS = {
   "16:9": { label: "16:9", description: "Widescreen", ratio: 16 / 9 },
@@ -153,6 +160,17 @@ export const MODEL_OPTIONS = {
     supportsI2V: true,
     dimensionAlignment: 16,
   },
+  "ltx23-distilled-fp8": {
+    label: "LTX-2.3 Distilled FP8 (16GB)",
+    description: "Lightricks LTX-2.3 — 8 steps, up to ~10s on 16GB Ada. T2V + I2V.",
+    type: "ltx",
+    maxFrames: 161,
+    resolution: [768, 512],
+    defaultSteps: 8,
+    supportsT2V: true,
+    supportsI2V: true,
+    dimensionAlignment: 32,
+  },
 };
 
 export const DEFAULT_T2V_MODEL = "wan22-5b";
@@ -160,6 +178,7 @@ export const DEFAULT_I2V_MODEL = "wan22-5b";
 
 export const isCogVideoXModel = (model) => MODEL_OPTIONS[model]?.type === "cogvideox";
 export const isWanModel = (model) => MODEL_OPTIONS[model]?.type === "wan";
+export const isLtxModel = (model) => MODEL_OPTIONS[model]?.type === "ltx";
 
 export const snapDimensions = (width, height, model) => {
   const align = MODEL_OPTIONS[model]?.dimensionAlignment ?? 16;

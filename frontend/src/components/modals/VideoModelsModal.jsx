@@ -22,15 +22,17 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import MemoryIcon from "@mui/icons-material/Memory";
 import axios from "axios";
 
-const GENERATION_TYPES = new Set(["wan", "cogvideox"]);
+const GENERATION_TYPES = new Set(["wan", "cogvideox", "ltx"]);
 const TYPE_LABELS = {
   wan: "Video",
   cogvideox: "Video",
+  ltx: "Video",
   facerestore: "Face restore",
   upscaler: "Upscale",
   flux: "Keyframe image",
   vae: "Dependency",
   encoder: "Dependency",
+  lora: "Dependency",
 };
 
 const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {

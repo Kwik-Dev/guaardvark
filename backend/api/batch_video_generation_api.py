@@ -293,7 +293,9 @@ def enhance_prompt_preview():
         # model_family hint (frontend can send model or we infer)
         model = data.get("model", "")
         model_family = None
-        if "wan" in (model or "").lower():
+        if "ltx" in (model or "").lower():
+            model_family = "ltx"
+        elif "wan" in (model or "").lower():
             model_family = "wan"
         elif "cog" in (model or "").lower():
             model_family = "cogvideox"

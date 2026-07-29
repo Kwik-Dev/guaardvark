@@ -55,14 +55,24 @@ git clone --depth 1 "$REPO_URL" "$TMP_DIR/ComfyUI"
 
 mkdir -p "$COMFYUI_DIR"
 
-# Preserve top-level weights only. Nested package paths like comfy/ldm/models
-# MUST be allowed to update from the fresh clone.
-RSYNC_OPTS=(-a --delete --exclude '/models/')
+# Preserve top-level weights, custom nodes, and per-machine user state.
+# Nested package paths like comfy/ldm/models MUST still update from the fresh clone.
+# NEVER delete custom_nodes/ — Wan depends on KJNodes/GGUF/VHS/CogVideoXWrapper.
+RSYNC_OPTS=(-a --delete --exclude '/models/' --exclude '/custom_nodes/' --exclude '/user/' --exclude '/input/' --exclude '/output/' --exclude '/temp/')
 if [ "$DRY_RUN" -eq 1 ]; then
   RSYNC_OPTS+=(--dry-run -v)
   info "Dry-run rsync (no files written):"
 else
-  info "Merging app into $COMFYUI_DIR (preserving top-level models/)..."
+  info "Merging app into $COMFYUI_DIR (preserving models/, custom_nodes/, user/)..."
+fi
+
+# Optional: pin to a release tag (e.g. COMFYUI_REF=v0.29.0)
+COMFYUI_REF="${COMFYUI_REF:-}"
+if [ -n "$COMFYUI_REF" ]; then
+  info "Checking out COMFYUI_REF=$COMFYUI_REF in temp clone..."
+  git -C "$TMP_DIR/ComfyUI" fetch --tags --depth 1 origin "refs/tags/$COMFYUI_REF:refs/tags/$COMFYUI_REF" 2>/dev/null \
+    || git -C "$TMP_DIR/ComfyUI" fetch --tags origin "$COMFYUI_REF"
+  git -C "$TMP_DIR/ComfyUI" checkout -q "$COMFYUI_REF"
 fi
 
 rsync "${RSYNC_OPTS[@]}" "$TMP_DIR/ComfyUI/" "$COMFYUI_DIR/"

@@ -76,6 +76,7 @@ MOTION_TERMS = {
     "default": "smooth coherent motion, temporal consistency",
     "wan": "smooth cinematic motion at native frame rate, strong temporal coherence, natural camera movement and dynamics",
     "cogvideox": "expressive fluid animation, detailed and coherent motion, good timing and pacing",
+    "ltx": "natural camera motion, sharp temporal detail, coherent subject movement across frames, cinematic pacing",
 }
 
 # Style-specific descriptors (style flavor only — base quality and motion appended at runtime).
