@@ -1299,14 +1299,16 @@ class ComfyUIVideoGenerator:
         fps: float = 16.0,
         interpolation_multiplier: int = 1,
     ) -> dict:
-        """LTX-2.3 distilled T2V — core ComfyUI nodes (no ComfyUI-LTXVideo required).
+        """LTX-2.3 distilled T2V — AV-aware core ComfyUI graph.
 
-        Graph: UNETLoader (diffusion_models FP8) + DualCLIPLoader(ltxv: Gemma FP4 +
-        text projection) + VAELoader → CLIPTextEncode ×2 → EmptyLTXVLatentVideo →
-        LTXVConditioning → ModelSamplingLTXV → KSampler(euler_ancestral_cfg_pp,
-        CFG=1, 8 steps) → VAEDecode → VHS_VideoCombine.
+        LTX-2.3 is an audio-video model: sampling on a video-only latent crashes
+        in rotary PE with T=0 audio (`reshape [2, 0, 32, -1]`). We always concat
+        an empty audio latent, sample the AV pair, then separate and decode video.
 
-        Frame count snapped to 8n+1; dims must be multiples of 32.
+        Graph: UNETLoader + DualCLIPLoader(ltxv) + video VAE + audio VAE →
+        CLIPTextEncode ×2 → EmptyLTXVLatentVideo + LTXVEmptyLatentAudio →
+        LTXVConcatAVLatent → LTXVConditioning → ModelSamplingLTXV → KSampler →
+        LTXVSeparateAVLatent → VAEDecode → VHS_VideoCombine.
         """
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
@@ -1317,6 +1319,7 @@ class ComfyUIVideoGenerator:
         clip = cfg.get("clip") or "gemma_3_12B_it_fp4_mixed.safetensors"
         text_proj = cfg.get("text_projection") or "ltx-2.3_text_projection_bf16.safetensors"
         vae = cfg.get("vae") or "LTX23_video_vae_bf16.safetensors"
+        audio_vae = cfg.get("audio_vae") or "LTX23_audio_vae_bf16.safetensors"
         length = self._ltx_frame_count(num_frames)
 
         if not negative_prompt:
@@ -1325,7 +1328,6 @@ class ComfyUIVideoGenerator:
                 "bad proportions, extra limbs, static, jitter, morphing, watermark"
             )
 
-        # Gemma is heavy — keep it on CPU on 16GB so the transformer keeps VRAM.
         clip_device = self._wan_clip_device()
 
         workflow = {
@@ -1343,9 +1345,10 @@ class ComfyUIVideoGenerator:
                 },
             },
             "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
-            "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
-            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
-            "6": {
+            "4": {"class_type": "LTXVAudioVAELoader", "inputs": {"ckpt_name": audio_vae}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
+            "7": {
                 "class_type": "EmptyLTXVLatentVideo",
                 "inputs": {
                     "width": width,
@@ -1354,30 +1357,43 @@ class ComfyUIVideoGenerator:
                     "batch_size": 1,
                 },
             },
-            "7": {
+            "8": {
+                "class_type": "LTXVEmptyLatentAudio",
+                "inputs": {
+                    "frames_number": length,
+                    "frame_rate": float(fps),
+                    "batch_size": 1,
+                    "audio_vae": ["4", 0],
+                },
+            },
+            "9": {
+                "class_type": "LTXVConcatAVLatent",
+                "inputs": {"video_latent": ["7", 0], "audio_latent": ["8", 0]},
+            },
+            "10": {
                 "class_type": "LTXVConditioning",
                 "inputs": {
-                    "positive": ["4", 0],
-                    "negative": ["5", 0],
+                    "positive": ["5", 0],
+                    "negative": ["6", 0],
                     "frame_rate": float(fps),
                 },
             },
-            "8": {
+            "11": {
                 "class_type": "ModelSamplingLTXV",
                 "inputs": {
                     "model": ["1", 0],
                     "max_shift": 2.05,
                     "base_shift": 0.95,
-                    "latent": ["6", 0],
+                    "latent": ["9", 0],
                 },
             },
-            "9": {
+            "12": {
                 "class_type": "KSampler",
                 "inputs": {
-                    "model": ["8", 0],
-                    "positive": ["7", 0],
-                    "negative": ["7", 1],
-                    "latent_image": ["6", 0],
+                    "model": ["11", 0],
+                    "positive": ["10", 0],
+                    "negative": ["10", 1],
+                    "latent_image": ["9", 0],
                     "seed": seed,
                     "steps": max(1, int(num_inference_steps or 8)),
                     "cfg": float(guidance_scale if guidance_scale is not None else 1.0),
@@ -1386,11 +1402,15 @@ class ComfyUIVideoGenerator:
                     "denoise": 1.0,
                 },
             },
-            "10": self._build_vae_decode_node("9", "3", width, height),
-            "11": {
+            "13": {
+                "class_type": "LTXVSeparateAVLatent",
+                "inputs": {"av_latent": ["12", 0]},
+            },
+            "14": self._build_vae_decode_node("13", "3", width, height),
+            "15": {
                 "class_type": "VHS_VideoCombine",
                 "inputs": {
-                    "images": ["10", 0],
+                    "images": ["14", 0],
                     "frame_rate": float(fps),
                     "loop_count": 0,
                     "filename_prefix": "ltx23_t2v",
@@ -1408,8 +1428,8 @@ class ComfyUIVideoGenerator:
         if interpolation_multiplier > 1:
             self._add_rife_interpolation(
                 workflow,
-                source_node_id="10",
-                video_combine_node_id="11",
+                source_node_id="14",
+                video_combine_node_id="15",
                 base_fps=fps,
                 multiplier=interpolation_multiplier,
             )
@@ -1431,7 +1451,7 @@ class ComfyUIVideoGenerator:
         interpolation_multiplier: int = 1,
         strength: float = 1.0,
     ) -> dict:
-        """LTX-2.3 distilled I2V — same backbone as T2V, latent from LTXVImgToVideo."""
+        """LTX-2.3 distilled I2V — AV concat path with LTXVImgToVideo start frame."""
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
 
@@ -1441,6 +1461,7 @@ class ComfyUIVideoGenerator:
         clip = cfg.get("clip") or "gemma_3_12B_it_fp4_mixed.safetensors"
         text_proj = cfg.get("text_projection") or "ltx-2.3_text_projection_bf16.safetensors"
         vae = cfg.get("vae") or "LTX23_video_vae_bf16.safetensors"
+        audio_vae = cfg.get("audio_vae") or "LTX23_audio_vae_bf16.safetensors"
         length = self._ltx_frame_count(num_frames)
         clip_device = self._wan_clip_device()
 
@@ -1465,20 +1486,21 @@ class ComfyUIVideoGenerator:
                 },
             },
             "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
-            "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
-            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
-            "6": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
-            "7": {
-                "class_type": "LTXVPreprocess",
-                "inputs": {"image": ["6", 0], "img_compression": 18},
-            },
+            "4": {"class_type": "LTXVAudioVAELoader", "inputs": {"ckpt_name": audio_vae}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
+            "7": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
             "8": {
+                "class_type": "LTXVPreprocess",
+                "inputs": {"image": ["7", 0], "img_compression": 18},
+            },
+            "9": {
                 "class_type": "LTXVImgToVideo",
                 "inputs": {
-                    "positive": ["4", 0],
-                    "negative": ["5", 0],
+                    "positive": ["5", 0],
+                    "negative": ["6", 0],
                     "vae": ["3", 0],
-                    "image": ["7", 0],
+                    "image": ["8", 0],
                     "width": width,
                     "height": height,
                     "length": length,
@@ -1486,30 +1508,43 @@ class ComfyUIVideoGenerator:
                     "strength": float(strength),
                 },
             },
-            "9": {
+            "10": {
+                "class_type": "LTXVEmptyLatentAudio",
+                "inputs": {
+                    "frames_number": length,
+                    "frame_rate": float(fps),
+                    "batch_size": 1,
+                    "audio_vae": ["4", 0],
+                },
+            },
+            "11": {
+                "class_type": "LTXVConcatAVLatent",
+                "inputs": {"video_latent": ["9", 2], "audio_latent": ["10", 0]},
+            },
+            "12": {
                 "class_type": "LTXVConditioning",
                 "inputs": {
-                    "positive": ["8", 0],
-                    "negative": ["8", 1],
+                    "positive": ["9", 0],
+                    "negative": ["9", 1],
                     "frame_rate": float(fps),
                 },
             },
-            "10": {
+            "13": {
                 "class_type": "ModelSamplingLTXV",
                 "inputs": {
                     "model": ["1", 0],
                     "max_shift": 2.05,
                     "base_shift": 0.95,
-                    "latent": ["8", 2],
+                    "latent": ["11", 0],
                 },
             },
-            "11": {
+            "14": {
                 "class_type": "KSampler",
                 "inputs": {
-                    "model": ["10", 0],
-                    "positive": ["9", 0],
-                    "negative": ["9", 1],
-                    "latent_image": ["8", 2],
+                    "model": ["13", 0],
+                    "positive": ["12", 0],
+                    "negative": ["12", 1],
+                    "latent_image": ["11", 0],
                     "seed": seed,
                     "steps": max(1, int(num_inference_steps or 8)),
                     "cfg": float(guidance_scale if guidance_scale is not None else 1.0),
@@ -1518,11 +1553,15 @@ class ComfyUIVideoGenerator:
                     "denoise": 1.0,
                 },
             },
-            "12": self._build_vae_decode_node("11", "3", width, height),
-            "13": {
+            "15": {
+                "class_type": "LTXVSeparateAVLatent",
+                "inputs": {"av_latent": ["14", 0]},
+            },
+            "16": self._build_vae_decode_node("15", "3", width, height),
+            "17": {
                 "class_type": "VHS_VideoCombine",
                 "inputs": {
-                    "images": ["12", 0],
+                    "images": ["16", 0],
                     "frame_rate": float(fps),
                     "loop_count": 0,
                     "filename_prefix": "ltx23_i2v",
@@ -1540,8 +1579,8 @@ class ComfyUIVideoGenerator:
         if interpolation_multiplier > 1:
             self._add_rife_interpolation(
                 workflow,
-                source_node_id="12",
-                video_combine_node_id="13",
+                source_node_id="16",
+                video_combine_node_id="17",
                 base_fps=fps,
                 multiplier=interpolation_multiplier,
             )

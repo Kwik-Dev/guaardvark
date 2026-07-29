@@ -331,9 +331,12 @@ VIDEO_MODEL_REGISTRY = {
                 "dst": "ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors",
             },
         ],
-        "requires": ["ltx-gemma-fp4", "ltx-text-projection", "ltx-vae"],
+        "requires": ["ltx-gemma-fp4", "ltx-text-projection", "ltx-vae", "ltx-audio-vae"],
         "size_gb": 25.2,
-        "vram_mb": 16000,
+        # 14000 (not 16000): distilled FP8 + Gemma-on-CPU runs on 16GB cards; the
+        # gpu_session fit check adds +1024MB margin, and 16000+1024 > ~16376 total
+        # falsely blocked VideoGen batches that already rendered via the direct path.
+        "vram_mb": 14000,
         "type": "ltx",
     },
     "ltx-gemma-fp4": {
@@ -381,6 +384,23 @@ VIDEO_MODEL_REGISTRY = {
             },
         ],
         "size_gb": 1.45,
+        "vram_mb": 0,
+        "type": "vae",
+    },
+    "ltx-audio-vae": {
+        "name": "LTX-2.3 Audio VAE",
+        "description": "Required companion — LTX-2.3 is an AV model; empty audio latents "
+                       "must be concatenated before sampling. Also hardlinked into "
+                       "checkpoints/ for LTXVAudioVAELoader.",
+        "hf_repo": "Kijai/LTX2.3_comfy",
+        "local_subdir": "vae",
+        "files": [
+            {
+                "src": "vae/LTX23_audio_vae_bf16.safetensors",
+                "dst": "LTX23_audio_vae_bf16.safetensors",
+            },
+        ],
+        "size_gb": 0.36,
         "vram_mb": 0,
         "type": "vae",
     },
@@ -568,14 +588,16 @@ def ltx_comfyui_map() -> dict:
                 continue
             dsts = [f["dst"] for f in entry.get("files", [])]
             unet = dsts[0] if dsts else None
-            vae = clip = text_projection = None
+            vae = audio_vae = clip = text_projection = None
             for dep in entry.get("requires", []):
                 dep_entry = VIDEO_MODEL_REGISTRY.get(dep, {})
                 dep_files = dep_entry.get("files", [])
                 dep_dst = dep_files[0]["dst"] if dep_files else (dep_entry.get("check_files") or [None])[0]
                 if not dep_dst:
                     continue
-                if dep_entry.get("type") == "vae":
+                if dep == "ltx-audio-vae":
+                    audio_vae = dep_dst
+                elif dep_entry.get("type") == "vae":
                     vae = dep_dst
                 elif dep == "ltx-text-projection":
                     text_projection = dep_dst
@@ -587,6 +609,7 @@ def ltx_comfyui_map() -> dict:
                 "clip": clip,
                 "text_projection": text_projection,
                 "vae": vae,
+                "audio_vae": audio_vae,
             }
     except Exception as e:
         logger.error("ltx_comfyui_map() build failed: %s", e, exc_info=True)
@@ -613,7 +636,7 @@ def verify_registry() -> list:
                         problems.append(f"{mid}: ComfyUI map missing '{k}' (companion/file not resolvable)")
             if entry.get("type") == "ltx":
                 m = ltx_comfyui_map().get(mid, {})
-                for k in ("unet", "clip", "text_projection", "vae"):
+                for k in ("unet", "clip", "text_projection", "vae", "audio_vae"):
                     if not m.get(k):
                         problems.append(f"{mid}: LTX ComfyUI map missing '{k}'")
     except Exception as e:

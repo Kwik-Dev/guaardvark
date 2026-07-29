@@ -304,15 +304,32 @@ class GPUMemoryOrchestrator:
                             hard_fit, short, list(self._registry.keys()),
                         )
                         if short:
+                            # Margin must not invent a refuse for near-full-card models
+                            # on a mostly-idle GPU (same rule as gpu_resource_policy
+                            # _ensure_fits_or_busy). ComfyUI's base ~2GB resident often
+                            # leaves free just under estimate+10% on a 16GB card even
+                            # though LTX/Cog already render successfully.
+                            mostly_free = (
+                                total_mb > 0
+                                and avail2 >= int(total_mb * 0.85)
+                                and vram_estimate_mb <= total_mb
+                            )
                             msg = (
                                 f"GPU short for {slot_id}: only {avail2}MB free "
                                 f"(need ~{vram_estimate_mb}MB + {safety_margin_mb}MB margin). "
                                 f"Unload other models or wait for jobs to finish."
                             )
-                            if hard_fit:
+                            if hard_fit and mostly_free:
+                                logger.info(
+                                    "%s — admitting (est %s fits card total %s; "
+                                    "free %s mostly idle — margin alone short)",
+                                    msg, vram_estimate_mb, total_mb, avail2,
+                                )
+                            elif hard_fit:
                                 logger.error("%s — refusing admit", msg)
                                 raise RuntimeError(msg)
-                            logger.warning("%s — admitting anyway (hard_fit=0)", msg)
+                            else:
+                                logger.warning("%s — admitting anyway (hard_fit=0)", msg)
 
             # Register the slot
             now = time.time()

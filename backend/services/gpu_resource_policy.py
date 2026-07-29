@@ -116,8 +116,13 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
     hung allocation. Probe-unavailable (CPU-only host / no driver) admits — never blocks.
 
     Message distinguishes two cases:
-      * need > total card VRAM → estimate exceeds GPU capacity (not "resident model")
+      * estimate alone > total card VRAM → estimate exceeds GPU capacity
       * card has free space but still short → another consumer may be resident
+
+    Margin must not invent capacity overflow: when the estimate itself fits the card
+    (`estimate_mb <= total`) but `estimate + margin` spills over total, and the GPU is
+    mostly free (≥85%), admit. That unblocks near-full-card models (LTX/Cog @ ~16GB
+    estimate on a ~16376MB card) that already render successfully via ComfyUI.
     """
     try:
         from backend.services.gpu_resource_coordinator import get_gpu_coordinator
@@ -129,8 +134,32 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
         return  # no usable GPU probe — do not block
     free = int(info.get("available_mb") or 0)
     total = int(info.get("total_mb") or 0)
-    need = int(estimate_mb) + margin_mb
+    estimate_mb = int(estimate_mb)
+    margin_mb = int(margin_mb)
+    need = estimate_mb + margin_mb
+    mostly_free = total > 0 and free >= int(total * 0.85)
     if free >= need:
+        return
+    # Honest capacity refuse: the estimate itself does not fit the card.
+    if total > 0 and estimate_mb > total:
+        from backend.services.job_operation_gate import GpuBusyError
+        raise GpuBusyError(
+            f"Not enough free VRAM for {slot}: estimate exceeds GPU capacity "
+            f"(~{need}MB needed = est {estimate_mb} + {margin_mb} headroom, "
+            f"card total ~{total}MB, free ~{free}MB). Pick a lighter model "
+            f"(e.g. Wan 2.2 5B on 16GB cards) or lower the estimate."
+        )
+    # Margin / headroom must not invent a refuse when the estimate fits the card
+    # and the GPU is mostly free (≥85%). Covers:
+    #   * estimate+margin > total (false "capacity overflow" on ~16GB cards)
+    #   * estimate+margin <= total but free is a few GB short (ComfyUI base ~2GB
+    #     resident) — proven renderable via the direct generator path.
+    if mostly_free and estimate_mb <= total:
+        log.info(
+            "VRAM fit-check: admitting %s (est %s fits card total %s; "
+            "need %s with margin; free %s mostly idle — not inventing a refuse)",
+            slot, estimate_mb, total, need, free,
+        )
         return
     from backend.services.job_operation_gate import GpuBusyError
     if total > 0 and need > total:
@@ -140,16 +169,7 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
             f"card total ~{total}MB, free ~{free}MB). Pick a lighter model "
             f"(e.g. Wan 2.2 5B on 16GB cards) or lower the estimate."
         )
-    # Free space exists but not enough after eviction — something else is using VRAM
-    # (or the free figure is fragmented). Don't claim capacity overflow when free is
-    # most of the card either.
-    if total > 0 and free >= int(total * 0.85) and need <= total:
-        raise GpuBusyError(
-            f"Not enough free VRAM for {slot}: need ~{need}MB "
-            f"(est {estimate_mb} + {margin_mb} headroom), only {free}MB free "
-            f"on a ~{total}MB card even though the GPU looks mostly idle. "
-            f"The estimate may be high for this hardware — try a lighter model."
-        )
+    # Free short and card is NOT mostly idle → something else is resident.
     raise GpuBusyError(
         f"Not enough free VRAM for {slot}: need ~{need}MB (est {estimate_mb} + "
         f"{margin_mb} headroom), only {free}MB free after eviction — another "

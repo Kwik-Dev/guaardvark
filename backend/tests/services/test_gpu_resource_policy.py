@@ -137,3 +137,46 @@ def test_gpu_session_ram_admit_uses_custom_weight(fresh_gate, monkeypatch):
     ):
         pass
     assert admitted == [32.0]
+
+
+# --- _ensure_fits_or_busy (LTX / 16GB margin overflow) -----------------------
+
+def _patch_vram(monkeypatch, *, free_mb: int, total_mb: int = 16376):
+    """Stub the coordinator probe used by _ensure_fits_or_busy (no real GPU)."""
+    import backend.services.gpu_resource_coordinator as coord
+
+    class _Fake:
+        def get_available_vram(self):
+            return {
+                "success": True,
+                "available_mb": free_mb,
+                "total_mb": total_mb,
+            }
+
+    monkeypatch.setattr(coord, "get_gpu_coordinator", lambda: _Fake())
+
+
+def test_ensure_fits_admits_ltx_14000_on_16gb(monkeypatch):
+    """estimate 14000 + margin; free ~14500 (mostly idle, Comfy base resident) → admit."""
+    _patch_vram(monkeypatch, free_mb=14500, total_mb=16376)
+    grp._ensure_fits_or_busy(14000, "video:ltx", margin_mb=1024)
+
+
+def test_ensure_fits_admits_margin_overflow_when_mostly_free(monkeypatch):
+    """estimate 16000 fits card but +margin spills past total; mostly free → admit."""
+    _patch_vram(monkeypatch, free_mb=14500, total_mb=16376)
+    grp._ensure_fits_or_busy(16000, "video:cog", margin_mb=1024)
+
+
+def test_ensure_fits_rejects_estimate_above_card_total(monkeypatch):
+    """estimate alone above card total → capacity reject (margin rule does not apply)."""
+    _patch_vram(monkeypatch, free_mb=14500, total_mb=16376)
+    with pytest.raises(GpuBusyError, match="estimate exceeds GPU capacity"):
+        grp._ensure_fits_or_busy(18000, "video:too-big", margin_mb=1024)
+
+
+def test_ensure_fits_rejects_when_another_consumer_resident(monkeypatch):
+    """estimate fits card but free is low (not mostly idle) → busy/resident refuse."""
+    _patch_vram(monkeypatch, free_mb=5000, total_mb=16376)
+    with pytest.raises(GpuBusyError, match="another model/render may be resident"):
+        grp._ensure_fits_or_busy(14000, "video:ltx", margin_mb=1024)
