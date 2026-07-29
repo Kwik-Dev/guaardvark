@@ -29,8 +29,12 @@ except ImportError:
 # already tolerate a missing entry, so import never hard-fails over this.
 try:
     from backend.services.video_model_registry import wan_comfyui_map as _wan_comfyui_map
+    from backend.services.video_model_registry import ltx_comfyui_map as _ltx_comfyui_map
 except Exception:  # pragma: no cover - defensive
     def _wan_comfyui_map():
+        return {}
+
+    def _ltx_comfyui_map():
         return {}
 
 
@@ -314,17 +318,21 @@ class ComfyUIVideoGenerator:
         "cogvideox-5b-i2v": 16,
         "wan22-14b": 16,
         "wan22-14b-i2v": 16,
+        "ltx23-distilled-fp8": 16,
     }
     # Family floors when an exact id isn't in the table (aliases like "wan22").
-    _FAMILY_MIN_VRAM_GB = {"wan": 16, "cogvideox": 16}
+    _FAMILY_MIN_VRAM_GB = {"wan": 16, "cogvideox": 16, "ltx": 16}
 
     # ── Wan 2.2 model mapping ────────────────────────────────────────────────
     # DERIVED from the shared registry (backend/services/video_model_registry.py)
     # so these loader paths can never drift from what the downloader writes
     # (issue #36). To change a Wan filename, edit the registry's `files` — not here.
     WAN22_MODELS = _wan_comfyui_map()
+    # LTX-2.3 loader map — same SSOT pattern as Wan.
+    LTX_MODELS = _ltx_comfyui_map()
 
     # CogVideoX/Wan are 8x VAE × 2x patch → /16. SVD is U-Net only → /8.
+    # LTX-2.3 spatial downscale is 32 (see EmptyLTXVLatentVideo).
     # Mirror of MODEL_OPTIONS[*].dimensionAlignment in VideoGeneratorPage.jsx —
     # the frontend should already snap, this is the defense-in-depth seam for
     # API/MCP/agent callers that go straight to the workflow builders.
@@ -332,6 +340,7 @@ class ComfyUIVideoGenerator:
         "cogvideox": 16,
         "wan": 16,
         "svd": 8,
+        "ltx": 32,
     }
 
     @classmethod
@@ -352,13 +361,38 @@ class ComfyUIVideoGenerator:
         return cls.WAN22_MODELS
 
     @classmethod
+    def _ensure_ltx_models(cls) -> dict:
+        """Same lazy re-resolve as `_ensure_wan_models` for the LTX-2.3 map."""
+        if not cls.LTX_MODELS:
+            try:
+                from backend.services.video_model_registry import ltx_comfyui_map
+                fresh = ltx_comfyui_map() or {}
+                if fresh:
+                    cls.LTX_MODELS = fresh
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return cls.LTX_MODELS
+
+    @classmethod
     def _model_family(cls, model: str) -> str:
         cls._ensure_wan_models()  # unfreeze the map if it froze empty at import
+        cls._ensure_ltx_models()
+        if model in cls.LTX_MODELS or str(model).startswith("ltx"):
+            return "ltx"
         if model in cls.WAN22_MODELS or model in ("wan22", "wan2.2"):
             return "wan"
         if model in cls.COGVIDEOX_MODELS:
             return "cogvideox"
         return "cogvideox"  # SVD retired; unknown models default to the cogvideox family
+
+    @staticmethod
+    def _ltx_frame_count(num_frames: int) -> int:
+        """LTX-2.3 latent length must be 8n+1 (65, 97, 121, 161, …)."""
+        n = max(9, int(num_frames or 65))
+        snapped = ((n - 1) // 8) * 8 + 1
+        if snapped < 9:
+            snapped = 9
+        return snapped
 
     @classmethod
     def _align_dimensions(cls, width: int, height: int, model: str) -> tuple[int, int]:
@@ -1251,6 +1285,268 @@ class ComfyUIVideoGenerator:
 
         return workflow
 
+    def _create_ltx23_t2v_workflow(
+        self,
+        prompt: str,
+        negative_prompt: str = "",
+        model_key: str = "ltx23-distilled-fp8",
+        num_frames: int = 65,
+        num_inference_steps: int = 8,
+        guidance_scale: float = 1.0,
+        width: int = 768,
+        height: int = 512,
+        seed: Optional[int] = None,
+        fps: float = 16.0,
+        interpolation_multiplier: int = 1,
+    ) -> dict:
+        """LTX-2.3 distilled T2V — core ComfyUI nodes (no ComfyUI-LTXVideo required).
+
+        Graph: UNETLoader (diffusion_models FP8) + DualCLIPLoader(ltxv: Gemma FP4 +
+        text projection) + VAELoader → CLIPTextEncode ×2 → EmptyLTXVLatentVideo →
+        LTXVConditioning → ModelSamplingLTXV → KSampler(euler_ancestral_cfg_pp,
+        CFG=1, 8 steps) → VAEDecode → VHS_VideoCombine.
+
+        Frame count snapped to 8n+1; dims must be multiples of 32.
+        """
+        if seed is None:
+            seed = int(time.time() * 1000) % (2**31)
+
+        self._ensure_ltx_models()
+        cfg = self.LTX_MODELS.get(model_key, {})
+        unet = cfg.get("unet") or "ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors"
+        clip = cfg.get("clip") or "gemma_3_12B_it_fp4_mixed.safetensors"
+        text_proj = cfg.get("text_projection") or "ltx-2.3_text_projection_bf16.safetensors"
+        vae = cfg.get("vae") or "LTX23_video_vae_bf16.safetensors"
+        length = self._ltx_frame_count(num_frames)
+
+        if not negative_prompt:
+            negative_prompt = (
+                "blurry, low quality, worst quality, deformed, disfigured, poor anatomy, "
+                "bad proportions, extra limbs, static, jitter, morphing, watermark"
+            )
+
+        # Gemma is heavy — keep it on CPU on 16GB so the transformer keeps VRAM.
+        clip_device = self._wan_clip_device()
+
+        workflow = {
+            "1": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": unet, "weight_dtype": "default"},
+            },
+            "2": {
+                "class_type": "DualCLIPLoader",
+                "inputs": {
+                    "clip_name1": clip,
+                    "clip_name2": text_proj,
+                    "type": "ltxv",
+                    "device": clip_device,
+                },
+            },
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
+            "6": {
+                "class_type": "EmptyLTXVLatentVideo",
+                "inputs": {
+                    "width": width,
+                    "height": height,
+                    "length": length,
+                    "batch_size": 1,
+                },
+            },
+            "7": {
+                "class_type": "LTXVConditioning",
+                "inputs": {
+                    "positive": ["4", 0],
+                    "negative": ["5", 0],
+                    "frame_rate": float(fps),
+                },
+            },
+            "8": {
+                "class_type": "ModelSamplingLTXV",
+                "inputs": {
+                    "model": ["1", 0],
+                    "max_shift": 2.05,
+                    "base_shift": 0.95,
+                    "latent": ["6", 0],
+                },
+            },
+            "9": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["8", 0],
+                    "positive": ["7", 0],
+                    "negative": ["7", 1],
+                    "latent_image": ["6", 0],
+                    "seed": seed,
+                    "steps": max(1, int(num_inference_steps or 8)),
+                    "cfg": float(guidance_scale if guidance_scale is not None else 1.0),
+                    "sampler_name": "euler_ancestral_cfg_pp",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                },
+            },
+            "10": self._build_vae_decode_node("9", "3", width, height),
+            "11": {
+                "class_type": "VHS_VideoCombine",
+                "inputs": {
+                    "images": ["10", 0],
+                    "frame_rate": float(fps),
+                    "loop_count": 0,
+                    "filename_prefix": "ltx23_t2v",
+                    "format": "video/h264-mp4",
+                    "pix_fmt": "yuv420p",
+                    "crf": 19,
+                    "save_metadata": True,
+                    "pingpong": False,
+                    "save_output": True,
+                    "videopreview": {"hidden": False, "paused": False, "params": {}},
+                },
+            },
+        }
+
+        if interpolation_multiplier > 1:
+            self._add_rife_interpolation(
+                workflow,
+                source_node_id="10",
+                video_combine_node_id="11",
+                base_fps=fps,
+                multiplier=interpolation_multiplier,
+            )
+        return workflow
+
+    def _create_ltx23_i2v_workflow(
+        self,
+        image_filename: str,
+        prompt: str,
+        negative_prompt: str = "",
+        model_key: str = "ltx23-distilled-fp8",
+        num_frames: int = 65,
+        num_inference_steps: int = 8,
+        guidance_scale: float = 1.0,
+        width: int = 768,
+        height: int = 512,
+        seed: Optional[int] = None,
+        fps: float = 16.0,
+        interpolation_multiplier: int = 1,
+        strength: float = 1.0,
+    ) -> dict:
+        """LTX-2.3 distilled I2V — same backbone as T2V, latent from LTXVImgToVideo."""
+        if seed is None:
+            seed = int(time.time() * 1000) % (2**31)
+
+        self._ensure_ltx_models()
+        cfg = self.LTX_MODELS.get(model_key, {})
+        unet = cfg.get("unet") or "ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors"
+        clip = cfg.get("clip") or "gemma_3_12B_it_fp4_mixed.safetensors"
+        text_proj = cfg.get("text_projection") or "ltx-2.3_text_projection_bf16.safetensors"
+        vae = cfg.get("vae") or "LTX23_video_vae_bf16.safetensors"
+        length = self._ltx_frame_count(num_frames)
+        clip_device = self._wan_clip_device()
+
+        if not negative_prompt:
+            negative_prompt = (
+                "blurry, low quality, worst quality, deformed, disfigured, poor anatomy, "
+                "bad proportions, extra limbs, static, jitter, morphing, watermark"
+            )
+
+        workflow = {
+            "1": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": unet, "weight_dtype": "default"},
+            },
+            "2": {
+                "class_type": "DualCLIPLoader",
+                "inputs": {
+                    "clip_name1": clip,
+                    "clip_name2": text_proj,
+                    "type": "ltxv",
+                    "device": clip_device,
+                },
+            },
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
+            "6": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
+            "7": {
+                "class_type": "LTXVPreprocess",
+                "inputs": {"image": ["6", 0], "img_compression": 18},
+            },
+            "8": {
+                "class_type": "LTXVImgToVideo",
+                "inputs": {
+                    "positive": ["4", 0],
+                    "negative": ["5", 0],
+                    "vae": ["3", 0],
+                    "image": ["7", 0],
+                    "width": width,
+                    "height": height,
+                    "length": length,
+                    "batch_size": 1,
+                    "strength": float(strength),
+                },
+            },
+            "9": {
+                "class_type": "LTXVConditioning",
+                "inputs": {
+                    "positive": ["8", 0],
+                    "negative": ["8", 1],
+                    "frame_rate": float(fps),
+                },
+            },
+            "10": {
+                "class_type": "ModelSamplingLTXV",
+                "inputs": {
+                    "model": ["1", 0],
+                    "max_shift": 2.05,
+                    "base_shift": 0.95,
+                    "latent": ["8", 2],
+                },
+            },
+            "11": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["10", 0],
+                    "positive": ["9", 0],
+                    "negative": ["9", 1],
+                    "latent_image": ["8", 2],
+                    "seed": seed,
+                    "steps": max(1, int(num_inference_steps or 8)),
+                    "cfg": float(guidance_scale if guidance_scale is not None else 1.0),
+                    "sampler_name": "euler_ancestral_cfg_pp",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                },
+            },
+            "12": self._build_vae_decode_node("11", "3", width, height),
+            "13": {
+                "class_type": "VHS_VideoCombine",
+                "inputs": {
+                    "images": ["12", 0],
+                    "frame_rate": float(fps),
+                    "loop_count": 0,
+                    "filename_prefix": "ltx23_i2v",
+                    "format": "video/h264-mp4",
+                    "pix_fmt": "yuv420p",
+                    "crf": 19,
+                    "save_metadata": True,
+                    "pingpong": False,
+                    "save_output": True,
+                    "videopreview": {"hidden": False, "paused": False, "params": {}},
+                },
+            },
+        }
+
+        if interpolation_multiplier > 1:
+            self._add_rife_interpolation(
+                workflow,
+                source_node_id="12",
+                video_combine_node_id="13",
+                base_fps=fps,
+                multiplier=interpolation_multiplier,
+            )
+        return workflow
+
     def _build_vae_decode_node(self, samples_node: str, vae_node: str, width: int, height: int) -> dict:
         """Pick the right VAE decode strategy based on resolution.
 
@@ -1862,6 +2158,8 @@ class ComfyUIVideoGenerator:
             interpolation = request.interpolation_multiplier
 
             # ── Route by model type ──────────────────────────────────
+            self._ensure_wan_models()
+            self._ensure_ltx_models()
             if model in self.WAN22_MODELS or model in ("wan22", "wan2.2"):
                 model_key = model if model in self.WAN22_MODELS else "wan22-14b"
                 cfg = self.WAN22_MODELS[model_key]
@@ -2006,12 +2304,58 @@ class ComfyUIVideoGenerator:
                 )
                 logger.info(f"Using CogVideoX image-to-video via ComfyUI")
 
+            elif model in self.LTX_MODELS or str(model).startswith("ltx23"):
+                model_key = model if model in self.LTX_MODELS else "ltx23-distilled-fp8"
+                # Distilled defaults: 8 steps, CFG=1. Don't silently inherit Cog/Wan defaults.
+                ltx_steps = request.num_inference_steps or 8
+                ltx_cfg = request.guidance_scale if request.guidance_scale is not None else 1.0
+                if ltx_cfg > 1.5:
+                    logger.info(
+                        "LTX distilled prefers CFG=1 (got %.2f); keeping caller value but "
+                        "quality may degrade.",
+                        ltx_cfg,
+                    )
+                if image_path and Path(image_path).exists():
+                    uploaded_image = self._upload_image_to_comfyui(image_path)
+                    if not uploaded_image:
+                        result.error = "Failed to upload image to ComfyUI"
+                        return result
+                    workflow = self._create_ltx23_i2v_workflow(
+                        image_filename=uploaded_image,
+                        prompt=request.prompt,
+                        negative_prompt=request.negative_prompt,
+                        model_key=model_key,
+                        num_frames=request.duration_frames,
+                        num_inference_steps=ltx_steps,
+                        guidance_scale=ltx_cfg,
+                        width=request.width,
+                        height=request.height,
+                        seed=seed,
+                        fps=request.fps or 16,
+                        interpolation_multiplier=interpolation,
+                    )
+                    logger.info("Using LTX-2.3 distilled I2V (%s) via ComfyUI", model_key)
+                else:
+                    workflow = self._create_ltx23_t2v_workflow(
+                        prompt=request.prompt,
+                        negative_prompt=request.negative_prompt,
+                        model_key=model_key,
+                        num_frames=request.duration_frames,
+                        num_inference_steps=ltx_steps,
+                        guidance_scale=ltx_cfg,
+                        width=request.width,
+                        height=request.height,
+                        seed=seed,
+                        fps=request.fps or 16,
+                        interpolation_multiplier=interpolation,
+                    )
+                    logger.info("Using LTX-2.3 distilled T2V (%s) via ComfyUI", model_key)
+
             else:
-                # SVD retired 2026-05-29. Supported models: wan22-14b(-i2v),
-                # cogvideox-5b, cogvideox-5b-i2v.
+                # SVD retired 2026-05-29. Supported: wan22-*, cogvideox-*, ltx23-*.
                 result.error = (
-                    f"Unsupported video model '{model}'. Use wan22-14b, wan22-14b-i2v, "
-                    f"cogvideox-5b, or cogvideox-5b-i2v."
+                    f"Unsupported video model '{model}'. Use wan22-5b, wan22-14b, "
+                    f"wan22-14b-i2v, cogvideox-5b, cogvideox-5b-i2v, or ltx23-distilled-fp8."
                 )
                 return result
 
