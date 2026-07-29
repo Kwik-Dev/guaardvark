@@ -100,6 +100,10 @@ class GuaardvarkBot(commands.Bot):
             except Exception as e:
                 logger.warning("Failed to load voice cog: %s (voice disabled)", e)
 
+        # Health first — Discord command sync can block for minutes on rate limits,
+        # and start.sh / plugin manager need /health before that finishes.
+        await self._start_health_server()
+
         guild_id = self.config.get("bot", {}).get("guild_id")
         if guild_id:
             guild = discord.Object(id=guild_id)
@@ -107,23 +111,26 @@ class GuaardvarkBot(commands.Bot):
             await self.tree.sync(guild=guild)
             logger.info("Synced commands to guild %s", guild_id)
         else:
-            await self.tree.sync()
-            logger.info("Synced commands globally (may take up to 1 hour)")
-
-        # Start health server for plugin manager
-        await self._start_health_server()
+            # Defer slow global sync to background; on_ready does fast per-guild sync.
+            asyncio.create_task(self._sync_commands_global())
 
         # VIP greeting — fires on every interaction without replacing default handler
         @self.listen("on_interaction")
         async def _vip_listener(interaction: discord.Interaction):
             asyncio.create_task(self._check_vip_greeting(interaction))
 
+    async def _sync_commands_global(self):
+        try:
+            await self.tree.sync()
+            logger.info("Synced commands globally (may take up to 1 hour to appear in DMs)")
+        except Exception as e:
+            logger.warning("Global command sync failed: %s", e)
+
     async def on_ready(self):
         logger.info("Bot is ready! Logged in as %s (ID: %s)", self.user, self.user.id)
         logger.info("Connected to %d guilds", len(self.guilds))
         # Fast path: sync slash commands into every joined guild so schema
-        # changes (e.g. new /imagine options) appear immediately. Global sync
-        # still ran in setup_hook for DMs / new servers (can take up to 1h).
+        # changes (e.g. new /imagine options) appear immediately.
         if not self.config.get("bot", {}).get("guild_id"):
             for guild in self.guilds:
                 try:
