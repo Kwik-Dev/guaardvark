@@ -9,6 +9,11 @@ from pathlib import Path
 import requests as http_requests
 from flask import Blueprint, request
 from backend.utils.response_utils import success_response, error_response
+from backend.utils.plugin_secrets import (
+    apply_secret_updates,
+    enrich_with_secrets,
+    secret_field_names,
+)
 from ..plugins import get_plugin_manager
 
 logger = logging.getLogger(__name__)
@@ -81,7 +86,9 @@ def list_plugins():
         
         plugins = manager.list_plugins()
         logger.debug(f"Retrieved {len(plugins)} plugins from manager")
-        
+        for plugin in plugins:
+            enrich_with_secrets(plugin.get("id", ""), plugin)
+
         return success_response(
             data={
                 "plugins": plugins,
@@ -103,7 +110,8 @@ def get_plugin(plugin_id):
         
         if 'error' in info:
             return error_response(info['error'], 404, "PLUGIN_NOT_FOUND")
-        
+
+        enrich_with_secrets(plugin_id, info)
         return success_response(data=info, message="Plugin info retrieved")
     except Exception as e:
         logger.error(f"Error getting plugin info: {e}", exc_info=True)
@@ -282,7 +290,9 @@ def get_plugin_config(plugin_id):
             return error_response(info['error'], 404, "PLUGIN_NOT_FOUND")
         
         config = info.get('config', {})
-        return success_response(data={"config": config}, message="Config retrieved")
+        payload = {"config": config}
+        enrich_with_secrets(plugin_id, payload)
+        return success_response(data=payload, message="Config retrieved")
     except Exception as e:
         logger.error(f"Error getting plugin config: {e}", exc_info=True)
         return error_response(str(e), 500, "PLUGIN_CONFIG_ERROR")
@@ -290,19 +300,81 @@ def get_plugin_config(plugin_id):
 
 @plugins_bp.route("/<plugin_id>/config", methods=["PUT", "PATCH"])
 def update_plugin_config(plugin_id):
-    """Update plugin configuration."""
+    """Update plugin configuration.
+
+    Secret fields (e.g. discord bot_token) are stripped and written to `.env`
+    via the portable-env allowlist — never into plugin.json.
+    """
     try:
         data = request.get_json()
         if not data:
             return error_response("No config data provided", 400, "INVALID_REQUEST")
-        
+
+        # Work on a shallow copy so we can strip secrets safely.
+        updates = dict(data)
+        secret_result = apply_secret_updates(plugin_id, updates)
+        if secret_result.get("env_result", {}).get("error"):
+            return error_response(
+                f"Failed to save secret: {secret_result['env_result']['error']}",
+                500,
+                "PLUGIN_SECRET_WRITE_ERROR",
+            )
+
         manager = get_plugin_manager()
-        success = manager.registry.update_plugin_config(plugin_id, data)
-        
-        if success:
-            return success_response(data={"updated": data}, message="Config updated")
-        else:
-            return error_response("Failed to update config", 400, "CONFIG_UPDATE_ERROR")
+        # Drop any residual secret keys that might have been nested oddly —
+        # apply_secret_updates already pops known fields; this is belt+suspenders.
+        for field in secret_field_names(plugin_id):
+            updates.pop(field, None)
+
+        manifest_updated = False
+        if updates:
+            success = manager.registry.update_plugin_config(plugin_id, updates)
+            if not success:
+                return error_response("Failed to update config", 400, "CONFIG_UPDATE_ERROR")
+            manifest_updated = True
+        elif not secret_result.get("updated") and not secret_result.get("skipped_empty"):
+            # Nothing to do at all (no secrets, no manifest keys).
+            return error_response("No config data provided", 400, "INVALID_REQUEST")
+
+        restarted = False
+        restart_result = None
+        if secret_result.get("updated"):
+            # Token change only takes effect after the bot reloads env.
+            try:
+                status = manager.get_status(plugin_id)
+                from backend.plugins.plugin_base import PluginStatus
+                if status == PluginStatus.RUNNING:
+                    restart_result = manager.restart_plugin(plugin_id)
+                    restarted = bool(restart_result.get("success"))
+            except Exception as e:
+                logger.warning(
+                    "Secret updated for %s but restart failed: %s", plugin_id, e
+                )
+
+        message = "Config updated"
+        if secret_result.get("updated"):
+            message = (
+                "Token saved and plugin restarted"
+                if restarted
+                else "Token saved — restart the plugin to apply"
+            )
+        elif secret_result.get("skipped_empty") and not manifest_updated:
+            message = "No changes (token left blank)"
+
+        secrets_status = {}
+        if secret_field_names(plugin_id):
+            secrets_status = enrich_with_secrets(plugin_id, {}).get("secrets", {})
+
+        return success_response(
+            data={
+                "updated": updates,
+                "secrets_updated": secret_result.get("updated", []),
+                "restarted": restarted,
+                "restart": restart_result,
+                "secrets": secrets_status,
+            },
+            message=message,
+        )
     except Exception as e:
         logger.error(f"Error updating plugin config: {e}", exc_info=True)
         return error_response(str(e), 500, "PLUGIN_CONFIG_ERROR")

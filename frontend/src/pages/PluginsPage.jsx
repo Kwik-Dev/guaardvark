@@ -29,6 +29,7 @@ import {
   Divider,
   Stack,
   Collapse,
+  InputAdornment,
 } from '@mui/material';
 import {
   PlayArrow as StartIcon,
@@ -45,6 +46,8 @@ import {
   Terminal as LogIcon,
   Videocam as CameraOnIcon,
   VideocamOff as CameraOffIcon,
+  Visibility as VisibilityIcon,
+  VisibilityOff as VisibilityOffIcon,
 } from '@mui/icons-material';
 import { useSnackbar } from '../components/common/SnackbarProvider';
 import PageLayout from '../components/layout/PageLayout';
@@ -500,15 +503,23 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
 const ConfigDialog = ({ open, plugin, onClose, onSave }) => {
   const [config, setConfig] = useState({});
   const [loading, setLoading] = useState(false);
+  const [botToken, setBotToken] = useState('');
+  const [showToken, setShowToken] = useState(false);
 
   useEffect(() => {
     if (plugin?.config) setConfig({ ...plugin.config });
+    setBotToken('');
+    setShowToken(false);
   }, [plugin]);
 
   const handleSave = async () => {
     setLoading(true);
     try {
-      await onSave(plugin.id, config);
+      const payload = { ...config };
+      if (plugin.id === 'discord' && botToken.trim()) {
+        payload.bot_token = botToken.trim();
+      }
+      await onSave(plugin.id, payload);
       onClose();
     } finally {
       setLoading(false);
@@ -517,11 +528,43 @@ const ConfigDialog = ({ open, plugin, onClose, onSave }) => {
 
   if (!plugin) return null;
 
+  const tokenStatus = plugin.secrets?.bot_token;
+  const tokenHelper = tokenStatus?.configured
+    ? `Configured (${tokenStatus.hint || '••••'}). Leave blank to keep, or enter a new token.`
+    : 'Not configured — paste your Discord bot token.';
+
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>Configure: {plugin.name}</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
+          {plugin.id === 'discord' && (
+            <TextField
+              label="Bot Token"
+              type={showToken ? 'text' : 'password'}
+              value={botToken}
+              onChange={(e) => setBotToken(e.target.value)}
+              fullWidth
+              size="small"
+              autoComplete="off"
+              placeholder={tokenStatus?.configured ? '••••••••••••••••' : ''}
+              helperText={tokenHelper}
+              InputProps={{
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton
+                      aria-label={showToken ? 'Hide bot token' : 'Show bot token'}
+                      onClick={() => setShowToken((v) => !v)}
+                      edge="end"
+                      size="small"
+                    >
+                      {showToken ? <VisibilityOffIcon /> : <VisibilityIcon />}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }}
+            />
+          )}
           {plugin.config?.service_url !== undefined && (
             <TextField
               label="Service URL"
@@ -850,7 +893,7 @@ const PluginsPage = () => {
     try {
       const response = await updatePluginConfig(pluginId, config);
       if (response.success) {
-        showMessage('Configuration saved', 'success');
+        showMessage(response.message || 'Configuration saved', 'success');
         fetchPlugins();
       } else {
         showMessage('Failed to save configuration', 'error');
