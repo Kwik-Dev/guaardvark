@@ -14,20 +14,7 @@ WORKDIR /app
 
 # Install Python dependencies (cached layer)
 COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt 2>/dev/null || \
-    pip install --no-cache-dir \
-    Flask==3.0.0 Flask-Executor==1.0.0 Flask-Migrate==4.0.7 \
-    Flask-SQLAlchemy==3.1.1 Flask-SocketIO==5.3.6 flask-cors==4.0.0 \
-    alembic==1.13.1 anthropic python-dotenv==1.0.1 \
-    celery==5.4.0 redis==5.0.4 eventlet==0.35.1 \
-    numpy pandas psutil requests beautifulsoup4 lxml pypdf \
-    psycopg2-binary python-slugify loguru \
-    llama-index-core llama-index-llms-ollama llama-index-embeddings-ollama \
-    llama-index-readers-file \
-    piper-tts onnxruntime pydub Pillow \
-    pydantic pydantic-settings PyYAML \
-    ariadne \
-    pytest
+RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 # Copy application code
 COPY backend/ /app/backend/

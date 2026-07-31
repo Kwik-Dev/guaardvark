@@ -1,17 +1,108 @@
 #!/usr/bin/env bash
 # scripts/platform/linux.sh — Linux platform backend (x86_64, aarch64/Pi, WSL).
 #
-# STATUS: PROPOSAL — not sourced by anything yet.
+# Sourced by start.sh after detect_platform(). Implements the platform interface:
+#   platform_install_system_deps   platform_ensure_python   ensure_node_npm
+#   platform_gpu_setup             platform_service_start
 #
-# Covers Ubuntu/Debian/Raspberry Pi OS via apt + systemctl.
-#   - Raspberry Pi  = this file with GUAARDVARK_ARCH=arm64.
-#   - WSL           = this file with GUAARDVARK_IS_WSL=1 (systemd may be absent → guarded).
-#
-# INCREMENTAL ROLLOUT NOTE: the existing inline Linux logic in start.sh keeps running
-# as-is during adoption. This backend is the eventual extraction target so all three
-# platforms share ONE interface. Wiring macos.sh first (the new code) is zero-risk to
-# the working Linux/CUDA boot; lifting Linux into here is a later, optional symmetry pass.
 # Assumes the vader_* log helpers from start.sh are in scope.
+
+_linux_os_release() {
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        export _LINUX_OS_ID="${ID:-unknown}"
+        export _LINUX_OS_VERSION="${VERSION_ID:-}"
+    else
+        export _LINUX_OS_ID=unknown
+        export _LINUX_OS_VERSION=
+    fi
+}
+
+_linux_sudo_available() {
+    sudo -n true 2>/dev/null || sudo -v 2>/dev/null
+}
+
+_linux_python312_usable() {
+    local py="$1"
+    [ -n "$py" ] && command -v "$py" >/dev/null 2>&1 || return 1
+    local ver minor
+    ver=$("$py" --version 2>&1 | awk '{print $2}')
+    minor=${ver#*.}
+    minor=${minor%%.*}
+    [ "${ver%%.*}" = "3" ] && [ "$minor" = "12" ]
+}
+
+_linux_set_python_cmd() {
+    local py="$1"
+    PYTHON_CMD="$py"
+    export PYTHON_CMD
+}
+
+_linux_persist_python_cmd() {
+    local env_file="${GUAARDVARK_ROOT:-$SCRIPT_DIR}/.env"
+    [ -n "$PYTHON_CMD" ] || return 0
+    if [ -f "$env_file" ] && grep -q '^PYTHON_CMD=' "$env_file" 2>/dev/null; then
+        return 0
+    fi
+    echo "PYTHON_CMD=$PYTHON_CMD" >> "$env_file"
+    chmod 600 "$env_file" 2>/dev/null || true
+}
+
+_linux_install_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        return 0
+    fi
+    vader_info "Installing uv (user-local Python manager)..."
+    if ! curl -fsSL https://astral.sh/uv/install.sh | sh; then
+        vader_error "Failed to install uv."
+        return 1
+    fi
+    export PATH="$HOME/.local/bin:$PATH"
+}
+
+_linux_ensure_python_via_uv() {
+    _linux_install_uv || return 1
+    export PATH="$HOME/.local/bin:$PATH"
+    vader_info "Installing Python 3.12 via uv (no sudo required)..."
+    if ! uv python install 3.12; then
+        vader_error "uv python install 3.12 failed."
+        return 1
+    fi
+    local found
+    found=$(uv python find 3.12 2>/dev/null || true)
+    if [ -z "$found" ] || ! _linux_python312_usable "$found"; then
+        vader_error "uv installed Python 3.12 but could not locate the interpreter."
+        return 1
+    fi
+    _linux_set_python_cmd "$found"
+    vader_success "Python 3.12 ready via uv ($PYTHON_CMD)"
+    return 0
+}
+
+_linux_apt_install_python312() {
+    local use_deadsnakes="${1:-0}"
+    if ! command -v apt-get >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! _linux_sudo_available; then
+        return 1
+    fi
+    if [ "$use_deadsnakes" = "1" ]; then
+        vader_info "Adding deadsnakes PPA for Python 3.12..."
+        sudo add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1 || return 1
+    fi
+    vader_info "Installing Python 3.12 via apt..."
+    sudo apt-get update -qq >/dev/null 2>&1 || true
+    if sudo apt-get install -y python3.12 python3.12-venv python3.12-dev >/dev/null 2>&1; then
+        if _linux_python312_usable python3.12; then
+            _linux_set_python_cmd python3.12
+            vader_success "Python 3.12 installed via apt"
+            return 0
+        fi
+    fi
+    return 1
+}
 
 platform_install_system_deps() {
     vader_info "Installing system deps via apt (postgresql, redis, ffmpeg, node, build tools, zstd)..."
@@ -19,20 +110,142 @@ platform_install_system_deps() {
 }
 
 platform_ensure_python() {
-    if command -v python3.12 >/dev/null 2>&1; then PYTHON_CMD=python3.12; export PYTHON_CMD; return 0; fi
-    if [ "$GUAARDVARK_ARCH" = arm64 ]; then
-        # Raspberry Pi OS (Debian 13/trixie) ships 3.13 and has no apt python3.12.
-        vader_error "Python 3.12 required. On a Pi (no apt python3.12): 'uv python install 3.12' (or pyenv), then 'PYTHON_CMD=\$(uv python find 3.12) ./start.sh'."
-    else
-        vader_error "Python 3.12 required: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev' (Ubuntu 22.04: add the deadsnakes PPA first), then 'PYTHON_CMD=python3.12 ./start.sh'."
+    # Fast path: already on PATH
+    if _linux_python312_usable python3.12; then
+        _linux_set_python_cmd python3.12
+        return 0
+    fi
+    # Respect an explicit PYTHON_CMD if it points at 3.12
+    if [ -n "${PYTHON_CMD:-}" ] && [ "$PYTHON_CMD" != python3 ] && _linux_python312_usable "$PYTHON_CMD"; then
+        return 0
+    fi
+
+    _linux_os_release
+
+    # arm64 (Pi): apt python3.12 is usually unavailable — prefer uv
+    if [ "${GUAARDVARK_ARCH:-}" = arm64 ]; then
+        if _linux_ensure_python_via_uv; then
+            _linux_persist_python_cmd
+            return 0
+        fi
+        vader_error "Python 3.12 required. On ARM/Pi: ensure uv works, or install python3.12 manually."
+        return 1
+    fi
+
+    # x86_64: try apt first when sudo is available
+    if command -v apt-get >/dev/null 2>&1 && _linux_sudo_available; then
+        # Ubuntu 24.04 ships python3.12 in main repos
+        if [ "$_LINUX_OS_ID" = ubuntu ] && [ "$_LINUX_OS_VERSION" = "24.04" ]; then
+            if _linux_apt_install_python312 0; then
+                _linux_persist_python_cmd
+                return 0
+            fi
+        else
+            # 22.04, 26.04, and other derivatives: try plain apt, then deadsnakes
+            if _linux_apt_install_python312 0 || _linux_apt_install_python312 1; then
+                _linux_persist_python_cmd
+                return 0
+            fi
+        fi
+    fi
+
+    # No sudo or apt failed — uv fallback
+    if _linux_ensure_python_via_uv; then
+        _linux_persist_python_cmd
+        return 0
+    fi
+
+    vader_error "Could not install Python 3.12 automatically."
+    vader_info "Try: sudo apt-get install -y python3.12 python3.12-venv python3.12-dev"
+    vader_info "Or:  curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.12"
+    vader_info "Then: PYTHON_CMD=\$(uv python find 3.12) ./start.sh"
+    return 1
+}
+
+_linux_ensure_node_via_binary() {
+    local node_dir="$HOME/.local/node"
+    local node_bin="$node_dir/bin/node"
+    local npm_bin="$node_dir/bin/npm"
+    if [ -x "$node_bin" ] && [ -x "$npm_bin" ]; then
+        export PATH="$node_dir/bin:$PATH"
+        NPM_CMD=npm
+        export NPM_CMD
+        return 0
+    fi
+    vader_info "Installing Node.js 20 LTS to ~/.local/node (no sudo required)..."
+    local ver="v20.18.0"
+    local arch="linux-x64"
+    case "$(uname -m)" in
+        aarch64|arm64) arch="linux-arm64" ;;
+        x86_64|amd64) arch="linux-x64" ;;
+    esac
+    local tarball="node-${ver}-${arch}.tar.xz"
+    local url="https://nodejs.org/dist/${ver}/${tarball}"
+    mkdir -p "$HOME/.local"
+    if ! curl -fsSL "$url" | tar -xJ -C "$HOME/.local" 2>/dev/null; then
+        vader_error "Failed to download Node.js from nodejs.org"
+        return 1
+    fi
+    rm -rf "$node_dir"
+    mv "$HOME/.local/node-${ver}-${arch}" "$node_dir"
+    export PATH="$node_dir/bin:$PATH"
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        NPM_CMD=npm
+        export NPM_CMD
+        vader_success "Node.js $(node --version) ready (~/.local/node)"
+        return 0
     fi
     return 1
 }
 
+ensure_node_npm() {
+    # User-local installs from prior runs
+    if [ -d "$HOME/.local/node/bin" ]; then
+        export PATH="$HOME/.local/node/bin:$PATH"
+    fi
+    # Require both node and npm — reject PATH entries that only provide node (e.g. IDE bundles)
+    local node_ok=0 npm_ok=0
+    if command -v node >/dev/null 2>&1; then
+        local ver major
+        ver=$(node --version 2>/dev/null | sed 's/^v//')
+        major=${ver%%.*}
+        [ -n "$major" ] && [ "$major" -ge 20 ] 2>/dev/null && node_ok=1
+    fi
+    if command -v npm >/dev/null 2>&1; then
+        npm_ok=1
+    fi
+    if [ "$node_ok" -eq 1 ] && [ "$npm_ok" -eq 1 ]; then
+        NPM_CMD=npm
+        export NPM_CMD
+        return 0
+    fi
+
+    if ! command -v apt-get >/dev/null 2>&1 || ! _linux_sudo_available; then
+        if _linux_ensure_node_via_binary; then
+            return 0
+        fi
+        vader_error "Node.js 20+ and npm are required but not found, and apt/sudo is unavailable."
+        vader_info "Install manually: sudo apt-get install -y nodejs npm"
+        return 1
+    fi
+
+    vader_info "Installing Node.js and npm via apt..."
+    sudo apt-get update -qq >/dev/null 2>&1 || true
+    if sudo apt-get install -y nodejs npm >/dev/null 2>&1; then
+        if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+            NPM_CMD=npm
+            export NPM_CMD
+            vader_success "Node.js $(node --version) and npm ready"
+            return 0
+        fi
+    fi
+    vader_error "Failed to install nodejs/npm via apt."
+    _linux_ensure_node_via_binary || return 1
+    return 0
+}
+
 platform_gpu_setup() {
     if [ "$GUAARDVARK_ACCEL" = cuda ]; then
-        # The existing nvidia persistence/power-limit + ollama systemd drop-in logic
-        # lives here when extracted. Guarded by nvidia-smi/systemctl presence today.
         vader_info "Linux + NVIDIA: GPU tuning (persistence/power, ollama systemd drop-in)."
     else
         vader_info "Linux ($GUAARDVARK_ARCH, accel=$GUAARDVARK_ACCEL): no NVIDIA tuning."
@@ -40,7 +253,6 @@ platform_gpu_setup() {
 }
 
 platform_service_start() {  # $1 = postgres | redis | ollama  (systemctl)
-    # WSL frequently has no systemd → don't hard-fail; log and move on.
     if [ "$GUAARDVARK_IS_WSL" = 1 ] && ! systemctl is-system-running >/dev/null 2>&1; then
         vader_info "WSL without systemd: start '$1' via its init script (e.g. 'sudo service $1 start') or manually."
         return 0

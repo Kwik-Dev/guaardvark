@@ -218,6 +218,35 @@ def test_code_release_includes_cluster_middleware(app):
         assert meta["backup_type"] == "code_release"
 
 
+def test_code_release_includes_platform_and_docker_essentials(app):
+    """Regression: Ubuntu/Docker/MCP paths omitted by the old allowlist must ship."""
+    with app.app_context():
+        path = backup_service.create_code_release()
+        with zipfile.ZipFile(path, "r") as zf:
+            names = set(zf.namelist())
+            install = zf.read("INSTALL.md").decode("utf-8")
+
+        required = [
+            "VERSION",
+            ".gitignore",
+            "setup.sh",
+            "start-docker.sh",
+            "docker-compose.gpu.yml",
+            "docker/Dockerfile.backend",
+            "backend/mcp/__main__.py",
+            "backend/mcp/server.py",
+            "backend/requirements-cv.txt",
+            "backend/static/calibrate.html",
+            "scripts/platform/linux.sh",
+        ]
+        missing = [p for p in required if p not in names]
+        assert not missing, f"code release missing required paths: {missing}"
+
+        assert "Ubuntu 26.04" in install
+        assert "start-docker.sh" in install
+        assert "backend/venv" in install  # wrong-venv troubleshooting tip
+
+
 def test_sanitize_preserves_unrelated_lines():
     env = (
         "FLASK_PORT=5002\n"

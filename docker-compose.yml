@@ -1,6 +1,7 @@
 ###############################################################################
 # Guaardvark — Self-Hosted AI Workstation
 # docker compose up — that's it.
+# GPU: ./start-docker.sh --gpu  (or: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up)
 ###############################################################################
 
 services:
@@ -39,14 +40,6 @@ services:
       - "11434:11434"
     volumes:
       - ollama_models:/root/.ollama
-    # Uncomment for GPU support:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
 
   # ── Backend (Flask + Celery) ───────────────────────────────────────────
   backend:

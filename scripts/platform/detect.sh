@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # scripts/platform/detect.sh — platform detection for the start.sh launcher.
 #
-# STATUS: PROPOSAL — nothing sources this yet. Part of the "detect → route to a
-# platform backend" refactor. Pure detection, no side effects.
-#
-# When wired, start.sh will `source` this near the top, call detect_platform(),
-# then `source "$GUAARDVARK_PLATFORM_BACKEND"`. Sets:
+# Sourced by start.sh near the top: detect_platform() then
+# `source "$GUAARDVARK_PLATFORM_BACKEND"`. Pure detection, no side effects.
+# Sets:
 #   GUAARDVARK_OS                linux | macos | unknown
 #   GUAARDVARK_ARCH              x86_64 | arm64 | <raw>
 #   GUAARDVARK_ACCEL             cuda | rocm | mps | cpu   (coarse; hardware_policy.py refines)

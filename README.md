@@ -348,10 +348,9 @@ The sections above cover the experience and differentiators. The rest of this RE
 
 ## Quick Start
 
-> **Python 3.12 is required.** 3.13 and 3.14 are not supported yet — core ML
-> dependencies (`numpy<2.0`, `mediapipe`, `basicsr`/`gfpgan`) don't publish wheels
-> for them, so installing on a newer Python fails to build. `./start.sh` checks
-> this for you; if you install dependencies by hand, use a 3.12 interpreter.
+> **Python 3.12 is required** for the ML stack. Ubuntu 26.04 ships Python 3.14 by
+> default — `./start.sh` installs 3.12 automatically (deadsnakes or uv). Manual
+> installs: use a 3.12 interpreter only.
 
 ```bash
 git clone https://github.com/guaardvark/guaardvark.git
@@ -359,7 +358,7 @@ cd guaardvark
 ./start.sh
 ```
 
-First run handles everything: Python venv, Node dependencies, PostgreSQL, Redis, Ollama, Whisper.cpp, database migrations, frontend build, and all services. Requires your system password once for PostgreSQL setup.
+First run handles everything: Python 3.12, venv, Node dependencies, PostgreSQL, Redis, Ollama, Whisper.cpp, database migrations, frontend build, and all services. Requires your system password once for PostgreSQL setup (and optionally apt packages on fresh Linux installs).
 
 | Service | URL (defaults; see `.env` for `VITE_PORT` / `FLASK_PORT`) |
 |---------|-----|

@@ -89,9 +89,9 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 # ── Platform detection (detect → route to a per-OS backend) ──────────────────
 # Sets GUAARDVARK_OS/_ARCH/_ACCEL/_IS_WSL and sources the matching backend
 # (scripts/platform/{linux,macos}.sh), which DEFINES platform_install_system_deps /
-# platform_ensure_python / platform_gpu_setup / platform_service_start. On Linux this
-# only defines functions — no behavior change; the Darwin path calls them below.
-# Guarded so an older checkout without scripts/platform/ still boots unchanged.
+# platform_ensure_python / platform_gpu_setup / platform_service_start / ensure_node_npm.
+# macOS and Linux both call platform_ensure_python before version gates (Linux also
+# ensures Node/npm). Guarded so an older checkout without scripts/platform/ still boots.
 if [ -f "$SCRIPT_DIR/scripts/platform/detect.sh" ]; then
     source "$SCRIPT_DIR/scripts/platform/detect.sh"
     detect_platform
@@ -356,7 +356,7 @@ check_python_version() {
     case "${GUAARDVARK_OS:-linux}/${GUAARDVARK_ARCH:-x86_64}" in
         macos/*) py_hint="macOS: 'brew install python@3.12', then re-run with 'PYTHON_CMD=python3.12 ./start.sh'." ;;
         */arm64) py_hint="Raspberry Pi / ARM (no apt python3.12): 'uv python install 3.12' (or pyenv), then 'PYTHON_CMD=\$(uv python find 3.12) ./start.sh'." ;;
-        *)       py_hint="'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev' (Ubuntu 22.04: add the deadsnakes PPA first; note 3.12 has no distutils), then re-run with 'PYTHON_CMD=python3.12 ./start.sh'." ;;
+        *)       py_hint="On Ubuntu 26.04+ ./start.sh installs Python 3.12 automatically (deadsnakes or uv). Manual: 'sudo apt-get install -y python3.12 python3.12-venv python3.12-dev' or uv python install 3.12." ;;
     esac
     if [ "$major" -ne 3 ] || [ "$minor" -lt 12 ]; then
         vader_error "Python 3.12 is required (found $ver). $py_hint"
@@ -1024,8 +1024,23 @@ ensure_npm_package() {
 # dep_reconciler for full state/CRITICAL_PACKAGES/pytorch, npm ci for lock safety).
 # -------------------------------------------------------------------
 
+ensure_venv_python_version() {
+    if [ ! -x "$VENV_DIR/bin/python" ]; then
+        return 0
+    fi
+    local venv_minor
+    venv_minor=$("$VENV_DIR/bin/python" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo "")
+    if [ -n "$venv_minor" ] && [ "$venv_minor" != "12" ]; then
+        vader_warn "Existing venv uses Python 3.$venv_minor — recreating with Python 3.12..."
+        rm -rf "$VENV_DIR"
+    fi
+}
+
 backend_venv_healthy() {
     [ -x "$VENV_DIR/bin/python" ] || return 1
+    local venv_minor
+    venv_minor=$("$VENV_DIR/bin/python" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo "")
+    [ "$venv_minor" = "12" ] || return 1
     "$VENV_DIR/bin/python" -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -1249,10 +1264,33 @@ if [ "${GUAARDVARK_OS:-linux}" = macos ]; then
     platform_gpu_setup
 fi
 
+# ── Linux bootstrap (auto Python 3.12 + node/npm before version gates) ───────
+if [ "${GUAARDVARK_OS:-linux}" = linux ] && [ -f "$SCRIPT_DIR/scripts/platform/linux.sh" ]; then
+    vader_info "Linux detected — ensuring Python 3.12..."
+    if platform_ensure_python; then
+        rm -f "$CACHE_DIR/python_check" 2>/dev/null || true
+    else
+        vader_error "Linux: could not ensure Python 3.12 (see hints above)."
+        exit 1
+    fi
+    # Reload .env in case platform_ensure_python persisted PYTHON_CMD
+    if [ -f "$SCRIPT_DIR/.env" ]; then
+        set -a
+        # shellcheck disable=SC1091
+        . "$SCRIPT_DIR/.env"
+        set +a
+        export GUAARDVARK_ROOT="$SCRIPT_DIR"
+    fi
+fi
+
 vader_step 2 "Checking environment dependencies..."
 if ! check_with_cache "python_check" check_python_version; then
     vader_error "Python 3.12 required. Exiting."
     exit 1
+fi
+if [ "${GUAARDVARK_OS:-linux}" = linux ] && declare -F ensure_node_npm >/dev/null 2>&1; then
+    ensure_node_npm || { vader_error "Node.js/npm setup failed. Exiting."; exit 1; }
+    rm -f "$CACHE_DIR/node_check" "$CACHE_DIR/npm_check" 2>/dev/null || true
 fi
 if ! check_with_cache "node_check" check_node_version; then
     vader_error "Node.js 20+ required. Exiting."
@@ -1329,6 +1367,7 @@ fi
 vader_separator
 
 vader_step 5 "Setting up Python environment..."
+ensure_venv_python_version
 FIRST_SETUP_DONE=1
 if [ ! -d "$VENV_DIR" ]; then
     FIRST_SETUP_DONE=0
@@ -1822,6 +1861,7 @@ if [ "$PYCACHE_COUNT" -gt 0 ]; then
 fi
 
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
+    ensure_venv_python_version
     vader_info "Creating Python venv..."
     if ! $PYTHON_CMD -m venv "$VENV_DIR"; then
         vader_error "Failed to create Python venv. Exiting."

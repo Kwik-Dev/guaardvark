@@ -51,12 +51,13 @@ MIN_DUMP_TABLE_COUNT = 30
 # dotted variants, to cover every venv layout we ship.
 GLOBAL_IGNORE_PATTERNS = [
     '__pycache__', '*.pyc', '*.pyo', 'node_modules', 'dist', 'build',
-    '.git', '.gitignore',
+    # Keep .gitignore in releases (root + plugin ignores). Drop only VCS metadata.
+    '.git',
     'venv', 'venv-*', '.venv', '.venv-*', 'env', 'env-*',
     '.DS_Store', 'Thumbs.db',
     '.pytest_cache', '.coverage', '*.egg-info',
     '.claud', '.claude', 'claude.*', 'gemini.*', '*.code-workspace',
-    '.cursorignore', '*__review__*', '*__tests__*', '*.zip',
+    '.cursorignore', '*__review__*', '*.zip',
     'compare-folders-tmp', '*.db', '*.sqlite', '*.sqlite3',
     'whisper.cpp', 'piper', 'piper-models', 'whisper-models',
     # AI model files — never include in backups (re-downloadable)
@@ -68,12 +69,12 @@ GLOBAL_IGNORE_PATTERNS = [
 # Used when copying data directories.
 DATA_IGNORE_PATTERNS = [
     '__pycache__', '*.pyc', '*.pyo', 'node_modules', 'dist', 'build',
-    '.git', '.gitignore',
+    '.git',
     'venv', 'venv-*', '.venv', '.venv-*', 'env', 'env-*',
     '.DS_Store', 'Thumbs.db',
     '.pytest_cache', '.coverage', '*.egg-info',
     '.claud', '.claude', 'claude.*', 'gemini.*', '*.code-workspace',
-    '.cursorignore', '*__review__*', '*__tests__*', '*.zip',
+    '.cursorignore', '*__review__*', '*.zip',
     'compare-folders-tmp',
     # AI model files — never include in backups
     '*.safetensors', '*.ckpt', '*.pt', '*.pth', '*.bin', '*.onnx',
@@ -968,23 +969,35 @@ def create_full_backup(name: str | None = None) -> str:
                 "start_redis.sh",
                 "start_celery.sh",
                 "start_postgres.sh",
+                "start-docker.sh",
+                "setup.sh",
+                "killswitch.sh",
                 "manager",
+                "VERSION",
+                ".gitignore",
 
                 # Configuration files
                 "backend/requirements.txt",
                 "backend/requirements-base.txt",
                 "backend/requirements-llm.txt",
+                "backend/requirements-cv.txt",
                 "backend/requirements-test.txt",
                 "frontend/package.json",
                 "frontend/package-lock.json",
                 "pytest.ini",
+                "docker-compose.yml",
+                "docker-compose.gpu.yml",
+                ".dockerignore",
+                "docker/",
 
                 # Documentation directory and root docs
-                "docs/",
+                "docs/ARCHITECTURE.md",
+                "docs/screenshots/",
                 "LICENSE",
                 "README.md",
                 "INSTALL.md",
                 "CLAUDE.md",
+                "GROK.md",
                 "GEMINI.md",
                 "FILE_GENERATION_GUIDE.md",
                 "GPU_SETUP_README.md",
@@ -1037,6 +1050,8 @@ def create_full_backup(name: str | None = None) -> str:
                 "backend/middleware/",
                 "backend/agents/",
                 "backend/plugins/",
+                "backend/mcp/",
+                "backend/static/",
 
                 # Root level plugins directory
                 "plugins/",
@@ -1051,6 +1066,9 @@ def create_full_backup(name: str | None = None) -> str:
                 "frontend/vite.config.js",
                 "frontend/.eslintrc.cjs",
                 "frontend/.eslintrc.json",
+
+                # GitHub configuration
+                ".github/",
             ]
 
             # Data directory - selective inclusion (exclude runtime/temp data and models)
@@ -1357,14 +1375,20 @@ def create_code_release(name: str | None = None) -> str:
                 "README.md",
                 "INSTALL.md",
                 "CLAUDE.md",
+                "GROK.md",
                 "GEMINI.md",
                 "AUTOMATION_QUICKSTART.md",
+                "VERSION",
+                ".gitignore",
                 "start.sh",
                 "stop.sh",
                 "restart.sh",
                 "start_celery.sh",
                 "start_redis.sh",
                 "start_postgres.sh",
+                "start-docker.sh",
+                "setup.sh",
+                "killswitch.sh",
                 # NOTE: "manager" is a symlink to scripts/system-manager/system-manager
                 # which is already included via "scripts/" below. start.sh recreates
                 # the symlink on fresh machines, so we don't need to copy it here.
@@ -1394,6 +1418,7 @@ def create_code_release(name: str | None = None) -> str:
                 "backend/requirements.txt",
                 "backend/requirements-base.txt",
                 "backend/requirements-llm.txt",
+                "backend/requirements-cv.txt",
                 
                 # Backend directories (code only)
                 "backend/api/",
@@ -1407,13 +1432,11 @@ def create_code_release(name: str | None = None) -> str:
                 "backend/middleware/",
                 "backend/agents/",
                 "backend/plugins/",
+                "backend/mcp/",
+                "backend/static/",
                 
                 # Backend tools directory (voice binaries excluded via ignore_patterns)
                 "backend/tools/",
-                
-                # NOTE: plugins/ root directory excluded from code-only backups
-                # It contains large user-generated data (training, outputs, etc.)
-                # Only include in full_system backups if needed
                 
                 # Frontend source code (excluding node_modules and dist)
                 "frontend/src/",
@@ -1444,14 +1467,17 @@ def create_code_release(name: str | None = None) -> str:
                 # Agent recipes (deterministic action library — not user data)
                 "data/agent/recipes.json",
 
-                # Project documentation
+                # Project documentation (selective — not personal docs/)
                 "CONTRIBUTING.md",
                 "CAPABILITIES.md",
                 "KNOWN_BUGS.md",
                 "README_zh.md",
+                "docs/ARCHITECTURE.md",
+                "docs/screenshots/",
                 "docker-compose.yml",
+                "docker-compose.gpu.yml",
                 ".dockerignore",
-                "killswitch.sh",
+                "docker/",
 
                 # GitHub configuration
                 ".github/",
@@ -1461,7 +1487,7 @@ def create_code_release(name: str | None = None) -> str:
             empty_dirs = [
                 "logs",        # Empty logs directory (will be populated at runtime)
                 "pids",        # Empty pids directory (will be populated at runtime)
-                "docs",        # Documentation (empty in code-only)
+                "docs",        # Placeholder; shipped docs (ARCHITECTURE/screenshots) copied above
                 "data/outputs", # Generated outputs
                 "data/models",  # AI models
                 "data/context", # Context files
@@ -1579,12 +1605,13 @@ To restore data, use a separate data backup or start with a fresh installation.
 - **Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 - **Type:** Code Release (no data — database and files are created fresh on first run)
 
-## Install
+## Install (Linux)
 
 1. **Extract:**
    ```bash
    unzip {backup_name}.zip
    cd guaardvark
+   chmod +x start.sh start-docker.sh
    ```
 
 2. **Start:**
@@ -1592,7 +1619,9 @@ To restore data, use a separate data backup or start with a fresh installation.
    ./start.sh
    ```
 
-The startup script handles everything: dependencies, database, frontend build, and all services.
+The startup script handles everything: Python 3.12 (auto-installed if needed), dependencies, database, frontend build, and all services.
+
+**Ubuntu 26.04 and other distros with Python 3.13+:** Your system `python3` may be 3.14 — that is fine. `./start.sh` installs Python 3.12 automatically via apt (deadsnakes PPA) or uv when sudo is unavailable.
 
 | Service | URL |
 |---------|-----|
@@ -1600,10 +1629,24 @@ The startup script handles everything: dependencies, database, frontend build, a
 | API | http://localhost:5000 |
 | Health Check | http://localhost:5000/api/health |
 
+First run may ask for your password once (PostgreSQL, Node.js, or Python packages via apt).
+
+## Alternative: Docker (Linux, core stack only)
+
+```bash
+./start-docker.sh          # CPU
+./start-docker.sh --gpu    # NVIDIA GPU (requires nvidia-container-toolkit)
+```
+
+Docker runs the **core stack** (API, UI, PostgreSQL, Redis, Ollama). It does not include plugins, ComfyUI, or the virtual agent display. For the full experience, use `./start.sh`.
+
+Stop: `docker compose down`
+
 ## Troubleshooting
 
 - Permission issues: `chmod +x *.sh`
 - Health diagnostics: `./start.sh --test`
+- Wrong Python venv (e.g. after upgrade): `rm -rf backend/venv && ./start.sh`
 - Check logs in `logs/`
 
 ## Data
@@ -1625,7 +1668,7 @@ To restore existing data, use a separate Guaardvark data backup.
                 readme_content = {
                     "logs": "# Logs Directory\n\nThis directory will contain runtime logs when the system is running.\nIt is intentionally empty in the backup to reduce file size.\n",
                     "pids": "# PIDs Directory\n\nThis directory will contain process ID files when the system is running.\nIt is intentionally empty in the backup to reduce file size.\n",
-                    "docs": "# Docs Directory\n\nThis directory is for documentation.\nIt is intentionally empty in this code-only backup.\n",
+                    "docs": "# Docs Directory\n\nShipped docs (ARCHITECTURE.md, screenshots/) live alongside this README.\nPersonal operator notes are not included in code releases.\n",
                     "data/outputs": "# Outputs Directory\n\nThis directory will contain generated outputs.\nIt is intentionally empty in this code-only backup.\n",
                     "data/models": "# Models Directory\n\nThis directory is for AI models.\nIt is intentionally empty in this code-only backup.\n",
                     "data/context": "# Context Directory\n\nThis directory is for conversation context files.\nIt is intentionally empty in this code-only backup.\n",
