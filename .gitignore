@@ -45,6 +45,8 @@ data/index_store.json
 data/default__vector_store.json
 data/graph_store.json
 data/conversations/sessions/
+data/conversations/daily/
+data/conversations/summaries/
 data/training/screenshots/
 data/training/failures/
 data/training/datasets/*.jsonl
@@ -263,6 +265,9 @@ data/cast_refs/
 /PUSH_PREVIEW.md
 docs/local-workspace-only/*
 !docs/local-workspace-only/MASTER_TASKS.md
+# Relocated local-only workspace (operator files, AI session state, .env backups
+# with secrets). Entire tree is personal/machine-local — NEVER for the public repo.
+.do-not-put-these-in-root/
 
 # --- Non-essential / generated artifacts (untracked 2026-06-18, public-push sweep) ---
 # Internal multi-agent audit/planning dumps (contain local absolute paths; not source)
