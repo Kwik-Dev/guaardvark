@@ -982,7 +982,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         const restored = paths.map((p, idx) => {
           const parts = (p || "").replace(/\\/g, '/').split('/');
           const filename = parts[parts.length - 1] || `image_${idx}.png`;
-          const match = (p || "").replace(/\\/g, '/').match(/\/image_batches\/([^\/]+)\//);
+          const match = (p || "").replace(/\\/g, '/').match(/\/image_batches\/([^/]+)\//);
           const imgBatchId = match ? match[1] : batchId;
           return {
             id: `${imgBatchId}_${filename}`,

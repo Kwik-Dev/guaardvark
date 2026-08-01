@@ -5,7 +5,6 @@ import {
   IconButton,
   Paper,
   Divider,
-  useTheme,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import { useSnackbar } from "../common/SnackbarProvider";
@@ -145,7 +144,6 @@ const TelemetryGraph = ({ history, title, primaryColor, secondaryColor, scale })
 };
 
 const SystemMetricsModal = ({ open, onClose }) => {
-  const theme = useTheme();
   const { showMessage } = useSnackbar();
   const [metrics, setMetrics] = useState(null);
   const [gpuHistory, setGpuHistory] = useState([]);

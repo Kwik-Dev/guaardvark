@@ -72,10 +72,22 @@ describe("DragDropImageUpload", () => {
     expect(axios.post.mock.calls[0][0]).toMatch(/\/subjects\/42\/upload-refs$/);
   });
 
-  it("renders existing paths as chips", () => {
+  it("renders existing refs as thumbnails when subjectId is present", () => {
     render(
       <DragDropImageUpload
         subjectId={1}
+        existingPaths={["/data/cast_refs/1/headshot.jpg", "/data/cast_refs/1/profile.png"]}
+      />,
+    );
+    // With a subject id, refs render as real <img> thumbnails served by index
+    // (visuals beat filename chips) — the filename lives in alt/title.
+    expect(screen.getByAltText("headshot.jpg")).toBeDefined();
+    expect(screen.getByAltText("profile.png")).toBeDefined();
+  });
+
+  it("falls back to filename chips when there is no subjectId", () => {
+    render(
+      <DragDropImageUpload
         existingPaths={["/data/cast_refs/1/headshot.jpg", "/data/cast_refs/1/profile.png"]}
       />,
     );

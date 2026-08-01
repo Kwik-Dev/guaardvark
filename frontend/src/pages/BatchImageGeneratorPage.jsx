@@ -50,11 +50,10 @@ import {
   Settings as SettingsIcon,
   Refresh as RefreshIcon,
   Image as ImageIcon,
-  Delete as DeleteIcon,
 } from '@mui/icons-material';
 
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import PageLayout from '../components/layout/PageLayout';
 import CharacterPicker from '../components/filmcrew/CharacterPicker';
 import ImageLightbox from '../components/images/ImageLightbox';
@@ -114,7 +113,6 @@ const sanitizeText = (text) => {
 
 const BatchImageGeneratorPage = ({ embedded = false }) => {
   const theme = useTheme();
-  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const isXs = useMediaQuery(theme.breakpoints.down('sm'));
   const isSm = useMediaQuery(theme.breakpoints.between('sm', 'md'));
@@ -150,17 +148,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
   // Director intelligence (new) — expand high-level concept via media_director (same as MV)
   const [directorEnabled, setDirectorEnabled] = useState(false);
-  // eslint-disable-next-line no-unused-vars -- setter reserved for the guidance input (WIP)
   const [directorGuidance, setDirectorGuidance] = useState("");
   const [isExpanding, setIsExpanding] = useState(false);
 
   // New: Content presets and quality enhancement state
   const [contentPresets, setContentPresets] = useState({});
   const [selectedPreset, setSelectedPreset] = useState('auto'); // 'auto' = auto-detect
-  const [autoEnhance, _setAutoEnhance] = useState(true);
-  const [enhanceAnatomy, _setEnhanceAnatomy] = useState(true);
-  const [enhanceFaces, _setEnhanceFaces] = useState(true);
-  const [enhanceHands, _setEnhanceHands] = useState(true);
+  const [autoEnhance, setAutoEnhance] = useState(true);
+  const [enhanceAnatomy, setEnhanceAnatomy] = useState(true);
+  const [enhanceFaces, setEnhanceFaces] = useState(true);
+  const [enhanceHands, setEnhanceHands] = useState(true);
   const [_contentDetection, setContentDetection] = useState(null);
   const [_analyzingPrompt, setAnalyzingPrompt] = useState(false);
   // Character casting: selected subject ids whose LoRA + trigger get applied.
@@ -330,7 +327,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const dimensionPresets = useMemo(
     () => dimensionPresetsForModel(params.model),
     // params.model only — forModel is pure over modelValue
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [params.model],
   );
 
