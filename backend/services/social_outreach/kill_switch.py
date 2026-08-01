@@ -312,7 +312,7 @@ def cadence_status() -> dict:
     """Snapshot for /status endpoint."""
     r = _get_redis()
     out = {}
-    platforms = ["reddit", "discord", "facebook", "youtube"]
+    platforms = ["reddit", "discord", "facebook", "youtube", "x", "twitter"]
     if r is None:
         for p in platforms:
             out[p] = {"redis": "unavailable"}

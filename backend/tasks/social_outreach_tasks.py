@@ -271,10 +271,14 @@ def tick_process_approved_drafts(self) -> dict:
         from backend.services.social_outreach.reddit_outreach import backend_url
         from backend.services.social_outreach.reddit_outreach import REDDIT_BASE
 
+        # Reddit/YouTube keep their calibrated BiDi posters; x/twitter/facebook
+        # post through the general agent loop (general_poster). Widened from
+        # reddit+youtube so approved X/FB rows are fetched instead of ignored.
         rows = (
             SocialOutreachLog.query
             .filter(SocialOutreachLog.status == "approved")
-            .filter(SocialOutreachLog.platform.in_(("reddit", "youtube")))
+            .filter(SocialOutreachLog.platform.in_(
+                ("reddit", "youtube", "x", "twitter", "facebook")))
             .order_by(SocialOutreachLog.created_at.asc())
             .limit(20)
             .all()
@@ -319,16 +323,19 @@ def tick_process_approved_drafts(self) -> dict:
                 # silently drop the tags Content already applied.
                 comment_text = row.posted_text or row.draft_text
 
-                # Branch on platform
+                # Branch on platform. Reddit/YouTube use their calibrated BiDi
+                # posters; everything else (X/Twitter, Facebook, …) posts through
+                # the general NL agent loop — no per-platform code, driven by the
+                # grounded eye. "Adding a platform" is now "be logged into it".
                 if row.platform == "reddit":
                     success, reason = reddit_post_comment(row.target_url, comment_text)
                 elif row.platform == "youtube":
                     success, reason = post_youtube_comment_via_servo(row.target_url, comment_text, row.task_id)
                 else:
-                    # Unsupported platform — leave at approved
-                    row.status = "approved"
-                    db.session.commit()
-                    continue
+                    from backend.services.social_outreach.general_poster import post_via_agent_loop
+                    success, reason = post_via_agent_loop(
+                        platform, row.target_url, comment_text, action="comment",
+                    )
 
                 if success:
                     record_post_via_backend(
