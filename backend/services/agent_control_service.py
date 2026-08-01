@@ -915,8 +915,13 @@ class AgentControlService:
                             break
 
                     if enforce_proof:
+                        # Keep DONE strict on vision — a false-positive DOM match
+                        # here would wrongly declare the whole task complete. The
+                        # per-action verifies (below) get the DOM fast-path since a
+                        # false positive there just proceeds to the next SEE, which
+                        # observes ground truth.
                         done_verify = self._wait_until_visible(
-                            proof, screen, timeout_s=10.0,
+                            proof, screen, timeout_s=10.0, allow_dom_fastpath=False,
                         )
                         if not bool(done_verify.get("success", False)):
                             if has_recent_verified:
@@ -2569,12 +2574,76 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
                 lines.append(f"- {name}: {desc}")
         return "\n".join(lines)
 
+    # Generic UI words that carry no page-identity — a match on these alone must
+    # NOT confirm a target (else "button"/"visible" false-positives everything).
+    _VERIFY_STOPWORDS = frozenset({
+        # Chrome / layout vocabulary
+        "visible", "button", "field", "input", "page", "screen", "window", "icon",
+        "open", "click", "now", "then", "should", "appear", "appears", "view",
+        "area", "bar", "the", "and", "with", "into", "from", "this", "that",
+        "your", "will", "show", "shows", "text", "box", "form", "link", "menu",
+        "tab", "panel", "dialog", "modal", "header", "footer", "list", "item",
+        "items", "loading", "load", "loaded",
+        # Generic UI ACTION/label words — present on countless pages, so a match on
+        # these alone must not confirm that a specific effect actually happened.
+        "submit", "comment", "reply", "post", "send", "search", "save", "cancel",
+        "close", "next", "back", "done", "enter", "sign", "share", "upload",
+        "download", "play", "pause", "results", "result",
+    })
+
+    def _dom_confirms_target(self, target_description: str) -> bool:
+        """Cheap, POSITIVE-ONLY verification via the live DOM (~50-200ms).
+
+        True only when the target's distinctive (non-generic) words actually
+        appear in the current page's title/url/element text — a real substring
+        match, never a guess. False means "the DOM can't confirm it" (fall
+        through to the vision poll), NOT "it isn't there". So this can only
+        *short-circuit success*; it can never wrongly declare failure, and on
+        pages the DOM can't introspect (desktop, canvas, PDF) it simply defers
+        to vision. Pulls a FRESH snapshot so it reflects post-action state.
+        """
+        try:
+            from backend.services.dom_metadata_extractor import (
+                DOMMetadataExtractor,
+                dom_grounding_enabled,
+            )
+            if not dom_grounding_enabled():
+                return False
+            snap = DOMMetadataExtractor.get_instance().extract()
+        except Exception:
+            return False
+        if not snap or not getattr(snap, "success", False):
+            return False
+
+        target = (target_description or "").strip().lower()
+        words = [w for w in re.split(r"[^a-z0-9]+", target)
+                 if len(w) >= 4 and w not in self._VERIFY_STOPWORDS]
+        if not words:
+            return False
+
+        url = (getattr(snap, "url", "") or "").lower()
+        haystack = " ".join(filter(None, [
+            (getattr(snap, "title", "") or ""),
+            url,
+            *[((getattr(el, "text", "") or "") + " " + (getattr(el, "element_type", "") or ""))
+              for el in (getattr(snap, "elements", None) or [])],
+        ])).lower()
+
+        # A distinctive word appearing in the URL (e.g. "youtube", "reddit") is a
+        # rock-solid navigation confirm on its own. Otherwise require a MAJORITY
+        # of the distinctive words to appear — one shared token isn't enough.
+        if any(w in url for w in words):
+            return True
+        hits = sum(1 for w in words if w in haystack)
+        return hits >= max(1, (len(words) + 1) // 2)
+
     def _wait_until_visible(
         self,
         target_description: str,
         screen,
         timeout_s: float = 5.0,
         poll_interval_s: float = 0.6,
+        allow_dom_fastpath: bool = True,
     ) -> Dict[str, Any]:
         """Poll the vision model until the target appears, or timeout.
 
@@ -2597,6 +2666,23 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
 
         while _time.monotonic() < deadline:
             polls += 1
+            # DOM fast-path: a cheap (~50-200ms) positive-only check BEFORE the
+            # 1-2s vision inference. When the grounded DOM already shows the
+            # target (navigation landed, results rendered, content present), this
+            # short-circuits in one poll instead of burning the whole timeout on
+            # vision — the fix for the 60s task-budget blowouts. Never confirms on
+            # a guess; a miss just falls through to the vision poll below.
+            if allow_dom_fastpath and self._dom_confirms_target(target_description):
+                logger.info(
+                    f"[AGENT][GATE] visible via DOM: \"{target_description}\" (poll {polls})"
+                )
+                return {
+                    "success": True,
+                    "action": "wait_until_visible",
+                    "target": target_description,
+                    "polls": polls,
+                    "via": "dom",
+                }
             try:
                 img, _ = screen.capture()
                 # Tight prompt keeps latency low — yes/no with one-line justification.
