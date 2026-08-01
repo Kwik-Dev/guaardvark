@@ -1,9 +1,9 @@
 {
   "_meta": {
     "description": "Deterministic action recipes for the Guaardvark agent. These skip the see-think-act loop entirely.",
-    "format": "Each recipe has trigger patterns (regex) and a sequence of steps. Steps may be hotkey/type/click for actions, or wait_until_settled/wait_until_visible for vision-gated waiting. Recipes can also declare a top-level success_proof — a vision-readable description that must be visible before the recipe is reported successful. Legacy `wait` steps still work but log a deprecation warning.",
+    "format": "Each recipe has trigger patterns (regex) and a sequence of steps. Steps may be hotkey/type/click for actions, or wait_until_settled/wait_until_visible for vision-gated waiting. Recipes can also declare a top-level success_proof \u2014 a vision-readable description that must be visible before the recipe is reported successful. Legacy `wait` steps still work but log a deprecation warning.",
     "timing": "wait values are in seconds",
-    "state": "Minimal recipe set — restored from backup once the basics (click browser icon, navigate to URL) are reliable. Full prior set in recipes.backup-2026-05-11.json."
+    "state": "Minimal recipe set \u2014 restored from backup once the basics (click browser icon, navigate to URL) are reliable. Full prior set in recipes.backup-2026-05-11.json."
   },
   "youtube_search": {
     "description": "Directly search YouTube for a term by constructing the URL.",
@@ -11,11 +11,31 @@
       "^search\\s+(?:youtube\\s+for\\s+)[\"']?(.+?)[\"']?\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["ctrl", "l"]},
-      {"action": "wait_until_settled", "timeout_s": 2.0},
-      {"action": "type", "text": "https://www.youtube.com/results?search_query={1}"},
-      {"action": "wait_until_settled", "timeout_s": 1.5},
-      {"action": "hotkey", "keys": ["Return"]},
+      {
+        "action": "hotkey",
+        "keys": [
+          "ctrl",
+          "l"
+        ]
+      },
+      {
+        "action": "wait_until_settled",
+        "timeout_s": 2.0
+      },
+      {
+        "action": "type",
+        "text": "https://www.youtube.com/results?search_query={1}"
+      },
+      {
+        "action": "wait_until_settled",
+        "timeout_s": 1.5
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Return"
+        ]
+      },
       {
         "action": "wait_until_visible",
         "target_description": "YouTube search results with video thumbnails visible",
@@ -54,7 +74,7 @@
       {
         "action": "click",
         "target_description": "Firefox icon",
-        "_comment": "Vision-driven — servo finds the icon on the current frame"
+        "_comment": "Vision-driven \u2014 servo finds the icon on the current frame"
       },
       {
         "action": "wait_until_visible",
@@ -76,11 +96,31 @@
       "^visit\\s+(?:https?://)?([\\w.-]+:[0-9]+(?:/\\S*?)?)\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["ctrl", "l"]},
-      {"action": "wait_until_settled", "timeout_s": 2.0},
-      {"action": "type", "text": "http://{1}"},
-      {"action": "wait_until_settled", "timeout_s": 1.5},
-      {"action": "hotkey", "keys": ["Return"]},
+      {
+        "action": "hotkey",
+        "keys": [
+          "ctrl",
+          "l"
+        ]
+      },
+      {
+        "action": "wait_until_settled",
+        "timeout_s": 2.0
+      },
+      {
+        "action": "type",
+        "text": "http://{1}"
+      },
+      {
+        "action": "wait_until_settled",
+        "timeout_s": 1.5
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Return"
+        ]
+      },
       {
         "action": "wait_until_visible",
         "target_description": "page content or main site UI loaded (not blank or error)",
@@ -91,15 +131,24 @@
     "success_proof_timeout_s": 12.0
   },
   "press_escape": {
-    "description": "Press Escape. Closes find bar, dismisses URL-bar focus, generally drops modal state. Plain time wait — wait_until_settled fails on pages with animation.",
+    "description": "Press Escape. Closes find bar, dismisses URL-bar focus, generally drops modal state. Plain time wait \u2014 wait_until_settled fails on pages with animation.",
     "triggers": [
       "^(?:press|hit|tap)\\s+(?:the\\s+)?escape\\s*$",
       "^escape\\s*$",
       "^cancel\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["Escape"]},
-      {"action": "wait_until_settled", "timeout_s": 1.5, "_comment": "short settle after escape to drop focus/modals"}
+      {
+        "action": "hotkey",
+        "keys": [
+          "Escape"
+        ]
+      },
+      {
+        "action": "wait_until_settled",
+        "timeout_s": 1.5,
+        "_comment": "short settle after escape to drop focus/modals"
+      }
     ]
   },
   "find_on_page": {
@@ -109,11 +158,31 @@
       "^search\\s+(?:for\\s+)?[\"']?(.+?)[\"']?\\s+on\\s+(?:the\\s+)?page\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["ctrl", "f"]},
-      {"action": "wait_until_settled", "timeout_s": 1.5},
-      {"action": "type", "text": "{1}"},
-      {"action": "wait_until_settled", "timeout_s": 1.0},
-      {"action": "hotkey", "keys": ["Return"]},
+      {
+        "action": "hotkey",
+        "keys": [
+          "ctrl",
+          "f"
+        ]
+      },
+      {
+        "action": "wait_until_settled",
+        "timeout_s": 1.5
+      },
+      {
+        "action": "type",
+        "text": "{1}"
+      },
+      {
+        "action": "wait_until_settled",
+        "timeout_s": 1.0
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Return"
+        ]
+      },
       {
         "action": "wait_until_visible",
         "target_description": "find bar or highlighted matches on the page",
@@ -124,35 +193,91 @@
     "success_proof_timeout_s": 5.0
   },
   "scroll_to_youtube_comments": {
-    "description": "Scroll a YouTube watch page down enough to bring the 'Add a comment...' composer into the viewport. Pure PageDown — no vision dependency, no find_on_page brittleness. Escape first to drop URL-bar focus so the page body receives the keystrokes.",
+    "description": "Scroll a YouTube watch page down enough to bring the 'Add a comment...' composer into the viewport. Pure PageDown \u2014 no vision dependency, no find_on_page brittleness. Escape first to drop URL-bar focus so the page body receives the keystrokes.",
     "triggers": [
       "^scroll\\s+(?:down\\s+)?to\\s+(?:the\\s+)?(?:youtube\\s+)?comments\\s*$",
       "^scroll\\s+to\\s+comments\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["Escape"]},
-      {"action": "wait", "seconds": 0.3},
-      {"action": "hotkey", "keys": ["Page_Down"]},
-      {"action": "wait", "seconds": 0.4},
-      {"action": "hotkey", "keys": ["Page_Down"]},
-      {"action": "wait", "seconds": 0.4},
-      {"action": "hotkey", "keys": ["Page_Down"]},
-      {"action": "wait", "seconds": 0.5},
-      {"action": "hotkey", "keys": ["Page_Down"]},
-      {"action": "wait", "seconds": 1.0}
+      {
+        "action": "hotkey",
+        "keys": [
+          "Escape"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.3
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Page_Down"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.4
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Page_Down"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.4
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Page_Down"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.5
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Page_Down"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 1.0
+      }
     ]
   },
   "pause_youtube_video": {
-    "description": "Pause a playing YouTube video. Escape first to drop URL-bar focus (a fresh page load leaves keyboard focus in the address bar; an earlier attempt's Space went into the URL bar — delta=0.00 was the smoking gun), then 'k' which is YouTube's pause shortcut once the page body has focus.",
+    "description": "Pause a playing YouTube video. Escape first to drop URL-bar focus (a fresh page load leaves keyboard focus in the address bar; an earlier attempt's Space went into the URL bar \u2014 delta=0.00 was the smoking gun), then 'k' which is YouTube's pause shortcut once the page body has focus.",
     "triggers": [
       "^pause\\s+(?:the\\s+)?video\\s*$",
       "^pause\\s+(?:the\\s+)?youtube(?:\\s+video)?\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["Escape"]},
-      {"action": "wait", "seconds": 0.4},
-      {"action": "hotkey", "keys": ["k"]},
-      {"action": "wait", "seconds": 0.5}
+      {
+        "action": "hotkey",
+        "keys": [
+          "Escape"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.4
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "k"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.5
+      }
     ]
   },
   "focus_youtube_comment_field": {
@@ -167,12 +292,15 @@
         "target_description": "empty Add a comment input",
         "_comment": "Vision-driven. The horizontal pill-shaped input reading 'Add a comment...' that sits BELOW the video title and ABOVE any existing comments. Not the avatar circle to its left and NOT any Reply input lower on the page."
       },
-      {"action": "wait", "seconds": 1.2},
+      {
+        "action": "wait",
+        "seconds": 1.2
+      },
       {
         "action": "wait_until_visible",
         "target_description": "Cancel button next to Comment submit button",
         "timeout_s": 4.0,
-        "_comment": "Distinctive verification — Cancel only appears when the composer expanded. If this fails the click missed the placeholder; recipe-level failure triggers the adaptive loop, which with the sharper target above should usually succeed on the second try."
+        "_comment": "Distinctive verification \u2014 Cancel only appears when the composer expanded. If this fails the click missed the placeholder; recipe-level failure triggers the adaptive loop, which with the sharper target above should usually succeed on the second try."
       }
     ]
   },
@@ -188,52 +316,180 @@
         "target_description": "Reply button under comment",
         "_comment": "Vision-driven. Small 'Reply' text button below the parent comment body."
       },
-      {"action": "wait", "seconds": 1.5}
+      {
+        "action": "wait",
+        "seconds": 1.5
+      }
     ]
   },
   "like_youtube_video": {
-    "description": "[DISABLED 2026-05-16] Click the thumbs-up Like button below a YouTube video. Escape first to drop any input focus, Home to scroll back to the top so the Like button is in view. NOT currently wired into post_youtube_comment_via_servo: the vision-driven click consistently misses (vision-model miscalibration) and the post-click visual delta (outline→fill, +1 count) is too subtle for vision-side verification — false-positive matches the still-outlined icon as filled. Re-enable once the click is DOM-driven via the Firefox CDP debug port (port 9222). Recipe kept in place so it's ready to use once the DOM path lands.",
+    "description": "[DISABLED 2026-05-16] Click the thumbs-up Like button below a YouTube video. Escape first to drop any input focus, Home to scroll back to the top so the Like button is in view. NOT currently wired into post_youtube_comment_via_servo: the vision-driven click consistently misses (vision-model miscalibration) and the post-click visual delta (outline\u2192fill, +1 count) is too subtle for vision-side verification \u2014 false-positive matches the still-outlined icon as filled. Re-enable once the click is DOM-driven via the Firefox CDP debug port (port 9222). Recipe kept in place so it's ready to use once the DOM path lands.",
     "triggers": [
       "^like\\s+(?:the\\s+)?(?:youtube\\s+)?video\\s*$",
       "^thumbs\\s+up\\s+(?:the\\s+)?video\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["Escape"]},
-      {"action": "wait", "seconds": 0.3},
-      {"action": "hotkey", "keys": ["Home"]},
-      {"action": "wait", "seconds": 1.2},
+      {
+        "action": "hotkey",
+        "keys": [
+          "Escape"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.3
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Home"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 1.2
+      },
       {
         "action": "click",
         "target_description": "thumbs up icon left of dislike",
         "_comment": "Vision-driven. The thumbs-up icon inside the pill-shaped Like|Dislike control directly under the video title. Disambiguator: it sits IMMEDIATELY to the left of the matching thumbs-down icon. NOT the channel Subscribe button (purple pill, further left). NOT any like icon inside a comment lower on the page."
       },
-      {"action": "wait", "seconds": 1.0},
+      {
+        "action": "wait",
+        "seconds": 1.0
+      },
       {
         "action": "wait_until_visible",
         "target_description": "filled thumbs up icon under video",
         "timeout_s": 4.0,
-        "_comment": "Verification — once Liked, YouTube renders the thumbs-up icon FILLED (solid white/grey) instead of OUTLINED. If we never see the filled state the click missed the button. Recipe-level failure triggers the adaptive loop. Non-fatal at the caller level."
+        "_comment": "Verification \u2014 once Liked, YouTube renders the thumbs-up icon FILLED (solid white/grey) instead of OUTLINED. If we never see the filled state the click missed the button. Recipe-level failure triggers the adaptive loop. Non-fatal at the caller level."
       }
     ]
   },
+  "youtube_comment": {
+    "description": "End-to-end: post a comment on the currently-open YouTube watch page. Chains scroll-to-comments (PageDown, no vision) -> focus the 'Add a comment' composer -> type the text -> submit via Ctrl+Enter. Ctrl+Enter is YouTube's composer submit shortcut and is far more reliable than vision-clicking the 'Comment' button, which has drifted onto the video title / '0 Comments' header. Fires ONLY when the command carries explicit literal comment text (quoted, or after 'saying'); freeform intents like 'leave a comment to let people know...' deliberately fall through to the see-think-act loop so the model composes the text rather than typing the instruction verbatim.",
+    "preconditions": [
+      "firefox_running"
+    ],
+    "triggers": [
+      "^(?:leave|post|write|add|make|submit)\\s+(?:a\\s+)?(?:youtube\\s+)?comment\\b[^\\\"']*[\\\"'](.+?)[\\\"']",
+      "^(?:leave|post|write|add|make)\\s+(?:a\\s+)?(?:youtube\\s+)?comment\\s+(?:saying|that says|which says|reading)\\s+(.+?)\\s*(?:on\\s+(?:this|the)\\b.*)?$"
+    ],
+    "steps": [
+      {
+        "action": "hotkey",
+        "keys": [
+          "Escape"
+        ],
+        "_comment": "drop URL-bar focus so PageDown hits the page body"
+      },
+      {
+        "action": "wait",
+        "seconds": 0.3
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Page_Down"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.4
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Page_Down"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 0.4
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "Page_Down"
+        ]
+      },
+      {
+        "action": "wait_until_visible",
+        "target_description": "the 'Add a comment' input box below the video",
+        "timeout_s": 6.0
+      },
+      {
+        "action": "click",
+        "target_description": "empty Add a comment input",
+        "_comment": "pill-shaped 'Add a comment...' input below the title, above existing comments \u2014 not the avatar, not a Reply box"
+      },
+      {
+        "action": "wait_until_visible",
+        "target_description": "Cancel button next to Comment submit button",
+        "timeout_s": 4.0,
+        "_comment": "Cancel only appears once the composer expands \u2014 confirms the click landed"
+      },
+      {
+        "action": "type",
+        "text": "{1}"
+      },
+      {
+        "action": "wait",
+        "seconds": 0.8
+      },
+      {
+        "action": "hotkey",
+        "keys": [
+          "ctrl",
+          "Return"
+        ],
+        "_comment": "reliable submit; avoids vision-clicking Comment"
+      },
+      {
+        "action": "wait_until_visible",
+        "target_description": "the just-posted comment text visible at the top of the comments",
+        "timeout_s": 8.0
+      }
+    ],
+    "success_proof": "The typed comment now appears in the video's comment thread",
+    "success_proof_timeout_s": 8.0
+  },
   "submit_youtube_comment": {
-    "description": "Submit the typed YouTube comment via Ctrl+Enter — YouTube's keyboard shortcut for the composer's submit button. More reliable than vision-clicking 'Comment' (which has misfired on the '0 Comments' header in the past).",
+    "description": "Submit the typed YouTube comment via Ctrl+Enter \u2014 YouTube's keyboard shortcut for the composer's submit button. More reliable than vision-clicking 'Comment' (which has misfired on the '0 Comments' header in the past).",
     "triggers": [
       "^(?:send|submit|post)\\s+(?:the\\s+)?comment\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["ctrl", "Return"]},
-      {"action": "wait", "seconds": 1.2}
+      {
+        "action": "hotkey",
+        "keys": [
+          "ctrl",
+          "Return"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 1.2
+      }
     ]
   },
   "submit_youtube_reply": {
-    "description": "Submit the typed YouTube reply via Ctrl+Enter — same shortcut as the top-level Comment submit, works on the reply composer too.",
+    "description": "Submit the typed YouTube reply via Ctrl+Enter \u2014 same shortcut as the top-level Comment submit, works on the reply composer too.",
     "triggers": [
       "^(?:send|submit|post)\\s+(?:the\\s+)?reply\\s*$"
     ],
     "steps": [
-      {"action": "hotkey", "keys": ["ctrl", "Return"]},
-      {"action": "wait", "seconds": 1.2}
+      {
+        "action": "hotkey",
+        "keys": [
+          "ctrl",
+          "Return"
+        ]
+      },
+      {
+        "action": "wait",
+        "seconds": 1.2
+      }
     ]
   }
 }

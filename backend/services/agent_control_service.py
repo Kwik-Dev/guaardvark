@@ -1365,6 +1365,26 @@ class AgentControlService:
                                 result["verified"] = False
                                 result["success"] = False
                                 failed = True
+                                # Ineffective scroll = the page didn't move (wrong focus,
+                                # non-scrollable region, or already at the end). Repeating
+                                # the scroll just burns steps (the STEP 9/10 dead-scroll
+                                # loop that timed out the YouTube comment task). Steer the
+                                # next THINK to the grounded DOM: click a real listed
+                                # element (e.g. the composer) or jump with keys instead of
+                                # re-scrolling.
+                                # NOTE (2026-08-01, needs revisit): this is a prompt-level
+                                # nudge, not a hard reroute. A fuller fix resolves the scroll
+                                # target from the DOM (or focuses the scrollable pane first)
+                                # rather than relying on the model to heed the hint.
+                                if decision.action.action_type == "scroll":
+                                    self._pending_world_observed = (
+                                        "OBSERVED: your last scroll moved NOTHING — the page did "
+                                        "not scroll. Do NOT scroll again. Instead, either click a "
+                                        "specific element from the 'Interactive elements on this "
+                                        "page' list above (e.g. the comment/composer box), or press "
+                                        "Page_Down / End to jump. If the target isn't listed yet, "
+                                        "click the page body once to give it keyboard focus, then retry."
+                                    )
                             else:
                                 result["verified"] = True
                                 logger.debug(f"[AGENT][STEP {iteration+1}][VERIFY] Screen changed after "

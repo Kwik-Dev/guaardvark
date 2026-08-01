@@ -6,15 +6,19 @@
 #   GUAARDVARK_AGENT_BROWSER   - Browser to use: firefox|chromium|chrome (auto-detected if unset)
 #   GUAARDVARK_AGENT_DISPLAY   - X display number (default: 99)
 #   GUAARDVARK_AGENT_VNC_PORT  - VNC port (default: 5999)
-#   GUAARDVARK_AGENT_RESOLUTION - Display resolution (default: 1000x1000x24)
+#   GUAARDVARK_AGENT_RESOLUTION - Display resolution (default: 1280x960x24, 4:3)
 
 GUAARDVARK_ROOT="${GUAARDVARK_ROOT:-$(dirname $(dirname $(readlink -f $0)))}"
 DISPLAY_NUM="${GUAARDVARK_AGENT_DISPLAY:-99}"
-# 1000x1000 matches Gemma4's internal coordinate grid (Google's box_2d format
-# normalizes to 1000). Identity mapping at this resolution — no scaling. A
-# bump to 1024x1024 in May 2026 introduced a quiet drift that left all servo
-# clicks clustered around screen X-center (Gemma4's "I'm unsure" default).
-RESOLUTION="${GUAARDVARK_AGENT_RESOLUTION:-1000x1000x24}"
+# 4:3 (1280x960) — widened from the old 1000x1000 square (2026-08-01). The square
+# was tied to Gemma4's box_2d grid (normalizes to 1000; identity mapping avoided a
+# scaling drift that once clustered clicks at screen X-center). As we phase Gemma
+# out toward the grounded-DOM eye, that constraint no longer binds: box_2d is still
+# denormalized as (coord/1000)*screen_size, so Gemma keeps working at any aspect —
+# it just scales. More width gives web UIs (comment threads, toolbars) real room.
+# NOTE: if servo aim regresses on non-square, revert to 1000x1000x24 (backups are
+# Gemma/Google-tied and predate this) and re-open the servo calibration question.
+RESOLUTION="${GUAARDVARK_AGENT_RESOLUTION:-1280x960x24}"
 VNC_PORT="${GUAARDVARK_AGENT_VNC_PORT:-5999}"
 PID_DIR="$GUAARDVARK_ROOT/pids"
 LOG_DIR="$GUAARDVARK_ROOT/logs"
