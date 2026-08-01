@@ -156,6 +156,139 @@ def compute_frame_consistency(video_path: str | Path, sample_frames: int = 5) ->
     return out
 
 
+DEFAULT_VIDEO_REVIEW_MODEL = "minicpm-v4.5:latest"
+
+_REVIEW_PROMPT = (
+    "These {n} frames are sampled in order from a {dur}s AI-generated video clip. "
+    "Review it as a strict QA reviewer of generated video. Reply with ONLY a JSON "
+    "object with these keys: "
+    '"summary" (one sentence: what happens across the clip), '
+    '"temporal_coherence" (does the subject/motion stay consistent frame-to-frame, '
+    "or morph/flicker/teleport — be specific), "
+    '"artifacts" (array of concrete visual defects: warping, extra limbs, texture '
+    "crawl, blur, duplicated objects; empty array if none), "
+    '"quality_score" (integer 0-10, 10 = flawless), '
+    '"justification" (one line for the score).'
+)
+
+
+def _extract_frames_b64(video_path: str | Path, n: int = 6, width: int = 448) -> list[str]:
+    """Sample n evenly-spaced frames as base64 JPEGs via ffmpeg. [] on any failure."""
+    import base64
+    import subprocess
+    import tempfile
+
+    p = Path(video_path)
+    if not p.exists():
+        return []
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=nb_frames", "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
+            capture_output=True, text=True, timeout=15,
+        )
+        nb = int((probe.stdout or "0").strip() or 0)
+    except Exception:
+        nb = 0
+    step = max(1, nb // n) if nb else 1
+
+    with tempfile.TemporaryDirectory() as td:
+        pattern = f"select='not(mod(n\\,{step}))'" if nb else "select='eq(pict_type\\,I)'"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", str(p),
+                 "-vf", f"{pattern},scale={width}:-1", "-frames:v", str(n),
+                 "-vsync", "vfr", f"{td}/f%02d.jpg"],
+                capture_output=True, timeout=60,
+            )
+        except Exception as e:
+            logger.warning("video review: ffmpeg frame extract failed: %s", e)
+            return []
+        frames = sorted(Path(td).glob("f*.jpg"))
+        out = []
+        for fp in frames[:n]:
+            try:
+                out.append(base64.b64encode(fp.read_bytes()).decode())
+            except Exception:
+                pass
+        return out
+
+
+def review_video_quality(
+    video_path: str | Path,
+    *,
+    sample_frames: int = 6,
+    model: Optional[str] = None,
+    annotate: bool = False,
+) -> Dict[str, Any]:
+    """VLM temporal QA of a generated clip — the real signal compute_frame_consistency
+    only gestured at. Samples frames and asks a video-capable local VLM (default
+    MiniCPM-V 4.5) to judge scene, temporal coherence, artifacts, and a 0-10 score.
+
+    Catches the failure single-frame metrics can't: subject morphing / flicker /
+    teleporting across frames. Best-effort and fails OPEN — returns
+    {"available": False, "reason": ...} when ffmpeg / ollama / the model is missing,
+    so callers can treat it as an optional signal.
+
+    annotate=True writes the result into the asset's .metrics.json sidecar.
+    """
+    import json as _json
+    import re as _re
+
+    model = model or __import__("os").environ.get(
+        "GUAARDVARK_VIDEO_REVIEW_MODEL", DEFAULT_VIDEO_REVIEW_MODEL
+    )
+    result: Dict[str, Any] = {"available": False, "model": model}
+
+    frames = _extract_frames_b64(video_path, n=sample_frames)
+    if not frames:
+        result["reason"] = "no_frames"
+        return result
+
+    dur = compute_basic_video_stats(video_path).get("duration_s", "?")
+    prompt = _REVIEW_PROMPT.format(n=len(frames), dur=dur)
+
+    try:
+        import ollama
+        resp = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt, "images": frames}],
+            format="json",
+            options={"temperature": 0.2, "num_predict": 500},
+        )
+        raw = (resp["message"]["content"] or "").strip()
+    except Exception as e:  # noqa: BLE001 — optional signal, never crash the caller
+        logger.warning("video review: VLM call failed: %s", e)
+        result["reason"] = f"vlm_unavailable: {e}"
+        return result
+
+    review: Dict[str, Any] = {}
+    try:
+        review = _json.loads(raw)
+    except _json.JSONDecodeError:
+        m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+        if m:
+            try:
+                review = _json.loads(m.group(0))
+            except _json.JSONDecodeError:
+                pass
+    if not review:
+        result["reason"] = "unparseable_review"
+        result["raw"] = raw[:300]
+        return result
+
+    try:
+        score = int(round(float(review.get("quality_score"))))
+        review["quality_score"] = max(0, min(10, score))
+    except (TypeError, ValueError):
+        review["quality_score"] = None
+
+    result.update({"available": True, "frames_reviewed": len(frames), "review": review})
+    if annotate:
+        annotate_asset(video_path, {"vlm_review": result})
+    return result
+
+
 def annotate_asset(asset_path: str | Path, metrics: Dict[str, Any]) -> None:
     """Write/append a .metrics.json sidecar next to the asset for later inspection."""
     try:
