@@ -2657,6 +2657,34 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         hits = sum(1 for w in words if w in haystack)
         return hits >= max(1, (len(words) + 1) // 2)
 
+    # Browser-chrome vocabulary. A verify target made ONLY of these + generic
+    # stopwords ("Firefox browser window …") is asking about the WINDOW, not page
+    # content — answerable by xdotool in ~10ms instead of a 12s vision poll.
+    _BROWSER_CHROME_WORDS = frozenset({
+        "firefox", "browser", "chrome", "chromium", "mozilla", "application",
+        "launched", "launcher", "opened", "opens", "gains", "focus", "focused",
+        "desktop", "mapped", "running",
+    })
+
+    def _is_pure_window_target(self, target_description: str) -> bool:
+        """True when the target describes only browser-window/launch state.
+
+        Requires at least one browser word AND no distinctive content words left
+        after stripping chrome + generic vocabulary. "Firefox browser window with
+        URL bar visible" → True (xdotool can answer). "YouTube page visible in
+        browser" → False ("youtube" is content — stay on the DOM/vision path)."""
+        target = (target_description or "").strip().lower()
+        words = [w for w in re.split(r"[^a-z0-9]+", target) if len(w) >= 3]
+        if not any(w in self._BROWSER_CHROME_WORDS for w in words):
+            return False
+        leftover = [
+            w for w in words
+            if len(w) >= 4
+            and w not in self._VERIFY_STOPWORDS
+            and w not in self._BROWSER_CHROME_WORDS
+        ]
+        return not leftover
+
     def _wait_until_visible(
         self,
         target_description: str,
@@ -2684,8 +2712,38 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         polls = 0
         last_err = None
 
+        # Classified once — the target string doesn't change across polls.
+        pure_window_target = allow_dom_fastpath and self._is_pure_window_target(target_description)
+
         while _time.monotonic() < deadline:
             polls += 1
+            # Window fast-path: launch-type gates ("Firefox browser window …")
+            # can NEVER DOM-confirm (those words aren't in any page's DOM) and
+            # the vision model is unreliable on them — live runs burned 12s+8s
+            # gates while the window was demonstrably up. xdotool answers window
+            # existence in ~10ms, checked EVERY poll so a window that maps 3s
+            # after the click confirms at 3s (the old one-shot pre-check at the
+            # launcher call site missed exactly that case).
+            if pure_window_target:
+                if self._is_firefox_running(screen):
+                    logger.info(
+                        f"[AGENT][GATE] visible via window-check: \"{target_description}\" (poll {polls})"
+                    )
+                    return {
+                        "success": True,
+                        "action": "wait_until_visible",
+                        "target": target_description,
+                        "polls": polls,
+                        "via": "window",
+                    }
+                # Window not mapped yet. Don't burn a 1-2s GPU vision inference
+                # per poll just to wait on a window xdotool checks in ~10ms —
+                # that churns VRAM against the think model. Poll xdotool at full
+                # speed; run the vision backstop only every 5th poll (in case
+                # xdotool is broken or the window title doesn't match).
+                if polls % 5 != 0:
+                    _time.sleep(poll_interval_s)
+                    continue
             # DOM fast-path: a cheap (~50-200ms) positive-only check BEFORE the
             # 1-2s vision inference. When the grounded DOM already shows the
             # target (navigation landed, results rendered, content present), this

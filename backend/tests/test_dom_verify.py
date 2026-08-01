@@ -85,6 +85,55 @@ class TestDomConfirmsTarget:
             assert svc._dom_confirms_target("youtube") is False
 
 
+class TestPureWindowTarget:
+    def test_launch_gate_phrases_are_window_targets(self):
+        svc = _bare_service()
+        assert svc._is_pure_window_target(
+            "Firefox browser window with URL bar visible or any browser/application "
+            "window opened from the desktop"
+        ) is True
+        assert svc._is_pure_window_target("Firefox browser window opens and gains focus") is True
+
+    def test_content_targets_are_not_window_targets(self):
+        svc = _bare_service()
+        # "youtube" is distinctive content — must stay on the DOM/vision path even
+        # though "browser"/"window" appear.
+        assert svc._is_pure_window_target("YouTube page visible in browser window") is False
+        assert svc._is_pure_window_target("guaardvark search results") is False
+
+    def test_no_browser_word_is_not_window_target(self):
+        svc = _bare_service()
+        assert svc._is_pure_window_target("the submit button is now visible") is False
+
+
+class TestWindowFastPath:
+    def test_window_target_confirms_via_xdotool_not_vision(self):
+        svc = _bare_service()
+        with patch.object(svc, "_is_firefox_running", return_value=True), \
+             patch.object(svc, "_dom_confirms_target", return_value=False):
+            res = svc._wait_until_visible(
+                "Firefox browser window opens and gains focus", screen=None, timeout_s=5.0
+            )
+        assert res["success"] is True
+        assert res["via"] == "window"
+        assert res["polls"] == 1
+
+    def test_window_not_up_falls_through_to_vision(self):
+        svc = _bare_service()
+        boom_screen = types.SimpleNamespace(
+            capture=lambda: (_ for _ in ()).throw(RuntimeError("x")))
+        fake_va = types.SimpleNamespace(
+            VisionAnalyzer=lambda: types.SimpleNamespace(default_model="m"))
+        with patch.object(svc, "_is_firefox_running", return_value=False), \
+             patch.object(svc, "_dom_confirms_target", return_value=False), \
+             patch.dict("sys.modules", {"backend.utils.vision_analyzer": fake_va}):
+            res = svc._wait_until_visible(
+                "Firefox browser window opens", screen=boom_screen,
+                timeout_s=0.2, poll_interval_s=0.05,
+            )
+        assert res["success"] is False
+
+
 class TestWaitUntilVisibleFastPath:
     def test_dom_confirm_short_circuits_before_vision(self):
         svc = _bare_service()
