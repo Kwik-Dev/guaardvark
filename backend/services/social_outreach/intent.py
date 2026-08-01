@@ -14,6 +14,7 @@ import logging
 import re
 from typing import Any, Callable, Optional
 
+from backend.services import nl_control_plane
 from backend.services.social_outreach import kill_switch
 from backend.services.social_outreach.job_service import queue_outreach_run
 from backend.services.social_outreach.transitions import can_approve, can_reject
@@ -91,14 +92,20 @@ def classify_outreach_utterance(
 
 
 def _default_classifier(system: str, user: str) -> dict[str, Any]:
-    from backend.services.social_outreach.persona import _ollama_json_chat
-    return _ollama_json_chat(system, user)
+    # Shared NL primitive (was a per-feature copy of persona._ollama_json_chat).
+    return nl_control_plane.json_chat(system, user, on_error={})
 
 
 def _normalize_classification(raw: dict[str, Any], *, raw_text: str) -> dict[str, Any]:
-    intent = str(raw.get("intent") or "refuse").strip().lower()
-    if intent not in _VALID_INTENTS:
-        intent = "refuse"
+    # Generic skeleton (intent whitelist, confidence clamp, int coercion) from the
+    # shared control plane; outreach-specific validation layered on top.
+    base = nl_control_plane.normalize(
+        raw,
+        valid_intents=_VALID_INTENTS,
+        default_intent="refuse",
+        int_fields=("draft_id",),
+    )
+    intent = base["intent"]
 
     platform = raw.get("platform")
     if platform is not None:
@@ -113,22 +120,11 @@ def _normalize_classification(raw: dict[str, Any], *, raw_text: str) -> dict[str
             topics.append(s)
     topics = topics[:8]
 
-    draft_id = raw.get("draft_id")
-    if draft_id is not None:
-        try:
-            draft_id = int(draft_id)
-        except (TypeError, ValueError):
-            draft_id = None
+    draft_id = base.get("draft_id")
     if draft_id is None:
         m = re.search(r"\b(?:draft|item|id|#)\s*#?\s*(\d+)\b", raw_text, re.I)
         if m:
             draft_id = int(m.group(1))
-
-    try:
-        confidence = float(raw.get("confidence") if raw.get("confidence") is not None else 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
 
     reason = str(raw.get("reason") or "").strip() or intent
 
@@ -137,7 +133,7 @@ def _normalize_classification(raw: dict[str, Any], *, raw_text: str) -> dict[str
         "platform": platform,
         "topics": topics,
         "draft_id": draft_id,
-        "confidence": confidence,
+        "confidence": base["confidence"],
         "reason": reason,
         "raw_text": raw_text,
     }
@@ -253,19 +249,17 @@ def execute_outreach_intent(
                 if extra and classification.get("intent") == "scout_and_draft":
                     classification["topics"] = extra[:8]
 
-    intent = classification["intent"]
-
-    if intent == "status":
-        return _dispatch_status(classification)
-    if intent == "list_queue":
-        return _dispatch_list_queue(classification)
-    if intent == "approve":
-        return _dispatch_approve(classification)
-    if intent == "reject":
-        return _dispatch_reject(classification)
-    if intent == "scout_and_draft":
-        return _dispatch_scout(classification, created_by=created_by)
-    return _dispatch_refuse(classification)
+    return nl_control_plane.dispatch(
+        classification,
+        {
+            "status": _dispatch_status,
+            "list_queue": _dispatch_list_queue,
+            "approve": _dispatch_approve,
+            "reject": _dispatch_reject,
+            "scout_and_draft": lambda c: _dispatch_scout(c, created_by=created_by),
+        },
+        default_handler=_dispatch_refuse,
+    )
 
 
 def _base(classification: dict[str, Any], **extra: Any) -> dict[str, Any]:
