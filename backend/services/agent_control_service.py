@@ -2290,14 +2290,17 @@ class AgentControlService:
             from backend.services.dom_metadata_extractor import (
                 DOMMetadataExtractor,
                 dom_assist_enabled,
+                dom_grounding_enabled,
             )
-            if not dom_assist_enabled():
+            # Grounding (prompt inventory) is model-agnostic — the inventory is
+            # text any model reads. The coord click-shortcut (dom_assist) is the
+            # gemma4-only, default-off path. Pull a snapshot if either wants it;
+            # extract() is cached (1s TTL) so a second reader this iteration is free.
+            if not (dom_grounding_enabled() or dom_assist_enabled()):
                 return
-            unified_model = self._get_unified_model()
-            if unified_model and "gemma4" in unified_model.lower():
-                snapshot = DOMMetadataExtractor.get_instance().extract()
-                if snapshot.success and snapshot.elements:
-                    self._dom_snapshot = snapshot
+            snapshot = DOMMetadataExtractor.get_instance().extract()
+            if snapshot.success and snapshot.elements:
+                self._dom_snapshot = snapshot
         except Exception:
             pass
 
@@ -2430,6 +2433,7 @@ class AgentControlService:
         )
 
         world_block = self._format_world_state_for_prompt(world_state or self._world_state)
+        dom_grounding_block = self._format_dom_grounding_for_prompt()
         failure_block = self._format_failure_history()
         if failure_block:
             failure_block = failure_block + "\n\n"
@@ -2451,11 +2455,11 @@ class AgentControlService:
 
 {desktop_state}
 {world_block}
-{world_observed_block}{failure_block}{done_lines}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
+{dom_grounding_block}{world_observed_block}{failure_block}{done_lines}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
 
 {state_management}
 
-target_description rules: SHORT label, ≤6 words, one distinctive adjective. Examples: "primary submit button", "chat input field", "main navigation icon", "desktop background". NOT a multi-clause description with position phrases — long descriptions break the vision detector and land at (0,0). Describe one shape (color, label, or icon), not a sentence.
+target_description rules: SHORT label, ≤6 words, one distinctive adjective. Examples: "primary submit button", "chat input field", "main navigation icon", "desktop background". NOT a multi-clause description with position phrases — long descriptions break the vision detector and land at (0,0). Describe one shape (color, label, or icon), not a sentence. When an "Interactive elements on this page" list is present above, prefer a target_description that matches one of those real element labels; if the field you need is already marked (focused), skip the click and type directly.
 
 For high-impact clicks (launch, submit, comment, modal dismiss), set expected_effect to the visible state that should appear after the click. Keep it short and vision-checkable.
 
@@ -4069,6 +4073,32 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         lines.append("")
         return "\n".join(lines)
 
+    def _format_dom_grounding_for_prompt(self) -> str:
+        """Render the cached DOM element inventory for the decision prompt.
+
+        This is the "grounded eye" — it tells the brain what interactable
+        elements actually exist on the page (tag/role/label/focused) so it stops
+        hallucinating field contents from history. Coordinate-free on purpose:
+        the model picks a target by label, and virtual-display coords are
+        unreliable (see dom_metadata_extractor.dom_assist_enabled). Empty string
+        when grounding is off or no snapshot is available (e.g. desktop/OS
+        screens Firefox can't introspect), so non-web tasks are unaffected.
+        """
+        snap = self._dom_snapshot
+        if not snap or not getattr(snap, "elements", None):
+            return ""
+        try:
+            from backend.services.dom_metadata_extractor import (
+                DOMMetadataExtractor,
+                dom_grounding_enabled,
+            )
+            if not dom_grounding_enabled():
+                return ""
+            block = DOMMetadataExtractor.format_for_prompt(snap, include_coords=False)
+            return block + "\n\n" if block else ""
+        except Exception:
+            return ""
+
     def _build_decision_prompt(self, task, scene, history, world_state: Optional[WorldState] = None):
         """Build the prompt for the LLM to decide the next action."""
         history_text = ""
@@ -4112,6 +4142,7 @@ Reply ONLY with JSON:
 
         desktop_state = self._get_desktop_state()
         world_block = self._format_world_state_for_prompt(world_state or self._world_state)
+        dom_grounding_block = self._format_dom_grounding_for_prompt()
         failures_block = self._format_failure_reports_for_prompt()
 
         # Persistent knowledge — loaded once per call, stable across sessions.
@@ -4153,7 +4184,7 @@ Task: {task}
 
 Screen: {scene}
 
-{history_text}
+{dom_grounding_block}{history_text}
 {loop_warning}
 {rules}"""
 

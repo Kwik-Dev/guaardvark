@@ -44,6 +44,21 @@ def dom_assist_enabled() -> bool:
     """
     return os.environ.get("GUAARDVARK_DOM_ASSIST", "").strip() in {"1", "true", "yes"}
 
+
+def dom_grounding_enabled() -> bool:
+    """Switch for feeding the DOM element INVENTORY into the decision prompt.
+
+    Distinct from `dom_assist_enabled` (the coordinate click-shortcut, off by
+    default because the viewport→screen translation is unreliable on the virtual
+    display). Grounding only puts the *text* inventory — tag, role, label,
+    focused-state — into the prompt so the brain reads what's actually on the
+    page instead of hallucinating field contents from history. The labels are
+    coordinate-independent, so this is safe even though DOM coords aren't.
+
+    ON by default. Set GUAARDVARK_DOM_GROUNDING=0 to disable (instant revert).
+    """
+    return os.environ.get("GUAARDVARK_DOM_GROUNDING", "1").strip() not in {"0", "false", "no", "off"}
+
 # JavaScript that runs inside Firefox to enumerate interactive elements
 # and return their bounding boxes in viewport coordinates.
 #
@@ -775,20 +790,33 @@ class DOMMetadataExtractor:
         }
 
     @staticmethod
-    def format_for_prompt(snapshot: DOMSnapshot) -> str:
-        """Format a DOM snapshot as compact text for the LLM prompt."""
+    def format_for_prompt(snapshot: DOMSnapshot, include_coords: bool = True) -> str:
+        """Format a DOM snapshot as compact text for the LLM prompt.
+
+        include_coords=False drops the (cx,cy) pixel coordinates — use this for
+        brain GROUNDING, where the model picks a target by label (not by
+        coordinate) and the virtual-display coords are unreliable anyway. The
+        tag/role/label/focused inventory alone tells the brain what exists.
+        """
         if not snapshot.success or not snapshot.elements:
             return ""
 
         lines = [f"Page: {snapshot.title} ({snapshot.url})"]
-        lines.append("Interactive elements (screen pixel coordinates):")
+        lines.append(
+            "Interactive elements on this page (use these real labels for target_description):"
+            if not include_coords
+            else "Interactive elements (screen pixel coordinates):"
+        )
 
         for i, el in enumerate(snapshot.elements, 1):
             label = el.text[:50] if el.text else el.id or el.name or el.tag
             type_hint = f"[{el.element_type}]" if el.element_type else ""
             focused = " (focused)" if el.focused else ""
-            lines.append(
-                f"  [{i}] {el.tag}{type_hint} \"{label}\" at ({el.cx},{el.cy}) {el.w}x{el.h}{focused}"
-            )
+            if include_coords:
+                lines.append(
+                    f"  [{i}] {el.tag}{type_hint} \"{label}\" at ({el.cx},{el.cy}) {el.w}x{el.h}{focused}"
+                )
+            else:
+                lines.append(f"  [{i}] {el.tag}{type_hint} \"{label}\"{focused}")
 
         return "\n".join(lines)
