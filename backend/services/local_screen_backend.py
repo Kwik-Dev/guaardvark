@@ -506,7 +506,7 @@ class LocalScreenBackend(ScreenInterface):
                 return (int(parts[0]), int(parts[1]))
         except Exception:
             pass
-        return (1280, 960)  # Fallback = start_agent_display.sh default (4:3). Only used if xdotool query fails.
+        return (1000, 1000)  # Fallback = start_agent_display.sh default (square, Gemma box_2d grid). Only if xdotool query fails.
 
     def cursor_position(self) -> Tuple[int, int]:
         """Return cursor position on the virtual display."""

@@ -10,15 +10,16 @@
 
 GUAARDVARK_ROOT="${GUAARDVARK_ROOT:-$(dirname $(dirname $(readlink -f $0)))}"
 DISPLAY_NUM="${GUAARDVARK_AGENT_DISPLAY:-99}"
-# 4:3 (1280x960) — widened from the old 1000x1000 square (2026-08-01). The square
-# was tied to Gemma4's box_2d grid (normalizes to 1000; identity mapping avoided a
-# scaling drift that once clustered clicks at screen X-center). As we phase Gemma
-# out toward the grounded-DOM eye, that constraint no longer binds: box_2d is still
-# denormalized as (coord/1000)*screen_size, so Gemma keeps working at any aspect —
-# it just scales. More width gives web UIs (comment threads, toolbars) real room.
-# NOTE: if servo aim regresses on non-square, revert to 1000x1000x24 (backups are
-# Gemma/Google-tied and predate this) and re-open the servo calibration question.
-RESOLUTION="${GUAARDVARK_AGENT_RESOLUTION:-1280x960x24}"
+# 1000x1000 matches Gemma4's internal coordinate grid (Google's box_2d normalizes
+# to 1000; identity mapping — no scaling drift). A 2026-08-01 trial at 1280x960
+# (4:3) REGRESSED servo aim live — clicks stopped landing (Firefox icon + search-
+# field focus both missed), timing out a task that took 21s at 1000x1000. So while
+# box_2d *should* scale as (coord/1000)*screen_size, Gemma's aim is empirically
+# calibrated to the square and degrades off it. Reverted here.
+# TODO (blocks widening): the 4:3 widen needs servo re-calibration on non-square
+# first (or the DOM-grounded click path landing, so we stop depending on Gemma's
+# box_2d for pixels). Re-open with the eye bake-off / qwen2.5vl calibration work.
+RESOLUTION="${GUAARDVARK_AGENT_RESOLUTION:-1000x1000x24}"
 VNC_PORT="${GUAARDVARK_AGENT_VNC_PORT:-5999}"
 PID_DIR="$GUAARDVARK_ROOT/pids"
 LOG_DIR="$GUAARDVARK_ROOT/logs"
