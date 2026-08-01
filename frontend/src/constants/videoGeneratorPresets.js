@@ -74,7 +74,7 @@ export const KEYFRAME_MODEL_OPTIONS = {
 
 export const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
 
-export const MODEL_DEFAULT_GUIDANCE = { wan: 3.5, cogvideox: 6.0, ltx: 1.0 };
+export const MODEL_DEFAULT_GUIDANCE = { wan: 5.0, cogvideox: 6.0, ltx: 1.0 };
 
 export const ASPECT_RATIO_PRESETS = {
   "16:9": { label: "16:9", description: "Widescreen", ratio: 16 / 9 },
@@ -114,7 +114,7 @@ export const MODEL_OPTIONS = {
     defaultSteps: 20,
     supportsT2V: true,
     supportsI2V: true,
-    dimensionAlignment: 16,
+    dimensionAlignment: 32,
   },
   "wan22-14b": {
     label: "Wan 2.2 14B (GGUF Q5)",
@@ -125,7 +125,7 @@ export const MODEL_OPTIONS = {
     defaultSteps: 25,
     supportsT2V: true,
     supportsI2V: false,
-    dimensionAlignment: 16,
+    dimensionAlignment: 32,
   },
   "wan22-14b-i2v": {
     label: "Wan 2.2 14B I2V (GGUF Q5)",
@@ -136,7 +136,7 @@ export const MODEL_OPTIONS = {
     defaultSteps: 25,
     supportsT2V: false,
     supportsI2V: true,
-    dimensionAlignment: 16,
+    dimensionAlignment: 32,
   },
   "cogvideox-5b": {
     label: "CogVideoX 5B",

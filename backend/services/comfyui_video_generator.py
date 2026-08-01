@@ -880,6 +880,10 @@ class ComfyUIVideoGenerator:
             clip_device,
         )
 
+        base_area = 1280 * 704
+        current_area = width * height
+        shift = round(max(3.0, min(12.0, 8.0 * (current_area / base_area))), 1)
+
         workflow = {
             # ── Model Loading ──────────────────────────────────────────────
             # Node 1: Load HighNoise GGUF expert
@@ -946,20 +950,20 @@ class ComfyUIVideoGenerator:
             },
 
             # ── Noise Scheduling ───────────────────────────────────────────
-            # Node 8: ModelSamplingSD3 for HighNoise expert (shift=8.0)
+            # Node 8: ModelSamplingSD3 for HighNoise expert
             "8": {
                 "class_type": "ModelSamplingSD3",
                 "inputs": {
                     "model": ["1", 0],
-                    "shift": 8.0,
+                    "shift": shift,
                 }
             },
-            # Node 9: ModelSamplingSD3 for LowNoise expert (shift=8.0)
+            # Node 9: ModelSamplingSD3 for LowNoise expert
             "9": {
                 "class_type": "ModelSamplingSD3",
                 "inputs": {
                     "model": ["2", 0],
-                    "shift": 8.0,
+                    "shift": shift,
                 }
             },
 
@@ -1107,8 +1111,8 @@ class ComfyUIVideoGenerator:
                     "start_image": ["14", 0],
                 },
             },
-            "8": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 8.0}},
-            "9": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["2", 0], "shift": 8.0}},
+            "8": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": shift}},
+            "9": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["2", 0], "shift": shift}},
             "10": {
                 "class_type": "KSamplerAdvanced",
                 "inputs": {
@@ -1196,7 +1200,7 @@ class ComfyUIVideoGenerator:
         two-pass, no CPU offload → none of the 38-min-per-clip A14B pain). Graph mirrors
         ComfyUI's bundled `video_wan2_2_5B_ti2v` template: UNETLoader + CLIPLoader(wan) +
         VAELoader(wan2.2 VAE) → CLIPTextEncode ×2 → Wan22ImageToVideoLatent (start_image
-        optional) → ModelSamplingSD3(shift 8) → single KSampler (uni_pc/simple, denoise 1)
+        optional) → ModelSamplingSD3(dynamic shift) → single KSampler (euler/simple, denoise 1)
         → decode. image_filename set → image-to-video; else text-to-video.
         """
         if seed is None:
@@ -1224,7 +1228,15 @@ class ComfyUIVideoGenerator:
             "length": num_frames,
             "batch_size": 1,
         }
-        logger.info("Wan TI2V-5B workflow clip_device=%s", clip_device)
+        
+        # SD3/Flow-matching shift should scale with resolution/sequence-length.
+        # Base shift 8.0 is tuned for 1280x704. At lower resolutions (e.g. 736x416),
+        # 8.0 is too strong, leading to blurry output and poor motion.
+        base_area = 1280 * 704
+        current_area = width * height
+        shift = round(max(3.0, min(12.0, 8.0 * (current_area / base_area))), 1)
+
+        logger.info("Wan TI2V-5B workflow clip_device=%s, dynamic_shift=%.1f", clip_device, shift)
 
         workflow = {
             "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
@@ -1233,7 +1245,7 @@ class ComfyUIVideoGenerator:
             "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["3", 0], "text": prompt}},
             "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["3", 0], "text": negative_prompt}},
             "7": {"class_type": "Wan22ImageToVideoLatent", "inputs": latent_inputs},
-            "8": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 8.0}},
+            "8": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": shift}},
             # Single sampling pass — the whole point (no high/low expert swap).
             "10": {
                 "class_type": "KSampler",
@@ -1245,7 +1257,7 @@ class ComfyUIVideoGenerator:
                     "seed": seed,
                     "steps": num_inference_steps,
                     "cfg": guidance_scale,
-                    "sampler_name": "uni_pc",
+                    "sampler_name": "euler",
                     "scheduler": "simple",
                     "denoise": 1.0,
                 },
