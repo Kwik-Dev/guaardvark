@@ -3,9 +3,9 @@
 diffusers==0.38.0
 peft==0.16.0
 accelerate==1.10.0
-transformers==5.0.0rc3
+transformers==5.5.0
 safetensors==0.5.3
-Pillow==12.2.0
+Pillow==12.3.0
 huggingface_hub==0.27.0
 # xformers is optional — speeds up attention but the version space tracks
 # torch wheels closely and the right pin drifts. Skip it from the hard
