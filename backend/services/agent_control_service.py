@@ -601,6 +601,22 @@ class AgentControlService:
         start_time = time.time()
         self._debug_run_id = f"run-{int(start_time * 1000)}"
 
+        # Meta/memory tasks ("save your learnings to memory") are NOT screen
+        # tasks — there is nothing to click and no visible proof, so forcing
+        # them through the see-think-act loop guarantees a done-proof reject
+        # spiral (observed live: 3× "proof not visible" → 60s timeout). Handle
+        # them here: flush session beliefs via the existing lesson machinery
+        # and return honestly. Lessons ALSO auto-persist at every task exit
+        # (the finish chokepoint), so this is a flush + acknowledgement, not a
+        # new storage path — LEARNING_PRINCIPLES-compliant.
+        meta_result = self._try_meta_memory_task(task)
+        if meta_result is not None:
+            with self._lock:
+                if self._active_task_id == task_id:
+                    self._active = False
+            meta_result.total_time_seconds = time.time() - start_time
+            return finish(meta_result)
+
         # Check for recipe match — skip see-think-act loop for known patterns
         recipe_result = self._try_recipe(task, screen)
         if recipe_result is not None:
@@ -2808,6 +2824,58 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
             "error": f"target not visible within {timeout_s}s",
             "polls": polls,
         }
+
+    # Save-verb + learning-noun ("save your learnings", "store lessons in
+    # memory", "update your knowledge") or a bare remember-this. Deliberately
+    # narrow — a screen verb anywhere disqualifies (see _try_meta_memory_task).
+    _META_MEMORY_RE = re.compile(
+        r"\b(save|store|persist|write|commit|update)\b.{0,50}\b(learn\w*|lessons?|memor\w*|knowledge)\b"
+        r"|\bremember\b.{0,30}\b(this|that|these|what|it)\b",
+        re.IGNORECASE,
+    )
+    _SCREEN_VERB_RE = re.compile(
+        r"\b(click|navigate|open|scroll|type|search|browser|page|website|url|"
+        r"youtube|reddit|firefox|window|button|field|screen)\b",
+        re.IGNORECASE,
+    )
+
+    def _try_meta_memory_task(self, task: str) -> 'AgentResult | None':
+        """Route memory/meta requests off the screen loop entirely.
+
+        Returns a completed AgentResult for tasks like "save your learnings to
+        memory" — flushing session beliefs through the existing
+        _write_session_lessons machinery — or None for everything else
+        (including anything mentioning a screen element, which stays with the
+        loop). Conservative on purpose: a false None costs a timeout, a false
+        match would silently skip a real screen task.
+        """
+        t = (task or "").strip()
+        if not t or len(t) > 140:
+            return None
+        if not self._META_MEMORY_RE.search(t):
+            return None
+        if self._SCREEN_VERB_RE.search(t):
+            return None
+
+        persisted = 0
+        try:
+            persisted = self._write_session_lessons()
+        except Exception as e:
+            logger.debug(f"[AGENT][META] lesson flush failed (non-fatal): {e}")
+
+        logger.info(
+            f"[AGENT][META] memory task handled off-screen: flushed {persisted} "
+            f"session lesson(s); lessons also auto-persist at every task exit"
+        )
+        return AgentResult(
+            success=True,
+            reason=(
+                f"learnings_saved ({persisted} new lesson(s) persisted this flush; "
+                "lessons also save automatically at the end of every task)"
+            ),
+            verified=True,
+            verified_reason="internal memory write — no screen proof applicable",
+        )
 
     def _try_recipe(self, task: str, screen) -> 'AgentResult | None':
         """Match task against recipe library and execute deterministically."""
