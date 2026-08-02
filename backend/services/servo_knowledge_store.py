@@ -620,3 +620,83 @@ class ServoArchive:
 def get_servo_archive() -> ServoArchive:
     """Get the singleton ServoArchive instance."""
     return ServoArchive()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TIER 1.5 — RUNTIME CALIBRATION (restored 2026-08-01)
+# The measured per-model, per-resolution aim correction — the module header's
+# "model X returns coords 20% too low" pattern, made concrete. A calibration
+# run (backend/tools/servo_calibrate.py) fits raw anchor output against DOM
+# ground truth on the vision trainer and stores a linear map per axis:
+#     raw ≈ a + b·truth   →   corrected = (raw − a) / b
+# Stored per-machine (gitignored) because it bakes in this display + model
+# build. It is a TRANSFORM, not stored coordinates — LEARNING_PRINCIPLES-safe.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_CALIBRATION_PATH = Path(__file__).resolve().parents[2] / "data" / "training" / "servo_calibration.json"
+_calibration_cache: Dict[str, Any] = {"mtime": None, "data": {}}
+_calibration_lock = threading.Lock()
+
+# Sanity bounds on the fitted slope — outside this, the fit is degenerate
+# (bad samples, moving UI) and must not be applied.
+CALIBRATION_SLOPE_MIN = 0.3
+CALIBRATION_SLOPE_MAX = 1.7
+
+
+def _calibration_key(model: str, screen_w: int, screen_h: int) -> str:
+    return f"{(model or 'unknown').strip()}@{int(screen_w)}x{int(screen_h)}"
+
+
+def _load_calibration_file() -> Dict[str, Any]:
+    """Read the calibration file with an mtime cache (hot path: servo init)."""
+    try:
+        mtime = _CALIBRATION_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    with _calibration_lock:
+        if _calibration_cache["mtime"] == mtime:
+            return _calibration_cache["data"]
+        try:
+            data = json.loads(_CALIBRATION_PATH.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"servo_calibration.json unreadable: {e}")
+            return {}
+        _calibration_cache.update(mtime=mtime, data=data)
+        return data
+
+
+def load_servo_calibration(model: str, screen_w: int, screen_h: int) -> Optional[Dict[str, float]]:
+    """Return the calibration fit for (model, resolution), or None.
+
+    Refuses (returns None) when the stored slope is outside sanity bounds so a
+    corrupt fit can never make aim WORSE than uncalibrated.
+    """
+    entry = _load_calibration_file().get(_calibration_key(model, screen_w, screen_h))
+    if not entry:
+        return None
+    try:
+        for b in (float(entry["b_x"]), float(entry["b_y"])):
+            if not (CALIBRATION_SLOPE_MIN <= abs(b) <= CALIBRATION_SLOPE_MAX):
+                logger.warning(f"servo calibration slope {b} out of bounds — ignoring entry")
+                return None
+        return {k: float(entry[k]) for k in ("a_x", "b_x", "a_y", "b_y")}
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(f"servo calibration entry malformed: {e}")
+        return None
+
+
+def save_servo_calibration(model: str, screen_w: int, screen_h: int, fit: Dict[str, Any]) -> str:
+    """Persist a calibration fit (overwrites the entry for this model+resolution)."""
+    key = _calibration_key(model, screen_w, screen_h)
+    with _calibration_lock:
+        data = {}
+        try:
+            data = json.loads(_CALIBRATION_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+        data[key] = fit
+        _CALIBRATION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CALIBRATION_PATH.write_text(json.dumps(data, indent=2) + "\n")
+        _calibration_cache.update(mtime=None, data={})  # force re-read
+    logger.info(f"servo calibration saved for {key}: {fit}")
+    return key

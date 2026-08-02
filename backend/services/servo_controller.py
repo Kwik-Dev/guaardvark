@@ -69,7 +69,42 @@ class ServoController:
         # Get the actual screen size from the backend — no more hardcoded 1024x1024!
         # This fixes the "horizontally stretched vision" bug on 1280x720 screens.
         self.screen_w, self.screen_h = self.screen.screen_size()
+
+        # Tier-1.5 runtime calibration (restored 2026-08-01): measured linear
+        # correction for the model's raw anchor bias (e.g. the Y-center-pull
+        # that dragged top-of-screen anchors ~150px down and pushed targets out
+        # of the refine crop). Loaded per (model, resolution); None = identity.
+        # A calibration RUN measures raw output, so it passes
+        # vision_config={"disable_calibration": True} to see the uncorrected eye.
+        self._calibration = None
+        if not (self._vision_config or {}).get("disable_calibration"):
+            try:
+                from backend.services.servo_knowledge_store import load_servo_calibration
+                model_name = getattr(analyzer, "default_model", "") or ""
+                self._calibration = load_servo_calibration(model_name, self.screen_w, self.screen_h)
+                if self._calibration:
+                    logger.info(f"Servo calibration active for {model_name}: {self._calibration}")
+            except Exception as e:
+                logger.debug(f"servo calibration load skipped: {e}")
+
         logger.info(f"Servo initialized for {self.screen_w}x{self.screen_h} screen")
+
+    def _apply_calibration(self, x: int, y: int) -> Tuple[int, int]:
+        """Invert the measured aim bias: truth ≈ (raw − a) / b, clamped on-screen.
+
+        Identity when no calibration is loaded. Applied to ANCHOR coordinates
+        only — the anchor places the refine crop, so correcting it here fixes
+        both the crop window and the anchor-fallback path. The refine pass is
+        crop-relative and stays untouched.
+        """
+        cal = self._calibration
+        if not cal:
+            return (x, y)
+        cx = (x - cal["a_x"]) / cal["b_x"]
+        cy = (y - cal["a_y"]) / cal["b_y"]
+        cx = max(0, min(self.screen_w - 1, int(round(cx))))
+        cy = max(0, min(self.screen_h - 1, int(round(cy))))
+        return (cx, cy)
 
     def locate_target(self, target_description: str) -> Dict[str, Any]:
         """Find a described target on screen. SEE only — no move, no click,
@@ -546,10 +581,29 @@ class ServoController:
             return None
 
         ax, ay = anchor_coords
-        
-        # --- PASS 2: REFINEMENT PASS (ZOOM-IN) ---
-        # Extract a localized crop centered on the anchor
         crop_size = 300
+        if self._calibration:
+            cal_ax, cal_ay = self._apply_calibration(ax, ay)
+            shift = ((cal_ax - ax) ** 2 + (cal_ay - ay) ** 2) ** 0.5
+            logger.info(f"Servo calibration: anchor ({ax},{ay}) → ({cal_ax},{cal_ay}) shift={shift:.0f}px")
+            if shift > 120:
+                # Ambiguity zone: the raw value could be a true mid-screen target
+                # OR a collapsed top-screen one (measured 2026-08-01: Gemma dumps
+                # top-third targets into a y≈360-390 attractor). A static map
+                # can't disambiguate — so center the refine crop BETWEEN the two
+                # candidates and widen it to cover both, letting the zoom pass
+                # decide visually.
+                crop_size = min(600, int(shift) + 360)
+                ax = (ax + cal_ax) // 2
+                ay = (ay + cal_ay) // 2
+            else:
+                ax, ay = cal_ax, cal_ay
+            # The fallback path below reuses anchor_coords — keep it corrected too.
+            anchor_coords = (cal_ax, cal_ay)
+
+        # --- PASS 2: REFINEMENT PASS (ZOOM-IN) ---
+        # Extract a localized crop centered on the anchor (widened when the
+        # calibration shift was large — see ambiguity note above)
         left = max(0, int(ax - crop_size // 2))
         top = max(0, int(ay - crop_size // 2))
         right = min(self.screen_w, left + crop_size)

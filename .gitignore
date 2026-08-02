@@ -53,6 +53,7 @@ data/training/datasets/*.jsonl
 data/training/models/
 # Servo calibration data — runtime-generated, regenerated per calibration run
 data/training/servo_logs/
+data/training/servo_calibration.json
 data/training/knowledge/servo_archive*.jsonl
 data/training/knowledge/*.pre_purge
 data/training/knowledge/feedback.jsonl
