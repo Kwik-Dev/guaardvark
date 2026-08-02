@@ -625,6 +625,14 @@ class ServoController:
         ax, ay = anchor_coords
         crop_size = 300
         if self._calibration:
+            # Wider catch basin under calibration: the residual anchor error is
+            # position-dependent (measured 2026-08-01: up to ~200px at right-
+            # edge mid-height even after correction). A 300px crop misses the
+            # target there — and a refine pass with no target in-crop INVENTS
+            # one (observed: hallucinated "circle 9"/"circle 6" labels). 450px
+            # covers the observed residuals; the 2x-scaled refine stays sharp.
+            crop_size = 450
+        if self._calibration:
             cal_ax, cal_ay = self._apply_calibration(ax, ay)
             shift = ((cal_ax - ax) ** 2 + (cal_ay - ay) ** 2) ** 0.5
             logger.info(f"Servo calibration: anchor ({ax},{ay}) → ({cal_ax},{cal_ay}) shift={shift:.0f}px")
@@ -659,11 +667,16 @@ class ServoController:
         # Scale up the crop to give the model more detail for the refinement pass
         crop_scaled = crop.resize((crop_size * 2, crop_size * 2), Image.LANCZOS)
         
-        # Refinement Pass: ask for a precise 'point' [y, x] on the crop
+        # Refinement Pass: ask for a precise 'point' [x, y] on the crop.
+        # ORDER MATTERS: the parser reads point as x-first. The prompt used to
+        # request [y, x] — and gemma OBEYED it, so every refine was transposed
+        # (banked telemetry 2026-08-01: median refine error 124px as-parsed vs
+        # 49px axis-swapped, n=82). Ask for the order the parser expects.
         prompt_pass2 = (
             f"Point at the {target} within this localized crop. "
-            f"Reply with ONLY a JSON list [{{\"point\": [y, x], \"label\": \"{target}\"}}] "
-            f"normalized to 1000. Be extremely precise."
+            f"Reply with ONLY a JSON list [{{\"point\": [x, y], \"label\": \"{target}\"}}] "
+            f"normalized to 1000, x measured from the LEFT edge, y from the TOP. "
+            f"Be extremely precise."
         )
         result2 = self.analyzer.analyze_fullsize(
             crop_scaled, prompt=prompt_pass2, num_predict=128, temperature=0.1
