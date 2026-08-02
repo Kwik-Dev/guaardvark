@@ -253,20 +253,16 @@ class ApprenticeEngine:
                 })
 
             # --- 6. Record for training ---
-            if self.collector:
-                try:
-                    self.collector.record(
-                        source="apprentice",
-                        data={
-                            "demonstration_id": demonstration_id,
-                            "step_index": step_index,
-                            "action_type": action_type,
-                            "success": exec_result.get("success", False),
-                            "result": exec_result,
-                        },
-                    )
-                except Exception as e:
-                    logger.debug(f"[APPRENTICE] Collector record failed: {e}")
+            # Click steps are already recorded by servo.click_target's own
+            # collector (the SAME TrainingDataCollector instance — see the
+            # construction in agent_control_service), with full screenshot +
+            # coordinate metadata. The old block here called record() with a
+            # `data=` kwarg the signature never had — it raised TypeError into
+            # the except on every step and had never written a row (found in
+            # the 2026-08-01 learning-stack audit). Removed rather than fixed:
+            # a second apprentice-level record would double-count clicks, and
+            # non-click steps carry no coordinate label (DemoStep rows are the
+            # labeled source for those).
 
         all_success = steps_completed == len(steps)
         return AttemptResult(

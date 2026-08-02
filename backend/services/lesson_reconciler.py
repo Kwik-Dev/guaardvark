@@ -176,6 +176,11 @@ def scan_belief_updates(threshold: int = DEFAULT_THRESHOLD) -> int:
     memories = (
         db.session.query(AgentMemory)
         .filter(AgentMemory.type == "belief_update")
+        # Respect the status column: archived belief rows are retired evidence
+        # (e.g. the 2026-08-01 Wave-0 cleanup of key-name-tagged recipes.json
+        # rows the group-key parser can't consume) and must not be recounted
+        # on every 6h scan.
+        .filter(AgentMemory.status == "active")
         .all()
     )
 

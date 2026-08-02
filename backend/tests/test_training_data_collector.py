@@ -43,7 +43,7 @@ class TestTrainingDataCollector(unittest.TestCase):
             )
             screenshots = os.listdir(os.path.join(tmpdir, "screenshots"))
             assert len(screenshots) == 1
-            assert screenshots[0].endswith(".jpg")
+            assert screenshots[0].endswith(".webp")  # collector writes WEBP q75 (training_data_collector.py:47-49)
 
     def test_mark_unreliable(self):
         from backend.services.training_data_collector import TrainingDataCollector

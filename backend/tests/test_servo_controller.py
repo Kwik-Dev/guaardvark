@@ -44,8 +44,14 @@ class TestServoController(unittest.TestCase):
             r.model_used = "test-model"
             r.inference_ms = 100
             results.append(r)
-        # Share the same response queue across both methods
-        shared_iter = iter(results)
+        # Share the same response queue across both methods. Repeat the LAST
+        # response once the queue drains — the two-pass zoom (anchor + refine,
+        # servo_controller.py:554/:626) consumes two vision calls per estimate,
+        # and exhausting after N seeded responses made every single-response
+        # test die in StopIteration when the second pass landed (stale-test
+        # breakage from the 2026-05 two-pass change; product behavior is fine).
+        import itertools
+        shared_iter = itertools.chain(iter(results), itertools.repeat(results[-1]))
         analyzer.analyze.side_effect = lambda *a, **kw: next(shared_iter)
         analyzer.analyze_fullsize.side_effect = lambda *a, **kw: next(shared_iter)
         return analyzer
@@ -120,17 +126,26 @@ class TestServoController(unittest.TestCase):
     @patch("time.sleep")
     def test_verification_detects_screen_change(self, mock_sleep):
         from backend.services.servo_controller import ServoController
+        import itertools
         screen = self._make_screen()
         same_img = Image.new("RGB", (1024, 1024), color=(50, 50, 50))
         diff_img = Image.new("RGB", (1024, 1024), color=(200, 200, 200))
-        screen.capture.return_value = (same_img, (400, 250))
+        # Pre-click capture sees the original frame; every capture after the
+        # click sees a changed frame — DPC must report the change. (The stale
+        # version fed same_img forever and asserted the long-gone
+        # "pending_observation" contract; current contract is changed /
+        # no_visible_change / not_checked.)
+        screen.capture.side_effect = itertools.chain(
+            [(same_img, (400, 250))], itertools.repeat((diff_img, (400, 250)))
+        )
         analyzer = self._make_analyzer([
             '```json\n[{"point": [400, 250], "label": "button"}]\n```',
         ])
         servo = ServoController(screen, analyzer)
         result = servo.click_target("Reply button")
         assert result["success"] is True
-        assert result["post_action_effect"] == "pending_observation"
+        assert result["post_action_effect"] == "changed"
+        assert result["verified"] is True
 
     def test_nudge_distances(self):
         from backend.services.servo_controller import ServoController
