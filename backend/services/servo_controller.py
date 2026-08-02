@@ -49,6 +49,11 @@ class ServoController:
         self.analyzer = analyzer
         self.max_corrections = max_corrections
         self.collector = collector
+        # Optional TrainerTruthProbe (trainer_truth_probe.py) — attached by the
+        # agent loop during training sessions. When present, clicks on the
+        # vision trainer get TRUE hit/miss labels from the page's own
+        # scoreboard instead of only the DPC pixel proxy. None = no probing.
+        self.truth_probe = None
         # The vision config tells us what scale factors the model *theoretically* needs.
         # We record these honestly in the archive — the self-improvement engine
         # decides when (if ever) to actually apply scaling.
@@ -151,6 +156,10 @@ class ServoController:
 
         # 1. SEE — capture + vision-model coordinate estimate
         screenshot, _ = self.screen.capture()
+        # Truth before-probe MUST pair with this capture: on a hit the trainer
+        # respawns the dot synchronously, so the target position that labels
+        # this frame is only readable now. Inert (None) off the trainer page.
+        truth_before = self.truth_probe.before() if self.truth_probe else None
         self._last_failure_reason = ""
         coords = self._estimate_coordinates(screenshot, target_description)
         if coords is None:
@@ -253,8 +262,16 @@ class ServoController:
                     post_action_effect = "changed"
                     break
 
+        # Truth after-probe: read the trainer's own scoreboard delta — the
+        # honest outcome the DPC proxy can't see (a miss-marker also changes
+        # pixels). Tri-state; None fields when off the trainer.
+        truth = None
+        if self.truth_probe and truth_before is not None and click_issued:
+            truth = self.truth_probe.after(truth_before)
+
         elapsed_ms = int((time.time() - start) * 1000)
-        logger.info(f"Servo: clicked \"{target_description}\" at ({x}, {y}) effect={post_action_effect} ({elapsed_ms}ms)")
+        logger.info(f"Servo: clicked \"{target_description}\" at ({x}, {y}) effect={post_action_effect} ({elapsed_ms}ms)"
+                    + (f" true_hit={truth.get('true_hit')}" if truth else ""))
 
         # 5. RECORD
         self._record_interaction(
@@ -267,6 +284,7 @@ class ServoController:
             elapsed_ms=elapsed_ms,
             reason="" if click_issued else click_result.get("error", "click_failed"),
             post_action_effect=post_action_effect,
+            truth=truth,
         )
 
         return {
@@ -362,6 +380,7 @@ class ServoController:
         elapsed_ms: int,
         reason: str = "",
         post_action_effect: str = "",
+        truth: Dict[str, Any] | None = None,
     ) -> None:
         """Record telemetry without treating predicted coords as ground truth."""
         x, y = coords
@@ -381,6 +400,12 @@ class ServoController:
             "reason": reason,
             "inference_ms": self._last_inference_ms,
         }
+        # Ground truth from the trainer page (TrainerTruthProbe), when present.
+        # ADDITIVE — success/click_issued/post_action_effect keep their old
+        # meanings so pre-truth rows stay comparable. Dataset builders should
+        # gate on truth.true_hit and label from (target_cx, target_cy).
+        if truth is not None:
+            metadata["truth"] = truth
         if self.collector:
             try:
                 self.collector.record(
@@ -419,6 +444,7 @@ class ServoController:
                 post_action_effect=post_action_effect,
                 reason=reason,
                 inference_ms=self._last_inference_ms,
+                truth=truth,
             )
         except Exception as e:
             logger.debug(f"Archive record failed (non-fatal): {e}")

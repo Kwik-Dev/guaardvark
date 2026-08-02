@@ -290,6 +290,7 @@ class ServoArchive:
         post_action_effect: str = "",
         reason: str = "",
         inference_ms: int = 0,
+        truth: Optional[Dict[str, Any]] = None,
     ):
         """Record a servo interaction to the universal archive."""
         entry = {
@@ -320,6 +321,17 @@ class ServoArchive:
             # Keep the field for readers, but do not treat it as calibration truth.
             "error_px": None,
         }
+
+        # Ground truth from the trainer page (TrainerTruthProbe): tri-state
+        # true_hit + real target center. This — not success/click_issued — is
+        # what the Archive Miner and calibration fits must consume. When
+        # present, an honest error is computable: |click_coords − target_c*|.
+        if truth is not None:
+            entry["truth"] = truth
+            tx, ty = truth.get("target_cx"), truth.get("target_cy")
+            if tx is not None and ty is not None:
+                cx, cy = actual_click_coords
+                entry["true_error_px"] = round(((cx - tx) ** 2 + (cy - ty) ** 2) ** 0.5, 1)
 
         # Include correction directions so the self-improvement engine
         # can see which way the model was consistently off

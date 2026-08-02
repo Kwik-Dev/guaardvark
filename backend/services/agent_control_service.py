@@ -597,6 +597,17 @@ class AgentControlService:
         analyzer = VisionAnalyzer(default_model=servo_vision_model)
         collector = TrainingDataCollector()
         servo = ServoController(screen, analyzer, collector=collector, vision_config=vision_config)
+        if training_mode:
+            # Training sessions get TRUE hit/miss labels from the trainer
+            # page's own scoreboard (probe is inert when the page isn't the
+            # trainer or BiDi isn't up). This is what un-lies the learning
+            # data — DPC counts a miss-marker as "screen changed".
+            try:
+                from backend.services.trainer_truth_probe import TrainerTruthProbe
+                servo.truth_probe = TrainerTruthProbe()
+                logger.info("[AGENT][TRUTH] trainer truth probe attached for training session")
+            except Exception as e:
+                logger.debug(f"[AGENT][TRUTH] probe unavailable: {e}")
         consecutive_failures = 0
         start_time = time.time()
         self._debug_run_id = f"run-{int(start_time * 1000)}"
@@ -1584,6 +1595,13 @@ class AgentControlService:
             ))
 
         finally:
+            # Release the truth probe's long-lived BiDi session (Firefox caps
+            # concurrent sessions; leaking one per training run exhausts it).
+            try:
+                if getattr(servo, "truth_probe", None):
+                    servo.truth_probe.close()
+            except Exception:
+                pass
             with self._lock:
                 if self._active_task_id == task_id:
                     self._active = False
@@ -3824,12 +3842,26 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         # Current compact knowledge is prose-first, not a fixed icon bullet
         # block. Pull only short, concrete UI objects from those hypothesis
         # lines so contradiction tracking still has useful file-backed claims.
+        #
+        # CLAIM-SHAPED lines only (Wave 1, 2026-08-01): the old bare-word match
+        # hedged ANY line containing "Firefox icon"/"desktop" — including the
+        # conditional teleport instruction ("If you are on the desktop,
+        # navigate will silently fail"), which is not a visibility claim. That
+        # manufactured 8 junk belief rows + 4 junk PendingFixes (the poison
+        # quarantined in Wave 0). A line only yields an expectation when it
+        # ASSERTS the element's presence and is not a conditional.
         prose_patterns = [
             (r"\bFirefox icon\b", "Firefox icon"),
             (r"\bdesktop\b", "desktop"),
         ]
+        _assertive = re.compile(
+            r"\b(is|are|appears?|shows?|visible|present|located|sits)\b", re.IGNORECASE
+        )
+        _conditional = re.compile(r"^(if|when|unless|should you|in case)\b", re.IGNORECASE)
         for idx, raw in enumerate(lines, start=1):
             line = raw.strip()
+            if _conditional.match(line) or not _assertive.search(line):
+                continue
             for pattern, element in prose_patterns:
                 if not re.search(pattern, line, re.IGNORECASE):
                     continue
@@ -3849,8 +3881,28 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         # Recipes are also knowledge: target_description says what the servo is
         # expected to find when that recipe applies. Keep these as low-confidence
         # hypotheses because recipes have preconditions and page-specific scope.
+        #
+        # Tag with the recipe key's LINE NUMBER in recipes.json (Wave 1): the
+        # old `source=recipes.json:<name>` + source_line=None produced tags the
+        # reconciler's group-key parser can't consume (int() on a key name) —
+        # 10 belief rows accumulated that could never do anything (archived in
+        # Wave 0). Line numbers make the evidence reconcilable like any other
+        # editable source.
         try:
+            recipe_lines: Dict[str, int] = {}
+            try:
+                from pathlib import Path as _Path
+                _recipes_path = _Path(__file__).resolve().parents[2] / "data" / "agent" / "recipes.json"
+                for _idx, _raw in enumerate(_recipes_path.read_text().splitlines(), start=1):
+                    m = re.match(r'\s*"([^"]+)"\s*:\s*\{', _raw)
+                    if m and m.group(1) not in recipe_lines:
+                        recipe_lines[m.group(1)] = _idx
+            except Exception:
+                pass
             for recipe_name, recipe in self._load_recipes().items():
+                line_no = recipe_lines.get(recipe_name)
+                if line_no is None:
+                    continue  # unlocatable key → skip rather than emit junk tags
                 for step in recipe.get("steps", []) or []:
                     if not isinstance(step, dict) or step.get("action") != "click":
                         continue
@@ -3865,8 +3917,8 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
                         element=element,
                         expected_visible=True,
                         observed_visible=False,
-                        source=f"recipes.json:{recipe_name}",
-                        source_line=None,
+                        source="recipes.json",
+                        source_line=line_no,
                         confidence=0.25,
                     ))
         except Exception as e:
