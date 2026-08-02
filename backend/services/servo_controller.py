@@ -95,18 +95,34 @@ class ServoController:
         logger.info(f"Servo initialized for {self.screen_w}x{self.screen_h} screen")
 
     def _apply_calibration(self, x: int, y: int) -> Tuple[int, int]:
-        """Invert the measured aim bias: truth ≈ (raw − a) / b, clamped on-screen.
+        """Invert the measured aim bias, clamped on-screen. Identity when no
+        calibration is loaded.
 
-        Identity when no calibration is loaded. Applied to ANCHOR coordinates
-        only — the anchor places the refine crop, so correcting it here fixes
-        both the crop window and the anchor-fallback path. The refine pass is
-        crop-relative and stays untouched.
+        Model families (see servo_knowledge_store.load_servo_calibration):
+          linear      truth ≈ (raw − a)/b per axis
+          radial      truth ≈ C + (raw − C)/k  — Dean's X-leg insight: the eye
+                      pulls raw output toward screen center along the spoke
+          piecewise_y identity below elbow (eye accurate there); linear above
+
+        Applied to ANCHOR coordinates only — the anchor places the refine crop,
+        so correcting it here fixes both the crop window and the anchor-fallback
+        path. The refine pass is crop-relative and stays untouched.
         """
         cal = self._calibration
         if not cal:
             return (x, y)
-        cx = (x - cal["a_x"]) / cal["b_x"]
-        cy = (y - cal["a_y"]) / cal["b_y"]
+        family = cal.get("model", "linear")
+        if family == "radial":
+            ccx, ccy = cal["cx"], cal["cy"]
+            k = cal["k"]
+            cx = ccx + (x - ccx) / k
+            cy = ccy + (y - ccy) / k
+        elif family == "piecewise_y":
+            cx = float(x)
+            cy = float(y) if y >= cal["elbow"] else (y - cal["a_y"]) / cal["b_y"]
+        else:  # linear (legacy)
+            cx = (x - cal["a_x"]) / cal["b_x"]
+            cy = (y - cal["a_y"]) / cal["b_y"]
         cx = max(0, min(self.screen_w - 1, int(round(cx))))
         cy = max(0, min(self.screen_h - 1, int(round(cy))))
         return (cx, cy)

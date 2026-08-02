@@ -130,12 +130,228 @@ def collect_samples(model: str, n: int, settle_s: float = 0.8):
     return samples, servo.screen_w, servo.screen_h
 
 
+# ── Wave 2: fit from TRUTH-LABELED archive rows, validate, gated save ────────
+
+ARCHIVE = None  # resolved lazily so tests can patch
+
+
+def load_labeled_pairs_from_archive(archive_path=None):
+    """(truth_xy, raw_anchor_xy, screen_wh) triples from truth-labeled rows.
+
+    The correction targets the ANCHOR (it places the refine crop), so the raw
+    anchor box is re-parsed from the verbatim raw_response telemetry.
+    """
+    import re
+    from pathlib import Path as _P
+    path = _P(archive_path) if archive_path else \
+        _P(__file__).resolve().parents[2] / "data" / "training" / "knowledge" / "servo_archive.jsonl"
+    pairs = []
+    try:
+        lines = open(path).read().splitlines()
+    except FileNotFoundError:
+        return pairs
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        t = d.get("truth") or {}
+        if t.get("target_cx") is None or t.get("target_cy") is None:
+            continue
+        m = re.search(r'anchor:.*?"box_2d":\s*\[([\d\s,.-]+)\]', d.get("raw_response") or "")
+        if not m:
+            continue
+        try:
+            y1, x1, y2, x2 = [float(v) for v in m.group(1).split(",")[:4]]
+        except ValueError:
+            continue
+        w, h = (d.get("screen_size") or [1000, 1000])[:2]
+        ax, ay = (x1 + x2) / 2 / 1000 * w, (y1 + y2) / 2 / 1000 * h
+        pairs.append(((float(t["target_cx"]), float(t["target_cy"])), (ax, ay), (w, h)))
+    return pairs
+
+
+def fit_radial(pairs):
+    """Dean's X-leg model: raw ≈ C + k·(truth − C). Fit k robustly (median of
+    per-sample radius ratios about screen center)."""
+    import statistics
+    if not pairs:
+        return None
+    w, h = pairs[0][2]
+    cx, cy = w / 2.0, h / 2.0
+    ratios = []
+    for (tx, ty), (rx, ry), _ in pairs:
+        tr = ((tx - cx) ** 2 + (ty - cy) ** 2) ** 0.5
+        rr = ((rx - cx) ** 2 + (ry - cy) ** 2) ** 0.5
+        if tr > 40:  # near-center samples carry no radial signal
+            ratios.append(rr / tr)
+    if len(ratios) < 4:
+        return None
+    return {"model": "radial", "k": round(statistics.median(ratios), 4),
+            "cx": cx, "cy": cy}
+
+
+def fit_piecewise_y(pairs, elbows=(350, 400, 450)):
+    """Identity at/below elbow (raw-y), linear correction above the collapse
+    zone. Returns the candidate list (one per elbow) — validation picks."""
+    out = []
+    for elbow in elbows:
+        seg = [(t[1], r[1]) for t, r, _ in pairs if r[1] < elbow]
+        if len(seg) < 6:
+            continue
+        a, b, _ = fit_axis([s[0] for s in seg], [s[1] for s in seg])
+        if 0.3 <= abs(b) <= 1.7:
+            out.append({"model": "piecewise_y", "elbow": float(elbow),
+                        "a_y": round(a, 2), "b_y": round(b, 4)})
+    return out
+
+
+def _apply_candidate(cand, rx, ry, w, h):
+    if cand is None:  # identity
+        return rx, ry
+    fam = cand["model"]
+    if fam == "radial":
+        return (cand["cx"] + (rx - cand["cx"]) / cand["k"],
+                cand["cy"] + (ry - cand["cy"]) / cand["k"])
+    if fam == "piecewise_y":
+        return rx, (ry if ry >= cand["elbow"] else (ry - cand["a_y"]) / cand["b_y"])
+    return ((rx - cand["a_x"]) / cand["b_x"], (ry - cand["a_y"]) / cand["b_y"])
+
+
+def evaluate_candidate(cand, pairs, catch_px=80.0):
+    """(mean_error, catch_rate) of corrected anchors vs truth."""
+    if not pairs:
+        return float("inf"), 0.0
+    errs = []
+    for (tx, ty), (rx, ry), (w, h) in pairs:
+        px, py = _apply_candidate(cand, rx, ry, w, h)
+        errs.append(((px - tx) ** 2 + (py - ty) ** 2) ** 0.5)
+    catch = sum(1 for e in errs if e <= catch_px) / len(errs)
+    return sum(errs) / len(errs), catch
+
+
+def split_by_position(pairs, eval_frac=0.25, seed=11):
+    """Hold out whole TARGET POSITIONS so the gate tests generalization, not
+    memorized dots."""
+    import random as _r
+    by_pos = {}
+    for p in pairs:
+        by_pos.setdefault((round(p[0][0]), round(p[0][1])), []).append(p)
+    keys = sorted(by_pos)
+    _r.Random(seed).shuffle(keys)
+    n_eval = max(1, int(len(keys) * eval_frac)) if len(keys) > 1 else 0
+    eval_keys = set(keys[:n_eval])
+    train = [p for k in keys[n_eval:] for p in by_pos[k]]
+    heldout = [p for k in keys[:n_eval] for p in by_pos[k]] if n_eval else []
+    return train, heldout
+
+
+def fit_from_archive(model_name: str, dry_run: bool, archive_path=None) -> int:
+    """The Wave-2 gated fit: candidates vs identity on held-out positions;
+    auto-apply ONLY on improvement (Dean's rule); prior entry kept for rollback."""
+    pairs = load_labeled_pairs_from_archive(archive_path)
+    print(f"labeled anchor pairs: {len(pairs)}")
+    return fit_and_gate(pairs, model_name, dry_run)
+
+
+def live_fit(model_name: str, n_samples: int, dry_run: bool) -> int:
+    """Collect (truth, raw-anchor) pairs live — fresh RANDOM position per
+    sample, so the collapse zone is always represented — then fit + gate.
+    Teach-archive fitting starves on position spread (the dot only moves on
+    hit/reload; a whole session can yield 3-4 positions); the live prober gets
+    a new position every ~6s."""
+    from backend.services.social_outreach.reddit_outreach import _bidi_navigate
+    print(f"navigating agent Firefox to trainer: {_bidi_navigate(TRAINER_URL)}")
+    time.sleep(1.5)
+    print(f"collecting {n_samples} spread samples with {model_name} (raw eye)…")
+    samples, w, h = collect_samples(model_name, n_samples)
+    pairs = [((tx, ty), (ax, ay), (w, h)) for tx, ty, ax, ay in samples]
+    print(f"labeled anchor pairs: {len(pairs)}")
+    return fit_and_gate(pairs, model_name, dry_run)
+
+
+def fit_and_gate(pairs, model_name: str, dry_run: bool) -> int:
+    if len(pairs) < 12:
+        print("ABORT: <12 labeled pairs — collect more (servo_teach or --live-fit)")
+        return 1
+    train, heldout = split_by_position(pairs)
+    if not heldout:
+        print("ABORT: only one target position — need spread (teach with reload-respawn)")
+        return 1
+    print(f"train={len(train)} pairs, held-out={len(heldout)} pairs "
+          f"({len(set((round(p[0][0]), round(p[0][1])) for p in heldout))} unseen positions)")
+
+    tx = [p[0][0] for p in train]; ty = [p[0][1] for p in train]
+    rx = [p[1][0] for p in train]; ry = [p[1][1] for p in train]
+    a_x, b_x, _ = fit_axis(tx, rx)
+    a_y, b_y, _ = fit_axis(ty, ry)
+    candidates = [None,
+                  {"model": "linear", "a_x": round(a_x, 2), "b_x": round(b_x, 4),
+                   "a_y": round(a_y, 2), "b_y": round(b_y, 4)},
+                  fit_radial(train)]
+    candidates += fit_piecewise_y(train)
+    candidates = [c for c in candidates if c is not None or c is None]  # keep identity marker
+
+    print("\ncandidate            held-out mean err   catch(≤80px)")
+    scored = []
+    for cand in candidates:
+        if cand is not None and cand["model"] == "linear" and not (0.3 <= abs(b_x) <= 1.7 and 0.3 <= abs(b_y) <= 1.7):
+            continue
+        mean_e, catch = evaluate_candidate(cand, heldout)
+        name = "identity" if cand is None else json.dumps(cand)[:44]
+        print(f"  {name:44s} {mean_e:7.1f}px      {catch*100:5.1f}%")
+        scored.append((mean_e, -catch, cand))
+    scored.sort(key=lambda s: (s[0], s[1]))
+    best_err, neg_catch, best = scored[0]
+    id_err, id_catch = evaluate_candidate(None, heldout)
+
+    if best is None or not (best_err < id_err and -neg_catch >= id_catch):
+        print(f"\nVERDICT: identity stands (best candidate does not beat it on BOTH "
+              f"mean err AND catch rate). Nothing saved.")
+        return 0
+
+    print(f"\nVERDICT: {best['model']} wins — {id_err:.1f}px → {best_err:.1f}px, "
+          f"catch {id_catch*100:.1f}% → {-neg_catch*100:.1f}%")
+    if dry_run:
+        print("dry-run: not saved")
+        return 0
+
+    from backend.services.servo_knowledge_store import (
+        save_servo_calibration, _load_calibration_file, _calibration_key,
+    )
+    if pairs:
+        w, h = pairs[0][2]
+    key = _calibration_key(model_name, int(w), int(h))
+    prior = _load_calibration_file().get(key)
+    entry = dict(best)
+    entry.update({
+        "samples": len(pairs), "heldout_mean_err_px": round(best_err, 1),
+        "identity_mean_err_px": round(id_err, 1),
+        "fitted_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "source": "teach_archive_truth",
+    })
+    if prior:
+        entry["_rollback"] = prior
+    save_servo_calibration(model_name, int(w), int(h), entry)
+    print(f"SAVED → {key} (prior kept under _rollback)")
+    return 0
+
+
 def main(argv: Optional[list] = None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--samples", type=int, default=12)
     ap.add_argument("--model", default="gemma4:e4b")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--from-archive", action="store_true",
+                    help="Wave 2: fit+validate from truth-labeled archive rows (no live probing)")
+    ap.add_argument("--live-fit", action="store_true",
+                    help="Wave 2: collect spread samples live (fresh position each), then fit+gate")
     args = ap.parse_args(argv)
+
+    if args.from_archive:
+        return fit_from_archive(args.model, args.dry_run)
+    if args.live_fit:
+        return live_fit(args.model, args.samples, args.dry_run)
 
     from backend.services.servo_knowledge_store import (
         CALIBRATION_SLOPE_MIN, CALIBRATION_SLOPE_MAX, save_servo_calibration,

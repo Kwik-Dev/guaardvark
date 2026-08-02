@@ -677,21 +677,49 @@ def _load_calibration_file() -> Dict[str, Any]:
         return data
 
 
-def load_servo_calibration(model: str, screen_w: int, screen_h: int) -> Optional[Dict[str, float]]:
+def load_servo_calibration(model: str, screen_w: int, screen_h: int) -> Optional[Dict[str, Any]]:
     """Return the calibration fit for (model, resolution), or None.
 
-    Refuses (returns None) when the stored slope is outside sanity bounds so a
-    corrupt fit can never make aim WORSE than uncalibrated.
+    Three model families (entry["model"], default "linear" for legacy entries):
+      linear      — per-axis: corrected = (raw − a)/b
+      radial      — Dean's X-leg insight (2026-08-01): the eye pulls raw
+                    coords toward screen center along the center→target spoke;
+                    corrected = C + (raw − C)/k
+      piecewise_y — identity below elbow (eye is accurate there), linear
+                    correction above (the top-of-screen collapse zone)
+
+    Refuses (returns None) on out-of-bounds gains so a corrupt fit can never
+    make aim WORSE than uncalibrated.
     """
     entry = _load_calibration_file().get(_calibration_key(model, screen_w, screen_h))
     if not entry:
         return None
     try:
-        for b in (float(entry["b_x"]), float(entry["b_y"])):
-            if not (CALIBRATION_SLOPE_MIN <= abs(b) <= CALIBRATION_SLOPE_MAX):
-                logger.warning(f"servo calibration slope {b} out of bounds — ignoring entry")
+        family = str(entry.get("model", "linear"))
+        def _sane(v: float) -> bool:
+            return CALIBRATION_SLOPE_MIN <= abs(float(v)) <= CALIBRATION_SLOPE_MAX
+
+        if family == "linear":
+            if not (_sane(entry["b_x"]) and _sane(entry["b_y"])):
+                logger.warning("servo calibration: linear slope out of bounds — ignoring")
                 return None
-        return {k: float(entry[k]) for k in ("a_x", "b_x", "a_y", "b_y")}
+            out = {k: float(entry[k]) for k in ("a_x", "b_x", "a_y", "b_y")}
+        elif family == "radial":
+            if not _sane(entry["k"]):
+                logger.warning("servo calibration: radial gain out of bounds — ignoring")
+                return None
+            out = {"k": float(entry["k"]), "cx": float(entry["cx"]), "cy": float(entry["cy"])}
+        elif family == "piecewise_y":
+            if not _sane(entry["b_y"]):
+                logger.warning("servo calibration: piecewise slope out of bounds — ignoring")
+                return None
+            out = {"elbow": float(entry["elbow"]),
+                   "a_y": float(entry["a_y"]), "b_y": float(entry["b_y"])}
+        else:
+            logger.warning(f"servo calibration: unknown model family {family!r} — ignoring")
+            return None
+        out["model"] = family
+        return out
     except (KeyError, TypeError, ValueError) as e:
         logger.warning(f"servo calibration entry malformed: {e}")
         return None
