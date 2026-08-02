@@ -270,9 +270,28 @@ def live_fit(model_name: str, n_samples: int, dry_run: bool) -> int:
     return fit_and_gate(pairs, model_name, dry_run)
 
 
+def dedupe_by_position(pairs):
+    """Average pairs per target position so a 15-click stuck streak counts as
+    ONE sample, not fifteen. Repeat-heavy archives otherwise dominate the fit
+    and the held-out draw (observed 2026-08-01: a refit on repeat-weighted
+    archive data replaced a better fit with a worse one)."""
+    by_pos = {}
+    for (t, r, wh) in pairs:
+        by_pos.setdefault((round(t[0]), round(t[1])), []).append((t, r, wh))
+    out = []
+    for k, group in by_pos.items():
+        n = len(group)
+        t = (sum(g[0][0] for g in group) / n, sum(g[0][1] for g in group) / n)
+        r = (sum(g[1][0] for g in group) / n, sum(g[1][1] for g in group) / n)
+        out.append((t, r, group[0][2]))
+    return out
+
+
 def fit_and_gate(pairs, model_name: str, dry_run: bool) -> int:
+    pairs = dedupe_by_position(pairs)
+    print(f"deduped to {len(pairs)} distinct-position samples")
     if len(pairs) < 12:
-        print("ABORT: <12 labeled pairs — collect more (servo_teach or --live-fit)")
+        print("ABORT: <12 distinct positions — collect more spread (--live-fit)")
         return 1
     train, heldout = split_by_position(pairs)
     if not heldout:
@@ -301,13 +320,28 @@ def fit_and_gate(pairs, model_name: str, dry_run: bool) -> int:
         name = "identity" if cand is None else json.dumps(cand)[:44]
         print(f"  {name:44s} {mean_e:7.1f}px      {catch*100:5.1f}%")
         scored.append((mean_e, -catch, cand))
+    # Incumbent challenge: the currently-stored fit must be beaten, not just
+    # identity — otherwise a lucky/unlucky held-out draw can replace a better
+    # fit with a worse one (observed live 2026-08-01; rolled back).
+    from backend.services.servo_knowledge_store import load_servo_calibration
+    if pairs:
+        _w, _h = pairs[0][2]
+    incumbent = load_servo_calibration(model_name, int(_w), int(_h))
+    inc_err, inc_catch = (evaluate_candidate(incumbent, heldout)
+                          if incumbent else (float("inf"), -1.0))
+    if incumbent:
+        print(f"  {'INCUMBENT ' + incumbent.get('model', '?'):44s} {inc_err:7.1f}px      {inc_catch*100:5.1f}%")
+
     scored.sort(key=lambda s: (s[0], s[1]))
     best_err, neg_catch, best = scored[0]
     id_err, id_catch = evaluate_candidate(None, heldout)
 
-    if best is None or not (best_err < id_err and -neg_catch >= id_catch):
-        print(f"\nVERDICT: identity stands (best candidate does not beat it on BOTH "
-              f"mean err AND catch rate). Nothing saved.")
+    beats_identity = best is not None and best_err < id_err and -neg_catch >= id_catch
+    beats_incumbent = best_err < inc_err and -neg_catch >= inc_catch
+    if not (beats_identity and beats_incumbent):
+        keeper = "incumbent" if incumbent and inc_err <= id_err else "identity"
+        print(f"\nVERDICT: {keeper} stands (challenger must beat BOTH identity and "
+              f"the incumbent on mean err AND catch rate). Nothing saved.")
         return 0
 
     print(f"\nVERDICT: {best['model']} wins — {id_err:.1f}px → {best_err:.1f}px, "
