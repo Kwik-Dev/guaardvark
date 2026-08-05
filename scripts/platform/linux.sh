@@ -277,7 +277,13 @@ ensure_node_npm() {
     vader_info "Installing Node.js and npm via apt..."
     sudo apt-get update -qq >/dev/null 2>&1 || true
     if sudo apt-get install -y nodejs npm >/dev/null 2>&1; then
-        if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        # Re-check the VERSION, not just presence: Ubuntu 24.04's apt ships Node 18,
+        # which fails the >=20 gate in start.sh. Without this the function reports
+        # success, the binary fallback below is never reached, and start.sh exits.
+        local apt_ver apt_major
+        apt_ver=$(node --version 2>/dev/null | sed 's/^v//')
+        apt_major=${apt_ver%%.*}
+        if command -v npm >/dev/null 2>&1 && [ -n "$apt_major" ] && [ "$apt_major" -ge 20 ] 2>/dev/null; then
             NPM_CMD=npm
             export NPM_CMD
             vader_success "Node.js $(node --version) and npm ready"
