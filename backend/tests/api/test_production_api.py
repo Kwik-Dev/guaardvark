@@ -137,11 +137,11 @@ def test_cast_use_existing_lora(client, app):
     with app.app_context():
         from backend.models import Subject
         # Existing trained subject
-        trained = Subject(kind="character", name="Dean", description="x",
-                          lora_path="/loras/dean.safetensors", training_status="trained",
+        trained = Subject(kind="character", name="Alex", description="x",
+                          lora_path="/loras/alex.safetensors", training_status="trained",
                           ref_image_paths=[])
         # New subject we want to cast
-        new_subj = Subject(kind="character", name="Dean", description="y",
+        new_subj = Subject(kind="character", name="Alex", description="y",
                            training_status="untrained", ref_image_paths=[])
         # A Production
         from backend.models import Production
@@ -163,7 +163,7 @@ def test_cast_use_existing_lora(client, app):
         from backend.models import Subject
         s = db.session.get(Subject, new_id)
         assert s.training_status == "trained"
-        assert s.lora_path == "/loras/dean.safetensors"
+        assert s.lora_path == "/loras/alex.safetensors"
 
 
 def test_cast_use_existing_lora_404_for_unknown_lora(client, app):

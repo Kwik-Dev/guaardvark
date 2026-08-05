@@ -166,7 +166,7 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
             # for future requirements; lora_trainer is a tool, not a sidecar.
             ensure_plugins_for_stage("cast", "train")
             # gpu_session = the gate's exclusivity PLUS VRAM reclaim once the slot
-            # is won. evict_ollama/free_comfyui are the actual fix for Dean's OOM:
+            # is won. evict_ollama/free_comfyui are the actual fix for the observed OOM:
             # ollama keeps a chat model (~6GB) resident and ComfyUI can hold a FLUX,
             # which left no room for SDXL on the 16GB card. The bare gate did no
             # VRAM math, so training claimed "exclusive" while ollama still owned
@@ -210,7 +210,7 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
                     # Free the ~7GB of SDXL the trainer daemon holds. Without this
                     # the daemon stays resident IDLE between jobs, and a single
                     # leftover daemon starves the next run on the shared 16GB card
-                    # — the exact OOM Dean hit (subject 16: 137MiB free, a zombie
+                    # — the exact OOM observed in the field (subject 16: 137MiB free, a zombie
                     # daemon holding 6.7GB). Shutting down also drops any
                     # half-applied PEFT/LoRA state from a failed run. Reload on the
                     # next job is ~6s (model is disk-cached), a cheap price for not

@@ -87,7 +87,7 @@ class TestFit:
 
 
 class TestModelFamilies:
-    """Wave 2: radial (Dean's X-leg insight) + piecewise_y apply and store."""
+    """Wave 2: radial (the X-leg insight) + piecewise_y apply and store."""
 
     def _servo(self, calibration):
         from backend.services.servo_controller import ServoController

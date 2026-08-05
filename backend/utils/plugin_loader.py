@@ -17,9 +17,9 @@ class PluginLoader:
         self.plugin_manifests: Dict[str, dict] = {}
 
     def _get_default_plugins_dir(self) -> str:
-        llamax_root = self.app.config.get('GUAARDVARK_ROOT')
-        if llamax_root:
-            return os.path.join(llamax_root, 'backend', 'plugins')
+        guaardvark_root = self.app.config.get('GUAARDVARK_ROOT')
+        if guaardvark_root:
+            return os.path.join(guaardvark_root, 'backend', 'plugins')
         else:
             return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'plugins')
 

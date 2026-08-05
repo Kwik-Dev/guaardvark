@@ -22,7 +22,10 @@ import json
 import time
 from typing import List, Optional, Tuple
 
-TRAINER_URL = "file:///home/llamax1/LLAMAX8/data/agent/files/vision_trainer.html"
+# Derived from the repo root — a hardcoded absolute path here breaks every
+# install but the original dev box (2026-08-05 pre-push hygiene sweep).
+from pathlib import Path as _Path
+TRAINER_URL = (_Path(__file__).resolve().parents[2] / "data" / "agent" / "files" / "vision_trainer.html").as_uri()
 
 TRUTH_JS = """(() => {
   const t = document.querySelector('.target');
@@ -172,7 +175,7 @@ def load_labeled_pairs_from_archive(archive_path=None):
 
 
 def fit_radial(pairs):
-    """Dean's X-leg model: raw ≈ C + k·(truth − C). Fit k robustly (median of
+    """The X-leg model: raw ≈ C + k·(truth − C). Fit k robustly (median of
     per-sample radius ratios about screen center)."""
     import statistics
     if not pairs:
@@ -248,7 +251,7 @@ def split_by_position(pairs, eval_frac=0.25, seed=11):
 
 def fit_from_archive(model_name: str, dry_run: bool, archive_path=None) -> int:
     """The Wave-2 gated fit: candidates vs identity on held-out positions;
-    auto-apply ONLY on improvement (Dean's rule); prior entry kept for rollback."""
+    auto-apply ONLY on improvement (operator rule); prior entry kept for rollback."""
     pairs = load_labeled_pairs_from_archive(archive_path)
     print(f"labeled anchor pairs: {len(pairs)}")
     return fit_and_gate(pairs, model_name, dry_run)

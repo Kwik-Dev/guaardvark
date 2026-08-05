@@ -3,7 +3,7 @@
 // - Added smart detection for qa_default and global_default_chat_system_prompt as SYSTEM type
 // - Updated styling: smaller badges (30% reduction), solid colors like TasksPage status items
 // - Three types: COMMAND (blue), SYSTEM (red), PROMPT (orange) with solid backgrounds
-// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from Dean (user/owner).
+// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {

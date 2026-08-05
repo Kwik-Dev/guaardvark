@@ -1,6 +1,6 @@
 """Platform-agnostic poster — drive the general agent loop to post anywhere.
 
-Dean's founding principle: put the work into the hand/eye/brain and the platform
+The founding principle: put the work into the hand/eye/brain and the platform
 stops mattering. Modern models already know how Reddit, X, YouTube, and Facebook
 compose boxes work; the grounded eye (DOM element inventory in the decision
 prompt) tells the brain what's actually on THIS page. So instead of a hand-written

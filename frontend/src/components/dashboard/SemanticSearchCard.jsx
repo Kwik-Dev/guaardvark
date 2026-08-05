@@ -54,12 +54,12 @@ const SemanticSearchCard = React.forwardRef(
     });
 
     const [sessionId] = useState(() => {
-      const storedSessionId = localStorage.getItem("llamax_chat_session_id");
+      const storedSessionId = localStorage.getItem("guaardvark_chat_session_id");
       if (storedSessionId) {
         return storedSessionId;
       }
       const newSessionId = `session_${Date.now()}`;
-      localStorage.setItem("llamax_chat_session_id", newSessionId);
+      localStorage.setItem("guaardvark_chat_session_id", newSessionId);
       return newSessionId;
     });
 
@@ -156,7 +156,7 @@ const SemanticSearchCard = React.forwardRef(
 
     useEffect(() => {
       const handleStorageChange = (e) => {
-        if (e.key === "llamax_chat_session_id") {
+        if (e.key === "guaardvark_chat_session_id") {
           loadHistory();
         }
       };

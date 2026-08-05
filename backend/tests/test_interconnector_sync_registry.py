@@ -55,7 +55,7 @@ def test_master_registry_refresh_and_persist(registry, tmp_path):
         {"path": "scripts/start.sh", "hash": "deadbeef", "size": 100, "modified_at": "2026-01-01"},
         {"path": "backend/app.py", "hash": "cafebabe", "size": 200, "modified_at": "2026-01-02"},
     ]
-    count = registry.refresh_from_scan(scanned, node_name="LLAMAX1", manifest_timestamp="2026-01-02")
+    count = registry.refresh_from_scan(scanned, node_name="MASTER1", manifest_timestamp="2026-01-02")
     assert count == 2
     assert registry.path.exists()
 

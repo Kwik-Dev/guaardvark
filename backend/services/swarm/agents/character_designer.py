@@ -1,6 +1,6 @@
 """Character Designer — the "Casting Director" appearance-bible role.
 
-Dean's term for this is the **Casting Director**: it writes a very comprehensive,
+The internal term for this is the **Casting Director**: it writes a very comprehensive,
 detail-locked description of a character (down to the mole on a cheek) and a
 reference-sheet of angle/expression prompts to generate synthetic LoRA training
 data with FLUX.

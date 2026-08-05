@@ -105,8 +105,8 @@ def test_legacy_merge_and_tags_to_bible_still_work():
     ]
     merged = merge_identity_tags(lists)
     assert merged
-    bible = tags_to_bible(merged, name="Dean")
-    assert "Dean:" in bible
+    bible = tags_to_bible(merged, name="Alex")
+    assert "Alex:" in bible
     assert short_identity_marks(merged)
 
 
@@ -118,17 +118,17 @@ def test_compose_prompt_lora_mode_omits_bible():
         scene="studio backdrop",
     )
     bible = (
-        "Dean: long brown hair, no glasses, heavy overweight build. "
+        "Alex: short black hair, square glasses, athletic build. "
         "Keep this exact appearance."
     )
-    with_bible = _compose_prompt("ohxdean", bible, v, "face-forward", include_bible=True)
+    with_bible = _compose_prompt("ohxalex", bible, v, "face-forward", include_bible=True)
     without = _compose_prompt(
-        "ohxdean", bible, v, "face-forward",
+        "ohxalex", bible, v, "face-forward",
         include_bible=False, class_token="man", identity_marks="shaved",
     )
-    assert "long brown hair" in with_bible
-    assert "a photo of ohxdean" in without
-    assert "long brown hair" not in without
+    assert "short black hair" in with_bible
+    assert "a photo of ohxalex" in without
+    assert "short black hair" not in without
 
 
 def test_compose_prompt_wolf_class_anchor():

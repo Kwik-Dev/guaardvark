@@ -10,8 +10,8 @@ def test_cinematographer_produces_shot_plans():
     ]}'''
     agent = Cinematographer(llm=lambda **kw: canned)
     inv = agent.invoke({
-        "shots": [{"scene_number": 1, "shot_number": 1, "description": "Dean enters"}],
-        "subjects": [{"id": 1, "name": "Dean"}, {"id": 2, "name": "kitchen"}],
+        "shots": [{"scene_number": 1, "shot_number": 1, "description": "Alex enters"}],
+        "subjects": [{"id": 1, "name": "Alex"}, {"id": 2, "name": "kitchen"}],
     })
     assert inv.status == "ok"
     assert len(inv.output.plans) == 1
@@ -25,7 +25,7 @@ def test_cinematographer_close_up_shot():
     canned = '''{"plans": [
         {"scene_number": 1, "shot_number": 2, "camera_angle": "close-up",
          "framing": "face only", "duration_seconds": 2.5, "mood": "tense",
-         "image_prompt": "extreme close-up on Dean's face, tense expression",
+         "image_prompt": "extreme close-up on Alex's face, tense expression",
          "subjects_in_shot": [1]}
     ]}'''
     agent = Cinematographer(llm=lambda **kw: canned)

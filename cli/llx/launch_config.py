@@ -99,7 +99,6 @@ def resolve_guaardvark_root() -> Path | None:
 
     for candidate in [
         Path.home() / "guaardvark",
-        Path.home() / "LLAMAX8",
         Path("/opt/guaardvark"),
     ]:
         if (candidate / "start.sh").exists():

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Servo teach runner — accumulate TRUTH-LABELED clicks at scale.
 
-Dean's teaching cycle, wave 2: run training-mode sessions on the vision
+The operator teaching cycle, wave 2: run training-mode sessions on the vision
 trainer (Wave-1 truth probe active), spreading target positions so labeled
 data covers the whole arena. Composes existing machinery — the agent loop,
 TrainerTruthProbe, the archive — this runner only orchestrates.
@@ -33,7 +33,9 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE = ROOT / "data" / "training" / "knowledge" / "servo_archive.jsonl"
-TRAINER_URL = "file:///home/llamax1/LLAMAX8/data/agent/files/vision_trainer.html"
+# Derived from the repo root — a hardcoded absolute path here breaks every
+# install but the original dev box (2026-08-05 pre-push hygiene sweep).
+TRAINER_URL = (ROOT / "data" / "agent" / "files" / "vision_trainer.html").as_uri()
 TASK = "click the colored numbered circle in the arena"
 
 

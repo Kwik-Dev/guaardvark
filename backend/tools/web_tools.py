@@ -365,7 +365,7 @@ class FetchUrlTool(BaseTool):
         "Fetch a specific URL and return its page title, meta description, and "
         "main text content (up to ~2000 chars). Use this for ANY question about "
         "a specific webpage or domain — e.g. 'what's on example.com', 'read "
-        "https://site.com/page', 'tell me about albenze.ai'. For open-ended "
+        "https://site.com/page', 'tell me about acme-example.ai'. For open-ended "
         "searches without a specific URL, use web_search instead."
     )
 

@@ -43,11 +43,11 @@ def test_list_empty_cast_library(client):
 
 def test_create_subject_returns_201(client):
     resp = client.post("/api/cast-library/subjects", json={
-        "kind": "character", "name": "Dean", "description": "the protagonist",
+        "kind": "character", "name": "Alex", "description": "the protagonist",
     })
     assert resp.status_code == 201
     data = resp.get_json()
-    assert data["name"] == "Dean"
+    assert data["name"] == "Alex"
     assert data["kind"] == "character"
     assert data["training_status"] == "untrained"
 
@@ -73,7 +73,7 @@ def test_list_after_create(client):
 
 def test_delete_subject(client, app):
     create = client.post("/api/cast-library/subjects", json={
-        "kind": "character", "name": "Dean", "description": "x",
+        "kind": "character", "name": "Alex", "description": "x",
     })
     subj_id = create.get_json()["id"]
     delete = client.delete(f"/api/cast-library/subjects/{subj_id}")
@@ -106,7 +106,7 @@ def test_voice_id_defaults_to_null(client):
 
 def test_patch_updates_voice_id(client):
     subj = client.post("/api/cast-library/subjects", json={
-        "kind": "character", "name": "Dean",
+        "kind": "character", "name": "Alex",
     }).get_json()
     patch = client.patch(f"/api/cast-library/subjects/{subj['id']}", json={
         "voice_id": "am_adam", "trigger_word": "dean_xyz",
@@ -119,7 +119,7 @@ def test_patch_updates_voice_id(client):
 
 def test_patch_empty_string_clears_voice_id(client):
     subj = client.post("/api/cast-library/subjects", json={
-        "kind": "character", "name": "Dean", "voice_id": "af_heart",
+        "kind": "character", "name": "Alex", "voice_id": "af_heart",
     }).get_json()
     patch = client.patch(f"/api/cast-library/subjects/{subj['id']}", json={"voice_id": ""})
     assert patch.get_json()["voice_id"] is None
@@ -127,7 +127,7 @@ def test_patch_empty_string_clears_voice_id(client):
 
 def test_patch_absent_key_leaves_voice_id_untouched(client):
     subj = client.post("/api/cast-library/subjects", json={
-        "kind": "character", "name": "Dean", "voice_id": "af_heart",
+        "kind": "character", "name": "Alex", "voice_id": "af_heart",
     }).get_json()
     patch = client.patch(f"/api/cast-library/subjects/{subj['id']}", json={"description": "updated"})
     data = patch.get_json()
@@ -143,7 +143,7 @@ def test_patch_unknown_subject_404(client):
 def test_patch_bible_clears_vision_grounded_sets_manual_override(client):
     from backend.models import db, Subject
     subj = client.post("/api/cast-library/subjects", json={
-        "kind": "character", "name": "Dean", "bible": "vision look",
+        "kind": "character", "name": "Alex", "bible": "vision look",
     }).get_json()
     s = db.session.get(Subject, subj["id"])
     s.training_settings_json = {
@@ -174,7 +174,7 @@ def _png_bytes() -> bytes:
     )
 
 
-def _create_subject(client, name="Dean"):
+def _create_subject(client, name="Alex"):
     return client.post("/api/cast-library/subjects", json={
         "kind": "character", "name": name, "description": "x",
     }).get_json()
@@ -216,7 +216,7 @@ def test_upload_refs_skips_unsupported_extension(client):
 def test_upload_refs_accepts_any_image_name(client):
     """No provenance guard: ANY supported image is accepted as a reference,
     including ones whose names look like generated frames. Curating a coherent
-    reference pool is the user's responsibility (Dean's call 2026-06-25 — these
+    reference pool is the user's responsibility (operator call 2026-06-25 — these
     characters are often AI-generated, so 'generated vs photo' is a false split)."""
     from io import BytesIO
     subj = _create_subject(client)
@@ -238,7 +238,7 @@ def test_upload_refs_accepts_any_image_name(client):
 def test_upload_refs_appends_to_existing_list(client):
     from io import BytesIO
     subj = client.post("/api/cast-library/subjects", json={
-        "kind": "character", "name": "Dean", "description": "x",
+        "kind": "character", "name": "Alex", "description": "x",
         "ref_image_paths": ["/already/there.png"],
     }).get_json()
     resp = client.post(

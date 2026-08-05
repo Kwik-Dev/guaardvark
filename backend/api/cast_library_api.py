@@ -56,7 +56,7 @@ _MAX_REF_BYTES = 25 * 1024 * 1024  # 25 MB per image — generous, but caps runa
 # NOTE: there is intentionally NO "generated-frame" provenance guard here. An earlier
 # version rejected uploads whose filenames looked like the system's own outputs
 # (storyboard/i2v/sample frames) to avoid a model-collapse feedback loop. Removed at
-# Dean's call (2026-06-25): characters here are often AI-generated to begin with, so
+# Operator call (2026-06-25): characters here are often AI-generated to begin with, so
 # "real photo vs generated" is a false distinction — generated-but-on-model frames are
 # legitimate training material. Curating a coherent reference pool is the user's job;
 # the system should not second-guess which images belong to a character.

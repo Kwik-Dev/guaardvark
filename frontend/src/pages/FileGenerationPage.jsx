@@ -1,7 +1,7 @@
 // frontend/src/pages/FileGenerationPage.jsx
 // Version 2.0.1: Corrected import from filegenService to use generateFileFromChat as generateSingleFile.
 // - Resolves "does not provide an export named 'generateSingleFile'" error.
-// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from Dean (user/owner).
+// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback } from "react";
 import {

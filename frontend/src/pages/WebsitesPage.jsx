@@ -5,7 +5,7 @@
 // - Implemented card and table views with a toggle.
 // - Card/row click now opens the edit modal.
 // - Note: "Notes Excerpt" not added as 'notes' field is not in the Website model.
-// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from Dean (user/owner).
+// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {

@@ -3,7 +3,7 @@
 // - Added card/table view toggle.
 // - Implemented table view with sorting and actions.
 // - Displayed notes excerpt in card and table views.
-// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from Dean (user/owner).
+// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {

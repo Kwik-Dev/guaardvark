@@ -130,6 +130,7 @@ Thumbs.db
 *~
 
 # Testing
+.start_cache/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -252,7 +253,7 @@ data/cast_refs/
 # publish them. Promoted here into the tracked .gitignore (same reasoning as the
 # firefox_profile promotion above) so the protection is durable and travels with
 # the repo. These are local operator context — NEVER for the public mirror.
-# NOTE: the repo-root CLAUDE.md ignored here is Dean's PRIVATE operator file. If a
+# NOTE: the repo-root CLAUDE.md ignored here is the operator's PRIVATE file. If a
 # public contributor-facing CLAUDE.md is ever wanted, it must live at a DIFFERENT
 # path (e.g. docs/ARCHITECTURE.md) to avoid colliding with / leaking this one.
 /CLAUDE.md
@@ -265,7 +266,8 @@ data/cast_refs/
 /AGENTS.md
 /PUSH_PREVIEW.md
 docs/local-workspace-only/*
-!docs/local-workspace-only/MASTER_TASKS.md
+# (2026-08-05: removed a `!MASTER_TASKS.md` negation here — it re-included the
+# 581KB private backlog and one `git add -A` away from publishing it.)
 # Relocated local-only workspace (operator files, AI session state, .env backups
 # with secrets). Entire tree is personal/machine-local — NEVER for the public repo.
 .do-not-put-these-in-root/
@@ -278,10 +280,10 @@ frontend/.npm_stamp
 data/gpu_stack_status.json
 data/ollama-dropin.rendered.conf
 
-# === Non-code artifacts — NEVER in git (Dean's standing rule, 2026-06-24) ===
+# === Non-code artifacts — NEVER in git (operator standing rule, 2026-06-24) ===
 # Policy: main tracks STANDARD APPLICATION CODE ONLY. No model weights, no
-# training data/outputs, no personal transcripts, no runtime state. Dean keeps
-# his own local backups for these — git is for source, not for gigabytes.
+# training data/outputs, no personal transcripts, no runtime state. The operator
+# keeps local backups for these — git is for source, not for gigabytes.
 #
 # Model weights & checkpoints (anywhere in the tree)
 *.safetensors

@@ -682,7 +682,7 @@ def load_servo_calibration(model: str, screen_w: int, screen_h: int) -> Optional
 
     Three model families (entry["model"], default "linear" for legacy entries):
       linear      — per-axis: corrected = (raw − a)/b
-      radial      — Dean's X-leg insight (2026-08-01): the eye pulls raw
+      radial      — the operator's X-leg insight (2026-08-01): the eye pulls raw
                     coords toward screen center along the center→target spoke;
                     corrected = C + (raw − C)/k
       piecewise_y — identity below elbow (eye is accurate there), linear

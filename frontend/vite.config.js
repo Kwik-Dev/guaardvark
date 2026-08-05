@@ -23,7 +23,7 @@ viteLogger.error = (msg, options) => {
 };
 
 function resolvePorts(mode) {
-  // Repo .env lives at LLAMAX8/.env (not frontend/.env). start.sh exports these,
+  // Repo .env lives at the repo root (not frontend/.env). start.sh exports these,
   // but `npm run dev` from frontend/ must still pick up FLASK_PORT=5002 / VITE_PORT=5175.
   const rootEnv = loadEnv(mode, REPO_ROOT, "");
   const flaskPort =

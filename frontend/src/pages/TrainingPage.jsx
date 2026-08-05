@@ -1,4 +1,4 @@
-// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from Dean (user/owner).
+// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 import React, { useState, useEffect, useCallback } from "react";
 import {
   Box,

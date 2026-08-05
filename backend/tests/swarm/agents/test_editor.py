@@ -11,7 +11,7 @@ def _make_shot(num, duration=3.0, dialogue=None, lora_paths=None):
         image_prompt=f"shot {num} prompt",
         duration_seconds=duration,
         dialogue_text=dialogue,
-        lora_paths=lora_paths or ["/loras/dean.safetensors"],
+        lora_paths=lora_paths or ["/loras/alex.safetensors"],
     )
 
 
@@ -41,7 +41,7 @@ def test_render_calls_i2v_per_shot(tmp_path):
     assert len(result.clip_paths) == 2
     # Verify the LoRAs were passed through
     first_call = i2v.i2v_from_image.call_args_list[0].kwargs
-    assert first_call["loras"] == ["/loras/dean.safetensors"]
+    assert first_call["loras"] == ["/loras/alex.safetensors"]
     assert first_call["duration_seconds"] == 3.0
 
 

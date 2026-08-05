@@ -1,5 +1,5 @@
-// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from Dean (user/owner).
-// Approved: Logo branding rollout per Dean's request.
+// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
+// Approved: Logo branding rollout per maintainer request.
 import React, { useEffect } from "react";
 import { Box, Typography } from "@mui/material";
 import { GuaardvarkLogo } from "../components/branding";

@@ -4,20 +4,20 @@ from backend.services.swarm.agents.screenwriter import Screenwriter, ScriptBreak
 def test_screenwriter_parses_breakdown():
     canned = '''{
       "scenes": [{"number": 1, "location": "kitchen", "shots": [
-        {"number": 1, "description": "Dean enters", "dialogue": "Hello"}
+        {"number": 1, "description": "Alex enters", "dialogue": "Hello"}
       ]}],
       "subjects": [
-        {"kind": "character", "name": "Dean", "description": "the protagonist"},
+        {"kind": "character", "name": "Alex", "description": "the protagonist"},
         {"kind": "environment", "name": "kitchen", "description": "small modern kitchen"}
       ]
     }'''
     agent = Screenwriter(llm=lambda **kw: canned)
-    inv = agent.invoke("INT. KITCHEN. Dean enters. 'Hello'.")
+    inv = agent.invoke("INT. KITCHEN. Alex enters. 'Hello'.")
     assert inv.status == "ok"
     assert len(inv.output.scenes) == 1
     assert inv.output.scenes[0].location == "kitchen"
     assert inv.output.subjects[0].kind == "character"
-    assert inv.output.subjects[0].name == "Dean"
+    assert inv.output.subjects[0].name == "Alex"
 
 
 def test_screenwriter_handles_missing_dialogue():

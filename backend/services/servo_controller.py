@@ -100,7 +100,7 @@ class ServoController:
 
         Model families (see servo_knowledge_store.load_servo_calibration):
           linear      truth ≈ (raw − a)/b per axis
-          radial      truth ≈ C + (raw − C)/k  — Dean's X-leg insight: the eye
+          radial      truth ≈ C + (raw − C)/k  — the operator's X-leg insight: the eye
                       pulls raw output toward screen center along the spoke
           piecewise_y identity below elbow (eye accurate there); linear above
 

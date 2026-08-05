@@ -3,7 +3,7 @@
 // - Standardized header with project title, client, actions (Edit/Delete), and active model.
 // - Placed project description in a separate Paper below the header.
 // - Ensured consistent padding and tab styling.
-// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from Dean (user/owner).
+// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";

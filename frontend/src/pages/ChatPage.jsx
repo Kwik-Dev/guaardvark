@@ -146,10 +146,10 @@ const ChatPage = () => {
   const [previousChatsOpen, setPreviousChatsOpen] = useState(false);
   const [sessionId, _setSessionId] = useState(() => {
     // Per-project session IDs: each project gets its own chat session
-    const storageKey = `llamax_chat_session_id_${projectId || 'global'}`;
+    const storageKey = `guaardvark_chat_session_id_${projectId || 'global'}`;
 
     // One-time migration: copy old global key to new per-project key if needed
-    const oldGlobalKey = "llamax_chat_session_id";
+    const oldGlobalKey = "guaardvark_chat_session_id";
     const oldGlobalSession = localStorage.getItem(oldGlobalKey);
     if (oldGlobalSession && !localStorage.getItem(storageKey)) {
       localStorage.setItem(storageKey, oldGlobalSession);
@@ -318,7 +318,7 @@ const ChatPage = () => {
     if (prevProjectIdRef.current === projectId) return;
     prevProjectIdRef.current = projectId;
 
-    const storageKey = `llamax_chat_session_id_${projectId || 'global'}`;
+    const storageKey = `guaardvark_chat_session_id_${projectId || 'global'}`;
     let storedSessionId = localStorage.getItem(storageKey);
 
     if (storedSessionId && !/^session_\d+$/.test(storedSessionId)) {
@@ -459,7 +459,7 @@ const ChatPage = () => {
     setError('');
     streamingServiceRef.current = null;
 
-    const storageKey = `llamax_chat_session_id_${projectId || 'global'}`;
+    const storageKey = `guaardvark_chat_session_id_${projectId || 'global'}`;
     localStorage.setItem(storageKey, newSessionId);
     sessionStorage.setItem("session_logged_" + newSessionId, "true");
     sessionStorage.setItem("session_continuity_" + newSessionId, Date.now().toString());
@@ -2387,7 +2387,7 @@ const ChatPage = () => {
             handleNewChat();
             return;
           }
-          const storageKey = `llamax_chat_session_id_${projectId || 'global'}`;
+          const storageKey = `guaardvark_chat_session_id_${projectId || 'global'}`;
           localStorage.setItem(storageKey, selectedSessionId);
           setMessages([]);
           historyLoadedRef.current = false;

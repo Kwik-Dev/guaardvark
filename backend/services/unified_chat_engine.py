@@ -238,7 +238,7 @@ REPO_INTEL_KEYWORDS = [
 # bare domains with common TLDs. Deliberately does NOT match dotted identifiers
 # like node.js, next.config.js, or README.md — those suffixes aren't TLDs. When
 # this fires on a user message, fetch_url is prepended to the tool list so the
-# LLM doesn't have to guess whether "albenze.ai" is a search term or a URL.
+# LLM doesn't have to guess whether "acme-example.ai" is a search term or a URL.
 _URL_OR_DOMAIN_PATTERN = re.compile(
     r"""
     (?:https?://\S+)                               # explicit URL
@@ -304,7 +304,7 @@ TOOL_CONTEXT_KEYWORDS = {
                   "comment on some youtube", "youtube videos", "comfyui",
                   "offline ai", "local llm", "local ai", "video comment",
                   "scout youtube",
-                  # Marketing phrasings Dean (and chat) actually say
+                  # Marketing phrasings operators (and chat) actually say
                   "market", "market on youtube", "market on reddit",
                   "promote", "advertise", "share the github",
                   "guaardvark on youtube", "guaardvark on reddit",
@@ -1402,7 +1402,7 @@ class UnifiedChatEngine:
         # GUAARDVARK_NATIVE_TOOLCALLS toggles passing Ollama's native tools=[...]
         # schema in the Tier 2 streaming call and reading structured
         # message.tool_calls instead of XML-in-content. Defaults OFF so the
-        # live chat path is byte-identical to the XML+regex path until Dean
+        # live chat path is byte-identical to the XML+regex path until the operator
         # validates the on-path against a live tool-capable model.
         #
         # The native path only activates when BOTH the flag is on AND the
@@ -3549,7 +3549,7 @@ class UnifiedChatEngine:
         get the same routing logic — not just ChatPage.
         """
         # URL / bare-domain boost runs regardless of router classification.
-        # "Check out albenze.ai" is easy to mis-classify as CHAT_ONLY, but a
+        # "Check out acme-example.ai" is easy to mis-classify as CHAT_ONLY, but a
         # specific URL/domain in the message is a strong signal for fetch_url.
         has_url = _message_mentions_url(message)
 

@@ -123,7 +123,7 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
                 "- REPLACE specific names/strings (channel names, search queries, client names, "
                 "  URLs, video titles, usernames) with {snake_case_placeholder} tokens. "
                 "  UI element names (Search, Subscribe, Back, Comment) stay literal.\n"
-                "- Title must be generic too — 'Subscribe to {channel}' not 'Subscribe to Albenze Inc'.\n"
+                "- Title must be generic too — 'Subscribe to {channel}' not 'Subscribe to Acme Inc'.\n"
                 "- Every placeholder used in steps MUST appear in parameters with a description "
                 "  and the concrete example from this session.\n"
                 "- If a lesson has no variable parts, return \"parameters\": [].\n"

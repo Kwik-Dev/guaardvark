@@ -6,7 +6,7 @@
 // - Compact Layered: real DashboardCardWrapper bars with card colors, indicators, expand-on-double-click
 // - Collapsed: simple text-only Paper bars
 // - Clicking any card brings it to the top z-layer
-// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from Dean (user/owner).
+// WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {

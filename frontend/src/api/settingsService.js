@@ -48,13 +48,13 @@ export const clearChatHistory = async (sessionId = "all") => {
       throw new Error(data.error);
     
     try {
-      localStorage.removeItem("llamax_chat_session_id");
+      localStorage.removeItem("guaardvark_chat_session_id");
 
       // Clear per-project session keys
       const lsKeysToRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (key && key.startsWith("llamax_chat_session_id_")) {
+        if (key && key.startsWith("guaardvark_chat_session_id_")) {
           lsKeysToRemove.push(key);
         }
       }

@@ -66,7 +66,7 @@ const analyzeWebsite = async (url) => {
     const response = await fetch(url, {
       method: "GET",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; LlamaX-WebAnalyzer/1.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; Guaardvark-WebAnalyzer/1.0)",
       },
     });
 
@@ -130,7 +130,7 @@ const analyzeSitemap = async (url) => {
     const response = await fetch(url, {
       method: "GET",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; LlamaX-SitemapAnalyzer/1.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; Guaardvark-SitemapAnalyzer/1.0)",
       },
     });
 

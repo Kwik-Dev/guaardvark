@@ -240,7 +240,7 @@ def _do_train(cmd: dict) -> dict:
     resolution = max(512, (int(params.get("resolution") or 512) // 64) * 64)
     # Soft-cap: on ≤16.5GB cards 768 train_loop peaks ~13GB for the trainer alone;
     # with desktop/other CUDA (~0.7–1GB) + allocator holes it OOMs around step 7–8.
-    # 512 leaves ~1GB headroom on Dean's 16GB card (measured).
+    # 512 leaves ~1GB headroom on the 16GB dev card (measured).
     gpu_gb = _gpu_total_gb()
     max_res = 512 if gpu_gb and gpu_gb <= 16.5 else 768
     if resolution > max_res:
