@@ -21,4 +21,9 @@
 # their own stacks and may legitimately want numpy 2.x.
 
 numpy<2.0,>=1.26.4
-setuptools<81,>=80.9.0
+# setuptools<81,>=80.9.0  -- REMOVED: unsatisfiable from the PyTorch index.
+#   install_pytorch.sh installs with --index-url https://download.pytorch.org/whl/<ver>,
+#   which REPLACES PyPI. That index hosts only setuptools 70.0.0/70.2.0/78.1.0, so this
+#   pin made torch ResolutionImpossible on every fresh machine (no GPU support at all).
+#   start.sh already force-reinstalls setuptools>=80.9.0,<81 AFTER torch, so pinning it
+#   here was redundant as well as fatal.
