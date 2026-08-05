@@ -252,7 +252,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       ? [
           { value: 'fast', label: 'Fast', steps: 6, guidance: 0.0, description: 'Quick draft' },
           { value: 'standard', label: 'Standard', steps: 9, guidance: 0.0, description: 'Official Turbo recipe (HF)' },
-          { value: 'high', label: 'High Quality', steps: 9, guidance: 0.0, description: 'Official recipe at 2K canvas' },
+          // 2026-08-04: 'high' used to SILENTLY rewrite the canvas to 2048×2048 —
+          // users hit 16GB memory crashes without ever choosing 2K. The 2K jump
+          // is now its own explicitly-labeled preset.
+          { value: 'high-2k', label: 'High 2K (2048²)', steps: 9, guidance: 0.0, description: 'Official recipe at 2K canvas — heavy; 16GB cards may refuse' },
         ]
       : isKreaTurbo
         ? [
@@ -779,19 +782,17 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           steps: preset.steps,
           guidance: preset.guidance,
         };
-        // Z-Image High = official sampling at 2K (the real quality lever for Turbo).
-        // Leave already-large custom sizes alone.
+        // Z-Image High 2K = official sampling at 2K (the real quality lever for
+        // Turbo). Only the EXPLICIT 'high-2k' preset touches the canvas — the
+        // old 'high' preset silently escalated to 2048² (2026-08-04 crashes).
         const modelKey = String(prev.model || 'auto').toLowerCase();
         const zimageFamily =
           modelKey.includes('zimage')
           || modelKey.includes('z-image')
           || modelKey === 'auto';
-        if (zimageFamily && presetValue === 'high') {
-          const area = (prev.width || 0) * (prev.height || 0);
-          if (area <= 1024 * 1024) {
-            next.width = 2048;
-            next.height = 2048;
-          }
+        if (zimageFamily && presetValue === 'high-2k') {
+          next.width = 2048;
+          next.height = 2048;
         }
         return next;
       });

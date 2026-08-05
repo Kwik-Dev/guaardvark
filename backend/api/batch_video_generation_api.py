@@ -869,13 +869,23 @@ def list_video_models():
 @batch_video_bp.route("/models/download", methods=["POST"])
 def download_video_model():
     """Start downloading a video model from HuggingFace."""
+    data = request.get_json()
+    if not data or "model_id" not in data:
+        return error_response("No model_id provided", 400)
+    return start_video_model_download(data["model_id"])
+
+
+def start_video_model_download(model_id):
+    """Start the registry download plan for model_id (+ required companions).
+
+    Split from the route so the image-models download endpoint can delegate
+    Comfy-only catalog entries (sentinel "comfy:" ids, e.g. flux-dev) here —
+    their assets live under ComfyUI/models/, not the diffusers snapshot dir,
+    and this downloader knows the gated repo + companion files. Returns a
+    Flask response.
+    """
     global _video_model_download_status, _DOWNLOAD_EPOCH
     try:
-        data = request.get_json()
-        if not data or "model_id" not in data:
-            return error_response("No model_id provided", 400)
-
-        model_id = data["model_id"]
         if model_id not in VIDEO_MODEL_REGISTRY:
             return error_response(f"Unknown model: {model_id}", 400)
 

@@ -15,6 +15,14 @@ from typing import Optional
 if __name__ == "__main__" and "backend.app" not in sys.modules:
     sys.modules["backend.app"] = sys.modules["__main__"]
 
+# Under memory pressure the kernel must kill THIS process, never the desktop
+# (2026-08-04 client box lockups). Early, before any heavy allocation.
+try:
+    from backend.oom_priority import apply_oom_score_adj
+    apply_oom_score_adj()
+except Exception:
+    pass
+
 import redis
 from celery import Celery
 from flask import Flask, jsonify, request, redirect
@@ -1733,7 +1741,7 @@ def debug_env():
         )
 
         env_info = {
-            "llamax_root": {
+            "guaardvark_root": {
                 "from_config": str(GUAARDVARK_ROOT),
                 "from_env": os.environ.get("GUAARDVARK_ROOT", "NOT SET"),
                 "match": str(GUAARDVARK_ROOT) == os.environ.get("GUAARDVARK_ROOT", ""),

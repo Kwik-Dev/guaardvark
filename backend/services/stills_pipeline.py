@@ -285,12 +285,16 @@ def _generate_one(
             from backend.services.job_operation_gate import GpuBusyError
             from backend.services.job_types import JobKind
 
+            # Resolution-aware estimates + compositor reserve (2026-08-04 client box
+            # 2048² incident): admission must price the requested canvas, and
+            # diffusers-image sessions hold back the desktop's VRAM share.
+            from backend.services.gpu_resource_policy import compositor_vram_reserve_mb
             ram_est = (
-                generator._ram_estimate_gb(model)
+                generator._ram_estimate_gb(model, width, height)
                 if hasattr(generator, "_ram_estimate_gb") else 10.0
             )
             vram_est = (
-                generator._vram_estimate_mb(model)
+                generator._vram_estimate_mb(model, width, height)
                 if hasattr(generator, "_vram_estimate_mb") else 11000
             )
             try:
@@ -303,6 +307,7 @@ def _generate_one(
                     ram_estimate_gb=ram_est,
                     require_fit=True,
                     cross_process=True,
+                    vram_reserve_mb=compositor_vram_reserve_mb(),
                 ):
                     gen_result = generator.generate_image(request)
             except GpuBusyError:

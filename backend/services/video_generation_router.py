@@ -221,8 +221,47 @@ class VideoGenerationRouter:
             logger.error(f"Failed to start ComfyUI via plugin: {e}")
             return False
 
+    @staticmethod
+    def _ensure_manager_offline_config(comfyui_dir: Path) -> None:
+        """Force ComfyUI-Manager network_mode=offline (OFFLINE-FIRST egress policy).
+
+        Mirrors ensure_comfyui_manager_offline() in plugins/comfyui/scripts/
+        install_deps.sh for the direct-launch fallback, which bypasses start.sh.
+        Override for a deliberate node install/update:
+        GUAARDVARK_COMFYUI_NETWORK_MODE=public|private (reverts next start).
+        """
+        import configparser
+
+        mode = (os.environ.get("GUAARDVARK_COMFYUI_NETWORK_MODE") or "offline").strip().lower()
+        if mode not in ("offline", "private", "public"):
+            logger.warning(f"Invalid GUAARDVARK_COMFYUI_NETWORK_MODE='{mode}' — using offline")
+            mode = "offline"
+
+        # Manager v3.x layout + legacy 2.x layout; the unused one is inert.
+        for rel in ("user/__manager/config.ini", "user/default/ComfyUI-Manager/config.ini"):
+            path = comfyui_dir / rel
+            try:
+                cfg = configparser.ConfigParser(interpolation=None)
+                if path.exists():
+                    try:
+                        cfg.read(path)
+                    except configparser.Error:
+                        cfg = configparser.ConfigParser(interpolation=None)
+                if not cfg.has_section("default"):
+                    cfg.add_section("default")
+                if cfg.get("default", "network_mode", fallback=None) == mode:
+                    continue
+                cfg.set("default", "network_mode", mode)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "w") as fh:
+                    cfg.write(fh)
+                logger.info(f"ComfyUI-Manager network_mode -> {mode} ({path})")
+            except OSError as e:
+                logger.warning(f"Could not enforce ComfyUI-Manager network_mode at {path}: {e}")
+
     def _start_comfyui_direct(self, comfyui_dir: Path) -> bool:
         """Fallback: start ComfyUI directly as a subprocess."""
+        self._ensure_manager_offline_config(comfyui_dir)
         venv_python = Path(COMFYUI_VENV) / "bin" / "python"
         if not venv_python.exists():
             venv_python = "python3"

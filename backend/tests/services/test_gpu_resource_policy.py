@@ -105,7 +105,7 @@ def test_gpu_session_register_degrade_skips_reclaim(fresh_gate, monkeypatch):
 
 def test_gpu_session_vram_budget_requests_and_releases(fresh_gate, monkeypatch):
     events = []
-    monkeypatch.setattr(grp, "_orchestrator_request", lambda slot, mb: events.append(("req", slot, mb)))
+    monkeypatch.setattr(grp, "_orchestrator_request", lambda slot, mb, **kw: events.append(("req", slot, mb)))
     monkeypatch.setattr(grp, "_orchestrator_release", lambda slot: events.append(("rel", slot)))
     with grp.gpu_session(JobKind.VIDEO_RENDER, "op", vram_estimate_mb=8000, slot_id="video:mv"):
         pass
@@ -114,7 +114,7 @@ def test_gpu_session_vram_budget_requests_and_releases(fresh_gate, monkeypatch):
 
 def test_gpu_session_releases_on_exception(fresh_gate, monkeypatch):
     released = []
-    monkeypatch.setattr(grp, "_orchestrator_request", lambda slot, mb: None)
+    monkeypatch.setattr(grp, "_orchestrator_request", lambda slot, mb, **kw: None)
     monkeypatch.setattr(grp, "_orchestrator_release", lambda slot: released.append(slot))
     with pytest.raises(RuntimeError):
         with grp.gpu_session(JobKind.VIDEO_RENDER, "op", vram_estimate_mb=8000, slot_id="s"):
@@ -126,7 +126,7 @@ def test_gpu_session_releases_on_exception(fresh_gate, monkeypatch):
 def test_gpu_session_ram_admit_uses_custom_weight(fresh_gate, monkeypatch):
     admitted = []
     monkeypatch.setattr(grp, "_load_admit_or_busy", lambda slot, ram_gb=2.0: admitted.append(ram_gb) or object())
-    monkeypatch.setattr(grp, "_orchestrator_request", lambda slot, mb: None)
+    monkeypatch.setattr(grp, "_orchestrator_request", lambda slot, mb, **kw: None)
     monkeypatch.setattr(grp, "_orchestrator_release", lambda slot: None)
     with grp.gpu_session(
         JobKind.VIDEO_RENDER,

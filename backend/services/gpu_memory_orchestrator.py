@@ -234,6 +234,7 @@ class GPUMemoryOrchestrator:
         model_type: Optional[ModelType] = None,
         exclusive: bool = False,
         hard_fit: Optional[bool] = None,
+        vram_reserve_mb: int = 0,
     ) -> ModelSlot:
         """
         Request GPU resources for a model. Evicts other models if needed.
@@ -246,6 +247,9 @@ class GPUMemoryOrchestrator:
             exclusive: If True, evict ALL other models first
             hard_fit: If True (default via GUAARDVARK_GPU_HARD_FIT=1), refuse when
                 physical free VRAM is still short after eviction — no "admit anyway".
+            vram_reserve_mb: MB treated as not-free (desktop compositor share;
+                2026-08-04 client box incident). Opt-in per caller, default 0 so
+                existing callers — incl. near-full-card video — are unchanged.
 
         Returns:
             The ModelSlot for the requested model.
@@ -281,7 +285,9 @@ class GPUMemoryOrchestrator:
                 # across the install base (8/12/16/24GB cards keep proportional headroom).
                 vram = self._get_vram_info()
                 if vram.get("success"):
-                    available = vram["available_mb"]
+                    # Compositor reserve (opt-in): reserved MB are not free.
+                    reserve_mb = max(0, int(vram_reserve_mb or 0))
+                    available = vram["available_mb"] - reserve_mb
                     total_mb = vram.get("total_mb") or 0
                     pct = float(os.environ.get("GUAARDVARK_GPU_SAFETY_MARGIN_PCT", "10")) / 100.0
                     safety_margin_mb = max(1024, int(total_mb * pct)) if total_mb else 1024
@@ -295,7 +301,7 @@ class GPUMemoryOrchestrator:
                     # Post-evict re-probe: require safety margin before registering.
                     vram2 = self._get_vram_info()
                     if vram2.get("success"):
-                        avail2 = vram2["available_mb"]
+                        avail2 = vram2["available_mb"] - reserve_mb
                         short = avail2 - safety_margin_mb < vram_estimate_mb
                         logger.info(
                             "request_model %s: free=%sMB estimate=%sMB margin=%sMB "
@@ -311,8 +317,8 @@ class GPUMemoryOrchestrator:
                             # though LTX/Cog already render successfully.
                             mostly_free = (
                                 total_mb > 0
-                                and avail2 >= int(total_mb * 0.85)
-                                and vram_estimate_mb <= total_mb
+                                and (avail2 + reserve_mb) >= int(total_mb * 0.85)
+                                and vram_estimate_mb <= total_mb - reserve_mb
                             )
                             msg = (
                                 f"GPU short for {slot_id}: only {avail2}MB free "

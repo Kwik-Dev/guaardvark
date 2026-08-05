@@ -1,4 +1,5 @@
 
+import contextlib
 import logging
 import os
 import uuid
@@ -15,6 +16,34 @@ if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 logger = logging.getLogger(__name__)
+
+
+def _detach_exception(exc: BaseException) -> None:
+    """Drop an exception's traceback/context so it stops pinning dead frames.
+
+    2026-08-04 client box 2048² incident: `except ... as e` keeps e.__traceback__,
+    whose frames hold the failed diffusers forward's locals — the pipeline,
+    latents, and decode activations. With that alive, _unload_pipeline() frees
+    ~nothing, and the OOM ladder stacked 2-3 host-resident pipelines (50-100GB)
+    until the desktop died. Call this BEFORE any unload/reload in an OOM handler.
+    On CPython, sys.exc_info() derives the traceback from the value, so nulling
+    it inside the live except block genuinely releases the frames.
+    """
+    try:
+        exc.__traceback__ = None
+        exc.__context__ = None
+        exc.__cause__ = None
+    except Exception:
+        pass
+
+
+class RamWatchdogAbort(RuntimeError):
+    """Raised mid-denoise when system RAM falls below the survival floor.
+
+    Deliberately handled BEFORE the CUDA-OOM ladder: reloading pipelines while
+    the box is out of RAM deepens the exact hole we're escaping (2026-08-04).
+    """
+
 
 try:
     import torch
@@ -455,6 +484,27 @@ class OfflineImageGenerator:
     _OFFLOAD_TURBO_VRAM_MB = 11000
     # Prefer sequential offload for krea2 on consumer cards (module offload OOMs).
     _SEQUENTIAL_OFFLOAD_VRAM_GB = 18.0
+    # Resolution scaling (2026-08-04 client box 2048² incident): the flat constants
+    # above were measured at ~1024², but admission approved 2048² (4× the pixels)
+    # under the same numbers. Slope = additional cost per megapixel ABOVE the 1MP
+    # calibration point, so 1024² requests still produce exactly the measured
+    # constants. CALIBRATED 2026-08-04 on a 16GB 4070 Ti SUPER, zimage sequential
+    # offload WITH the vae-level tiling fix active (bounded-scope 3-point run):
+    #   1024²=28s, 1448² peak 12467MB, 2048² peak 9534MB CUDA alloc;
+    #   peak RSS flat 20.9-21.0GB at ALL THREE sizes (weights dominate — the old
+    #   50-100GB RAM blowups were the ladder/unload leaks, not the canvas).
+    # Tiled peaks are noisy but bounded WELL under 16GB, so slopes are modest:
+    # they price bigger canvases without refusing tiled 2K on 16GB cards.
+    # Override via GUAARDVARK_VRAM_SLOPE_MB_PER_MP / GUAARDVARK_RAM_SLOPE_GB_PER_MP.
+    _FAMILY_VRAM_SLOPE_MB_PER_MP = {"krea2": 1000, "zimage": 500, "sdxl": 1500, "sd": 800}
+    _FAMILY_RAM_SLOPE_GB_PER_MP = {"krea2": 1.0, "zimage": 1.0, "sdxl": 1.0, "sd": 0.5}
+
+    @staticmethod
+    def _extra_megapixels(width: Optional[int], height: Optional[int]) -> float:
+        """Megapixels beyond the 1MP calibration point; 0 when dims unknown."""
+        if not width or not height:
+            return 0.0
+        return max(0.0, (int(width) * int(height)) / 1_048_576.0 - 1.0)
 
     def _will_use_sequential_for_krea2(self) -> bool:
         """True when krea2 loads with sequential CPU offload (≤18GB CUDA cards)."""
@@ -463,52 +513,91 @@ class OfflineImageGenerator:
         total = self._cuda_total_vram_gb()
         return total > 0 and total <= self._SEQUENTIAL_OFFLOAD_VRAM_GB
 
-    def _vram_estimate_mb(self, model_id: str) -> int:
+    def _vram_estimate_mb(
+        self, model_id: str, width: Optional[int] = None, height: Optional[int] = None
+    ) -> int:
+        # No dims ⇒ assume the 1MP calibration point ⇒ exactly the flat constants
+        # (backward compatible with every estimate-only caller).
         if model_id in (None, "", "auto"):
             # Auto leads with zimage on consumer GPUs; worst-case is still ~11GB.
             # On roomy GPUs auto may pick krea2 — use the sequential/model peak.
             if self._prefer_krea2_for_auto():
-                return self._FAMILY_VRAM_MB["krea2"]
-            return self._OFFLOAD_TURBO_VRAM_MB
-        family = self._model_family(model_id)
-        if family == "flux":
-            return 12000
-        if family == "krea2" and self._will_use_sequential_for_krea2():
-            return self._KREA2_SEQUENTIAL_VRAM_MB
-        return self._FAMILY_VRAM_MB.get(family, 4000)
+                family, base = "krea2", self._FAMILY_VRAM_MB["krea2"]
+            else:
+                family, base = "zimage", self._OFFLOAD_TURBO_VRAM_MB
+        else:
+            family = self._model_family(model_id)
+            if family == "flux":
+                base = 12000
+            elif family == "krea2" and self._will_use_sequential_for_krea2():
+                base = self._KREA2_SEQUENTIAL_VRAM_MB
+            else:
+                base = self._FAMILY_VRAM_MB.get(family, 4000)
+        extra_mp = self._extra_megapixels(width, height)
+        if extra_mp > 0:
+            try:
+                slope = int(os.environ["GUAARDVARK_VRAM_SLOPE_MB_PER_MP"])
+            except (KeyError, ValueError):
+                slope = self._FAMILY_VRAM_SLOPE_MB_PER_MP.get(family, 1500)
+            base += round(extra_mp * slope)
+        return base
 
-    def _ram_estimate_gb(self, model_id: str) -> float:
+    def _ram_estimate_gb(
+        self, model_id: str, width: Optional[int] = None, height: Optional[int] = None
+    ) -> float:
         if model_id in (None, "", "auto"):
-            return self._FAMILY_RAM_GB["zimage"]
-        if self._model_family(model_id) == "flux":
-            return 16.0
-        return self._FAMILY_RAM_GB.get(self._model_family(model_id), 6.0)
+            family, base = "zimage", self._FAMILY_RAM_GB["zimage"]
+        else:
+            family = self._model_family(model_id)
+            if family == "flux":
+                base = 16.0
+            else:
+                base = self._FAMILY_RAM_GB.get(family, 6.0)
+        extra_mp = self._extra_megapixels(width, height)
+        if extra_mp > 0:
+            try:
+                slope = float(os.environ["GUAARDVARK_RAM_SLOPE_GB_PER_MP"])
+            except (KeyError, ValueError):
+                slope = self._FAMILY_RAM_SLOPE_GB_PER_MP.get(family, 1.0)
+            base += extra_mp * slope
+        return base
 
-    def _ensure_vram_for_pipeline(self, model_id: str) -> None:
+    def _ensure_vram_for_pipeline(
+        self, model_id: str, width: Optional[int] = None, height: Optional[int] = None
+    ) -> None:
         """Make room on the card BEFORE the pipeline load.
 
         Evicts Ollama, books ``sd:pipeline`` with hard_fit (refuse if still short).
         Raises RuntimeError when the orchestrator refuses admit — callers should
-        surface that as a busy/retry, not CUDA OOM thrash.
+        surface that as a busy/retry, not CUDA OOM thrash. Pass the request dims
+        so the booking prices >1MP canvases (2026-08-04).
         """
         if self._pipeline is not None and self._current_model == model_id:
             return  # already resident — its VRAM is already spent
-        estimate_mb = self._vram_estimate_mb(model_id)
-        if self._device == "cuda" and torch.cuda.is_available():
-            if self._pipeline is None:
-                import gc
-                gc.collect()
-                torch.cuda.empty_cache()
-            free_b, total_b = torch.cuda.mem_get_info()
-            free_mb, total_mb = free_b // (1024 * 1024), total_b // (1024 * 1024)
-            margin_mb = max(1024, int(total_mb * 0.10))
-            if free_mb - margin_mb < estimate_mb:
-                from backend.services.gpu_resource_policy import evict_ollama_models
-                logger.info(
-                    f"VRAM admission: {free_mb}MB free won't fit {estimate_mb}MB "
-                    f"(+{margin_mb}MB margin) for {model_id} — evicting Ollama models"
-                )
-                evict_ollama_models()
+        estimate_mb = self._vram_estimate_mb(model_id, width, height)
+        # Probe/evict is best-effort: a failing CUDA query must not kill the
+        # request (2026-08-04: pinned by test_admission_failure_never_raises —
+        # only the orchestrator's hard_fit refusal below may raise).
+        try:
+            if self._device == "cuda" and torch.cuda.is_available():
+                if self._pipeline is None:
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                free_b, total_b = torch.cuda.mem_get_info()
+                free_mb, total_mb = free_b // (1024 * 1024), total_b // (1024 * 1024)
+                margin_mb = max(1024, int(total_mb * 0.10))
+                if free_mb - margin_mb < estimate_mb:
+                    from backend.services.gpu_resource_policy import evict_ollama_models
+                    logger.info(
+                        f"VRAM admission: {free_mb}MB free won't fit {estimate_mb}MB "
+                        f"(+{margin_mb}MB margin) for {model_id} — evicting Ollama models"
+                    )
+                    evict_ollama_models()
+        except Exception as probe_err:
+            logger.warning(
+                f"VRAM probe/evict failed (continuing to orchestrator admit): {probe_err}"
+            )
         from backend.services.gpu_memory_orchestrator import get_orchestrator
         # hard_fit=True: no "admit anyway" when free stays ~hundreds of MB
         get_orchestrator().request_model(
@@ -517,6 +606,43 @@ class OfflineImageGenerator:
             priority=85,
             hard_fit=True,
         )
+
+    def _ram_watchdog_callback(self):
+        """Per-step denoise callback: abort before RAM exhaustion kills the box.
+
+        2026-08-04: admission is a point-in-time check and its reservation
+        expires while a job runs for minutes — nothing guarded the denoise
+        itself. On breach we RAISE (never pipeline._interrupt: interrupt skips
+        remaining steps but still runs the VAE decode — potentially the very
+        allocation being fled). Floor: GUAARDVARK_MIN_FREE_RAM_GB, default
+        max(8GB, 6% of total). Returns None when psutil is unavailable.
+        """
+        try:
+            import psutil
+        except Exception:
+            return None
+        try:
+            floor_gb = float(os.environ["GUAARDVARK_MIN_FREE_RAM_GB"])
+        except (KeyError, ValueError):
+            floor_gb = max(8.0, 0.06 * psutil.virtual_memory().total / (1024 ** 3))
+
+        def _cb(pipe, step, timestep, callback_kwargs):
+            avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+            if avail_gb < floor_gb:
+                logger.error(
+                    f"RAM watchdog: {avail_gb:.1f}GB available < {floor_gb:.1f}GB "
+                    f"floor at denoise step {step} — aborting this item before "
+                    "the OOM killer / swap thrash takes the desktop"
+                )
+                raise RamWatchdogAbort(
+                    f"System RAM fell to {avail_gb:.1f}GB free (floor "
+                    f"{floor_gb:.1f}GB) during generation at step {step}. Aborted "
+                    "to protect the machine — close other applications or reduce "
+                    "resolution."
+                )
+            return callback_kwargs
+
+        return _cb
 
     def _has_text_intent(self, prompt: str) -> bool:
         """True if the prompt asks for on-image text — bypass enhancement to keep
@@ -686,7 +812,27 @@ class OfflineImageGenerator:
 
         try:
             model_path = self._get_model_path(model_id)
-            logger.info(f"Downloading model {model_id} to {model_path}")
+
+            # LOUD first-run banner: this download is multi-GB and used to be
+            # invisible outside a raw HF progress bar in backend_startup.log —
+            # on the 24.04 client box install it crawled at ~33s/file (unauthenticated
+            # + saturated link) and looked exactly like a frozen boot.
+            hf_token_set = bool(
+                os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+            )
+            logger.warning(
+                "FIRST-RUN MODEL DOWNLOAD: %s -> %s. This is a one-time multi-GB "
+                "download; the backend is NOT frozen — progress is logged here and "
+                "image generation stays unavailable until it finishes.%s",
+                model_id,
+                model_path,
+                (
+                    ""
+                    if hf_token_set
+                    else " Downloads are UNAUTHENTICATED and Hugging Face may "
+                    "rate-limit them — set HF_TOKEN in .env for faster downloads."
+                ),
+            )
 
             family = self._model_family(model_id)
 
@@ -704,10 +850,11 @@ class OfflineImageGenerator:
                     return False, msg
                 from huggingface_hub import snapshot_download
                 logger.info(f"Snapshot-downloading {model_id} (family={family})")
+                # local_dir_use_symlinks was removed: deprecated and ignored by
+                # current huggingface_hub (it warned on every download).
                 snapshot_download(
                     repo_id=model_id,
                     local_dir=str(model_path),
-                    local_dir_use_symlinks=False,
                 )
                 if not self._is_model_downloaded(model_id):
                     msg = f"Snapshot download finished but {model_path} is empty"
@@ -755,6 +902,55 @@ class OfflineImageGenerator:
         except Exception as e:
             logger.exception(f"Failed to download model {model_id}: {e}")
             return False, str(e)
+
+    # 2026-08-04 client box 2048² incident: ZImagePipeline/Krea2Pipeline don't inherit
+    # StableDiffusionMixin, so the old pipeline-level hasattr checks for
+    # enable_vae_slicing/enable_vae_tiling silently no-opped for EXACTLY the two
+    # families allowed to reach 2K — the 2048² latent decoded whole-tensor, OOM'd
+    # the card, and the recovery ladder exhausted system RAM until the desktop
+    # died. The capability lives one level down on the autoencoder itself
+    # (AutoencoderMixin); offline_video_generator.py has always used the
+    # vae-level fallback. These helpers try pipeline level first, then vae level.
+
+    def _enable_vae_slicing_any(self) -> None:
+        """Enable VAE slicing at whichever level this pipeline exposes it."""
+        pipeline = self._pipeline
+        self._vae_slicing_enabled = False
+        try:
+            if hasattr(pipeline, "enable_vae_slicing"):
+                pipeline.enable_vae_slicing()
+                self._vae_slicing_enabled = True
+                logger.info("Enabled VAE slicing (pipeline level)")
+            elif hasattr(getattr(pipeline, "vae", None), "enable_slicing"):
+                pipeline.vae.enable_slicing()
+                self._vae_slicing_enabled = True
+                logger.info("Enabled VAE slicing (vae level)")
+            else:
+                logger.warning("VAE slicing unavailable at either level for this pipeline")
+        except Exception as e:
+            logger.error(f"Failed to enable VAE slicing: {e}")
+
+    def _set_vae_tiling(self, enabled: bool) -> bool:
+        """Enable/disable VAE tiling at whichever level exists. True if applied."""
+        pipeline = self._pipeline
+        vae = getattr(pipeline, "vae", None)
+        try:
+            if hasattr(pipeline, "enable_vae_tiling"):
+                if enabled:
+                    pipeline.enable_vae_tiling()
+                elif hasattr(pipeline, "disable_vae_tiling"):
+                    pipeline.disable_vae_tiling()
+                return True
+            if hasattr(vae, "enable_tiling"):
+                if enabled:
+                    vae.enable_tiling()
+                elif hasattr(vae, "disable_tiling"):
+                    vae.disable_tiling()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to {'enable' if enabled else 'disable'} VAE tiling: {e}")
+            return False
+        return False
 
     def _load_pipeline(self, model_id: str, *, force_sequential: bool = False) -> bool:
         if not self.service_available:
@@ -899,13 +1095,29 @@ class OfflineImageGenerator:
                     else:
                         logger.debug("xformers still unavailable: %s", e)
 
-            if hasattr(self._pipeline, "enable_vae_slicing"):
-                self._pipeline.enable_vae_slicing()
-                logger.info("Enabled VAE slicing")
+            self._enable_vae_slicing_any()
 
-            # VAE tiling only at high resolutions (>1024px) — avoids quality loss at normal sizes
-            self._vae_tiling_available = hasattr(self._pipeline, "enable_vae_tiling")
-            logger.info(f"VAE tiling available (will activate for resolutions > 1024px)")
+            # VAE tiling only at high resolutions (>1024px) — avoids quality loss at
+            # normal sizes. Availability computed across BOTH levels (see the
+            # 2026-08-04 incident note at _enable_vae_slicing_any).
+            _vae = getattr(self._pipeline, "vae", None)
+            self._vae_tiling_via = (
+                "pipeline" if hasattr(self._pipeline, "enable_vae_tiling")
+                else "vae" if hasattr(_vae, "enable_tiling")
+                else None
+            )
+            self._vae_tiling_available = self._vae_tiling_via is not None
+            if self._vae_tiling_available:
+                logger.info(
+                    f"VAE tiling available via {self._vae_tiling_via} level "
+                    "(will activate for resolutions > 1024px)"
+                )
+            else:
+                logger.error(
+                    "VAE tiling NOT available at either level for this pipeline — "
+                    ">1MP DiT requests will be refused instead of risking an "
+                    "untiled decode"
+                )
 
             # torch.compile(mode='reduce-overhead') uses CUDA graphs which allocate
             # persistent IPC semaphores. When the pipeline is later moved to CPU and
@@ -1342,18 +1554,74 @@ Negative Prompt: {negative_prompt}""",
 
             model_id = self.available_models.get(request.model, self.default_model)
             logger.info(f"Using model: {request.model} -> {model_id}")
-            ram_est = self._ram_estimate_gb(request.model)
-            vram_est = self._vram_estimate_mb(request.model)
 
+            # Family-aware max side + area clamp BEFORE the estimates (2026-08-04):
+            # admission must see the final W×H now that estimates scale with
+            # resolution. (Z-Image/Krea → 2K; Flux not offline.)
+            from backend.services.image_resolution_limits import clamp_image_dimensions
+            _clamp_family = self._model_family(model_id)
+            ow, oh = request.width, request.height
+            request.width, request.height, dim_warns = clamp_image_dimensions(
+                request.width, request.height, _clamp_family
+            )
+            for msg in dim_warns:
+                logger.warning(msg)
+            if (request.width, request.height) != (ow, oh):
+                logger.info(
+                    "Resolution clamped %sx%s → %sx%s (family=%s)",
+                    ow, oh, request.width, request.height, _clamp_family,
+                )
+            result.image_size = (request.width, request.height)
+
+            ram_est = self._ram_estimate_gb(request.model, request.width, request.height)
+            vram_est = self._vram_estimate_mb(request.model, request.width, request.height)
+
+            _gpu_stack = None
             try:
                 _sd_pinned = False
-                with gpu_session(JobKind.VIDEO_RENDER, f"gen_{_uuid_local.uuid4().hex[:8]}",
-                                 on_busy="raise", evict_ollama=True, free_comfyui=True,
-                                 vram_estimate_mb=vram_est, ram_estimate_gb=ram_est,
-                                 require_fit=True, cross_process=True):
-                    pass
+                # 2026-08-04: this session used to be `with ...: pass` — the lease,
+                # VRAM fit-check and RAM reservation were acquired and RELEASED
+                # before the pipeline load and denoise, so the entire 2048² forward
+                # ran with zero coordination held. Hold it for the real work; closed
+                # as the LAST step of the finally below. Reentrancy-safe: batch and
+                # stills outer sessions make this a pass-through (TLS flag in
+                # gpu_resource_policy), so nested paths keep exactly one session.
+                from backend.services.gpu_resource_policy import compositor_vram_reserve_mb
+                _gpu_stack = contextlib.ExitStack()
+                _gpu_stack.enter_context(gpu_session(
+                    JobKind.VIDEO_RENDER, f"gen_{_uuid_local.uuid4().hex[:8]}",
+                    on_busy="raise", evict_ollama=True, free_comfyui=True,
+                    vram_estimate_mb=vram_est, ram_estimate_gb=ram_est,
+                    require_fit=True, cross_process=True,
+                    vram_reserve_mb=compositor_vram_reserve_mb(),
+                ))
 
                 family = self._model_family(model_id)
+
+                # Field calibration: reset the CUDA peak counter so the post-run
+                # estimate-vs-measured log reflects THIS generation (2026-08-04).
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.reset_peak_memory_stats()
+                except Exception:
+                    pass
+
+                # 2026-08-04: refuse to run multi-billion-param DiT families on CPU.
+                # __init__ silently falls back to CPU when the CUDA kernel probe fails
+                # (e.g. a torch wheel without this GPU's sm arch — Blackwell sm_120 on
+                # an older build). fp32 CPU inference of a 6B DiT consumes tens of GB
+                # of RAM and locks the desktop — identical symptoms to the GPU crash,
+                # with only one WARNING line as evidence. Fail loud instead.
+                if family in ('zimage', 'krea2') and self._device != "cuda":
+                    result.error = (
+                        f"CUDA is unavailable/unusable on this box (device="
+                        f"{self._device}) — refusing to run {family} on CPU (fp32 CPU "
+                        "inference = tens of GB of RAM + desktop lockup). Check that "
+                        "torch.cuda.get_arch_list() includes this GPU's architecture "
+                        "(e.g. sm_120 for RTX 5060 Ti) and install a matching torch."
+                    )
+                    result.generation_time = time.time() - start_time
+                    return result
 
                 # Family-appropriate sampling. Batch UI often validates against the
                 # *requested* model (e.g. zimage-turbo → steps=9, guidance=0.0). If
@@ -1384,25 +1652,12 @@ Negative Prompt: {negative_prompt}""",
                     logger.warning(f"Guidance scale {request.guidance_scale} is extremely high. Capping at 15.0")
                     request.guidance_scale = 15.0
 
-                # Family-aware max side + area (Z-Image/Krea → 2K; Flux not offline).
-                from backend.services.image_resolution_limits import clamp_image_dimensions
-                ow, oh = request.width, request.height
-                request.width, request.height, dim_warns = clamp_image_dimensions(
-                    request.width, request.height, family
-                )
-                for msg in dim_warns:
-                    logger.warning(msg)
-                if (request.width, request.height) != (ow, oh):
-                    logger.info(
-                        "Resolution clamped %sx%s → %sx%s (family=%s)",
-                        ow, oh, request.width, request.height, family,
-                    )
-                result.image_size = (request.width, request.height)
+                # (Resolution clamp moved ABOVE the estimates — 2026-08-04.)
 
                 # Make room BEFORE loading — family-aware estimate + Ollama eviction
                 # when the card is too full. Runs after ALL model rerouting so the
                 # estimate matches the model we actually load.
-                self._ensure_vram_for_pipeline(model_id)
+                self._ensure_vram_for_pipeline(model_id, request.width, request.height)
 
                 if not self._load_pipeline(model_id):
                     # Requested model failed to load (gated/removed repo, missing
@@ -1416,7 +1671,7 @@ Negative Prompt: {negative_prompt}""",
                         model_id = self.default_model
                         family = self._model_family(model_id)
                         self._apply_family_sampling(request, family)
-                        self._ensure_vram_for_pipeline(model_id)
+                        self._ensure_vram_for_pipeline(model_id, request.width, request.height)
                         if not self._load_pipeline(model_id):
                             result.error = f"Failed to load fallback model {self.default_model}"
                             return result
@@ -1540,13 +1795,40 @@ Negative Prompt: {negative_prompt}""",
                 if lora_paths:
                     self._apply_loras(family, lora_paths, lora_scale)
 
-                # Dynamic VAE tiling: only at high res to preserve quality at normal sizes
-                if getattr(self, '_vae_tiling_available', False):
-                    if request.width > 1024 or request.height > 1024:
-                        self._pipeline.enable_vae_tiling()
-                        logger.info(f"VAE tiling enabled ({request.width}x{request.height} > 1024px)")
-                    elif hasattr(self._pipeline, 'disable_vae_tiling'):
-                        self._pipeline.disable_vae_tiling()
+                # Dynamic VAE tiling: only at high res to preserve quality at normal
+                # sizes. _set_vae_tiling handles pipeline- and vae-level APIs (the old
+                # pipeline-only call silently no-opped for ZImage/Krea2 — 2026-08-04
+                # client box 2048² desktop crash).
+                _wants_tiling = request.width > 1024 or request.height > 1024
+                _tiling_applied = self._set_vae_tiling(_wants_tiling)
+                if _wants_tiling and _tiling_applied:
+                    logger.info(
+                        f"VAE tiling enabled ({request.width}x{request.height} > 1024px) "
+                        f"via {getattr(self, '_vae_tiling_via', 'unknown')} level"
+                    )
+                # Hard gate: succeed tiled or fail cleanly. A >1MP DiT decode without
+                # tiling is exactly the allocation that killed the client box's desktop; if a
+                # future diffusers bump changes the API again, refuse rather than risk it.
+                if (
+                    not _tiling_applied
+                    and family in ('zimage', 'krea2')
+                    and request.width * request.height > 1024 * 1024
+                ):
+                    result.error = (
+                        f"{request.width}x{request.height} with {family} requires VAE "
+                        "tiling, which is unavailable on this pipeline build. Refusing "
+                        "the untiled decode (it exhausts GPU+system memory). Retry at "
+                        "≤1024×1024 or update diffusers."
+                    )
+                    result.generation_time = time.time() - start_time
+                    return result
+
+                # Mid-denoise RAM floor (2026-08-04): admission can't guard a
+                # minutes-long forward; the watchdog aborts per-step on breach.
+                _watchdog = self._ram_watchdog_callback()
+                _watchdog_kwargs = (
+                    {"callback_on_step_end": _watchdog} if _watchdog else {}
+                )
 
                 def _call_pipeline(pos_prompt: str, neg_prompt: Optional[str]):
                     """Single forward; raises on OOM / compile failure for recovery."""
@@ -1560,6 +1842,7 @@ Negative Prompt: {negative_prompt}""",
                             num_inference_steps=request.num_inference_steps,
                             guidance_scale=request.guidance_scale,
                             generator=generator,
+                            **_watchdog_kwargs,
                         )
                     if self._device == "cuda":
                         # Match autocast dtype to the LOADED model dtype. The model is
@@ -1579,6 +1862,7 @@ Negative Prompt: {negative_prompt}""",
                                 num_inference_steps=request.num_inference_steps,
                                 guidance_scale=request.guidance_scale,
                                 generator=generator,
+                                **_watchdog_kwargs,
                             )
                     return self._pipeline(
                         prompt=pos_prompt,
@@ -1588,6 +1872,7 @@ Negative Prompt: {negative_prompt}""",
                         num_inference_steps=request.num_inference_steps,
                         guidance_scale=request.guidance_scale,
                         generator=generator,
+                        **_watchdog_kwargs,
                     )
 
                 if family in ('zimage', 'krea2'):
@@ -1603,6 +1888,18 @@ Negative Prompt: {negative_prompt}""",
 
                 try:
                     output = _call_pipeline(enhanced_prompt, neg)
+                except RamWatchdogAbort as ram_err:
+                    # System-RAM floor breached mid-denoise: fail THIS item
+                    # cleanly and never enter the OOM ladder — reloading
+                    # pipelines while the box is out of RAM deepens the exact
+                    # hole we're escaping (2026-08-04).
+                    _detach_exception(ram_err)
+                    import gc as _gc_ram
+                    _gc_ram.collect()
+                    self._unload_pipeline()
+                    result.error = str(ram_err)
+                    result.generation_time = time.time() - start_time
+                    return result
                 except (AssertionError, RuntimeError, torch.cuda.OutOfMemoryError) as infer_err:
                     # torch.compile recovery (SD/SDXL full-GPU path)
                     is_compile_failure = (
@@ -1641,6 +1938,13 @@ Negative Prompt: {negative_prompt}""",
                             f"CUDA OOM during inference with {failed_label} "
                             f"(offload={prior_offload}): {infer_err}"
                         )
+                        # Detach the traceback BEFORE unloading — otherwise the
+                        # failed forward's frames pin the pipeline and the unload
+                        # below frees ~nothing (see _detach_exception docstring).
+                        oom_summary = f"{type(infer_err).__name__}: {infer_err}"
+                        _detach_exception(infer_err)
+                        import gc as _gc
+                        _gc.collect()
                         try:
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
@@ -1666,6 +1970,22 @@ Negative Prompt: {negative_prompt}""",
                         except Exception:
                             pass
 
+                        # Large-canvas OOM: reload ladder DISABLED by design
+                        # (2026-08-04). With tiling active, a >1MP OOM means genuinely
+                        # insufficient memory — a sequential reload retries the same
+                        # doomed forward with a second ~24GB host-resident pipeline,
+                        # and the old ladder stacked three of them until the desktop
+                        # died. Fail the item loudly instead.
+                        if request.width * request.height > 1024 * 1024:
+                            result.error = (
+                                f"CUDA out of memory at {request.width}x{request.height} "
+                                f"with {failed_label} ({oom_summary}). Large-canvas OOM "
+                                "retry is disabled by design — retry at ≤1024×1024 or "
+                                "pick a lighter model."
+                            )
+                            result.generation_time = time.time() - start_time
+                            return result
+
                         output = None
                         # Attempt 1: same model with sequential offload if not already.
                         if family in ('krea2', 'zimage') and prior_offload != "sequential":
@@ -1674,7 +1994,7 @@ Negative Prompt: {negative_prompt}""",
                             )
                             self._force_sequential_offload = True
                             try:
-                                self._ensure_vram_for_pipeline(model_id)
+                                self._ensure_vram_for_pipeline(model_id, request.width, request.height)
                             except RuntimeError as admit_err:
                                 raise RuntimeError(
                                     f"GPU busy after OOM — cannot reload: {admit_err}"
@@ -1699,6 +2019,10 @@ Negative Prompt: {negative_prompt}""",
                                         logger.warning(
                                             f"Sequential offload still OOM for {failed_label}: {seq_err}"
                                         )
+                                        # Same traceback-pinning hazard as the outer
+                                        # handler — detach before unloading.
+                                        _detach_exception(seq_err)
+                                        _gc.collect()
                                         self._unload_pipeline()
                                         try:
                                             if torch.cuda.is_available():
@@ -1716,6 +2040,7 @@ Negative Prompt: {negative_prompt}""",
                             logger.warning(
                                 f"{failed_label} OOM → falling back to '{fb_key}'"
                             )
+                            _gc.collect()
                             request.model = fb_key
                             model_id = self.available_models.get(fb_key, self.default_model)
                             family = self._model_family(model_id)
@@ -1736,7 +2061,7 @@ Negative Prompt: {negative_prompt}""",
                             )
                             result.image_size = (request.width, request.height)
                             try:
-                                self._ensure_vram_for_pipeline(model_id)
+                                self._ensure_vram_for_pipeline(model_id, request.width, request.height)
                             except RuntimeError as admit_err:
                                 raise RuntimeError(
                                     f"GPU busy — cannot load OOM fallback '{fb_key}': {admit_err}"
@@ -1850,6 +2175,18 @@ Negative Prompt: {negative_prompt}""",
                 }
 
                 logger.info(f"Image generated successfully in {result.generation_time:.2f}s: {image_path}")
+                # Estimate-vs-measured (2026-08-04): accumulates field data for
+                # slope calibration across the install base.
+                try:
+                    if torch.cuda.is_available():
+                        _peak_mb = torch.cuda.max_memory_allocated() // (1024 * 1024)
+                        logger.info(
+                            f"VRAM estimate vs measured: est {vram_est}MB, peak "
+                            f"{_peak_mb}MB ({request.width}x{request.height}, "
+                            f"offload={self._pipeline_offload_mode})"
+                        )
+                except Exception:
+                    pass
 
             except Exception as e:
                 logger.error(f"Image generation failed: {type(e).__name__}: {e}", exc_info=True)
@@ -1878,6 +2215,14 @@ Negative Prompt: {negative_prompt}""",
                         get_orchestrator().release_model("sd:pipeline")
                     except Exception:
                         pass
+                # Release the gpu_session LAST — after LoRA/pipeline teardown — so
+                # the lease and gate cover the whole unit of work (2026-08-04).
+                # Guarded own try/except: a close failure must not mask the result.
+                if _gpu_stack is not None:
+                    try:
+                        _gpu_stack.close()
+                    except Exception as close_err:
+                        logger.warning(f"gpu_session close failed (non-fatal): {close_err}")
 
         return result
 
@@ -2067,6 +2412,22 @@ Negative Prompt: {negative_prompt}""",
         self._compile_vae_orig = None
         self._loaded_lora_adapters = []
 
+        # Accelerate CPU-offload hooks retain large CPU weight copies (the hook's
+        # weights_map holds the ENTIRE offloaded state dict) until removed.
+        # ORDER MATTERS: remove_all_hooks() iterates pipeline.components and only
+        # acts on live nn.Modules — running it AFTER the nulling loop below made it
+        # a guaranteed no-op, so multi-GB weight maps survived every "unload"
+        # (2026-08-04 client box 2048² incident; same defect class as the ComfyUI
+        # unpatch_model leak). Hooks must be detached while components are alive.
+        # maybe_free_model_hooks deliberately NOT called: after remove_all_hooks it
+        # is a no-op, and on any path where hooks remain it RE-APPLIES
+        # enable_model_cpu_offload (diffusers pipeline_utils maybe_free_model_hooks).
+        try:
+            if hasattr(pipeline, "remove_all_hooks"):
+                pipeline.remove_all_hooks()
+        except Exception as e:
+            logger.warning(f"Pipeline hook teardown failed (continuing unload): {e}")
+
         # Explicitly break references to submodules (weights stay in CPU tensors until all refs gone)
         for attr in ("unet", "vae", "text_encoder", "text_encoder_2", "tokenizer", "tokenizer_2",
                      "scheduler", "transformer", "safety_checker", "feature_extractor"):
@@ -2077,16 +2438,6 @@ Negative Prompt: {negative_prompt}""",
                     del obj
             except Exception:
                 pass
-
-        try:
-            # Accelerate CPU-offload hooks retain large CPU weight copies until removed.
-            if hasattr(pipeline, "remove_all_hooks"):
-                pipeline.remove_all_hooks()
-            free_hooks = getattr(pipeline, "maybe_free_model_hooks", None)
-            if callable(free_hooks):
-                free_hooks()
-        except Exception as e:
-            logger.warning(f"Pipeline hook teardown failed (continuing unload): {e}")
 
         try:
             pipeline.to("cpu")
@@ -2329,8 +2680,11 @@ Negative Prompt: {negative_prompt}""",
             optimizations = {
                 "attention_slicing": hasattr(self._pipeline, "enable_attention_slicing"),
                 "xformers_available": hasattr(self._pipeline, "enable_xformers_memory_efficient_attention"),
-                "vae_slicing": hasattr(self._pipeline, "enable_vae_slicing"),
-                "vae_tiling": hasattr(self._pipeline, "enable_vae_tiling"),
+                # Computed truth, not pipeline-level hasattr — that lie hid the
+                # ZImage/Krea2 tiling no-op behind the 2026-08-04 2048² crash.
+                "vae_slicing": bool(getattr(self, "_vae_slicing_enabled", False)),
+                "vae_tiling": bool(getattr(self, "_vae_tiling_available", False)),
+                "vae_tiling_via": getattr(self, "_vae_tiling_via", None),
                 "torch_compile_available": hasattr(torch, 'compile'),
                 "cpu_offloading_disabled": True
             }

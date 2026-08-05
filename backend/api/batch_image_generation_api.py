@@ -489,6 +489,21 @@ def download_model():
                 f"Unknown model '{model_path}' — not in the allowed model set", 400
             )
 
+        # Comfy-only catalog entries carry a "comfy:" sentinel, not an HF repo id —
+        # feeding it to the diffusers path fails HF validation ('comfy:flux-dev').
+        # Their assets (unet + encoders + VAE) install into ComfyUI/models/ via the
+        # video registry downloader, which knows the gated repo + companion files.
+        # The status endpoint below mirrors that downloader for flux plans.
+        if str(hf_model_id).startswith("comfy:"):
+            from backend.api import batch_video_generation_api as _video_api
+            from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
+            if catalog_key not in VIDEO_MODEL_REGISTRY:
+                return error_response(
+                    f"'{catalog_key}' is ComfyUI-only but has no VIDEO_MODEL_REGISTRY "
+                    "entry — no install path for it", 501
+                )
+            return _video_api.start_video_model_download(catalog_key)
+
         estimated_size_gb = IMAGE_MODEL_SIZES.get(catalog_key, IMAGE_MODEL_SIZES.get(hf_model_id, 2.5))
 
         with model_download_lock:
@@ -611,7 +626,19 @@ def get_download_status():
     global model_download_status
     try:
         with model_download_lock:
-            return success_response(model_download_status)
+            status = dict(model_download_status)
+        if not status.get("is_downloading"):
+            # Comfy-only entries (flux-dev) delegate to the video registry
+            # downloader — mirror its status for flux plans so this modal's
+            # poller tracks progress/completion of the delegated install.
+            # Module-attribute access on purpose: the video module REBINDS its
+            # status dict per download, so a from-import would go stale.
+            from backend.api import batch_video_generation_api as _video_api
+            with _video_api._video_model_download_lock:
+                vstatus = dict(_video_api._video_model_download_status)
+            if str(vstatus.get("current_model") or "").startswith("flux"):
+                return success_response(vstatus)
+        return success_response(status)
     except Exception as e:
         logger.error(f"Error getting download status: {e}")
         return error_response(str(e), 500)

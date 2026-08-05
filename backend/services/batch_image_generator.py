@@ -420,15 +420,29 @@ class BatchImageGenerator:
                 ram_gb = max(ram_gb, 16.0)
                 continue
             catalog_id = gen.available_models.get(model_key, model_key)
-            
+
+            # Resolution-aware estimates (2026-08-04): clamp the prompt's dims the
+            # same way generation will, then let the estimators price the extra
+            # megapixels. A 2048² prompt must raise the batch booking above the
+            # flat 1024²-calibrated constants.
+            pw = getattr(prompt, "width", None)
+            ph = getattr(prompt, "height", None)
+            try:
+                if pw and ph:
+                    from backend.services.image_resolution_limits import clamp_image_dimensions
+                    pw, ph, _ = clamp_image_dimensions(pw, ph, gen._model_family(catalog_id))
+            except Exception:
+                pw = ph = None
+
             # If the model is already loaded (resident), its memory footprint is already
-            # reflected in the system's available RAM. Avoid double-gating it.
+            # reflected in the system's available RAM. Avoid double-gating it — but the
+            # per-generation activation surcharge above 1MP still applies.
             if getattr(gen, "_pipeline", None) is not None and getattr(gen, "_current_model", None) == catalog_id:
-                model_vram = 1024
-                model_ram = 2.0
+                model_vram = 1024 + max(0, gen._vram_estimate_mb(catalog_id, pw, ph) - gen._vram_estimate_mb(catalog_id))
+                model_ram = 2.0 + max(0.0, gen._ram_estimate_gb(catalog_id, pw, ph) - gen._ram_estimate_gb(catalog_id))
             else:
-                model_vram = gen._vram_estimate_mb(catalog_id)
-                model_ram = gen._ram_estimate_gb(catalog_id)
+                model_vram = gen._vram_estimate_mb(catalog_id, pw, ph)
+                model_ram = gen._ram_estimate_gb(catalog_id, pw, ph)
 
             vram_mb = max(vram_mb, model_vram)
             ram_gb = max(ram_gb, model_ram)
@@ -1227,6 +1241,7 @@ class BatchImageGenerator:
                     f"(vram~{vram_mb}MB ram~{ram_gb}GB)"
                 )
                 try:
+                    from backend.services.gpu_resource_policy import compositor_vram_reserve_mb
                     with gpu_session(
                         JobKind.VIDEO_RENDER,
                         batch_id,
@@ -1240,6 +1255,10 @@ class BatchImageGenerator:
                         require_fit=True,
                         slot_id=slot_id,
                         lease_seconds=1800,
+                        # 2026-08-04: diffusers-image sessions hold back the desktop
+                        # compositor's VRAM share (Wayland died when 2048² jobs were
+                        # admitted against raw card totals).
+                        vram_reserve_mb=compositor_vram_reserve_mb(),
                     ):
                         _run_batch_body(session_held=True)
                 except GpuBusyError as e:

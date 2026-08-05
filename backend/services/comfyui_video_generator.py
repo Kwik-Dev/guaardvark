@@ -456,6 +456,17 @@ class ComfyUIVideoGenerator:
             return "cpu"
         return "default"
 
+    @staticmethod
+    def _wan_dynamic_shift(width: int, height: int) -> float:
+        """ModelSamplingSD3 shift for Wan, scaled to resolution.
+
+        SD3/flow-matching shift should scale with resolution/sequence-length.
+        Base shift 8.0 is tuned for 1280x704; at lower resolutions (e.g. 736x416)
+        8.0 is too strong, leading to blurry output and poor motion.
+        """
+        base_area = 1280 * 704
+        return round(max(3.0, min(12.0, 8.0 * ((width * height) / base_area))), 1)
+
     def _vram_preflight(self, model: str) -> Optional[str]:
         """Read-only VRAM gate run BEFORE queuing a ComfyUI job, so an
         under-spec card gets an honest message instead of a silent OOM mid-render.
@@ -880,9 +891,7 @@ class ComfyUIVideoGenerator:
             clip_device,
         )
 
-        base_area = 1280 * 704
-        current_area = width * height
-        shift = round(max(3.0, min(12.0, 8.0 * (current_area / base_area))), 1)
+        shift = self._wan_dynamic_shift(width, height)
 
         workflow = {
             # ── Model Loading ──────────────────────────────────────────────
@@ -1083,9 +1092,11 @@ class ComfyUIVideoGenerator:
             )
 
         midpoint = num_inference_steps // 2
+        shift = self._wan_dynamic_shift(width, height)
         logger.info(
-            "Wan I2V MoE workflow clip_device=%s (TE off-GPU frees UNet residency on 16GB)",
+            "Wan I2V MoE workflow clip_device=%s, dynamic_shift=%.1f (TE off-GPU frees UNet residency on 16GB)",
             clip_device,
+            shift,
         )
 
         workflow = {
@@ -1229,12 +1240,7 @@ class ComfyUIVideoGenerator:
             "batch_size": 1,
         }
         
-        # SD3/Flow-matching shift should scale with resolution/sequence-length.
-        # Base shift 8.0 is tuned for 1280x704. At lower resolutions (e.g. 736x416),
-        # 8.0 is too strong, leading to blurry output and poor motion.
-        base_area = 1280 * 704
-        current_area = width * height
-        shift = round(max(3.0, min(12.0, 8.0 * (current_area / base_area))), 1)
+        shift = self._wan_dynamic_shift(width, height)
 
         logger.info("Wan TI2V-5B workflow clip_device=%s, dynamic_shift=%.1f", clip_device, shift)
 
@@ -1916,16 +1922,34 @@ class ComfyUIVideoGenerator:
         last_log_time = start_time
         poll_count = 0
         orphan_grace_s = 30  # allow queue/history to populate after POST /prompt
+        # The liveness probe (GET / with a 2s timeout) can miss while ComfyUI is
+        # pegged on the final VHS/ffmpeg encode — one transient miss must not
+        # abandon a render (a real 331s clip was orphaned 2s before completion).
+        # Only sustained silence (~20s+) means the server is actually gone.
+        consecutive_dead = 0
+        dead_probe_limit = 5
 
         while time.time() - start_time < timeout:
             poll_count += 1
 
             if not self._comfyui_alive():
-                logger.error(
-                    "ComfyUI unreachable while waiting for %s — prompt orphaned",
+                consecutive_dead += 1
+                if consecutive_dead >= dead_probe_limit:
+                    logger.error(
+                        "ComfyUI unreachable (%d consecutive probes) while waiting for %s — prompt orphaned",
+                        consecutive_dead,
+                        prompt_id,
+                    )
+                    return None
+                logger.warning(
+                    "ComfyUI liveness probe missed (%d/%d) while waiting for %s — retrying",
+                    consecutive_dead,
+                    dead_probe_limit,
                     prompt_id,
                 )
-                return None
+                time.sleep(2)
+                continue
+            consecutive_dead = 0
 
             try:
                 response = requests.get(
@@ -2106,9 +2130,13 @@ class ComfyUIVideoGenerator:
                 success=False,
                 error=(
                     "ComfyUI is missing the VHS_VideoCombine node (Video Helper Suite). "
-                    "This usually means opencv-python (cv2) is not installed in the backend "
-                    "venv or ComfyUI was not restarted after installing it. "
-                    "Fix: backend/venv/bin/pip install opencv-python, then restart ComfyUI."
+                    "Most often the ComfyUI-VideoHelperSuite custom node is not installed at all "
+                    "(fresh installs before 2026-08 never received custom nodes). "
+                    "Fix: run plugins/comfyui/scripts/install_deps.sh — it installs every required "
+                    "node from plugins/comfyui/custom_nodes.manifest — then restart ComfyUI. "
+                    "If custom_nodes/ComfyUI-VideoHelperSuite/ IS present, its import failed "
+                    "(commonly missing cv2: backend/venv/bin/pip install opencv-python); "
+                    "check logs/comfyui.log for the import error, then restart ComfyUI."
                 ),
                 prompt_used=request.prompt,
             )

@@ -4,6 +4,14 @@ import logging
 from celery import Celery
 from flask import Flask
 
+# Under memory pressure the kernel must kill THIS worker, never the desktop
+# (2026-08-04 client box lockups). Early, before any heavy allocation.
+try:
+    from backend.oom_priority import apply_oom_score_adj
+    apply_oom_score_adj()
+except Exception:
+    pass
+
 def create_minimal_celery_flask_app():
     minimal_app = Flask(__name__)
 

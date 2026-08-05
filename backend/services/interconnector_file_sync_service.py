@@ -84,6 +84,13 @@ class InterconnectorFileSyncService:
             "backend/socketio_instance.py",
             "backend/requirements.txt",
             "backend/requirements-base.txt",
+            # requirements-cv was never listed (pre-existing gap): the CV extra
+            # and its jax/jaxlib pins silently never reached clients.
+            "backend/requirements-cv.txt",
+            # Global pip constraints (numpy<2 convergence) — consumed via
+            # PIP_CONSTRAINT by install_pytorch.sh, comfyui install_deps.sh and
+            # heal_backend_venv.sh; without it clients keep the numpy churn.
+            "backend/constraints.txt",
             "frontend/src/",
             "frontend/package.json",
             "frontend/package-lock.json",
@@ -150,6 +157,12 @@ class InterconnectorFileSyncService:
             "*.onnx",
             ".pytest_cache",
             ".requirements_installed",
+            # Sibling install stamp from the same script (install_deps.sh) —
+            # missed when .requirements_installed was excluded. If the master's
+            # stamp syncs to a client whose venv never got the custom-node
+            # deps, install_deps.sh skips the pip install there and the nodes
+            # fail at runtime with no error anywhere.
+            ".custom_nodes_installed",
         ]
 
     def get_file_hash(self, file_path: str) -> Optional[str]:
@@ -227,9 +240,9 @@ class InterconnectorFileSyncService:
     def get_project_root(self) -> Path:
         logger.debug("[FILE_SYNC] Detecting project root...")
         
-        llamax_root = os.environ.get("GUAARDVARK_ROOT")
-        if llamax_root:
-            root_path = Path(llamax_root).resolve()
+        guaardvark_root = os.environ.get("GUAARDVARK_ROOT")
+        if guaardvark_root:
+            root_path = Path(guaardvark_root).resolve()
             logger.info(f"[FILE_SYNC] Project root from GUAARDVARK_ROOT env: {root_path}")
             return root_path
 

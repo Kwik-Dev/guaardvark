@@ -57,6 +57,26 @@ def test_all_venv_dirs_excluded(svc, path):
     "backend/__pycache__/app.cpython-312.pyc", # __pycache__ + .pyc
     "plugins/comfyui/ComfyUI/main.py",         # multi-segment dir pattern
     "backups/old/backend/app.py",              # backups/
+    # install stamps from plugins/comfyui/scripts/install_deps.sh — a synced
+    # master stamp makes clients SKIP installing deps their venv never got
+    "plugins/comfyui/.requirements_installed",
+    "plugins/comfyui/.custom_nodes_installed",
 ])
 def test_real_artifacts_still_excluded(svc, path):
     assert svc.should_exclude_file(path) is True, f"{path} should be excluded but was not"
+
+
+# --- dependency-pin manifests MUST ride the sync allowlist (2026-08-04) ---
+# default_sync_paths enumerates backend/ files INDIVIDUALLY, so new manifests
+# are silently left behind unless listed: backend/constraints.txt (numpy<2
+# convergence via PIP_CONSTRAINT) and backend/requirements-cv.txt (jax pins)
+# were both missing — clients kept the numpy churn no matter what master fixed.
+@pytest.mark.parametrize("path", [
+    "backend/requirements.txt",
+    "backend/requirements-base.txt",
+    "backend/requirements-cv.txt",
+    "backend/constraints.txt",
+])
+def test_dependency_manifests_are_synced(svc, path):
+    assert path in svc.default_sync_paths, f"{path} missing from default_sync_paths"
+    assert svc.should_exclude_file(path) is False, f"{path} is in sync paths but exclude-filtered"

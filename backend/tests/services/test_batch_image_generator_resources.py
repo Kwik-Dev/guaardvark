@@ -52,3 +52,59 @@ def test_batch_resource_estimates_resident():
     vram_mb, ram_gb = batch_gen._batch_resource_estimates(request)
     assert vram_mb == 4000
     assert ram_gb == 6.0
+
+
+def test_batch_resource_estimates_2048_raises_above_flat_constant():
+    # 2026-08-04: a 2048² prompt must raise the batch booking above the flat
+    # 1024²-calibrated constant (11000MB/24GB for zimage).
+    gen = OfflineImageGenerator()
+    gen._pipeline = None
+    gen._current_model = None
+
+    batch_gen = BatchImageGenerator()
+    batch_gen.image_generator = gen
+
+    prompt = BatchPrompt(
+        id="p1",
+        prompt="A beautiful cat",
+        model="zimage-turbo",
+        width=2048,
+        height=2048,
+    )
+    request = BatchImageRequest(
+        batch_id="batch_2k",
+        prompts=[prompt],
+        output_dir="/tmp/test_batch"
+    )
+
+    vram_mb, ram_gb = batch_gen._batch_resource_estimates(request)
+    assert vram_mb == 11000 + 3 * 500
+    assert ram_gb == 24.0 + 3 * 1.0
+
+
+def test_batch_resource_estimates_resident_still_prices_2048_surcharge():
+    # Resident pipeline: weights are already on the box, but the >1MP activation
+    # surcharge still applies to the booking.
+    gen = OfflineImageGenerator()
+    gen._pipeline = object()
+    gen._current_model = "Tongyi-MAI/Z-Image-Turbo"
+
+    batch_gen = BatchImageGenerator()
+    batch_gen.image_generator = gen
+
+    prompt = BatchPrompt(
+        id="p1",
+        prompt="A beautiful cat",
+        model="zimage-turbo",
+        width=2048,
+        height=2048,
+    )
+    request = BatchImageRequest(
+        batch_id="batch_2k_resident",
+        prompts=[prompt],
+        output_dir="/tmp/test_batch"
+    )
+
+    vram_mb, ram_gb = batch_gen._batch_resource_estimates(request)
+    assert vram_mb == max(4000, 1024 + 3 * 500)
+    assert ram_gb == max(6.0, 2.0 + 3 * 1.0)

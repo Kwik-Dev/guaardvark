@@ -24,11 +24,27 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from typing import Iterator, Optional
 
 log = logging.getLogger(__name__)
 
 COMFYUI_URL = "http://127.0.0.1:8188"
+
+
+def compositor_vram_reserve_mb() -> int:
+    """VRAM held back for the desktop compositor on fit checks (opt-in per caller).
+
+    2026-08-04 client box 2048² incident: gnome-shell/Xwayland hold ~600-800MB of the
+    card; admitting jobs against raw totals starves the compositor and kills the
+    Wayland session. OPT-IN by call site (default reserve stays 0) because the
+    video path legitimately admits near-full-card estimates (LTX/Cog ~16000MB on
+    16376MB) and ComfyUI already self-guards via --reserve-vram.
+    """
+    try:
+        return max(0, int(os.environ.get("GUAARDVARK_COMPOSITOR_VRAM_RESERVE_MB", "800")))
+    except ValueError:
+        return 800
 
 
 # --- Canonical VRAM reclaim (consolidates the scattered ad-hoc hacks) ---------
@@ -83,11 +99,14 @@ def reclaim_gpu(*, evict_ollama: bool = False, free_comfyui: bool = False) -> No
 
 # --- Orchestrator budget hooks (opt-in) --------------------------------------
 
-def _orchestrator_request(slot_id: str, vram_estimate_mb: int, *, hard_fit: bool = True) -> None:
+def _orchestrator_request(
+    slot_id: str, vram_estimate_mb: int, *, hard_fit: bool = True, vram_reserve_mb: int = 0
+) -> None:
     try:
         from backend.services.gpu_memory_orchestrator import get_orchestrator
         get_orchestrator().request_model(
             slot_id, vram_estimate_mb, priority=95, exclusive=False, hard_fit=hard_fit,
+            vram_reserve_mb=vram_reserve_mb,
         )
     except RuntimeError as e:
         # Hard-fit refuse → surface as GpuBusyError so callers can retry cleanly
@@ -106,7 +125,9 @@ def _orchestrator_release(slot_id: str) -> None:
         log.warning("orchestrator release_model(%s) failed (non-fatal): %s", slot_id, e)
 
 
-def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) -> None:
+def _ensure_fits_or_busy(
+    estimate_mb: int, slot: str, *, margin_mb: int = 1024, reserve_mb: int = 0
+) -> None:
     """After eviction, re-probe PHYSICAL free VRAM and fail fast if it still won't fit.
 
     The physical probe (pynvml/nvidia-smi via the coordinator) already includes ComfyUI +
@@ -136,9 +157,14 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
     total = int(info.get("total_mb") or 0)
     estimate_mb = int(estimate_mb)
     margin_mb = int(margin_mb)
+    # Compositor reserve (opt-in, 2026-08-04): treat reserved MB as not free —
+    # the desktop's share of the card must survive the job. mostly_free stays
+    # computed on RAW free (it detects "card is idle", which reserve can't change).
+    reserve_mb = max(0, int(reserve_mb))
+    free_eff = max(0, free - reserve_mb)
     need = estimate_mb + margin_mb
     mostly_free = total > 0 and free >= int(total * 0.85)
-    if free >= need:
+    if free_eff >= need:
         return
     # Honest capacity refuse: the estimate itself does not fit the card.
     if total > 0 and estimate_mb > total:
@@ -154,11 +180,12 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
     #   * estimate+margin > total (false "capacity overflow" on ~16GB cards)
     #   * estimate+margin <= total but free is a few GB short (ComfyUI base ~2GB
     #     resident) — proven renderable via the direct generator path.
-    if mostly_free and estimate_mb <= total:
+    if mostly_free and estimate_mb <= total - reserve_mb:
         log.info(
-            "VRAM fit-check: admitting %s (est %s fits card total %s; "
-            "need %s with margin; free %s mostly idle — not inventing a refuse)",
-            slot, estimate_mb, total, need, free,
+            "VRAM fit-check: admitting %s (est %s fits card total %s minus "
+            "%s reserve; need %s with margin; free %s mostly idle — not "
+            "inventing a refuse)",
+            slot, estimate_mb, total, reserve_mb, need, free,
         )
         return
     from backend.services.job_operation_gate import GpuBusyError
@@ -170,10 +197,12 @@ def _ensure_fits_or_busy(estimate_mb: int, slot: str, *, margin_mb: int = 1024) 
             f"(e.g. Wan 2.2 5B on 16GB cards) or lower the estimate."
         )
     # Free short and card is NOT mostly idle → something else is resident.
+    _reserve_note = f" − {reserve_mb} compositor reserve" if reserve_mb else ""
     raise GpuBusyError(
         f"Not enough free VRAM for {slot}: need ~{need}MB (est {estimate_mb} + "
-        f"{margin_mb} headroom), only {free}MB free after eviction — another "
-        f"model/render may be resident. Try again shortly."
+        f"{margin_mb} headroom), only {free_eff}MB usable ({free}MB free"
+        f"{_reserve_note}) after eviction — another model/render may be "
+        f"resident. Try again shortly."
     )
 
 
@@ -282,6 +311,7 @@ def gpu_session(
     cross_process: bool = False,
     slot_id: Optional[str] = None,
     lease_seconds: Optional[int] = None,
+    vram_reserve_mb: int = 0,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
 
@@ -328,7 +358,9 @@ def gpu_session(
                 # Strict admission (opt-in): after eviction, refuse with a clean "busy" if
                 # the estimate still won't physically fit — turns a CUDA OOM/hang into retry.
                 if require_fit and vram_estimate_mb:
-                    _ensure_fits_or_busy(vram_estimate_mb, _slot)
+                    _ensure_fits_or_busy(
+                        vram_estimate_mb, _slot, reserve_mb=vram_reserve_mb
+                    )
                 admit_ram_gb = ram_estimate_gb if ram_estimate_gb is not None else (
                     2.0 if vram_estimate_mb else None
                 )
@@ -339,7 +371,9 @@ def gpu_session(
                     # error). Serialize-don't-thrash WITHOUT touching output quality.
                     load_weight = _load_admit_or_busy(_slot, ram_gb=admit_ram_gb)
                 if vram_estimate_mb:
-                    _orchestrator_request(_slot, vram_estimate_mb)
+                    _orchestrator_request(
+                        _slot, vram_estimate_mb, vram_reserve_mb=vram_reserve_mb
+                    )
             yield acquired
             # Success path for the unit of work: transition LOADING -> LOADED so
             # the orchestrator's tracked_vram and eviction scoring are accurate.

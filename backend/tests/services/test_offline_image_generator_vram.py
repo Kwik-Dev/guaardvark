@@ -276,3 +276,33 @@ def test_build_img2img_sd_uses_unet(gen, monkeypatch):
     )
     gen._build_img2img_pipeline("sd")
     assert captured["unet"] == "u"
+
+
+# --- Resolution-scaled estimates (2026-08-04 client box 2048² incident) ----------
+# Flat constants were calibrated at ~1024²; admission approved 2048² (4× the
+# pixels) under the same numbers. Estimates now price extra megapixels above
+# the 1MP calibration point; dims omitted ⇒ exactly the old constants.
+
+def test_estimate_dims_none_matches_constants(gen):
+    assert gen._vram_estimate_mb("Tongyi-MAI/Z-Image-Turbo") == 11000
+    assert gen._ram_estimate_gb("Tongyi-MAI/Z-Image-Turbo") == 24.0
+
+
+def test_estimate_1mp_matches_constants(gen):
+    assert gen._vram_estimate_mb("Tongyi-MAI/Z-Image-Turbo", 1024, 1024) == 11000
+    assert gen._ram_estimate_gb("Tongyi-MAI/Z-Image-Turbo", 1024, 1024) == 24.0
+
+
+def test_estimate_2048_adds_slope(gen):
+    # 2048² = 4MP ⇒ 3 extra MP above the calibration point.
+    assert gen._vram_estimate_mb("Tongyi-MAI/Z-Image-Turbo", 2048, 2048) == 11000 + 3 * 500
+    assert gen._ram_estimate_gb("Tongyi-MAI/Z-Image-Turbo", 2048, 2048) == 24.0 + 3 * 1.0
+
+
+def test_estimate_monotonic_in_resolution(gen):
+    sizes = [(512, 512), (1024, 1024), (1448, 1448), (2048, 2048)]
+    vram = [gen._vram_estimate_mb("Tongyi-MAI/Z-Image-Turbo", w, h) for w, h in sizes]
+    ram = [gen._ram_estimate_gb("Tongyi-MAI/Z-Image-Turbo", w, h) for w, h in sizes]
+    assert vram == sorted(vram)
+    assert ram == sorted(ram)
+    assert vram[0] == vram[1] == 11000  # sub-1MP never dips below the constant
