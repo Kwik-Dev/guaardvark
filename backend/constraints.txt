@@ -1,0 +1,24 @@
+# backend/constraints.txt — global pip CONSTRAINTS for the shared backend venv.
+#
+# Applied via PIP_CONSTRAINT by scripts/install_pytorch.sh and
+# plugins/comfyui/scripts/install_deps.sh (guarded: only when this file exists
+# and PIP_CONSTRAINT isn't already set by the caller). Constraints never ADD
+# packages — they only cap versions when pip resolves something anyway.
+#
+# WHY: the ML stack pins numpy<2.0 (requirements-base/requirements.txt), but
+# two layers kept dragging numpy 2.4.x back in and forcing a downgrade cycle
+# on every install (Observed in the 24.04 client box setup.log: numpy 2.4.4 and
+# 2.4.6 installed, then force-reinstalled to 1.26.4 by the repin steps):
+#   1. install_pytorch.sh's `pip install --upgrade --force-reinstall torch...`
+#      re-resolves numpy from the pytorch index (hosts 2.x AND 1.26.4 — verified
+#      cp312 manylinux x86_64 present on cu128 + cpu indexes, 2026-08-04).
+#   2. ComfyUI custom-node requirements installed into this same venv.
+# With these constraints the resolver picks a compliant version up front; the
+# existing repin steps stay as no-op belt-and-braces.
+#
+# NOTE for isolated plugin venvs (scripts/dep_reconciler/reconcilers/
+# isolated_plugin_venv.py): NOT applied there on purpose — those venvs manage
+# their own stacks and may legitimately want numpy 2.x.
+
+numpy<2.0,>=1.26.4
+setuptools<81,>=80.9.0

@@ -55,6 +55,33 @@ def _entries_match(stored: dict, current_hash: str, current_extra: dict) -> bool
     return stored.get("extra", {}) == current_extra
 
 
+def _reexec_with_venv_python(repo: Path) -> None:
+    """PEP 668 guard: the reconcilers pip-install via sys.executable, so any
+    invoker using the SYSTEM interpreter makes every install fail with
+    'externally-managed-environment' on Debian/Ubuntu (Observed: client box heal
+    run 2026-08-04 — backend_venv + cli_venv both exit 1, sentinel set).
+    Re-exec with the backend venv python whenever we aren't already inside it.
+
+    Compare sys.prefix to the venv DIR — never resolved executable paths:
+    venv/bin/python is a symlink to the system python3.12, so resolving both
+    sides makes system and venv interpreters look identical.
+    """
+    if os.environ.get("GUAARDVARK_RECONCILER_REEXEC") == "1":
+        return  # already re-exec'd once; never loop
+    venv_dir = repo / "backend" / "venv"
+    venv_py = venv_dir / "bin" / "python"
+    if not venv_py.is_file() or not os.access(venv_py, os.X_OK):
+        return  # bootstrap case: no venv yet — run with whatever invoked us
+    try:
+        if Path(sys.prefix).resolve() == venv_dir.resolve():
+            return  # already running inside the backend venv
+    except OSError:
+        return
+    os.environ["GUAARDVARK_RECONCILER_REEXEC"] = "1"
+    print(f"[reconciler] re-exec via {venv_py} (invoked with {sys.executable})", flush=True)
+    os.execv(str(venv_py), [str(venv_py), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     log = _setup_logging(args.quiet)
@@ -64,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     repo = Path(args.repo_root).resolve() if args.repo_root else _REPO_ROOT
+    if argv is None:
+        # Real CLI invocation only — a test calling main([...]) must never have
+        # its process replaced (and sys.argv wouldn't be ours to replay anyway).
+        _reexec_with_venv_python(repo)
 
     # Sync-in-progress sentinel: refuse to run.
     sentinel = repo / "data" / "dep_reconciler" / ".sync_in_progress"
@@ -97,6 +128,22 @@ def _run(
 ) -> int:
     state = load_state(state_path)
 
+    # Failure sentinel consumed by scripts/preflight_check.py: while it exists,
+    # preflight fails RED instead of printing "All checks passed" over a venv a
+    # reconciler couldn't fully install. Owned here (not in start.sh) so any
+    # invoking layer (start.sh, heal_backend_venv.sh, system-manager) that later
+    # succeeds clears it.
+    fail_sentinel = repo / "logs" / ".dep_reconcile_failed"
+
+    def _clear_sentinel_if_covered() -> None:
+        # Only a run that actually covered backend_venv (the target preflight
+        # gates on) — or an unscoped run — proves the venv reconciles cleanly.
+        if not only or "backend_venv" in only:
+            try:
+                fail_sentinel.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     # Trust-on-upgrade: state file is empty AND we detect a populated venv.
     # Write current hashes as initial state without re-installing.
     if not state.reconcilers:
@@ -120,6 +167,7 @@ def _run(
                 }
             save_state(state_path, state)
             log.info("trust-on-upgrade: snapshot saved; no installers run")
+            _clear_sentinel_if_covered()
             return 0
 
     reconcilers = build_active_reconcilers(repo)
@@ -206,7 +254,19 @@ def _run(
         for f in failures:
             print(f"  - {f.reconciler_id}: {f.message}", file=sys.stderr)
         print(f"\nFull log: {log_path}", file=sys.stderr)
+        try:
+            fail_sentinel.parent.mkdir(parents=True, exist_ok=True)
+            fail_sentinel.write_text(
+                "dep_reconciler failed at "
+                + datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                + "\n"
+                + "".join(f"  - {f.reconciler_id}: {f.message}\n" for f in failures)
+                + f"Full log: {log_path}\n"
+            )
+        except OSError:
+            pass
         return 1
+    _clear_sentinel_if_covered()
     return 0
 
 

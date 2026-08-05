@@ -49,6 +49,54 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+# Pin-convergence for EVERY pip call in this script: without it, install_pytorch
+# and the ComfyUI custom-node reqs re-resolve numpy to 2.x and force the
+# repin-downgrade churn (see backend/constraints.txt). Caller override respected.
+if [ -z "${PIP_CONSTRAINT:-}" ] && [ -f "$BACKEND_DIR/constraints.txt" ]; then
+    export PIP_CONSTRAINT="$BACKEND_DIR/constraints.txt"
+fi
+
+ensure_python_headers() {
+    # Native sdist builds (evdev in requirements-base) need Python.h. On Ubuntu
+    # 24.04 the system python3.12 ships WITHOUT python3.12-dev — the client box
+    # hit this repeatedly (pip run dies at evdev, NOTHING from the file installs).
+    local inc
+    inc=$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["include"])' 2>/dev/null || true)
+    if [ -n "$inc" ] && [ -f "$inc/Python.h" ]; then
+        return 0
+    fi
+    log "Python dev headers missing (Python.h) — native wheels (evdev) cannot build."
+    if command -v apt-get >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        log "Installing python3.12-dev + python3.12-venv via apt..."
+        sudo -n apt-get install -y python3.12-dev python3.12-venv >/dev/null 2>&1 || true
+        inc=$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["include"])' 2>/dev/null || true)
+        if [ -n "$inc" ] && [ -f "$inc/Python.h" ]; then
+            log "Python dev headers installed."
+            return 0
+        fi
+    fi
+    log "WARNING: could not install headers automatically. Run: sudo apt-get install -y python3.12-dev python3.12-venv"
+    return 0   # non-fatal here — the pip step below fails loudly if it matters
+}
+
+# pip install -r with the failure surfaced instead of silently killing the
+# script (set -euo pipefail turned the old `pip | tail -5` into a message-less
+# death on the first bad wheel).
+pip_install_req() {
+    local req="$1" scratch="$LOG_DIR/.heal_pip_last.log"
+    log "pip install -r $(basename "$req")"
+    if ! "$VENV_PIP" install -r "$req" > "$scratch" 2>&1; then
+        tail -n 30 "$scratch"
+        if grep -q "Python\.h: No such file or directory" "$scratch"; then
+            log "ERROR: a native wheel build needs Python dev headers."
+            log "Fix:   sudo apt-get install -y python3.12-dev python3.12-venv   — then re-run this script."
+        fi
+        log "ERROR: pip install -r $(basename "$req") FAILED — nothing from this file was installed. Full output: $scratch"
+        exit 1
+    fi
+    tail -n 5 "$scratch"
+}
+
 repin_numpy_setuptools() {
     log "Re-pinning numpy<2 and setuptools (ML stack guard)..."
     "$VENV_PIP" install --no-deps --force-reinstall \
@@ -62,10 +110,10 @@ repin_numpy_setuptools() {
 heal_backend_core() {
     log "=== Step 1: backend core requirements ==="
     if [ -f "$BACKEND_DIR/requirements-base.txt" ]; then
-        "$VENV_PIP" install -r "$BACKEND_DIR/requirements-base.txt" 2>&1 | tail -5
+        pip_install_req "$BACKEND_DIR/requirements-base.txt"
     fi
     if [ -f "$BACKEND_DIR/requirements.txt" ]; then
-        "$VENV_PIP" install -r "$BACKEND_DIR/requirements.txt" 2>&1 | tail -5
+        pip_install_req "$BACKEND_DIR/requirements.txt"
     fi
     # Packages reconciler verifies but pip resolution sometimes drops
     "$VENV_PIP" install 'websocket-client==1.8.0' --quiet 2>&1 | tail -2 || true
@@ -89,7 +137,13 @@ heal_pytorch() {
 heal_dep_reconciler() {
     log "=== Step 3: dep reconciler (backend_venv + cli_venv) ==="
     if [ -x "$REPO_ROOT/scripts/dep_reconciler.py" ] || [ -f "$REPO_ROOT/scripts/dep_reconciler.py" ]; then
-        python3 "$REPO_ROOT/scripts/dep_reconciler.py" \
+        # MUST run under the venv python: the reconcilers pip-install via
+        # sys.executable, so `python3 ...` here made every install hit PEP 668
+        # "externally-managed-environment" on Ubuntu 24.04 and fail both
+        # targets (Observed: client box sentinel 2026-08-04, backend_venv +
+        # cli_venv exit 1). dep_reconciler.py now also self-re-execs as a
+        # backstop, but call it correctly regardless.
+        "$VENV_PYTHON" "$REPO_ROOT/scripts/dep_reconciler.py" \
             --force --only backend_venv,cli_venv --repo-root "$REPO_ROOT" 2>&1 | tail -15 \
             || log "WARNING: dep_reconciler reported issues (see logs/dep_reconciler.log)"
     fi
@@ -204,9 +258,14 @@ main() {
         exit 1
     fi
 
+    ensure_python_headers
+
     if [ "$COMFYUI_ONLY" -eq 1 ]; then
         heal_comfyui_deps
+        # See comment below — the leak breaks the comfyui-only path identically.
+        unset GUAARDVARK_HEAL_FORCE
         restart_comfyui_if_requested
+        repin_numpy_setuptools
         verify_heal || exit 1
         log "========== heal_backend_venv DONE (comfyui-only) =========="
         exit 0
@@ -217,7 +276,15 @@ main() {
     heal_dep_reconciler
     heal_cv_optional
     heal_comfyui_deps
+    # GUAARDVARK_HEAL_FORCE must NOT leak into the restart: ComfyUI's start.sh
+    # re-runs install_deps.sh, and force mode clears the stamps and reinstalls
+    # unpinned custom-node reqs AFTER the last repin above — exactly how the
+    # client box heal (2026-08-04 00:36) ended on numpy 2.5.1 with verify FAILing.
+    unset GUAARDVARK_HEAL_FORCE
     restart_comfyui_if_requested
+    # Belt-and-braces: repin once more after the restart's install_deps re-run,
+    # so verify below judges the venv state that will actually serve traffic.
+    repin_numpy_setuptools
     verify_heal || exit 1
 
     log "========== heal_backend_venv DONE =========="

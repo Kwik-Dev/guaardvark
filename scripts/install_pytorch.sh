@@ -78,6 +78,18 @@ else
     vader_info "Using active virtualenv: $VIRTUAL_ENV"
 fi
 
+# Pin-convergence: constrain the SHARED backend venv so `--upgrade
+# --force-reinstall torch...` can't re-resolve numpy to 2.x and force the
+# repin-downgrade churn (see backend/constraints.txt; numpy 1.26.4 cp312
+# wheels verified present on the pytorch cu128/cpu indexes). Deliberately NOT
+# applied to isolated plugin venvs (--venv elsewhere) or a caller-set override.
+if [ -z "${PIP_CONSTRAINT:-}" ] \
+   && [ "$TARGET_VENV" = "$PROJECT_ROOT/backend/venv" ] \
+   && [ -f "$PROJECT_ROOT/backend/constraints.txt" ]; then
+    export PIP_CONSTRAINT="$PROJECT_ROOT/backend/constraints.txt"
+    vader_info "Applying pip constraints: backend/constraints.txt (numpy<2, setuptools<81)"
+fi
+
 # ---------------------------------------------------------------------------
 # Accelerator branching.
 #
@@ -319,6 +331,14 @@ if command -v nvidia-smi &> /dev/null; then
             vader_info "Installing PyTorch with CUDA ${CUDA_NAME} support..."
             echo ""
             pip install --upgrade --force-reinstall ${USE_PRE:-}torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/$CUDA_VERSION"
+            # Re-add nvidia-ml-py after the blanket purge above. The purge exists
+            # to kill the DEPRECATED `pynvml` dist (torch FutureWarning source);
+            # nvidia-ml-py is the official replacement and powers the VRAM queries
+            # in gpu_resource_coordinator/ollama_resource_manager. Without this,
+            # every GPU boot warned "pynvml not installed, falling back to
+            # nvidia-smi" because NOTHING in the boot path reinstalled it
+            # (only heal_backend_venv.sh did). See requirements.txt:35-44.
+            pip install nvidia-ml-py 2>/dev/null | tail -1 || true
         else
             vader_detail "PyTorch Index: https://download.pytorch.org/whl/cpu"
             vader_detail "Mode:          CPU-only (GPU not supported)"

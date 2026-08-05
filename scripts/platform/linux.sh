@@ -33,6 +33,47 @@ _linux_python312_usable() {
     [ "${ver%%.*}" = "3" ] && [ "$minor" = "12" ]
 }
 
+_linux_python_headers_ok() {
+    # Native sdist builds (evdev in requirements-base) need Python.h. Ubuntu 24.04
+    # ships python3.12 WITHOUT python3.12-dev, so "3.12 is on PATH" is not enough.
+    local py="$1" inc
+    command -v "$py" >/dev/null 2>&1 || return 1
+    inc=$("$py" -c 'import sysconfig; print(sysconfig.get_paths()["include"])' 2>/dev/null) || return 1
+    [ -n "$inc" ] && [ -f "$inc/Python.h" ]
+}
+
+_linux_ensure_python_headers() {
+    # Best-effort: verify headers for $1, apt-install the matching -dev (+venv)
+    # package when absent. Returns 1 only when headers are missing AND unfixable
+    # here, so platform_ensure_python can fall through to uv (bundles headers).
+    local py="$1" pyver
+    _linux_python_headers_ok "$py" && return 0
+    pyver=$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "3.12")
+    if command -v apt-get >/dev/null 2>&1 && _linux_sudo_available; then
+        vader_info "Python dev headers missing (Python.h) — installing python${pyver}-dev + python${pyver}-venv via apt..."
+        sudo apt-get install -y "python${pyver}-dev" "python${pyver}-venv" >/dev/null 2>&1 || true
+        if _linux_python_headers_ok "$py"; then
+            vader_success "Python ${pyver} dev headers installed (native wheels like evdev can build now)"
+            return 0
+        fi
+    fi
+    vader_warn "Python dev headers still missing for $py — pip will fail building native wheels (evdev: 'Python.h: No such file or directory')."
+    vader_info "Fix manually: sudo apt-get install -y python${pyver}-dev python${pyver}-venv"
+    return 1
+}
+
+# Public wrapper for start.sh: cheap no-op when headers are present. Called
+# EARLY (before system-manager repair) because that layer pip-installs
+# requirements on fresh boxes and hits the evdev/Python.h wall on 24.04.
+# Only acts when a 3.12 interpreter already exists (the 24.04 case) — when
+# 3.12 is absent, platform_ensure_python installs it WITH headers later.
+platform_ensure_python_headers() {
+    local py="${PYTHON_CMD:-}"
+    _linux_python312_usable "$py" || py=python3.12
+    _linux_python312_usable "$py" || return 0
+    _linux_ensure_python_headers "$py"
+}
+
 _linux_set_python_cmd() {
     local py="$1"
     PYTHON_CMD="$py"
@@ -106,17 +147,21 @@ _linux_apt_install_python312() {
 
 platform_install_system_deps() {
     vader_info "Installing system deps via apt (postgresql, redis, ffmpeg, node, build tools, zstd)..."
-    sudo apt-get install -y postgresql postgresql-contrib redis-server ffmpeg nodejs npm cmake build-essential zstd || return 1
+    sudo apt-get install -y postgresql postgresql-contrib redis-server ffmpeg nodejs npm cmake build-essential zstd python3.12-dev python3.12-venv || return 1
 }
 
 platform_ensure_python() {
-    # Fast path: already on PATH
-    if _linux_python312_usable python3.12; then
+    # Fast path: already on PATH — but ONLY with dev headers. Ubuntu 24.04's
+    # system python3.12 lands here headerless and used to sail straight into
+    # the evdev 'Python.h: No such file' pip abort (client box install, 2026-08).
+    # If headers are missing and can't be apt-fixed, fall through to uv below
+    # (python-build-standalone bundles its own headers).
+    if _linux_python312_usable python3.12 && _linux_ensure_python_headers python3.12; then
         _linux_set_python_cmd python3.12
         return 0
     fi
-    # Respect an explicit PYTHON_CMD if it points at 3.12
-    if [ -n "${PYTHON_CMD:-}" ] && [ "$PYTHON_CMD" != python3 ] && _linux_python312_usable "$PYTHON_CMD"; then
+    # Respect an explicit PYTHON_CMD if it points at 3.12 (same header gate)
+    if [ -n "${PYTHON_CMD:-}" ] && [ "$PYTHON_CMD" != python3 ] && _linux_python312_usable "$PYTHON_CMD" && _linux_ensure_python_headers "$PYTHON_CMD"; then
         return 0
     fi
 

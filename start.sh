@@ -86,6 +86,30 @@ fi
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
+# ── Single-instance guard (must run BEFORE any installing layer, including the
+# system-manager repair below) ───────────────────────────────────────────────
+# Overlapping ./start.sh runs interleave pip/npm/ollama output in setup.log and
+# race each other's installs; worse, concurrent multi-GB downloads (torch wheels
+# + npm + ollama pulls) saturate the link until systemd-resolved DNS lookups
+# time out (Observed on the 24.04 client box install: registry.ollama.ai i/o
+# timeout on 127.0.0.53 while cudnn/nccl wheels pulled at 40MB/s).
+# PID file + liveness check rather than flock: daemons we spawn would inherit
+# a lock fd and block legitimate restarts after this script exits.
+START_PID_FILE="$SCRIPT_DIR/.start_cache/start.sh.pid"
+mkdir -p "$SCRIPT_DIR/.start_cache"
+if [ -f "$START_PID_FILE" ]; then
+    _prev_pid=$(cat "$START_PID_FILE" 2>/dev/null)
+    if [ -n "$_prev_pid" ] && kill -0 "$_prev_pid" 2>/dev/null \
+       && ps -p "$_prev_pid" -o command= 2>/dev/null | grep -q "start\.sh"; then
+        vader_error "Another ./start.sh (PID $_prev_pid) is still running — refusing to overlap."
+        vader_error "Concurrent runs corrupt installs and starve DNS while big downloads compete."
+        vader_info "Wait for it to finish (watch: tail -f logs/setup.log), or stop everything first: ./stop.sh"
+        exit 1
+    fi
+fi
+echo $$ > "$START_PID_FILE"
+trap 'rm -f "$START_PID_FILE" 2>/dev/null' EXIT
+
 # ── Platform detection (detect → route to a per-OS backend) ──────────────────
 # Sets GUAARDVARK_OS/_ARCH/_ACCEL/_IS_WSL and sources the matching backend
 # (scripts/platform/{linux,macos}.sh), which DEFINES platform_install_system_deps /
@@ -107,6 +131,15 @@ is_macos() {
     [ "$(uname -s 2>/dev/null)" = Darwin ] && return 0
     return 1
 }
+
+# Python dev headers BEFORE any pip-installing layer runs. The system-manager
+# repair just below installs requirements on fresh/broken boxes; on Ubuntu 24.04
+# the system python3.12 has no python3.12-dev, so evdev's sdist build aborts the
+# whole pip run ('Python.h: No such file or directory') and nothing installs.
+# Cheap no-op (one file test) when headers are already present.
+if ! is_macos && declare -F platform_ensure_python_headers >/dev/null 2>&1; then
+    platform_ensure_python_headers || true
+fi
 
 MANAGER_SCRIPT="$SCRIPT_DIR/scripts/system-manager/system-manager"
 if [ -f "$MANAGER_SCRIPT" ]; then
@@ -1053,6 +1086,35 @@ except Exception:
 " >/dev/null 2>&1
 }
 
+# Install one requirements file into the active venv. NEVER '|| true' this:
+# a single failed sdist build (evdev) makes pip install NOTHING from the run,
+# which is how the 24.04 install died with numpy missing while setup.log said
+# the error 800 lines earlier. On failure: scan for known-fixable signatures,
+# remediate once, retry; else fail LOUD with the actual first pip error.
+pip_install_requirements() {
+    local req="$1" attempt
+    for attempt in 1 2; do
+        if pip install -r "$req" >> "$SETUP_LOG" 2>&1; then
+            return 0
+        fi
+        if [ "$attempt" -eq 1 ] \
+           && tail -n 400 "$SETUP_LOG" | grep -q "Python\.h: No such file or directory"; then
+            vader_warn "pip failed building a native wheel: Python dev headers missing (Python.h)."
+            if command_exists apt-get; then
+                vader_info "Auto-fix: installing python3.12-dev via apt, then retrying $(basename "$req")..."
+                sudo apt-get install -y python3.12-dev python3.12-venv >> "$SETUP_LOG" 2>&1 || true
+                continue
+            fi
+        fi
+        break
+    done
+    vader_error "pip install -r $(basename "$req") FAILED — dependencies from this file are NOT installed."
+    vader_error "First error in $SETUP_LOG:"
+    tail -n 400 "$SETUP_LOG" | grep -m1 -E "fatal error:|error: subprocess-exited-with-error|ERROR: " | sed 's/^/      /'
+    vader_info "After fixing, re-run ./start.sh (or: ./scripts/heal_backend_venv.sh)"
+    return 1
+}
+
 ensure_backend_python_environment() {
     # Under --fast we still repair a completely broken venv (otherwise nothing works).
     # We only fast-skip when the probe already says it's healthy.
@@ -1068,15 +1130,33 @@ ensure_backend_python_environment() {
     fi
 
     if [ "$needed" -eq 1 ]; then
+        # DNS sanity probe before multi-GB downloads. On the 24.04 client box a
+        # full resolution outage ("Temporary failure in name resolution" for
+        # pypi.org) failed the whole reconcile mid-bootstrap. Warn loudly and
+        # continue — the box may be deliberately offline with a warm cache.
+        if ! timeout 5 getent hosts pypi.org >/dev/null 2>&1; then
+            vader_error "DNS resolution is broken on this box (cannot resolve pypi.org) — dependency installs WILL fail."
+            vader_error "Try: sudo systemctl restart systemd-resolved   (check: resolvectl status)"
+            vader_info "Continuing anyway in case this box is intentionally offline..."
+        fi
         vader_info "Python environment incomplete or first-time setup — bootstrapping dependencies (logged to $SETUP_LOG)..."
         source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv for bootstrap"; return 1; }
 
-        # requirements-base first (matches system-manager + leaves room for smart torch)
+        # requirements-base first (matches system-manager + leaves room for smart torch).
+        # Fail fast: if the core files can't install there is nothing to boot —
+        # stop HERE with the real error instead of cascading numpy tracebacks
+        # through the hardware probe, vite build, and reconciler (24.04 lesson).
         if [ -f "$BACKEND_DIR/requirements-base.txt" ]; then
-            pip install -r "$BACKEND_DIR/requirements-base.txt" >> "$SETUP_LOG" 2>&1 || true
+            if ! pip_install_requirements "$BACKEND_DIR/requirements-base.txt"; then
+                deactivate
+                return 1
+            fi
         fi
         if [ -f "$BACKEND_DIR/requirements.txt" ]; then
-            pip install -r "$BACKEND_DIR/requirements.txt" >> "$SETUP_LOG" 2>&1 || true
+            if ! pip_install_requirements "$BACKEND_DIR/requirements.txt"; then
+                deactivate
+                return 1
+            fi
         fi
 
         # Optional CV/face-restoration extra (P3-10). These deps (gfpgan/realesrgan/
@@ -1128,9 +1208,16 @@ ensure_backend_python_environment() {
         fi
 
         # Full reconciler pass for state tracking, CRITICAL_PACKAGES verification, cli_venv, etc.
+        # A failure here is NOT a soft warn: it means a dependency target is broken.
+        # Surface the reconciler's own failure summary and drop a sentinel that
+        # preflight_check.py turns into a red failure (no more green "All checks
+        # passed" over a half-installed venv).
         if [ -x "$VENV_DIR/bin/python" ]; then
-            "$VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/dep_reconciler.py" --force --only backend_venv,cli_venv --repo-root "$SCRIPT_DIR" >> "$SETUP_LOG" 2>&1 || \
-                vader_warn "dep_reconciler had issues (see setup.log); basic pip may still have succeeded"
+            if ! "$VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/dep_reconciler.py" --force --only backend_venv,cli_venv --repo-root "$SCRIPT_DIR" >> "$SETUP_LOG" 2>&1; then
+                vader_error "Dependency reconciler FAILED:"
+                tail -n 200 "$SETUP_LOG" | grep -A4 "Reconciliation failed for:" | sed 's/^/      /'
+                vader_info "Details: $SETUP_LOG and logs/dep_reconciler.log. Repair: ./scripts/heal_backend_venv.sh"
+            fi
         fi
 
         deactivate
@@ -1665,19 +1752,56 @@ if [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ]; then
             done
         fi
 
-        # Step 5: Non-fatal failure
+        # Step 5: HARD failure. Ollama is installed AND the plugin is enabled,
+        # yet nothing listens on 11434 after systemctl + direct serve. Booting
+        # anyway means every chat/RAG call dies with connection-refused (the
+        # 24.04 client box boot shipped exactly that). Stop with remediation unless
+        # the operator explicitly opts into a degraded boot.
         if [ "$OLLAMA_STARTED" -eq 0 ]; then
-            vader_warn "Ollama failed to start (non-critical). Chat/RAG features will be unavailable."
-            vader_info "Check $LOGS_DIR/ollama_serve.log or start manually: ollama serve"
-            # Clean up PID file if the process didn't respond
             rm -f "$SCRIPT_DIR/pids/ollama.pid" 2>/dev/null
+            if [ "${GUAARDVARK_OLLAMA_OPTIONAL:-0}" = "1" ]; then
+                vader_warn "Ollama failed to start — continuing because GUAARDVARK_OLLAMA_OPTIONAL=1. Chat/RAG features will be unavailable."
+                vader_info "Check $LOGS_DIR/ollama_serve.log or start manually: ollama serve"
+            else
+                vader_error "Ollama failed to start: nothing is listening on 127.0.0.1:11434 after systemctl AND direct-serve attempts."
+                vader_error "Chat and RAG cannot work in this state, so startup is stopping here."
+                vader_info "Diagnose:  tail -n 50 $LOGS_DIR/ollama_serve.log ; systemctl status ollama"
+                vader_info "Manual:    ollama serve   (then re-run ./start.sh)"
+                vader_info "Boot anyway without chat/RAG:  GUAARDVARK_OLLAMA_OPTIONAL=1 ./start.sh  (or disable the Ollama plugin in the UI)"
+                exit 1
+            fi
         fi
     fi
 elif [ "$OLLAMA_ENABLED" = "False" ]; then
-    vader_info "Ollama plugin is disabled — skipping startup"
+    # WARN, not info: with the plugin off, chat and RAG are dead and the backend
+    # will log connection-refused against 127.0.0.1:11434 on every boot. This
+    # exact state masqueraded as an "Ollama install failure" on the 24.04
+    # client box for a full day of debugging.
+    vader_warn "Ollama plugin is DISABLED — skipping startup. Chat/RAG will not work."
+    vader_info "Re-enable: Settings → Plugins → Ollama (or edit data/plugin_state.json), then re-run ./start.sh"
 else
     vader_warn "Ollama CLI not available; skipping service check."
 fi
+
+# `ollama pull` with retry/backoff. Single-shot pulls failed on the 24.04
+# install because DNS through systemd-resolved (127.0.0.53) times out
+# transiently while torch wheels / HF snapshots saturate the link — the embed
+# model never landed and RAG was silently dead. 3 attempts, 10s → 30s backoff.
+ollama_pull_retry() {
+    local model="$1" attempts="${2:-3}" delay=10 i
+    for i in $(seq 1 "$attempts"); do
+        echo "--- ollama_pull_retry: $model attempt $i/$attempts $(date '+%Y-%m-%d %H:%M:%S') ---" >> "$LOGS_DIR/ollama_bootstrap.log"
+        if ollama pull "$model" >> "$LOGS_DIR/ollama_bootstrap.log" 2>&1; then
+            return 0
+        fi
+        if [ "$i" -lt "$attempts" ]; then
+            vader_warn "ollama pull $model failed (attempt $i/$attempts) — retrying in ${delay}s (transient DNS/network is common during first-boot downloads)"
+            sleep "$delay"
+            delay=$((delay * 3))
+        fi
+    done
+    return 1
+}
 
 # ── Fresh-install model bootstrap (P0-3) ──
 # A fresh box boots with ZERO models → first chat 404s and RAG's
@@ -1742,17 +1866,17 @@ except Exception:
     # A "chat model" is any non-embed tag. Detect absence of either class.
     if ! echo "$BOOT_LIST" | grep -viE 'embed|minilm' | grep -qE '[a-zA-Z0-9].*:'; then
         vader_info "No chat model found — pulling $BOOT_CHAT_MODEL (one-time, ~minutes)..."
-        ollama pull "$BOOT_CHAT_MODEL" >> "$LOGS_DIR/ollama_bootstrap.log" 2>&1 \
+        ollama_pull_retry "$BOOT_CHAT_MODEL" \
             && vader_success "Chat model ready: $BOOT_CHAT_MODEL" \
-            || vader_warn "Failed to pull $BOOT_CHAT_MODEL (non-critical; see logs/ollama_bootstrap.log). Pull manually: ollama pull $BOOT_CHAT_MODEL"
+            || vader_warn "Failed to pull $BOOT_CHAT_MODEL after retries (non-critical; see logs/ollama_bootstrap.log). Pull manually: ollama pull $BOOT_CHAT_MODEL"
     else
         vader_success "Chat model already present"
     fi
     if ! echo "$BOOT_LIST" | grep -qiE 'embed|minilm'; then
         vader_info "No embedding model found — pulling $BOOT_EMBED_MODEL (one-time)..."
-        ollama pull "$BOOT_EMBED_MODEL" >> "$LOGS_DIR/ollama_bootstrap.log" 2>&1 \
+        ollama_pull_retry "$BOOT_EMBED_MODEL" \
             && vader_success "Embedding model ready: $BOOT_EMBED_MODEL" \
-            || vader_warn "Failed to pull $BOOT_EMBED_MODEL (non-critical; RAG stays disabled until present). Pull manually: ollama pull $BOOT_EMBED_MODEL"
+            || vader_warn "Failed to pull $BOOT_EMBED_MODEL after retries (non-critical; RAG stays disabled until present). Pull manually: ollama pull $BOOT_EMBED_MODEL"
     else
         vader_success "Embedding model already present"
     fi
@@ -1986,8 +2110,13 @@ if [ "$FAST_START" -eq 0 ]; then
     cd "$SCRIPT_DIR"
     PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH" python3 scripts/preflight_check.py --quick >> "$GUAARDVARK_LOG_DIR/preflight.log" 2>&1
     if [ $? -ne 0 ]; then
-        vader_warn "Preflight check found import errors — see logs/preflight.log"
-        vader_info "Attempting to continue anyway..."
+        # RED and specific, not a soft one-liner: a failed preflight means a
+        # known-broken capability (missing torch on a GPU box, unhealed
+        # reconcile). Print the actual errors so nobody has to dig in logs.
+        vader_error "Preflight check FAILED — the app will start DEGRADED:"
+        grep -E "^    - " "$GUAARDVARK_LOG_DIR/preflight.log" | tail -n 10 | sed 's/^/      /'
+        vader_error "Full report: logs/preflight.log"
+        vader_info "Continuing startup so you can use unaffected features; fix the above and re-run ./start.sh"
     else
         vader_success "Import validation passed"
     fi
@@ -2245,7 +2374,7 @@ export FLASK_PORT
 export VITE_PORT
 
 # ┌──────────────────────────────────────────────────────────────────────────────┐
-# │ OPERATOR-CRITICAL — DO NOT REMOVE OR "SIMPLIFY" (Dean's standing rule, 2026-06-27).
+# │ OPERATOR-CRITICAL — DO NOT REMOVE OR "SIMPLIFY" (operator standing rule, 2026-06-27).
 # │ `./start.sh` MUST rebuild the frontend on every boot. This block + the default
 # │ AUTO_BUILD_FRONTEND=1 (top of file) exist ON PURPOSE and have been silently
 # │ discarded before. If you are an agent reading this: leave it. If it ever vanishes,

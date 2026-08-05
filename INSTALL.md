@@ -30,6 +30,30 @@ The startup script handles everything: Python 3.12 (auto-installed if needed), d
 
 First run may ask for your password once (PostgreSQL, Node.js, or Python packages via apt).
 
+**Optional but recommended — Hugging Face token:** the first image/video generation triggers a one-time multi-GB model download. Without a token these downloads are unauthenticated and may be rate-limited. Create a free token at https://huggingface.co/settings/tokens and add one line to `.env` in the project root:
+
+```bash
+HF_TOKEN=hf_...
+```
+
+**Optional but recommended — protect the desktop from memory pressure:** heavy
+generations (large images, video) can push system RAM hard. Guaardvark already
+marks its own processes as the OOM killer's preferred victims (so a memory
+crisis kills a generation job, not your desktop session), but two OS-level
+steps shrink the freeze window further:
+
+```bash
+# 1) earlyoom: acts before the kernel stalls; spares the desktop, prefers our workers
+sudo apt-get install -y earlyoom
+sudo sed -i 's|^EARLYOOM_ARGS=.*|EARLYOOM_ARGS="-r 0 --avoid (^\|/)(gnome-shell\|Xwayland\|gnome-session\|systemd\|dbus)$ --prefer (^\|/)(python3?\|celery)$"|' /etc/default/earlyoom
+sudo systemctl restart earlyoom
+
+# 2) Swap posture: >=16GB swap and low swappiness keeps a spike survivable
+#    without minutes of desktop-freezing thrash first.
+swapon --show   # if under 16G, grow it
+echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-guaardvark.conf && sudo sysctl --system
+```
+
 ## Alternative: Docker (Linux, core stack only)
 
 If you want to evaluate the UI/API without a native Python install:

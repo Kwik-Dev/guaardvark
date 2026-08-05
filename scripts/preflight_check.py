@@ -11,6 +11,7 @@ Usage:
 import sys
 import os
 import importlib
+import shutil
 import subprocess
 
 # Resolve project root
@@ -156,6 +157,71 @@ def check_service_modules():
     return all_ok
 
 
+def check_reconciler_sentinel():
+    """Fail RED if the dependency reconciler failed and was never repaired.
+
+    scripts/dep_reconciler.py writes logs/.dep_reconcile_failed on failure and
+    removes it on the next successful backend_venv run. While it exists, the
+    venv is known-incomplete — a green "All checks passed" here would be a lie
+    (this exact lie shipped on the 24.04 client box install, 2026-08).
+    """
+    print("\n\033[1m[R] Dependency reconciler state\033[0m")
+    sentinel = os.path.join(PROJECT_ROOT, "logs", ".dep_reconcile_failed")
+    if not os.path.isfile(sentinel):
+        print(f"  {PASS} No unresolved reconciler failure")
+        return True
+    try:
+        with open(sentinel) as f:
+            detail = f.read().strip()
+    except OSError:
+        detail = "(sentinel unreadable)"
+    print(f"  {FAIL} Last dependency reconcile FAILED and has not succeeded since:")
+    for line in detail.splitlines():
+        print(f"      {line}")
+    errors.append(
+        "Dependency reconciler failed (logs/.dep_reconcile_failed present). "
+        "Repair: ./scripts/heal_backend_venv.sh  or  ./scripts/dep_reconciler.py --force"
+    )
+    return False
+
+
+def check_gpu_stack():
+    """On a working-GPU box, torch MUST import — never downgrade it to a warning.
+
+    check_service_modules() treats a missing torch as an optional dep (right for
+    CPU/ARM boxes, wrong on a GPU box: image/video generation silently dies).
+    Gate on nvidia-smi actually running, not merely existing, so boxes with a
+    stale driver package don't get blocked.
+    """
+    print("\n\033[1m[G] GPU stack\033[0m")
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        print(f"  {PASS} No nvidia-smi — CPU/ARM box, torch not required")
+        return True
+    try:
+        result = subprocess.run([smi], capture_output=True, timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        result = None
+    if result is None or result.returncode != 0:
+        warn("nvidia-smi", "present but not functional (no driver loaded?) — skipping torch requirement")
+        return True
+    try:
+        torch = importlib.import_module("torch")
+        print(f"  {PASS} import torch ({getattr(torch, '__version__', '?')})")
+        if not torch.cuda.is_available():
+            warn("torch.cuda", "torch imports but CUDA is unavailable (CPU wheel installed? driver mismatch?)")
+    except Exception as e:
+        short_err = str(e).split("\n")[0][:120]
+        print(f"  {FAIL} import torch: {short_err}")
+        errors.append(
+            f"NVIDIA GPU detected but torch cannot import ({short_err}). "
+            "Image/video generation will be dead. Fix: bash scripts/install_pytorch.sh "
+            "(or ./scripts/heal_backend_venv.sh)"
+        )
+        return False
+    return True
+
+
 def check_frontend():
     """Check frontend build state."""
     print("\n\033[1m[4/4] Frontend\033[0m")
@@ -197,6 +263,10 @@ def main():
     print(f"  {PASS} Cleared stale bytecode cache")
 
     check_critical_imports()
+    # Run in --quick too: start.sh's boot preflight is --quick, and these two
+    # are exactly the checks that catch a half-installed venv (24.04 lesson).
+    check_reconciler_sentinel()
+    check_gpu_stack()
 
     if not quick:
         check_api_modules()

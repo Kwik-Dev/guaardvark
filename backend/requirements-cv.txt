@@ -37,6 +37,14 @@ tb-nightly             # Required by GFPGAN (optional at runtime, recommended)
 # --- Anatomy & Pose Control (ControlNet) ---
 controlnet-aux==0.0.9
 mediapipe==0.10.14     # no aarch64 wheel for many versions — primary Pi abort cause
+# mediapipe declares an UNPINNED jax/jaxlib dep; the resolver grabs the latest
+# (0.11.x), which requires numpy>=2.1 — permanently incompatible with the ML
+# stack's numpy<2.0 pin, so every install ends with pip resolver conflict noise
+# and a jax that can't even import. mediapipe's runtime (solutions/tasks APIs we
+# use via anatomy_improvement_service) never imports jax — it's only needed for
+# model-maker workflows. Pin the last numpy<2-friendly line so one pass converges.
+jax==0.4.30
+jaxlib==0.4.30
 
 # --- Imaging backend used only by the two services above ---
 opencv-python==4.8.1.78

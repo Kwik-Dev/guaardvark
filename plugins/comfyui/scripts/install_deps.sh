@@ -12,6 +12,114 @@
 # Resolve this library's directory once (works sourced or executed directly).
 _COMFYUI_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Force ComfyUI-Manager to network_mode=offline (OFFLINE-FIRST: Manager otherwise
+# fetches 5 cache JSONs from raw.githubusercontent.com + ComfyRegistry on every
+# ComfyUI start). Runs on every start so it covers fresh installs, restore_app.sh,
+# and a Manager added later. Deliberate node installs/updates: set
+# GUAARDVARK_COMFYUI_NETWORK_MODE=public (or private) for that start; the next
+# unflagged start reverts to offline.
+ensure_comfyui_manager_offline() {
+    local SCRIPT_DIR PLUGIN_ROOT PROJECT_ROOT COMFYUI_DIR MODE PY
+    SCRIPT_DIR="$_COMFYUI_SCRIPTS_DIR"
+    PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    PROJECT_ROOT="$(cd "$PLUGIN_ROOT/../.." && pwd)"
+    COMFYUI_DIR="${1:-$PLUGIN_ROOT/ComfyUI}"
+    MODE="${GUAARDVARK_COMFYUI_NETWORK_MODE:-offline}"
+
+    [ -d "$COMFYUI_DIR" ] || return 0
+
+    case "$MODE" in
+        offline|private|public) ;;
+        *)
+            echo "WARNING: invalid GUAARDVARK_COMFYUI_NETWORK_MODE='$MODE' — using offline" >&2
+            MODE=offline
+            ;;
+    esac
+
+    PY="${VENV_PYTHON:-$PROJECT_ROOT/backend/venv/bin/python}"
+    [ -x "$PY" ] || PY="$(command -v python3 || true)"
+    if [ -z "$PY" ]; then
+        echo "WARNING: no python found — cannot enforce ComfyUI-Manager network_mode" >&2
+        return 0
+    fi
+
+    "$PY" - "$COMFYUI_DIR" "$MODE" <<'PYEOF'
+import configparser, pathlib, sys
+
+comfy = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+# Manager v3.x layout + legacy 2.x layout; the unused one is inert.
+for rel in ("user/__manager/config.ini", "user/default/ComfyUI-Manager/config.ini"):
+    path = comfy / rel
+    cfg = configparser.ConfigParser(interpolation=None)
+    if path.exists():
+        try:
+            cfg.read(path)
+        except configparser.Error:
+            cfg = configparser.ConfigParser(interpolation=None)
+    if not cfg.has_section("default"):
+        cfg.add_section("default")
+    if cfg.get("default", "network_mode", fallback=None) == mode:
+        continue
+    cfg.set("default", "network_mode", mode)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        cfg.write(fh)
+    print(f"ComfyUI-Manager network_mode -> {mode} ({path})")
+PYEOF
+}
+
+# Ensure REQUIRED custom nodes exist, from the pinned manifest
+# (plugins/comfyui/custom_nodes.manifest). A fresh box previously had NO
+# mechanism to obtain these: plugins/comfyui/ComfyUI/ is excluded from
+# Interconnector sync, restore_app.sh deliberately never touches
+# custom_nodes/, and this script only installed reqs for nodes ALREADY on
+# disk — so clients booted with facerestore_cf only and video generation
+# failed with "missing VHS_VideoCombine" (Observed: client box, 2026-08-04).
+# Pinned-SHA fetch keeps clients on master's tested revisions; falls back to
+# a shallow default-branch clone when the pinned fetch isn't possible.
+# Offline: per-node warning, non-fatal. Skip: GUAARDVARK_COMFYUI_AUTONODES=0.
+ensure_custom_nodes() {
+    local COMFYUI_DIR="$1"
+    local PLUGIN_ROOT MANIFEST CN_DIR
+    PLUGIN_ROOT="$(cd "$_COMFYUI_SCRIPTS_DIR/.." && pwd)"
+    MANIFEST="$PLUGIN_ROOT/custom_nodes.manifest"
+    CN_DIR="$COMFYUI_DIR/custom_nodes"
+
+    [ "${GUAARDVARK_COMFYUI_AUTONODES:-1}" = "0" ] && return 0
+    [ -f "$MANIFEST" ] || return 0
+    if ! command -v git >/dev/null 2>&1; then
+        echo "WARNING: git not found — cannot install missing custom nodes (video generation may be unavailable)"
+        return 0
+    fi
+    mkdir -p "$CN_DIR"
+
+    local name url sha dest
+    while IFS='|' read -r name url sha; do
+        case "$name" in ''|'#'*) continue ;; esac
+        [ -n "$url" ] || continue
+        dest="$CN_DIR/$name"
+        [ -d "$dest" ] && continue
+        echo "Custom node missing: $name — fetching pinned revision ${sha:0:12}..."
+        if git init -q "$dest" 2>/dev/null \
+           && git -C "$dest" remote add origin "$url" 2>/dev/null \
+           && git -C "$dest" fetch -q --depth 1 origin "$sha" 2>/dev/null \
+           && git -C "$dest" checkout -q FETCH_HEAD 2>/dev/null; then
+            echo "  installed $name @ ${sha:0:12}"
+        else
+            # Pinned fetch can fail (old git, server refuses SHA fetch) — a
+            # current default-branch node beats no node at all.
+            rm -rf "$dest"
+            if git clone -q --depth 1 "$url" "$dest" 2>/dev/null; then
+                echo "  installed $name @ default branch (pinned fetch unavailable)"
+            else
+                rm -rf "$dest"
+                echo "  WARNING: could not fetch $name from $url (offline?) — features needing it stay unavailable."
+            fi
+        fi
+    done < "$MANIFEST"
+}
+
 install_comfyui_python_deps() {
     local SCRIPT_DIR PLUGIN_ROOT PROJECT_ROOT COMFYUI_DIR
     SCRIPT_DIR="$_COMFYUI_SCRIPTS_DIR"
@@ -29,6 +137,23 @@ install_comfyui_python_deps() {
         echo "Error: ComfyUI not found at $COMFYUI_DIR/main.py" >&2
         return 1
     fi
+
+    # Pin-convergence: ComfyUI core + custom-node requirements install into the
+    # SHARED backend venv, and unpinned "numpy" lines in custom-node reqs were
+    # one of the two sources dragging numpy 2.4.x in over the ML stack's
+    # numpy<2.0 pin (install → force-downgrade churn on every boot; Observed in
+    # the 24.04 client box setup.log). Constrain the resolver up front — the REPIN
+    # step below stays as a no-op safety net. Caller override respected.
+    if [ -z "${PIP_CONSTRAINT:-}" ] && [ -f "$PROJECT_ROOT/backend/constraints.txt" ]; then
+        export PIP_CONSTRAINT="$PROJECT_ROOT/backend/constraints.txt"
+    fi
+
+    # Egress lockdown first, so it holds even if a later pip step fails.
+    ensure_comfyui_manager_offline "$COMFYUI_DIR"
+
+    # Required custom nodes BEFORE the reqs loop below, so freshly fetched
+    # nodes get their requirements installed in the same pass.
+    ensure_custom_nodes "$COMFYUI_DIR"
 
     local COMFYUI_REQS REQS_STAMP CN_DIR CN_STAMP
     COMFYUI_REQS="$COMFYUI_DIR/requirements.txt"
