@@ -64,6 +64,49 @@ done
 VENV_PIP="$TARGET_VENV/bin/pip"
 VENV_PYTHON="$TARGET_VENV/bin/python"
 
+# --- safety: stage wheels BEFORE destroying the working install -------------
+# Every branch below uninstalls torch and then downloads the replacement. A
+# network drop (or Ctrl-C) between those two steps leaves the venv with NO
+# torch at all — not the new one, not the old one. Observed 2026-08-05: an
+# unplugged ethernet cable mid-run stripped torch/torchvision/torchaudio from
+# a working box and took the whole stack down.
+#
+# _pt_stage_wheels downloads every wheel (plus deps) into PT_STAGE first and
+# fails BEFORE anything is uninstalled. The installs then run offline from
+# that directory, so the destructive window no longer depends on the network.
+PT_STAGE="$PROJECT_ROOT/data/.pt-wheels-$$"
+_pt_stage_cleanup() { [ -n "${PT_STAGE:-}" ] && rm -rf "$PT_STAGE" 2>/dev/null || true; }
+trap _pt_stage_cleanup EXIT INT TERM
+
+_pt_stage_wheels() {  # usage: _pt_stage_wheels <index-url|""> <pkg...>
+    local idx="$1"; shift
+    local dlargs=()
+    [ -n "$idx" ] && dlargs=(--index-url "$idx")
+    mkdir -p "$PT_STAGE" || { vader_warn "Could not create wheel staging dir; falling back to direct install."; PT_STAGE=""; return 0; }
+    vader_info "Staging PyTorch wheels first (existing install untouched until this succeeds)..."
+    if ! pip download --dest "$PT_STAGE" "${dlargs[@]}" "$@"; then
+        vader_warn "PyTorch wheel download FAILED — existing install left intact, nothing was removed."
+        vader_warn "Re-run once the network is healthy: bash scripts/install_pytorch.sh"
+        _pt_stage_cleanup
+        return 1
+    fi
+    vader_success "Wheels staged; the swap below now runs offline."
+    return 0
+}
+
+# Installs from the staged dir when staging succeeded, else falls back to the
+# original network install so behaviour is unchanged if staging was skipped.
+_pt_install_staged() {  # usage: _pt_install_staged <index-url|""> <pkg...>
+    local idx="$1"; shift
+    if [ -n "${PT_STAGE:-}" ] && [ -d "$PT_STAGE" ]; then
+        pip install --upgrade --force-reinstall --no-index --find-links "$PT_STAGE" "$@"
+    elif [ -n "$idx" ]; then
+        pip install --upgrade --force-reinstall "$@" --index-url "$idx"
+    else
+        pip install --upgrade --force-reinstall "$@"
+    fi
+}
+
 if [ -x "$VENV_PIP" ] && [ -x "$VENV_PYTHON" ]; then
     vader_info "Using venv: $TARGET_VENV"
     pip() { "$VENV_PIP" "$@"; }
@@ -137,8 +180,9 @@ if [ "$UNAME_S" = "Darwin" ]; then
     # MPS-capable build; the whl/cpu index would strip Metal support. Swap-safety
     # uninstall first (same rationale as the other branches) but no CUDA/triton
     # cleanup — those never exist on macOS — and no pynvml removal.
+    _pt_stage_wheels "" torch torchvision torchaudio || exit 1
     pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
-    pip install --upgrade --force-reinstall torch torchvision torchaudio
+    _pt_install_staged "" torch torchvision torchaudio
 
     vader_section "Verification:"
     python3 << 'EOF'
@@ -185,13 +229,14 @@ if command -v rocm-smi &> /dev/null || _hardware_json_says_amd; then
     # Swap-safety: clean prior torch + any lingering CUDA/triton bloat from a
     # previous build, then force-reinstall the ROCm variant (the +rocm local
     # tag collides with +cpu/+cuXXX in pip's resolver, same as the CUDA path).
+    _pt_stage_wheels "https://download.pytorch.org/whl/${ROCM_WHL}" torch torchvision torchaudio || exit 1
     pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
     pip freeze 2>/dev/null | grep -iE "^(nvidia-|cuda-bindings|cuda-pathfinder|cuda-toolkit|triton)" | awk -F'==' '{print $1}' | xargs -r pip uninstall -y 2>/dev/null | tail -3 || true
     # Purge flash-attn/xformers/pynvml for the same reasons as CUDA/CPU paths (shared
     # backend/venv contract; custom nodes and some plugin reqs inject incompatible
     # versions leading to diffusers import crashes with aten schema errors).
     pip uninstall -y flash-attn flash_attn xformers pynvml nvidia-ml-py 2>/dev/null | tail -3 || true
-    pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/${ROCM_WHL}"
+    _pt_install_staged "https://download.pytorch.org/whl/${ROCM_WHL}" torch torchvision torchaudio
 
     vader_section "Verification:"
     python3 << 'EOF'
@@ -313,6 +358,11 @@ if command -v nvidia-smi &> /dev/null; then
         # Ctrl-C during this phase the target venv will be left without torch
         # (and without the old one either). Let the script finish. The verify
         # gate at the end of start.sh will surface the problem if it happens.
+        if [ "$CUDA_VERSION" != "cpu" ]; then
+            _pt_stage_wheels "https://download.pytorch.org/whl/$CUDA_VERSION" ${USE_PRE:-}torch torchvision torchaudio || exit 1
+        else
+            _pt_stage_wheels "https://download.pytorch.org/whl/cpu" torch torchvision torchaudio || exit 1
+        fi
         pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
         pip freeze 2>/dev/null | grep -iE "^(nvidia-|cuda-bindings|cuda-pathfinder|cuda-toolkit|triton)" | awk -F'==' '{print $1}' | xargs -r pip uninstall -y 2>/dev/null | tail -3 || true
         # Purge flash-attn / xformers (the #1 source of "Current Torch with Flash-Attention 2.5.7
@@ -330,7 +380,7 @@ if command -v nvidia-smi &> /dev/null; then
             echo ""
             vader_info "Installing PyTorch with CUDA ${CUDA_NAME} support..."
             echo ""
-            pip install --upgrade --force-reinstall ${USE_PRE:-}torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/$CUDA_VERSION"
+            _pt_install_staged "https://download.pytorch.org/whl/$CUDA_VERSION" ${USE_PRE:-}torch torchvision torchaudio
             # Re-add nvidia-ml-py after the blanket purge above. The purge exists
             # to kill the DEPRECATED `pynvml` dist (torch FutureWarning source);
             # nvidia-ml-py is the official replacement and powers the VRAM queries
@@ -345,7 +395,7 @@ if command -v nvidia-smi &> /dev/null; then
             echo ""
             vader_info "Installing CPU-only PyTorch..."
             echo ""
-            pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+            _pt_install_staged "https://download.pytorch.org/whl/cpu" torch torchvision torchaudio
             # pynvml is deprecated and fires FutureWarning on every `import torch`
             # via torch/cuda/__init__.py. On CPU-only hosts it serves no purpose —
             # torch handles the ImportError gracefully. Remove it to silence the noise.
@@ -392,8 +442,9 @@ EOF
         vader_warn "Could not detect GPU compute capability"
         vader_info "Installing CPU-only PyTorch as fallback..."
         echo ""
+        _pt_stage_wheels "https://download.pytorch.org/whl/cpu" torch torchvision torchaudio || exit 1
         pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
-        pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        _pt_install_staged "https://download.pytorch.org/whl/cpu" torch torchvision torchaudio
         pip uninstall -y pynvml flash-attn flash_attn xformers nvidia-ml-py 2>/dev/null | tail -2 || true
 
         vader_section "Verification:"
@@ -407,12 +458,13 @@ else
     vader_info "Installing CPU-only PyTorch..."
     echo ""
     # Same variant-swap safety: uninstall first, force-reinstall, drop pynvml.
+    _pt_stage_wheels "https://download.pytorch.org/whl/cpu" torch torchvision torchaudio || exit 1
     pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
     pip freeze 2>/dev/null | grep -iE "^(nvidia-|cuda-bindings|cuda-pathfinder|cuda-toolkit|triton)" | awk -F'==' '{print $1}' | xargs -r pip uninstall -y 2>/dev/null | tail -3 || true
     # Also purge flash/xformers/pynvml here (see main CUDA clean comment for rationale:
     # prevents schema mismatch on diffusers import + repeated FutureWarnings from plugins).
     pip uninstall -y flash-attn flash_attn xformers pynvml nvidia-ml-py 2>/dev/null | tail -3 || true
-    pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    _pt_install_staged "https://download.pytorch.org/whl/cpu" torch torchvision torchaudio
 
     vader_section "Verification:"
     python3 -c "import torch; print(f'    PyTorch Version: {torch.__version__}'); print(f'    Mode: CPU-only')"
