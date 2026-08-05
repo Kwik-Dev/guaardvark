@@ -243,7 +243,11 @@ if [ "$NEEDS_SUDO" = true ]; then
   echo ""
 
   # Validate sudo access upfront so we get a clean prompt
-  if ! sudo -v 2>/dev/null; then
+  # 'sudo -v' insists on a password even under NOPASSWD when another matching
+  # rule (e.g. the %sudo group) requires one, and it needs a tty - so it fails in
+  # any non-interactive run. Try the passwordless path first, exactly as
+  # _linux_sudo_available() in scripts/platform/linux.sh does.
+  if ! { sudo -n true 2>/dev/null || sudo -v; }; then
     vader_error "sudo authentication failed. Cannot proceed with PostgreSQL setup."
     vader_warn "Run with: sudo -v && ./start.sh"
     exit 1
