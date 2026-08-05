@@ -1680,6 +1680,10 @@ if [ "${GUAARDVARK_OLLAMA_TUNING:-1}" != "0" ] && command_exists systemctl; then
             {
                 echo "# RENDERED by start.sh from backend.services.hardware_policy — do not edit by hand."
                 echo "# Regenerate by re-running start.sh or: python -m backend.services.hardware_policy ollama_env"
+                # systemd requires a section header; hardware_policy emits bare
+                # Environment= lines. Without this every setting is discarded with
+                # "Assignment outside of section" and the tuning silently does nothing.
+                echo "[Service]"
                 cat "$OLLAMA_DROPIN_RENDERED"
             } > "$OLLAMA_DROPIN_RENDERED.tmp" && mv "$OLLAMA_DROPIN_RENDERED.tmp" "$OLLAMA_DROPIN_RENDERED"
             DROPIN_SRC="$OLLAMA_DROPIN_RENDERED"
