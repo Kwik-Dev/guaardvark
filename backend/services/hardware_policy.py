@@ -27,7 +27,7 @@ def torch_channel(gpu: dict[str, Any], rocm_whl: str = DEFAULT_ROCM_WHL) -> str:
     """Map a GPU descriptor to a PyTorch wheel channel.
 
     Mirrors the arch table historically embedded in scripts/install_pytorch.sh.
-    NVIDIA: Blackwell/Hopper(>=9) -> cu128 ; Ampere/Ada(8) -> cu121 ;
+    NVIDIA: Blackwell/Hopper(>=9) -> cu128 ; Ampere/Ada(8) -> cu124 ;
     Volta/Turing/Pascal(6-7) -> cu118 ; older/unknown -> cpu.
     """
     vendor = (gpu or {}).get("vendor", "none")
@@ -41,7 +41,11 @@ def torch_channel(gpu: dict[str, Any], rocm_whl: str = DEFAULT_ROCM_WHL) -> str:
     if major >= 9:
         return "cu128"
     if major >= 8:
-        return "cu121"
+        # cu124, NOT cu121: the cu121 wheel index tops out at torch 2.5.1, which is
+        # permanently vulnerable to CVE-2025-32434 (torch.load RCE, fixed in 2.6.0).
+        # Routing Ampere/Ada here made that CVE structurally unpatchable for every
+        # 30/40-series user. cu124 reaches 2.6.0 and supports sm_80-sm_89.
+        return "cu124"
     if major >= 6:
         return "cu118"
     return "cpu"
