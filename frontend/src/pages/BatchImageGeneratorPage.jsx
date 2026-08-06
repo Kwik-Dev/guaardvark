@@ -387,11 +387,20 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         if (selectedPreset === 'auto' && data.data.detection.recommended_preset) {
           const preset = contentPresets[data.data.detection.recommended_preset];
           if (preset) {
-            setParams(prev => ({
-              ...prev,
-              steps: preset.recommended_steps || prev.steps,
-              guidance: preset.recommended_guidance || prev.guidance
-            }));
+            setParams(prev => {
+              // Z-Image is CFG-free with a fixed sampling recipe. Content presets are
+              // tuned for CFG models, so applying one here silently pushed steps to
+              // 30+ the moment a prompt was pasted - bypassing the model/preset guard,
+              // which only fires when the MODEL or PRESET changes, not the prompt.
+              if (isZimageModel(prev.model)) return prev;
+              return {
+                ...prev,
+                // ?? not ||: a legitimate recommendation of 0 is falsy and was being
+                // discarded, so guidance could never be auto-set to 0.
+                steps: preset.recommended_steps ?? prev.steps,
+                guidance: preset.recommended_guidance ?? prev.guidance,
+              };
+            });
           }
         }
       }
@@ -1911,6 +1920,31 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               ))}
                             </Select>
                           </FormControl>
+                        </Grid>
+
+                        <Grid item xs={12}>
+                          {/* Auto-detect analyses the prompt and applies a content preset's recommended
+                              settings. It runs invisibly on every prompt edit, so give the user a way to
+                              turn it off when they have deliberately chosen their own steps/guidance. */}
+                          <FormControlLabel
+                            control={
+                              <Switch
+                                checked={autoEnhance}
+                                onChange={(e) => setAutoEnhance(e.target.checked)}
+                                size="small"
+                              />
+                            }
+                            label={
+                              <Box>
+                                <Typography variant="body2">Auto-detect settings from prompt</Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  {autoEnhance
+                                    ? 'Adjusts steps and guidance based on the prompt. Off = your settings are kept exactly.'
+                                    : 'Off — your steps and guidance are left exactly as you set them.'}
+                                </Typography>
+                              </Box>
+                            }
+                          />
                         </Grid>
 
                         <Grid item xs={12} sm={6} md={4}>
