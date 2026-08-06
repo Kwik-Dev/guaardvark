@@ -81,6 +81,8 @@ import {
   AutoFixHigh as EnhanceIcon,
   NavigateBefore as PrevIcon,
   NavigateNext as NextIcon,
+  Fullscreen as FullscreenIcon,
+  FullscreenExit as FullscreenExitIcon,
 } from "@mui/icons-material";
 
 /** Coerce API/error payloads to a string safe for <Alert> children. */
@@ -294,6 +296,58 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [videoPlayer, setVideoPlayer] = useState(null); // { url, title, batchId, results, currentIndex }
+  const videoPlayerBoxRef = useRef(null);
+  const [isPlayerFullscreen, setIsPlayerFullscreen] = useState(false);
+
+  const navigateVideoPlayer = useCallback((delta) => {
+    setVideoPlayer(prev => {
+      if (!prev) return prev;
+      const idx = prev.currentIndex + delta;
+      if (idx < 0 || idx >= prev.results.length) return prev;
+      const r = prev.results[idx];
+      const url = `${API_BASE}/batch-video/video/${prev.batchId}/${encodePathSegments(PathFromUrl(r.video_path))}`;
+      return { ...prev, url, currentIndex: idx, title: r.video_path?.split("/").pop() || `Video ${idx + 1}` };
+    });
+  }, []);
+
+  const togglePlayerFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      videoPlayerBoxRef.current?.requestFullscreen?.().catch(() => {});
+    }
+  }, []);
+
+  // Arrow-key prev/next for the player. Capture phase so it wins over the
+  // native <video> controls' seek behavior, and keeps working while the
+  // player container is fullscreen (key events still reach document there).
+  useEffect(() => {
+    if (!videoPlayer) return undefined;
+    const onKeyDown = (e) => {
+      const tag = e.target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable) return;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        e.stopPropagation();
+        navigateVideoPlayer(-1);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        e.stopPropagation();
+        navigateVideoPlayer(1);
+      } else if (e.key === "Escape" && document.fullscreenElement) {
+        // Let the browser exit fullscreen without also closing the dialog.
+        e.stopPropagation();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [videoPlayer, navigateVideoPlayer]);
+
+  useEffect(() => {
+    const onFsChange = () => setIsPlayerFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
 
   // Authoritative set of selectable model ids from the backend registry. Null
   // until loaded (then we don't filter). Keeps the dropdown from ever drifting
@@ -3054,14 +3108,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         PaperProps={{ sx: { bgcolor: "grey.900", borderRadius: 2 } }}
       >
         {videoPlayer && (() => {
-          const { results, currentIndex, batchId } = videoPlayer;
+          const { results, currentIndex } = videoPlayer;
           const hasPrev = currentIndex > 0;
           const hasNext = currentIndex < results.length - 1;
-          const navigateTo = (idx) => {
-            const r = results[idx];
-            const url = `${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(PathFromUrl(r.video_path))}`;
-            setVideoPlayer(prev => ({ ...prev, url, currentIndex: idx, title: r.video_path?.split("/").pop() || `Video ${idx + 1}` }));
-          };
           return (
             <>
               <DialogTitle sx={{ color: "grey.300", display: "flex", justifyContent: "space-between", alignItems: "center", pb: 1 }}>
@@ -3076,19 +3125,42 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 </IconButton>
               </DialogTitle>
               <DialogContent sx={{ p: 0, position: "relative" }}>
-                <Box sx={{ position: "relative", bgcolor: "black" }}>
+                <Box
+                  ref={videoPlayerBoxRef}
+                  sx={{
+                    position: "relative", bgcolor: "black",
+                    // When this container is fullscreened the overlays stay visible;
+                    // center the video and let it use the full viewport.
+                    "&:fullscreen": { display: "flex", alignItems: "center", justifyContent: "center" },
+                    "&:fullscreen video": { maxHeight: "100vh" },
+                  }}
+                >
                   <video
                     key={videoPlayer.url}
                     src={videoPlayer.url}
                     controls
                     autoPlay
                     loop
+                    // Fullscreen goes through our button so the container (with the
+                    // nav arrows) is what gets fullscreened, not the bare <video>.
+                    controlsList="nofullscreen"
+                    onDoubleClick={togglePlayerFullscreen}
                     style={{ width: "100%", display: "block", maxHeight: "70vh" }}
                   />
+                  <IconButton
+                    onClick={togglePlayerFullscreen}
+                    title={isPlayerFullscreen ? "Exit full screen" : "Full screen"}
+                    sx={{
+                      position: "absolute", right: 8, top: 8,
+                      bgcolor: "rgba(0,0,0,0.5)", color: "white", "&:hover": { bgcolor: "rgba(0,0,0,0.7)" },
+                    }}
+                  >
+                    {isPlayerFullscreen ? <FullscreenExitIcon /> : <FullscreenIcon />}
+                  </IconButton>
                   {/* Prev/Next overlays */}
                   {hasPrev && (
                     <IconButton
-                      onClick={() => navigateTo(currentIndex - 1)}
+                      onClick={() => navigateVideoPlayer(-1)}
                       sx={{
                         position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)",
                         bgcolor: "rgba(0,0,0,0.5)", color: "white", "&:hover": { bgcolor: "rgba(0,0,0,0.7)" },
@@ -3099,7 +3171,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   )}
                   {hasNext && (
                     <IconButton
-                      onClick={() => navigateTo(currentIndex + 1)}
+                      onClick={() => navigateVideoPlayer(1)}
                       sx={{
                         position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
                         bgcolor: "rgba(0,0,0,0.5)", color: "white", "&:hover": { bgcolor: "rgba(0,0,0,0.7)" },
@@ -3112,10 +3184,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               </DialogContent>
               <DialogActions sx={{ justifyContent: "space-between", px: 2, py: 1 }}>
                 <Stack direction="row" spacing={1}>
-                  <Button size="small" disabled={!hasPrev} onClick={() => navigateTo(currentIndex - 1)} startIcon={<PrevIcon />}>
+                  <Button size="small" disabled={!hasPrev} onClick={() => navigateVideoPlayer(-1)} startIcon={<PrevIcon />}>
                     Prev
                   </Button>
-                  <Button size="small" disabled={!hasNext} onClick={() => navigateTo(currentIndex + 1)} endIcon={<NextIcon />}>
+                  <Button size="small" disabled={!hasNext} onClick={() => navigateVideoPlayer(1)} endIcon={<NextIcon />}>
                     Next
                   </Button>
                 </Stack>
