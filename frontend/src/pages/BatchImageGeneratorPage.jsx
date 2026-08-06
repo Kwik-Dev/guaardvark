@@ -1260,8 +1260,29 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         if (typeof cfg.directorGuidance === 'string') setDirectorGuidance(cfg.directorGuidance);
         setSuccess(`Loaded "${name}" settings into control panel — adjust anything, then Start Generation.`);
       } else if (Array.isArray(rd.prompts)) {
-        setBatchItems(rd.prompts.join('\n'));
-        setInputMode('bulk');
+        // rd.prompts is the EXPANDED list - one entry per generated image. A batch of
+        // 1 prompt x quantity 7 comes back as 7 identical lines, so pasting it straight
+        // back multiplied the prompt on every retry (reported 2026-08-05).
+        //
+        // If every unique prompt repeats the same number of times, that count IS the
+        // original quantity: N copies at qty 1 generates exactly the same images as
+        // 1 copy at qty N, so collapsing is lossless rather than a guess. Uneven
+        // counts (A x3, B x2) can't be expressed with one quantity, so those keep the
+        // literal expanded list.
+        const promptCounts = new Map();
+        rd.prompts.forEach((pr) => promptCounts.set(pr, (promptCounts.get(pr) || 0) + 1));
+        const uniquePrompts = [...promptCounts.keys()];
+        const repeats = [...promptCounts.values()];
+        const evenlyRepeated = repeats.length > 0 && repeats.every((r) => r === repeats[0]);
+
+        if (evenlyRepeated && repeats[0] > 1) {
+          setBatchItems(uniquePrompts.join('\n'));
+          setQuantity(repeats[0]);
+        } else {
+          setBatchItems(rd.prompts.join('\n'));
+        }
+        // Single prompt belongs in the single-prompt field, not the bulk textarea.
+        setInputMode(uniquePrompts.length > 1 ? 'bulk' : 'single');
         if (rd.params) {
           const p = rd.params;
           setParams((prev) => ({
@@ -1274,7 +1295,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             guidance: p.guidance !== undefined ? p.guidance : prev.guidance,
           }));
         }
-        setSuccess(`Loaded "${name}" prompts into panel.`);
+        setSuccess(
+          uniquePrompts.length === rd.prompts.length
+            ? `Loaded "${name}" prompts into panel.`
+            : `Loaded "${name}": ${uniquePrompts.length} prompt${uniquePrompts.length === 1 ? '' : 's'} x qty ${repeats[0]}.`
+        );
       }
       setError('');
       window.scrollTo({ top: 0, behavior: 'smooth' });
