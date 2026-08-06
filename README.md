@@ -521,13 +521,63 @@ Star the repo if you find it interesting — it helps with visibility.
 
 ---
 
-## Contributing
+## Get Involved
 
-We welcome contributions! See the [Contributing Guide](CONTRIBUTING.md) to get started.
+Guaardvark is open source (MIT) and built in public. Whether you want to try the bot, ship a small PR, or hang out with other local-AI builders — here is the short path.
+
+### 1. Join the community
+
+| Where | What |
+|-------|------|
+| **Discord** | Chat with people *and* with Guaardvark itself (local chat, `/imagine` images, search, status, demos). Invite: *(add permanent invite once the bot token is restored — see maintainer notes)*. |
+| **GitHub Issues** | Bugs, features, and labeled starter work |
+| **GitHub Discussions** | Longer-form questions if enabled |
+
+### 2. Run it (≈ two commands)
+
+```bash
+git clone https://github.com/guaardvark/guaardvark.git && cd guaardvark
+./start.sh
+```
+
+Web UI → http://localhost:5173 · API → http://localhost:5000  
+Details: [INSTALL.md](INSTALL.md) · full feature list: [CAPABILITIES.md](CAPABILITIES.md)
+
+### 3. Pick a good first issue
+
+Start here — each issue has acceptance criteria and a clear **out of scope** list:
+
+| Issue | What you do | Risk |
+|-------|-------------|------|
+| [#46](https://github.com/guaardvark/guaardvark/issues/46) | Add browser-basic **agent recipes** (JSON only) | Low |
+| [#47](https://github.com/guaardvark/guaardvark/issues/47) | Write `docs/AGENT_MENTAL_MODEL.md` | Low |
+| [#48](https://github.com/guaardvark/guaardvark/issues/48) | CLI: `guaardvark recipes list/show/validate` | Low |
+| [#49](https://github.com/guaardvark/guaardvark/issues/49) | Document **hardware / VRAM tiers** | Low |
+
+All open starters: [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+
+We aim to review serious PRs within **24–48 hours**.
+
+### 4. Safe vs high-risk contribution zones
+
+| Safe (great first PRs) | Ask first / high risk |
+|------------------------|------------------------|
+| Agent **recipes** (`data/agent/recipes.json`) | Agent loop, servo, vision targeting |
+| Docs, INSTALL, mental-model guides | Self-improvement auto-apply paths |
+| CLI polish & offline commands | MCP default-deny / security policy |
+| UI copy, empty states, error messages | Core GPU fork/CUDA plugin runner |
+| Tests for pure helpers | Production auth / credential handling |
+
+Full setup, style, and PR expectations: **[CONTRIBUTING.md](CONTRIBUTING.md)**
 
 **For AI coding agents and heavy contributors:** read [AGENTS.md](AGENTS.md) (required reading order), [CLAUDE.md](CLAUDE.md), and [GROK.md](GROK.md). They document the self-coding chokepoint (`guarded_code_service.py::apply_exact_replacement`), project conventions, dead-code handling, and verification habits.
 
-Looking for something to work on? Check out issues labeled [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+### 5. Other ways to help (no code required)
+
+- Star the repo and share a short demo (screen agent, Film Crew, or Discord `/imagine`)
+- Report install friction with GPU model + logs from `logs/`
+- Suggest recipes or workflows you wish worked out of the box
+- Support development: [Ko-fi](https://ko-fi.com/albenze) · [Sponsors](https://github.com/sponsors/guaardvark) · [PayPal](https://paypal.me/albenze)
 
 ---
 

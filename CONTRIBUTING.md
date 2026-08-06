@@ -7,6 +7,26 @@ Thanks for your interest in contributing to Guaardvark! Whether it's a bug repor
 - [Open Issues](https://github.com/guaardvark/guaardvark/issues)
 - [Good First Issues](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
 - [Project Board](https://github.com/guaardvark/guaardvark/projects)
+- [README — Get Involved](README.md#get-involved)
+
+### I want to help — 4 steps
+
+1. **Join Discord** (community + live Guaardvark bot: chat, `/imagine`, status) — invite link in the README when the server bot is live.
+2. **Run the project:** `git clone … && ./start.sh` (see Development Setup below).
+3. **Pick a** [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) — especially recipes, docs, CLI, hardware tiers (#46–#49).
+4. **Open a focused PR** and expect feedback within 24–48 hours when possible.
+
+### Safe vs high-risk areas
+
+| Prefer for first PRs | High risk — open an issue before large changes |
+|----------------------|--------------------------------------------------|
+| `data/agent/recipes.json` and recipe docs | Agent control loop, servo, vision targeting |
+| `docs/`, README, INSTALL, CAPABILITIES accuracy | Self-improvement apply / codebase mutation paths |
+| `cli/` offline commands (list/validate/doctor polish) | MCP default-deny policy and tool exposure |
+| Frontend copy, empty states, accessibility | Plugin CUDA/fork runner and GPU orchestrator core |
+| Unit tests for pure helpers | Auth, credentials, Interconnector credential sync |
+
+If your change touches high-risk paths, describe the approach in an issue first. Smaller, reviewable PRs merge faster.
 
 ---
 
