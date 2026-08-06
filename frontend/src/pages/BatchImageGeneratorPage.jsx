@@ -1993,18 +1993,29 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
                         <Grid item xs={12}>
                           <Typography gutterBottom>
-                            {String(params.model).startsWith('flux')
-                              ? `FluxGuidance: ${params.guidance}`
-                              : `Guidance Scale: ${params.guidance}`}
+                            {isZimageModel(params.model)
+                              ? 'Guidance Scale: 0 (CFG-free model)'
+                              : String(params.model).startsWith('flux')
+                                ? `FluxGuidance: ${params.guidance}`
+                                : `Guidance Scale: ${params.guidance}`}
                           </Typography>
+                          {/* Z-Image is CFG-free: there is NO valid non-zero guidance. Any other value
+                              produces washed-out, over-cooked output, so the control is disabled rather
+                              than left free to drift off the only correct setting. */}
                           <Slider
-                            value={params.guidance}
+                            value={isZimageModel(params.model) ? ZIMAGE_GUIDANCE : params.guidance}
                             onChange={(e, value) => setParams({ ...params, guidance: value })}
                             min={0}
                             max={String(params.model).startsWith('flux') ? 6 : 20}
                             step={0.5}
                             marks
+                            disabled={isZimageModel(params.model)}
                           />
+                          {isZimageModel(params.model) && (
+                            <Typography variant="caption" color="text.secondary">
+                              Z-Image runs CFG-free — guidance is fixed at 0. Use Steps for quality.
+                            </Typography>
+                          )}
                         </Grid>
 
                         <Grid item xs={12}>
