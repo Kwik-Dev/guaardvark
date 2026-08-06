@@ -96,6 +96,25 @@ _pt_stage_wheels() {  # usage: _pt_stage_wheels <index-url|""> <pkg...>
 
 # Installs from the staged dir when staging succeeded, else falls back to the
 # original network install so behaviour is unchanged if staging was skipped.
+_pt_repin_pillow() {
+    # torch/torchvision depend on pillow, and --force-reinstall re-resolves it from
+    # download.pytorch.org, whose index tops out at Pillow 12.2.0. That release has 10
+    # HIGH CVEs (heap OOB writes in Image.paste/crop/RankFilter/ImageCmsTransform, plus
+    # decompression-bomb bypasses), so every torch install silently un-patched them.
+    #
+    # This CANNOT be fixed with PIP_CONSTRAINT: constraining Pillow>=12.3.0 during the
+    # torch install makes it unsatisfiable from that index and aborts the whole run -
+    # exactly the failure the old setuptools pin used to cause. So re-pin AFTER, from
+    # PyPI, with --no-deps so torch's own resolution is left untouched.
+    command -v pip >/dev/null 2>&1 || return 0
+    vader_info "Re-pinning Pillow (torch index caps it at a vulnerable 12.2.0)..."
+    if pip install --no-deps --upgrade 'Pillow>=12.3.0' >/dev/null 2>&1; then
+        vader_success "Pillow $(pip show Pillow 2>/dev/null | awk '/^Version/{print $2}') re-pinned"
+    else
+        vader_warn "Could not re-pin Pillow - 12.2.0 has 10 HIGH CVEs. Run: pip install --upgrade 'Pillow>=12.3.0'"
+    fi
+}
+
 _pt_install_staged() {  # usage: _pt_install_staged <index-url|""> <pkg...>
     local idx="$1"; shift
     if [ -n "${PT_STAGE:-}" ] && [ -d "$PT_STAGE" ]; then
@@ -184,7 +203,9 @@ if [ "$UNAME_S" = "Darwin" ]; then
     pip uninstall -y torch torchvision torchaudio 2>/dev/null | tail -3 || true
     _pt_install_staged "" torch torchvision torchaudio
 
-    vader_section "Verification:"
+    _pt_repin_pillow
+
+vader_section "Verification:"
     python3 << 'EOF'
 import torch
 print(f"    PyTorch Version:    {torch.__version__}")
@@ -238,7 +259,9 @@ if command -v rocm-smi &> /dev/null || _hardware_json_says_amd; then
     pip uninstall -y flash-attn flash_attn xformers pynvml nvidia-ml-py 2>/dev/null | tail -3 || true
     _pt_install_staged "https://download.pytorch.org/whl/${ROCM_WHL}" torch torchvision torchaudio
 
-    vader_section "Verification:"
+    _pt_repin_pillow
+
+vader_section "Verification:"
     python3 << 'EOF'
 import torch
 print(f"    PyTorch Version:    {torch.__version__}")
@@ -403,7 +426,9 @@ if command -v nvidia-smi &> /dev/null; then
         fi
 
         # Verification
-        vader_section "Verification:"
+        _pt_repin_pillow
+
+vader_section "Verification:"
         python3 << 'EOF'
 import torch
 
@@ -447,7 +472,9 @@ EOF
         _pt_install_staged "https://download.pytorch.org/whl/cpu" torch torchvision torchaudio
         pip uninstall -y pynvml flash-attn flash_attn xformers nvidia-ml-py 2>/dev/null | tail -2 || true
 
-        vader_section "Verification:"
+        _pt_repin_pillow
+
+vader_section "Verification:"
         python3 -c "import torch; print(f'    PyTorch Version: {torch.__version__}'); print(f'    Mode: CPU-only')"
     fi
 else
@@ -466,7 +493,9 @@ else
     pip uninstall -y flash-attn flash_attn xformers pynvml nvidia-ml-py 2>/dev/null | tail -3 || true
     _pt_install_staged "https://download.pytorch.org/whl/cpu" torch torchvision torchaudio
 
-    vader_section "Verification:"
+    _pt_repin_pillow
+
+vader_section "Verification:"
     python3 -c "import torch; print(f'    PyTorch Version: {torch.__version__}'); print(f'    Mode: CPU-only')"
 fi
 

@@ -47,7 +47,10 @@ diffusers>=0.38.0
 transformers>=5.2.0,<6.0  # Krea2/Qwen3-VL needs 5.2+ (rope_parameters); was <5.0 for legacy ComfyUI pin
 accelerate==1.2.1
 safetensors>=0.4.0
-Pillow>=12.2.0  # aligned with requirements.txt (was ==12.2.0; drift fixed P3-10b)
+Pillow>=12.3.0  # aligned with requirements.txt. >=12.3.0: 12.2.0 carries 10 HIGH CVEs
+                # (heap OOB writes in Image.paste/crop/RankFilter/ImageCmsTransform,
+                # decompression-bomb bypasses). NOTE: the PyTorch wheel index tops out
+                # at Pillow 12.2.0, so install_pytorch.sh re-pins this AFTER torch.
 
 # ComfyUI / Video Generation Dependencies
 torchsde>=0.2.6
