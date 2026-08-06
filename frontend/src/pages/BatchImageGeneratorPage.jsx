@@ -111,6 +111,22 @@ const sanitizeText = (text) => {
   });
 };
 
+// Z-Image family test, in ONE place. Z-Image is CFG-free: guidance MUST be 0 and the
+// official sampling recipe is 9 steps. Three call sites previously disagreed - the
+// quality-preset list used a fuzzy includes('zimage') while handleModelChange used an
+// exact === 'zimage-turbo' - so they could classify the same model differently and
+// leave another family's steps/guidance applied.
+const isZimageModel = (m) => {
+  const k = String(m || 'auto').toLowerCase();
+  return k.includes('zimage') || k.includes('z-image') || k === 'auto';
+};
+
+const ZIMAGE_STEPS = 9;
+const ZIMAGE_GUIDANCE = 0;
+// Steps each Z-Image preset legitimately uses, so the guard below corrects foreign
+// values without fighting the model's own Fast / Standard / High-2K presets.
+const ZIMAGE_PRESET_STEPS = { fast: 6, standard: 9, 'high-2k': 9 };
+
 const BatchImageGeneratorPage = ({ embedded = false }) => {
   const theme = useTheme();
   const [searchParams] = useSearchParams();
@@ -215,6 +231,22 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     description: 'Router picks the best downloaded model for each prompt',
   };
   const [modelOptions, setModelOptions] = useState([AUTO_MODEL_OPTION]);
+
+  // Z-Image guard: guidance MUST be 0 (the model is CFG-free) and steps must follow
+  // its own recipe. Without this, switching in from another family left that family's
+  // settings applied - e.g. Realistic Vision "High" (30 steps / guidance 8.0), which
+  // the Z-Image preset list cannot correct because it has no 'high' entry, so
+  // qualityPresets.find() returns undefined and re-applying silently no-ops.
+  // Keyed on model + preset only, so the steps slider stays usable afterwards.
+  useEffect(() => {
+    if (!isZimageModel(params.model)) return;
+    setParams(prev => {
+      if (!isZimageModel(prev.model)) return prev;
+      const wantedSteps = ZIMAGE_PRESET_STEPS[prev.quality_preset] ?? ZIMAGE_STEPS;
+      if (prev.guidance === ZIMAGE_GUIDANCE && prev.steps === wantedSteps) return prev;
+      return { ...prev, guidance: ZIMAGE_GUIDANCE, steps: wantedSteps };
+    });
+  }, [params.model, params.quality_preset]);
 
   useEffect(() => {
     (async () => {
@@ -810,7 +842,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (
         modelValue.includes('xl')
         || modelValue.startsWith('krea2')
-        || modelValue === 'zimage-turbo'
+        || isZimageModel(modelValue)
         || modelValue.startsWith('flux')
         || modelValue === 'auto'
       ) {
@@ -828,9 +860,17 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       } else if (modelValue === 'krea2-turbo') {
         newParams.steps = 8;
         newParams.guidance = 0;
-      } else if (modelValue === 'zimage-turbo') {
-        newParams.steps = 9;
-        newParams.guidance = 0;
+      } else if (isZimageModel(modelValue)) {
+        // Z-Image is CFG-FREE: guidance MUST be 0, official recipe is 9 steps.
+        // Family test, not `=== 'zimage-turbo'`, so any future zimage-* id is covered
+        // and this agrees with the preset list's own fuzzy check.
+        newParams.steps = ZIMAGE_STEPS;
+        newParams.guidance = ZIMAGE_GUIDANCE;
+        // Reset the preset as well. Without this, a preset carried over from another
+        // family (Realistic Vision "High" = 30 steps / guidance 8.0) stays selected;
+        // the Z-Image list has no 'high', so qualityPresets.find() returns undefined
+        // and re-applying it silently does nothing - leaving 30/8.0 in force.
+        newParams.quality_preset = 'standard';
       } else if (modelValue === 'flux-dev' || modelValue.startsWith('flux')) {
         // FLUX.1-dev max-quality defaults (FluxGuidance 3.5, 28 steps)
         newParams.steps = 28;
