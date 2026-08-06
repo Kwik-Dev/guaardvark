@@ -530,11 +530,34 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (!response.ok) return;
       const data = await response.json();
       const rows = data?.data?.queue ?? data?.queue ?? [];
-      setQueue(Array.isArray(rows) ? rows : []);
+      // Frontend-only dismissal: hide terminal rows the user cleared. Only
+      // terminal statuses are filtered so a live batch can never be masked.
+      let clearedQueue = [];
+      try {
+        clearedQueue = JSON.parse(localStorage.getItem('clearedImageQueueIds') || '[]');
+      } catch (e) {
+        clearedQueue = [];
+      }
+      const visible = (Array.isArray(rows) ? rows : []).filter(
+        (q) => !(TERMINAL_BATCH_STATUSES.has(q.status) && clearedQueue.includes(q.batch_id))
+      );
+      setQueue(visible);
     } catch (err) {
       console.debug('Failed to load image batch queue:', err);
     }
   }, []);
+
+  const handleClearCompletedQueue = useCallback(() => {
+    const doneIds = queue.filter((q) => TERMINAL_BATCH_STATUSES.has(q.status)).map((q) => q.batch_id);
+    if (doneIds.length === 0) return;
+    try {
+      const stored = JSON.parse(localStorage.getItem('clearedImageQueueIds') || '[]');
+      localStorage.setItem('clearedImageQueueIds', JSON.stringify(Array.from(new Set([...stored, ...doneIds]))));
+    } catch (e) {
+      console.error('Failed to save cleared queue items to localStorage:', e);
+    }
+    setQueue((prev) => prev.filter((q) => !TERMINAL_BATCH_STATUSES.has(q.status)));
+  }, [queue]);
 
   const loadBatchHistory = useCallback(async () => {
     try {
@@ -2109,12 +2132,25 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   <Typography variant="h6" sx={{ fontWeight: 600 }}>
                     Batch Queue
                   </Typography>
-                  <Chip
-                    label={`${queue.filter((q) => POLLABLE_STATUSES.has(q.status)).length} active`}
-                    size="small"
-                    color="primary"
-                    variant="outlined"
-                  />
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    {queue.some((q) => TERMINAL_BATCH_STATUSES.has(q.status)) && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="inherit"
+                        onClick={handleClearCompletedQueue}
+                        sx={{ textTransform: 'none', borderRadius: 1 }}
+                      >
+                        Clear Completed
+                      </Button>
+                    )}
+                    <Chip
+                      label={`${queue.filter((q) => POLLABLE_STATUSES.has(q.status)).length} active`}
+                      size="small"
+                      color="primary"
+                      variant="outlined"
+                    />
+                  </Stack>
                 </Stack>
                 <Stack spacing={1}>
                   {queue.map((q, idx) => {
@@ -2405,7 +2441,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     const rawName = batch.display_name || `Batch ${batch.batch_id.slice(0, 8)}`;
                     const label = rawName.length > 36 ? rawName.slice(0, 35).trimEnd() + '…' : rawName;
                     return (
-                      <Grid item xs={12} sm={6} key={batch.batch_id}>
+                      <Grid item xs={6} sm={4} md={3} key={batch.batch_id}>
                         <Box
                           onClick={() => {
                             if (batch.status === 'completed') {
@@ -2415,6 +2451,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             }
                           }}
                           sx={{
+                            // Backend thumbnails are 256px max — don't upscale past that.
+                            maxWidth: 256,
+                            mx: 'auto',
                             cursor: 'pointer',
                             position: 'relative',
                             borderRadius: 2,
