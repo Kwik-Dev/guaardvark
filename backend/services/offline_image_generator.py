@@ -479,7 +479,12 @@ class OfflineImageGenerator:
     _KREA2_SEQUENTIAL_VRAM_MB = 10000  # layer-by-layer offload on ≤18GB cards
     # CPU-RAM footprint with enable_model_cpu_offload (weights + PyTorch arena).
     # Observed: ~47 GB RSS on 60 GB box during Z-Image batch; gate before load.
-    _FAMILY_RAM_GB = {"krea2": 24.0, "zimage": 24.0, "sdxl": 10.0, "sd": 6.0}
+    _FAMILY_RAM_GB = {"krea2": 24.0, "zimage": 21.0, "sdxl": 10.0, "sd": 6.0}
+    # zimage 24.0 -> 21.0 (2026-08-05): 24.0 predated the ladder/unload leak fixes
+    # (the "~47 GB RSS" note above is from that era). The CALIBRATED comment below
+    # measured peak RSS flat at 20.9-21.0 GB across 1024/1448/2048 AFTER those fixes.
+    # Measured again on a 32GB/RTX5080 box 2026-08-05: 16.3 GB peak for a single
+    # 1024 image, 19.9 GB across a 15-image batch - so 21.0 remains conservative.
     # auto-router worst-case: zimage leads on consumer cards; krea2 when absent
     _OFFLOAD_TURBO_VRAM_MB = 11000
     # Prefer sequential offload for krea2 on consumer cards (module offload OOMs).

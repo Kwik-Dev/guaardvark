@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 # ---- thresholds (this box) -------------------------------------------------
 
-RAM_HARD_MIN_GB = 6.0      # below this available RAM -> hard block
+RAM_HARD_MIN_GB = 6.0      # hard-floor CAP; the effective floor scales down on small boxes
 RAM_WARN_MIN_GB = 12.0     # below this -> warn (still admit)
 SWAP_HARD_MAX_GB = 8.0     # above this swap used -> hard block
 VRAM_HARD_MIN_GB = 1.5     # below this free VRAM -> hard block
@@ -63,6 +63,33 @@ LOADAVG_HARD_MAX = 18.0    # 1-min loadavg above this -> hard block
 # How long an admitted job's RAM reservation lingers to cover subprocess
 # "shadow RAM" before psutil reflects it.
 RESERVED_RAM_TTL_S = 60.0
+
+
+def effective_ram_hard_min_gb() -> float:
+    """Hard RAM floor for this machine: RAM_HARD_MIN_GB, capped at 10% of total RAM.
+
+    A FIXED 6 GB floor is ~20% of a 32 GB machine but ~5% of a 128 GB one. On 32 GB
+    boxes that made the default image model unadmittable at ANY moment: it declares
+    ~21 GB, so the gate demanded 21 + 6 = 27 GB against the ~25 GB such a machine ever
+    has available. Guaardvark refused to run its own recommended model, with no
+    configuration that could help (this constant was not overridable).
+
+    Scaling by total RAM keeps large machines exactly as protected as before -
+    min() means the floor can only ever shrink, never grow.
+
+    Override with GUAARDVARK_RAM_HARD_MIN_GB (float, GB) to pin an explicit value.
+    """
+    override = os.environ.get("GUAARDVARK_RAM_HARD_MIN_GB")
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            logger.warning("Ignoring non-numeric GUAARDVARK_RAM_HARD_MIN_GB=%r", override)
+    try:
+        total_gb = psutil.virtual_memory().total / (1024 ** 3)
+    except Exception:
+        return RAM_HARD_MIN_GB
+    return min(RAM_HARD_MIN_GB, total_gb * 0.10)
 
 GB = 1024 ** 3
 
@@ -175,11 +202,12 @@ class GlobalLoadGate:
         """Return a human-readable reason to block, or None if admittable."""
         eff_ram = reading.effective_ram_avail_gb
         # The job needs its declared ram on top of the hard floor.
-        if eff_ram - weight.ram_gb < RAM_HARD_MIN_GB:
+        ram_floor = effective_ram_hard_min_gb()
+        if eff_ram - weight.ram_gb < ram_floor:
             return (
                 f"RAM too low: {eff_ram:.1f} GB available "
                 f"(reserved {reading.reserved_ram_gb:.1f} GB), "
-                f"need {weight.ram_gb:.1f} GB + {RAM_HARD_MIN_GB:.0f} GB floor"
+                f"need {weight.ram_gb:.1f} GB + {ram_floor:.1f} GB floor"
             )
         if reading.swap_used_gb > SWAP_HARD_MAX_GB:
             return f"swap in use: {reading.swap_used_gb:.1f} GB > {SWAP_HARD_MAX_GB:.0f} GB"
