@@ -21,7 +21,11 @@ class VoiceCog(commands.Cog):
     @voice_group.command(name="join", description="Join your voice channel")
     async def voice_join(self, interaction):
         if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.response.send_message("You need to be in a voice channel first.", ephemeral=True)
+            await interaction.response.send_message(
+                "Join a voice channel first (click one in the channel list, e.g. under the speaker icon) — "
+                "then run `/voice join` and I'll hop into it with you.",
+                ephemeral=True,
+            )
             return
         guild_id = interaction.guild.id
         channel = interaction.user.voice.channel

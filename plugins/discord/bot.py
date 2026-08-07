@@ -132,6 +132,17 @@ class GuaardvarkBot(commands.Bot):
                 logger.info("Synced commands to guild %s", guild_id)
             except Exception as e:
                 logger.warning("Guild sync failed for %s: %s", guild_id, e)
+            # Remove the stale GLOBAL command set left over from pre-guild_id runs —
+            # otherwise every command appears twice in the guild picker. Push an empty
+            # global set over HTTP rather than tree.clear_commands(), which would empty
+            # the in-memory tree and wipe guild commands on the next reconnect.
+            if not getattr(self, "_global_cleared", False):
+                self._global_cleared = True
+                try:
+                    await self.http.bulk_upsert_global_commands(self.application_id, [])
+                    logger.info("Cleared stale global command set (guild-scoped sync active)")
+                except Exception as e:
+                    logger.warning("Failed to clear global commands: %s", e)
         else:
             # Fast path first — schema changes appear in joined servers immediately.
             for guild in self.guilds:
