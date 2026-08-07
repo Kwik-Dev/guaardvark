@@ -47,6 +47,20 @@ class VoiceCog(commands.Cog):
         else:
             await interaction.response.send_message("Not connected to a voice channel.", ephemeral=True)
 
+    @voice_group.command(name="say", description="Speak the given text in the voice channel (TTS test)")
+    async def voice_say(self, interaction, text: str):
+        handler = self.handlers.get(interaction.guild.id)
+        if not handler or not handler.voice_client or not handler.voice_client.is_connected():
+            await interaction.response.send_message("Not connected — use /voice join first.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            await handler.speak(text)
+            await interaction.followup.send(f"Spoke {len(text)} chars via TTS.")
+        except Exception as e:
+            logger.exception("/voice say failed")
+            await interaction.followup.send(f"TTS failed: {e}")
+
     @voice_group.command(name="status", description="Show voice session info")
     async def voice_status(self, interaction):
         guild_id = interaction.guild.id
@@ -59,6 +73,11 @@ class VoiceCog(commands.Cog):
         embed.add_field(name="Channel", value=channel.name, inline=True)
         embed.add_field(name="Members", value=str(len(channel.members)), inline=True)
         embed.add_field(name="Processing", value="Yes" if handler._processing else "Idle", inline=True)
+        embed.add_field(name="Listening", value="Yes" if handler.listening else "No (playback-only)", inline=True)
+        if handler.sink:
+            with handler.sink.lock:
+                buffered = sum(1 for b in handler.sink.buffers.values() if b)
+            embed.add_field(name="Speakers buffered", value=str(buffered), inline=True)
         await interaction.response.send_message(embed=embed)
 
     async def cog_unload(self):

@@ -29,7 +29,8 @@ voice:
   silence_threshold_ms: 1500
   max_listen_duration_s: 30
   tts_voice: "ryan"
-  interrupt_on_speech: true
+  interrupt_on_speech: true  # barge-in not implemented yet (reserved)
+  min_utterance_ms: 400  # discard blips shorter than this (coughs, key clicks)
 
 image:
   max_queue_depth: 5

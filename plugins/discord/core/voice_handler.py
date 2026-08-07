@@ -1,8 +1,9 @@
-"""Voice channel audio pipeline: Discord PCM -> Whisper STT -> LLM -> Piper TTS -> Discord playback."""
+"""Voice channel audio pipeline: Discord PCM -> Whisper STT -> LLM -> TTS -> Discord playback."""
 import asyncio
 import io
 import logging
-import struct
+import threading
+import time
 import wave
 from typing import Optional
 
@@ -10,12 +11,21 @@ import discord
 
 from core.api_client import GuaardvarkClient, APIError
 
+try:
+    from discord.ext import voice_recv
+    VOICE_RECV_AVAILABLE = True
+except ImportError:
+    voice_recv = None
+    VOICE_RECV_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 DISCORD_SAMPLE_RATE = 48000
 DISCORD_CHANNELS = 2
-TARGET_SAMPLE_RATE = 16000
-TARGET_CHANNELS = 1
+# 48kHz stereo s16le
+BYTES_PER_SECOND = DISCORD_SAMPLE_RATE * DISCORD_CHANNELS * 2
+
+WATCHER_INTERVAL_S = 0.2
 
 
 def pcm_to_wav(pcm_data: bytes, sample_rate: int = DISCORD_SAMPLE_RATE, channels: int = DISCORD_CHANNELS) -> bytes:
@@ -28,16 +38,41 @@ def pcm_to_wav(pcm_data: bytes, sample_rate: int = DISCORD_SAMPLE_RATE, channels
     return buf.getvalue()
 
 
-def downsample_pcm(pcm_data: bytes, from_rate=DISCORD_SAMPLE_RATE, to_rate=TARGET_SAMPLE_RATE, from_channels=2, to_channels=1) -> bytes:
-    samples = struct.unpack(f"<{len(pcm_data)//2}h", pcm_data)
-    if from_channels == 2 and to_channels == 1:
-        mono = [(samples[i] + samples[i+1]) // 2 for i in range(0, len(samples), 2)]
-    else:
-        mono = list(samples)
-    ratio = from_rate // to_rate
-    if ratio > 1:
-        mono = mono[::ratio]
-    return struct.pack(f"<{len(mono)}h", *mono)
+if VOICE_RECV_AVAILABLE:
+
+    class UtteranceSink(voice_recv.AudioSink):
+        """Accumulates per-user PCM. write() runs on the voice-recv decoder thread,
+        so it only touches plain structures under a lock; the segmentation watcher
+        (asyncio side) polls and pops completed utterances."""
+
+        def __init__(self):
+            super().__init__()
+            self.lock = threading.Lock()
+            self.buffers: dict[int, bytearray] = {}
+            self.last_packet: dict[int, float] = {}
+            self.names: dict[int, str] = {}
+
+        def wants_opus(self) -> bool:
+            return False
+
+        def write(self, user, data):
+            try:
+                if user is None or getattr(user, "bot", False):
+                    return
+                if not data.pcm:
+                    return
+                with self.lock:
+                    self.buffers.setdefault(user.id, bytearray()).extend(data.pcm)
+                    self.last_packet[user.id] = time.monotonic()
+                    self.names[user.id] = getattr(user, "display_name", str(user))
+            except Exception:
+                logger.exception("UtteranceSink.write failed")
+
+        def cleanup(self):
+            with self.lock:
+                self.buffers.clear()
+                self.last_packet.clear()
+                self.names.clear()
 
 
 class VoiceHandler:
@@ -47,73 +82,147 @@ class VoiceHandler:
         self.voice_client: Optional[discord.VoiceClient] = None
         self.text_channel = None
         self._processing = False
-        self._listen_task = None
+        self._watch_task = None
+        self._worker_task = None
+        self.sink = None
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.session_id = "discord_voice"
+
+    @property
+    def listening(self) -> bool:
+        return self.sink is not None and self.voice_client is not None and self.voice_client.is_connected()
 
     async def join(self, channel: discord.VoiceChannel, text_channel) -> bool:
         try:
-            self.voice_client = await channel.connect()
+            if VOICE_RECV_AVAILABLE:
+                self.voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
+                self.sink = UtteranceSink()
+                self.voice_client.listen(self.sink)
+            else:
+                logger.warning("discord-ext-voice-recv not installed; joining playback-only")
+                self.voice_client = await channel.connect()
             self.text_channel = text_channel
             self.session_id = f"discord_voice_{channel.guild.id}"
-            self._listen_task = asyncio.create_task(self._listen_loop())
-            logger.info("Joined voice channel: %s", channel.name)
+            self._watch_task = asyncio.create_task(self._segmentation_watcher())
+            self._worker_task = asyncio.create_task(self._worker())
+            logger.info("Joined voice channel: %s (listening=%s)", channel.name, self.sink is not None)
             return True
         except Exception as e:
             logger.error("Failed to join voice channel: %s", e)
             return False
 
     async def leave(self):
-        if self._listen_task:
-            self._listen_task.cancel()
-            self._listen_task = None
-        if self.voice_client and self.voice_client.is_connected():
-            await self.voice_client.disconnect()
+        for task_attr in ("_watch_task", "_worker_task"):
+            task = getattr(self, task_attr)
+            if task:
+                task.cancel()
+                setattr(self, task_attr, None)
+        if self.voice_client:
+            if hasattr(self.voice_client, "stop_listening"):
+                try:
+                    self.voice_client.stop_listening()
+                except Exception:
+                    logger.exception("stop_listening failed")
+            if self.voice_client.is_connected():
+                await self.voice_client.disconnect()
             self.voice_client = None
+        self.sink = None
         logger.info("Left voice channel")
 
-    async def _listen_loop(self):
-        silence_ms = self.config.get("voice", {}).get("silence_threshold_ms", 1500)
-        max_duration = self.config.get("voice", {}).get("max_listen_duration_s", 30)
-        # SCAFFOLD: discord.py audio receive is experimental.
-        # The process_audio() method below implements the complete pipeline.
-        # TODO: Wire up VoiceClient.listen(sink) when discord.py voice receive is stable.
-        logger.info("Voice listen loop started (silence=%dms, max=%ds)", silence_ms, max_duration)
-        logger.info("NOTE: Audio capture requires discord.py experimental voice receive.")
-        while self.voice_client and self.voice_client.is_connected():
-            await asyncio.sleep(1.0)
-
-    async def process_audio(self, pcm_data: bytes, user_id: int):
-        """Process a completed utterance: STT -> LLM -> TTS -> playback."""
-        if self._processing:
+    async def _segmentation_watcher(self):
+        """Poll the sink's buffers and emit completed utterances to the worker queue."""
+        voice_cfg = self.config.get("voice", {})
+        silence_s = voice_cfg.get("silence_threshold_ms", 1500) / 1000.0
+        max_bytes = voice_cfg.get("max_listen_duration_s", 30) * BYTES_PER_SECOND
+        min_bytes = int(voice_cfg.get("min_utterance_ms", 400) / 1000.0 * BYTES_PER_SECOND)
+        # NOTE: interrupt_on_speech (barge-in) is deliberately not implemented yet.
+        # Slot-in point: when a buffer goes empty -> non-empty while is_playing(), call voice_client.stop().
+        logger.info("Voice listen loop started (silence=%.1fs, max=%ds, min=%dms)",
+                    silence_s, voice_cfg.get("max_listen_duration_s", 30), voice_cfg.get("min_utterance_ms", 400))
+        if not self.sink:
+            logger.info("NOTE: audio capture unavailable (discord-ext-voice-recv not installed); playback-only.")
             return
+        while self.voice_client and self.voice_client.is_connected():
+            await asyncio.sleep(WATCHER_INTERVAL_S)
+            now = time.monotonic()
+            completed = []
+            with self.sink.lock:
+                for user_id, buf in list(self.sink.buffers.items()):
+                    if not buf:
+                        continue
+                    ended = now - self.sink.last_packet.get(user_id, now) >= silence_s
+                    overflow = len(buf) >= max_bytes
+                    if ended or overflow:
+                        pcm = bytes(buf)
+                        del self.sink.buffers[user_id]
+                        completed.append((user_id, self.sink.names.get(user_id, str(user_id)), pcm))
+            for user_id, name, pcm in completed:
+                if len(pcm) < min_bytes:
+                    logger.debug("Discarding short utterance from %s (%d bytes)", name, len(pcm))
+                    continue
+                try:
+                    self._queue.put_nowait((user_id, name, pcm))
+                except asyncio.QueueFull:
+                    logger.info("Dropped utterance from %s (busy)", name)
+
+    async def _worker(self):
+        while True:
+            user_id, name, pcm = await self._queue.get()
+            try:
+                await self.process_audio(pcm, user_id, name)
+            except Exception:
+                logger.exception("Voice worker error")
+            finally:
+                self._queue.task_done()
+
+    async def process_audio(self, pcm_data: bytes, user_id: int, display_name: str = ""):
+        """Process a completed utterance: STT -> LLM -> TTS -> playback."""
         self._processing = True
         try:
-            downsampled = downsample_pcm(pcm_data)
-            wav_bytes = pcm_to_wav(downsampled, TARGET_SAMPLE_RATE, TARGET_CHANNELS)
-            stt_result = await self.api.speech_to_text(wav_bytes)
+            utt_seconds = len(pcm_data) / BYTES_PER_SECOND
+            wav_bytes = pcm_to_wav(pcm_data)
+            t0 = time.monotonic()
+            try:
+                stt_result = await self.api.speech_to_text(wav_bytes)
+            except APIError as e:
+                # 400 = "No speech detected" — benign (breath, cough, keyboard noise)
+                if e.status_code == 400:
+                    logger.debug("No speech in %.1fs utterance from %s", utt_seconds, display_name)
+                    return
+                raise
             text = stt_result.get("text", "").strip()
             if not text:
                 return
-            logger.info("Voice STT: '%s'", text[:100])
-            chat_result = await self.api.chat(text, self.session_id)
+            stt_s = time.monotonic() - t0
+            logger.info("Voice STT (%s, %.1fs audio, %.1fs stt): '%s'", display_name, utt_seconds, stt_s, text[:100])
+            t0 = time.monotonic()
+            chat_result = await self.api.chat(f"{display_name} says: {text}" if display_name else text, self.session_id)
             response = chat_result.get("response", "")
             if not response:
                 return
-            logger.info("Voice LLM response: '%s'", response[:100])
-            tts_result = await self.api.text_to_speech(response, voice=self.config.get("voice", {}).get("tts_voice", "ryan"))
-            audio_filename = tts_result.get("filename")
-            if not audio_filename:
-                return
-            wav_audio = await self.api.get_voice_audio(audio_filename)
-            await self._play_audio(wav_audio)
+            logger.info("Voice LLM response (%.1fs): '%s'", time.monotonic() - t0, response[:100])
+            await self.speak(response)
         except APIError as e:
             logger.error("Voice pipeline API error: %s", e)
             if self.text_channel:
                 await self.text_channel.send(f"Voice error: {e}")
-        except Exception as e:
+        except Exception:
             logger.exception("Voice pipeline error")
         finally:
             self._processing = False
+
+    async def speak(self, text: str):
+        """TTS the text and play it in the connected voice channel."""
+        tts_result = await self.api.text_to_speech(text, voice=self.config.get("voice", {}).get("tts_voice", "ryan"))
+        audio_url = tts_result.get("audio_url")
+        if not audio_url and tts_result.get("filename"):
+            audio_url = f"/api/voice/audio/{tts_result['filename']}"
+        if not audio_url:
+            logger.warning("TTS returned no audio_url/filename: %s", tts_result)
+            return
+        logger.info("Voice TTS engine=%s url=%s", tts_result.get("engine", "?"), audio_url)
+        wav_audio = await self.api.fetch_audio_by_url(audio_url)
+        await self._play_audio(wav_audio)
 
     async def _play_audio(self, wav_bytes: bytes):
         if not self.voice_client or not self.voice_client.is_connected():

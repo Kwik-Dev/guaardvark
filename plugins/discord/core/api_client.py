@@ -224,6 +224,19 @@ class GuaardvarkClient:
         """GET /voice/audio/<filename>"""
         return await self._get_raw(f"/voice/audio/{filename}")
 
+    async def fetch_audio_by_url(self, audio_url: str) -> bytes:
+        """GET an /api-prefixed audio URL against the backend origin.
+
+        TTS returns audio_url as e.g. /api/voice/audio/<file> (audio_foundry) or
+        /api/voice/stream-tts/<id> (Piper) — both already carry the /api prefix,
+        so they must be resolved against the origin, not base_url.
+        """
+        origin = self.base_url.rsplit("/api", 1)[0]
+        async with self.session.get(f"{origin}{audio_url}") as resp:
+            if resp.status >= 400:
+                raise APIError(await resp.text(), resp.status)
+            return await resp.read()
+
     # --- Health ---
     async def health_check(self) -> dict:
         """GET /health"""
