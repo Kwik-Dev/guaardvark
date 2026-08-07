@@ -52,6 +52,36 @@ def test_empty_and_none():
     assert sanitize_image_prompt("generate an image of") == ""
 
 
+def test_strips_trailing_batch_copy_counter():
+    assert sanitize_image_prompt("batman on a rooftop (2)") == "batman on a rooftop"
+
+
+def test_strips_compounded_copy_counters():
+    # The 2026-08-07 case: original run appended (2), the re-run appended another.
+    assert sanitize_image_prompt("iron man in a hangar (2) (2)") == "iron man in a hangar"
+    assert sanitize_image_prompt("iron man in a hangar (3) (1)") == "iron man in a hangar"
+
+
+def test_copy_counter_strip_is_idempotent():
+    p = "iron man in a hangar (2) (2)"
+    once = sanitize_image_prompt(p)
+    assert sanitize_image_prompt(once) == once
+
+
+def test_preserves_four_digit_year_in_parens():
+    p = "a still in the style of Blade Runner (1982)"
+    assert sanitize_image_prompt(p) == p
+
+
+def test_preserves_mid_prompt_parenthetical():
+    p = "a portrait (soft rim light) on a grey backdrop"
+    assert sanitize_image_prompt(p) == p
+
+
+def test_counter_strip_never_empties_prompt():
+    assert sanitize_image_prompt("(2)") == "(2)"
+
+
 def test_looks_like_chrome():
     assert looks_like_image_gen_chrome("generate an image of x") is True
     assert looks_like_image_gen_chrome("batman on rooftop") is False

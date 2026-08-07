@@ -62,6 +62,14 @@ _TRAILING_FLUFF = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# Batch UI copy counters: "…suit. (2)" / "…suit. (2) (2)". The bulk batch path
+# used to append " (i+1)" to make each copy of a prompt unique, and that suffix
+# was stored in retry_data — so re-running a batch appended ANOTHER one and the
+# markers compounded (observed 2026-08-07: 42 images all ending "(N) (M)").
+# They are not visual content but the text encoder still tokenizes them.
+# Bounded to 1-3 digits so 4-digit years survive ("Blade Runner (1982)").
+_TRAILING_COUNTER = re.compile(r"(?:\s*\(\d{1,3}\))+\s*$")
+
 # Collapse runs of whitespace
 _WS = re.compile(r"\s+")
 
@@ -74,6 +82,7 @@ def sanitize_image_prompt(prompt: Optional[str], *, max_len: int = 4000) -> str:
 
     - Strips leading NL/slash chrome (``generate an image of``, ``/imagine``, …)
     - Strips light trailing politeness fluff
+    - Strips trailing batch copy counters (``… (2)``, ``… (2) (2)``)
     - Collapses whitespace; optional outer quotes
     - Caps length (does not smart-truncate mid-word for short overruns)
 
@@ -99,6 +108,11 @@ def sanitize_image_prompt(prompt: Optional[str], *, max_len: int = 4000) -> str:
 
     # Trailing fluff once
     text = _TRAILING_FLUFF.sub("", text).strip()
+
+    # Batch copy counters — never strip the prompt down to nothing
+    _decounted = _TRAILING_COUNTER.sub("", text).strip()
+    if _decounted:
+        text = _decounted
 
     # Whitespace
     text = _WS.sub(" ", text).strip(" \t,;:-")

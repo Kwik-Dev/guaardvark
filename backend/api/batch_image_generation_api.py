@@ -1372,6 +1372,60 @@ def download_batch_results(batch_id: str):
         logger.error(f"Error downloading batch results: {e}")
         return error_response(str(e), 500)
 
+# Generated images are Bates-stamped and never rewritten in place, so they can be
+# cached hard. Without an explicit max_age Werkzeug stamps every send_file response
+# `Cache-Control: no-cache`, which forces a revalidation round-trip per thumbnail on
+# every visit to the batch page.
+IMAGE_CACHE_MAX_AGE = 86400
+
+
+def _resolve_batch_output_dir(generator, batch_id: str) -> Optional[Path]:
+    """Find a batch's output directory without scanning every batch folder.
+
+    get_batch_status() only tracks in-flight batches, so requests for completed
+    batches always missed and fell through to list_all_batches(), which does an
+    iterdir plus a json.load of *every* batch folder. At one request per thumbnail
+    that is O(batches^2) disk work per page load. Batch folders are named after the
+    batch id, so try the direct path first and keep the scan only as a fallback for
+    layouts where that does not hold.
+    """
+    status = generator.get_batch_status(batch_id)
+    if status and status.output_dir:
+        return Path(status.output_dir)
+
+    safe_id = secure_filename(batch_id)
+    if safe_id:
+        direct = Path(generator.base_output_dir) / safe_id
+        if (direct / "batch_metadata.json").exists():
+            return direct
+
+    match = next((b for b in generator.list_all_batches() if b.batch_id == batch_id), None)
+    if match and match.output_dir:
+        return Path(match.output_dir)
+    return None
+
+
+def _ensure_thumbnail(generator, source: Path, thumbnail_dir: Path) -> Optional[Path]:
+    """Return a cached 256px thumbnail for `source`, generating it if missing.
+
+    Thumbnails go missing whenever generate_thumbnails was off or PIL failed during
+    the run. The old fallback shipped the full-resolution image instead, so a 1300px
+    PNG got decoded into a multi-megabyte bitmap just to fill a ~200px box — the main
+    reason the batch page balloons in memory. Build the thumbnail once, on demand,
+    and reuse it from disk thereafter.
+    """
+    try:
+        thumb_path = thumbnail_dir / (source.stem + ".jpg")
+        if thumb_path.exists() and thumb_path.stat().st_mtime >= source.stat().st_mtime:
+            return thumb_path
+        thumbnail_dir.mkdir(parents=True, exist_ok=True)
+        created = generator._create_thumbnail(str(source), thumbnail_dir)
+        return Path(created) if created else None
+    except Exception as e:
+        logger.warning(f"On-demand thumbnail generation failed for {source}: {e}")
+        return None
+
+
 @batch_image_bp.route("/image/<batch_id>/<image_name>", methods=["GET"])
 def get_batch_image(batch_id: str, image_name: str):
     """Get individual image from batch."""
@@ -1380,66 +1434,68 @@ def get_batch_image(batch_id: str, image_name: str):
             return error_response("Batch image generation service not available", 503)
 
         generator = get_batch_image_generator()
-        status = generator.get_batch_status(batch_id)
-        
-        # If not in active batches, try to load from disk
-        if not status:
-            all_batches = generator.list_all_batches()
-            status = next((b for b in all_batches if b.batch_id == batch_id), None)
-        
-        if not status or not status.output_dir:
+        output_dir = _resolve_batch_output_dir(generator, batch_id)
+
+        if not output_dir:
             return error_response("Batch not found", 404)
 
         # URL decode the image name in case it was encoded
         from urllib.parse import unquote
         decoded_image_name = unquote(image_name)
-        
+
         # Secure filename to prevent directory traversal
         safe_image_name = secure_filename(decoded_image_name)
 
+        want_thumbnail = request.args.get('thumbnail') == 'true'
+        thumbnail_dir = output_dir / "thumbnails"
+
         # Check if it's a thumbnail request
-        if request.args.get('thumbnail') == 'true':
-            image_path = Path(status.output_dir) / "thumbnails" / safe_image_name
-            
+        if want_thumbnail:
+            image_path = thumbnail_dir / safe_image_name
+
             # Special case: BatchImageGenerator saves thumbnails as .jpg
             if not image_path.exists():
                 jpg_name = Path(safe_image_name).with_suffix('.jpg')
-                image_path = Path(status.output_dir) / "thumbnails" / jpg_name
-                
+                image_path = thumbnail_dir / jpg_name
+
             # If not found with safe name, try with original decoded name
             if not image_path.exists() and safe_image_name != decoded_image_name:
-                image_path = Path(status.output_dir) / "thumbnails" / decoded_image_name
+                image_path = thumbnail_dir / decoded_image_name
                 if not image_path.exists():
                     jpg_name = Path(decoded_image_name).with_suffix('.jpg')
-                    image_path = Path(status.output_dir) / "thumbnails" / jpg_name
+                    image_path = thumbnail_dir / jpg_name
         else:
-            image_path = Path(status.output_dir) / "images" / safe_image_name
+            image_path = output_dir / "images" / safe_image_name
             # If not found with safe name, try with original decoded name
             if not image_path.exists() and safe_image_name != decoded_image_name:
-                image_path = Path(status.output_dir) / "images" / decoded_image_name
+                image_path = output_dir / "images" / decoded_image_name
 
         if not image_path.exists():
-            # If thumbnail was requested but not found, fall back to serving the full image.
-            # Use stem matching because thumbnails are always .jpg while images keep their original ext.
-            if request.args.get('thumbnail') == 'true':
+            # Thumbnail requested but absent: build it from the full image rather than
+            # serving the full image itself. Use stem matching because thumbnails are
+            # always .jpg while images keep their original extension.
+            if want_thumbnail:
                 stem = Path(safe_image_name).stem
-                images_dir = Path(status.output_dir) / "images"
-                # Try common extensions for the matching full image
-                for ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif'):
-                    for candidate_name in (f"{stem}{ext}", f"{safe_image_name}"):
-                        candidate = images_dir / candidate_name
-                        if candidate.exists():
-                            logger.info(f"Thumbnail not found, serving full image as fallback by stem: {candidate}")
-                            return send_file(str(candidate))
-                # Last resort: try original decoded name variants in images/
-                fallback_path = Path(status.output_dir) / "images" / safe_image_name
-                if not fallback_path.exists() and safe_image_name != decoded_image_name:
-                    fallback_path = Path(status.output_dir) / "images" / decoded_image_name
-                if fallback_path.exists():
-                    logger.info(f"Thumbnail not found, serving full image as fallback: {fallback_path}")
-                    return send_file(str(fallback_path))
+                images_dir = output_dir / "images"
+                candidates = [f"{stem}{ext}" for ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif')]
+                candidates.append(safe_image_name)
+                if safe_image_name != decoded_image_name:
+                    candidates.append(decoded_image_name)
+
+                for candidate_name in candidates:
+                    candidate = images_dir / candidate_name
+                    if not candidate.exists():
+                        continue
+                    generated = _ensure_thumbnail(generator, candidate, thumbnail_dir)
+                    if generated:
+                        return send_file(str(generated), mimetype='image/jpeg',
+                                         max_age=IMAGE_CACHE_MAX_AGE)
+                    # Thumbnailing failed (no PIL, unreadable file). Serving the
+                    # full-resolution image is heavy but beats showing nothing.
+                    logger.info(f"Thumbnail generation failed, serving full image: {candidate}")
+                    return send_file(str(candidate), max_age=IMAGE_CACHE_MAX_AGE)
             logger.warning(f"Image not found: {image_path} (requested: {image_name}, decoded: {decoded_image_name}, safe: {safe_image_name})")
-            images_dir = Path(status.output_dir) / ("thumbnails" if request.args.get('thumbnail') == 'true' else "images")
+            images_dir = output_dir / ("thumbnails" if want_thumbnail else "images")
             if images_dir.exists():
                 available_files = [f.name for f in images_dir.iterdir() if f.is_file()]
                 logger.warning(f"Available files in {images_dir}: {available_files[:5]}")
@@ -1456,7 +1512,7 @@ def get_batch_image(batch_id: str, image_name: str):
         elif image_path.suffix.lower() == '.webp':
             mime_type = 'image/webp'
 
-        return send_file(str(image_path), mimetype=mime_type)
+        return send_file(str(image_path), mimetype=mime_type, max_age=IMAGE_CACHE_MAX_AGE)
 
     except Exception as e:
         logger.error(f"Error serving batch image: {e}")
@@ -1691,18 +1747,11 @@ def get_batch_preview(batch_id: str):
             return error_response("Batch image generation service not available", 503)
 
         generator = get_batch_image_generator()
-        batch = generator.get_batch_status(batch_id)
-        
-        # If not in active batches, try to load from disk
-        if not batch:
-            all_batches = generator.list_all_batches()
-            batch = next((b for b in all_batches if b.batch_id == batch_id), None)
-        
-        if not batch or not batch.output_dir:
+        output_dir = _resolve_batch_output_dir(generator, batch_id)
+
+        if not output_dir:
             return error_response("Batch not found", 404)
 
-        output_dir = Path(batch.output_dir)
-        
         # Try to get first thumbnail, then first image
         thumbnail_dir = output_dir / "thumbnails"
         images_dir = output_dir / "images"
@@ -1716,16 +1765,21 @@ def get_batch_preview(batch_id: str):
             for pattern in image_patterns:
                 thumbnails.extend(sorted(thumbnail_dir.glob(pattern)))
             if thumbnails:
-                return send_file(str(thumbnails[0]))
+                return send_file(str(thumbnails[0]), max_age=IMAGE_CACHE_MAX_AGE)
 
-        # Fallback to first image (will be resized by browser if needed)
+        # No thumbnail on disk: build one from the first image instead of shipping a
+        # full-resolution render into the ~200px preview tile.
         if images_dir.exists():
             images = []
             for pattern in image_patterns:
                 images.extend(sorted(images_dir.glob(pattern)))
             if images:
-                return send_file(str(images[0]))
-        
+                generated = _ensure_thumbnail(generator, images[0], thumbnail_dir)
+                if generated:
+                    return send_file(str(generated), mimetype='image/jpeg',
+                                     max_age=IMAGE_CACHE_MAX_AGE)
+                return send_file(str(images[0]), max_age=IMAGE_CACHE_MAX_AGE)
+
         return error_response("No images found in batch", 404)
 
     except Exception as e:

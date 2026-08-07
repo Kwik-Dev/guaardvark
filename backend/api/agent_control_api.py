@@ -1433,6 +1433,111 @@ def _probe_display_socket(display_num: int = 99) -> bool:
     return probe_display_socket(display_num)
 
 
+def _passwordless_sudo_available() -> bool:
+    """True when `sudo -n` runs without prompting for a password.
+
+    A Flask request has no controlling terminal, so an interactive sudo prompt can
+    never be answered — `sudo -n` just exits non-zero with "interactive
+    authentication is required". Stock Ubuntu does not grant passwordless sudo, so
+    this is the normal case, not the exception. Checking up front lets the caller
+    hand the user a command they can run instead of failing on a raw apt error.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "true"], capture_output=True, timeout=10
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _manual_apt_command(packages: list) -> str:
+    """The exact line a user should paste to install `packages` themselves."""
+    return "sudo apt-get update && sudo apt-get install -y " + " ".join(packages)
+
+
+def _desktop_session_available() -> bool:
+    """True when pkexec can raise a graphical password prompt.
+
+    pkexec defers to polkit, which needs an authentication agent attached to the
+    caller's session (GNOME ships one in gnome-shell). The backend inherits
+    DISPLAY/WAYLAND_DISPLAY and the session bus when it is launched from a desktop
+    session; with none of those there is nothing to prompt on, and pkexec would
+    just fail after a delay.
+    """
+    import os
+    import shutil
+    if not shutil.which("pkexec"):
+        return False
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    return bool(
+        os.environ.get("DBUS_SESSION_BUS_ADDRESS") or os.environ.get("XDG_RUNTIME_DIR")
+    )
+
+
+# Everything this endpoint is ever allowed to install. Package names come from the
+# module constants above, never from the request, but this is interpolated into a
+# shell line for pkexec — so gate it explicitly rather than relying on that.
+_ALLOWED_APT_PACKAGES = frozenset(
+    [pkg for pkg, _ in _DISPLAY_SYSTEM_DEPS]
+    + [pkg for pkg, _ in _DISPLAY_BROWSER_CHOICES]
+)
+
+
+def _apt_install_script(packages: list) -> str:
+    """One shell line that refreshes the index then installs `packages`.
+
+    Combined into a single command on purpose: pkexec authenticates per invocation,
+    so splitting update and install would ask the user for a password twice. The
+    index refresh is best-effort — a warm cache can still satisfy the install.
+    """
+    import shlex
+    unknown = [p for p in packages if p not in _ALLOWED_APT_PACKAGES]
+    if unknown:
+        raise ValueError(f"Refusing to install unexpected packages: {unknown}")
+    quoted = " ".join(shlex.quote(p) for p in packages)
+    return (
+        "apt-get update -qq || true; "
+        f"DEBIAN_FRONTEND=noninteractive apt-get install -y {quoted}"
+    )
+
+
+def _run_privileged_apt(packages: list, timeout: int = 600) -> dict:
+    """Install apt packages as root, without a terminal.
+
+    Two ways in, tried in order:
+      1. passwordless sudo — silent when the host is configured for it;
+      2. pkexec — raises a password dialog on the user's desktop.
+    Returns method="none" when neither is possible, so the caller can fall back to
+    telling the user what to run by hand.
+    """
+    import subprocess
+
+    script = _apt_install_script(packages)
+
+    if _passwordless_sudo_available():
+        cmd, method = ["sudo", "-n", "/bin/sh", "-c", script], "sudo"
+    elif _desktop_session_available():
+        cmd, method = ["pkexec", "/bin/sh", "-c", script], "pkexec"
+    else:
+        return {"ok": False, "method": "none", "returncode": None, "stderr": ""}
+
+    logger.info(f"Agent display install: escalating via {method} for {packages}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "method": method, "returncode": "timeout", "stderr": ""}
+
+    return {
+        "ok": result.returncode == 0,
+        "method": method,
+        "returncode": result.returncode,
+        "stderr": (result.stderr or ""),
+    }
+
+
 @agent_control_bp.route("/display-status", methods=["GET"])
 def display_status():
     """Probe everything the agent virtual display needs and report per-component.
@@ -1511,6 +1616,24 @@ def display_status():
     }
 
     all_ready = all(c.get("installed") for c in components.values() if c is not components["display_running"])
+
+    # Only apt packages need root. Probe just when something is actually missing, so
+    # the common all-installed path does no extra work. The UI uses install_method to
+    # warn that a password prompt will appear on the desktop, and falls back to a
+    # copyable command when neither escalation route exists.
+    can_auto_install = True
+    install_method = None
+    manual_command = None
+    if missing_apt:
+        if _passwordless_sudo_available():
+            install_method = "sudo"
+        elif _desktop_session_available():
+            install_method = "pkexec"
+        else:
+            install_method = "none"
+            can_auto_install = False
+            manual_command = _manual_apt_command(missing_apt)
+
     return jsonify({
         "success": True,
         "ready": all_ready,
@@ -1518,6 +1641,9 @@ def display_status():
         "components": components,
         "missing_apt_packages": missing_apt,
         "missing_pip_packages": [] if mss_installed else ["mss"],
+        "can_auto_install": can_auto_install,
+        "install_method": install_method,
+        "manual_command": manual_command,
     })
 
 
@@ -1554,36 +1680,65 @@ def install_display():
 
         steps = []
 
+        # Only apt needs root; a pip-only gap installs unattended either way.
         if missing_apt:
-            logger.info(f"Agent display install: apt-get installing {missing_apt}")
-            try:
-                apt_result = subprocess.run(
-                    ["sudo", "-n", "apt-get", "install", "-y", *missing_apt],
-                    capture_output=True, text=True, timeout=600,
-                )
-            except subprocess.TimeoutExpired:
-                return jsonify({
-                    "success": False,
-                    "error": "apt-get timed out after 10 minutes — check network and try again",
-                }), 500
+            apt = _run_privileged_apt(missing_apt)
             steps.append({
                 "step": "apt_install",
                 "packages": missing_apt,
-                "returncode": apt_result.returncode,
-                "stderr_tail": (apt_result.stderr or "")[-500:],
+                "method": apt["method"],
+                "returncode": apt["returncode"],
+                "stderr_tail": apt["stderr"][-500:],
             })
-            if apt_result.returncode != 0:
-                stderr = (apt_result.stderr or "").strip()
-                hint = ""
-                if "sudo" in stderr.lower() or "password" in stderr.lower():
-                    hint = (
-                        " Passwordless sudo not configured for apt-get. "
-                        "Run manually: sudo apt-get install -y "
-                        + " ".join(missing_apt)
-                    )
+
+            if apt["method"] == "none":
+                # No passwordless sudo and no desktop session to prompt on — e.g.
+                # reached over SSH or from another machine's browser. Nothing to do
+                # but hand back the command.
                 return jsonify({
                     "success": False,
-                    "error": f"apt-get install failed (exit {apt_result.returncode}).{hint}",
+                    "needs_manual_install": True,
+                    "manual_command": _manual_apt_command(missing_apt),
+                    "missing_apt_packages": missing_apt,
+                    "error": (
+                        "Installing system packages needs root, and this session has no "
+                        "desktop to show a password prompt on. Run the command below on "
+                        "the machine itself, then click Recheck."
+                    ),
+                    "steps": steps,
+                }), 409
+
+            if not apt["ok"]:
+                stderr = apt["stderr"].strip()
+                rc = apt["returncode"]
+                # pkexec: 126 = dismissed or wrong password, 127 = agent missing.
+                if apt["method"] == "pkexec" and rc == 126:
+                    return jsonify({
+                        "success": False,
+                        "error": (
+                            "Authorisation was dismissed or the password was wrong. "
+                            "Click Install again and approve the prompt on your desktop."
+                        ),
+                        "steps": steps,
+                    }), 403
+                if rc == "timeout":
+                    return jsonify({
+                        "success": False,
+                        "error": (
+                            "Timed out waiting for the install. If a password prompt is "
+                            "open on your desktop, approve it and try again."
+                        ),
+                        "steps": steps,
+                    }), 504
+                return jsonify({
+                    "success": False,
+                    "needs_manual_install": True,
+                    "manual_command": _manual_apt_command(missing_apt),
+                    "missing_apt_packages": missing_apt,
+                    "error": (
+                        f"apt-get failed (exit {rc}) via {apt['method']}. "
+                        "Run the command below in a terminal, then click Recheck."
+                    ),
                     "stderr_tail": stderr[-500:],
                     "steps": steps,
                 }), 500
@@ -1629,11 +1784,19 @@ def install_display():
             mss_ok = False
 
         if still_missing or not mss_ok:
-            return jsonify({
+            payload = {
                 "success": False,
                 "error": f"Install completed but components still missing: {still_missing} mss_ok={mss_ok}",
                 "steps": steps,
-            }), 500
+            }
+            # "(browser)" is a placeholder for "any one of several", not a real
+            # package, so keep it out of a command we tell the user to paste.
+            real_pkgs = [p for p in still_missing if not p.startswith("(")]
+            if real_pkgs:
+                payload["needs_manual_install"] = True
+                payload["manual_command"] = _manual_apt_command(real_pkgs)
+                payload["missing_apt_packages"] = real_pkgs
+            return jsonify(payload), 500
 
         nothing_to_do = not missing_apt and not mss_missing
         return jsonify({

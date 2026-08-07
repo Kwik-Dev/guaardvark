@@ -14,6 +14,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import StopIcon from '@mui/icons-material/Stop';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 
 import {
   getDisplayStatus,
@@ -70,6 +71,8 @@ const AgentDisplaySection = ({ showMessage }) => {
   // on whichever button the user clicked.
   const [controlAction, setControlAction] = useState(null);
   const [error, setError] = useState(null);
+  // Set when the host needs a human to run apt itself (sudo wants a password).
+  const [manualInstall, setManualInstall] = useState(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -77,6 +80,11 @@ const AgentDisplaySection = ({ showMessage }) => {
     try {
       const data = await getDisplayStatus();
       setStatus(data);
+      // Drop any stale manual-install prompt once apt is satisfied, so Recheck
+      // after running the command by hand clears the banner.
+      if (!(data.missing_apt_packages || []).length) {
+        setManualInstall(null);
+      }
     } catch (e) {
       setError(e.message || 'Failed to probe agent display');
     } finally {
@@ -90,7 +98,15 @@ const AgentDisplaySection = ({ showMessage }) => {
 
   const onInstall = async () => {
     setInstalling(true);
-    showMessage?.('Installing agent display dependencies… apt-get may take a minute.', 'info');
+    setManualInstall(null);
+    // pkexec raises the password dialog on the desktop, which can land behind the
+    // browser window — say so, or it just looks like the button hung.
+    showMessage?.(
+      status?.install_method === 'pkexec'
+        ? 'Approve the password prompt on your desktop to continue installing.'
+        : 'Installing agent display dependencies… apt-get may take a minute.',
+      'info',
+    );
     try {
       const result = await installDisplay();
       if (result.success) {
@@ -103,10 +119,28 @@ const AgentDisplaySection = ({ showMessage }) => {
         showMessage?.(`Install failed: ${result.error}`, 'error');
       }
     } catch (e) {
-      showMessage?.(`Install failed: ${e.message}`, 'error');
+      // handleResponse throws on non-2xx but preserves the JSON body on error.data.
+      // A sudo-password host is the normal case, not a server fault: keep the exact
+      // command on screen instead of burying it in a toast that disappears.
+      const data = e.data || {};
+      if (data.needs_manual_install && data.manual_command) {
+        setManualInstall({ command: data.manual_command, reason: data.error || e.message });
+      } else {
+        showMessage?.(`Install failed: ${e.message}`, 'error');
+      }
     } finally {
       setInstalling(false);
       refresh();
+    }
+  };
+
+  const onCopyCommand = async (command) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      showMessage?.('Command copied to clipboard.', 'success');
+    } catch (e) {
+      // Clipboard needs a secure context; over plain http on a LAN IP it is absent.
+      showMessage?.('Could not copy — select the command and copy it manually.', 'warning');
     }
   };
 
@@ -187,10 +221,61 @@ const AgentDisplaySection = ({ showMessage }) => {
   const missingApt = status.missing_apt_packages || [];
   const missingPip = status.missing_pip_packages || [];
   const needsInstall = missingApt.length > 0 || missingPip.length > 0;
+  // The backend reports this false when apt packages are needed but sudo would
+  // prompt for a password — which a web service can never answer.
+  const canAutoInstall = status.can_auto_install !== false;
+  // Prefer the command from a failed attempt; otherwise the one the probe supplied.
+  const pendingManual = manualInstall
+    || (needsInstall && !canAutoInstall && status.manual_command
+      ? {
+        command: status.manual_command,
+        reason: 'Installing system packages requires sudo, and this machine asks for a '
+          + 'password. Guaardvark runs as a web service with no terminal, so it cannot '
+          + 'answer that prompt. Run this in a terminal, then click Recheck.',
+      }
+      : null);
 
   return (
     <Box>
-      {needsInstall ? (
+      {pendingManual ? (
+        <MuiAlert severity="warning" sx={{ mb: 1.5 }}>
+          <Typography variant="body2" sx={{ mb: 1 }}>{pendingManual.reason}</Typography>
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              p: 1,
+              borderRadius: 1,
+              bgcolor: 'action.hover',
+              fontFamily: 'monospace',
+              fontSize: '0.8rem',
+              overflowX: 'auto',
+            }}
+          >
+            <Box component="code" sx={{ flex: 1, whiteSpace: 'pre' }}>
+              {pendingManual.command}
+            </Box>
+            <Tooltip title="Copy command">
+              <Button
+                size="small"
+                color="inherit"
+                startIcon={<ContentCopyIcon fontSize="small" />}
+                onClick={() => onCopyCommand(pendingManual.command)}
+                sx={{ flexShrink: 0 }}
+              >
+                Copy
+              </Button>
+            </Tooltip>
+          </Box>
+          {missingPip.length > 0 && (
+            <Typography variant="caption" sx={{ display: 'block', mt: 1 }}>
+              The Python package{missingPip.length > 1 ? 's' : ''} ({missingPip.join(', ')})
+              {' '}will install automatically — no sudo needed for that part.
+            </Typography>
+          )}
+        </MuiAlert>
+      ) : needsInstall ? (
         <MuiAlert
           severity="warning"
           sx={{ mb: 1.5 }}
@@ -207,7 +292,9 @@ const AgentDisplaySection = ({ showMessage }) => {
           }
         >
           Agent Display is missing components: {[...missingApt, ...missingPip].join(', ')}.
-          Click to install via apt-get + pip.
+          {status.install_method === 'pkexec'
+            ? ' Click to install — your desktop will ask for your password.'
+            : ' Click to install via apt-get + pip.'}
         </MuiAlert>
       ) : status.display_running ? (
         <MuiAlert

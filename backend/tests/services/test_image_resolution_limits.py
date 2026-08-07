@@ -24,6 +24,14 @@ def test_zimage_allows_2688x1472_area():
     assert w * h <= 2048 * 2048
 
 
+def test_zimage_allows_2688x1152_ultrawide():
+    """2K Ultrawide 21:9 preset — must survive the clamp untouched."""
+    w, h, warns = clamp_image_dimensions(2688, 1152, "zimage")
+    assert (w, h) == (2688, 1152)
+    assert w * h <= 2048 * 2048
+    assert not any("exceeds" in m or "scaling" in m for m in warns)
+
+
 def test_zimage_clamps_oversize_area():
     w, h, warns = clamp_image_dimensions(3000, 3000, "zimage")
     assert w * h <= 2048 * 2048
@@ -73,3 +81,13 @@ def test_validator_zimage_2048_ok():
         "zimage-turbo", guidance=0.0, steps=8, width=2048, height=2048, auto_correct=True
     )
     assert "width" not in r.corrected_values
+
+
+def test_validator_zimage_2688x1152_ok():
+    from backend.services.settings_validator import SettingsValidator
+    v = SettingsValidator()
+    r = v.validate_settings(
+        "zimage-turbo", guidance=0.0, steps=9, width=2688, height=1152, auto_correct=True
+    )
+    assert "width" not in r.corrected_values
+    assert "height" not in r.corrected_values
