@@ -174,7 +174,10 @@ training.zip
 data/dep_reconciler/
 
 # Celery beat schedule state (per-machine, runtime-managed)
+data/celerybeat-schedule
 data/celerybeat-schedule.db*
+# Local passwordless Redis sidecar data dir (start_redis.sh alt-port broker)
+data/redis-broker/
 
 # --- Local scratch, backups & per-machine runtime (gitignore audit 2026-05-21) ---
 # Backup archives — the bare *.BACK rule misses compound extensions like .BACK.zip

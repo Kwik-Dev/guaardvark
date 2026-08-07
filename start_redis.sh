@@ -21,6 +21,10 @@ PORT=${REDIS_PORT:-6379}
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 REDIS_CONF="/etc/redis/redis.conf"
+PIDS_DIR="$SCRIPT_DIR/pids"
+REDIS_PID_FILE="$PIDS_DIR/redis.pid"
+# Sidecar data dir (not /tmp alone) so we can find our process after restart.
+REDIS_ALT_DIR="${REDIS_ALT_DIR:-$SCRIPT_DIR/data/redis-broker}"
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
@@ -42,6 +46,12 @@ get_redis_url_port() {
   [ -n "$url" ] || return
   port=$(echo "$url" | sed -E 's|^redis://([^@]*@)?[^:]+:([0-9]+).*|\2|')
   [ -n "$port" ] && echo "$port"
+}
+
+get_redis_url_raw() {
+  if [ -f "$ENV_FILE" ]; then
+    grep "^REDIS_URL=" "$ENV_FILE" 2>/dev/null | tail -1 | sed 's/^REDIS_URL=//'
+  fi
 }
 
 # ─── Helper: test Redis connectivity (with or without auth) ─────────────────
@@ -91,11 +101,90 @@ write_redis_env_urls() {
   chmod 600 "$ENV_FILE"
 }
 
+write_redis_pid() {
+  local port="$1"
+  local rpid=""
+  mkdir -p "$PIDS_DIR"
+  rpid=$(redis-cli -p "$port" INFO server 2>/dev/null | tr -d '\r' | sed -n 's/^process_id://p')
+  if [ -n "$rpid" ]; then
+    echo "$rpid" > "$REDIS_PID_FILE"
+  fi
+}
+
+clear_redis_pid_if_dead() {
+  if [ -f "$REDIS_PID_FILE" ]; then
+    local old
+    old=$(cat "$REDIS_PID_FILE" 2>/dev/null || true)
+    if [ -z "$old" ] || ! kill -0 "$old" 2>/dev/null; then
+      rm -f "$REDIS_PID_FILE"
+    fi
+  fi
+}
+
+# Sync .env to a reachable broker. Prefer default PORT when passwordless (or with
+# known password) so we do not leave REDIS_URL stuck on a dead alt port (6380).
+# Returns 0 and writes .env on success.
+sync_env_to_reachable_broker() {
+  local pass="${1:-$(get_redis_password)}"
+  local env_port
+  env_port=$(get_redis_url_port)
+
+  # 1) Default port, passwordless — preferred durable path (systemd redis).
+  if redis_ping "" "$PORT"; then
+    write_redis_env_urls "redis://localhost:${PORT}/0"
+    # Not our sidecar — drop stale alt pid if it pointed at a dead process.
+    clear_redis_pid_if_dead
+    if [ -n "$env_port" ] && [ "$env_port" != "$PORT" ]; then
+      vader_success "Redis broker URL reset to :${PORT} (was stale :${env_port} in .env)."
+    else
+      vader_success "Redis broker URL set to :${PORT}."
+    fi
+    return 0
+  fi
+
+  # 2) Default port with password from .env.
+  if [ -n "$pass" ] && redis_ping "$pass" "$PORT"; then
+    write_redis_env_urls "redis://:${pass}@localhost:${PORT}/0"
+    clear_redis_pid_if_dead
+    vader_success "Redis broker URL set to :${PORT} (authenticated)."
+    return 0
+  fi
+
+  # 3) Env-recorded alt port still alive.
+  if [ -n "$env_port" ] && [ "$env_port" != "$PORT" ]; then
+    if redis_ping "" "$env_port" || { [ -n "$pass" ] && redis_ping "$pass" "$env_port"; }; then
+      if [ -n "$pass" ] && redis_ping "$pass" "$env_port"; then
+        write_redis_env_urls "redis://:${pass}@localhost:${env_port}/0"
+      else
+        write_redis_env_urls "redis://localhost:${env_port}/0"
+      fi
+      write_redis_pid "$env_port"
+      vader_success "Redis already running on port ${env_port}."
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 # When :6379 is owned by a passworded system Redis we cannot reconfigure (no sudo),
 # start a local passwordless broker on the next free port and point .env at it.
+# Prefer restarting the port recorded in .env (usually 6380) so URLs stay stable.
 start_redis_alt_port() {
-  local alt_port="${REDIS_ALT_PORT:-6380}"
-  while redis_port_listening "$alt_port"; do
+  local preferred=""
+  local alt_port
+  preferred=$(get_redis_url_port)
+  if [ -n "$preferred" ] && [ "$preferred" -ge 6380 ] 2>/dev/null && [ "$preferred" -le 6399 ] 2>/dev/null; then
+    alt_port="$preferred"
+  else
+    alt_port="${REDIS_ALT_PORT:-6380}"
+  fi
+
+  # If preferred port is free, use it; if occupied but not pingable, try next ports.
+  if redis_port_listening "$alt_port" && ! redis_ping "" "$alt_port"; then
+    alt_port=$((alt_port + 1))
+  fi
+  while redis_port_listening "$alt_port" && ! redis_ping "" "$alt_port"; do
     alt_port=$((alt_port + 1))
     if [ "$alt_port" -gt 6399 ]; then
       vader_error "No free Redis port found between 6380-6399."
@@ -103,13 +192,22 @@ start_redis_alt_port() {
     fi
   done
 
+  if redis_ping "" "$alt_port"; then
+    write_redis_env_urls "redis://localhost:${alt_port}/0"
+    write_redis_pid "$alt_port"
+    vader_success "Redis broker already up on port ${alt_port}."
+    return 0
+  fi
+
+  mkdir -p "$REDIS_ALT_DIR" "$PIDS_DIR"
   vader_warn "Port $PORT is in use with auth we cannot match — starting passwordless broker on :${alt_port}."
-  redis-server --daemonize yes --port "$alt_port" --bind 127.0.0.1 --dir /tmp \
+  redis-server --daemonize yes --port "$alt_port" --bind 127.0.0.1 --dir "$REDIS_ALT_DIR" \
     --stop-writes-on-bgsave-error no --save "" >/dev/null 2>&1
   sleep 2
   if redis_ping "" "$alt_port"; then
     write_redis_env_urls "redis://localhost:${alt_port}/0"
-    vader_success "Redis broker running on port ${alt_port} (passwordless, local-only)."
+    write_redis_pid "$alt_port"
+    vader_success "Redis broker running on port ${alt_port} (passwordless, local-only, pidfile)."
     return 0
   fi
   vader_error "Failed to start passwordless Redis on port ${alt_port}."
@@ -168,78 +266,40 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 # ─── Step 1: Check if Redis is already running and reachable ─────────────────
+# Critical: always leave REDIS_URL / CELERY_* pointing at a broker that PING's.
+# A prior alt-port (6380) written to .env with a dead process used to pass
+# "Redis already running" via :6379 while Celery still targeted :6380.
 
 REDIS_PASS=$(get_redis_password)
 ENV_REDIS_PORT=$(get_redis_url_port)
+clear_redis_pid_if_dead
 
 if command_exists redis-cli; then
-  # Honor a broker port already recorded in .env (e.g. alt-port fallback).
-  if [ -n "$ENV_REDIS_PORT" ] && [ "$ENV_REDIS_PORT" != "$PORT" ]; then
-    if redis_ping "$REDIS_PASS" "$ENV_REDIS_PORT" || redis_ping "" "$ENV_REDIS_PORT"; then
-      vader_success "Redis already running on port $ENV_REDIS_PORT."
-      exit 0
+  # Stale .env port (e.g. 6380 down) but default PORT alive → rewrite .env now.
+  if sync_env_to_reachable_broker "$REDIS_PASS"; then
+    # Optional: fix dir/save on default PORT when we own the password path.
+    if redis_ping "$REDIS_PASS" "$PORT" || redis_ping "" "$PORT"; then
+      AUTH_ARGS=()
+      if [ -n "$REDIS_PASS" ] && redis_ping "$REDIS_PASS" "$PORT"; then
+        AUTH_ARGS=(-a "$REDIS_PASS" --no-auth-warning)
+      fi
+      if [ "${#AUTH_ARGS[@]}" -gt 0 ] || redis_ping "" "$PORT"; then
+        CURRENT_DIR=$(redis-cli "${AUTH_ARGS[@]}" -p "$PORT" CONFIG GET dir 2>/dev/null | tail -1)
+        if [ "$CURRENT_DIR" = "/" ] || [ -z "$CURRENT_DIR" ]; then
+          redis-cli "${AUTH_ARGS[@]}" -p "$PORT" CONFIG SET save "" >/dev/null 2>&1
+          redis-cli "${AUTH_ARGS[@]}" -p "$PORT" CONFIG SET stop-writes-on-bgsave-error no >/dev/null 2>&1
+        else
+          redis-cli "${AUTH_ARGS[@]}" -p "$PORT" CONFIG SET stop-writes-on-bgsave-error no >/dev/null 2>&1
+        fi
+      fi
     fi
+    exit 0
   fi
 
-  if redis_ping "$REDIS_PASS"; then
-    # Redis is running — ensure critical settings are correct at runtime.
-    # If systemd started Redis before our config was written (e.g. after reboot),
-    # it may have compiled-in defaults (dir /, stop-writes-on-bgsave-error yes).
-    AUTH_ARGS=()
-    if [ -n "$REDIS_PASS" ]; then
-      AUTH_ARGS=(-a "$REDIS_PASS" --no-auth-warning)
-    fi
-    CURRENT_DIR=$(redis-cli "${AUTH_ARGS[@]}" -p "$PORT" CONFIG GET dir 2>/dev/null | tail -1)
-    NEEDS_RESTART=0
-    if [ "$CURRENT_DIR" = "/" ] || [ -z "$CURRENT_DIR" ]; then
-      vader_warn "Redis dir is '$CURRENT_DIR' (can't persist snapshots) — needs restart"
-      NEEDS_RESTART=1
-    fi
-    redis-cli "${AUTH_ARGS[@]}" -p "$PORT" CONFIG SET stop-writes-on-bgsave-error no >/dev/null 2>&1
-    if [ "$NEEDS_RESTART" -eq 1 ]; then
-      # Try systemctl restart with sudo first
-      RESTARTED=0
-      if sudo -n test -r /etc/redis/redis.conf 2>/dev/null; then
-        if ! sudo grep -q "^dir /var/lib/redis" /etc/redis/redis.conf 2>/dev/null; then
-          vader_info "Updating Redis config before restart..."
-          sudo mkdir -p "$(dirname "$REDIS_CONF")"
-          cat <<REDISEOF | sudo tee "$REDIS_CONF" >/dev/null
-# Guaardvark Redis config — auto-generated by start_redis.sh
-bind 127.0.0.1 ::1
-port $PORT
-requirepass $REDIS_PASS
-daemonize no
-dir /var/lib/redis
-stop-writes-on-bgsave-error no
-REDISEOF
-          sudo mkdir -p /var/lib/redis 2>/dev/null
-          sudo chown redis:redis /var/lib/redis 2>/dev/null
-          sudo chmod 640 "$REDIS_CONF"
-          sudo chown redis:redis "$REDIS_CONF" 2>/dev/null
-        fi
-        vader_info "Restarting Redis via systemctl..."
-        if sudo -n systemctl restart redis-server >/dev/null 2>&1; then
-          sleep 2
-          if redis_ping "$REDIS_PASS"; then
-            vader_success "Redis restarted with correct config."
-            RESTARTED=1
-          fi
-        fi
-      fi
-
-      # Fallback: no sudo or systemctl restart failed.
-      # Can't change dir at runtime and can't restart systemd service without sudo.
-      # Disable RDB snapshots entirely so the broken dir doesn't matter —
-      # Redis is used as a Celery broker/cache, not for durable storage.
-      if [ "$RESTARTED" -eq 0 ]; then
-        vader_info "Disabling RDB snapshots (dir is unwritable, not needed for broker use)..."
-        redis-cli "${AUTH_ARGS[@]}" -p "$PORT" CONFIG SET save "" >/dev/null 2>&1
-        vader_success "Redis running as broker-only (no RDB persistence)"
-      fi
-      exit 0
-    fi
-    vader_success "Redis already running on port $PORT."
-    exit 0
+  # Env alt port dead — try restart sidecar on that port before broader install path.
+  if [ -n "$ENV_REDIS_PORT" ] && [ "$ENV_REDIS_PORT" != "$PORT" ]; then
+    vader_warn "Broker in .env (:$ENV_REDIS_PORT) is down — restarting local passwordless broker."
+    start_redis_alt_port && exit 0
   fi
 
   # Port is listening but our ping failed — common when system Redis has a password
@@ -359,7 +419,7 @@ if command_exists systemctl; then
   vader_info "Attempting to start redis service via systemctl..."
   if systemctl --user start redis-server >/dev/null 2>&1 || sudo -n systemctl start redis-server >/dev/null 2>&1; then
     sleep 2
-    if command_exists redis-cli && redis_ping "$REDIS_PASS"; then
+    if command_exists redis-cli && sync_env_to_reachable_broker "$REDIS_PASS"; then
       vader_success "Redis service started via systemctl."
       exit 0
     fi
@@ -389,9 +449,16 @@ else
 fi
 sleep 2
 if command_exists redis-cli && redis_ping "$REDIS_PASS"; then
+  if [ -n "$REDIS_PASS" ]; then
+    write_redis_env_urls "redis://:${REDIS_PASS}@localhost:${PORT}/0"
+  else
+    write_redis_env_urls "redis://localhost:${PORT}/0"
+  fi
   vader_success "redis-server started on port $PORT."
   exit 0
 else
+  # Last resort: sidecar when direct start on PORT failed.
+  start_redis_alt_port && exit 0
   vader_error "Failed to start redis-server."
   exit 1
 fi

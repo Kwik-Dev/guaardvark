@@ -222,6 +222,91 @@ def check_gpu_stack():
     return True
 
 
+def _load_dotenv_redis_url():
+    """Read REDIS_URL / CELERY_BROKER_URL from project .env (no third-party dotenv)."""
+    env_path = os.path.join(PROJECT_ROOT, ".env")
+    values = {}
+    if not os.path.isfile(env_path):
+        return values
+    try:
+        with open(env_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                values[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return values
+
+
+def check_redis_broker():
+    """Fail RED when .env points at a broker that does not PING.
+
+    Historical failure mode: start_redis.sh left REDIS_URL=redis://localhost:6380/0
+    after an alt-port sidecar died, while system Redis on :6379 was fine. Preflight
+    used to pass and Celery spammed Connection refused forever.
+    """
+    print("\n\033[1m[B] Redis broker\033[0m")
+    env = _load_dotenv_redis_url()
+    url = env.get("CELERY_BROKER_URL") or env.get("REDIS_URL") or os.environ.get(
+        "CELERY_BROKER_URL"
+    ) or os.environ.get("REDIS_URL") or "redis://localhost:6379/0"
+
+    # Parse redis://[:password@]host:port/db
+    port = "6379"
+    password = None
+    try:
+        rest = url.split("://", 1)[-1]
+        if "@" in rest:
+            creds, hostpart = rest.rsplit("@", 1)
+            if creds.startswith(":"):
+                password = creds[1:]
+            elif ":" in creds:
+                password = creds.split(":", 1)[1]
+            else:
+                password = creds
+        else:
+            hostpart = rest
+        hostport = hostpart.split("/")[0]
+        if ":" in hostport:
+            port = hostport.rsplit(":", 1)[-1]
+    except Exception:
+        pass
+
+    redis_cli = shutil.which("redis-cli")
+    if redis_cli is None:
+        warn("redis-cli", "not installed — cannot verify broker (install redis-tools)")
+        return True
+
+    cmd = [redis_cli, "-p", str(port), "ping"]
+    if password:
+        cmd = [redis_cli, "-p", str(port), "-a", password, "--no-auth-warning", "ping"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"  {FAIL} Redis broker PING failed ({url}): {e}")
+        errors.append(
+            f"Redis broker not reachable at {url}. "
+            "Fix: ./start_redis.sh  (rewrites REDIS_URL to a live port) then re-run ./start.sh"
+        )
+        return False
+
+    out = (result.stdout or "").strip()
+    if result.returncode == 0 and out.upper() == "PONG":
+        print(f"  {PASS} Redis broker PING ok ({url.split('@')[-1] if '@' in url else url})")
+        return True
+
+    err = (result.stderr or result.stdout or "connection failed").strip()[:120]
+    print(f"  {FAIL} Redis broker PING failed ({url}): {err}")
+    errors.append(
+        f"Redis broker not reachable at {url} ({err}). "
+        "Fix: ./start_redis.sh then ensure REDIS_URL/CELERY_BROKER_URL in .env match a live port"
+    )
+    return False
+
+
 def check_frontend():
     """Check frontend build state."""
     print("\n\033[1m[4/4] Frontend\033[0m")
@@ -267,6 +352,8 @@ def main():
     # are exactly the checks that catch a half-installed venv (24.04 lesson).
     check_reconciler_sentinel()
     check_gpu_stack()
+    # Broker must answer PING before Celery; stale REDIS_URL=:6380 was a silent outage.
+    check_redis_broker()
 
     if not quick:
         check_api_modules()

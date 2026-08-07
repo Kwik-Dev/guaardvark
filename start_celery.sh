@@ -24,12 +24,15 @@ VENV_DIR="$BACKEND_DIR/venv"
 LOGS_DIR="$SCRIPT_DIR/logs"
 
 check_workers() {
-  local count=$(pgrep -f "celery.*worker" | wc -l)
-  echo $count
+  # Match real worker CLIs only — avoid matching parent shells that embed this
+  # pattern in their argv (tooling wrappers, pgrep itself).
+  local count
+  count=$(pgrep -f "celery -A backend.celery_app.celery worker" 2>/dev/null | wc -l)
+  echo "$count"
 }
 
 check_beat() {
-  pgrep -f "celery.*beat" | wc -l
+  pgrep -f "celery -A backend.celery_app.celery beat" 2>/dev/null | wc -l
 }
 
 start_worker() {
@@ -63,6 +66,48 @@ start_worker() {
   fi
 }
 
+clean_beat_schedule() {
+  # Linux shelve/dbm appends ".db" to the path Celery is given, so
+  # --schedule=.../celerybeat-schedule.db creates celerybeat-schedule.db.db.
+  # Only removing the bare path left a corrupt shelf that killed beat on every restart.
+  rm -f "$SCRIPT_DIR/data/celerybeat-schedule.db" \
+        "$SCRIPT_DIR/data/celerybeat-schedule.db.db" \
+        "$SCRIPT_DIR/data/celerybeat-schedule.db.dir" \
+        "$SCRIPT_DIR/data/celerybeat-schedule.db.bak" \
+        "$SCRIPT_DIR/data/celerybeat-schedule" \
+        "$SCRIPT_DIR/data/celerybeat-schedule.dir" \
+        "$SCRIPT_DIR/data/celerybeat-schedule.bak" 2>/dev/null
+  rm -f "$SCRIPT_DIR"/data/celerybeat-schedule.db* 2>/dev/null
+}
+
+wait_for_broker() {
+  # Fail closed: workers that start against a dead REDIS_URL spam forever.
+  local url port pass tries=0 max_tries=30
+  url="${CELERY_BROKER_URL:-${REDIS_URL:-redis://localhost:6379/0}}"
+  port=$(echo "$url" | sed -E 's|^redis://([^@]*@)?[^:]+:([0-9]+).*|\2|')
+  pass=$(echo "$url" | sed -n 's|^redis://:\([^@]*\)@.*|\1|p')
+  [ -n "$port" ] || port=6379
+  vader_info "Waiting for Redis broker on :${port}..."
+  while [ "$tries" -lt "$max_tries" ]; do
+    if [ -n "$pass" ]; then
+      if redis-cli -p "$port" -a "$pass" --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+        vader_success "Redis broker reachable on :${port}"
+        return 0
+      fi
+    else
+      if redis-cli -p "$port" ping 2>/dev/null | grep -q PONG; then
+        vader_success "Redis broker reachable on :${port}"
+        return 0
+      fi
+    fi
+    tries=$((tries + 1))
+    sleep 1
+  done
+  vader_error "Redis broker not reachable at ${url} after ${max_tries}s"
+  vader_detail "Run ./start_redis.sh then re-check REDIS_URL in .env"
+  return 1
+}
+
 start_beat() {
   # Celery beat scheduler — dispatches the periodic tasks declared in
   # backend.celery_app.beat_schedule (process_approved_drafts every 60s,
@@ -74,12 +119,16 @@ start_beat() {
   # gitignored. --pidfile makes stop.sh's pid sweep deterministic.
   vader_info "Starting Celery beat scheduler"
 
-  rm -f "$SCRIPT_DIR/data/celerybeat-schedule.db" 2>/dev/null  # corruption-clean restart
-  mkdir -p "$SCRIPT_DIR/pids"
+  clean_beat_schedule
+  mkdir -p "$SCRIPT_DIR/pids" "$SCRIPT_DIR/data"
+
+  # Use a path WITHOUT a trailing .db so shelve creates a single
+  # celerybeat-schedule.db (not celerybeat-schedule.db.db).
+  local schedule_path="$SCRIPT_DIR/data/celerybeat-schedule"
 
   nohup celery -A backend.celery_app.celery beat \
     --loglevel=info \
-    --schedule="$SCRIPT_DIR/data/celerybeat-schedule.db" \
+    --schedule="$schedule_path" \
     --pidfile="$SCRIPT_DIR/pids/celery_beat.pid" \
     --logfile="$LOGS_DIR/celery_beat.log" \
     >> "$LOGS_DIR/celery_beat.log" 2>&1 &
@@ -91,17 +140,36 @@ start_beat() {
   sleep 2
   if kill -0 "$beat_pid" 2>/dev/null; then
     vader_success "Celery beat started (PID: $beat_pid)"
-  else
-    vader_error "Celery beat FAILED to start (died immediately: corrupt schedule? import error?) — see $LOGS_DIR/celery_beat.log"
-    return 1
+    return 0
   fi
+
+  # One automatic recovery: wipe schedule artifacts and retry (dbm corruption).
+  vader_warn "Celery beat died immediately — wiping schedule files and retrying once..."
+  if grep -qE '_dbm\.error|cannot add item to database|shelve' "$LOGS_DIR/celery_beat.log" 2>/dev/null; then
+    vader_detail "Detected schedule/dbm error in celery_beat.log"
+  fi
+  clean_beat_schedule
+  nohup celery -A backend.celery_app.celery beat \
+    --loglevel=info \
+    --schedule="$schedule_path" \
+    --pidfile="$SCRIPT_DIR/pids/celery_beat.pid" \
+    --logfile="$LOGS_DIR/celery_beat.log" \
+    >> "$LOGS_DIR/celery_beat.log" 2>&1 &
+  beat_pid=$!
+  sleep 2
+  if kill -0 "$beat_pid" 2>/dev/null; then
+    vader_success "Celery beat started after schedule reset (PID: $beat_pid)"
+    return 0
+  fi
+  vader_error "Celery beat FAILED to start (corrupt schedule? import error?) — see $LOGS_DIR/celery_beat.log"
+  return 1
 }
 
 worker_count=$(check_workers)
 if [ $worker_count -gt 0 ]; then
   vader_info "Celery workers already running ($worker_count processes)."
   vader_detail "Use ./stop.sh first to stop them, or kill them manually:"
-  pgrep -f "celery.*worker" | while read pid; do
+  pgrep -f "celery -A backend.celery_app.celery worker" 2>/dev/null | while read pid; do
     vader_detail "PID $pid: $(ps -p $pid -o command= | cut -c1-80)"
   done
   exit 0
@@ -139,6 +207,13 @@ ulimit -n 65535
 vader_info "File descriptor limit set to: $(ulimit -n)"
 
 vader_header "Enhanced Celery Worker Startup"
+
+# Block until REDIS_URL / CELERY_BROKER_URL answers PING — otherwise workers
+# boot into an infinite "Cannot connect to redis://…Connection refused" loop.
+if ! wait_for_broker; then
+  exit 1
+fi
+
 vader_info "Starting workers..."
 
 # SINGLE-GPU INVARIANT: all GPU-bearing queues live on ONE worker so the in-process
@@ -166,7 +241,7 @@ else
   vader_success "$worker_count Celery workers running (concurrency=1 for race condition test)"
   
   vader_info "Worker processes:"
-  pgrep -f "celery.*worker" | while read pid; do
+  pgrep -f "celery -A backend.celery_app.celery worker" 2>/dev/null | while read pid; do
     vader_detail "PID $pid: $(ps -p $pid -o command= | cut -c1-100)"
   done
   

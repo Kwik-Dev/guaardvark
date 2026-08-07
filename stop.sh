@@ -242,6 +242,36 @@ else
     vader_info "Ollama was not running (or managed externally)."
 fi
 
+# ── Stop Guaardvark-owned alt Redis (sidecar on 6380–6399 only) ──
+# Never kill system Redis on :6379 managed by systemd. We only stop a process
+# whose PID we recorded in pids/redis.pid when start_redis.sh launched a sidecar.
+if [ -f "$PIDS_DIR/redis.pid" ]; then
+    redis_pid=$(cat "$PIDS_DIR/redis.pid" 2>/dev/null)
+    if [ -n "$redis_pid" ] && kill -0 "$redis_pid" 2>/dev/null; then
+        # Extra safety: only stop if the process looks like redis-server and is
+        # not the distro service bound solely as the system unit (we check cmdline).
+        redis_cmd=$(ps -p "$redis_pid" -o args= 2>/dev/null || true)
+        if echo "$redis_cmd" | grep -q "redis-server"; then
+            vader_info "Stopping Guaardvark Redis sidecar (PID: $redis_pid)..."
+            kill -TERM "$redis_pid" 2>/dev/null
+            sleep 1
+            if kill -0 "$redis_pid" 2>/dev/null; then
+                kill -KILL "$redis_pid" 2>/dev/null
+            fi
+            if ! kill -0 "$redis_pid" 2>/dev/null; then
+                vader_success "Redis sidecar stopped."
+            else
+                vader_warn "Redis sidecar PID $redis_pid still running."
+            fi
+        else
+            vader_info "pids/redis.pid ($redis_pid) is not redis-server — leaving alone."
+        fi
+    else
+        vader_info "Redis sidecar not running (stale pidfile)."
+    fi
+    rm -f "$PIDS_DIR/redis.pid"
+fi
+
 # ── Stop Guaardvark services ──
 kill_and_cleanup "backend"
 kill_and_cleanup "frontend"

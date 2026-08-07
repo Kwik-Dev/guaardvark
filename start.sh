@@ -1442,6 +1442,29 @@ vader_separator
 
 vader_step 3 "Ensuring Redis service is running..."
 "$(dirname "$0")/start_redis.sh" || { vader_error "Redis failed to start"; exit 1; }
+# start_redis.sh rewrites REDIS_URL when an alt port dies — pick it up immediately
+# so later Celery / backend exports match a live broker.
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a
+  . "$SCRIPT_DIR/.env"
+  set +a
+fi
+# Fail closed: never continue into Celery with a dead REDIS_URL.
+_redis_check_url="${CELERY_BROKER_URL:-${REDIS_URL:-redis://localhost:6379/0}}"
+_redis_check_port=$(echo "$_redis_check_url" | sed -E 's|^redis://([^@]*@)?[^:]+:([0-9]+).*|\2|')
+_redis_check_pass=$(echo "$_redis_check_url" | sed -n 's|^redis://:\([^@]*\)@.*|\1|p')
+[ -n "$_redis_check_port" ] || _redis_check_port=6379
+if [ -n "$_redis_check_pass" ]; then
+  _redis_pong=$(redis-cli -p "$_redis_check_port" -a "$_redis_check_pass" --no-auth-warning ping 2>/dev/null || true)
+else
+  _redis_pong=$(redis-cli -p "$_redis_check_port" ping 2>/dev/null || true)
+fi
+if [ "$_redis_pong" != "PONG" ]; then
+  vader_error "Redis broker not reachable at $_redis_check_url after start_redis.sh"
+  vader_info "Check logs above and REDIS_URL in .env — refusing to start with a dead broker."
+  exit 1
+fi
+vader_success "Redis broker PING ok (:${_redis_check_port})"
 vader_separator
 
 vader_step 4 "Ensuring PostgreSQL database is ready..."
