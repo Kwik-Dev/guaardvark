@@ -1,6 +1,7 @@
 bot:
   token: "${DISCORD_BOT_TOKEN}"
-  guild_id: null
+  # Guaardvark Discord server — enables instant slash-command sync on boot
+  guild_id: 1481468315187810306
 
 api:
   base_url: "http://localhost:${FLASK_PORT:-5002}/api"
