@@ -13,7 +13,8 @@ import {
 import { themes } from "./theme";
 import { spacing } from "./theme/tokens";
 import { useAppStore } from "./stores/useAppStore";
-import { GuaardvarkLogo } from "./components/branding";
+import { BrandLogo } from "./components/branding";
+import brand from "./config/brand";
 
 import TrainingFloater from "./components/agent/TrainingFloater";
 
@@ -134,7 +135,10 @@ const GlobalTrainer = () => {
 
 const AppContainer = () => {
   const themeName = useAppStore((state) => state.themeName);
-  const theme = themes[themeName]?.theme || themes["guaardvark"].theme;
+  const theme =
+    themes[themeName]?.theme ||
+    themes[brand.defaultThemeKey]?.theme ||
+    themes["guaardvark"].theme;
   const fetchSystemInfo = useAppStore((state) => state.fetchSystemInfo);
   const systemName = useAppStore((state) => state.systemName);
 
@@ -160,7 +164,7 @@ const AppContainer = () => {
     if (systemName) {
       document.title = systemName;
     } else {
-      document.title = "Guaardvark";
+      document.title = brand.appName;
     }
   }, [systemName]);
 
@@ -179,7 +183,7 @@ const AppContainer = () => {
                 <SnackbarProvider>
                   <UncleNotificationListener />
                   <ErrorProvider>
-                    <Suspense fallback={<Box sx={{ display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", height: "100vh", gap: 2 }}><GuaardvarkLogo size={64} animate /><CircularProgress size={24} /></Box>}>
+                    <Suspense fallback={<Box sx={{ display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", height: "100vh", gap: 2 }}><BrandLogo size={64} animate /><CircularProgress size={24} /></Box>}>
                     <Routes>
                       <Route
                         path="/"

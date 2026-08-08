@@ -1,8 +1,9 @@
 import { create } from "zustand";
 import { persist, createJSONStorage, subscribeWithSelector, devtools } from "zustand/middleware";
+import brand from "../config/brand";
 
 const createUISlice = (set, get) => ({
-  themeName: "guaardvark",
+  themeName: brand.defaultThemeKey,
   setThemeName: (name) => set({ themeName: name }),
   
   dashboardLayout: [],

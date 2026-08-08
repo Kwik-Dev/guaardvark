@@ -659,9 +659,11 @@ class AgentBrain:
         except Exception:
             pass
 
+        from backend.config import GUAARDVARK_PROJECT_NAME
+
         persona = (self_knowledge or "").strip()[:600]
         system_prompt = (
-            "You are Guaardvark. "
+            f"You are {GUAARDVARK_PROJECT_NAME}. "
             + (persona + "\n\n" if persona else "")
             + "Reply in 1-2 short sentences about what just happened on screen. "
               "Direct, no corporate filler, no exclamation marks unless something "

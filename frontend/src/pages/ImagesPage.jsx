@@ -46,7 +46,7 @@ import {
   Videocam as VideocamIcon,
   OpenInNew as OpenInNewIcon,
 } from '@mui/icons-material';
-import { GuaardvarkLogo } from "../components/branding";
+import { BrandLogo } from "../components/branding";
 import ReactGridLayoutLib, { WidthProvider } from 'react-grid-layout';
 import BatchImageGeneratorPage from './BatchImageGeneratorPage';
 import VideoGeneratorPage from './VideoGeneratorPage';
@@ -1598,7 +1598,7 @@ const ImagesPage = () => {
                   alignItems: 'center', justifyContent: 'center',
                   pointerEvents: 'none', opacity: 0.5, gap: 1,
                 }}>
-                  <GuaardvarkLogo size={64} sx={{ opacity: 0.4 }} />
+                  <BrandLogo size={64} sx={{ opacity: 0.4 }} />
                   <Typography variant="h6" color="text.disabled">
                     No images yet
                   </Typography>

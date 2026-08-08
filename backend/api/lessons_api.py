@@ -107,8 +107,10 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
             # get replaced with {snake_case} placeholders so the same lesson
             # applies to any future target. The parameter list explains each
             # placeholder so Gemma4 can map a new user request onto the slots.
+            from backend.config import GUAARDVARK_PROJECT_NAME
+
             prompt = (
-                "You are Guaardvark's lesson distiller. The user has just finished "
+                f"You are {GUAARDVARK_PROJECT_NAME}'s lesson distiller. The user has just finished "
                 "teaching the agent a sequence of actions via thumbs-up pearls. "
                 "Produce a short REPLAYABLE GENERIC guide that can be reused with "
                 "different targets — not tied to the specific names in these pearls.\n\n"
