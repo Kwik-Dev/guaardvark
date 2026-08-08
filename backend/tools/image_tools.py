@@ -558,6 +558,147 @@ class AnimationGeneratorTool(BaseTool):
             )
 
 
+class VideoGeneratorTool(BaseTool):
+    """Generate a real text-to-video clip via the batch video pipeline (Wan et al.).
+
+    Use when the user asks to create/generate/make a video from a description.
+    (Contrast generate_animation, which produces short frame-morph GIF loops.)"""
+
+    name = "generate_video"
+    description = (
+        "Generate a video clip from a text prompt using the local video model "
+        "(Wan text-to-video). Takes one to several minutes; the finished video "
+        "is shown inline in chat and saved to the media library. Use when the "
+        "user asks to create, generate, or make a video. For short looping "
+        "frame-morph animations use generate_animation instead."
+    )
+    parameters = {
+        "prompt": ToolParameter(
+            name="prompt",
+            type="string",
+            description="Description of the video to generate (scene, subject, motion, style).",
+            required=True,
+        ),
+        "duration_frames": ToolParameter(
+            name="duration_frames",
+            type="int",
+            description="Number of frames. Default 49 (~2s at 24fps). Max 121.",
+            required=False,
+            default=49,
+        ),
+        "num_inference_steps": ToolParameter(
+            name="num_inference_steps",
+            type="int",
+            description="Inference steps. Default 25. Higher = better quality, slower.",
+            required=False,
+            default=25,
+        ),
+    }
+
+    # Batch queue can stack behind another render; poll generously.
+    POLL_INTERVAL_S = 3
+    MAX_WAIT_S = 900
+
+    def __init__(self):
+        super().__init__()
+
+    def execute(self, prompt: str, duration_frames: int = 49,
+                num_inference_steps: int = 25, **kwargs) -> ToolResult:
+        import time as _time
+
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return ToolResult(success=False, error="Empty video prompt")
+        try:
+            duration_frames = max(9, min(int(duration_frames), 121))
+        except (TypeError, ValueError):
+            duration_frames = 49
+        try:
+            num_inference_steps = max(4, min(int(num_inference_steps), 50))
+        except (TypeError, ValueError):
+            num_inference_steps = 25
+
+        logger.info("VideoGeneratorTool: frames=%s steps=%s prompt=%r",
+                    duration_frames, num_inference_steps, prompt[:100])
+        try:
+            from backend.services.batch_video_generator import get_batch_video_generator
+            from backend.services.video_model_registry import (
+                DEFAULT_T2V_MODEL, preflight_video_model,
+            )
+
+            ready, preflight_err = preflight_video_model(DEFAULT_T2V_MODEL)
+            if not ready:
+                return ToolResult(success=False, error=f"Video model not ready: {preflight_err}")
+
+            generator = get_batch_video_generator()
+            if not generator.service_available:
+                return ToolResult(success=False, error="Video generation service not available")
+
+            status = generator.start_batch_from_prompts(
+                prompts=[prompt],
+                model=DEFAULT_T2V_MODEL,
+                duration_frames=duration_frames,
+                num_inference_steps=num_inference_steps,
+                metadata={"source": "chat"},
+            )
+            batch_id = status.batch_id
+
+            deadline = _time.monotonic() + self.MAX_WAIT_S
+            while _time.monotonic() < deadline:
+                _time.sleep(self.POLL_INTERVAL_S)
+                status = generator.get_batch_status(batch_id)
+                if status is None:
+                    return ToolResult(success=False, error=f"Video batch {batch_id} disappeared")
+                if status.status == "completed":
+                    break
+                if status.status in ("error", "cancelled"):
+                    err = status.error or (
+                        status.results[0].error if status.results and status.results[0].error
+                        else status.status
+                    )
+                    return ToolResult(success=False, error=f"Video generation failed: {err}")
+            else:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Video generation still running after {self.MAX_WAIT_S // 60} minutes "
+                        f"(batch {batch_id}). Check the Video Generator page for the result."
+                    ),
+                )
+
+            result = next((r for r in status.results if r.success and r.video_path), None)
+            if not result:
+                err = status.results[0].error if status.results else "no results"
+                return ToolResult(success=False, error=f"Video generation failed: {err}")
+
+            # video_path is batch-relative; the serving route accepts it verbatim.
+            video_url = f"/api/batch-video/video/{batch_id}/{result.video_path}"
+            gen_seconds = None
+            if status.start_time and status.end_time:
+                gen_seconds = (status.end_time - status.start_time).total_seconds()
+            output_lines = [
+                f"Video generated successfully" + (f" in {gen_seconds:.0f}s." if gen_seconds else "."),
+                f"Prompt: {prompt}",
+                f"Frames: {duration_frames} | Steps: {num_inference_steps} | Batch: {batch_id}",
+                f"Video: {video_url}",
+            ]
+            metadata = {
+                "prompt": prompt,
+                "batch_id": batch_id,
+                "video_url": video_url,
+                "generation_time": gen_seconds,
+            }
+            if result.thumbnail_path:
+                metadata["thumbnail_url"] = f"/api/batch-video/video/{batch_id}/{result.thumbnail_path}"
+            return ToolResult(success=True, output="\n".join(output_lines), metadata=metadata)
+
+        except ImportError:
+            return ToolResult(success=False, error="Video generation dependencies not available.")
+        except Exception as e:
+            logger.error(f"VideoGeneratorTool error: {e}", exc_info=True)
+            return ToolResult(success=False, error=f"Video generation failed: {str(e)}")
+
+
 class EditImageTool(BaseTool):
     """Edit an EXISTING image from a natural-language instruction (FLUX.1 Kontext).
 

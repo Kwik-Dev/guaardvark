@@ -159,7 +159,7 @@ DESKTOP_TOOLS = ["app_launch", "app_list", "app_focus", "gui_click", "gui_type",
                  "clipboard_get", "clipboard_set", "gui_locate_image"]
 WEB_TOOLS = ["analyze_website", "fetch_url"]
 MEDIA_TOOLS = ["media_play", "media_control", "media_volume", "media_status"]
-IMAGE_TOOLS = ["generate_image", "generate_animation"]
+IMAGE_TOOLS = ["generate_image", "generate_animation", "generate_video"]
 
 # Narrow create-intent phrases for image/video generation — excludes descriptive
 # "image of X on the website" references that falsely triggered direct generate_image.
@@ -341,6 +341,36 @@ def user_wants_image_generation(message: str) -> bool:
         return False
     msg_lower = message.lower()
     if not _has_explicit_image_gen_intent(msg_lower):
+        return False
+    for pat in _IMAGE_GEN_NEGATIVE_PATTERNS:
+        if re.search(pat, msg_lower):
+            return False
+    return True
+
+
+# Create-verb within reach of "video" — "generate a video of X", "make me a short
+# video showing Y". Bare references ("what is in this video of my trip") don't match.
+_VIDEO_INTENT_RE = re.compile(
+    r"\b(generate|create|make|render|produce)\b[^.?!]{0,40}\bvideo\b", re.IGNORECASE
+)
+
+# Strip "generate a video of…" chrome so the video model gets pure scene text.
+_VIDEO_CHROME_RE = re.compile(
+    r"^\s*(please\s+)?(can\s+you\s+|could\s+you\s+)?"
+    r"(generate|create|make|render|produce)\s+(me\s+)?(a|an|the)?\s*"
+    r"(short\s+|quick\s+)?video\s*(clip\s*)?(of|about|showing|where|with|:)?\s*",
+    re.IGNORECASE,
+)
+
+
+def user_wants_video_generation(message: str) -> bool:
+    """True for explicit new-video requests; GIF/animation phrasing stays with generate_animation."""
+    if not message or not message.strip():
+        return False
+    msg_lower = message.lower()
+    if not (_VIDEO_INTENT_RE.search(msg_lower) or msg_lower.startswith("video of ")):
+        return False
+    if any(w in msg_lower for w in ("gif", "animate", "animation", "animated")):
         return False
     for pat in _IMAGE_GEN_NEGATIVE_PATTERNS:
         if re.search(pat, msg_lower):
@@ -1279,6 +1309,13 @@ class UnifiedChatEngine:
         edit_result = self._try_image_edit_direct(message, session_id, emit_fn, request_id, options)
         if edit_result is not None:
             return edit_result
+
+        # Natural language VIDEO generation ("generate a video of ...") → direct
+        # generate_video. Must run BEFORE the image intercept: "video of" is also in
+        # IMAGE_GEN_INTENT_KEYWORDS, so the image path would otherwise swallow it.
+        video_result = self._try_video_generate_direct(message, session_id, emit_fn, request_id, options)
+        if video_result is not None:
+            return video_result
 
         # Natural language image generation (e.g. "generate an image of an ostrich",
         # "draw a cat", "picture of a sunset") → direct generate_image. Mirrors the
@@ -2453,6 +2490,20 @@ class UnifiedChatEngine:
         })
 
         generated_images = []
+        video_url = (result.metadata or {}).get("video_url") if result.success else None
+        if video_url:
+            caption = (result.metadata or {}).get("prompt") or params.get("prompt") or ""
+            emit_fn("chat:video", {
+                "video_url": video_url,
+                "alt": "Generated video",
+                "caption": caption[:120],
+                "session_id": session_id,
+            })
+            generated_images.append({
+                "url": video_url,
+                "type": "video",
+                "alt": "Generated video",
+            })
         image_url = (result.metadata or {}).get("image_url") if result.success else None
         if image_url:
             caption = (result.metadata or {}).get("prompt") or params.get("prompt") or ""
@@ -2504,7 +2555,9 @@ class UnifiedChatEngine:
                     "image": img,
                 }
 
-        if result.success and image_url:
+        if result.success and video_url:
+            response = "Here's the generated video."
+        elif result.success and image_url:
             response = "Here's the generated image." if tool_name == "generate_image" else str(result.output)
         elif result.success:
             response = str(result.output)
@@ -2845,6 +2898,29 @@ class UnifiedChatEngine:
         # gpu lease, execute, chat:image, complete, assistant save) to the shared runner.
         return self._run_direct_tool_execution(
             "generate_image", {"prompt": prompt}, session_id, emit_fn, request_id, message, options
+        )
+
+    def _try_video_generate_direct(self, message: str, session_id: str,
+                                   emit_fn: Callable, request_id: str,
+                                   options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Natural language request for a new video ("generate a video of ...")
+        → call generate_video DIRECTLY (bypass LLM tool selection).
+
+        Video-side counterpart to _try_image_generate_direct, for the same reason:
+        small local models tend to apologize that they "can only generate text"
+        instead of calling the tool.
+        """
+        if not message or not message.strip():
+            return None
+        if not user_wants_video_generation(message):
+            return None
+        if not self.registry.get_tool("generate_video"):
+            return None
+
+        prompt = _VIDEO_CHROME_RE.sub("", message).strip() or message.strip()
+        logger.info("Video-gen direct (natural lang): generate_video(prompt=%r)", prompt[:80])
+        return self._run_direct_tool_execution(
+            "generate_video", {"prompt": prompt}, session_id, emit_fn, request_id, message, options
         )
 
     def _native_tool_calls_to_response(self, native_calls, llm_response: str):

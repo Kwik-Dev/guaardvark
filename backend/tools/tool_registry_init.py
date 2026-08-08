@@ -553,6 +553,15 @@ def register_image_tools() -> List[str]:
         logger.warning(f"Failed to register animation tools: {e}")
 
     try:
+        from backend.tools.image_tools import VideoGeneratorTool
+        register_tool(VideoGeneratorTool())
+        registered.append("generate_video")
+        _tool_categories["generate_video"] = "image"
+        logger.debug("Registered: VideoGeneratorTool")
+    except Exception as e:
+        logger.warning(f"Failed to register video tool: {e}")
+
+    try:
         from backend.tools.image_tools import EditImageTool
         register_tool(EditImageTool())
         registered.append("edit_image")
