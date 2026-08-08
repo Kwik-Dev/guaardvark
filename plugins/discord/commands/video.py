@@ -88,9 +88,11 @@ class VideoCog(commands.Cog):
                 if state == "completed":
                     results = status.get("results", [])
                     if results and results[0].get("success"):
+                        # video_path is batch-relative (e.g. "<item_id>/videos/x.mp4");
+                        # the download route takes it verbatim via <path:video_name>.
                         video_path = results[0]["video_path"]
                         video_name = os.path.basename(video_path)
-                        video_bytes = await self.api.get_video_bytes(batch_id, video_name)
+                        video_bytes = await self.api.get_video_bytes(batch_id, video_path)
 
                         if len(video_bytes) > 25 * 1024 * 1024:
                             await interaction.followup.send(
