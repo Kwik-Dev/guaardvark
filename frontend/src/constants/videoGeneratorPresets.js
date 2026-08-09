@@ -115,6 +115,9 @@ export const MODEL_OPTIONS = {
     supportsT2V: true,
     supportsI2V: true,
     dimensionAlignment: 32,
+    // 1280×736 (0.94 MPx) is proven on 16GB; 1920×1920 (3.7 MPx) never finishes
+    // and reads as "the aspect selector is broken". Aspect is preserved.
+    maxPixelArea: 1_000_000,
   },
   "wan22-14b": {
     label: "Wan 2.2 14B (GGUF Q5)",
@@ -126,6 +129,7 @@ export const MODEL_OPTIONS = {
     supportsT2V: true,
     supportsI2V: false,
     dimensionAlignment: 32,
+    maxPixelArea: 1_000_000,
   },
   "wan22-14b-i2v": {
     label: "Wan 2.2 14B I2V (GGUF Q5)",
@@ -137,6 +141,7 @@ export const MODEL_OPTIONS = {
     supportsT2V: false,
     supportsI2V: true,
     dimensionAlignment: 32,
+    maxPixelArea: 1_000_000,
   },
   "cogvideox-5b": {
     label: "CogVideoX 5B",
@@ -186,4 +191,12 @@ export const snapDimensions = (width, height, model) => {
     width: Math.round(width / align) * align,
     height: Math.round(height / align) * align,
   };
+};
+
+/** Redistribute a fixed pixel-area budget across an aspect ratio, snapped to
+ *  the model's alignment. Keeps VRAM/compute constant while the frame reshapes:
+ *  768×512 (3:2) ≈ 832×480 (16:9) ≈ 480×832 (9:16) ≈ 640×640 (1:1). */
+export const fitAreaToRatio = (area, ratio, model) => {
+  const width = Math.sqrt(area * ratio);
+  return snapDimensions(width, width / ratio, model);
 };

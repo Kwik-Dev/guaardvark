@@ -58,6 +58,7 @@ import {
   isWanModel,
   isLtxModel,
   snapDimensions,
+  fitAreaToRatio,
 } from "../constants/videoGeneratorPresets";
 import {
   PlayArrow as PlayIcon,
@@ -465,10 +466,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       const [nativeW, nativeH] = MODEL_OPTIONS[model].resolution;
       return { width: nativeW, height: nativeH };
     }
-    // LTX-2.3: dims must be divisible by 32; default 768×512 is the 16GB-safe native.
+    // LTX-2.3: dims must be divisible by 32; 768×512 is the 16GB-safe pixel
+    // budget. The old hard pin silently ignored the Aspect Ratio selector —
+    // portrait/square batches came out landscape. Honor the aspect by
+    // redistributing the SAME pixel area (constant VRAM/compute); Video Size
+    // stays pinned to the budget and its dropdown is disabled for LTX.
     if (isLtxModel(model)) {
       const [nativeW, nativeH] = MODEL_OPTIONS[model].resolution;
-      return { width: nativeW, height: nativeH };
+      const ratioConfig = ASPECT_RATIO_PRESETS[aspectRatio] || ASPECT_RATIO_PRESETS["16:9"];
+      return fitAreaToRatio(nativeW * nativeH, ratioConfig.ratio, model);
     }
 
     const ratioConfig = ASPECT_RATIO_PRESETS[aspectRatio] || ASPECT_RATIO_PRESETS["16:9"];
@@ -485,6 +491,16 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       // Portrait
       height = baseSize;
       width = Math.round(baseSize * ratio);
+    }
+
+    // Cap total pixel area at what the model can actually sustain. Full HD
+    // Square (1920×1920 = 3.7 MPx) never finished on either Wan and read as
+    // "the selector is broken" — scale down preserving the chosen aspect.
+    const maxArea = MODEL_OPTIONS[model]?.maxPixelArea;
+    if (maxArea && width * height > maxArea) {
+      const scale = Math.sqrt(maxArea / (width * height));
+      width *= scale;
+      height *= scale;
     }
 
     // Snap to the model's required alignment (16 for CogVideoX/Wan, 8 for SVD).
@@ -598,9 +614,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     }
 
     // High resolution mode — trade steps/frames for pixels.
-    // At 1280+ the model needs breathing room, so we cap steps and frames
-    // unless the user explicitly overrode them in advanced settings.
-    const isHighRes = Math.max(width, height) >= 1280;
+    // Area-based so a square frame gets the same guard as widescreen with the
+    // same pixel count (992×992 ≈ 1280×736). Caps steps and frames unless the
+    // user explicitly overrode them in advanced settings.
+    const pixelArea = width * height;
+    const isHighRes = pixelArea >= 900_000; // ≈1280×720
     if (isHighRes && !lowVramMode) {
       // Cap steps — more pixels per step means fewer steps needed for quality
       const userOverrodeSteps = advancedParams.num_inference_steps !== null && advancedParams.num_inference_steps !== undefined;
@@ -608,7 +626,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         effectiveSteps = 30;
       }
       // Cap frames to keep VRAM in check on 16GB cards
-      if (Math.max(width, height) >= 1920 && effectiveDurationFrames > 33) {
+      if (pixelArea >= 2_000_000 && effectiveDurationFrames > 33) {
         effectiveDurationFrames = 33; // ~2s at 16fps — still looks great at 1080p
       } else if (effectiveDurationFrames > 49) {
         effectiveDurationFrames = 49; // ~3s at 16fps for 720p HD
@@ -1939,7 +1957,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     </FormControl>
                   </Grid>
                   <Grid item xs={12} sm={6} md={4}>
-                    <FormControl fullWidth size="small">
+                    <FormControl fullWidth size="small" disabled={isLtxModel(model)}>
                       <InputLabel>Video Size</InputLabel>
                       <Select
                         value={videoSize}
@@ -1958,6 +1976,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         ))}
                       </Select>
                     </FormControl>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                      Renders at {computedParams.width}×{computedParams.height}
+                      {isLtxModel(model)
+                        ? " — LTX runs a fixed pixel budget; aspect ratio reshapes the frame"
+                        : ""}
+                    </Typography>
                   </Grid>
                 </>
               )}

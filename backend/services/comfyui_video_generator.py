@@ -394,6 +394,27 @@ class ComfyUIVideoGenerator:
             snapped = 9
         return snapped
 
+    # Timeout guard per family: ~1.0 MPx (1280×736) is proven on 16GB cards;
+    # 3.7 MPx (1920×1920) never finished on either Wan. Aspect is preserved.
+    _MAX_PIXEL_AREA_BY_FAMILY = {"wan": 1_050_000, "ltx": 1_050_000}
+
+    @classmethod
+    def _clamp_pixel_area(cls, width: int, height: int, model: str) -> tuple[int, int]:
+        """Scale (width, height) down to the family's pixel-area budget,
+        preserving aspect ratio. No-op when unbudgeted or already within it."""
+        cap = cls._MAX_PIXEL_AREA_BY_FAMILY.get(cls._model_family(model))
+        area = int(width) * int(height)
+        if not cap or area <= cap:
+            return width, height
+        scale = (cap / area) ** 0.5
+        new_w, new_h = int(width * scale), int(height * scale)
+        logger.warning(
+            "Clamped %s video dims %dx%d (%.1f MPx) → %dx%d to stay within the "
+            "%.1f MPx budget — larger frames time out on this hardware",
+            model, width, height, area / 1e6, new_w, new_h, cap / 1e6,
+        )
+        return new_w, new_h
+
     @classmethod
     def _align_dimensions(cls, width: int, height: int, model: str) -> tuple[int, int]:
         """Snap (width, height) to the model family's required alignment.
@@ -2228,8 +2249,14 @@ class ComfyUIVideoGenerator:
                 result.error = preflight_error
                 return result
 
-            # Defense-in-depth: snap dims before they enter any workflow builder.
-            # Off-by-one here is the "tensor a (51) must match tensor b (50)" crash.
+            # Defense-in-depth: cap pixel area, then snap dims, before they enter
+            # any workflow builder. 1920×1920 (3.7 MPx) requests ran until the
+            # watchdog timeout on both Wan variants and read as a hang — and old
+            # batch retry_data can replay those dims verbatim.
+            # Off-by-one in the snap is the "tensor a (51) must match tensor b (50)" crash.
+            request.width, request.height = self._clamp_pixel_area(
+                request.width, request.height, model
+            )
             request.width, request.height = self._align_dimensions(
                 request.width, request.height, model
             )
