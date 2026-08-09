@@ -239,6 +239,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     description: 'Router picks the best downloaded model for each prompt',
   };
   const [modelOptions, setModelOptions] = useState([AUTO_MODEL_OPTION]);
+  // Models the backend filtered out (gated, unreachable). Listed read-only with the
+  // reason — picking one used to mean a failed run or, worse, silent SD 1.5 output.
+  const [unavailableModels, setUnavailableModels] = useState([]);
 
   // Z-Image guard: guidance MUST be 0 (the model is CFG-free) and steps must follow
   // its own recipe. Without this, switching in from another family left that family's
@@ -262,12 +265,18 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         const response = await fetch(`${API_BASE}/batch-image/models`);
         const data = await response.json();
         if (data.success && data.data?.models) {
+          // The backend only returns models that can actually run. A model needing a
+          // download is still offered (it fetches on first use); gated or unreachable
+          // ones arrive in unavailable_models instead, with a reason.
           const fetched = data.data.models.map(m => ({
             value: m.id,
             label: m.recommended ? `${m.label} ⭐` : m.label,
-            description: m.description || '',
+            description: m.availability === 'downloadable'
+              ? `${m.description || ''} (downloads ~${m.size_gb}GB on first use)`.trim()
+              : (m.description || ''),
           }));
           setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
+          setUnavailableModels(data.data.unavailable_models || []);
         }
       } catch (e) {
         debugLog('Failed to load image models', e);
@@ -392,26 +401,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (data.success && data.data.detection) {
         setContentDetection(data.data.detection);
 
-        // If auto-detect mode, apply recommended settings
-        if (selectedPreset === 'auto' && data.data.detection.recommended_preset) {
-          const preset = contentPresets[data.data.detection.recommended_preset];
-          if (preset) {
-            setParams(prev => {
-              // Z-Image is CFG-free with a fixed sampling recipe. Content presets are
-              // tuned for CFG models, so applying one here silently pushed steps to
-              // 30+ the moment a prompt was pasted - bypassing the model/preset guard,
-              // which only fires when the MODEL or PRESET changes, not the prompt.
-              if (isZimageModel(prev.model)) return prev;
-              return {
-                ...prev,
-                // ?? not ||: a legitimate recommendation of 0 is falsy and was being
-                // discarded, so guidance could never be auto-set to 0.
-                steps: preset.recommended_steps ?? prev.steps,
-                guidance: preset.recommended_guidance ?? prev.guidance,
-              };
-            });
-          }
-        }
+        // Detection now only reports what the prompt looks like; it no longer touches
+        // steps/guidance/size. Those came from SD 1.5-era content presets that knew
+        // nothing about the selected model — typing a full-body prompt pushed the UI to
+        // 35 steps / CFG 8.0 even for Krea 2 Turbo (8 steps, CFG-free). The backend
+        // clamped it back at render time, so the panel was showing numbers that never
+        // ran. Sampling belongs to the model's own recipe.
       }
     } catch (err) {
       console.error('Failed to analyze prompt:', err);
@@ -526,21 +521,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     }
   }, []);
 
-  // Handle preset selection
+  // Handle preset selection. Content presets shape the prompt (suffix + negatives)
+  // and nothing else — picking one no longer rewrites steps/guidance/size, which the
+  // model's own recipe owns. See the note on content_presets in offline_image_generator.
   const handlePresetChange = useCallback((presetName) => {
     setSelectedPreset(presetName);
-
-    if (presetName !== 'auto' && contentPresets[presetName]) {
-      const preset = contentPresets[presetName];
-      setParams(prev => ({
-        ...prev,
-        steps: preset.recommended_steps || prev.steps,
-        guidance: preset.recommended_guidance || prev.guidance,
-        width: preset.recommended_dimensions?.[0] || prev.width,
-        height: preset.recommended_dimensions?.[1] || prev.height
-      }));
-    }
-  }, [contentPresets]);
+  }, []);
 
   const fetchQueue = useCallback(async () => {
     try {
@@ -1956,6 +1942,24 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               ))}
                             </Select>
                           </FormControl>
+                          {unavailableModels.length > 0 && (
+                            <Box sx={{ mt: 1 }}>
+                              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                                Not available on this machine:
+                              </Typography>
+                              {unavailableModels.map((m) => (
+                                <Tooltip key={m.id} title={m.reason || ''}>
+                                  <Typography
+                                    variant="caption"
+                                    color="text.disabled"
+                                    sx={{ display: 'block', lineHeight: 1.4 }}
+                                  >
+                                    • {m.label} — {m.reason}
+                                  </Typography>
+                                </Tooltip>
+                              ))}
+                            </Box>
+                          )}
                         </Grid>
 
                         <Grid item xs={12} sm={6} md={4}>

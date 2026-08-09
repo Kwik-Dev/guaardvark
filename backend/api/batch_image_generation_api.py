@@ -90,7 +90,21 @@ IMAGE_MODEL_SIZES = {
     "stabilityai/sdxl-turbo": 6.9,
     "SG161222/Realistic_Vision_V5.1_noVAE": 2.1,
     "emilianJR/epiCRealism": 2.1,
-    "runwayml/stable-diffusion-v1-5": 4.3,  # hidden fallback
+}
+
+# Why a model is missing from the picker, phrased for the person reading it.
+_AVAILABILITY_REASONS = {
+    "needs_licence": (
+        "Gated on Hugging Face — open the model page and click "
+        "'Agree and access repository' with the account your HF_TOKEN belongs to."
+    ),
+    "needs_token": (
+        "Gated on Hugging Face — set HF_TOKEN in .env and restart the backend."
+    ),
+    "unreachable": (
+        "Not downloaded and the source could not be reached. Check network access, "
+        "or install the weights manually."
+    ),
 }
 
 def _resolve_catalog_model(model_ref: str):
@@ -438,12 +452,13 @@ def list_models():
         if not generator.image_generator:
             return error_response("Image generator not initialized", 503)
             
-        # Curated, ordered, menu-ready list (excludes hidden fallbacks like sd-1.5,
-        # carries label/description/recommended). Single source of truth.
+        # Curated, ordered, menu-ready list carrying label/description/recommended
+        # and a per-model usability verdict. Single source of truth.
         meta = generator.image_generator.get_available_models()
         models = []
+        unavailable = []
         for model_id, info in sorted(meta.items(), key=lambda kv: kv[1].get("order", 99)):
-            models.append({
+            row = {
                 "id": model_id,
                 "path": info["id"],
                 "is_downloaded": info["downloaded"],
@@ -452,10 +467,22 @@ def list_models():
                 "description": info.get("description", ""),
                 "recommended": info.get("recommended", False),
                 "size_gb": IMAGE_MODEL_SIZES.get(info["id"], 2.5),
-            })
+                "availability": info.get("availability", "downloadable"),
+            }
+            # A model the user cannot actually run must not sit in the picker — that
+            # is how a gated Krea 2 got selected and silently produced SD 1.5 output.
+            # Report it separately so the UI can explain rather than just hide.
+            if info.get("selectable", True):
+                models.append(row)
+            else:
+                row["reason"] = _AVAILABILITY_REASONS.get(
+                    row["availability"], "Unavailable on this machine."
+                )
+                unavailable.append(row)
 
         return success_response({
             "models": models,
+            "unavailable_models": unavailable,
             "default_model": "auto",
         })
 
@@ -765,9 +792,9 @@ def get_content_presets():
                 "name": name,
                 "label": name.replace("_", " ").title(),
                 "description": _get_preset_description(name),
-                "recommended_steps": config.get("recommended_steps", 20),
-                "recommended_guidance": config.get("recommended_guidance", 7.5),
-                "recommended_dimensions": config.get("recommended_dimensions", (512, 512)),
+                # No sampling values here on purpose — content presets shape the prompt,
+                # they do not choose steps/guidance/size. Those are per-model and come
+                # from settings_validator; see the note on content_presets.
             }
 
         # Also include available styles
@@ -877,11 +904,23 @@ def enhance_prompt():
         enhance_anatomy = data.get('enhance_anatomy', True)
         enhance_faces = data.get('enhance_faces', True)
         enhance_hands = data.get('enhance_hands', True)
+        model = data.get('model', '')
 
         generator = get_batch_image_generator()
 
         if not generator.image_generator:
             return error_response("Image generator not initialized", 503)
+
+        # Family-aware so the preview applies the same long-context token
+        # budgeting the generation path does (krea2/zimage cap at 512 tokens).
+        family = ""
+        if model and model != 'auto':
+            try:
+                family = generator.image_generator._model_family(
+                    generator.image_generator.available_models.get(model, model)
+                )
+            except Exception:
+                family = ""
 
         # Enhance the prompt
         enhanced_prompt, negative_prompt, detection = generator.image_generator.enhance_prompt_for_quality(
@@ -891,7 +930,8 @@ def enhance_prompt():
             auto_enhance=auto_enhance,
             enhance_anatomy=enhance_anatomy,
             enhance_faces=enhance_faces,
-            enhance_hands=enhance_hands
+            enhance_hands=enhance_hands,
+            family=family
         )
 
         # Get recommended settings from preset
@@ -925,11 +965,10 @@ def enhance_prompt():
             "enhanced_prompt": enhanced_prompt,
             "negative_prompt": negative_prompt,
             "detection": detection,
-            "recommended_settings": {
-                "steps": preset.get("recommended_steps", 20),
-                "guidance": preset.get("recommended_guidance", 7.5),
-                "dimensions": preset.get("recommended_dimensions", (512, 512))
-            },
+            # Deliberately no content-derived "recommended_settings": the prompt's
+            # content type cannot know which model will render it, and the sampling
+            # values it used to emit were SD 1.5-era. Per-model recipes come from
+            # settings_validator / model_recommendations below.
             "model_recommendations": model_recommendations
         })
 

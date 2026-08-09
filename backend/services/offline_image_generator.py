@@ -2,6 +2,7 @@
 import contextlib
 import logging
 import os
+import re
 import uuid
 import time
 from typing import Optional, Dict, Any, List, Tuple
@@ -177,10 +178,16 @@ class OfflineImageGenerator:
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self.default_model = "runwayml/stable-diffusion-v1-5"
+        # No default/fallback model, by design (2026-08-07). SD 1.5 used to sit here
+        # as a hidden fallback: when a requested model failed to load — gated repo,
+        # missing download, OOM — generation silently continued on SD 1.5 and returned
+        # an image. Because the canvas was never re-clamped, a 2021-era 512px model was
+        # asked for 1024²/2048² and produced garbage that looked like the requested
+        # model misbehaving (observed with Krea 2). A model that cannot be loaded is now
+        # an error, and unusable models are filtered out of the menu before the user can
+        # pick one — see get_available_models().
         # Curated quality lineup (2026-05-29 cull). Outdated SD1.5/2.1-era models
         # (sd-2.1, sd-turbo, dreamlike, deliberate, openjourney, analog) were removed.
-        # sd-1.5 is kept ONLY as a hidden internal fallback (see hidden_models).
         self.available_models = {
             # Z-Image-Turbo (Tongyi-MAI): 6B, Apache-2.0, ungated. Best prompt
             # adherence per VRAM on a 16 GB card — the preferred all-rounder.
@@ -194,12 +201,11 @@ class OfflineImageGenerator:
             "sdxl-turbo": "stabilityai/sdxl-turbo",
             "realistic-vision": "SG161222/Realistic_Vision_V5.1_noVAE",
             "epic-realism": "emilianJR/epiCRealism",
-            # Hidden fallback — resolvable for default_model / load-failure recovery
-            # but excluded from user-facing menus (see hidden_models below).
-            "sd-1.5": "runwayml/stable-diffusion-v1-5",
         }
         # Models resolvable internally but NOT shown in menus / list_available_models.
-        self.hidden_models = {"sd-1.5"}
+        # Empty since the sd-1.5 hidden fallback was removed; the mechanism stays because
+        # get_available_models() and model_recommender still honour it.
+        self.hidden_models: set[str] = set()
         # Offline Diffusers cannot load these — batch/API must route to ComfyUI.
         self.comfy_only_models = {"flux-dev"}
         # UI metadata for the visible models (label/description/recommended/order).
@@ -254,62 +260,47 @@ class OfflineImageGenerator:
             }
         }
 
+        # Prompt shaping only — deliberately NO steps/guidance/dimensions (2026-08-07).
+        # These presets used to carry recommended_steps / recommended_guidance /
+        # recommended_dimensions tuned for SD 1.5 (35 steps, CFG 8.0, 512x768). They are
+        # keyed on *content type*, so they knew nothing about the selected model: typing
+        # a full-body prompt pushed the UI to 35 steps even for Krea 2 Turbo, an 8-step
+        # CFG-free model. The backend clamped it back at render time
+        # (_soft_clamp_family_sampling), so the numbers on screen were never what ran —
+        # a placebo slider. Sampling belongs to the model, and lives in
+        # settings_validator's per-model config.
         self.content_presets = {
             "person_portrait": {
                 "positive_suffix": "professional portrait photography, natural skin texture, realistic lighting, sharp focus on face, proper facial proportions, symmetrical features",
-                "negative_prompt": f"{self.anatomy_negative}, {self.face_negative}, {self.base_negative}",
-                "recommended_steps": 30,
-                "recommended_guidance": 7.5,
-                "recommended_dimensions": (512, 768)
+                "negative_prompt": f"{self.anatomy_negative}, {self.face_negative}, {self.base_negative}"
             },
             "person_full_body": {
                 "positive_suffix": "full body shot, proper human proportions, natural pose, correct anatomy, realistic stance, balanced composition, anatomically correct",
-                "negative_prompt": f"{self.anatomy_negative}, {self.hands_negative}, {self.body_negative}, {self.logic_negative}, floating limbs, disconnected body parts, {self.base_negative}",
-                "recommended_steps": 35,
-                "recommended_guidance": 8.0,
-                "recommended_dimensions": (512, 768)
+                "negative_prompt": f"{self.anatomy_negative}, {self.hands_negative}, {self.body_negative}, {self.logic_negative}, floating limbs, disconnected body parts, {self.base_negative}"
             },
             "person_athletic": {
                 "positive_suffix": "athletic activity, natural movement, dynamic pose, proper body mechanics, focused action, correct body proportions",
-                "negative_prompt": f"{self.anatomy_negative}, {self.hands_negative}, {self.body_negative}, {self.logic_negative}, stiff pose, unnatural stance, {self.base_negative}",
-                "recommended_steps": 30,
-                "recommended_guidance": 7.5,
-                "recommended_dimensions": (768, 512)
+                "negative_prompt": f"{self.anatomy_negative}, {self.hands_negative}, {self.body_negative}, {self.logic_negative}, stiff pose, unnatural stance, {self.base_negative}"
             },
             "person_working": {
                 "positive_suffix": "realistic work scene, natural work pose, logical workspace, proper body posture",
-                "negative_prompt": f"{self.anatomy_negative}, {self.hands_negative}, {self.body_negative}, {self.logic_negative}, floating tools, disconnected actions, impossible poses, {self.base_negative}",
-                "recommended_steps": 35,
-                "recommended_guidance": 8.0,
-                "recommended_dimensions": (768, 512)
+                "negative_prompt": f"{self.anatomy_negative}, {self.hands_negative}, {self.body_negative}, {self.logic_negative}, floating tools, disconnected actions, impossible poses, {self.base_negative}"
             },
             "product_photo": {
                 "positive_suffix": "product photography, clean background, studio lighting, commercial quality, sharp focus, professional presentation",
-                "negative_prompt": f"blurry, distorted, {self.base_negative}",
-                "recommended_steps": 25,
-                "recommended_guidance": 7.0,
-                "recommended_dimensions": (512, 512)
+                "negative_prompt": f"blurry, distorted, {self.base_negative}"
             },
             "landscape": {
                 "positive_suffix": "landscape photography, scenic, natural lighting, high dynamic range, beautiful composition, vivid colors",
-                "negative_prompt": f"blurry, oversaturated, artificial, {self.base_negative}",
-                "recommended_steps": 25,
-                "recommended_guidance": 7.0,
-                "recommended_dimensions": (768, 512)
+                "negative_prompt": f"blurry, oversaturated, artificial, {self.base_negative}"
             },
             "infographic_preset": {
                 "positive_suffix": "flat vector design, clean geometric shapes, minimal design, professional infographic, clear icons, simple composition",
-                "negative_prompt": f"photorealistic, 3d, shadows, gradients, complex textures, realistic people, {self.base_negative}",
-                "recommended_steps": 20,
-                "recommended_guidance": 7.5,
-                "recommended_dimensions": (768, 768)
+                "negative_prompt": f"photorealistic, 3d, shadows, gradients, complex textures, realistic people, {self.base_negative}"
             },
             "general": {
                 "positive_suffix": "high quality, detailed, professional, sharp focus",
-                "negative_prompt": f"{self.base_negative}",
-                "recommended_steps": 20,
-                "recommended_guidance": 7.5,
-                "recommended_dimensions": (512, 512)
+                "negative_prompt": f"{self.base_negative}"
             }
         }
 
@@ -356,7 +347,78 @@ class OfflineImageGenerator:
         if mid.startswith("comfy:") or mid == "flux-dev" or "flux1-dev" in mid or mid.endswith("flux-dev"):
             return self._flux_dev_assets_present()
         model_path = self._get_model_path(model_id)
-        return model_path.exists() and any(model_path.iterdir())
+        # A non-empty directory is NOT enough. An aborted gated download leaves a
+        # README and an empty images/ folder behind — observed with Krea 2 (1 MB of
+        # ~28 GB). That counted as "downloaded", so the menu advertised the model and
+        # every run then died inside the loader. Diffusers needs model_index.json.
+        if not (model_path / "model_index.json").is_file():
+            return False
+        # model_index.json is small and lands early, so its presence alone still reads
+        # as "ready" while multi-GB shards are still in flight. huggingface_hub tracks
+        # those with .incomplete markers under .cache/huggingface/download.
+        download_cache = model_path / ".cache" / "huggingface" / "download"
+        if download_cache.is_dir():
+            if next(download_cache.rglob("*.incomplete"), None) is not None:
+                return False
+        # ...but a *failed* download cleans those markers up on its way out, taking the
+        # only in-flight signal with it. Observed 2026-08-07: Krea 2 Turbo aborted at
+        # 14 GB and left a tidy-looking tree with model_index.json, configs, tokenizer
+        # and VAE — and zero transformer shards. So confirm the declared weights exist.
+        return self._snapshot_weights_present(model_path)
+
+    # Components in a diffusers pipeline that legitimately carry no weight files.
+    _WEIGHTLESS_COMPONENTS = frozenset({
+        "scheduler", "tokenizer", "tokenizer_2", "tokenizer_3",
+        "feature_extractor", "image_processor", "processor",
+    })
+
+    def _snapshot_weights_present(self, model_path: Path) -> bool:
+        """True when every weight-bearing component named in model_index.json is there.
+
+        Shards are the common casualty of an interrupted download — they are the big
+        files, so they finish last. A sharded component also ships an index naming
+        every piece, which makes "is this complete?" exactly checkable.
+        """
+        try:
+            import json
+            with open(model_path / "model_index.json") as f:
+                index = json.load(f)
+        except Exception as e:
+            logger.debug(f"Could not read model_index.json under {model_path}: {e}")
+            return False
+
+        for component, spec in index.items():
+            if component.startswith("_") or component in self._WEIGHTLESS_COMPONENTS:
+                continue
+            # Component entries look like ["diffusers", "AutoencoderKL"]; anything
+            # else (nulls for optional pieces, scalars) carries no weights to check.
+            if not isinstance(spec, (list, tuple)) or len(spec) != 2:
+                continue
+            comp_dir = model_path / component
+            if not comp_dir.is_dir():
+                logger.debug(f"{model_path.name}: component '{component}' missing")
+                return False
+
+            shard_index = next(comp_dir.glob("*.index.json"), None)
+            if shard_index is not None:
+                try:
+                    with open(shard_index) as f:
+                        weight_map = json.load(f).get("weight_map", {})
+                except Exception:
+                    return False
+                for shard in set(weight_map.values()):
+                    if not (comp_dir / shard).is_file():
+                        logger.debug(
+                            f"{model_path.name}: '{component}' missing shard {shard}"
+                        )
+                        return False
+                continue
+
+            if not any(comp_dir.glob("*.safetensors")) and not any(comp_dir.glob("*.bin")):
+                logger.debug(f"{model_path.name}: '{component}' has no weight file")
+                return False
+
+        return True
 
     @staticmethod
     def _flux_dev_assets_present() -> bool:
@@ -382,6 +444,90 @@ class OfflineImageGenerator:
     def is_comfy_only_model(self, model_key: str) -> bool:
         key = (model_key or "").strip().lower()
         return key in getattr(self, "comfy_only_models", set()) or key.startswith("flux")
+
+    # How long a repo-access verdict stays good. The menu asks per model, so without
+    # a cache every dropdown open would fan out HTTP requests.
+    _REPO_ACCESS_TTL_SECONDS = 300
+
+    @staticmethod
+    def _hf_token() -> Optional[str]:
+        return (
+            os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+            or None
+        )
+
+    def _probe_repo_access(self, repo_id: str) -> str:
+        """Can we actually fetch weights for this HF repo?
+
+        Returns one of: ``ok`` | ``needs_token`` | ``needs_licence`` | ``unreachable``.
+
+        Metadata access is not a sufficient test — a gated repo answers 200 on
+        /api/models but 403 on the files themselves, which is exactly how Krea 2
+        looked "fine" right up until the download failed. So probe a real file.
+        """
+        cache = getattr(self, "_repo_access_cache", None)
+        if cache is None:
+            cache = self._repo_access_cache = {}
+        now = time.monotonic()
+        hit = cache.get(repo_id)
+        if hit and now - hit[1] < self._REPO_ACCESS_TTL_SECONDS:
+            return hit[0]
+
+        verdict = "unreachable"
+        try:
+            import requests
+            token = self._hf_token()
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            resp = requests.head(
+                f"https://huggingface.co/{repo_id}/resolve/main/model_index.json",
+                headers=headers, timeout=6, allow_redirects=True,
+            )
+            if resp.status_code == 200:
+                verdict = "ok"
+            elif resp.status_code in (401, 403):
+                # 401 without a token is "log in"; 403 with one means the account
+                # has not accepted this repo's terms.
+                verdict = "needs_licence" if token else "needs_token"
+            elif resp.status_code == 404:
+                verdict = "unreachable"
+        except Exception as e:
+            logger.debug(f"Repo access probe failed for {repo_id}: {e}")
+
+        cache[repo_id] = (verdict, now)
+        return verdict
+
+    def _load_failure_reason(self, model_key: str, model_id: str) -> str:
+        """Explain a load failure in terms the user can act on."""
+        if self.is_comfy_only_model(model_key or ""):
+            return (
+                f"'{model_key}' runs through ComfyUI and its weights are not installed. "
+                "Install the FLUX dev unet/clip/vae assets, then retry."
+            )
+        if not self._is_model_downloaded(model_id):
+            access = self._probe_repo_access(model_id)
+            if access == "needs_licence":
+                return (
+                    f"'{model_key}' is not downloaded: {model_id} is a gated repository "
+                    f"and your Hugging Face account has not accepted its terms. Visit "
+                    f"https://huggingface.co/{model_id}, click 'Agree and access "
+                    "repository', then retry."
+                )
+            if access == "needs_token":
+                return (
+                    f"'{model_key}' is not downloaded: {model_id} requires authentication. "
+                    "Set HF_TOKEN in .env and restart the backend."
+                )
+            if access == "unreachable":
+                return (
+                    f"'{model_key}' is not downloaded and {model_id} could not be reached. "
+                    "Check network access to huggingface.co."
+                )
+            return f"'{model_key}' is not downloaded yet ({model_id})."
+        return (
+            f"'{model_key}' is downloaded but its pipeline failed to load. See the backend "
+            "log for the loader error — usually VRAM pressure or an incomplete download."
+        )
 
     def _resolve_model_ref(self, model_ref: str) -> str:
         """Catalog key (e.g. krea2-turbo) → HF repo id; pass through HF ids and auto."""
@@ -698,7 +844,7 @@ class OfflineImageGenerator:
         elif detection.get("recommended_preset") in ("landscape", "product_photo"):
             prefs = [lead, second, "sd-xl", "epic-realism"]
         else:  # general / complex
-            prefs = [lead, second, "sd-xl", "realistic-vision", "sd-1.5"]
+            prefs = [lead, second, "sd-xl", "realistic-vision"]
 
         for key in prefs:
             model_id = self.available_models.get(key)
@@ -708,9 +854,13 @@ class OfflineImageGenerator:
 
         # Nothing preferred is downloaded — fall back to any downloaded model.
         for key, model_id in self.available_models.items():
+            if key in self.comfy_only_models:
+                continue  # sentinel id, nothing on disk to load
             if self._is_model_downloaded(model_id):
                 return key
-        return "sd-1.5"
+        # Genuinely nothing on disk. Returning a model that isn't there would only
+        # push the failure downstream, so let the caller report it honestly.
+        return None
 
     def _oom_fallback_catalog_key(self, failed_key: str) -> Optional[str]:
         """Next model to try after a CUDA OOM on failed_key (catalog key or HF id)."""
@@ -718,11 +868,11 @@ class OfflineImageGenerator:
         # Prefer lighter DiT, then SDXL, then classic SD — only if present on disk.
         candidates = []
         if failed_family == "krea2":
-            candidates = ["krea2-turbo", "zimage-turbo", "sd-xl", "realistic-vision", "sd-1.5"]
+            candidates = ["krea2-turbo", "zimage-turbo", "sd-xl", "realistic-vision"]
         elif failed_family == "zimage":
-            candidates = ["sd-xl", "realistic-vision", "sd-1.5"]
+            candidates = ["sd-xl", "realistic-vision"]
         else:
-            candidates = ["sd-xl", "realistic-vision", "sd-1.5"]
+            candidates = ["sd-xl", "realistic-vision"]
         failed_resolved = self._resolve_model_ref(failed_key)
         for key in candidates:
             mid = self.available_models.get(key)
@@ -809,6 +959,97 @@ class OfflineImageGenerator:
             if request.num_inference_steps < 15:
                 request.num_inference_steps = 20
 
+    # Model repos ship a sample-image gallery, a licence PDF and a README alongside
+    # the weights — 39 of Krea 2 Turbo's 55 files. Diffusers never reads any of it, and
+    # on a flaky link those JPEGs were what actually broke the download (2026-08-07).
+    _SNAPSHOT_IGNORE_PATTERNS = [
+        "images/*", "*.pdf", "*.md",
+        "*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp",
+    ]
+
+    def _redundant_root_checkpoints(self, model_id: str) -> List[str]:
+        """Root-level single-file checkpoints that duplicate the sharded layout.
+
+        Some repos ship both: the diffusers component folders AND one consolidated
+        checkpoint for single-file loaders. Krea 2 Turbo carries `turbo.safetensors`
+        at 26.28 GB — on top of the 26 GB of `transformer/` shards it duplicates.
+        `from_pretrained(folder)` reads model_index.json and the component
+        subdirectories and never touches the root file, so downloading it doubles the
+        transfer for nothing. It is also why the Settings progress bar sat at
+        "37.9 / 28.0 GB — 99%" (observed 2026-08-07): the denominator counted only the
+        weights the pipeline needs, while the transfer kept going.
+
+        Returns [] for single-file repos, where that checkpoint IS the model.
+        """
+        try:
+            from huggingface_hub import HfApi
+            files = HfApi().list_repo_files(model_id, token=self._hf_token())
+        except Exception as e:
+            logger.debug(f"Could not list files for {model_id}: {e}")
+            return []
+        if "model_index.json" not in files:
+            return []
+        return [
+            f for f in files
+            if "/" not in f and f.endswith((".safetensors", ".ckpt", ".pt", ".bin"))
+        ]
+
+    def _snapshot_with_retry(self, model_id: str, model_path: Path) -> tuple[bool, str | None]:
+        """snapshot_download with weight-only filtering and resume-on-failure.
+
+        Hugging Face drops connections mid-transfer often enough that a multi-GB
+        pull rarely completes first try ("peer closed connection", "Server
+        disconnected"). huggingface_hub retries individual files, but when it gives
+        up the whole call raises and the model is left half-fetched. Already-complete
+        files are skipped on re-entry, so simply going round again is cheap and
+        usually finishes the job.
+        """
+        from huggingface_hub import snapshot_download
+
+        attempts = int(os.environ.get("GUAARDVARK_HF_DOWNLOAD_ATTEMPTS", "4"))
+        # Fewer parallel connections are steadier on a saturated or throttled link.
+        workers = int(os.environ.get("GUAARDVARK_HF_DOWNLOAD_WORKERS", "4"))
+
+        ignore = list(self._SNAPSHOT_IGNORE_PATTERNS)
+        redundant = self._redundant_root_checkpoints(model_id)
+        if redundant:
+            logger.info(
+                f"Skipping redundant single-file checkpoint(s) for {model_id}: "
+                f"{', '.join(redundant)} — the sharded component folders are what "
+                "diffusers loads"
+            )
+            ignore.extend(redundant)
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, attempts + 1):
+            try:
+                snapshot_download(
+                    repo_id=model_id,
+                    local_dir=str(model_path),
+                    ignore_patterns=ignore,
+                    max_workers=workers,
+                )
+                if attempt > 1:
+                    logger.info(f"{model_id} download completed on attempt {attempt}")
+                return True, None
+            except Exception as e:
+                last_error = e
+                if attempt >= attempts:
+                    break
+                backoff = min(30, 2 ** attempt)
+                logger.warning(
+                    f"{model_id} download attempt {attempt}/{attempts} failed ({e}); "
+                    f"resuming in {backoff}s — completed files are kept"
+                )
+                time.sleep(backoff)
+
+        msg = (
+            f"Download of {model_id} failed after {attempts} attempts: {last_error}. "
+            "Partial files were kept, so retrying will resume where it stopped."
+        )
+        logger.error(msg)
+        return False, msg
+
     def _download_model(self, model_id: str) -> tuple[bool, str | None]:
         if not self.service_available:
             msg = "Diffusion service not available for model download"
@@ -857,12 +1098,11 @@ class OfflineImageGenerator:
                 logger.info(f"Snapshot-downloading {model_id} (family={family})")
                 # local_dir_use_symlinks was removed: deprecated and ignored by
                 # current huggingface_hub (it warned on every download).
-                snapshot_download(
-                    repo_id=model_id,
-                    local_dir=str(model_path),
-                )
+                ok, msg = self._snapshot_with_retry(model_id, model_path)
+                if not ok:
+                    return False, msg
                 if not self._is_model_downloaded(model_id):
-                    msg = f"Snapshot download finished but {model_path} is empty"
+                    msg = f"Snapshot download finished but {model_path} has no model_index.json"
                     logger.error(msg)
                     return False, msg
                 logger.info(f"Model {model_id} downloaded successfully (snapshot)")
@@ -1178,24 +1418,31 @@ class OfflineImageGenerator:
     def _detect_subject_count(self, prompt: str) -> Dict[str, Any]:
         prompt_lower = prompt.lower()
 
-        single_indicators = ['a ', 'an ', 'one ', 'single ', 'solo ']
-        multiple_indicators = ['two ', 'three ', 'four ', 'multiple ', 'several ', 'many ', 'group of ', 'couple ', 'pair of ']
+        # Word-boundary matching throughout. The old substring test matched the
+        # plural "men" inside "element"/"embellishment", flagging single-person
+        # costume prompts as multi-person scenes — which then steered enhancement
+        # toward group phrasing and produced multi-character images.
+        def _has_word(terms: List[str]) -> bool:
+            return any(
+                re.search(r"\b" + re.escape(t) + r"\b", prompt_lower) for t in terms
+            )
 
-        has_single = any(indicator in prompt_lower for indicator in single_indicators)
-        has_multiple = any(indicator in prompt_lower for indicator in multiple_indicators)
+        single_indicators = ['a', 'an', 'one', 'single', 'solo', 'alone', 'lone']
+        multiple_indicators = ['two', 'three', 'four', 'multiple', 'several', 'many',
+                               'group of', 'couple', 'pair of', 'crowd', 'trio', 'duo']
+
+        has_single = _has_word(single_indicators)
+        has_multiple = _has_word(multiple_indicators)
 
         person_plurals = ['men', 'women', 'people', 'workers', 'builders', 'chefs', 'doctors',
                          'teachers', 'children', 'boys', 'girls', 'employees', 'professionals']
-        has_plural_subject = any(plural in prompt_lower for plural in person_plurals)
+        has_plural_subject = _has_word(person_plurals)
 
         person_singulars = ['man', 'woman', 'person', 'child', 'boy', 'girl']
         has_and_conjunction = False
         if ' and ' in prompt_lower:
-            words_around_and = []
-            for singular in person_singulars:
-                if singular in prompt_lower:
-                    words_around_and.append(singular)
-            if len(words_around_and) > 1 and ' and ' in prompt_lower:
+            distinct_singulars = [s for s in person_singulars if _has_word([s])]
+            if len(distinct_singulars) > 1:
                 has_and_conjunction = True
 
         if has_multiple or has_plural_subject or has_and_conjunction:
@@ -1296,7 +1543,8 @@ class OfflineImageGenerator:
                                    auto_enhance: bool = True,
                                    enhance_anatomy: bool = True,
                                    enhance_faces: bool = True,
-                                   enhance_hands: bool = True) -> Tuple[str, str, Dict[str, Any]]:
+                                   enhance_hands: bool = True,
+                                   family: str = "") -> Tuple[str, str, Dict[str, Any]]:
         logger.debug(
             "Image prompt enhancement started "
             f"(prompt_len={len(prompt)}, auto_enhance={auto_enhance})"
@@ -1307,27 +1555,37 @@ class OfflineImageGenerator:
         preset = self.content_presets.get(preset_name, self.content_presets["general"])
         style_config = self.style_configs.get(style, self.style_configs["realistic"])
 
+        # (priority, text) — priority decides what survives when a long-context
+        # encoder budget forces a re-fit: 0 = subject/coherence guards,
+        # 1 = anatomy/scene logic, 2 = preset, 3 = style boilerplate.
         enhancements = []
         negative_parts = []
 
-        enhancements.append(style_config.get("positive_suffix", ""))
-        enhancements.append(preset.get("positive_suffix", ""))
+        enhancements.append((3, style_config.get("positive_suffix", "")))
+        enhancements.append((2, preset.get("positive_suffix", "")))
 
         negative_parts.append(self.base_negative)
         negative_parts.append(style_config.get("negative_prompt", ""))
         negative_parts.append(preset.get("negative_prompt", ""))
 
         if auto_enhance:
+            is_single_subject = detection.get("subject_count_info", {}).get("is_single_subject", True)
+
+            if detection["has_person"] and is_single_subject:
+                # Explicit count anchor: long descriptive prompts without one read
+                # as lookbook/catalog copy and render several figures (Krea Raw).
+                enhancements.append((0, "solo, only one person"))
+
             if detection["has_person"] and enhance_anatomy:
-                enhancements.append("correct human proportions, realistic anatomy, proper body structure")
+                enhancements.append((1, "correct human proportions, realistic anatomy, proper body structure"))
                 negative_parts.append(self.anatomy_negative)
 
             if detection["has_face"] and enhance_faces:
-                enhancements.append("detailed facial features, symmetrical face, natural expression")
+                enhancements.append((1, "detailed facial features, symmetrical face, natural expression"))
                 negative_parts.append(self.face_negative)
 
             if detection["has_hands"] and enhance_hands:
-                enhancements.append("correctly drawn hands, proper finger count, natural hand position")
+                enhancements.append((1, "correctly drawn hands, proper finger count, natural hand position"))
                 negative_parts.append(self.hands_negative)
 
             action_enhancements = {
@@ -1341,33 +1599,41 @@ class OfflineImageGenerator:
                 'gardening': ['outdoor setting', 'natural environment', 'gardening activity']
             }
 
-            is_single_subject = detection.get("subject_count_info", {}).get("is_single_subject", True)
-
             for action in detection["detected_actions"]:
                 if action in action_enhancements:
-                    enhancements.extend(action_enhancements[action])
+                    enhancements.extend((1, e) for e in action_enhancements[action])
                     negative_parts.append(f"floating objects, illogical {action}")
 
             if detection["has_spatial"]:
-                enhancements.append("correct spatial relationships, logical positioning, proper depth, consistent perspective")
+                enhancements.append((1, "correct spatial relationships, logical positioning, proper depth, consistent perspective"))
                 negative_parts.append("wrong perspective, floating objects, incorrect scale, impossible physics")
 
             if detection["has_interaction"] and not is_single_subject:
-                enhancements.append("realistic interaction, natural positioning")
+                enhancements.append((1, "realistic interaction, natural positioning"))
                 negative_parts.append("awkward poses, impossible poses")
 
-            enhancements.append("coherent scene, logical composition, consistent lighting, unified style")
+            enhancements.append((0, "coherent scene, logical composition, consistent lighting, unified style"))
             negative_parts.append("inconsistent elements, mixed styles, impossible scene, conflicting perspectives")
 
         unique_enhancements = []
         seen = set()
-        for e in enhancements:
+        for _prio, e in enhancements:
             e_clean = e.strip()
             if e_clean and e_clean.lower() not in seen:
                 seen.add(e_clean.lower())
                 unique_enhancements.append(e_clean)
 
         enhanced_prompt = f"{prompt}, {', '.join(unique_enhancements)}"
+
+        # Long-context encoders (Krea2/Z-Image) hard-cap at 512 tokens and the
+        # tokenizer truncates SILENTLY — on long user prompts the tail that fell
+        # off was exactly the coherence/subject guards appended above. Re-fit so
+        # the user's prompt always survives intact and suffixes are kept in
+        # priority order only while they still fit.
+        if (family or "").lower() in self._LONG_CONTEXT_FAMILIES:
+            enhanced_prompt = self._fit_enhancements_to_token_budget(
+                prompt, enhancements, enhanced_prompt
+            )
         logger.debug(
             f"Image prompt enhancement complete (enhanced_prompt_len={len(enhanced_prompt)})"
         )
@@ -1395,6 +1661,91 @@ class OfflineImageGenerator:
         caller already chose auto_enhance=False (that was a silent re-enhance bug)."""
         style_config = self.style_configs.get(style, self.style_configs.get("realistic", {}))
         return prompt, style_config.get("negative_prompt", "") or ""
+
+    # Krea2Pipeline / Z-Image default max_sequence_length. Their tokenizers
+    # truncate anything past this without a warning.
+    _LONG_CONTEXT_FAMILIES = ("krea2", "zimage")
+    _LONG_CONTEXT_TOKEN_LIMIT = 512
+
+    def _count_prompt_tokens(self, text: str) -> int:
+        """Token count via the loaded pipeline's tokenizer when available;
+        conservative prose estimate otherwise (~1.5 tokens/word — measured 1.34
+        on real long prompts, so the estimate errs toward trimming earlier)."""
+        tokenizer = getattr(getattr(self, "_pipeline", None), "tokenizer", None)
+        if tokenizer is not None:
+            try:
+                return len(tokenizer(text).input_ids)
+            except Exception:
+                pass
+        return int(len(text.split()) * 1.5) + 1
+
+    def _fit_enhancements_to_token_budget(
+        self,
+        prompt: str,
+        prioritized_enhancements: List[Tuple[int, str]],
+        fused_prompt: str,
+    ) -> str:
+        """Keep prompt + suffixes within the long-context encoder budget.
+
+        The user's prompt is never trimmed. Suffix phrases are re-added
+        greedily in priority order (subject/coherence guards first, style
+        boilerplate last) while the total still fits.
+        """
+        budget = self._LONG_CONTEXT_TOKEN_LIMIT
+        if self._count_prompt_tokens(fused_prompt) <= budget:
+            return fused_prompt
+
+        if self._count_prompt_tokens(prompt) >= budget:
+            logger.warning(
+                "User prompt alone is at/over the %d-token encoder limit "
+                "(%d words) — enhancement suffixes skipped and the prompt tail "
+                "will be truncated by the tokenizer. Shorten the prompt to "
+                "keep its ending.",
+                budget, len(prompt.split()),
+            )
+            return prompt
+
+        kept: List[str] = []
+        seen = set()
+        for _prio, entry in sorted(prioritized_enhancements, key=lambda t: t[0]):
+            for phrase in entry.split(', '):
+                p_clean = phrase.strip()
+                if not p_clean or p_clean.lower() in seen:
+                    continue
+                candidate = f"{prompt}, {', '.join(kept + [p_clean])}"
+                if self._count_prompt_tokens(candidate) > budget:
+                    continue
+                seen.add(p_clean.lower())
+                kept.append(p_clean)
+        logger.info(
+            "Enhanced prompt exceeded the %d-token encoder budget — kept %d "
+            "suffix phrases (priority order), user prompt intact.",
+            budget, len(kept),
+        )
+        return f"{prompt}, {', '.join(kept)}" if kept else prompt
+
+    def _augment_krea2_raw_negatives(
+        self, combined_negative: str, detection: Dict[str, Any]
+    ) -> str:
+        """Krea 2 Raw (base checkpoint, full CFG so negatives DO apply) reads
+        catalog-style prompts as lookbook spreads: split panels, caption text,
+        or several figures wearing outfit variants. Anti-collage negatives steer
+        it back to one photograph; people-count negatives only when the prompt
+        is a single-person scene so group prompts stay groups."""
+        anti_collage = (
+            "collage, split screen, diptych, triptych, grid layout, "
+            "multiple panels, magazine layout, caption text"
+        )
+        combined_negative = (
+            f"{combined_negative}, {anti_collage}" if combined_negative else anti_collage
+        )
+        subject_info = (detection or {}).get("subject_count_info", {})
+        if (detection or {}).get("has_person") and subject_info.get("is_single_subject"):
+            combined_negative = (
+                f"{combined_negative}, multiple people, clones, "
+                "duplicate character, twins"
+            )
+        return combined_negative
 
     def _optimize_prompt_for_tokens(
         self, prompt: str, max_tokens: int = 75, family: str = ""
@@ -1539,6 +1890,12 @@ Negative Prompt: {negative_prompt}""",
             # Resolve routing before admission so VRAM/RAM estimates match the loaded model.
             if request.model in (None, "", "auto"):
                 request.model = self._auto_select_model(request.prompt, request.style)
+                if not request.model:
+                    result.error = (
+                        "No image model is downloaded yet. Open Settings → Image Models "
+                        "and download one (Z-Image Turbo is the recommended default)."
+                    )
+                    return result
             if (
                 self._has_text_intent(request.prompt)
                 and "sd-xl" in self.available_models
@@ -1557,7 +1914,13 @@ Negative Prompt: {negative_prompt}""",
                 )
                 return result
 
-            model_id = self.available_models.get(request.model, self.default_model)
+            model_id = self.available_models.get(request.model)
+            if not model_id:
+                result.error = (
+                    f"Unknown image model '{request.model}'. Available: "
+                    + ", ".join(sorted(self.available_models))
+                )
+                return result
             logger.info(f"Using model: {request.model} -> {model_id}")
 
             # Family-aware max side + area clamp BEFORE the estimates (2026-08-04):
@@ -1665,24 +2028,15 @@ Negative Prompt: {negative_prompt}""",
                 self._ensure_vram_for_pipeline(model_id, request.width, request.height)
 
                 if not self._load_pipeline(model_id):
-                    # Requested model failed to load (gated/removed repo, missing
-                    # download, OOM). Fall back to the default model instead of
-                    # failing the whole request — keeps chat image-gen resilient.
-                    if model_id != self.default_model:
-                        logger.warning(
-                            f"Model {request.model} ({model_id}) failed to load; "
-                            f"falling back to default {self.default_model}"
-                        )
-                        model_id = self.default_model
-                        family = self._model_family(model_id)
-                        self._apply_family_sampling(request, family)
-                        self._ensure_vram_for_pipeline(model_id, request.width, request.height)
-                        if not self._load_pipeline(model_id):
-                            result.error = f"Failed to load fallback model {self.default_model}"
-                            return result
-                    else:
-                        result.error = f"Failed to load model {request.model} ({model_id})"
-                        return result
+                    # No substitution. This used to silently swap in SD 1.5 and carry
+                    # on, which returned a plausible-looking image from a completely
+                    # different (and much older) model — the user then blamed the model
+                    # they picked. Report why it failed instead.
+                    result.error = self._load_failure_reason(request.model, model_id)
+                    logger.error(
+                        f"Model {request.model} ({model_id}) failed to load: {result.error}"
+                    )
+                    return result
 
                 # Pin sd:pipeline for the duration of this forward so idle eviction
                 # cannot null scheduler mid-denoise (300s default timeout).
@@ -1756,7 +2110,8 @@ Negative Prompt: {negative_prompt}""",
                         auto_enhance=True,
                         enhance_anatomy=request.enhance_anatomy,
                         enhance_faces=request.enhance_faces,
-                        enhance_hands=request.enhance_hands
+                        enhance_hands=request.enhance_hands,
+                        family=family
                     )
                     logger.info(f"Content detection: {detection.get('recommended_preset')}, enhancements: {len(detection.get('enhancements_applied', []))}")
                 else:
@@ -1777,6 +2132,16 @@ Negative Prompt: {negative_prompt}""",
                 combined_negative = request.negative_prompt
                 if style_negative:
                     combined_negative = f"{combined_negative}, {style_negative}" if combined_negative else style_negative
+
+                # Verbatim mode is exempt: negatives stay exactly as the user set them.
+                if (
+                    not verbatim
+                    and family == "krea2"
+                    and self._krea2_variant(request.model or "") == "raw"
+                ):
+                    combined_negative = self._augment_krea2_raw_negatives(
+                        combined_negative, detection
+                    )
 
                 generator = None
                 if request.seed is not None:
@@ -2047,7 +2412,9 @@ Negative Prompt: {negative_prompt}""",
                             )
                             _gc.collect()
                             request.model = fb_key
-                            model_id = self.available_models.get(fb_key, self.default_model)
+                            model_id = self.available_models.get(fb_key)
+                            if not model_id:
+                                raise infer_err
                             family = self._model_family(model_id)
                             self._apply_family_sampling(request, family)
                             if family in ('zimage', 'krea2'):
@@ -2342,8 +2709,12 @@ Negative Prompt: {negative_prompt}""",
                 f"{family} pipeline scheduler is None and FlowMatchEulerDiscreteScheduler "
                 "is unavailable — reload the model"
             )
-        model_id = self._current_model or self.default_model
-        model_path = self._get_model_path(model_id)
+        if not self._current_model:
+            raise RuntimeError(
+                f"{family} pipeline scheduler is None and no model is loaded — "
+                "reload the model"
+            )
+        model_path = self._get_model_path(self._current_model)
         try:
             sched = FlowMatchEulerDiscreteScheduler.from_pretrained(
                 str(model_path), subfolder="scheduler"
@@ -2489,7 +2860,7 @@ Negative Prompt: {negative_prompt}""",
         self, prompt: str, init_image, strength: float = 0.20,
         negative_prompt: str = "", width: int = 512, height: int = 512,
         num_inference_steps: int = 20, guidance_scale: float = 7.5,
-        seed: int = None, model: str = "sd-1.5",
+        seed: int = None, model: str = "auto",
         keep_pipeline_loaded: bool = False
     ) -> ImageGenerationResult:
         """Generate an image using img2img — takes an existing PIL Image and
@@ -2644,17 +3015,58 @@ Negative Prompt: {negative_prompt}""",
 
         return result
 
-    def get_available_models(self) -> Dict[str, Any]:
-        """Visible image models for menus/API. Excludes hidden fallbacks (sd-1.5)
-        and carries UI metadata (label/description/recommended/order) so the
-        frontend dropdowns can be driven entirely from this single source.
+    def get_available_models(self, *, probe_remote: bool = True) -> Dict[str, Any]:
+        """Visible image models for menus/API, with a usability verdict per model.
+
+        Carries UI metadata (label/description/recommended/order) so the frontend
+        dropdowns are driven entirely from this single source, plus ``availability``:
+
+          ``ready``          weights on disk, selectable now
+          ``downloadable``   not on disk but fetchable — selecting it starts a download
+          ``needs_licence``  gated repo, account has not accepted the terms
+          ``needs_token``    gated repo and no HF_TOKEN configured
+          ``unreachable``    not on disk and the repo could not be reached
+
+        Anything other than ready/downloadable is unusable, and the caller is expected
+        to keep it out of the picker rather than let a run fail later — a silent
+        substitution is what made Krea 2 look like it was producing garbage.
+
+        ``probe_remote=False`` skips the network probe (disk truth only) for callers
+        that must not block.
         """
         models = {}
+
+        # Network probes only matter for models that are not already on disk. Run
+        # them together so a cold menu costs one round trip, not one per model.
+        to_probe = [
+            mid for key, mid in self.available_models.items()
+            if key not in self.hidden_models
+            and not self.is_comfy_only_model(key)
+            and not self._is_model_downloaded(mid)
+        ]
+        if probe_remote and to_probe:
+            try:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=min(8, len(to_probe))) as pool:
+                    list(pool.map(self._probe_repo_access, to_probe))
+            except Exception as e:
+                logger.debug(f"Model availability probe failed: {e}")
 
         for model_key, model_id in self.available_models.items():
             if model_key in self.hidden_models:
                 continue
             meta = self.model_meta.get(model_key, {})
+            downloaded = self._is_model_downloaded(model_id)
+            if downloaded:
+                availability = "ready"
+            elif self.is_comfy_only_model(model_key):
+                # Sentinel id — nothing to fetch from HF; assets are installed for Comfy.
+                availability = "unreachable"
+            elif not probe_remote:
+                availability = "downloadable"
+            else:
+                access = self._probe_repo_access(model_id)
+                availability = "downloadable" if access == "ok" else access
             models[model_key] = {
                 "id": model_id,
                 "name": model_key,
@@ -2662,7 +3074,9 @@ Negative Prompt: {negative_prompt}""",
                 "description": meta.get("description", ""),
                 "recommended": meta.get("recommended", False),
                 "order": meta.get("order", 99),
-                "downloaded": self._is_model_downloaded(model_id),
+                "downloaded": downloaded,
+                "availability": availability,
+                "selectable": availability in ("ready", "downloadable"),
                 "current": model_id == self._current_model,
                 "size_estimate": (
                     "28-36GB" if "krea" in model_id.lower()

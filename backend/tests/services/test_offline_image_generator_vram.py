@@ -140,8 +140,10 @@ def test_estimate_sdxl(gen):
     assert gen._vram_estimate_mb("stabilityai/stable-diffusion-xl-base-1.0") == 8000
 
 
-def test_estimate_sd15(gen):
-    assert gen._vram_estimate_mb("runwayml/stable-diffusion-v1-5") == 4000
+def test_estimate_sd_family_default(gen):
+    # SD-class models fall through _FAMILY_VRAM_MB to the 4000 MB default.
+    # (Was SD 1.5 before it was removed from the system, 2026-08-07.)
+    assert gen._vram_estimate_mb("SG161222/Realistic_Vision_V5.1_noVAE") == 4000
 
 
 def test_ram_estimate_zimage(gen):
@@ -152,8 +154,8 @@ def test_ram_estimate_sdxl(gen):
     assert gen._ram_estimate_gb("stabilityai/stable-diffusion-xl-base-1.0") == 10.0
 
 
-def test_ram_estimate_sd15(gen):
-    assert gen._ram_estimate_gb("runwayml/stable-diffusion-v1-5") == 6.0
+def test_ram_estimate_sd_family_default(gen):
+    assert gen._ram_estimate_gb("SG161222/Realistic_Vision_V5.1_noVAE") == 6.0
 
 
 # --- Eviction decision --------------------------------------------------------
@@ -196,7 +198,7 @@ def test_cpu_device_skips_vram_check_but_still_registers(gen, spy, monkeypatch):
         oig.torch.cuda, "mem_get_info",
         lambda: pytest.fail("mem_get_info must not be called on a CPU box"),
     )
-    gen._ensure_vram_for_pipeline("runwayml/stable-diffusion-v1-5")
+    gen._ensure_vram_for_pipeline("SG161222/Realistic_Vision_V5.1_noVAE")
     assert spy["evicted"] == 0
     assert spy["requests"] == [("sd:pipeline", 4000, 85)]
 
