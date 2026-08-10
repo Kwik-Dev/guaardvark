@@ -20,6 +20,7 @@ node_modules/
 data/uploads/
 data/outputs/
 data/cache/
+data/piptmp/
 data/database/
 data/models/
 data/context/

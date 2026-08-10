@@ -56,6 +56,21 @@ if [ -z "${PIP_CONSTRAINT:-}" ] && [ -f "$BACKEND_DIR/constraints.txt" ]; then
     export PIP_CONSTRAINT="$BACKEND_DIR/constraints.txt"
 fi
 
+# Scratch space for EVERY pip call in this script. pip buffers each wheel body
+# in full under TMPDIR (and fetches several in parallel), so the multi-GB CUDA
+# stack blows up on boxes where /tmp is a small tmpfs — ENOSPC mid-download
+# while `df /` shows plenty free. This script is the documented recovery path
+# for exactly that failure, so it must not re-trigger it. Matches start.sh's
+# ensure_pip_tmpdir() and install_pytorch.sh (same dir, one shared cache).
+if [ -z "${TMPDIR:-}" ] || [ ! -w "${TMPDIR:-/nonexistent}" ]; then
+    PIP_TMP="$REPO_ROOT/data/piptmp"
+    mkdir -p "$PIP_TMP" 2>/dev/null || true
+    if [ -d "$PIP_TMP" ] && [ -w "$PIP_TMP" ]; then
+        export TMPDIR="$PIP_TMP"
+        export PIP_CACHE_DIR="$PIP_TMP"
+    fi
+fi
+
 ensure_python_headers() {
     # Native sdist builds (evdev in requirements-base) need Python.h. On Ubuntu
     # 24.04 the system python3.12 ships WITHOUT python3.12-dev — the client box

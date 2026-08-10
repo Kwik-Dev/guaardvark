@@ -978,6 +978,8 @@ def create_full_backup(name: str | None = None) -> str:
 
                 # Configuration files
                 "backend/requirements.txt",
+                "backend/constraints.txt",
+                "backend/oom_priority.py",
                 "backend/requirements-base.txt",
                 "backend/requirements-llm.txt",
                 "backend/requirements-cv.txt",
@@ -1415,6 +1417,8 @@ def create_code_release(name: str | None = None) -> str:
                 "backend/seed_models.py",
                 "backend/seed_rules.json",
                 "backend/cuda_config.py",
+                "backend/constraints.txt",
+                "backend/oom_priority.py",
                 "backend/requirements.txt",
                 "backend/requirements-base.txt",
                 "backend/requirements-llm.txt",

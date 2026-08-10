@@ -1069,7 +1069,21 @@ ensure_venv_python_version() {
     fi
 }
 
-backend_venv_healthy() {
+# Fingerprint of the requirements files the bootstrap installs. Recorded in the
+# bootstrap stamp on success so an EDIT to either file re-triggers the install
+# instead of being masked by an import probe that only tests requirements-base
+# packages.
+BOOTSTRAP_STAMP="$VENV_DIR/.guaardvark_bootstrap_ts"
+venv_reqs_fingerprint() {
+    cat "$BACKEND_DIR/requirements-base.txt" "$BACKEND_DIR/requirements.txt" 2>/dev/null \
+        | sha256sum 2>/dev/null | awk '{print $1}'
+}
+
+# Does the venv actually WORK right now? Pure functional probe, no stamp logic.
+# This is what the post-bootstrap verification must use: the stamp is written
+# only after a successful bootstrap, so a stamp-aware check there can never pass
+# on a fresh box — it would gate the stamp on itself and fail forever.
+backend_venv_functional() {
     [ -x "$VENV_DIR/bin/python" ] || return 1
     local venv_minor
     venv_minor=$("$VENV_DIR/bin/python" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo "")
@@ -1084,6 +1098,97 @@ try:
 except Exception:
     sys.exit(1)
 " >/dev/null 2>&1
+}
+
+# Can we SKIP the bootstrap? Functional AND provably complete. Use this only for
+# the skip decision, never to verify a bootstrap that just ran.
+backend_venv_healthy() {
+    backend_venv_functional || return 1
+
+    # The import probe only names packages from requirements-base.txt. If
+    # requirements-base succeeds and requirements.txt then FAILS (ENOSPC, network
+    # drop, bad sdist), the probe passes over a half-installed venv — so the next
+    # ./start.sh sets needed=0 and SKIPS the very repair that would fix it. The
+    # venv stays broken and start.sh never touches it again. Observed 2026-08-10.
+    #
+    # The stamp is written ONLY after a fully successful bootstrap, so its absence
+    # is an exact marker for "bootstrap never finished". Consult it.
+    if [ ! -f "$BOOTSTRAP_STAMP" ]; then
+        return 1
+    fi
+    # Stamps written before this check existed hold only a timestamp — grandfather
+    # them (a stamp at all means some past bootstrap ran to completion). A stamp
+    # WITH a fingerprint must still match the current requirements files.
+    local recorded current
+    recorded="$(awk -F: '/^reqs:/ {print $2; exit}' "$BOOTSTRAP_STAMP" 2>/dev/null || true)"
+    if [ -n "$recorded" ]; then
+        current="$(venv_reqs_fingerprint)"
+        [ "$recorded" = "$current" ] || return 1
+    fi
+    return 0
+}
+
+# Point pip's scratch space at real disk BEFORE any requirements install.
+#
+# pip's cachecontrol wrapper buffers each downloaded wheel body IN FULL into a
+# tempfile under TMPDIR before committing it to the on-disk cache, and
+# batch_download fetches several wheels in PARALLEL. The ML stack pulls
+# multi-hundred-MB wheels (torch ~527MB, nvidia-cudnn ~366MB, nccl ~206MB,
+# cusparselt ~170MB, cublas, cufft, cusolver, ...), so peak TMPDIR usage is the
+# sum of the concurrent downloads — several GB.
+#
+# On any box where /tmp is a tmpfs (systemd default on Ubuntu 24.04+, sized
+# from RAM) that blows the tmpfs ceiling and pip dies with
+#   OSError: [Errno 28] No space left on device
+# mid-download, WHILE `df /` still shows tens of GB free. Observed 2026-08-10 on
+# this box: /tmp = 1.7G tmpfs, / = 68G free, install died fetching nccl and left
+# a 14MB venv with numpy missing — which then surfaced as a bare
+# "ModuleNotFoundError: No module named 'numpy'" at boot.
+#
+# scripts/install_pytorch.sh already does this for the torch step; the
+# requirements-base.txt / requirements.txt installs run FIRST and were the
+# actual casualty. Same convention (data/piptmp) so both share one cache.
+ensure_pip_tmpdir() {
+    # Respect an explicit TMPDIR from the operator/caller.
+    if [ -n "${GUAARDVARK_PIP_TMPDIR_SET:-}" ]; then
+        return 0
+    fi
+    local cand pip_tmp="" avail_kb avail_gb tmp_fs
+    # Caller's TMPDIR first (operator override), then the repo default that
+    # install_pytorch.sh also uses. An unusable candidate must not be left in
+    # place — a stale TMPDIR pointing somewhere unwritable breaks pip harder
+    # than no TMPDIR at all.
+    for cand in "${TMPDIR:-}" "$SCRIPT_DIR/data/piptmp"; do
+        [ -n "$cand" ] || continue
+        mkdir -p "$cand" 2>/dev/null || true
+        if [ -d "$cand" ] && [ -w "$cand" ]; then
+            pip_tmp="$cand"
+            break
+        fi
+        vader_warn "pip scratch dir $cand is not writable — trying next candidate."
+    done
+    if [ -z "$pip_tmp" ]; then
+        vader_warn "No writable pip scratch dir found — clearing TMPDIR so pip uses the system default."
+        unset TMPDIR
+        return 0
+    fi
+    export TMPDIR="$pip_tmp"
+    export PIP_CACHE_DIR="$pip_tmp"
+    export GUAARDVARK_PIP_TMPDIR_SET=1
+
+    # Zero placebo: prove the chosen scratch dir actually has room, and say so
+    # loudly if it does not. 8 GB is the working headroom for the CUDA stack.
+    avail_kb="$(df -Pk "$pip_tmp" 2>/dev/null | awk 'NR==2 {print $4}')"
+    tmp_fs="$(df -Ph "$pip_tmp" 2>/dev/null | awk 'NR==2 {print $1}')"
+    if [ -n "$avail_kb" ]; then
+        avail_gb=$(( avail_kb / 1024 / 1024 ))
+        if [ "$avail_kb" -lt 8388608 ]; then
+            vader_warn "pip scratch dir $pip_tmp has only ${avail_gb}GB free on $tmp_fs — the CUDA/torch wheels need ~8GB."
+            vader_warn "Free space or set TMPDIR to a roomier filesystem, or the install will die with ENOSPC."
+        else
+            vader_info "pip scratch: $pip_tmp (${avail_gb}GB free on $tmp_fs)"
+        fi
+    fi
 }
 
 # Install one requirements file into the active venv. NEVER '|| true' this:
@@ -1109,6 +1214,15 @@ pip_install_requirements() {
         break
     done
     vader_error "pip install -r $(basename "$req") FAILED — dependencies from this file are NOT installed."
+    # ENOSPC gets its own message: the raw pip traceback points at urllib3 and
+    # reads like a network fault ("Connection broken"), which sends you chasing
+    # the wrong bug. Name the real filesystem and its free space.
+    if tail -n 400 "$SETUP_LOG" | grep -q "No space left on device"; then
+        vader_error "CAUSE: ran out of disk in pip's scratch space (TMPDIR=${TMPDIR:-/tmp})."
+        df -Ph "${TMPDIR:-/tmp}" 2>/dev/null | sed 's/^/      /'
+        vader_error "If that filesystem is a small tmpfs, point TMPDIR at real disk:"
+        vader_error "      TMPDIR=$SCRIPT_DIR/data/piptmp ./start.sh"
+    fi
     vader_error "First error in $SETUP_LOG:"
     tail -n 400 "$SETUP_LOG" | grep -m1 -E "fatal error:|error: subprocess-exited-with-error|ERROR: " | sed 's/^/      /'
     vader_info "After fixing, re-run ./start.sh (or: ./scripts/heal_backend_venv.sh)"
@@ -1134,13 +1248,43 @@ ensure_backend_python_environment() {
         # full resolution outage ("Temporary failure in name resolution" for
         # pypi.org) failed the whole reconcile mid-bootstrap. Warn loudly and
         # continue — the box may be deliberately offline with a warm cache.
-        if ! timeout 5 getent hosts pypi.org >/dev/null 2>&1; then
+        #
+        # PROXY-AWARE: when http_proxy/https_proxy is set, local DNS is the WRONG
+        # probe. pip does not resolve the hostname itself — it opens a CONNECT to
+        # the proxy and the proxy's far side resolves. A box whose only route to
+        # the internet is a proxy (e.g. an adb port-forward to a phone's proxy on
+        # 127.0.0.1:8080, with no network interface but lo) therefore fails `getent
+        # hosts pypi.org` permanently while pip works perfectly. Probing DNS there
+        # prints a red "installs WILL fail" that is simply untrue, and sends the
+        # operator off restarting systemd-resolved for nothing. Probe whichever
+        # thing pip will actually use.
+        _gv_proxy="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
+        if [ -n "$_gv_proxy" ]; then
+            _gv_pp="${_gv_proxy#*://}"; _gv_pp="${_gv_pp%%/*}"; _gv_pp="${_gv_pp##*@}"
+            _gv_ph="${_gv_pp%%:*}"
+            _gv_pt="${_gv_pp##*:}"
+            [ "$_gv_pt" = "$_gv_ph" ] && _gv_pt=80
+            if timeout 5 bash -c "exec 3<>/dev/tcp/${_gv_ph}/${_gv_pt}" >/dev/null 2>&1; then
+                vader_info "Proxy $_gv_proxy is reachable — pip resolves through it (local DNS not required)."
+            else
+                vader_error "Proxy $_gv_proxy is NOT reachable — dependency installs WILL fail."
+                vader_error "Check the tunnel is up (e.g. adb forward / the proxy app on the phone)."
+                vader_info "Continuing anyway in case a warm pip cache covers this run..."
+            fi
+            unset _gv_pp _gv_ph _gv_pt
+        elif ! timeout 5 getent hosts pypi.org >/dev/null 2>&1; then
             vader_error "DNS resolution is broken on this box (cannot resolve pypi.org) — dependency installs WILL fail."
             vader_error "Try: sudo systemctl restart systemd-resolved   (check: resolvectl status)"
             vader_info "Continuing anyway in case this box is intentionally offline..."
         fi
+        unset _gv_proxy
         vader_info "Python environment incomplete or first-time setup — bootstrapping dependencies (logged to $SETUP_LOG)..."
         source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv for bootstrap"; return 1; }
+
+        # MUST precede every pip call below (requirements-base, requirements,
+        # requirements-cv, install_pytorch.sh, the reconciler). Exported, so the
+        # install_pytorch.sh subprocess inherits it instead of re-deriving it.
+        ensure_pip_tmpdir
 
         # requirements-base first (matches system-manager + leaves room for smart torch).
         # Fail fast: if the core files can't install there is nothing to boot —
@@ -1222,9 +1366,17 @@ ensure_backend_python_environment() {
 
         deactivate
 
-        if backend_venv_healthy; then
+        # backend_venv_functional, NOT backend_venv_healthy: healthy() requires the
+        # stamp, and the stamp is written on the next line. Gating it on itself
+        # deadlocks every fresh box into "Bootstrap did not produce a working
+        # Python environment" no matter how well the install went.
+        if backend_venv_functional; then
             vader_success "Backend Python environment bootstrapped and healthy"
-            date +%s > "$VENV_DIR/.guaardvark_bootstrap_ts" 2>/dev/null || true
+            # Written ONLY here, on a fully successful bootstrap. backend_venv_healthy()
+            # treats its absence as "bootstrap never finished" and forces a re-run, so
+            # a half-installed venv can no longer masquerade as healthy.
+            { date +%s; printf 'reqs:%s\n' "$(venv_reqs_fingerprint)"; } \
+                > "$BOOTSTRAP_STAMP" 2>/dev/null || true
         else
             vader_error "Bootstrap did not produce a working Python environment."
             vader_info "See $SETUP_LOG for details. Recommended manual steps:"
