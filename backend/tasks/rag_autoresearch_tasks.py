@@ -21,14 +21,22 @@ def create_autoresearch_tasks(celery_app):
             idle_setting = Setting.query.filter_by(key="rag_autoresearch_idle_minutes").first()
             idle_minutes = int(idle_setting.value) if idle_setting else 10
 
+            # Default OFF: auto-start must be an explicit opt-in. It used to
+            # default on, and in this process is_idle() is ALWAYS true after 10
+            # minutes of worker uptime — activity tracking lives in the web
+            # process and never updates the Celery-side singleton. Combined with
+            # an unbounded run_loop and an empty eval set, that self-started the
+            # 2026-08 134M-row runaway on a box nobody had opted in on.
             auto_setting = Setting.query.filter_by(key="rag_autoresearch_auto_enabled").first()
-            auto_enabled = (auto_setting.value.lower() == "true") if auto_setting else True
+            auto_enabled = (auto_setting.value.lower() == "true") if auto_setting else False
 
             if not auto_enabled:
                 return
 
             if svc.is_idle(idle_minutes=idle_minutes):
                 max_setting = Setting.query.filter_by(key="rag_autoresearch_max_experiments").first()
+                # 0 means "no user override", never "unbounded" — run_loop caps
+                # it at AUTORESEARCH_MAX_EXPERIMENTS_PER_RUN.
                 max_exp = int(max_setting.value) if max_setting and max_setting.value != "0" else 0
 
                 logger.info(f"System idle for >{idle_minutes}m — starting autoresearch")

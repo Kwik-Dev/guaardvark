@@ -162,6 +162,13 @@ AUTORESEARCH_IDLE_MINUTES = int(os.environ.get("GUAARDVARK_AUTORESEARCH_IDLE_MIN
 AUTORESEARCH_MAX_EXPERIMENT_DURATION = 300  # 5 minutes, matching Karpathy's time budget
 AUTORESEARCH_MAX_LLM_CALLS_PER_EXPERIMENT = 200
 AUTORESEARCH_PHASE_PLATEAU_THRESHOLD = 10  # consecutive discards before phase advance
+# Bounds that keep the loop finite and paced. A single loop invocation may never
+# run unbounded (the 2026-08-07..10 runaway spun ~3,500 no-op experiments/second
+# for 3.4 days = 134M rows, because 0 eval pairs made each "experiment" a 1ms
+# discard and max_experiments=0 meant forever). Real evals take minutes, so the
+# floor costs nothing; a degenerate fast-fail can no longer spin.
+AUTORESEARCH_MAX_EXPERIMENTS_PER_RUN = 25   # cap when caller passes 0/unbounded
+AUTORESEARCH_MIN_EXPERIMENT_INTERVAL = 5.0  # seconds between experiments, minimum
 AUTORESEARCH_MIN_CORPUS_SIZE = 10  # minimum indexed documents to enable
 AUTORESEARCH_SHADOW_CORPUS_SIZE = 100  # documents in shadow eval corpus
 AUTORESEARCH_EVAL_PAIR_TARGET = 100  # target eval pairs per generation

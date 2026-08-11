@@ -39,6 +39,16 @@ def start_loop():
 def stop_loop():
     svc = get_autoresearch_service()
     svc.pause()
+    # pause() only reaches THIS process's singleton; a loop running inside the
+    # Celery worker never sees it. Persist the disable so every loop, wherever
+    # it lives, stops at its next iteration (run_loop checks this row). Stop
+    # therefore also switches off idle auto-start — re-enable in Settings.
+    s = Setting.query.filter_by(key="rag_autoresearch_auto_enabled").first()
+    if s:
+        s.value = "false"
+    else:
+        db.session.add(Setting(key="rag_autoresearch_auto_enabled", value="false"))
+    db.session.commit()
     return jsonify({"status": "paused"})
 
 
@@ -113,7 +123,8 @@ def get_settings():
         settings[key] = s.value if s else None
     defaults = {
         "rag_autoresearch_idle_minutes": "10",
-        "rag_autoresearch_auto_enabled": "true",
+        # Off by default — auto-start is an explicit opt-in (see check_idle task).
+        "rag_autoresearch_auto_enabled": "false",
         "rag_autoresearch_max_experiments": "0",
         "rag_autoresearch_phase_limit": "2",
         "rag_autoresearch_judge_model": "",

@@ -14,6 +14,9 @@ from threading import Lock
 from backend.config import (
     AUTORESEARCH_DEFAULT_PARAMS,
     AUTORESEARCH_MAX_EXPERIMENT_DURATION,
+    AUTORESEARCH_MAX_EXPERIMENTS_PER_RUN,
+    AUTORESEARCH_MIN_EXPERIMENT_INTERVAL,
+    AUTORESEARCH_PHASE_PLATEAU_THRESHOLD,
 )
 from backend.services.rag_eval_harness import RAGEvalHarness
 from backend.services.rag_experiment_agent import RAGExperimentAgent
@@ -34,6 +37,9 @@ class RAGAutoresearchService:
         self._last_activity = time.time()
         self._lock = Lock()
         self._current_experiment_id = None
+        # Seconds between experiments. An attribute (not the constant inline) so
+        # tests can zero it; production leaves it at the config floor.
+        self.experiment_interval = AUTORESEARCH_MIN_EXPERIMENT_INTERVAL
 
     # --- Activity tracking ---
 
@@ -153,6 +159,32 @@ class RAGAutoresearchService:
             self._log_experiment(result)
             return result
 
+        # 5b. A 0-pair eval "succeeds" with score 0.0 in about a millisecond and
+        # would be logged as an ordinary discard — which is exactly how the
+        # 2026-08 runaway kept spinning for 3.4 days. No eval pairs means no
+        # experiment actually happened; report it as a crash so run_loop's
+        # consecutive-crash guard halts the loop instead of iterating forever.
+        if eval_result.get("num_pairs", 0) == 0:
+            logger.error(
+                "Eval set is empty — nothing was measured. Generate eval pairs "
+                "(POST /api/autoresearch/eval-pairs/regenerate) before running experiments."
+            )
+            result = {
+                "experiment_id": experiment_id,
+                "parameter": param_name,
+                "old_value": str(old_value),
+                "new_value": str(new_value),
+                "hypothesis": hypothesis,
+                "status": "crash",
+                "composite_score": 0.0,
+                "baseline_score": baseline,
+                "delta": 0.0,
+                "duration": duration,
+                "phase": phase,
+            }
+            self._log_experiment(result)
+            return result
+
         # 6. Compare to baseline
         delta = round(new_score - baseline, 4)
         status = "keep" if new_score > baseline else "discard"
@@ -195,10 +227,22 @@ class RAGAutoresearchService:
         return result
 
     def run_loop(self, max_experiments: int = 0):
-        """Run experiment loop until paused or max reached."""
+        """Run experiment loop until paused, disabled, capped, or plateaued.
+
+        A single invocation is always FINITE: callers asking for "unbounded"
+        (max_experiments=0) get AUTORESEARCH_MAX_EXPERIMENTS_PER_RUN. The
+        2026-08-07..10 runaway ran max_experiments=0 inside a Celery beat task
+        with an empty eval set — ~3,500 no-op discards/second for 3.4 days
+        (134M ExperimentRun rows) with no way to stop it short of killing the
+        worker: self._paused lives per-process, and neither the /stop endpoint
+        nor activity tracking ever reach the Celery process.
+        """
         if self._running:
             logger.warning("Autoresearch loop already running")
             return
+
+        if max_experiments <= 0:
+            max_experiments = AUTORESEARCH_MAX_EXPERIMENTS_PER_RUN
 
         self._running = True
         self._paused = False
@@ -209,8 +253,12 @@ class RAGAutoresearchService:
                 return
 
             while not self._paused:
-                if max_experiments > 0 and count >= max_experiments:
+                if count >= max_experiments:
                     logger.info(f"Reached max experiments ({max_experiments})")
+                    break
+
+                if self._disabled_in_settings():
+                    logger.info("Autoresearch disabled in settings — stopping loop")
                     break
 
                 result = self.run_single_experiment()
@@ -220,6 +268,28 @@ class RAGAutoresearchService:
                 if len(recent) >= 3 and all(r.get("status") == "crash" for r in recent):
                     logger.error("3 consecutive crashes — pausing autoresearch")
                     break
+
+                # Terminal condition: another discard while the LAST phase is
+                # already plateaued. There is no phase 4 to advance to, so more
+                # iterations can only rediscover the plateau — stop instead of
+                # spinning against it. A "keep" resets the plateau and the loop
+                # continues, so recovery stays possible.
+                cfg = self._load_config()
+                if (
+                    result.get("status") == "discard"
+                    and cfg.get("phase", 1) >= 3
+                    and cfg.get("phase_plateau_count", 0) >= AUTORESEARCH_PHASE_PLATEAU_THRESHOLD
+                ):
+                    logger.info(
+                        "Phase 3 plateaued after %d consecutive discards — research "
+                        "complete for this corpus; stopping loop",
+                        cfg.get("phase_plateau_count", 0),
+                    )
+                    break
+
+                # Pacing floor. Real evals take minutes, so this costs nothing —
+                # but a degenerate fast-failing experiment can no longer spin.
+                time.sleep(self.experiment_interval)
 
         finally:
             self._running = False
@@ -233,6 +303,22 @@ class RAGAutoresearchService:
                 pass
             logger.info(f"Autoresearch loop ended after {count} experiments")
 
+    def _disabled_in_settings(self) -> bool:
+        """Cross-process kill switch, checked every loop iteration.
+
+        self._paused only reaches whichever process handled the /stop request or
+        the user's HTTP activity — a loop running inside a Celery worker never
+        hears either. The Settings row is shared state every process can see, so
+        flipping the SettingsPage toggle off must stop ALL loops, wherever they
+        live. Absence of the row means "no opinion" (manual /start still works).
+        """
+        try:
+            from backend.models import Setting
+            s = Setting.query.filter_by(key="rag_autoresearch_auto_enabled").first()
+            return s is not None and str(s.value).strip().lower() == "false"
+        except Exception:
+            return False
+
     def _check_prerequisites(self) -> bool:
         """Verify system is ready for autoresearch.
 
@@ -244,6 +330,14 @@ class RAGAutoresearchService:
         try:
             if not self.eval_harness.has_sufficient_corpus():
                 logger.warning("Insufficient corpus for autoresearch")
+                return False
+            # An empty eval set makes every experiment a ~1ms score-0.0 no-op —
+            # there is nothing to research. Refuse to start rather than spin.
+            if not self.eval_harness._get_active_eval_pairs():
+                logger.warning(
+                    "No eval pairs — autoresearch has nothing to measure. Generate an "
+                    "eval set first (POST /api/autoresearch/eval-pairs/regenerate)."
+                )
                 return False
         except RuntimeError as e:
             # Almost always "Working outside of application context" — a real
