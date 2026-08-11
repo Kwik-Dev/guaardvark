@@ -327,3 +327,4 @@ storage/
 backend/tools/voice/whisper.cpp/
 # App-mutated plugin state (same class as data/ runtime state, see b2cc46a)
 plugins/comfyui/.custom_nodes_installed
+data/embedding_meta.json
