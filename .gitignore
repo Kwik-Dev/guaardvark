@@ -322,3 +322,8 @@ grok-transcript.mc
 # Per-machine runtime state written by the app
 data/video_model_download_status.json
 storage/
+
+# In-tree whisper.cpp checkout (own nested .git, 800MB+ build) — never track
+backend/tools/voice/whisper.cpp/
+# App-mutated plugin state (same class as data/ runtime state, see b2cc46a)
+plugins/comfyui/.custom_nodes_installed
