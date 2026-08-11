@@ -1286,8 +1286,18 @@ def download_document(doc_id):
             '.pdf',
         }
         as_attachment = physical_path.suffix.lower() not in media_exts
-        response = send_file(physical_path, as_attachment=as_attachment, download_name=document.filename)
-        # Disable long-term caching so edited images are served fresh
+        # conditional=True enables Range requests and ETag/Last-Modified 304s.
+        # Ranges matter for large PDFs (browsers render page 1 while streaming
+        # the rest) and for <video> seeking; without them a 15MB PDF must fully
+        # download before anything paints.
+        response = send_file(
+            physical_path,
+            as_attachment=as_attachment,
+            download_name=document.filename,
+            conditional=True,
+        )
+        # Disable long-term caching so edited images are served fresh; the
+        # conditional ETag still lets unchanged files revalidate as cheap 304s
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
     except Exception as e:

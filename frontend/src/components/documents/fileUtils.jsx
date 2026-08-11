@@ -78,6 +78,14 @@ export const isPdfFile = (filename) => {
   return ext === 'pdf';
 };
 
+// Check if a filename is a Word document the in-app viewer can render
+// (mammoth handles .docx only; legacy binary .doc is not supported)
+export const isDocxFile = (filename) => {
+  if (!filename) return false;
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  return ext === 'docx';
+};
+
 // Helper component for index status indicator dot
 const IndexStatusIndicator = ({ indexStatus, theme }) => {
   if (!indexStatus) return null;
