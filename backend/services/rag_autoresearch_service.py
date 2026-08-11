@@ -97,8 +97,15 @@ class RAGAutoresearchService:
 
     # --- Experiment execution ---
 
-    def run_single_experiment(self) -> dict:
-        """Execute one experiment cycle. Returns result dict."""
+    def run_single_experiment(self, run_tag: str = None,
+                              promote_mode: str = "active") -> dict:
+        """Execute one experiment cycle. Returns result dict.
+
+        run_tag stamps the ledger row with the owning ResearchRun (nightly
+        runs). promote_mode: "active" promotes winners live immediately
+        (legacy /start behavior); "candidate" stores winners inactive for the
+        run-end A/B confirmation to activate.
+        """
         config = self._load_config()
         phase = config.get("phase", 1)
         baseline = config.get("baseline_score", 0.0)
@@ -109,7 +116,8 @@ class RAGAutoresearchService:
 
         # 2. Check phase transition
         if self.agent.should_advance_phase(history):
-            new_phase = min(phase + 1, 3)
+            from backend.services.rag_experiment_agent import MAX_PHASE
+            new_phase = min(phase + 1, MAX_PHASE)
             if new_phase != phase:
                 logger.info(f"Advancing from Phase {phase} to Phase {new_phase}")
                 config["phase"] = new_phase
@@ -126,6 +134,14 @@ class RAGAutoresearchService:
         old_value = params.get(param_name)
         new_value = proposal["new_value"]
         hypothesis = proposal.get("hypothesis", "")
+        # Provenance for the ledger: was this a real LLM proposal or the random
+        # fallback, and which models proposed/judged.
+        provenance = {
+            "proposal_source": proposal.get("source", "llm"),
+            "proposer_model": getattr(self.agent, "proposer_model_name", None),
+            "judge_model": getattr(self.eval_harness, "judge_model_name", None),
+            "run_tag": run_tag,
+        }
 
         logger.info(
             f"Experiment {experiment_id[:8]}: {param_name} {old_value} -> {new_value} | {hypothesis}"
@@ -155,6 +171,7 @@ class RAGAutoresearchService:
                 "delta": 0.0,
                 "duration": time.time() - t0,
                 "phase": phase,
+                **provenance,
             }
             self._log_experiment(result)
             return result
@@ -181,6 +198,7 @@ class RAGAutoresearchService:
                 "delta": 0.0,
                 "duration": duration,
                 "phase": phase,
+                **provenance,
             }
             self._log_experiment(result)
             return result
@@ -195,7 +213,8 @@ class RAGAutoresearchService:
             config["baseline_score"] = new_score
             config["phase_plateau_count"] = 0
             self._save_config(config)
-            self._promote_config(config, new_score, "local")
+            self._promote_config(config, new_score, "local",
+                                 activate=(promote_mode == "active"))
             logger.info(f"KEEP: {param_name}={new_value} score={new_score:.4f} (delta=+{delta:.4f})")
         else:
             config["phase_plateau_count"] = config.get("phase_plateau_count", 0) + 1
@@ -215,6 +234,8 @@ class RAGAutoresearchService:
             "duration": duration,
             "phase": phase,
             "eval_details": eval_result.get("details", []),
+            "retrieval_metrics": eval_result.get("retrieval"),
+            **provenance,
         }
 
         # 8. Log and broadcast
@@ -257,8 +278,8 @@ class RAGAutoresearchService:
                     logger.info(f"Reached max experiments ({max_experiments})")
                     break
 
-                if self._disabled_in_settings():
-                    logger.info("Autoresearch disabled in settings — stopping loop")
+                if self._stop_requested():
+                    logger.info("Autoresearch stop requested via settings — stopping loop")
                     break
 
                 result = self.run_single_experiment()
@@ -274,10 +295,11 @@ class RAGAutoresearchService:
                 # iterations can only rediscover the plateau — stop instead of
                 # spinning against it. A "keep" resets the plateau and the loop
                 # continues, so recovery stays possible.
+                from backend.services.rag_experiment_agent import MAX_PHASE
                 cfg = self._load_config()
                 if (
                     result.get("status") == "discard"
-                    and cfg.get("phase", 1) >= 3
+                    and cfg.get("phase", 1) >= MAX_PHASE
                     and cfg.get("phase_plateau_count", 0) >= AUTORESEARCH_PHASE_PLATEAU_THRESHOLD
                 ):
                     logger.info(
@@ -303,21 +325,25 @@ class RAGAutoresearchService:
                 pass
             logger.info(f"Autoresearch loop ended after {count} experiments")
 
-    def _disabled_in_settings(self) -> bool:
+    def _stop_requested(self) -> bool:
         """Cross-process kill switch, checked every loop iteration.
 
         self._paused only reaches whichever process handled the /stop request or
         the user's HTTP activity — a loop running inside a Celery worker never
-        hears either. The Settings row is shared state every process can see, so
-        flipping the SettingsPage toggle off must stop ALL loops, wherever they
-        live. Absence of the row means "no opinion" (manual /start still works).
+        hears either. The dedicated `autoresearch_kill` Settings row is shared
+        state every process can see: POST /stop sets it, /start and run kickoff
+        clear it. (Deliberately NOT the auto_enabled toggle — that only gates
+        AUTO-start; flipping it off must not kill a manual run mid-flight.)
         """
         try:
             from backend.models import Setting
-            s = Setting.query.filter_by(key="rag_autoresearch_auto_enabled").first()
-            return s is not None and str(s.value).strip().lower() == "false"
+            s = Setting.query.filter_by(key="autoresearch_kill").first()
+            return s is not None and str(s.value).strip().lower() == "true"
         except Exception:
             return False
+
+    # Backwards-compat alias (older tests/callers)
+    _disabled_in_settings = _stop_requested
 
     def _check_prerequisites(self) -> bool:
         """Verify system is ready for autoresearch.
@@ -368,29 +394,50 @@ class RAGAutoresearchService:
                 status=result["status"],
                 eval_details=result.get("eval_details"),
                 duration_seconds=result.get("duration"),
+                run_tag=result.get("run_tag"),
+                proposal_source=result.get("proposal_source"),
+                proposer_model=result.get("proposer_model"),
+                judge_model=result.get("judge_model"),
+                retrieval_metrics=result.get("retrieval_metrics"),
             )
             db.session.add(run)
             db.session.commit()
         except Exception as e:
             logger.error(f"Failed to log experiment: {e}")
 
-    def _promote_config(self, config: dict, score: float, source: str):
-        """Save winning config to ResearchConfig table."""
+    def _promote_config(self, config: dict, score: float, source: str,
+                        activate: bool = True):
+        """Save a winning config to the ResearchConfig table.
+
+        activate=True: goes live immediately (deactivates predecessors).
+        activate=False: stored as a CANDIDATE — nightly-run winners stay
+        inactive until the run-end A/B confirmation activates the best one.
+        Returns the new row id (or None on failure).
+        """
         try:
             from backend.models import ResearchConfig, db
-            ResearchConfig.query.filter_by(is_active=True).update({"is_active": False})
+            if activate:
+                ResearchConfig.query.filter_by(is_active=True).update({"is_active": False})
             new_config = ResearchConfig(
                 id=str(uuid.uuid4()),
                 params=config["params"],
                 composite_score=score,
-                is_active=True,
-                promoted_at=datetime.utcnow(),
+                is_active=activate,
+                promoted_at=datetime.utcnow() if activate else None,
                 source=source,
+                status="promoted" if activate else "candidate",
             )
             db.session.add(new_config)
             db.session.commit()
+            if activate:
+                # Promoted params now feed live retrieval (get_active_rag_params);
+                # drop the cache so the change applies immediately, not after TTL.
+                from backend.utils.experiment_context import invalidate_active_params_cache
+                invalidate_active_params_cache()
+            return new_config.id
         except Exception as e:
             logger.error(f"Failed to promote config: {e}")
+            return None
 
     def _get_recent_history(self, limit: int = 20) -> list:
         """Get recent experiment results from DB."""
@@ -407,15 +454,42 @@ class RAGAutoresearchService:
             return []
 
     def _broadcast_to_family(self, result: dict):
-        """Broadcast winning config via interconnector."""
+        """Share a winning config with the interconnector family.
+
+        Two real channels (the old `broadcast_learning` import never existed —
+        this method was a permanent silent ImportError): an
+        InterconnectorLearning row, which the DB entity sync carries to peers,
+        and a broadcast_directive so active peers hear about it immediately.
+        Receivers store foreign configs as CANDIDATES only (is_active=False) —
+        a peer's winner is never auto-activated here.
+        """
+        description = (
+            f"[AUTORESEARCH] {result['parameter']}={result['new_value']}, "
+            f"score={result['composite_score']:.4f}, delta=+{result['delta']:.4f}"
+        )
         try:
-            from backend.services.interconnector_sync_service import broadcast_learning
-            broadcast_learning(
+            from backend.models import InterconnectorLearning, db
+            learning = InterconnectorLearning(
+                source_node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
                 learning_type="rag_optimization",
-                description=(
-                    f"[AUTORESEARCH] {result['parameter']}={result['new_value']}, "
-                    f"score={result['composite_score']:.4f}, delta=+{result['delta']:.4f}"
-                ),
+                description=description,
+                confidence=min(1.0, max(0.0, result.get("delta", 0.0))),
+                model_used=result.get("judge_model") or "local",
+            )
+            db.session.add(learning)
+            db.session.commit()
+        except Exception as e:
+            logger.debug(f"Family learning row skipped: {e}")
+            try:
+                from backend.models import db
+                db.session.rollback()
+            except Exception:
+                pass
+        try:
+            from backend.services.interconnector_sync_service import get_sync_service
+            get_sync_service().broadcast_directive(
+                directive=f"rag_config_promoted: {description}",
+                reason="autoresearch promotion",
             )
         except Exception as e:
             logger.debug(f"Family broadcast skipped: {e}")

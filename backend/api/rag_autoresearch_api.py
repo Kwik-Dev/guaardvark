@@ -17,6 +17,7 @@ def start_loop():
     svc = get_autoresearch_service()
     if svc.is_running():
         return jsonify({"error": "Already running"}), 409
+    _set_kill_flag("false")
     max_exp = request.json.get("max_experiments", 0) if request.is_json else 0
     import threading
     from flask import current_app
@@ -35,20 +36,24 @@ def start_loop():
     return jsonify({"status": "started"})
 
 
+def _set_kill_flag(value: str) -> None:
+    s = Setting.query.filter_by(key="autoresearch_kill").first()
+    if s:
+        s.value = value
+    else:
+        db.session.add(Setting(key="autoresearch_kill", value=value))
+    db.session.commit()
+
+
 @autoresearch_bp.route("/stop", methods=["POST"])
 def stop_loop():
     svc = get_autoresearch_service()
     svc.pause()
     # pause() only reaches THIS process's singleton; a loop running inside the
-    # Celery worker never sees it. Persist the disable so every loop, wherever
-    # it lives, stops at its next iteration (run_loop checks this row). Stop
-    # therefore also switches off idle auto-start — re-enable in Settings.
-    s = Setting.query.filter_by(key="rag_autoresearch_auto_enabled").first()
-    if s:
-        s.value = "false"
-    else:
-        db.session.add(Setting(key="rag_autoresearch_auto_enabled", value="false"))
-    db.session.commit()
+    # Celery worker never sees it. The persisted kill flag is checked by every
+    # loop/run on each iteration, wherever it lives. /start and run kickoff
+    # clear it again.
+    _set_kill_flag("true")
     return jsonify({"status": "paused"})
 
 
@@ -100,12 +105,195 @@ def get_eval_pairs():
 @autoresearch_bp.route("/eval-pairs/regenerate", methods=["POST"])
 def regenerate_eval_pairs():
     svc = get_autoresearch_service()
-    pairs = svc.eval_harness.generate_eval_set()
+    from backend.services.rag_eval_harness import LLMUnavailableError
+    try:
+        pairs = svc.eval_harness.generate_eval_set()
+    except LLMUnavailableError as e:
+        return jsonify({"error": str(e)}), 503
+    if not pairs:
+        return jsonify({"error": "No pairs generated — is the corpus indexed?"}), 400
+    # Regeneration REPLACES the active set: deactivate the old generation so
+    # eval cost doesn't compound with every regenerate.
+    EvalPair.query.filter(EvalPair.is_active.isnot(False)).update(
+        {"is_active": False, "stale_reason": "superseded_by_regeneration"},
+        synchronize_session=False,
+    )
     for pair_data in pairs:
         pair = EvalPair(**{k: v for k, v in pair_data.items() if k in EvalPair.__table__.columns.keys()})
+        pair.is_active = True
         db.session.add(pair)
     db.session.commit()
     return jsonify({"status": "regenerated", "count": len(pairs)})
+
+
+@autoresearch_bp.route("/promotions", methods=["GET"])
+def get_promotions():
+    """Promotion history — every config autoresearch ever promoted or received."""
+    rows = ResearchConfig.query.order_by(ResearchConfig.created_at.desc()).limit(100).all()
+    return jsonify({"promotions": [r.to_dict() for r in rows]})
+
+
+def _activate_config(row) -> None:
+    ResearchConfig.query.filter_by(is_active=True).update({"is_active": False})
+    row.is_active = True
+    row.status = "promoted"
+    db.session.commit()
+    from backend.utils.experiment_context import invalidate_active_params_cache
+    invalidate_active_params_cache()
+
+
+@autoresearch_bp.route("/promotions/<config_id>/activate", methods=["POST"])
+def activate_promotion(config_id):
+    """Manually activate a config (including family-broadcast candidates)."""
+    row = db.session.get(ResearchConfig, config_id)
+    if row is None:
+        return jsonify({"error": "Unknown config id"}), 404
+    _activate_config(row)
+    return jsonify({"status": "activated", "config": row.to_dict()})
+
+
+@autoresearch_bp.route("/promotions/revert", methods=["POST"])
+def revert_promotion():
+    """Deactivate the current config and activate the previous promoted one.
+
+    With no predecessor, retrieval falls back to legacy defaults — the
+    pre-autoresearch behavior, which is always a safe place to land.
+    """
+    current = ResearchConfig.query.filter_by(is_active=True).first()
+    if current is None:
+        return jsonify({"status": "nothing_active"})
+    current.is_active = False
+    current.status = "superseded"
+    previous = (
+        ResearchConfig.query.filter(
+            ResearchConfig.id != current.id,
+            ResearchConfig.status == "promoted",
+        )
+        .order_by(ResearchConfig.promoted_at.desc().nullslast())
+        .first()
+    )
+    if previous is not None:
+        previous.is_active = True
+    db.session.commit()
+    from backend.utils.experiment_context import invalidate_active_params_cache
+    invalidate_active_params_cache()
+    return jsonify({
+        "status": "reverted",
+        "now_active": previous.to_dict() if previous else None,
+    })
+
+
+@autoresearch_bp.route("/experiments", methods=["POST"])
+def log_experiment():
+    """Ledger write for swarm code-tuning arms (source=code_arm).
+
+    Arms run as coding agents in worktrees; this is how their results land in
+    the same ExperimentRun ledger the RAG-tuning loop uses, so one morning
+    report covers both engines.
+    """
+    body = request.get_json(silent=True) or {}
+    if not body.get("parameter") or body.get("status") not in ("keep", "discard", "crash"):
+        return jsonify({"error": "parameter and status(keep|discard|crash) required"}), 400
+    import uuid as _uuid
+    row = ExperimentRun(
+        id=str(_uuid.uuid4()),
+        run_tag=body.get("run_tag"),
+        phase=0,  # code arms are not phase-parameter experiments
+        parameter_changed=str(body["parameter"])[:200],
+        old_value=None,
+        new_value=str(body.get("new_value", ""))[:500],
+        hypothesis=body.get("hypothesis"),
+        composite_score=float(body.get("composite_score", 0.0) or 0.0),
+        baseline_score=float(body.get("baseline_score", 0.0) or 0.0),
+        delta=body.get("delta"),
+        status=body["status"],
+        proposal_source=body.get("source", "code_arm"),
+    )
+    db.session.add(row)
+    db.session.commit()
+    return jsonify({"status": "logged", "id": row.id}), 201
+
+
+@autoresearch_bp.route("/runs", methods=["POST"])
+def create_run():
+    """Kick off a research run NOW ('research tonight' button)."""
+    from backend.services.research_run_service import get_research_run_service
+    body = request.get_json(silent=True) or {}
+    result = get_research_run_service().kickoff(
+        mode=body.get("mode", "rag_tuning"),
+        budget_hours=body.get("budget_hours"),
+        trigger="manual",
+    )
+    status = 409 if "error" in result else 202
+    return jsonify(result), status
+
+
+@autoresearch_bp.route("/runs", methods=["GET"])
+def list_runs():
+    from backend.models import ResearchRun
+    runs = ResearchRun.query.order_by(ResearchRun.created_at.desc()).limit(30).all()
+    return jsonify({"runs": [r.to_dict() for r in runs]})
+
+
+@autoresearch_bp.route("/runs/<run_id>", methods=["GET"])
+def get_run(run_id):
+    from backend.models import ResearchRun
+    run = db.session.get(ResearchRun, run_id)
+    if run is None:
+        return jsonify({"error": "Unknown run"}), 404
+    return jsonify(run.to_dict(include_report=True))
+
+
+@autoresearch_bp.route("/runs/<run_id>/ledger", methods=["GET"])
+def get_run_ledger(run_id):
+    """The run's experiment ledger as TSV (karpathy results.tsv analog)."""
+    from backend.models import ResearchRun
+    run = db.session.get(ResearchRun, run_id)
+    if run is None:
+        return jsonify({"error": "Unknown run"}), 404
+    rows = (
+        ExperimentRun.query.filter_by(run_tag=run.run_tag)
+        .order_by(ExperimentRun.created_at.asc())
+        .all()
+    )
+    lines = ["experiment_id\tparameter\tchange\tscore\tdelta\tstatus\tsource"]
+    for r in rows:
+        lines.append(
+            f"{r.id[:8]}\t{r.parameter_changed}\t{r.old_value}->{r.new_value}\t"
+            f"{r.composite_score:.4f}\t{r.delta if r.delta is not None else ''}\t"
+            f"{r.status}\t{r.proposal_source or ''}"
+        )
+    return "\n".join(lines), 200, {"Content-Type": "text/tab-separated-values"}
+
+
+@autoresearch_bp.route("/metrics", methods=["GET"])
+def get_metrics():
+    """Recent per-experiment retrieval metrics + provenance."""
+    limit = request.args.get("limit", 50, type=int)
+    runs = (
+        ExperimentRun.query.order_by(ExperimentRun.created_at.desc())
+        .limit(min(limit, 200))
+        .all()
+    )
+    return jsonify({
+        "experiments": [
+            {
+                "id": r.id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "parameter": r.parameter_changed,
+                "new_value": r.new_value,
+                "status": r.status,
+                "composite_score": r.composite_score,
+                "delta": r.delta,
+                "proposal_source": r.proposal_source,
+                "proposer_model": r.proposer_model,
+                "judge_model": r.judge_model,
+                "retrieval_metrics": r.retrieval_metrics,
+                "run_tag": r.run_tag,
+            }
+            for r in runs
+        ]
+    })
 
 
 @autoresearch_bp.route("/settings", methods=["GET"])
@@ -116,6 +304,9 @@ def get_settings():
         "rag_autoresearch_max_experiments",
         "rag_autoresearch_phase_limit",
         "rag_autoresearch_judge_model",
+        "autoresearch_proposer_model",
+        "autoresearch_judge_model",
+        "autoresearch_nightly_window",
     ]
     settings = {}
     for key in keys:
@@ -126,8 +317,11 @@ def get_settings():
         # Off by default — auto-start is an explicit opt-in (see check_idle task).
         "rag_autoresearch_auto_enabled": "false",
         "rag_autoresearch_max_experiments": "0",
-        "rag_autoresearch_phase_limit": "2",
+        "rag_autoresearch_phase_limit": "1",
         "rag_autoresearch_judge_model": "",
+        "autoresearch_proposer_model": "",
+        "autoresearch_judge_model": "",
+        "autoresearch_nightly_window": "01:00-06:00",
     }
     for k, v in defaults.items():
         if settings[k] is None:
@@ -139,7 +333,7 @@ def get_settings():
 def update_settings():
     data = request.get_json()
     for key, value in data.items():
-        if key.startswith("rag_autoresearch_"):
+        if key.startswith(("rag_autoresearch_", "autoresearch_")):
             s = Setting.query.filter_by(key=key).first()
             if s:
                 s.value = str(value)

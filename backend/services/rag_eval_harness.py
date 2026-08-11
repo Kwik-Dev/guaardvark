@@ -19,6 +19,18 @@ from backend.config import (
 
 logger = logging.getLogger(__name__)
 
+
+class LLMUnavailableError(RuntimeError):
+    """No LLM reachable for a required eval role.
+
+    Raised instead of scoring: an unavailable LLM used to be scored as
+    composite 1.0 (the floor), making "Ollama is off" indistinguishable from
+    "RAG is terrible" — and feeding the keep/discard loop pure noise. Callers
+    (run_single_experiment) surface this as a crash, which the
+    consecutive-crash guard halts on.
+    """
+
+
 # --- Prompts ---
 
 EVAL_PAIR_GENERATION_PROMPT = """You are generating evaluation questions for a RAG (Retrieval-Augmented Generation) system.
@@ -52,35 +64,74 @@ class RAGEvalHarness:
     """Immutable eval harness for autoresearch experiments."""
 
     def __init__(self):
-        self._llm = None
+        self._llms = {}  # role -> LLM instance
+        self.judge_model_name = None  # resolved lazily; recorded in the ledger
+        self.single_model_judging = False
 
-    def _get_llm(self):
-        """Get the Ollama LLM instance (lazy-loaded)."""
-        if self._llm is None:
-            try:
-                from flask import current_app
-                self._llm = current_app.config.get("LLAMA_INDEX_LLM")
-            except RuntimeError:
-                pass
-            if self._llm is None:
-                try:
-                    from backend.services.llm_service import get_llm
-                    self._llm = get_llm()
-                except Exception:
-                    pass
-        return self._llm
+    @staticmethod
+    def _model_setting(key: str) -> Optional[str]:
+        try:
+            from backend.models import Setting
+            s = Setting.query.filter_by(key=key).first()
+            value = (s.value or "").strip() if s else ""
+            return value or None
+        except Exception:
+            return None
 
-    def _call_llm(self, prompt: str, temperature: float = 0.0) -> str:
-        """Call the local LLM with the given prompt."""
-        llm = self._get_llm()
+    def _get_llm(self, role: str = "answer"):
+        """LLM for a role: 'answer' (production model) or 'judge'.
+
+        The judge intentionally runs on a DIFFERENT local model when
+        `autoresearch_judge_model` is configured — a model grading its own
+        answers is self-confirmation bias. Falls back to the active model
+        with `single_model_judging` flagged for the report.
+        """
+        if role in self._llms:
+            return self._llms[role]
+
+        from backend.utils.llm_service import get_llm_instance
+
+        llm = None
+        if role == "judge":
+            judge_model = self._model_setting("autoresearch_judge_model")
+            if judge_model:
+                llm = get_llm_instance(model=judge_model)
+                if llm is not None:
+                    self.judge_model_name = judge_model
+            if llm is None:
+                # Same model as answers — allowed, but loudly flagged.
+                self.single_model_judging = True
+
         if llm is None:
-            return ""
+            try:
+                llm = get_llm_instance()
+            except Exception:
+                llm = None
+            if llm is None:
+                try:
+                    from flask import current_app
+                    llm = current_app.config.get("LLAMA_INDEX_LLM")
+                except RuntimeError:
+                    llm = None
+            if role == "judge" and llm is not None and self.judge_model_name is None:
+                self.judge_model_name = getattr(llm, "model", None) or "active"
+
+        if llm is not None:
+            self._llms[role] = llm
+        return llm
+
+    def _call_llm(self, prompt: str, temperature: float = 0.0, role: str = "answer") -> str:
+        """Call the role's LLM. Raises LLMUnavailableError instead of faking."""
+        llm = self._get_llm(role)
+        if llm is None:
+            raise LLMUnavailableError(
+                f"No LLM available for eval role '{role}' — is Ollama running?"
+            )
         try:
             response = llm.complete(prompt, temperature=temperature)
             return str(response).strip()
         except Exception as e:
-            logger.warning(f"LLM call failed: {e}")
-            return ""
+            raise LLMUnavailableError(f"LLM call failed for role '{role}': {e}") from e
 
     def has_sufficient_corpus(self) -> bool:
         """Check if enough documents are indexed for meaningful eval."""
@@ -88,17 +139,42 @@ class RAGEvalHarness:
         count = db.session.query(Document).count()
         return count >= AUTORESEARCH_MIN_CORPUS_SIZE
 
+    def _chunk_document(self, doc) -> list:
+        """Chunk a Document the same way indexing does (EnhancedRAGChunker,
+        'auto' strategy) and return the chunk TEXTS as retrieval surfaces them.
+
+        This is what makes eval-pair chunk hashes comparable with hashes of
+        retrieved chunks: same splitter, same normalization. The old code
+        hashed the whole (truncated) document, which could never equal any
+        retrieved chunk's hash — retrieval metrics scored a structural zero.
+        """
+        text = getattr(doc, "content", None) or ""
+        if len(text.strip()) < 50:
+            return []
+        try:
+            from llama_index.core import Document as LlamaDocument
+            from backend.utils.enhanced_rag_chunking import EnhancedRAGChunker
+            nodes = EnhancedRAGChunker().chunk_documents(
+                [LlamaDocument(text=text, metadata={})], strategy_name="auto"
+            )
+            chunks = [n.get_content() for n in (nodes or []) if getattr(n, "text", None)]
+            if chunks:
+                return chunks
+        except Exception as e:
+            logger.debug(f"Eval chunking fell back to doc head: {e}")
+        return [text[:2000]]
+
     def generate_eval_pair(self, chunk_text: str, corpus_type: str) -> Optional[dict]:
-        """Generate a Q&A eval pair from a text chunk."""
+        """Generate a Q&A eval pair from one REAL index chunk."""
         prompt = EVAL_PAIR_GENERATION_PROMPT.format(chunk_text=chunk_text[:2000])
-        response = self._call_llm(prompt, temperature=0.3)
+        response = self._call_llm(prompt, temperature=0.3, role="judge")
         try:
             parsed = json.loads(response)
             if "question" in parsed and "expected_answer" in parsed:
+                chunk_hash = hashlib.sha256(chunk_text.encode()).hexdigest()
                 parsed["corpus_type"] = corpus_type
-                parsed["source_chunk_hash"] = hashlib.sha256(
-                    chunk_text.encode()
-                ).hexdigest()
+                parsed["source_chunk_hash"] = chunk_hash  # legacy column
+                parsed["source_chunk_hashes"] = [chunk_hash]
                 return parsed
         except (json.JSONDecodeError, KeyError):
             pass
@@ -107,12 +183,15 @@ class RAGEvalHarness:
     def generate_eval_set(self, target_count: int = None):
         """Generate a full eval set from indexed documents.
 
-        Returns list of eval pair dicts ready for DB insertion.
+        Returns list of eval pair dicts ready for DB insertion. Each pair is
+        generated from ONE randomly chosen real chunk of a sampled document.
+        Raises LLMUnavailableError if no LLM is reachable (fail loudly, never
+        produce a silent empty set).
         """
         if target_count is None:
             target_count = AUTORESEARCH_EVAL_PAIR_TARGET
 
-        from backend.models import Document, db
+        from backend.models import Document
         import random
 
         documents = Document.query.all()
@@ -122,7 +201,6 @@ class RAGEvalHarness:
             )
             return []
 
-        # Sample documents, stratified by any available type info
         sampled = random.sample(documents, min(len(documents), target_count * 2))
         generation_id = f"gen-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
 
@@ -130,10 +208,10 @@ class RAGEvalHarness:
         for doc in sampled:
             if len(pairs) >= target_count:
                 break
-            # Use document content or title as the chunk text
-            chunk_text = getattr(doc, "content", None) or getattr(doc, "title", "") or ""
-            if len(chunk_text) < 50:
+            chunks = self._chunk_document(doc)
+            if not chunks:
                 continue
+            chunk_text = random.choice(chunks)
             corpus_type = self._detect_corpus_type(doc)
             pair = self.generate_eval_pair(chunk_text, corpus_type)
             if pair:
@@ -171,7 +249,7 @@ class RAGEvalHarness:
             actual_response=actual_response,
             chunks_text=chunks_text or "(no chunks retrieved)",
         )
-        response = self._call_llm(prompt, temperature=0.0)
+        response = self._call_llm(prompt, temperature=0.0, role="judge")
         try:
             parsed = json.loads(response)
             relevance = max(1, min(5, int(parsed.get("relevance", 1))))
@@ -185,12 +263,26 @@ class RAGEvalHarness:
                 "composite": round(composite, 3),
             }
         except (json.JSONDecodeError, KeyError, ValueError):
-            return {"relevance": 1, "grounding": 1, "completeness": 1, "composite": 1.0}
+            # Judge answered but not in the schema — floor score, LABELED so
+            # parse noise is distinguishable from genuine low quality.
+            return {
+                "relevance": 1, "grounding": 1, "completeness": 1,
+                "composite": 1.0, "judge_parse_failed": True,
+            }
 
     def _get_active_eval_pairs(self) -> list:
-        """Load active eval pairs from DB."""
+        """Load ACTIVE eval pairs only.
+
+        Regeneration deactivates the previous generation, so — unlike the old
+        unfiltered query — eval cost doesn't compound with every regenerate.
+        Legacy rows predating the is_active column default to active.
+        """
         from backend.models import EvalPair
-        pairs = EvalPair.query.order_by(EvalPair.created_at.desc()).all()
+        pairs = (
+            EvalPair.query.filter(EvalPair.is_active.isnot(False))
+            .order_by(EvalPair.created_at.desc())
+            .all()
+        )
         return [p.to_dict() for p in pairs]
 
     def _eval_single_pair(self, pair: dict, config: dict) -> dict:
@@ -203,18 +295,24 @@ class RAGEvalHarness:
 
         try:
             set_experiment_config(config)
-            # Query the real retrieval path
-            results = search_with_llamaindex(
-                pair["question"],
-                max_chunks=config.get("context_window_chunks", 3),
-            )
+            # Query retrieval EXACTLY as production chat does: no explicit
+            # max_chunks — the layered params (experiment override here)
+            # decide top_k and how many chunks come back.
+            results = search_with_llamaindex(pair["question"])
             results = results or []
             retrieved_chunks = [r.get("text", "") for r in results]
 
-            # Generate response using LLM with retrieved context
-            context = "\n".join(retrieved_chunks)
+            # Answer with the same context shape production chat builds
+            # (_retrieve_rag_context: source-labeled, 500-char-clipped chunks),
+            # on the production answer model — so score deltas transfer to
+            # what users actually experience.
+            context_blocks = []
+            for r in results:
+                source = (r.get("metadata") or {}).get("source_filename", "Unknown")
+                context_blocks.append(f"[Source: {source}]\n{r.get('text', '')[:500]}")
+            context = "\n\n".join(context_blocks)
             response_prompt = f"Based on the following context, answer the question.\n\nContext:\n{context}\n\nQuestion: {pair['question']}\n\nAnswer:"
-            actual_response = self._call_llm(response_prompt, temperature=0.0)
+            actual_response = self._call_llm(response_prompt, temperature=0.0, role="answer")
 
             score = self.score_response(
                 question=pair["question"],
@@ -254,13 +352,19 @@ class RAGEvalHarness:
                 return None
             return {"hit_rate_at_k": 0.0, "mrr": 0.0, "ndcg_at_10": 0.0}
 
-        # Build retrieved id list + relevant id, preferring chunk-hash precision.
+        # Build retrieved id list + relevant ids, preferring chunk-hash
+        # precision. source_chunk_hashes holds hashes of REAL index chunks
+        # (same chunker as ingest), so equality with retrieved-text hashes is
+        # actually possible — unlike the legacy whole-document hash.
         retrieved_ids: list = []
-        relevant_id = None
+        relevant_ids: list = []
 
-        chunk_hash = pair.get("source_chunk_hash")
-        if chunk_hash:
-            relevant_id = chunk_hash
+        chunk_hashes = pair.get("source_chunk_hashes") or []
+        if not chunk_hashes and pair.get("source_chunk_hash"):
+            chunk_hashes = [pair["source_chunk_hash"]]
+
+        if chunk_hashes:
+            relevant_ids = list(chunk_hashes)
             for r in results:
                 text = r.get("text", "") or ""
                 retrieved_ids.append(hashlib.sha256(text.encode()).hexdigest())
@@ -268,7 +372,7 @@ class RAGEvalHarness:
             doc_id = pair.get("source_doc_id")
             if doc_id is None:
                 return None  # no known-relevant id -> skip retrieval scoring
-            relevant_id = str(doc_id)
+            relevant_ids = [str(doc_id)]
             for r in results:
                 meta = r.get("metadata") or {}
                 rid = meta.get("document_id") or meta.get("source_doc_id") or r.get("node_id")
@@ -279,11 +383,11 @@ class RAGEvalHarness:
             retrieved_docs=[],
             relevant_docs=[],
             retrieved_ids=retrieved_ids,
-            relevant_ids=[relevant_id],
+            relevant_ids=relevant_ids,
             k=10,
         )
         # hit-rate@k = did any of the k retrieved chunks contain a relevant id.
-        hit = 1.0 if relevant_id in set(retrieved_ids) else 0.0
+        hit = 1.0 if set(relevant_ids) & set(retrieved_ids) else 0.0
         return {
             "hit_rate_at_k": hit,
             "mrr": round(metrics.mrr, 4),
@@ -334,14 +438,37 @@ class RAGEvalHarness:
         _n = "run_full_" + "".join(map(chr, (101, 118, 97, 108)))
         return getattr(self, _n)(config)
 
+    def _pair_is_stale(self, pair) -> Optional[str]:
+        """Reason a single EvalPair row is stale, or None if still valid.
+
+        Stale when its source document is gone, or when none of its recorded
+        chunk hashes match the document's CURRENT chunking (content edited or
+        re-chunked since the pair was generated).
+        """
+        if pair.source_document is None:
+            return "source_document_deleted"
+        hashes = pair.source_chunk_hashes or (
+            [pair.source_chunk_hash] if pair.source_chunk_hash else []
+        )
+        if not hashes:
+            return None  # nothing to compare — treat as valid (doc-id scoring)
+        current = {
+            hashlib.sha256(c.encode()).hexdigest()
+            for c in self._chunk_document(pair.source_document)
+        }
+        if current and not (set(hashes) & current):
+            return "chunk_hashes_no_longer_match"
+        return None
+
     def is_stale(self) -> bool:
-        """Check if eval pairs need regeneration by sampling chunk hashes."""
+        """Do active eval pairs need regeneration? Samples pairs and checks
+        their chunk hashes against the source documents' current chunking
+        (the old implementation only null-checked the FK — content edits
+        never triggered regeneration)."""
         import random
         from backend.models import EvalPair
 
-        pairs = EvalPair.query.filter(
-            EvalPair.source_chunk_hash.isnot(None)
-        ).all()
+        pairs = EvalPair.query.filter(EvalPair.is_active.isnot(False)).all()
         if not pairs:
             return True
 
@@ -350,9 +477,22 @@ class RAGEvalHarness:
 
         stale_count = 0
         for pair in sample:
-            if pair.source_document is None:
+            reason = self._pair_is_stale(pair)
+            if reason:
                 stale_count += 1
-                continue
+                try:
+                    pair.is_active = False
+                    pair.stale_reason = reason
+                except Exception:
+                    pass
+
+        if stale_count:
+            try:
+                from backend.models import db
+                db.session.commit()
+            except Exception:
+                from backend.models import db
+                db.session.rollback()
 
         stale_ratio = stale_count / len(sample) if sample else 1.0
         return stale_ratio > AUTORESEARCH_STALENESS_THRESHOLD

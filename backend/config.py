@@ -175,15 +175,19 @@ AUTORESEARCH_EVAL_PAIR_TARGET = 100  # target eval pairs per generation
 AUTORESEARCH_STALENESS_SAMPLE_RATE = 0.1  # fraction of pairs to spot-check
 AUTORESEARCH_STALENESS_THRESHOLD = 0.2  # fraction of stale pairs triggering regen
 
-# Default RAG experiment parameters
+# Default RAG experiment parameters. These MUST mirror actual production
+# behavior (the values retrieval uses when nothing is promoted), so that an
+# experiment's baseline measures the system users actually experience:
+# rerank defaults ON (GUAARDVARK_RERANK_ENABLED default), alpha matches the
+# GUAARDVARK_HYBRID_SEARCH_ALPHA default, chat returns 3 chunks.
 AUTORESEARCH_DEFAULT_PARAMS = {
     # Phase 1 — query-time
     "top_k": 5,
     "dedup_threshold": 0.85,
     "context_window_chunks": 3,
-    "reranking_enabled": False,
+    "reranking_enabled": True,
     "query_expansion": False,
-    "hybrid_search_alpha": 0.0,
+    "hybrid_search_alpha": 0.3,
     # Phase 2 — index-time
     "chunk_size": 1000,
     "chunk_overlap": 200,

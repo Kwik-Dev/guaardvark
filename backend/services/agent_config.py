@@ -36,6 +36,10 @@ class AgentConfig:
     priority: int = 0
     trigger_patterns: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Optional model pin. None = the process-wide active LLM (historical
+    # behavior). Set to run this agent on a specific local model — e.g. an
+    # autoresearch judge must not share the proposer's model.
+    model: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -49,7 +53,8 @@ class AgentConfig:
             "enabled": self.enabled,
             "priority": self.priority,
             "trigger_patterns": self.trigger_patterns,
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "model": self.model
         }
 
 
@@ -578,7 +583,7 @@ class AgentConfigManager:
                 agent = self._agents.get(agent_id)
                 if not agent:
                     continue
-                for key in ("enabled", "max_iterations", "system_prompt"):
+                for key in ("enabled", "max_iterations", "system_prompt", "model"):
                     if key in overrides:
                         setattr(agent, key, overrides[key])
             logger.info(f"Loaded agent state from {AGENT_STATE_FILE} ({len(saved)} agents)")
@@ -598,6 +603,7 @@ class AgentConfigManager:
                         "enabled": agent.enabled,
                         "max_iterations": agent.max_iterations,
                         "system_prompt": agent.system_prompt,
+                        "model": agent.model,
                     }
                 else:
                     # Only save fields that differ from defaults
@@ -607,6 +613,8 @@ class AgentConfigManager:
                         overrides["max_iterations"] = agent.max_iterations
                     if agent.system_prompt != default.system_prompt:
                         overrides["system_prompt"] = agent.system_prompt
+                    if agent.model != default.model:
+                        overrides["model"] = agent.model
                 if overrides:
                     state[agent_id] = overrides
             AGENT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)

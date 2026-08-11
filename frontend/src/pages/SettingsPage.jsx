@@ -2973,36 +2973,75 @@ const SettingsPage = () => {
                   />
                 </Box>
 
-                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
-                  <Typography variant="body2">Max experiment phase</Typography>
-                  <Select
-                    value={autoresearchSettings.rag_autoresearch_phase_limit || "2"}
-                    size="small"
-                    onChange={(e) => handleAutoresearchSettingChange("rag_autoresearch_phase_limit", e.target.value)}
-                    sx={{ minWidth: 160 }}
-                  >
-                    <MenuItem value="1">Phase 1 (Query)</MenuItem>
-                    <MenuItem value="2">Phase 2 (Index)</MenuItem>
-                    <MenuItem value="3">Phase 3 (Model)</MenuItem>
-                  </Select>
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="body2">Phase 1 — query-time parameters</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Chunking and embedding phases return in a later release
+                  </Typography>
                 </Box>
 
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={async () => {
-                    try {
-                      await ragAutoresearchService.resetConfig();
-                      const data = await ragAutoresearchService.getSettings();
-                      setAutoresearchSettings(data);
-                      showMessage("Autoresearch config reset to defaults", "success");
-                    } catch (e) {
-                      showMessage("Failed to reset autoresearch config", "error");
-                    }
-                  }}
-                >
-                  Reset to Defaults
-                </Button>
+                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
+                  <Typography variant="body2">Proposer model</Typography>
+                  <TextField
+                    size="small"
+                    placeholder="(active model)"
+                    value={autoresearchSettings.autoresearch_proposer_model || ""}
+                    onChange={(e) => setAutoresearchSettings({ ...autoresearchSettings, autoresearch_proposer_model: e.target.value })}
+                    onBlur={(e) => handleAutoresearchSettingChange("autoresearch_proposer_model", e.target.value)}
+                    sx={{ minWidth: 220 }}
+                  />
+                </Box>
+
+                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
+                  <Typography variant="body2">Judge model</Typography>
+                  <TextField
+                    size="small"
+                    placeholder="(active model)"
+                    value={autoresearchSettings.autoresearch_judge_model || ""}
+                    onChange={(e) => setAutoresearchSettings({ ...autoresearchSettings, autoresearch_judge_model: e.target.value })}
+                    onBlur={(e) => handleAutoresearchSettingChange("autoresearch_judge_model", e.target.value)}
+                    sx={{ minWidth: 220 }}
+                  />
+                </Box>
+
+                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
+                  <Typography variant="body2">Nightly window</Typography>
+                  <TextField
+                    size="small"
+                    placeholder="01:00-06:00"
+                    value={autoresearchSettings.autoresearch_nightly_window || ""}
+                    onChange={(e) => setAutoresearchSettings({ ...autoresearchSettings, autoresearch_nightly_window: e.target.value })}
+                    onBlur={(e) => handleAutoresearchSettingChange("autoresearch_nightly_window", e.target.value)}
+                    sx={{ minWidth: 220 }}
+                  />
+                </Box>
+
+                <Box sx={{ display: "flex", gap: 1 }}>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={async () => {
+                      try {
+                        await ragAutoresearchService.resetConfig();
+                        const data = await ragAutoresearchService.getSettings();
+                        setAutoresearchSettings(data);
+                        showMessage("Autoresearch config reset to defaults", "success");
+                      } catch (e) {
+                        showMessage("Failed to reset autoresearch config", "error");
+                      }
+                    }}
+                  >
+                    Reset to Defaults
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    startIcon={<OpenInNewIcon sx={{ fontSize: 14 }} />}
+                    onClick={() => navigate("/autoresearch")}
+                  >
+                    Open Autoresearch page
+                  </Button>
+                </Box>
           </SettingsCardWrapper>
 
           <SettingsCardWrapper title="A.I. Features">

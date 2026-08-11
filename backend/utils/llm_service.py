@@ -59,7 +59,31 @@ def _safe_content(message) -> Optional[str]:
         return None
 
 
-def get_llm_instance() -> Optional[LLM]:
+def get_llm_instance(model: Optional[str] = None) -> Optional[LLM]:
+    """Return the active LLM, or a per-call Ollama bound to `model`.
+
+    `model=None` (the default) preserves the historical behavior: cloud
+    provider routing, then the process-wide LLAMA_INDEX_LLM singleton.
+
+    `model="name"` constructs a dedicated local Ollama instance for that
+    model without touching the singleton — used by autoresearch to judge on
+    a DIFFERENT model than the proposer (same-model judging is
+    self-confirmation bias). Cloud routing is deliberately skipped for
+    explicit local model requests.
+    """
+    if model:
+        try:
+            from backend.config import OLLAMA_BASE_URL
+            from llama_index.llms.ollama import Ollama
+            return Ollama(
+                model=model,
+                base_url=OLLAMA_BASE_URL,
+                request_timeout=120.0,
+            )
+        except Exception as e:
+            logger.warning("Per-model LLM construction failed for %r: %s", model, e)
+            return None
+
     # Cloud provider routing: when the master cloud toggle is on AND a cloud
     # provider (e.g. Mistral) is the active selection, hand back a cloud-backed
     # LlamaIndex LLM so every .chat()/.complete() caller routes to the API.

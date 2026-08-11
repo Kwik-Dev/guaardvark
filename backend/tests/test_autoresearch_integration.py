@@ -250,11 +250,13 @@ class TestRunawayGuards:
             assert len(calls) == 4
 
     def test_settings_toggle_stops_loop_cross_process(self, app):
-        """The persisted Settings row must stop a loop no matter which process
-        it runs in — self._paused never reaches the Celery worker."""
+        """The persisted kill flag must stop a loop no matter which process
+        it runs in — self._paused never reaches the Celery worker. (The
+        auto_enabled toggle deliberately does NOT kill running loops; it only
+        gates auto-start.)"""
         with app.app_context():
             from backend.models import Setting
-            db.session.add(Setting(key="rag_autoresearch_auto_enabled", value="false"))
+            db.session.add(Setting(key="autoresearch_kill", value="true"))
             db.session.commit()
 
             svc = RAGAutoresearchService()

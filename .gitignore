@@ -30,6 +30,8 @@ data/video-editor-projects/
 data/video_editor_session.json.migrated
 
 # App-mutated runtime state (written by the backend at runtime, per-machine)
+data/ab_tests/
+data/autoresearch/
 data/active_model.json
 data/rag_experiment_config.json
 data/rag_experiment_config.json.tmp

@@ -1,0 +1,275 @@
+"""Autoresearch 2.0 tests: the active-config layer, honest eval scoring,
+and the research-run engine (Phases A+B of the 2026-08-10 rebuild)."""
+import hashlib
+import pytest
+from unittest.mock import patch, MagicMock
+
+try:
+    from flask import Flask
+    from backend.models import db, ResearchConfig, ResearchRun, EvalPair, Setting
+    from backend.utils import experiment_context as ec
+    from backend.services.rag_autoresearch_service import RAGAutoresearchService
+    from backend.services.rag_eval_harness import RAGEvalHarness, LLMUnavailableError
+    from backend.services.research_run_service import ResearchRunService
+except Exception:
+    pytest.skip("Backend modules not available", allow_module_level=True)
+
+
+@pytest.fixture
+def app():
+    app = Flask(__name__)
+    app.config.update(
+        {"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:"}
+    )
+    db.init_app(app)
+    with app.app_context():
+        db.create_all()
+        ec.invalidate_active_params_cache()
+        yield app
+        ec.clear_experiment_config()
+        ec.invalidate_active_params_cache()
+        db.session.remove()
+        db.drop_all()
+
+
+class TestActiveParamsLayer:
+    def test_empty_overlay_without_promotion_or_experiment(self, app):
+        with app.app_context():
+            assert ec.get_active_rag_params() == {}
+
+    def test_promoted_config_feeds_overlay(self, app):
+        with app.app_context():
+            db.session.add(ResearchConfig(
+                params={"top_k": 8, "hybrid_search_alpha": 0.7},
+                is_active=True, status="promoted",
+            ))
+            db.session.commit()
+            ec.invalidate_active_params_cache()
+            overlay = ec.get_active_rag_params()
+            assert overlay["top_k"] == 8
+            assert overlay["hybrid_search_alpha"] == 0.7
+
+    def test_experiment_override_beats_promoted(self, app):
+        with app.app_context():
+            db.session.add(ResearchConfig(params={"top_k": 8}, is_active=True))
+            db.session.commit()
+            ec.invalidate_active_params_cache()
+            ec.set_experiment_config({"top_k": 2})
+            assert ec.get_active_rag_params()["top_k"] == 2
+            ec.clear_experiment_config()
+            assert ec.get_active_rag_params()["top_k"] == 8
+
+    def test_hostile_values_are_clamped(self, app):
+        with app.app_context():
+            db.session.add(ResearchConfig(
+                params={"top_k": 500, "hybrid_search_alpha": 9.0,
+                        "dedup_threshold": "garbage"},
+                is_active=True,
+            ))
+            db.session.commit()
+            ec.invalidate_active_params_cache()
+            overlay = ec.get_active_rag_params()
+            assert overlay["top_k"] == 20          # clamped to max
+            assert overlay["hybrid_search_alpha"] == 1.0
+            assert "dedup_threshold" not in overlay  # non-numeric dropped
+
+    def test_cache_invalidation_applies_immediately(self, app):
+        with app.app_context():
+            row = ResearchConfig(params={"top_k": 8}, is_active=True)
+            db.session.add(row)
+            db.session.commit()
+            ec.invalidate_active_params_cache()
+            assert ec.get_active_rag_params()["top_k"] == 8
+            row.is_active = False
+            db.session.commit()
+            # cached until invalidated
+            assert ec.get_active_rag_params()["top_k"] == 8
+            ec.invalidate_active_params_cache()
+            assert ec.get_active_rag_params() == {}
+
+
+class TestHonestEval:
+    def test_llm_unavailable_raises_not_floor(self, app):
+        with app.app_context():
+            harness = RAGEvalHarness()
+            with patch.object(harness, "_get_llm", return_value=None):
+                with pytest.raises(LLMUnavailableError):
+                    harness._call_llm("prompt", role="judge")
+
+    def test_llm_unavailable_mid_eval_becomes_crash(self, app):
+        with app.app_context():
+            svc = RAGAutoresearchService()
+            with patch.object(svc.agent, "propose_experiment",
+                              return_value={"parameter": "top_k", "new_value": 9,
+                                            "hypothesis": "t", "source": "llm"}), \
+                 patch.object(svc.eval_harness, "run_full_eval",
+                              side_effect=LLMUnavailableError("ollama down")), \
+                 patch.object(svc, "_load_config", return_value={
+                     "params": {}, "baseline_score": 3.0, "phase": 1,
+                     "phase_plateau_count": 0}), \
+                 patch.object(svc, "_save_config"), \
+                 patch.object(svc, "_log_experiment"):
+                result = svc.run_single_experiment()
+            assert result["status"] == "crash"
+
+    def test_chunk_hash_alignment_produces_hits(self, app):
+        """A retrieved chunk whose text matches a stored chunk hash scores a hit
+        — the legacy whole-document hash could never match anything."""
+        with app.app_context():
+            harness = RAGEvalHarness()
+            chunk = "The mitochondria is the powerhouse of the cell."
+            pair = {
+                "source_chunk_hashes": [hashlib.sha256(chunk.encode()).hexdigest()],
+                "source_doc_id": 1,
+            }
+            results = [{"text": "unrelated"}, {"text": chunk}]
+            metrics = harness._score_retrieval(pair, results)
+            assert metrics["hit_rate_at_k"] == 1.0
+            assert metrics["mrr"] > 0
+
+    def test_inactive_pairs_are_excluded(self, app):
+        with app.app_context():
+            db.session.add(EvalPair(question="q1", expected_answer="a1", is_active=True))
+            db.session.add(EvalPair(question="q2", expected_answer="a2", is_active=False))
+            db.session.commit()
+            harness = RAGEvalHarness()
+            pairs = harness._get_active_eval_pairs()
+            assert [p["question"] for p in pairs] == ["q1"]
+
+    def test_judge_parse_failure_is_labeled(self, app):
+        with app.app_context():
+            harness = RAGEvalHarness()
+            with patch.object(harness, "_call_llm", return_value="not json"):
+                score = harness.score_response("q", "a", "r", [])
+            assert score["composite"] == 1.0
+            assert score.get("judge_parse_failed") is True
+
+
+class TestResearchRunEngine:
+    def _mk_service(self):
+        return ResearchRunService()
+
+    def test_ollama_down_is_failed_precondition(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-1", mode="rag_tuning",
+                              wall_clock_budget_s=60)
+            db.session.add(run)
+            db.session.commit()
+            auto_svc = MagicMock()
+            with patch("requests.get", side_effect=ConnectionError("refused")), \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service",
+                       return_value=auto_svc):
+                svc_run.execute_run(run.id)
+            db.session.refresh(run)
+            assert run.status == "failed_precondition"
+            assert "ollama" in (run.halt_reason or "").lower()
+            assert "DID NOT RUN" in (run.report_md or "")
+
+    def test_kill_flag_halts_run(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-2", mode="rag_tuning",
+                              wall_clock_budget_s=3600)
+            db.session.add(run)
+            db.session.add(Setting(key="autoresearch_kill", value="true"))
+            db.session.commit()
+            auto_svc = MagicMock()
+            auto_svc._load_config.return_value = {
+                "params": {}, "baseline_score": 3.0, "phase": 1,
+                "phase_plateau_count": 0,
+            }
+            with patch.object(svc_run, "_check_preconditions", return_value=(True, "")), \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service",
+                       return_value=auto_svc):
+                svc_run.execute_run(run.id)
+            db.session.refresh(run)
+            assert run.status == "killed"
+            assert run.halt_reason == "killed"
+            auto_svc.run_single_experiment.assert_not_called()
+
+    def test_budget_exhaustion_completes_with_report(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-3", mode="rag_tuning",
+                              wall_clock_budget_s=0)  # instantly exhausted
+            db.session.add(run)
+            db.session.commit()
+            auto_svc = MagicMock()
+            auto_svc._load_config.return_value = {
+                "params": {}, "baseline_score": 3.0, "phase": 1,
+                "phase_plateau_count": 0,
+            }
+            auto_svc.eval_harness = MagicMock()
+            with patch.object(svc_run, "_check_preconditions", return_value=(True, "")), \
+                 patch.object(svc_run, "_confirm_and_activate",
+                              return_value="no candidate configs produced"), \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service",
+                       return_value=auto_svc):
+                svc_run.execute_run(run.id)
+            db.session.refresh(run)
+            assert run.status == "completed"
+            assert run.halt_reason == "budget_exhausted"
+            assert "Headline" in run.report_md
+
+    def test_confirmation_rejects_weak_candidate(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-4", mode="rag_tuning")
+            db.session.add(run)
+            active = ResearchConfig(params={"top_k": 5}, is_active=True,
+                                    status="promoted", composite_score=3.0)
+            cand = ResearchConfig(params={"top_k": 9}, is_active=False,
+                                  status="candidate", composite_score=3.2)
+            db.session.add_all([active, cand])
+            db.session.commit()
+            auto_svc = MagicMock()
+            # candidate barely better than active — below CONFIRMATION_MIN_DELTA
+            auto_svc.eval_harness.run_full_eval.side_effect = [
+                {"composite_score": 3.01}, {"composite_score": 3.0},
+            ]
+            note = svc_run._confirm_and_activate(auto_svc, run)
+            assert "NOT confirmed" in note
+            db.session.refresh(cand)
+            db.session.refresh(active)
+            assert cand.status == "rejected"
+            assert active.is_active is True
+
+    def test_confirmation_activates_clear_winner(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-5", mode="rag_tuning")
+            db.session.add(run)
+            active = ResearchConfig(params={"top_k": 5}, is_active=True,
+                                    status="promoted", composite_score=3.0)
+            cand = ResearchConfig(params={"top_k": 9}, is_active=False,
+                                  status="candidate", composite_score=3.8)
+            db.session.add_all([active, cand])
+            db.session.commit()
+            auto_svc = MagicMock()
+            auto_svc.eval_harness.run_full_eval.side_effect = [
+                {"composite_score": 3.8}, {"composite_score": 3.0},
+            ]
+            note = svc_run._confirm_and_activate(auto_svc, run)
+            assert "CONFIRMED" in note
+            db.session.refresh(cand)
+            db.session.refresh(active)
+            assert cand.is_active is True and cand.status == "promoted"
+            assert active.is_active is False and active.status == "superseded"
+            assert run.promotions == [cand.id]
+
+    def test_report_flags_single_model_judging(self, app):
+        with app.app_context():
+            svc_run = self._mk_service()
+            run = ResearchRun(run_tag="t-6", mode="rag_tuning",
+                              baseline_score=3.0, best_score=3.1,
+                              halt_reason="budget_exhausted")
+            ledger = [
+                {"parameter": "top_k", "old_value": "5", "new_value": "8",
+                 "delta": 0.1, "status": "keep", "proposal_source": "llm",
+                 "proposer_model": "gemma4", "judge_model": "gemma4",
+                 "composite_score": 3.1},
+            ]
+            report = svc_run._write_report(run, ledger)
+            assert "single-model judging" in report
+            assert "100% LLM-proposed" in report

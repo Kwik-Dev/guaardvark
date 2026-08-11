@@ -44,6 +44,7 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import StickyNote2Icon from "@mui/icons-material/StickyNote2";
 import ExtensionIcon from "@mui/icons-material/Extension";
 import HiveIcon from "@mui/icons-material/Hive";
+import ScienceIcon from "@mui/icons-material/Science";
 import CampaignIcon from "@mui/icons-material/Campaign";
 import TextFieldsIcon from "@mui/icons-material/TextFields";
 import QueueIcon from "@mui/icons-material/Queue";
@@ -118,6 +119,7 @@ const navGroups = [
       { text: "FileGen", icon: <PetsIcon />, path: "/file-generation" },
       { text: "CSVGen", icon: <LibraryBooksIcon />, path: "/content-library" },
       { text: "Swarm", icon: <HiveIcon />, path: "/swarm" },
+      { text: "Autoresearch", icon: <ScienceIcon />, path: "/autoresearch" },
       { text: "Plugins", icon: <ExtensionIcon />, path: "/plugins" },
       { text: "System Map", icon: <BubbleChartIcon />, path: "/system-map" },
       { text: "Settings", icon: <SettingsIcon />, path: "/settings" },

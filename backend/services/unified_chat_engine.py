@@ -3587,15 +3587,21 @@ class UnifiedChatEngine:
             return []
 
     def _retrieve_rag_context(self, query: str) -> str:
-        """Retrieve relevant RAG context for the query."""
+        """Retrieve relevant RAG context for the query.
+
+        No explicit max_chunks: the count comes from the layered RAG params
+        (promoted autoresearch config → context_window_chunks/top_k), falling
+        back to the retrieval default when nothing is promoted. This is the
+        production path autoresearch experiments are supposed to improve.
+        """
         try:
             from backend.services.indexing_service import search_with_llamaindex
             project_id = getattr(self, '_project_id', None)
-            results = search_with_llamaindex(query, max_chunks=3, project_id=project_id)
+            results = search_with_llamaindex(query, project_id=project_id)
             if not results:
                 return ""
             chunks = []
-            for r in results[:3]:
+            for r in results:
                 source = r.get("metadata", {}).get("source_filename", "Unknown")
                 text = r.get("text", "")[:500]
                 chunks.append(f"[Source: {source}]\n{text}")

@@ -1269,6 +1269,16 @@ try:
                 ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
                 # Local source folder for swarm/agent code runs (added Phase 2).
                 ("websites", "local_path", "ALTER TABLE websites ADD COLUMN IF NOT EXISTS local_path VARCHAR(2048)"),
+                # Autoresearch 2.0 (2026-08-10): honest eval pairs + experiment
+                # provenance + candidate/promoted config lifecycle.
+                ("eval_pairs", "is_active", "ALTER TABLE eval_pairs ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("eval_pairs", "source_chunk_hashes", "ALTER TABLE eval_pairs ADD COLUMN IF NOT EXISTS source_chunk_hashes JSON"),
+                ("eval_pairs", "stale_reason", "ALTER TABLE eval_pairs ADD COLUMN IF NOT EXISTS stale_reason VARCHAR(100)"),
+                ("experiment_runs", "proposal_source", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS proposal_source VARCHAR(20)"),
+                ("experiment_runs", "proposer_model", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS proposer_model VARCHAR(100)"),
+                ("experiment_runs", "judge_model", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS judge_model VARCHAR(100)"),
+                ("experiment_runs", "retrieval_metrics", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS retrieval_metrics JSON"),
+                ("research_configs", "status", "ALTER TABLE research_configs ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'promoted'"),
             ):
                 try:
                     from sqlalchemy import text as _sa_text

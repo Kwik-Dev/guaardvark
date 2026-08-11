@@ -2224,6 +2224,12 @@ class ExperimentRun(db.Model):
     eval_details = db.Column(db.JSON, nullable=True)
     duration_seconds = db.Column(db.Float, nullable=True)
     node_id = db.Column(db.String(36), nullable=True)  # nullable for standalone instances
+    # Provenance: was the proposal LLM-generated or the random fallback, and
+    # which models proposed/judged (visible LLM-vs-random ratio in reports).
+    proposal_source = db.Column(db.String(20), nullable=True)  # llm, random
+    proposer_model = db.Column(db.String(100), nullable=True)
+    judge_model = db.Column(db.String(100), nullable=True)
+    retrieval_metrics = db.Column(db.JSON, nullable=True)  # hit_rate_at_k/mrr/ndcg_at_10
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
     def to_dict(self):
@@ -2237,6 +2243,10 @@ class ExperimentRun(db.Model):
             "status": self.status, "eval_details": self.eval_details,
             "duration_seconds": self.duration_seconds,
             "node_id": self.node_id,
+            "proposal_source": self.proposal_source,
+            "proposer_model": self.proposer_model,
+            "judge_model": self.judge_model,
+            "retrieval_metrics": self.retrieval_metrics,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -2250,9 +2260,16 @@ class EvalPair(db.Model):
     question = db.Column(db.Text, nullable=False)
     expected_answer = db.Column(db.Text, nullable=False)
     source_doc_id = db.Column(db.Integer, db.ForeignKey("documents.id"), nullable=True)
-    source_chunk_hash = db.Column(db.String(64), nullable=True)
+    source_chunk_hash = db.Column(db.String(64), nullable=True)  # legacy: sha256(whole doc)
+    # sha256 of each ACTUAL index chunk the question was generated from —
+    # comparable with hashes of retrieved chunk texts (retrieval metrics).
+    source_chunk_hashes = db.Column(db.JSON, nullable=True)
     corpus_type = db.Column(db.String(20), nullable=True)  # code, knowledge, client
     quality_score = db.Column(db.Float, nullable=True)
+    # Only active pairs run in evals; regeneration deactivates the previous
+    # generation instead of stacking cost forever.
+    is_active = db.Column(db.Boolean, default=True, index=True)
+    stale_reason = db.Column(db.String(100), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     source_document = db.relationship("Document", backref="eval_pairs", lazy=True)
@@ -2263,8 +2280,11 @@ class EvalPair(db.Model):
             "question": self.question, "expected_answer": self.expected_answer,
             "source_doc_id": self.source_doc_id,
             "source_chunk_hash": self.source_chunk_hash,
+            "source_chunk_hashes": self.source_chunk_hashes,
             "corpus_type": self.corpus_type,
             "quality_score": self.quality_score,
+            "is_active": self.is_active,
+            "stale_reason": self.stale_reason,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -2279,6 +2299,9 @@ class ResearchConfig(db.Model):
     is_active = db.Column(db.Boolean, default=False, index=True)
     promoted_at = db.Column(db.DateTime, nullable=True)
     source = db.Column(db.String(30), nullable=True)  # local, family_broadcast, uncle_directive
+    # promoted = live-eligible; candidate = awaiting A/B confirmation (nightly
+    # runs, family broadcasts); rejected/superseded = history.
+    status = db.Column(db.String(20), nullable=True, default="promoted")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def to_dict(self):
@@ -2288,8 +2311,53 @@ class ResearchConfig(db.Model):
             "is_active": self.is_active,
             "promoted_at": self.promoted_at.isoformat() if self.promoted_at else None,
             "source": self.source,
+            "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class ResearchRun(db.Model):
+    """One bounded autoresearch session (e.g. an overnight run)."""
+    __tablename__ = "research_runs"
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_tag = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    mode = db.Column(db.String(30), nullable=False, default="rag_tuning")
+    # pending | running | completed | halted | failed_precondition | killed
+    status = db.Column(db.String(30), nullable=False, default="pending", index=True)
+    started_at = db.Column(db.DateTime, nullable=True)
+    ended_at = db.Column(db.DateTime, nullable=True)
+    wall_clock_budget_s = db.Column(db.Integer, nullable=True)
+    experiments_planned = db.Column(db.Integer, nullable=True)
+    experiments_completed = db.Column(db.Integer, nullable=True, default=0)
+    baseline_score = db.Column(db.Float, nullable=True)
+    best_score = db.Column(db.Float, nullable=True)
+    promotions = db.Column(db.JSON, nullable=True)  # list of ResearchConfig ids
+    report_md = db.Column(db.Text, nullable=True)
+    halt_reason = db.Column(db.String(200), nullable=True)
+    # The research program text frozen at kickoff (reproducibility).
+    program_snapshot = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self, include_report: bool = False):
+        d = {
+            "id": self.id, "run_tag": self.run_tag, "mode": self.mode,
+            "status": self.status,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "ended_at": self.ended_at.isoformat() if self.ended_at else None,
+            "wall_clock_budget_s": self.wall_clock_budget_s,
+            "experiments_planned": self.experiments_planned,
+            "experiments_completed": self.experiments_completed,
+            "baseline_score": self.baseline_score,
+            "best_score": self.best_score,
+            "promotions": self.promotions,
+            "halt_reason": self.halt_reason,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+        if include_report:
+            d["report_md"] = self.report_md
+            d["program_snapshot"] = self.program_snapshot
+        return d
 
 
 # --- Demonstration / Learning Models ---

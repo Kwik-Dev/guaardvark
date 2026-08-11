@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Box, Typography, Chip, LinearProgress, Tooltip, IconButton,
+  Box, Typography, Chip, LinearProgress, Tooltip, IconButton, Link,
   Table, TableBody, TableRow, TableCell,
 } from '@mui/material';
 import {
@@ -8,14 +8,20 @@ import {
   Pause as PauseIcon,
   Science as ScienceIcon,
 } from '@mui/icons-material';
+import { useNavigate } from 'react-router-dom';
+import { io } from 'socket.io-client';
+import { SOCKET_URL } from '../../api/apiClient';
 import { ragAutoresearchService } from '../../api/ragAutoresearchService';
 import DashboardCardWrapper from './DashboardCardWrapper';
 
 const RAGAutoresearchCard = React.forwardRef(
   ({ style, isMinimized, onToggleMinimize, cardColor, onCardColorChange, ...props }, ref) => {
+  const navigate = useNavigate();
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
+  const [lastRun, setLastRun] = useState(null);
   const [loading, setLoading] = useState(false);
+  const socketRef = useRef(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -31,15 +37,57 @@ const RAGAutoresearchCard = React.forwardRef(
     } catch (e) { /* ignore */ }
   }, []);
 
+  const fetchLastRun = useCallback(async () => {
+    try {
+      const data = await ragAutoresearchService.listRuns();
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      const recent = (data.runs || []).find(
+        (r) => r.status === 'completed' && r.ended_at
+          && new Date(r.ended_at).getTime() >= cutoff,
+      );
+      setLastRun(recent || null);
+    } catch (e) { /* ignore */ }
+  }, []);
+
   useEffect(() => {
     fetchStatus();
     fetchHistory();
+    fetchLastRun();
+
+    // Push updates via Socket.IO; the 30s poll below stays as fallback.
+    try {
+      const socket = io(SOCKET_URL, {
+        reconnection: true,
+        reconnectionAttempts: 3,
+        transports: ['polling', 'websocket'],
+      });
+      socketRef.current = socket;
+
+      socket.on('autoresearch:experiment_complete', () => {
+        fetchStatus();
+        fetchHistory();
+      });
+
+      socket.on('autoresearch:run_complete', () => {
+        fetchStatus();
+        fetchHistory();
+        fetchLastRun();
+      });
+    } catch (e) { /* socket unavailable — polling covers it */ }
+
     const interval = setInterval(() => {
       fetchStatus();
       fetchHistory();
+      fetchLastRun();
     }, 30000);
-    return () => clearInterval(interval);
-  }, [fetchStatus, fetchHistory]);
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+      clearInterval(interval);
+    };
+  }, [fetchStatus, fetchHistory, fetchLastRun]);
 
   const handleStart = async () => {
     setLoading(true);
@@ -111,6 +159,28 @@ const RAGAutoresearchCard = React.forwardRef(
               {status.total_experiments} runs / {status.total_improvements} improvements
             </Typography>
           </Box>
+
+          {/* Last night's research */}
+          {lastRun && (
+            <Box sx={{ mb: 1 }}>
+              <Typography variant="caption" color="text.secondary">
+                Last night's research:{' '}
+                <Link
+                  component="button"
+                  variant="caption"
+                  onClick={() => navigate('/autoresearch')}
+                  sx={{ verticalAlign: 'baseline' }}
+                >
+                  {lastRun.run_tag}
+                </Link>
+                {' '}
+                {lastRun.baseline_score != null ? lastRun.baseline_score.toFixed(3) : '—'}
+                {' → '}
+                {lastRun.best_score != null ? lastRun.best_score.toFixed(3) : '—'}
+                {lastRun.halt_reason ? ` (${lastRun.halt_reason})` : ''}
+              </Typography>
+            </Box>
+          )}
 
           {/* Recent experiments */}
           {history.length > 0 && (

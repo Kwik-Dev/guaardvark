@@ -18,14 +18,20 @@ from backend.config import (
 
 logger = logging.getLogger(__name__)
 
-# Phase -> parameter names
+# Phase -> parameter names. Only phases whose parameters are ACTUALLY consumed
+# by retrieval may appear here — tuning a knob nothing reads just measures
+# LLM-judge noise and promotes false positives.
+#   Phase 2 (index-time chunking: chunk_size, chunk_overlap, semantic/
+#   hierarchical splitting, entities, structure) returns when per-experiment
+#   eval-subset re-indexing lands — until then those params never reach the
+#   chunker at query time.
+#   Phase 3 (embedding_model) is excluded: swapping embeddings means re-indexing
+#   the corpus per experiment, far outside a per-iteration budget.
 PHASE_PARAMS = {
     1: ["top_k", "dedup_threshold", "context_window_chunks",
         "reranking_enabled", "query_expansion", "hybrid_search_alpha"],
-    2: ["chunk_size", "chunk_overlap", "use_semantic_splitting",
-        "use_hierarchical_splitting", "extract_entities", "preserve_structure"],
-    3: ["embedding_model"],
 }
+MAX_PHASE = max(PHASE_PARAMS)
 
 # Parameter ranges for random fallback
 PARAM_RANGES = {
@@ -42,6 +48,15 @@ PARAM_RANGES = {
     "extract_entities": (False, True, "bool"),
     "preserve_structure": (False, True, "bool"),
 }
+
+def _extract_json(text: str) -> str:
+    """Pull the first {...} block out of a possibly chatty LLM reply."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        return text[start:end + 1]
+    return text
+
 
 AGENT_PROMPT = """You are a RAG optimization researcher. Based on the experiment history
 and research program, propose ONE parameter change.
@@ -63,20 +78,34 @@ class RAGExperimentAgent:
 
     def __init__(self):
         self._llm = None
+        self.proposer_model_name = None  # recorded in the experiment ledger
 
     def _get_llm(self):
         if self._llm is None:
+            from backend.utils.llm_service import get_llm_instance
             try:
-                from flask import current_app
-                self._llm = current_app.config.get("LLAMA_INDEX_LLM")
-            except RuntimeError:
-                pass
+                from backend.models import Setting
+                s = Setting.query.filter_by(key="autoresearch_proposer_model").first()
+                configured = (s.value or "").strip() if s else ""
+            except Exception:
+                configured = ""
+            if configured:
+                self._llm = get_llm_instance(model=configured)
+                if self._llm is not None:
+                    self.proposer_model_name = configured
             if self._llm is None:
                 try:
-                    from backend.services.llm_service import get_llm
-                    self._llm = get_llm()
+                    self._llm = get_llm_instance()
                 except Exception:
+                    self._llm = None
+            if self._llm is None:
+                try:
+                    from flask import current_app
+                    self._llm = current_app.config.get("LLAMA_INDEX_LLM")
+                except RuntimeError:
                     pass
+            if self._llm is not None and self.proposer_model_name is None:
+                self.proposer_model_name = getattr(self._llm, "model", None) or "active"
         return self._llm
 
     def _call_llm(self, prompt: str) -> str:
@@ -138,25 +167,38 @@ class RAGExperimentAgent:
             history_table=history_table,
         )
 
-        response = self._call_llm(prompt)
-        try:
-            parsed = json.loads(response)
-            param = parsed.get("parameter")
-            new_value = parsed.get("new_value")
-            hypothesis = parsed.get("hypothesis", "LLM-proposed experiment")
+        # Up to 3 attempts (1 + 2 repairs): small local models flub JSON often
+        # enough that a single shot degraded to random.choice most of the time.
+        attempt_prompt = prompt
+        for attempt in range(3):
+            response = self._call_llm(attempt_prompt)
+            if not response:
+                break  # LLM unavailable — retrying won't help
+            try:
+                parsed = json.loads(_extract_json(response))
+                param = parsed.get("parameter")
+                new_value = parsed.get("new_value")
+                hypothesis = parsed.get("hypothesis", "LLM-proposed experiment")
 
-            if param in available and new_value is not None:
-                # Validate the value is different from current
-                if str(new_value) != str(current_config.get(param)):
-                    return {
-                        "parameter": param,
-                        "new_value": new_value,
-                        "hypothesis": hypothesis,
-                    }
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
+                if param in available and new_value is not None:
+                    # Validate the value is different from current
+                    if str(new_value) != str(current_config.get(param)):
+                        return {
+                            "parameter": param,
+                            "new_value": new_value,
+                            "hypothesis": hypothesis,
+                            "source": "llm",
+                        }
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+            attempt_prompt = (
+                prompt
+                + "\n\nYour previous reply was not valid JSON in the required shape. "
+                  'Return ONLY: {"parameter": "...", "new_value": ..., "hypothesis": "..."}'
+            )
 
-        # Fallback: random proposal
+        # Fallback: random proposal — labeled, so reports can show the
+        # LLM-vs-random proposal ratio instead of hiding degradation.
         logger.info("Agent LLM failed to produce valid proposal, falling back to random")
         return self._random_proposal(available, current_config)
 
@@ -169,6 +211,7 @@ class RAGExperimentAgent:
                 "parameter": param,
                 "new_value": not current_config.get(param, False),
                 "hypothesis": "Random fallback: toggle boolean",
+                "source": "random",
             }
 
         low, high, ptype = prange
@@ -191,6 +234,7 @@ class RAGExperimentAgent:
             "parameter": param,
             "new_value": new_val,
             "hypothesis": f"Random exploration: try {param}={new_val}",
+            "source": "random",
         }
 
     def should_advance_phase(self, history: list) -> bool:

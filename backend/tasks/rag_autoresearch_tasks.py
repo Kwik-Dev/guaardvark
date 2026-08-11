@@ -9,40 +9,63 @@ def create_autoresearch_tasks(celery_app):
 
     @celery_app.task(name="autoresearch.check_idle")
     def check_idle_and_start():
-        """Runs every 60s. Starts autoresearch if system is idle."""
+        """Runs every 10 min. Starts tonight's research run inside the
+        configured nightly window, if auto mode is opted in.
+
+        Replaces the old idle-detection start: in this process is_idle() was
+        ALWAYS true after 10 minutes of worker uptime (activity tracking lives
+        in the web process), which — combined with an unbounded run_loop and
+        an empty eval set — self-started the 2026-08 134M-row runaway. A
+        window-scheduled BOUNDED run has no such failure mode: preconditions
+        fail loudly, the wall clock caps it, and one run per night max.
+        """
         try:
-            from backend.models import Setting
-            from backend.services.rag_autoresearch_service import get_autoresearch_service
+            from datetime import datetime, timedelta
+            from backend.models import ResearchRun, Setting
 
-            svc = get_autoresearch_service()
-            if svc.is_running():
-                return
-
-            idle_setting = Setting.query.filter_by(key="rag_autoresearch_idle_minutes").first()
-            idle_minutes = int(idle_setting.value) if idle_setting else 10
-
-            # Default OFF: auto-start must be an explicit opt-in. It used to
-            # default on, and in this process is_idle() is ALWAYS true after 10
-            # minutes of worker uptime — activity tracking lives in the web
-            # process and never updates the Celery-side singleton. Combined with
-            # an unbounded run_loop and an empty eval set, that self-started the
-            # 2026-08 134M-row runaway on a box nobody had opted in on.
+            # Default OFF: auto-start must be an explicit opt-in.
             auto_setting = Setting.query.filter_by(key="rag_autoresearch_auto_enabled").first()
             auto_enabled = (auto_setting.value.lower() == "true") if auto_setting else False
-
             if not auto_enabled:
                 return
 
-            if svc.is_idle(idle_minutes=idle_minutes):
-                max_setting = Setting.query.filter_by(key="rag_autoresearch_max_experiments").first()
-                # 0 means "no user override", never "unbounded" — run_loop caps
-                # it at AUTORESEARCH_MAX_EXPERIMENTS_PER_RUN.
-                max_exp = int(max_setting.value) if max_setting and max_setting.value != "0" else 0
+            window_setting = Setting.query.filter_by(key="autoresearch_nightly_window").first()
+            window = (window_setting.value if window_setting else "") or "01:00-06:00"
+            try:
+                start_s, end_s = window.split("-")
+                start_h, start_m = (int(x) for x in start_s.strip().split(":"))
+                end_h, end_m = (int(x) for x in end_s.strip().split(":"))
+            except ValueError:
+                logger.warning(f"Bad autoresearch_nightly_window {window!r}; using 01:00-06:00")
+                start_h, start_m, end_h, end_m = 1, 0, 6, 0
 
-                logger.info(f"System idle for >{idle_minutes}m — starting autoresearch")
-                svc.run_loop(max_experiments=max_exp)
+            now = datetime.now()
+            minutes = now.hour * 60 + now.minute
+            w_start, w_end = start_h * 60 + start_m, end_h * 60 + end_m
+            in_window = (w_start <= minutes < w_end) if w_start <= w_end \
+                else (minutes >= w_start or minutes < w_end)
+            if not in_window:
+                return
+
+            # One run per night: anything created in the last 20h counts.
+            recent = ResearchRun.query.filter(
+                ResearchRun.created_at > datetime.utcnow() - timedelta(hours=20)
+            ).first()
+            if recent is not None:
+                return
+
+            remaining_min = (w_end - minutes) if w_start <= w_end else \
+                ((w_end - minutes) % (24 * 60))
+            budget_hours = max(0.5, remaining_min / 60.0)
+
+            logger.info(f"Nightly window open — kicking off research run "
+                        f"({budget_hours:.1f}h budget)")
+            from backend.services.research_run_service import get_research_run_service
+            get_research_run_service().kickoff(
+                mode="rag_tuning", budget_hours=budget_hours, trigger="nightly"
+            )
         except Exception as e:
-            logger.error(f"Autoresearch idle check failed: {e}")
+            logger.error(f"Autoresearch nightly check failed: {e}")
 
     @celery_app.task(name="autoresearch.on_index_complete")
     def on_index_complete():
@@ -61,6 +84,7 @@ def schedule_autoresearch_tasks(celery_app):
     celery_app.conf.beat_schedule.update({
         "autoresearch-idle-check": {
             "task": "autoresearch.check_idle",
-            "schedule": 60.0,
+            # Window check, not idle polling — every 10 min is plenty.
+            "schedule": 600.0,
         },
     })

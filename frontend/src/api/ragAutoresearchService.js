@@ -54,4 +54,57 @@ export const ragAutoresearchService = {
     });
     return handleResponse(res);
   },
+
+  async getPromotions() {
+    const res = await fetch(`${BASE_URL}/autoresearch/promotions`);
+    return handleResponse(res);
+  },
+
+  async activatePromotion(configId) {
+    const res = await fetch(
+      `${BASE_URL}/autoresearch/promotions/${configId}/activate`,
+      { method: "POST" },
+    );
+    return handleResponse(res);
+  },
+
+  async revertPromotion() {
+    const res = await fetch(`${BASE_URL}/autoresearch/promotions/revert`, {
+      method: "POST",
+    });
+    return handleResponse(res);
+  },
+
+  async getMetrics(limit = 50) {
+    const res = await fetch(`${BASE_URL}/autoresearch/metrics?limit=${limit}`);
+    return handleResponse(res);
+  },
+
+  // Kicks off a research run now ("research tonight"). Backend responds 202
+  // on success and 409 when a run is already in progress — handleResponse
+  // throws on 409 with error.status set, so callers can branch on it.
+  async createRun({ mode = "rag_tuning", budget_hours: budgetHours } = {}) {
+    const res = await fetch(`${BASE_URL}/autoresearch/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, budget_hours: budgetHours }),
+    });
+    return handleResponse(res);
+  },
+
+  async listRuns() {
+    const res = await fetch(`${BASE_URL}/autoresearch/runs`);
+    return handleResponse(res);
+  },
+
+  // Includes report_md + program_snapshot.
+  async getRun(runId) {
+    const res = await fetch(`${BASE_URL}/autoresearch/runs/${runId}`);
+    return handleResponse(res);
+  },
+
+  // Direct URL to the run's TSV experiment ledger (for download links).
+  getRunLedgerUrl(runId) {
+    return `${BASE_URL}/autoresearch/runs/${runId}/ledger`;
+  },
 };

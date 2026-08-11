@@ -10,7 +10,7 @@ from typing import List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-from backend.utils.experiment_context import get_experiment_config
+from backend.utils.experiment_context import get_experiment_config, get_active_rag_params
 import backend.utils.llama_index_local_config
 
 # Per edge-portability audit: remove unconditional CUDA_VISIBLE_DEVICES at
@@ -740,9 +740,9 @@ def deduplicate_chunks(chunks: list, similarity_threshold: float = None) -> list
         active_model = get_active_embedding_model()
         threshold = similarity_threshold if similarity_threshold is not None else get_dedup_threshold(active_model)
 
-        exp_config = get_experiment_config()
-        if exp_config and "dedup_threshold" in exp_config:
-            threshold = exp_config["dedup_threshold"]
+        overlay = get_active_rag_params()
+        if "dedup_threshold" in overlay:
+            threshold = overlay["dedup_threshold"]
 
         texts = [
             (c.get("text", "") if isinstance(c, dict) else getattr(c, "text", str(c)))[:500]
@@ -795,7 +795,26 @@ def deduplicate_chunks(chunks: list, similarity_threshold: float = None) -> list
         return chunks
 
 
-def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional[int] = None) -> List[Dict[str, Any]]:
+def _expand_query(query: str) -> Optional[str]:
+    """One cheap LLM paraphrase for the query_expansion param. Fail-soft: None."""
+    try:
+        from flask import current_app
+        llm = current_app.config.get("LLAMA_INDEX_LLM")
+        if llm is None:
+            return None
+        resp = llm.complete(
+            "Rewrite this search query using different words but the same meaning. "
+            "Return ONLY the rewritten query, nothing else.\nQuery: " + query[:500]
+        )
+        text = str(resp).strip().strip('"')
+        if text and text.lower() != query.lower():
+            return text[:500]
+    except Exception as e:
+        logger.debug(f"Query expansion failed: {e}")
+    return None
+
+
+def search_with_llamaindex(query: str, max_chunks: Optional[int] = None, project_id: Optional[int] = None) -> List[Dict[str, Any]]:
     global index
 
     try:
@@ -819,15 +838,20 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
         if not _check_index_embedding_model(project_id):
             return []
 
-        max_chunks = max(1, min(max_chunks, 50))
-
-        # Apply experiment config overrides (autoresearch)
+        # Layered RAG params (autoresearch): experiment override > explicit
+        # max_chunks argument > promoted active config > legacy default (5).
+        # The overlay already merges promoted+experiment (experiment wins) and
+        # clamps values; an empty overlay means "behave exactly as pre-layer".
+        overlay = get_active_rag_params()
         exp_config = get_experiment_config()
-        if exp_config:
-            effective_top_k = exp_config.get("top_k", max_chunks)
-            max_chunks = exp_config.get("context_window_chunks", max_chunks)
+        if exp_config and "top_k" in exp_config:
+            effective_top_k = overlay["top_k"]
+        elif max_chunks is not None:
+            effective_top_k = max(1, min(int(max_chunks), 50))
+        elif "top_k" in overlay:
+            effective_top_k = overlay["top_k"]
         else:
-            effective_top_k = max_chunks
+            effective_top_k = 5
 
         if project_id is not None:
             try:
@@ -843,8 +867,12 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
                 base_retriever = local_index.as_retriever(similarity_top_k=effective_top_k)
         else:
             base_retriever = local_index.as_retriever(similarity_top_k=effective_top_k)
-        # Hybrid search: add BM25 retrieval alongside vector search
-        hybrid_alpha = float(os.environ.get("GUAARDVARK_HYBRID_SEARCH_ALPHA", "0.3"))
+        # Hybrid search: add BM25 retrieval alongside vector search.
+        # Promoted/experiment alpha wins; env var is the legacy default.
+        hybrid_alpha = overlay.get(
+            "hybrid_search_alpha",
+            float(os.environ.get("GUAARDVARK_HYBRID_SEARCH_ALPHA", "0.3")),
+        )
         retriever = base_retriever  # Default to vector-only
         use_query_embedding = True  # False only when we fall back to BM25-only (no vector leg)
 
@@ -912,7 +940,17 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
             query_bundle = query
 
         nodes = retriever.retrieve(query_bundle)
-        
+
+        # query_expansion (autoresearch param, default off): one LLM paraphrase,
+        # union the two retrievals; downstream dedup removes the overlap.
+        if overlay.get("query_expansion") and isinstance(query, str):
+            expanded = _expand_query(query)
+            if expanded:
+                try:
+                    nodes.extend(retriever.retrieve(QueryBundle(query_str=expanded)))
+                except Exception as e:
+                    logger.debug(f"Expanded-query retrieval failed: {e}")
+
         results = []
         for node_with_score in nodes:
             node = node_with_score.node if hasattr(node_with_score, 'node') else node_with_score
@@ -939,7 +977,10 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
         results = deduplicate_chunks(results)
 
         # CPU-only MMR rerank of the top candidates (relevance × diversity). Zero VRAM.
-        if os.environ.get("GUAARDVARK_RERANK_ENABLED", "true").lower() == "true":
+        # Env var is the operator's master allow; the tunable param decides per-query
+        # (defaults on, matching pre-layer behavior).
+        if (os.environ.get("GUAARDVARK_RERANK_ENABLED", "true").lower() == "true"
+                and overlay.get("reranking_enabled", True)):
             results = _mmr_rerank(results)
 
         # Expand results with cross-file dependency context
@@ -948,6 +989,14 @@ def search_with_llamaindex(query: str, max_chunks: int = 5, project_id: Optional
             results = expand_with_dependencies(results)
         except Exception as e:
             logger.debug(f"Context expansion skipped: {e}")
+
+        # context_window_chunks: how many chunks the CALLER receives, distinct
+        # from top_k (candidate pool fed to dedup/rerank). Only applies when the
+        # caller didn't pass an explicit max_chunks cap of its own. The default
+        # of 3 preserves chat's pre-layer behavior (it used to pass max_chunks=3).
+        if max_chunks is None:
+            cwc = overlay.get("context_window_chunks", 3)
+            results = results[:cwc]
 
         # Fallback: if project-scoped search returned 0 results, retry with global scope
         if not results and project_id is not None:
