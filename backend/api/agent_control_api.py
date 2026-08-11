@@ -839,8 +839,10 @@ def _distill_pearl_memory(app, session_id: str):
             except Exception:
                 active_model = "gemma4:e4b"
 
+            from backend.config import GUAARDVARK_PROJECT_NAME
+
             prompt = (
-                "You are Guaardvark, a local AI assistant. The user just approved "
+                f"You are {GUAARDVARK_PROJECT_NAME}, a local AI assistant. The user just approved "
                 "(👍) a response in this chat session. Read the positive pearls "
                 "from this session and the recent exchange, then write a short note "
                 "to your future self (2–3 sentences, plain English, first person) "

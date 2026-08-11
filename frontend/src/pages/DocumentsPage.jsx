@@ -8,7 +8,7 @@
 
 import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { Box, Typography, Card, CardActionArea, CardContent, IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, useTheme, CircularProgress } from "@mui/material";
-import { GuaardvarkLogo } from "../components/branding";
+import { BrandLogo } from "../components/branding";
 import { Apps as AppsIcon, GridView as GridViewIcon, FolderOutlined, Code, UploadFile as UploadFileIcon } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { getFileIcon, getItemKey, FolderIndexIndicator, isImageFile, isCodeFile, isPdfFile, isAudioFile } from "../components/documents/fileUtils.jsx";
@@ -2057,7 +2057,7 @@ const DocumentsPage = () => {
                 gap: 1,
               }}
             >
-              <GuaardvarkLogo size={64} sx={{ opacity: 0.4 }} />
+              <BrandLogo size={64} sx={{ opacity: 0.4 }} />
               <Typography variant="h6" color="text.disabled">
                 No documents yet
               </Typography>

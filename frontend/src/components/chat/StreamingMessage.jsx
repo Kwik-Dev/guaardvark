@@ -14,7 +14,7 @@ import {
   Chip,
   CardMedia,
 } from "@mui/material";
-import { GuaardvarkLogo } from "../branding";
+import { BrandLogo } from "../branding";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -348,7 +348,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
           {logoUrl ? (
             <Box component="img" src={logoUrl} sx={{ width: 32, height: 32 }} />
           ) : (
-            <GuaardvarkLogo size={20} />
+            <BrandLogo size={20} />
           )}
         </Avatar>
         <Paper
@@ -403,9 +403,9 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
         }}
       >
         {isActive ? (
-          <GuaardvarkLogo size={20} variant="warning" animate />
+          <BrandLogo size={20} variant="warning" animate />
         ) : !logo ? (
-          <GuaardvarkLogo size={20} />
+          <BrandLogo size={20} />
         ) : null}
       </Avatar>
 

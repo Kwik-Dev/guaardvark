@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Fab, Badge, Tooltip, Zoom } from "@mui/material";
-import { GuaardvarkLogo } from "../branding";
+import { BrandLogo } from "../branding";
 import { useAppStore } from "../../stores/useAppStore";
 import { useFloatingChatStore } from "../../stores/useFloatingChatStore";
 
@@ -61,7 +61,7 @@ const FloatingChatFAB = () => {
                   }}
                 />
               ) : (
-                <GuaardvarkLogo size={24} color="#fff" />
+                <BrandLogo size={24} color="#fff" />
               )}
             </Box>
           </Badge>

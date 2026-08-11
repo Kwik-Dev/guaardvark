@@ -9,6 +9,8 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
+from backend.config import GUAARDVARK_PROJECT_NAME as _PROJECT_NAME
+
 logger = logging.getLogger(__name__)
 
 AGENT_STATE_FILE = Path(os.environ.get("GUAARDVARK_ROOT", ".")) / "data" / "agent_state.json"
@@ -521,7 +523,7 @@ Be helpful, concise, and action-oriented.""",
             "agent_screen_capture",
             "agent_status",
         ],
-        system_prompt="""You are the Agent Vision Control system for Guaardvark. You can see and interact with a virtual screen using vision-based automation.
+        system_prompt=f"""You are the Agent Vision Control system for {_PROJECT_NAME}. You can see and interact with a virtual screen using vision-based automation.
 
 CAPABILITIES:
 1. START/STOP: Activate or deactivate agent vision control mode

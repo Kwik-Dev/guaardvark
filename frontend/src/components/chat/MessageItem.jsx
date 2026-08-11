@@ -20,7 +20,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import MemoryIcon from "@mui/icons-material/Memory";
 import Tooltip from "@mui/material/Tooltip";
 import IconButton from "@mui/material/IconButton";
-import { GuaardvarkLogo } from "../branding";
+import { BrandLogo } from "../branding";
 import { useAppStore } from "../../stores/useAppStore";
 import { BASE_URL } from "../../api/apiClient";
 import AgentResultDisplay from "./AgentResultDisplay";
@@ -209,7 +209,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
               borderColor: "divider",
             }}
           >
-            <GuaardvarkLogo
+            <BrandLogo
               size={20}
               variant={isThinking ? "warning" : isComplete ? "success" : hasError ? "error" : "default"}
               animate={isThinking}
@@ -292,7 +292,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
               borderColor: "divider",
             }}
           >
-            {!logo && <GuaardvarkLogo size={20} variant="warning" animate />}
+            {!logo && <BrandLogo size={20} variant="warning" animate />}
           </Avatar>
           <Paper
             elevation={2}
@@ -390,7 +390,7 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
             borderColor: "divider"
           }}
         >
-          {!logo && <GuaardvarkLogo size={20} />}
+          {!logo && <BrandLogo size={20} />}
         </Avatar>
       )}
       <Paper

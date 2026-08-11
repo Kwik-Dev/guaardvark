@@ -17,6 +17,7 @@ from werkzeug.utils import secure_filename
 
 from sqlalchemy import func as sa_func
 
+from backend.config import GUAARDVARK_PROJECT_NAME
 from backend.models import Folder, Document as DBDocument, Client, Project, Website, db
 from backend.services.guarded_code_service import GuardedCodeError, browse_repo_path, default_repo_root
 from backend.utils.db_utils import ensure_db_session_cleanup
@@ -173,18 +174,22 @@ _DOC_SORT_COLS = {
 
 LIVE_REPO_PREFIX = "/__repo__"
 
+# File-browser label for the live repo mount; follows the product name so
+# white-label distributions read naturally (e.g. "Roof Brain Code").
+_REPO_MOUNT_NAME = f"{GUAARDVARK_PROJECT_NAME} Code"
+
 
 def _live_repo_mount_folder() -> dict:
     root = default_repo_root()
     return {
         "id": "repo:.",
-        "name": "Guaardvark Code",
+        "name": _REPO_MOUNT_NAME,
         "path": LIVE_REPO_PREFIX,
         "parent_id": None,
         "source_type": "live_repo",
         "relative_path": "",
         "is_repository": True,
-        "description": "Live read-only mount of the configured Guaardvark repository.",
+        "description": f"Live read-only mount of the configured {GUAARDVARK_PROJECT_NAME} repository.",
         "repo_metadata": {
             "source_type": "live_repo",
             "repo_root": str(root),
@@ -201,7 +206,7 @@ def _live_repo_mount_folder() -> dict:
 def _browse_live_repo_folder(folder_path: str) -> dict:
     relative = folder_path[len(LIVE_REPO_PREFIX):].lstrip("/")
     listing = browse_repo_path(relative)
-    breadcrumbs = [{"name": "Root", "path": "/"}, {"name": "Guaardvark Code", "path": LIVE_REPO_PREFIX}]
+    breadcrumbs = [{"name": "Root", "path": "/"}, {"name": _REPO_MOUNT_NAME, "path": LIVE_REPO_PREFIX}]
     parts = [p for p in relative.split("/") if p]
     accum = LIVE_REPO_PREFIX
     for part in parts:
@@ -215,7 +220,7 @@ def _browse_live_repo_folder(folder_path: str) -> dict:
         "limit": 0,
         "current_folder": {
             **_live_repo_mount_folder(),
-            "name": parts[-1] if parts else "Guaardvark Code",
+            "name": parts[-1] if parts else _REPO_MOUNT_NAME,
             "path": folder_path,
             "relative_path": relative,
         },

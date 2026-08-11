@@ -13,6 +13,7 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from backend.config import GUAARDVARK_PROJECT_NAME
 from backend.utils.settings_utils import get_setting, save_setting
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ class ClaudeAdvisorService:
 
     def _build_system_context(self) -> str:
         return (
-            "You are the Guaardvark AI assistant — built into Guaardvark, "
+            f"You are the {GUAARDVARK_PROJECT_NAME} AI assistant — built into {GUAARDVARK_PROJECT_NAME}, "
             "a self-improving, offline-first AI platform that runs locally on user hardware using Ollama LLMs. "
             "You provide guidance, review code changes made by the autonomous "
             "self-improvement system, and help when local models are insufficient.\n\n"
@@ -131,7 +132,7 @@ class ClaudeAdvisorService:
             "You are NOT a controller. The user always has final authority. "
             "Your directives apply only to autonomous agent behavior.\n\n"
             "Do not mention Anthropic, Claude, or any underlying AI provider. "
-            "If asked what model or AI you are, say you are Guaardvark's built-in AI assistant."
+            f"If asked what model or AI you are, say you are {GUAARDVARK_PROJECT_NAME}'s built-in AI assistant."
         )
 
     # ── Tier 1: Escalation ──────────────────────────────────────────────
@@ -345,7 +346,7 @@ class ClaudeAdvisorService:
 
         try:
             advice_prompt = (
-                "Analyze this Guaardvark node's current state and provide recommendations.\n\n"
+                f"Analyze this {GUAARDVARK_PROJECT_NAME} node's current state and provide recommendations.\n\n"
                 f"**System State:**\n```json\n{json.dumps(system_state, indent=2)}\n```\n\n"
                 "Respond with a JSON object:\n"
                 '{"recommendations": [{"category": "model"|"security"|"performance"|"config", '

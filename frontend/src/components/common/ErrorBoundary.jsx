@@ -9,7 +9,7 @@ import {
   Divider 
 } from "@mui/material";
 import { RefreshOutlined } from "@mui/icons-material";
-import { GuaardvarkLogo } from "../branding";
+import { BrandLogo } from "../branding";
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -71,7 +71,7 @@ class ErrorBoundary extends React.Component {
             }}
           >
             <Box sx={{ mb: 2 }}>
-              <GuaardvarkLogo size={64} variant="error" />
+              <BrandLogo size={64} variant="error" />
             </Box>
             
             <Typography variant="h4" gutterBottom color="error">

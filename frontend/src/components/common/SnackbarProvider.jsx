@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
 import { Snackbar, Alert } from "@mui/material";
-import { GuaardvarkLogo } from "../branding";
+import { BrandLogo } from "../branding";
 
 const SnackbarContext = createContext(null);
 
@@ -35,7 +35,7 @@ export const SnackbarProvider = ({ children }) => {
           onClose={handleClose}
           severity={snackbar.severity || "info"}
           variant="outlined"
-          icon={<GuaardvarkLogo size={20} variant={snackbar.severity || "info"} />}
+          icon={<BrandLogo size={20} variant={snackbar.severity || "info"} />}
           sx={{
             width: "100%",
             backgroundColor: "rgba(8, 10, 14, 0.85)",

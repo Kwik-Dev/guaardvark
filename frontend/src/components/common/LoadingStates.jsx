@@ -24,7 +24,7 @@ import {
   CheckCircle as SuccessIcon,
   Error as ErrorIcon,
 } from '@mui/icons-material';
-import { GuaardvarkLogo } from '../branding';
+import { BrandLogo } from '../branding';
 
 // Enhanced Loading Spinner with context
 export const ContextualLoader = ({
@@ -74,7 +74,7 @@ export const ContextualLoader = ({
       {/* Main Progress Indicator */}
       <Box sx={{ position: 'relative', display: 'inline-flex' }}>
         {branded && progress === null ? (
-          <GuaardvarkLogo size={size} animate />
+          <BrandLogo size={size} animate />
         ) : (
         <CircularProgress
           variant={variant}
