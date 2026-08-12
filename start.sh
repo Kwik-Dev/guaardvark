@@ -95,16 +95,26 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 # timeout on 127.0.0.53 while cudnn/nccl wheels pulled at 40MB/s).
 # PID file + liveness check rather than flock: daemons we spawn would inherit
 # a lock fd and block legitimate restarts after this script exits.
+# stop.sh reaps this lock (including Ctrl+Z / STAT=T leftovers). A stopped or
+# foreign pidfile is not a live overlap — take it over.
 START_PID_FILE="$SCRIPT_DIR/.start_cache/start.sh.pid"
 mkdir -p "$SCRIPT_DIR/.start_cache"
+# shellcheck source=scripts/lib/start_lock.sh
+. "$SCRIPT_DIR/scripts/lib/start_lock.sh"
 if [ -f "$START_PID_FILE" ]; then
     _prev_pid=$(cat "$START_PID_FILE" 2>/dev/null)
-    if [ -n "$_prev_pid" ] && kill -0 "$_prev_pid" 2>/dev/null \
-       && ps -p "$_prev_pid" -o command= 2>/dev/null | grep -q "start\.sh"; then
+    if [ "$(start_lock_guard_decision "$_prev_pid")" = "live" ]; then
         vader_error "Another ./start.sh (PID $_prev_pid) is still running — refusing to overlap."
         vader_error "Concurrent runs corrupt installs and starve DNS while big downloads compete."
         vader_info "Wait for it to finish (watch: tail -f logs/setup.log), or stop everything first: ./stop.sh"
         exit 1
+    fi
+    if [ -n "$_prev_pid" ] && [ "$_prev_pid" != "$$" ] \
+       && start_lock_is_our_script "$_prev_pid"; then
+        # Abandoned (stopped/zombie) copy of this script — reap so the pid
+        # cannot race us after we write the new pidfile.
+        start_lock_kill_pid "$_prev_pid"
+        vader_info "Reaped abandoned start.sh (PID $_prev_pid)."
     fi
 fi
 echo $$ > "$START_PID_FILE"
@@ -1453,6 +1463,9 @@ done
 
 vader_step 1 "Stopping previous application servers..."
 if [ -f "$SCRIPT_DIR/stop.sh" ]; then
+    # stop.sh reaps leftover start.sh; do not let it kill this boot.
+    START_LOCK_PROTECT_PIDS="$$ ${START_LOCK_PROTECT_PIDS:-}"
+    export START_LOCK_PROTECT_PIDS
     "$SCRIPT_DIR/stop.sh" >/dev/null 2>&1
 fi
 

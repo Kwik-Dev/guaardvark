@@ -19,8 +19,17 @@ vader_error() { echo -e "  ${VADER_RED_DARK}✖${VADER_RESET} ${VADER_RED}$1${VA
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDS_DIR="$SCRIPT_DIR/pids"
+# shellcheck source=scripts/lib/start_lock.sh
+. "$SCRIPT_DIR/scripts/lib/start_lock.sh"
 
 vader_header "Guaardvark Stop Script"
+
+# Reap a leftover ./start.sh (including Ctrl+Z / STAT=T) so the next
+# ./start.sh is not blocked by the overlap guard. Must run even when no
+# backend/frontend pidfiles exist.
+while IFS= read -r _lock_line; do
+    [ -n "$_lock_line" ] && vader_info "$_lock_line"
+done < <(start_lock_reap)
 
 kill_and_cleanup() {
     local service_name=$1
