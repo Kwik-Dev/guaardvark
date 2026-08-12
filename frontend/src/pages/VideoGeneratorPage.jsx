@@ -60,6 +60,8 @@ import {
   snapDimensions,
   fitAreaToRatio,
 } from "../constants/videoGeneratorPresets";
+import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
+import { videoGenStageLabel } from "../components/videogen/stageLabels";
 import {
   PlayArrow as PlayIcon,
   Refresh as RefreshIcon,
@@ -388,7 +390,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         setAnyModelReady(vids.some(m => m.is_ready));
         const meta = {};
         vids.forEach(m => {
-          meta[m.id] = { is_ready: m.is_ready, missing_files: m.missing_files || [], name: m.name };
+          meta[m.id] = {
+            is_ready: m.is_ready,
+            missing_files: m.missing_files || [],
+            name: m.name,
+            dimension_alignment: m.dimension_alignment,
+            max_pixel_area: m.max_pixel_area,
+          };
         });
         setModelMeta(meta);
         // If a previously-flagged model is now ready, retract the banner.
@@ -474,7 +482,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     if (isLtxModel(model)) {
       const [nativeW, nativeH] = MODEL_OPTIONS[model].resolution;
       const ratioConfig = ASPECT_RATIO_PRESETS[aspectRatio] || ASPECT_RATIO_PRESETS["16:9"];
-      return fitAreaToRatio(nativeW * nativeH, ratioConfig.ratio, model);
+      return fitAreaToRatio(nativeW * nativeH, ratioConfig.ratio, model, modelMeta[model]);
     }
 
     const ratioConfig = ASPECT_RATIO_PRESETS[aspectRatio] || ASPECT_RATIO_PRESETS["16:9"];
@@ -496,18 +504,18 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // Cap total pixel area at what the model can actually sustain. Full HD
     // Square (1920×1920 = 3.7 MPx) never finished on either Wan and read as
     // "the selector is broken" — scale down preserving the chosen aspect.
-    const maxArea = MODEL_OPTIONS[model]?.maxPixelArea;
+    const maxArea = modelMeta[model]?.max_pixel_area ?? MODEL_OPTIONS[model]?.maxPixelArea;
     if (maxArea && width * height > maxArea) {
       const scale = Math.sqrt(maxArea / (width * height));
       width *= scale;
       height *= scale;
     }
 
-    // Snap to the model's required alignment (16 for CogVideoX/Wan, 8 for SVD).
-    ({ width, height } = snapDimensions(width, height, model));
+    // Snap to the model's required alignment (registry SSOT when available).
+    ({ width, height } = snapDimensions(width, height, model, modelMeta[model]));
 
     return { width, height };
-  }, [aspectRatio, videoSize, model]);
+  }, [aspectRatio, videoSize, model, modelMeta]);
 
   // Compute final params from presets
   const computedParams = useMemo(() => {
@@ -579,7 +587,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       if (width < 256) width = 256;
       if (height < 256) height = 256;
       // Snap to the model's required alignment (always last, after every resize)
-      ({ width, height } = snapDimensions(width, height, effectiveModel));
+      ({ width, height } = snapDimensions(width, height, effectiveModel, modelMeta[effectiveModel]));
 
       // Aggressive step reduction - tested working with 15 steps
       if (effectiveSteps > 15) {
@@ -605,7 +613,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       }
       if (width < 256) width = 256;
       if (height < 256) height = 256;
-      ({ width, height } = snapDimensions(width, height, effectiveModel));
+      ({ width, height } = snapDimensions(width, height, effectiveModel, modelMeta[effectiveModel]));
 
       // Moderate step reduction
       if (effectiveSteps > 20) {
@@ -677,7 +685,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           : {}),
       },
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta]);
 
   const {
     activeBatchId,
@@ -694,6 +702,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     handleDeleteBatch,
     handleCancelBatch,
     handleRetryBatch,
+    handleClearCompletedQueue,
   } = useBatchVideo({ setError, setSuccess, computedParams });
 
   // Fetch enhanced prompt preview from backend (re-uses the same enhance_video_prompt logic + fidelity_mode)
@@ -978,18 +987,27 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         inputMode, promptsText, lookAndFeel, model,
         qualityPreset, durationPreset, motionPreset, aspectRatio, videoSize,
         promptStyle, cinematicKeyframe, fidelityMode, negativePrompt,
-        storyboardMode, storyboardShots, lowVramMode, advancedParams,
+        storyboardMode, storyboardShots, lowVramMode, highConsistencyMode, advancedParams,
         selectedImages,
       };
 
       const body =
         inputMode === "text"
-          ? { prompts: finalPrompts, ...computedParams, fidelity_mode: fidelityMode, ...storyboardPayload, ...negativePayload, ui_config: uiConfig }
+          ? {
+              prompts: finalPrompts,
+              ...computedParams,
+              fidelity_mode: fidelityMode,
+              high_consistency: highConsistencyMode,
+              ...storyboardPayload,
+              ...negativePayload,
+              ui_config: uiConfig,
+            }
           : {
               image_paths: imagePaths,
               prompt: lf && motionPrompt ? `${motionPrompt}, ${lf}` : motionPrompt,
               ...computedParams,
               fidelity_mode: fidelityMode,
+              high_consistency: highConsistencyMode,
               ...negativePayload,
               ui_config: uiConfig,
             };
@@ -1019,7 +1037,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
       const batchId = data.data.batch_id;
       setActiveBatchId(batchId);
-      setSuccess(`Batch queued. The worker drains one batch at a time — keep stacking 'em.`);
+      const gpuMsg = data.data?.gpu?.message;
+      setSuccess(
+        gpuMsg
+          ? `Batch queued. ${gpuMsg}`
+          : "Batch queued. The worker drains one batch at a time — keep stacking 'em."
+      );
       startPollingStatus(batchId);
       await fetchBatches();
       await fetchQueue();
@@ -1278,6 +1301,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         const newValue = e.target.checked;
                         setLowVramMode(newValue);
                         localStorage.setItem('lowVramMode', newValue.toString());
+                        if (newValue && highConsistencyMode) {
+                          setHighConsistencyMode(false);
+                        }
                       }}
                       color="primary"
                       size="small"
@@ -1299,7 +1325,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   control={
                     <Switch
                       checked={highConsistencyMode}
-                      onChange={(e) => setHighConsistencyMode(e.target.checked)}
+                      onChange={(e) => {
+                        const on = e.target.checked;
+                        setHighConsistencyMode(on);
+                        if (on && lowVramMode) {
+                          setLowVramMode(false);
+                          localStorage.setItem('lowVramMode', 'false');
+                        }
+                      }}
                       color="secondary"
                       size="small"
                     />
@@ -1310,15 +1343,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         High consistency mode
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
-                        Enables Director, keyframe→I2V, face restore, Cinema post-processing, and temporal coherence (FETA on CogVideoX / FreeU on Wan).
+                        Enables Director, keyframe→I2V, face restore, Cinema post-processing, and temporal coherence (FETA on CogVideoX / FreeU on Wan). Turns off Low VRAM.
                       </Typography>
                     </Box>
                   }
                   sx={{ mt: 1.5 }}
                 />
-                {highConsistencyMode && lowVramMode && (
-                  <Alert severity="warning" sx={{ mt: 1 }}>
-                    Low VRAM mode reduces resolution and steps — it trades quality for memory. Turn it off for best consistency.
+                {highConsistencyMode && (
+                  <Alert severity="info" sx={{ mt: 1 }}>
+                    High consistency prioritizes quality — Low VRAM is off so resolution and steps stay at cinema settings.
                   </Alert>
                 )}
               </Box>
@@ -2243,112 +2276,16 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           </Box>
 
           {/* Preview of computed settings */}
-          <Box sx={{ mb: 2 }}>
-            <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: "block", fontWeight: 500 }}>
-              Computed Settings
-            </Typography>
-            <Box sx={{ 
-              display: "flex", 
-              gap: 1, 
-              flexWrap: "wrap", 
-              alignItems: "center",
-              p: 1.5,
-              borderRadius: 1,
-              bgcolor: 'action.hover',
-            }}>
-              {isLtxModel(model) ? (
-                <Chip
-                  size="small"
-                  color="warning"
-                  label="LTX-2.3"
-                  sx={{ fontWeight: 600 }}
-                />
-              ) : isWanModel(model) ? (
-                <Chip
-                  size="small"
-                  color="secondary"
-                  label="Wan 2.2"
-                  sx={{ fontWeight: 600 }}
-                />
-              ) : (
-                <Chip
-                  size="small"
-                  color="primary"
-                  label="CogVideoX"
-                  sx={{ fontWeight: 600 }}
-                />
-              )}
-              <Chip
-                size="small"
-                variant="outlined"
-                label={`${computedParams.num_inference_steps} steps`}
-              />
-              <Chip
-                size="small"
-                variant="outlined"
-                label={`${computedParams.duration_frames} frames`}
-              />
-              <Chip
-                size="small"
-                variant="outlined"
-                label={`${computedParams.fps} FPS`}
-              />
-              <Chip
-                size="small"
-                variant="outlined"
-                label={`~${(computedParams.duration_frames / computedParams.fps).toFixed(1)}s video`}
-              />
-              <Chip
-                size="small"
-                variant="outlined"
-                label={`${computedParams.width}x${computedParams.height}`}
-              />
-              {(cinematicKeyframe || selectedSubjectIds.length > 0) && (
-                <Chip size="small" variant="outlined" color="secondary" label={`Keyframe: ${keyframeModel}`} />
-              )}
-              {directorMode && (
-                <Chip size="small" variant="outlined" color="secondary" label="Director" />
-              )}
-              {advancedParams.face_restore && (
-                <Chip size="small" variant="outlined" color="success" label="Face restore" />
-              )}
-              {advancedParams.freeu && isWanModel(model) && (
-                <Chip size="small" variant="outlined" color="success" label="FreeU" />
-              )}
-              {computedParams.interpolation_multiplier > 1 && (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  color="info"
-                  label={`${computedParams.interpolation_multiplier}x FPS`}
-                />
-              )}
-              {computedParams.upscale && (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  color="secondary"
-                  label="2x Upscale"
-                />
-              )}
-              {computedParams.enhance_prompt && computedParams.prompt_style !== "none" && (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  color="warning"
-                  label={`${PROMPT_STYLES[computedParams.prompt_style]?.label || computedParams.prompt_style} style`}
-                />
-              )}
-              {computedParams.feta_weight && (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  color="success"
-                  label={`FETA ${computedParams.feta_weight}`}
-                />
-              )}
-            </Box>
-          </Box>
+          <VideoGenEffectiveSettings
+            model={model}
+            computedParams={computedParams}
+            cinematicKeyframe={cinematicKeyframe}
+            selectedSubjectIds={selectedSubjectIds}
+            keyframeModel={keyframeModel}
+            directorMode={directorMode}
+            faceRestore={advancedParams.face_restore}
+            freeu={advancedParams.freeu}
+          />
 
           {/* Model-mode mismatch is now prevented by filtering — no warning needed */}
 
@@ -2386,12 +2323,25 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   <Typography variant="h6" sx={{ fontWeight: 600 }}>
                     Batch Queue
                   </Typography>
-                  <Chip
-                    label={`${queue.filter(q => q.status === 'queued' || q.status === 'running').length} active`}
-                    size="small"
-                    color="primary"
-                    variant="outlined"
-                  />
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    {queue.some((q) => ["completed", "error", "cancelled"].includes(q.status)) && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="inherit"
+                        onClick={handleClearCompletedQueue}
+                        sx={{ textTransform: "none", borderRadius: 1 }}
+                      >
+                        Clear Completed
+                      </Button>
+                    )}
+                    <Chip
+                      label={`${queue.filter(q => q.status === 'queued' || q.status === 'running' || q.status === 'pending').length} active`}
+                      size="small"
+                      color="primary"
+                      variant="outlined"
+                    />
+                  </Stack>
                 </Stack>
                 <Stack spacing={1}>
                   {queue.map((q, idx) => {
@@ -2496,7 +2446,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   <Typography variant="body2" color="text.secondary">
                     Batch ID: {batchStatus.batch_id}
                   </Typography>
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1 }}>
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1, flexWrap: "wrap" }}>
                     <Chip
                       label={batchStatus.status.toUpperCase()}
                       color={batchStatus.status === 'running' ? 'primary' :
@@ -2505,7 +2455,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                              batchStatus.status === 'cancelled' ? 'warning' : 'default'}
                       size="small"
                     />
-                    {(batchStatus.status === 'running' || batchStatus.status === 'pending') && (
+                    {batchStatus.stage && (
+                      <Chip
+                        label={videoGenStageLabel(batchStatus.stage)}
+                        size="small"
+                        variant="outlined"
+                        color={batchStatus.stage === "gpu_wait" ? "warning" : "default"}
+                      />
+                    )}
+                    {(batchStatus.status === 'running' || batchStatus.status === 'pending' || batchStatus.status === 'queued') && (
                       <Button
                         size="small"
                         color="warning"
@@ -2522,14 +2480,21 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
                     <Typography variant="body2">
                       Progress: {batchStatus.completed_videos || 0}/{batchStatus.total_videos || 0}
+                      {batchStatus.stage === "gpu_wait" ? " — waiting for GPU" : ""}
                     </Typography>
                     <Typography variant="body2">
-                      {Math.round(((batchStatus.completed_videos || 0) / (batchStatus.total_videos || 1)) * 100)}%
+                      {typeof batchStatus.progress_pct === "number"
+                        ? Math.round(batchStatus.progress_pct)
+                        : Math.round(((batchStatus.completed_videos || 0) / (batchStatus.total_videos || 1)) * 100)}%
                     </Typography>
                   </Box>
                   <LinearProgress
                     variant="determinate"
-                    value={((batchStatus.completed_videos || 0) / (batchStatus.total_videos || 1)) * 100}
+                    value={
+                      typeof batchStatus.progress_pct === "number"
+                        ? batchStatus.progress_pct
+                        : ((batchStatus.completed_videos || 0) / (batchStatus.total_videos || 1)) * 100
+                    }
                   />
                 </Box>
 
@@ -2646,7 +2611,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               </Box>
                             )}
                           </Box>
-                          <Stack direction="row" spacing={0.5} alignItems="center">
+                          <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
                             <Chip
                               label={res.success ? "Ready" : "Error"}
                               color={res.success ? "success" : "error"}
@@ -2654,6 +2619,30 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             />
                             {res.frame_paths?.length > 0 && (
                               <Chip label={`${res.frame_paths.length}f`} size="small" variant="outlined" />
+                            )}
+                            {res.metadata?.quality?.vlm_review?.available &&
+                              typeof res.metadata.quality.vlm_review.review?.quality_score === "number" && (
+                              <Chip
+                                label={`QA ${res.metadata.quality.vlm_review.review.quality_score}/10`}
+                                size="small"
+                                color={res.metadata.quality.vlm_review.review.quality_score >= 5 ? "success" : "warning"}
+                                variant="outlined"
+                              />
+                            )}
+                            {typeof res.metadata?.quality?.identity?.score === "number" && (
+                              <Chip
+                                label={`ID ${Math.round(res.metadata.quality.identity.score * 100)}%`}
+                                size="small"
+                                variant="outlined"
+                              />
+                            )}
+                            {res.metadata?.quality?.flagged && (
+                              <Chip
+                                label="Review"
+                                size="small"
+                                color="warning"
+                                title={(res.metadata.quality.flag_reasons || []).join(", ")}
+                              />
                             )}
                           </Stack>
                           {res.error && (

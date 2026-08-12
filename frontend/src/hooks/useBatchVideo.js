@@ -3,9 +3,23 @@ import { io } from "socket.io-client";
 import { SOCKET_URL } from "../api/apiClient";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
+const ACTIVE_STATUSES = new Set(["queued", "pending", "running"]);
+const TERMINAL_STATUSES = new Set(["completed", "error", "cancelled"]);
+const STATUS_POLL_MS = 2000;
+const CLEARED_QUEUE_KEY = "clearedVideoQueueIds";
+
+function readClearedQueueIds() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(CLEARED_QUEUE_KEY) || "[]");
+    return Array.isArray(stored) ? stored : [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Batch video queue state, WebSocket progress, and batch lifecycle handlers.
+ * HTTP status polling runs while a batch is active so progress survives WS drops.
  */
 export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
   const [activeBatchId, setActiveBatchId] = useState(null);
@@ -16,6 +30,11 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
   const pollingRef = useRef(null);
   const queuePollingRef = useRef(null);
   const socketRef = useRef(null);
+  const activeBatchIdRef = useRef(null);
+
+  useEffect(() => {
+    activeBatchIdRef.current = activeBatchId;
+  }, [activeBatchId]);
 
   const stopPolling = useCallback(() => {
     if (pollingRef.current) {
@@ -49,7 +68,11 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
-          setQueue(data.data.queue || []);
+          const cleared = new Set(readClearedQueueIds());
+          const visible = (data.data.queue || []).filter(
+            (q) => !(TERMINAL_STATUSES.has(q.status) && cleared.has(q.batch_id)),
+          );
+          setQueue(visible);
         }
       }
     } catch {
@@ -57,41 +80,82 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
     }
   }, []);
 
+  const handleClearCompletedQueue = useCallback(() => {
+    const doneIds = queue
+      .filter((q) => TERMINAL_STATUSES.has(q.status))
+      .map((q) => q.batch_id);
+    if (doneIds.length === 0) return;
+    try {
+      const stored = readClearedQueueIds();
+      localStorage.setItem(
+        CLEARED_QUEUE_KEY,
+        JSON.stringify(Array.from(new Set([...stored, ...doneIds]))),
+      );
+    } catch (e) {
+      console.error("Failed to save cleared video queue items:", e);
+    }
+    setQueue((prev) => prev.filter((q) => !TERMINAL_STATUSES.has(q.status)));
+  }, [queue]);
+
+  const fetchStatusOnce = useCallback(async (batchId) => {
+    try {
+      const res = await fetch(`${API_BASE}/batch-video/status/${batchId}`);
+      const data = await res.json();
+      if (data.success) {
+        setBatchStatus(data.data);
+        if (TERMINAL_STATUSES.has(data.data.status)) {
+          stopPolling();
+          fetchBatches();
+        }
+        return data.data;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return null;
+  }, [stopPolling, fetchBatches]);
+
   const startPollingStatus = useCallback((batchId) => {
     stopPolling();
     if (socketRef.current?.connected) {
       socketRef.current.emit("subscribe", { job_id: batchId });
     }
-    fetch(`${API_BASE}/batch-video/status/${batchId}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.success) {
-          setBatchStatus(data.data);
-          if (["completed", "error", "cancelled"].includes(data.data.status)) {
-            fetchBatches();
-          }
-        }
-      })
-      .catch((e) => console.error(e));
-  }, [stopPolling, fetchBatches]);
+    // Immediate snapshot, then keep polling while active (WS is the fast path).
+    fetchStatusOnce(batchId).then((snap) => {
+      if (snap && ACTIVE_STATUSES.has(snap.status)) {
+        pollingRef.current = setInterval(() => {
+          fetchStatusOnce(batchId);
+        }, STATUS_POLL_MS);
+      }
+    });
+  }, [stopPolling, fetchStatusOnce]);
 
   useEffect(() => {
     socketRef.current = io(SOCKET_URL);
     socketRef.current.on("video_batch:update", (data) => {
+      // Only apply WS updates for the active batch (or unset until first poll).
+      if (
+        activeBatchIdRef.current &&
+        data?.batch_id &&
+        data.batch_id !== activeBatchIdRef.current
+      ) {
+        return;
+      }
       setBatchStatus(data);
-      if (["completed", "error", "cancelled"].includes(data.status)) {
+      if (TERMINAL_STATUSES.has(data.status)) {
+        stopPolling();
         fetchBatches();
       }
     });
     return () => {
       socketRef.current?.disconnect();
     };
-  }, [fetchBatches]);
+  }, [fetchBatches, stopPolling]);
 
   useEffect(() => {
     fetchBatches();
     fetchQueue();
-    queuePollingRef.current = setInterval(fetchQueue, 2000);
+    queuePollingRef.current = setInterval(fetchQueue, STATUS_POLL_MS);
     return () => {
       stopPolling();
       if (queuePollingRef.current) clearInterval(queuePollingRef.current);
@@ -130,6 +194,7 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
       const res = await fetch(`${API_BASE}/batch-video/delete/${batchId}`, { method: "DELETE" });
       if (res.ok) {
         await fetchBatches();
+        await fetchQueue();
         if (activeBatchId === batchId) {
           setActiveBatchId(null);
           setBatchStatus(null);
@@ -143,13 +208,14 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
     } catch (e) {
       setError?.(`Delete failed: ${e.message}`);
     }
-  }, [activeBatchId, fetchBatches, setError, setSuccess, stopPolling]);
+  }, [activeBatchId, fetchBatches, fetchQueue, setError, setSuccess, stopPolling]);
 
   const handleCancelBatch = useCallback(async (batchId) => {
     try {
       const res = await fetch(`${API_BASE}/batch-video/batch/${batchId}/cancel`, { method: "POST" });
       if (res.ok) {
         await fetchBatches();
+        await fetchQueue();
         if (activeBatchId === batchId) {
           startPollingStatus(batchId);
         }
@@ -157,7 +223,7 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
     } catch {
       // ignore
     }
-  }, [activeBatchId, fetchBatches, startPollingStatus]);
+  }, [activeBatchId, fetchBatches, fetchQueue, startPollingStatus]);
 
   const handleRetryBatch = useCallback(async (batchId) => {
     try {
@@ -199,6 +265,7 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
     handleDeleteBatch,
     handleCancelBatch,
     handleRetryBatch,
+    handleClearCompletedQueue,
   };
 }
 

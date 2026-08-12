@@ -185,8 +185,11 @@ export const isCogVideoXModel = (model) => MODEL_OPTIONS[model]?.type === "cogvi
 export const isWanModel = (model) => MODEL_OPTIONS[model]?.type === "wan";
 export const isLtxModel = (model) => MODEL_OPTIONS[model]?.type === "ltx";
 
-export const snapDimensions = (width, height, model) => {
-  const align = MODEL_OPTIONS[model]?.dimensionAlignment ?? 16;
+export const snapDimensions = (width, height, model, registryMeta) => {
+  const align =
+    registryMeta?.dimension_alignment ??
+    MODEL_OPTIONS[model]?.dimensionAlignment ??
+    16;
   return {
     width: Math.round(width / align) * align,
     height: Math.round(height / align) * align,
@@ -196,7 +199,17 @@ export const snapDimensions = (width, height, model) => {
 /** Redistribute a fixed pixel-area budget across an aspect ratio, snapped to
  *  the model's alignment. Keeps VRAM/compute constant while the frame reshapes:
  *  768×512 (3:2) ≈ 832×480 (16:9) ≈ 480×832 (9:16) ≈ 640×640 (1:1). */
-export const fitAreaToRatio = (area, ratio, model) => {
-  const width = Math.sqrt(area * ratio);
-  return snapDimensions(width, width / ratio, model);
+export const fitAreaToRatio = (area, ratio, model, registryMeta) => {
+  const align =
+    registryMeta?.dimension_alignment ??
+    MODEL_OPTIONS[model]?.dimensionAlignment ??
+    16;
+  const maxArea = registryMeta?.max_pixel_area ?? MODEL_OPTIONS[model]?.maxPixelArea ?? area;
+  const budget = Math.min(area, maxArea);
+  // height = width / ratio; width * height = budget → width = sqrt(budget * ratio)
+  let width = Math.sqrt(budget * ratio);
+  let height = width / ratio;
+  width = Math.round(width / align) * align;
+  height = Math.round(height / align) * align;
+  return { width: Math.max(align, width), height: Math.max(align, height) };
 };
