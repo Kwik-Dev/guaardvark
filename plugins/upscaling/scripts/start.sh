@@ -33,8 +33,20 @@ fi
 # Activate venv
 source "$PROJECT_ROOT/backend/venv/bin/activate"
 
-# Install requirements
-pip install -q -r "$PLUGIN_ROOT/requirements.txt" 2>/dev/null || true
+# Install plugin deps into the shared backend venv.
+# Filter torch*/xformers/flash/pynvml/numpy: core owns those (install_pytorch.sh +
+# backend/constraints.txt). Blind `pip install -r` here used to pull numpy 2.x over
+# the ML stack's numpy<2 pin and corrupt C extensions mid-restart.
+if [ -z "${PIP_CONSTRAINT:-}" ] && [ -f "$PROJECT_ROOT/backend/constraints.txt" ]; then
+    export PIP_CONSTRAINT="$PROJECT_ROOT/backend/constraints.txt"
+fi
+FILTERED_REQS="$(mktemp)"
+# Match bare pins too (numpy<2.0, torch>=2.0.0) — `=`-only patterns miss `<`/`>`.
+grep -v -iE '^(torch|torchvision|torchaudio|xformers|flash|pynvml|nvidia-ml-py|numpy)([<>=!~]|[[:space:]]|$)' \
+    "$PLUGIN_ROOT/requirements.txt" > "$FILTERED_REQS" 2>/dev/null \
+    || cp "$PLUGIN_ROOT/requirements.txt" "$FILTERED_REQS"
+pip install -q -r "$FILTERED_REQS" 2>/dev/null || true
+rm -f "$FILTERED_REQS"
 
 # Log file
 LOG_DIR="$PROJECT_ROOT/logs"
