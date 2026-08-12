@@ -28,7 +28,7 @@ One style prompt and a short narrative, then **go**. Guaardvark wrote every shot
 
 ## Highlights (as of latest release)
 
-- **Video & Audio Production** — Wan 2.2 (T2V + I2V, 5B default + 14B MoE), CogVideoX-5B, LTX-2.3; ACE-Step full-song generation with LLM tag polish; Chatterbox/Kokoro neural voice + Piper; explicit consent-gated voice cloning; frame-by-frame 4K/8K upscaling.
+- **Video & Audio Production** — Wan 2.2 (T2V + I2V, 5B default + 14B MoE), CogVideoX-5B, LTX-2.3 + LTX-2.5; ACE-Step full-song generation with LLM tag polish; Chatterbox/Kokoro neural voice + Piper; explicit consent-gated voice cloning; frame-by-frame 4K/8K upscaling.
 - **AgentBrain + Screen Agents** — Reflex/Instinct/Deliberation routing. Agents drive a real Ubuntu/XFCE desktop on a virtual display (`:99`), see with vision models (Gemma4 native `box_2d`), use closed-loop servo targeting, and stream per-step reasoning.
 - **Swarm Orchestrator & Film Crew** — Up to 20 parallel agents in isolated git worktrees with dependency-aware merging. Five-role production pipeline (Screenwriter → Casting (LoRAs) → Cinematographer → Storyboard → Editor).
 - **Self-Improvement & Safety** — Scheduled/reactive/directed bug detection + agent fixes with verification. Optional "Uncle Claude" (Anthropic) guardian review + codebase lock + Pending Fixes queue. Cross-machine learning via Interconnector.
@@ -42,7 +42,7 @@ One style prompt and a short narrative, then **go**. Guaardvark wrote every shot
 ## Marquee Capabilities
 
 **Generation & Editing (all local, no cloud APIs)**
-- Text-to-Video / Image-to-Video (Wan 2.2 5B + 14B MoE, CogVideoX-5B, LTX-2.3) with an in-process batch queue, quality tiers, frame interpolation, prompt enhancement, and one-click jump to ComfyUI for custom workflows.
+- Text-to-Video / Image-to-Video (Wan 2.2 5B + 14B MoE, CogVideoX-5B, LTX-2.3, LTX-2.5) with an in-process batch queue, quality tiers, frame interpolation, prompt enhancement, and one-click jump to ComfyUI for custom workflows.
 - Audio Studio (Audio Foundry plugin): ACE-Step 3.5B music (vocals or instrumental, Suno-style chips + LLM polish), Stable Audio Open FX/ambience, Chatterbox + Kokoro neural TTS, Piper fallback, consent-gated voice cloning.
 - Image gen (Stable Diffusion + batch + face/anatomy controls) + powerful 4K/8K GPU upscaling (Real-ESRGAN family, HAT-L, NMKD, Foolhardy, two-pass, video frame-by-frame).
 - Built-in Video Editor (Shotcut-lite 3-lane timeline: video/text/audio, real `ffmpeg drawtext` overlays, drag-and-drop from media library, visual trims, undo, keyboard shortcuts).
@@ -230,6 +230,7 @@ State-of-the-art video generation running entirely on your GPU. No cloud APIs, n
 | **CogVideoX-5B** | Text-to-Video | 6s (49 frames @ 8fps) | 720x480 | 16GB |
 | **CogVideoX-5B I2V** | Image-to-Video | 6s (49 frames @ 8fps) | 720x480 | 16GB |
 | **LTX-2.3 Distilled FP8** | Text + Image-to-Video | ~10s (161 frames @ 16fps) | 768x512 | ~14GB |
+| **LTX-2.5 Distilled Int8** | Text + Image-to-Video | ~10s (161 frames @ 16fps) | 768x512 | ~14GB |
 
 - **Resolution options** — 512px, 576px, 720px, 1280px, 1920px (1080p), and custom dimensions (aligned per model)
 - **Quality tiers** — Fast (10 steps), Standard (30), High (40), Maximum (50)
@@ -237,7 +238,7 @@ State-of-the-art video generation running entirely on your GPU. No cloud APIs, n
 - **Prompt enhancement** — Cinematic, Realistic, Artistic, Anime, or raw
 - **Low VRAM mode** — automatically reduces resolution, frames, and inference steps for 8–12GB GPUs (mutually exclusive with High consistency)
 - **Batch processing** — queue multiple videos from a prompt list via an in-process worker (one batch at a time; ComfyUI primary, offline CogVideoX fallback)
-- **ComfyUI integration** — one-click launch to the node editor for custom workflows; Wan/LTX require ComfyUI
+- **ComfyUI integration** — one-click launch to the node editor for custom workflows; Wan/LTX require ComfyUI. LTX-2.5 needs ComfyUI ≥ 0.32.0 and a one-time license accept on [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) (`HF_TOKEN` in `.env`); after download, generation stays local.
 
 ### Audio Studio — Music, FX, and Neural Voice
 

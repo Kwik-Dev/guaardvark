@@ -1195,6 +1195,408 @@ class ComfyUIVideoWorkflowMixin:
         return workflow
 
 
+    # Official LTX-2.5 distilled sigma schedules (ComfyUI 0.32 T2V/I2V templates).
+    _LTX25_STAGE1_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+    _LTX25_STAGE2_SIGMAS = "0.85, 0.7250, 0.4219, 0.0"
+
+    @staticmethod
+    def _ltx25_stage1_size(width: int, height: int, align: int = 32) -> tuple[int, int]:
+        """Half-res stage-1 so the x2 latent upsampler lands on the requested size."""
+        w = max(align, (int(width) // 2) // align * align)
+        h = max(align, (int(height) // 2) // align * align)
+        return w, h
+
+    def _ltx25_loader_cfg(self, model_key: str) -> dict:
+        self._ensure_ltx_models()
+        cfg = self.LTX_MODELS.get(model_key, {})
+        return {
+            "unet": cfg.get("unet") or "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+            "clip": cfg.get("clip") or "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+            "vae": cfg.get("vae") or "ltx-2.5-video-vae-bf16.safetensors",
+            "audio_vae": cfg.get("audio_vae") or "ltx-2.5-audio-vae-bf16.safetensors",
+            "upscale_model": cfg.get("upscale_model") or "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+        }
+
+    @staticmethod
+    def _ltx25_default_negative(negative_prompt: str) -> str:
+        if negative_prompt:
+            return negative_prompt
+        return (
+            "blurry, low quality, worst quality, deformed, disfigured, poor anatomy, "
+            "bad proportions, extra limbs, static, jitter, morphing, watermark"
+        )
+
+    def _create_ltx25_t2v_workflow(
+        self,
+        prompt: str,
+        negative_prompt: str = "",
+        model_key: str = "ltx25-distilled-int8",
+        num_frames: int = 65,
+        num_inference_steps: int = 8,
+        guidance_scale: float = 1.0,
+        width: int = 768,
+        height: int = 512,
+        seed: Optional[int] = None,
+        fps: float = 16.0,
+        interpolation_multiplier: int = 1,
+    ) -> dict:
+        """LTX-2.5 distilled T2V — official two-stage ComfyUI graph, video-only decode.
+
+        Stage 1 runs at half the requested size; LTXVLatentUpsampler ×2 restores
+        the user-facing resolution so 16GB cards stay at 768×512 out, not 1536×1024.
+
+        Graph: UNETLoader + CLIPLoader(ltxv) + DiffVAE + audio VAE →
+        CLIPTextEncode ×2 → EmptyLTXVLatentVideo (half) + LTXVEmptyLatentAudio →
+        concat → DualCFG + ManualSigmas stage-1 → upsample → DualCFG stage-2 →
+        separate → VAEDecode → VHS_VideoCombine.
+
+        Audio is sampled (required by rotary PE) then discarded — same contract as 2.3.
+        """
+        if seed is None:
+            seed = int(time.time() * 1000) % (2**31)
+
+        files = self._ltx25_loader_cfg(model_key)
+        length = self._ltx_frame_count(num_frames)
+        stage_w, stage_h = self._ltx25_stage1_size(width, height)
+        clip_device = self._wan_clip_device()
+        negative_prompt = self._ltx25_default_negative(negative_prompt)
+        cfg = float(guidance_scale if guidance_scale is not None else 1.0)
+        # Distilled schedule is fixed; keep the arg for API symmetry / logging.
+        _ = num_inference_steps
+
+        workflow = {
+            "1": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": files["unet"], "weight_dtype": "default"},
+            },
+            "2": {
+                "class_type": "CLIPLoader",
+                "inputs": {
+                    "clip_name": files["clip"],
+                    "type": "ltxv",
+                    "device": clip_device,
+                },
+            },
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}},
+            "4": {"class_type": "LTXVAudioVAELoader", "inputs": {"ckpt_name": files["audio_vae"]}},
+            "5": {
+                "class_type": "LatentUpscaleModelLoader",
+                "inputs": {"model_name": files["upscale_model"]},
+            },
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
+            "8": {
+                "class_type": "EmptyLTXVLatentVideo",
+                "inputs": {
+                    "width": stage_w,
+                    "height": stage_h,
+                    "length": length,
+                    "batch_size": 1,
+                },
+            },
+            "9": {
+                "class_type": "LTXVEmptyLatentAudio",
+                "inputs": {
+                    "frames_number": length,
+                    "frame_rate": float(fps),
+                    "batch_size": 1,
+                    "audio_vae": ["4", 0],
+                },
+            },
+            "10": {
+                "class_type": "LTXVConcatAVLatent",
+                "inputs": {"video_latent": ["8", 0], "audio_latent": ["9", 0]},
+            },
+            "11": {
+                "class_type": "LTXVConditioning",
+                "inputs": {
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "frame_rate": float(fps),
+                },
+            },
+            "12": {
+                "class_type": "LTXVDualCFGGuider",
+                "inputs": {
+                    "model": ["1", 0],
+                    "positive": ["11", 0],
+                    "negative": ["11", 1],
+                    "video_cfg": cfg,
+                    "audio_cfg": cfg,
+                },
+            },
+            "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}},
+            "14": {
+                "class_type": "ManualSigmas",
+                "inputs": {"sigmas": self._LTX25_STAGE1_SIGMAS},
+            },
+            "15": {
+                "class_type": "RandomNoise",
+                "inputs": {"noise_seed": seed},
+            },
+            "16": {
+                "class_type": "SamplerCustomAdvanced",
+                "inputs": {
+                    "noise": ["15", 0],
+                    "guider": ["12", 0],
+                    "sampler": ["13", 0],
+                    "sigmas": ["14", 0],
+                    "latent_image": ["10", 0],
+                },
+            },
+            "17": {
+                "class_type": "LTXVSeparateAVLatent",
+                "inputs": {"av_latent": ["16", 0]},
+            },
+            "18": {
+                "class_type": "LTXVLatentUpsampler",
+                "inputs": {
+                    "samples": ["17", 0],
+                    "upscale_model": ["5", 0],
+                    "vae": ["3", 0],
+                },
+            },
+            "19": {
+                "class_type": "LTXVConcatAVLatent",
+                "inputs": {"video_latent": ["18", 0], "audio_latent": ["17", 1]},
+            },
+            "20": {
+                "class_type": "ManualSigmas",
+                "inputs": {"sigmas": self._LTX25_STAGE2_SIGMAS},
+            },
+            "20b": {
+                "class_type": "RandomNoise",
+                "inputs": {"noise_seed": seed},
+            },
+            "21": {
+                "class_type": "SamplerCustomAdvanced",
+                "inputs": {
+                    "noise": ["20b", 0],
+                    "guider": ["12", 0],
+                    "sampler": ["13", 0],
+                    "sigmas": ["20", 0],
+                    "latent_image": ["19", 0],
+                },
+            },
+            "22": {
+                "class_type": "LTXVSeparateAVLatent",
+                "inputs": {"av_latent": ["21", 0]},
+            },
+            "23": self._build_vae_decode_node("22", "3", width, height),
+            "24": {
+                "class_type": "VHS_VideoCombine",
+                "inputs": {
+                    "images": ["23", 0],
+                    "frame_rate": float(fps),
+                    "loop_count": 0,
+                    "filename_prefix": "ltx25_t2v",
+                    "format": "video/h264-mp4",
+                    "pix_fmt": "yuv420p",
+                    "crf": 19,
+                    "save_metadata": True,
+                    "pingpong": False,
+                    "save_output": True,
+                    "videopreview": {"hidden": False, "paused": False, "params": {}},
+                },
+            },
+        }
+
+        if interpolation_multiplier > 1:
+            self._add_rife_interpolation(
+                workflow,
+                source_node_id="23",
+                video_combine_node_id="24",
+                base_fps=fps,
+                multiplier=interpolation_multiplier,
+            )
+        return workflow
+
+    def _create_ltx25_i2v_workflow(
+        self,
+        image_filename: str,
+        prompt: str,
+        negative_prompt: str = "",
+        model_key: str = "ltx25-distilled-int8",
+        num_frames: int = 65,
+        num_inference_steps: int = 8,
+        guidance_scale: float = 1.0,
+        width: int = 768,
+        height: int = 512,
+        seed: Optional[int] = None,
+        fps: float = 16.0,
+        interpolation_multiplier: int = 1,
+        strength: float = 1.0,
+    ) -> dict:
+        """LTX-2.5 distilled I2V — two-stage stack with LTXVImgToVideo start frame."""
+        if seed is None:
+            seed = int(time.time() * 1000) % (2**31)
+
+        files = self._ltx25_loader_cfg(model_key)
+        length = self._ltx_frame_count(num_frames)
+        stage_w, stage_h = self._ltx25_stage1_size(width, height)
+        clip_device = self._wan_clip_device()
+        negative_prompt = self._ltx25_default_negative(negative_prompt)
+        cfg = float(guidance_scale if guidance_scale is not None else 1.0)
+        _ = num_inference_steps
+
+        workflow = {
+            "1": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": files["unet"], "weight_dtype": "default"},
+            },
+            "2": {
+                "class_type": "CLIPLoader",
+                "inputs": {
+                    "clip_name": files["clip"],
+                    "type": "ltxv",
+                    "device": clip_device,
+                },
+            },
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": files["vae"]}},
+            "4": {"class_type": "LTXVAudioVAELoader", "inputs": {"ckpt_name": files["audio_vae"]}},
+            "5": {
+                "class_type": "LatentUpscaleModelLoader",
+                "inputs": {"model_name": files["upscale_model"]},
+            },
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
+            "8": {"class_type": "LoadImage", "inputs": {"image": image_filename}},
+            "9": {
+                "class_type": "LTXVPreprocess",
+                "inputs": {"image": ["8", 0], "img_compression": 18},
+            },
+            "10": {
+                "class_type": "LTXVImgToVideo",
+                "inputs": {
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "vae": ["3", 0],
+                    "image": ["9", 0],
+                    "width": stage_w,
+                    "height": stage_h,
+                    "length": length,
+                    "batch_size": 1,
+                    "strength": float(strength),
+                },
+            },
+            "11": {
+                "class_type": "LTXVEmptyLatentAudio",
+                "inputs": {
+                    "frames_number": length,
+                    "frame_rate": float(fps),
+                    "batch_size": 1,
+                    "audio_vae": ["4", 0],
+                },
+            },
+            "12": {
+                "class_type": "LTXVConcatAVLatent",
+                "inputs": {"video_latent": ["10", 2], "audio_latent": ["11", 0]},
+            },
+            "13": {
+                "class_type": "LTXVConditioning",
+                "inputs": {
+                    "positive": ["10", 0],
+                    "negative": ["10", 1],
+                    "frame_rate": float(fps),
+                },
+            },
+            "14": {
+                "class_type": "LTXVDualCFGGuider",
+                "inputs": {
+                    "model": ["1", 0],
+                    "positive": ["13", 0],
+                    "negative": ["13", 1],
+                    "video_cfg": cfg,
+                    "audio_cfg": cfg,
+                },
+            },
+            "15": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}},
+            "16": {
+                "class_type": "ManualSigmas",
+                "inputs": {"sigmas": self._LTX25_STAGE1_SIGMAS},
+            },
+            "17": {
+                "class_type": "RandomNoise",
+                "inputs": {"noise_seed": seed},
+            },
+            "18": {
+                "class_type": "SamplerCustomAdvanced",
+                "inputs": {
+                    "noise": ["17", 0],
+                    "guider": ["14", 0],
+                    "sampler": ["15", 0],
+                    "sigmas": ["16", 0],
+                    "latent_image": ["12", 0],
+                },
+            },
+            "19": {
+                "class_type": "LTXVSeparateAVLatent",
+                "inputs": {"av_latent": ["18", 0]},
+            },
+            "20": {
+                "class_type": "LTXVLatentUpsampler",
+                "inputs": {
+                    "samples": ["19", 0],
+                    "upscale_model": ["5", 0],
+                    "vae": ["3", 0],
+                },
+            },
+            "21": {
+                "class_type": "LTXVConcatAVLatent",
+                "inputs": {"video_latent": ["20", 0], "audio_latent": ["19", 1]},
+            },
+            "22": {
+                "class_type": "ManualSigmas",
+                "inputs": {"sigmas": self._LTX25_STAGE2_SIGMAS},
+            },
+            "22b": {
+                "class_type": "RandomNoise",
+                "inputs": {"noise_seed": seed},
+            },
+            "23": {
+                "class_type": "SamplerCustomAdvanced",
+                "inputs": {
+                    "noise": ["22b", 0],
+                    "guider": ["14", 0],
+                    "sampler": ["15", 0],
+                    "sigmas": ["22", 0],
+                    "latent_image": ["21", 0],
+                },
+            },
+            "24": {
+                "class_type": "LTXVSeparateAVLatent",
+                "inputs": {"av_latent": ["23", 0]},
+            },
+            "25": self._build_vae_decode_node("24", "3", width, height),
+            "26": {
+                "class_type": "VHS_VideoCombine",
+                "inputs": {
+                    "images": ["25", 0],
+                    "frame_rate": float(fps),
+                    "loop_count": 0,
+                    "filename_prefix": "ltx25_i2v",
+                    "format": "video/h264-mp4",
+                    "pix_fmt": "yuv420p",
+                    "crf": 19,
+                    "save_metadata": True,
+                    "pingpong": False,
+                    "save_output": True,
+                    "videopreview": {"hidden": False, "paused": False, "params": {}},
+                },
+            },
+        }
+
+        if interpolation_multiplier > 1:
+            self._add_rife_interpolation(
+                workflow,
+                source_node_id="25",
+                video_combine_node_id="26",
+                base_fps=fps,
+                multiplier=interpolation_multiplier,
+            )
+        return workflow
+
+
     def _build_vae_decode_node(self, samples_node: str, vae_node: str, width: int, height: int) -> dict:
         """Pick the right VAE decode strategy based on resolution.
 

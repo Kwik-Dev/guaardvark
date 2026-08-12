@@ -41,7 +41,12 @@ export default function VideoGenEffectiveSettings({
         }}
       >
         {isLtxModel(model) ? (
-          <Chip size="small" color="warning" label="LTX-2.3" sx={{ fontWeight: 600 }} />
+          <Chip
+            size="small"
+            color="warning"
+            label={String(model || "").startsWith("ltx25") ? "LTX-2.5" : "LTX-2.3"}
+            sx={{ fontWeight: 600 }}
+          />
         ) : isWanModel(model) ? (
           <Chip size="small" color="secondary" label="Wan 2.2" sx={{ fontWeight: 600 }} />
         ) : (

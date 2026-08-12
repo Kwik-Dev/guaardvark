@@ -232,6 +232,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         "wan22-14b": 16,
         "wan22-14b-i2v": 16,
         "ltx23-distilled-fp8": 16,
+        "ltx25-distilled-int8": 16,
     }
     # Family floors when an exact id isn't in the table (aliases like "wan22").
     _FAMILY_MIN_VRAM_GB = {"wan": 16, "cogvideox": 16, "ltx": 16}
@@ -1122,8 +1123,14 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 )
                 logger.info(f"Using CogVideoX image-to-video via ComfyUI")
 
-            elif model in self.LTX_MODELS or str(model).startswith("ltx23"):
-                model_key = model if model in self.LTX_MODELS else "ltx23-distilled-fp8"
+            elif model in self.LTX_MODELS or str(model).startswith("ltx"):
+                model_key = model if model in self.LTX_MODELS else (
+                    "ltx25-distilled-int8" if str(model).startswith("ltx25")
+                    else "ltx23-distilled-fp8"
+                )
+                use_ltx25 = str(model_key).startswith("ltx25") or bool(
+                    (self.LTX_MODELS.get(model_key) or {}).get("upscale_model")
+                )
                 # Distilled defaults: 8 steps, CFG=1. Don't silently inherit Cog/Wan defaults.
                 ltx_steps = request.num_inference_steps or 8
                 ltx_cfg = request.guidance_scale if request.guidance_scale is not None else 1.0
@@ -1133,13 +1140,46 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         "quality may degrade.",
                         ltx_cfg,
                     )
-                if image_path and Path(image_path).exists():
+                i2v = bool(image_path and Path(image_path).exists())
+                if i2v:
                     uploaded_image = self._upload_image_to_comfyui(image_path)
                     if not uploaded_image:
                         result.error = "Failed to upload image to ComfyUI"
                         return result
-                    workflow = self._create_ltx23_i2v_workflow(
-                        image_filename=uploaded_image,
+                    if use_ltx25:
+                        workflow = self._create_ltx25_i2v_workflow(
+                            image_filename=uploaded_image,
+                            prompt=request.prompt,
+                            negative_prompt=request.negative_prompt,
+                            model_key=model_key,
+                            num_frames=request.duration_frames,
+                            num_inference_steps=ltx_steps,
+                            guidance_scale=ltx_cfg,
+                            width=request.width,
+                            height=request.height,
+                            seed=seed,
+                            fps=request.fps or 16,
+                            interpolation_multiplier=interpolation,
+                        )
+                        logger.info("Using LTX-2.5 distilled I2V (%s) via ComfyUI", model_key)
+                    else:
+                        workflow = self._create_ltx23_i2v_workflow(
+                            image_filename=uploaded_image,
+                            prompt=request.prompt,
+                            negative_prompt=request.negative_prompt,
+                            model_key=model_key,
+                            num_frames=request.duration_frames,
+                            num_inference_steps=ltx_steps,
+                            guidance_scale=ltx_cfg,
+                            width=request.width,
+                            height=request.height,
+                            seed=seed,
+                            fps=request.fps or 16,
+                            interpolation_multiplier=interpolation,
+                        )
+                        logger.info("Using LTX-2.3 distilled I2V (%s) via ComfyUI", model_key)
+                elif use_ltx25:
+                    workflow = self._create_ltx25_t2v_workflow(
                         prompt=request.prompt,
                         negative_prompt=request.negative_prompt,
                         model_key=model_key,
@@ -1152,7 +1192,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         fps=request.fps or 16,
                         interpolation_multiplier=interpolation,
                     )
-                    logger.info("Using LTX-2.3 distilled I2V (%s) via ComfyUI", model_key)
+                    logger.info("Using LTX-2.5 distilled T2V (%s) via ComfyUI", model_key)
                 else:
                     workflow = self._create_ltx23_t2v_workflow(
                         prompt=request.prompt,
@@ -1170,10 +1210,11 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                     logger.info("Using LTX-2.3 distilled T2V (%s) via ComfyUI", model_key)
 
             else:
-                # SVD retired 2026-05-29. Supported: wan22-*, cogvideox-*, ltx23-*.
+                # SVD retired 2026-05-29. Supported: wan22-*, cogvideox-*, ltx23-*, ltx25-*.
                 result.error = (
                     f"Unsupported video model '{model}'. Use wan22-5b, wan22-14b, "
-                    f"wan22-14b-i2v, cogvideox-5b, cogvideox-5b-i2v, or ltx23-distilled-fp8."
+                    f"wan22-14b-i2v, cogvideox-5b, cogvideox-5b-i2v, "
+                    f"ltx23-distilled-fp8, or ltx25-distilled-int8."
                 )
                 return result
 

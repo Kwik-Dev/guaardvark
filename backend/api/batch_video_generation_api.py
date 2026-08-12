@@ -28,6 +28,7 @@ from backend.services.video_model_registry import (
     DEFAULT_T2V_MODEL,
     DEFAULT_I2V_MODEL,
     preflight_video_model,
+    classify_hf_download_error,
 )
 
 # GPU Resource Coordinator for pre-flight availability check
@@ -1016,6 +1017,7 @@ def start_video_model_download(model_id):
                         local_dir=str(local_dir),
                     )
 
+            last_repo = None
             try:
                 from huggingface_hub import hf_hub_download, snapshot_download
 
@@ -1089,6 +1091,7 @@ def start_video_model_download(model_id):
                     for eid, einfo, ldir in entries:
                         if stalled.is_set():
                             break
+                        last_repo = einfo.get("hf_repo")
                         _update_status(current_model=eid)
                         _pull_one(einfo, ldir)
                         # Verify each entry's files actually landed — no placebo
@@ -1117,7 +1120,10 @@ def start_video_model_download(model_id):
                 logger.error(f"Video model download failed: {e}", exc_info=True)
                 if not stalled.is_set():
                     _update_status(
-                        status="failed", error=str(e), progress=0, is_downloading=False
+                        status="failed",
+                        error=classify_hf_download_error(e, repo_id=last_repo),
+                        progress=0,
+                        is_downloading=False,
                     )
             finally:
                 # Belt-and-suspenders: release the lock for THIS epoch even if an

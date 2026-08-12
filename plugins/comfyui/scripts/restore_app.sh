@@ -66,8 +66,11 @@ else
   info "Merging app into $COMFYUI_DIR (preserving models/, custom_nodes/, user/)..."
 fi
 
-# Optional: pin to a release tag (e.g. COMFYUI_REF=v0.29.0)
-COMFYUI_REF="${COMFYUI_REF:-}"
+# Pin to a release tag. LTX-2.5 needs ≥ 0.32.0 (LTXVDualCFGGuider + DiffVAE).
+# Override with COMFYUI_REF=v0.31.1 (or empty string for unpinned HEAD) only
+# if you are deliberately staying off 2.5.
+#   COMFYUI_REF=v0.32.0 bash plugins/comfyui/scripts/restore_app.sh
+COMFYUI_REF="${COMFYUI_REF-v0.32.0}"
 if [ -n "$COMFYUI_REF" ]; then
   info "Checking out COMFYUI_REF=$COMFYUI_REF in temp clone..."
   git -C "$TMP_DIR/ComfyUI" fetch --tags --depth 1 origin "refs/tags/$COMFYUI_REF:refs/tags/$COMFYUI_REF" 2>/dev/null \

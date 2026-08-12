@@ -474,7 +474,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       const [nativeW, nativeH] = MODEL_OPTIONS[model].resolution;
       return { width: nativeW, height: nativeH };
     }
-    // LTX-2.3: dims must be divisible by 32; 768×512 is the 16GB-safe pixel
+    // LTX-2.3 / 2.5: dims must be divisible by 32; 768×512 is the 16GB-safe pixel
     // budget. The old hard pin silently ignored the Aspect Ratio selector —
     // portrait/square batches came out landscape. Honor the aspect by
     // redistributing the SAME pixel area (constant VRAM/compute); Video Size
@@ -558,7 +558,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       effectiveSteps = 50;
     }
 
-    // LTX-2.3 distilled is trained for 8 steps @ CFG=1 — quality presets that
+    // LTX distilled is trained for 8 steps @ CFG=1 — quality presets that
     // push 30–50 steps waste time and can degrade distilled output.
     if (isLtxModel(model) &&
         (advancedParams.num_inference_steps === null || advancedParams.num_inference_steps === undefined)) {

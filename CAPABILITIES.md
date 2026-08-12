@@ -302,6 +302,7 @@ Full video generation pipeline running locally via ComfyUI with multiple model b
 - **CogVideoX 5B** — THUDM text-to-video (ComfyUI or offline Diffusers fallback)
 - **CogVideoX 5B I2V** — image-to-video variant that animates a still image with text-guided motion
 - **LTX-2.3 Distilled FP8** — Lightricks LTX-2.3 for longer clips (~10s) on 16GB Ada; requires ComfyUI
+- **LTX-2.5 Distilled Int8** — Lightricks LTX-2.5 distilled (Gemma 4 + two-stage upsample) for ~10s clips on 16GB Ada; gated Hugging Face accept + ComfyUI ≥ 0.32.0; local weights only (no Partner Nodes / LTX Desktop)
 
 #### Generation Modes
 - **Text-to-Video** — describe a scene in natural language and generate video from scratch
@@ -703,7 +704,7 @@ Each plugin lives in `plugins/<name>/` with a `plugin.json` manifest declaring i
 | Plugin | Port | Purpose |
 |---|---|---|
 | **Ollama** | 11434 | Local LLM and embedding inference (chat, RAG, agents) |
-| **ComfyUI** | 8188 | Image + video generation (Wan2.2, CogVideoX, LTX-2.3, RIFE, Real-ESRGAN) |
+| **ComfyUI** | 8188 | Image + video generation (Wan2.2, CogVideoX, LTX-2.3, LTX-2.5, RIFE, Real-ESRGAN) |
 | **Audio Foundry** | — | Voiceover (Chatterbox / Kokoro / Piper), music (ACE-Step / Suno), SFX/ambience (Stable Audio Open). Dual-venv with torch isolation |
 | **Upscaling** | 8202 | GPU image/video upscaling via spandrel + torch.compile |
 | **Vision Pipeline** | 8201 | Real-time scene narration, camera feed, video chat input |
@@ -755,7 +756,7 @@ Plugins can register:
 - **Celery + Redis** — async task processing with two worker pools (main + training/GPU)
 - **LlamaIndex** — RAG pipeline with vector storage, entity extraction, hybrid retrieval
 - **Ollama** — local LLM and embedding model inference (managed plugin)
-- **ComfyUI** — video/image generation server supporting Wan2.2, CogVideoX, LTX-2.3, RIFE, Real-ESRGAN (managed plugin)
+- **ComfyUI** — video/image generation server supporting Wan2.2, CogVideoX, LTX-2.3, LTX-2.5, RIFE, Real-ESRGAN (managed plugin)
 - **Socket.IO** — real-time bidirectional communication for streaming and progress
 - **Ariadne** — GraphQL API layer
 

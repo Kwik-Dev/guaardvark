@@ -51,6 +51,14 @@ class TestClampPixelArea(unittest.TestCase):
         w, h = ComfyUIVideoGenerator._clamp_pixel_area(1920, 1920, "ltx23-distilled-fp8")
         self.assertLessEqual(w * h, 1_050_000)
 
+    def test_ltx25_budget(self):
+        self.assertEqual(
+            ComfyUIVideoGenerator._clamp_pixel_area(768, 512, "ltx25-distilled-int8"),
+            (768, 512),
+        )
+        w, h = ComfyUIVideoGenerator._clamp_pixel_area(1920, 1920, "ltx25-distilled-int8")
+        self.assertLessEqual(w * h, 1_050_000)
+
     def test_unbudgeted_family_is_untouched(self):
         self.assertEqual(
             ComfyUIVideoGenerator._clamp_pixel_area(1920, 1920, "cogvideox-5b"),

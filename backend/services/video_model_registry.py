@@ -429,6 +429,102 @@ VIDEO_MODEL_REGISTRY = {
         "vram_mb": 0,
         "type": "lora",
     },
+    # ── LTX-2.5 (Lightricks) — 16GB Ada: distilled Comfy int8 + Gemma 4 int8 ──
+    # Official ComfyUI T2V/I2V templates (0.32+). Gated repo: accept the license
+    # on Hugging Face with the HF_TOKEN account before Install will succeed.
+    # Gemma 4 ships with projections baked in — no DualCLIP / text_projection.
+    "ltx25-distilled-int8": {
+        "name": "LTX-2.5 Distilled Int8 (16GB)",
+        "description": "Lightricks LTX-2.5 distilled 22B — Comfy int8+convrot for "
+                       "RTX 40xx 16GB. 8 steps, CFG=1. Up to ~10s. T2V + I2V. "
+                       "Gated: accept Lightricks/LTX-2.5 on Hugging Face first. "
+                       "Requires ComfyUI ≥ 0.32.0. Pulls Gemma 4 + DiffVAE + "
+                       "audio VAE + spatial upscaler.",
+        "hf_repo": "Lightricks/LTX-2.5",
+        "local_subdir": "diffusion_models",
+        "files": [
+            {
+                "src": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+                "dst": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+            },
+        ],
+        "requires": [
+            "ltx25-gemma4-int8",
+            "ltx25-vae",
+            "ltx25-audio-vae",
+            "ltx25-spatial-upscaler",
+        ],
+        "size_gb": 20.03,
+        "vram_mb": 14000,
+        "type": "ltx",
+        "dimension_alignment": 32,
+    },
+    "ltx25-gemma4-int8": {
+        "name": "Gemma 4 12B + proj (Int8) — LTX-2.5 text encoder",
+        "description": "Required by LTX-2.5. Projections are baked in (CLIPLoader, "
+                       "not DualCLIP). Int8 so it can sit on CPU beside the "
+                       "transformer on 16GB.",
+        "hf_repo": "Lightricks/LTX-2.5",
+        "local_subdir": "text_encoders",
+        "files": [
+            {
+                "src": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+                "dst": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+            },
+        ],
+        "size_gb": 14.32,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "ltx25-vae": {
+        "name": "LTX-2.5 Video VAE (DiffVAE)",
+        "description": "Diffusion video decoder for LTX-2.5. Official ComfyUI "
+                       "templates use this, not the conv VAE.",
+        "hf_repo": "Lightricks/LTX-2.5",
+        "local_subdir": "vae",
+        "files": [
+            {
+                "src": "vae/ltx-2.5-video-vae-bf16.safetensors",
+                "dst": "ltx-2.5-video-vae-bf16.safetensors",
+            },
+        ],
+        "size_gb": 1.37,
+        "vram_mb": 0,
+        "type": "vae",
+    },
+    "ltx25-audio-vae": {
+        "name": "LTX-2.5 Audio VAE",
+        "description": "Required companion — LTX-2.5 is an AV model; empty audio "
+                       "latents must be concatenated before sampling.",
+        "hf_repo": "Lightricks/LTX-2.5",
+        "local_subdir": "vae",
+        "files": [
+            {
+                "src": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+                "dst": "ltx-2.5-audio-vae-bf16.safetensors",
+            },
+        ],
+        "size_gb": 0.34,
+        "vram_mb": 0,
+        "type": "vae",
+    },
+    "ltx25-spatial-upscaler": {
+        "name": "LTX-2.5 Spatial Upscaler x2",
+        "description": "Latent x2 spatial upsampler for the official two-stage "
+                       "distilled pipeline. Stage 1 runs at half res so 16GB "
+                       "output stays 768×512.",
+        "hf_repo": "Lightricks/LTX-2.5",
+        "local_subdir": "latent_upscale_models",
+        "files": [
+            {
+                "src": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+                "dst": "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+            },
+        ],
+        "size_gb": 0.93,
+        "vram_mb": 0,
+        "type": "upscaler",
+    },
 }
 
 
@@ -535,6 +631,11 @@ def preflight_video_model(model_id: str) -> tuple[bool, str]:
                     f"Open Manage Video Models and Install again (companions auto-pull)."
                 )
         if not _comfyui_reachable():
+            if str(model_id).startswith("ltx25"):
+                return False, (
+                    f"{name} requires ComfyUI ≥ 0.32.0 with LTX-2.5 support. "
+                    f"Start the ComfyUI plugin, then retry."
+                )
             return False, (
                 f"{name} requires ComfyUI ≥ 0.16.1 with LTX-2.3 support. "
                 f"Start the ComfyUI plugin, then retry."
@@ -584,11 +685,57 @@ def wan_comfyui_map() -> dict:
     return out
 
 
-def ltx_comfyui_map() -> dict:
-    """Build the ComfyUI LTX-2.3 loader map from the registry (never raises).
+def is_ltx25_model(model_id: str) -> bool:
+    """True for LTX-2.5 generation ids (Gemma 4 + two-stage, no text_projection)."""
+    mid = str(model_id or "")
+    if mid.startswith("ltx25"):
+        return True
+    entry = VIDEO_MODEL_REGISTRY.get(mid) or {}
+    return any(str(d).startswith("ltx25") for d in entry.get("requires", []))
 
-    Returns {model_id: {unet, clip, text_projection, vae}} from the same
-    `files[].dst` paths the downloader writes.
+
+def classify_hf_download_error(exc: BaseException, *, repo_id: str | None = None) -> str:
+    """Turn a Hugging Face 401/403 into the same copy the image catalog uses.
+
+    Non-gated failures are returned as ``str(exc)`` unchanged.
+    """
+    msg = str(exc).lower()
+    gated = any(
+        token in msg
+        for token in (
+            "401",
+            "403",
+            "gated",
+            "restricted",
+            "cannot access",
+            "access to model",
+            "401 client error",
+            "403 client error",
+        )
+    )
+    if not gated:
+        return str(exc)
+    has_token = bool(
+        os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    )
+    if not has_token:
+        return (
+            "Gated on Hugging Face — set HF_TOKEN in .env and restart the backend."
+        )
+    url = f"https://huggingface.co/{repo_id}" if repo_id else "the model page"
+    return (
+        f"Gated on Hugging Face — open {url} and click "
+        "'Agree and access repository' with the account your HF_TOKEN belongs to."
+    )
+
+
+def ltx_comfyui_map() -> dict:
+    """Build the ComfyUI LTX loader map from the registry (never raises).
+
+    2.3 entries: {unet, clip, text_projection, vae, audio_vae}
+    2.5 entries: {unet, clip, vae, audio_vae, upscale_model} — projections
+    are baked into the Gemma 4 file, so there is no DualCLIP companion.
+    Paths come from the same ``files[].dst`` the downloader writes.
     """
     out = {}
     try:
@@ -597,29 +744,35 @@ def ltx_comfyui_map() -> dict:
                 continue
             dsts = [f["dst"] for f in entry.get("files", [])]
             unet = dsts[0] if dsts else None
-            vae = audio_vae = clip = text_projection = None
+            vae = audio_vae = clip = text_projection = upscale_model = None
             for dep in entry.get("requires", []):
                 dep_entry = VIDEO_MODEL_REGISTRY.get(dep, {})
                 dep_files = dep_entry.get("files", [])
                 dep_dst = dep_files[0]["dst"] if dep_files else (dep_entry.get("check_files") or [None])[0]
                 if not dep_dst:
                     continue
-                if dep == "ltx-audio-vae":
+                if dep in ("ltx-audio-vae", "ltx25-audio-vae"):
                     audio_vae = dep_dst
+                elif dep in ("ltx-text-projection",):
+                    text_projection = dep_dst
                 elif dep_entry.get("type") == "vae":
                     vae = dep_dst
-                elif dep == "ltx-text-projection":
-                    text_projection = dep_dst
                 elif dep_entry.get("type") == "encoder":
                     clip = dep_dst
-            out[mid] = {
+                elif dep_entry.get("type") == "upscaler" or dep.endswith("spatial-upscaler"):
+                    upscale_model = dep_dst
+            mapped = {
                 "type": "ti2v",
                 "unet": unet,
                 "clip": clip,
-                "text_projection": text_projection,
                 "vae": vae,
                 "audio_vae": audio_vae,
             }
+            if is_ltx25_model(mid):
+                mapped["upscale_model"] = upscale_model
+            else:
+                mapped["text_projection"] = text_projection
+            out[mid] = mapped
     except Exception as e:
         logger.error("ltx_comfyui_map() build failed: %s", e, exc_info=True)
     return out
@@ -645,7 +798,12 @@ def verify_registry() -> list:
                         problems.append(f"{mid}: ComfyUI map missing '{k}' (companion/file not resolvable)")
             if entry.get("type") == "ltx":
                 m = ltx_comfyui_map().get(mid, {})
-                for k in ("unet", "clip", "text_projection", "vae", "audio_vae"):
+                required = (
+                    ("unet", "clip", "vae", "audio_vae", "upscale_model")
+                    if is_ltx25_model(mid)
+                    else ("unet", "clip", "text_projection", "vae", "audio_vae")
+                )
+                for k in required:
                     if not m.get(k):
                         problems.append(f"{mid}: LTX ComfyUI map missing '{k}'")
     except Exception as e:

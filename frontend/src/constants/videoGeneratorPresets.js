@@ -41,7 +41,7 @@ export const WAN_DURATION_PRESETS = {
   long: { label: "Long", description: "~5 seconds", duration_frames: 81, fps: 16 },
 };
 
-/** LTX-2.3 frame counts must be 8n+1. 161 @ 16fps ≈ 10s (16GB Ada target). */
+/** LTX-2.3 / 2.5 frame counts must be 8n+1. 161 @ 16fps ≈ 10s (16GB Ada target). */
 export const LTX_DURATION_PRESETS = {
   short: { label: "Short", description: "~4 seconds", duration_frames: 65, fps: 16 },
   medium: { label: "Medium", description: "~6 seconds", duration_frames: 97, fps: 16 },
@@ -168,6 +168,18 @@ export const MODEL_OPTIONS = {
   "ltx23-distilled-fp8": {
     label: "LTX-2.3 Distilled FP8 (16GB)",
     description: "Lightricks LTX-2.3 — 8 steps, up to ~10s on 16GB Ada. T2V + I2V.",
+    type: "ltx",
+    maxFrames: 161,
+    resolution: [768, 512],
+    defaultSteps: 8,
+    supportsT2V: true,
+    supportsI2V: true,
+    dimensionAlignment: 32,
+  },
+  "ltx25-distilled-int8": {
+    label: "LTX-2.5 Distilled Int8 (16GB)",
+    description: "Lightricks LTX-2.5 — 8 steps, up to ~10s on 16GB Ada. T2V + I2V. "
+      + "Gated HF accept + ComfyUI ≥ 0.32.",
     type: "ltx",
     maxFrames: 161,
     resolution: [768, 512],
