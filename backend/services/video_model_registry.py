@@ -63,6 +63,7 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 11.3,
         "vram_mb": 16000,
         "type": "cogvideox",
+        "dimension_alignment": 16,
     },
     "cogvideox-5b-i2v": {
         "name": "CogVideoX 1.5 5B I2V (BF16)",
@@ -76,6 +77,7 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 10.4,
         "vram_mb": 16000,
         "type": "cogvideox",
+        "dimension_alignment": 16,
     },
     # Wan GGUFs live in HighNoise/ and LowNoise/ subfolders in the repo, but
     # ComfyUI's UnetLoaderGGUF loads them flat from models/unet/. The `files`
@@ -98,6 +100,8 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 21.0,
         "vram_mb": 11000,
         "type": "wan",
+        "dimension_alignment": 32,
+        "max_pixel_area": 1_000_000,
     },
     "wan22-14b-i2v": {
         "name": "Wan 2.2 14B I2V MoE (GGUF Q5_K)",
@@ -114,6 +118,8 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 21.0,
         "vram_mb": 11000,
         "type": "wan",
+        "dimension_alignment": 32,
+        "max_pixel_area": 1_000_000,
     },
     "wan22-5b": {
         "name": "Wan 2.2 TI2V-5B (fp16)",
@@ -128,6 +134,8 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 9.5,
         "vram_mb": 11000,
         "type": "wan",
+        "dimension_alignment": 32,
+        "max_pixel_area": 1_000_000,
     },
     "wan-vae": {
         "name": "Wan 2.1/2.2 VAE",
@@ -338,6 +346,7 @@ VIDEO_MODEL_REGISTRY = {
         # falsely blocked VideoGen batches that already rendered via the direct path.
         "vram_mb": 14000,
         "type": "ltx",
+        "dimension_alignment": 32,
     },
     "ltx-gemma-fp4": {
         "name": "Gemma 3 12B IT (FP4) — LTX text encoder",

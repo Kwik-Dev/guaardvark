@@ -13,6 +13,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 import uuid
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,20 +53,32 @@ def _get_video_logger():
             from backend.config import LOG_DIR
             log_path = Path(LOG_DIR) / "video_generation.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
+            # Avoid duplicate lines when BatchVideoGenerator is constructed more
+            # than once (or when both this module and comfy already share a handler).
+            target = str(log_path.resolve())
+
+            def _has_video_file_handler(lg: logging.Logger) -> bool:
+                for h in lg.handlers:
+                    if isinstance(h, logging.FileHandler):
+                        try:
+                            if str(Path(getattr(h, "baseFilename", "")).resolve()) == target:
+                                return True
+                        except Exception:
+                            continue
+                return False
+
             _video_log_handler = logging.FileHandler(str(log_path))
             _video_log_handler.setFormatter(logging.Formatter(
                 "%(asctime)s %(levelname)s [%(name)s] %(message)s"
             ))
-            # Attach to this module (high-level batch orchestration)
-            logger.addHandler(_video_log_handler)
+            if not _has_video_file_handler(logger):
+                logger.addHandler(_video_log_handler)
             logger.setLevel(logging.INFO)
 
-            # Also attach to the detailed generator so "Using Wan/Cog...", "Added TeaCache",
-            # "Prompt enhanced", VAE/RIFE/ post-proc logs, etc. end up in the dedicated file
-            # instead of only backend.log or being lost to stdout/Comfy capture.
             try:
                 comfy_log = logging.getLogger("backend.services.comfyui_video_generator")
-                comfy_log.addHandler(_video_log_handler)
+                if not _has_video_file_handler(comfy_log):
+                    comfy_log.addHandler(_video_log_handler)
                 comfy_log.setLevel(logging.INFO)
             except Exception:
                 pass
@@ -135,7 +148,7 @@ class BatchVideoResult:
 @dataclass
 class BatchVideoStatus:
     batch_id: str
-    status: str  # "pending", "running", "completed", "error", "cancelled"
+    status: str  # "pending", "queued", "running", "completed", "error", "cancelled"
     total_videos: int
     completed_videos: int = 0
     failed_videos: int = 0
@@ -146,6 +159,11 @@ class BatchVideoStatus:
     output_dir: Optional[str] = None
     metadata: Dict = field(default_factory=dict)
     retry_data: Optional[Dict] = None  # persisted original prompts/image_paths + params for one-click retry on failed batches
+    # Pipeline progress (Phase 1): stage-level signal for UI when WS is flaky.
+    # Stages: queued | gpu_wait | storyboard | director | keyframe | generate | post | register | done
+    stage: str = "queued"
+    current_item: Optional[str] = None
+    progress_pct: Optional[int] = None
 
 
 class BatchVideoGenerator:
@@ -313,11 +331,126 @@ class BatchVideoGenerator:
     def _get_batch_dir(self, batch_id: str) -> Path:
         return self.base_output_dir / batch_id
 
+    def _attach_quality_metrics(
+        self,
+        batch_result: BatchVideoResult,
+        *,
+        video_path: str,
+        keyframe_path: Optional[str] = None,
+        cinematic: bool = False,
+        high_consistency: bool = False,
+    ) -> None:
+        """Best-effort quality sidecar for completed clips (never raises / never fails the item)."""
+        try:
+            from backend.services.video_consistency_metrics import (
+                compute_basic_video_stats,
+                score_identity_preservation,
+                review_video_quality,
+                annotate_asset,
+            )
+        except Exception as e:
+            logger.debug("quality metrics import failed: %s", e)
+            return
+
+        quality: Dict = {"flagged": False, "flag_reasons": []}
+        try:
+            quality["stats"] = compute_basic_video_stats(video_path)
+        except Exception as e:
+            logger.debug("basic video stats failed: %s", e)
+
+        if cinematic and keyframe_path and Path(keyframe_path).exists():
+            try:
+                # Sample a mid-frame via identity score against the keyframe still.
+                # score_identity_preservation expects image refs; extract one frame.
+                import subprocess
+                import tempfile
+                with tempfile.TemporaryDirectory() as td:
+                    frame_path = str(Path(td) / "mid.jpg")
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-loglevel", "error",
+                            "-ss", "0.5", "-i", str(video_path),
+                            "-frames:v", "1", frame_path,
+                        ],
+                        capture_output=True,
+                        timeout=30,
+                    )
+                    if Path(frame_path).exists():
+                        identity = score_identity_preservation(
+                            [keyframe_path], frame_path, method="hist"
+                        )
+                        quality["identity"] = identity
+                        score = float(identity.get("score") or 0)
+                        if score < 0.5:
+                            quality["flagged"] = True
+                            quality["flag_reasons"].append(
+                                f"low_identity_score:{score:.2f}"
+                            )
+            except Exception as e:
+                logger.debug("identity scoring skipped: %s", e)
+
+        # Optional VLM review for high-consistency / cinematic runs (fail-open).
+        if high_consistency or cinematic:
+            try:
+                review = review_video_quality(video_path, annotate=False)
+                quality["vlm_review"] = review
+                if review.get("available"):
+                    qscore = (review.get("review") or {}).get("quality_score")
+                    if isinstance(qscore, (int, float)) and qscore < 5:
+                        quality["flagged"] = True
+                        quality["flag_reasons"].append(f"low_vlm_score:{qscore}")
+            except Exception as e:
+                logger.debug("VLM video review skipped: %s", e)
+
+        batch_result.metadata = dict(batch_result.metadata or {})
+        batch_result.metadata["quality"] = quality
+        try:
+            annotate_asset(video_path, {"quality": quality})
+        except Exception:
+            pass
+
+    @staticmethod
+    def _compute_progress_pct(batch_status: BatchVideoStatus) -> int:
+        total = max(1, int(batch_status.total_videos or 1))
+        done = int(batch_status.completed_videos or 0) + int(batch_status.failed_videos or 0)
+        pct = int(round(100.0 * done / total))
+        # Stage hints while an item is in flight (before completed_videos bumps).
+        stage = (batch_status.stage or "").lower()
+        if stage == "gpu_wait":
+            return min(pct, 2)
+        if stage in ("storyboard", "director"):
+            return max(pct, 5)
+        if stage == "keyframe":
+            return max(pct, min(95, pct + 5))
+        if stage in ("generate", "post"):
+            return max(pct, min(99, pct + 1))
+        if stage == "register":
+            return max(pct, 98)
+        if stage == "done" or batch_status.status in ("completed", "error", "cancelled"):
+            return 100 if batch_status.status == "completed" else min(100, max(pct, 1))
+        return min(100, max(0, pct))
+
+    def _set_stage(
+        self,
+        batch_status: BatchVideoStatus,
+        stage: str,
+        *,
+        current_item: Optional[str] = None,
+        save: bool = True,
+    ) -> None:
+        batch_status.stage = stage
+        if current_item is not None:
+            batch_status.current_item = current_item
+        batch_status.progress_pct = self._compute_progress_pct(batch_status)
+        if save:
+            self._save_metadata(batch_status)
+
     def _save_metadata(self, batch_status: BatchVideoStatus) -> None:
         try:
             batch_dir = Path(batch_status.output_dir or self._get_batch_dir(batch_status.batch_id))
             batch_dir.mkdir(parents=True, exist_ok=True)
             metadata_file = batch_dir / "batch_metadata.json"
+            batch_status.progress_pct = self._compute_progress_pct(batch_status)
             serializable = asdict(batch_status)
             # Convert datetime to isoformat
             if batch_status.start_time:
@@ -521,9 +654,15 @@ class BatchVideoGenerator:
 
     def _run_batch(self, batch_request: BatchVideoRequest, status: BatchVideoStatus) -> None:
         # gpu_session composes gate + cross-process lease + Ollama eviction + VRAM
-        # orchestrator debit (P0.3c). Serial background queue waits out the 8s
-        # post-release cooldown (on_busy="wait") instead of failing the batch.
-        from backend.services.gpu_resource_policy import gpu_session
+        # orchestrator debit (P0.3c). Serial background queue waits out the gate
+        # busy/cooldown, then retries require_fit while residual Comfy weights
+        # still occupy the card — never cascade-fail the rest of the queue.
+        from backend.services.gpu_resource_policy import (
+            gpu_session,
+            is_capacity_overflow_error,
+            reclaim_and_settle,
+            vram_probe_snapshot,
+        )
         from backend.services.job_operation_gate import GpuBusyError
         from backend.services.job_types import JobKind
         from backend.services.video_model_registry import vram_mb_for_model
@@ -533,32 +672,128 @@ class BatchVideoGenerator:
         parallel_comfyui = os.environ.get(
             "GUAARDVARK_BATCH_COMFYUI_PARALLEL", ""
         ).lower() in ("1", "true", "yes")
+        cancel_event = self.cancel_events.get(batch_request.batch_id)
 
         try:
-            with gpu_session(
-                JobKind.VIDEO_RENDER,
-                batch_request.batch_id,
-                on_busy="wait",
-                wait_timeout=120.0,
-                evict_ollama=True,
-                free_comfyui=True,
-                cross_process=True,
-                vram_estimate_mb=vram_mb,
-                require_fit=True,
-                slot_id=slot_id,
-                lease_seconds=3600,
-            ):
-                self._run_batch_inner(
-                    batch_request,
-                    status,
-                    parallel_comfyui=parallel_comfyui,
+            admit_deadline_s = float(
+                os.environ.get("GUAARDVARK_VIDEO_VRAM_WAIT_S", "5400")  # 90 min
+            )
+        except ValueError:
+            admit_deadline_s = 5400.0
+        admit_deadline_s = max(60.0, admit_deadline_s)
+
+        backoff_s = 2.0
+        deadline = time.time() + admit_deadline_s
+        need_mb = int(vram_mb) + 1024
+
+        while True:
+            if cancel_event and cancel_event.is_set():
+                status.status = "cancelled"
+                status.error = "Cancelled while waiting for GPU/VRAM"
+                status.end_time = datetime.now()
+                self._set_stage(status, "done", save=False)
+                self._save_metadata(status)
+                return
+
+            snap = vram_probe_snapshot()
+            wait_msg = (
+                f"Waiting for VRAM — "
+                f"{(snap.get('free_mb') or 0) / 1024:.1f}GB free, "
+                f"need ~{need_mb / 1024:.1f}GB"
+            )
+            status.status = status.status if status.status in ("running", "queued", "pending") else "queued"
+            if status.status == "pending":
+                status.status = "queued"
+            status.metadata = dict(status.metadata or {})
+            status.metadata["gpu_wait_reason"] = wait_msg
+            status.metadata["vram_free_mb"] = snap.get("free_mb")
+            status.metadata["vram_need_mb"] = need_mb
+            self._set_stage(status, "gpu_wait", current_item=None)
+
+            try:
+                with gpu_session(
+                    JobKind.VIDEO_RENDER,
+                    batch_request.batch_id,
+                    on_busy="wait",
+                    wait_timeout=120.0,
+                    evict_ollama=True,
+                    free_comfyui=True,
+                    cross_process=True,
+                    vram_estimate_mb=vram_mb,
+                    require_fit=True,
+                    slot_id=slot_id,
+                    lease_seconds=3600,
+                ):
+                    # Clear wait metadata once admitted.
+                    status.metadata.pop("gpu_wait_reason", None)
+                    self._run_batch_inner(
+                        batch_request,
+                        status,
+                        parallel_comfyui=parallel_comfyui,
+                    )
+                return
+            except GpuBusyError as e:
+                if is_capacity_overflow_error(e):
+                    status.status = "error"
+                    status.error = f"Could not acquire GPU: {e}"
+                    status.end_time = datetime.now()
+                    self._set_stage(status, "done", save=False)
+                    self._save_metadata(status)
+                    logger.error(
+                        "Batch %s capacity refuse (no retry): %s",
+                        batch_request.batch_id,
+                        e,
+                    )
+                    return
+
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    status.status = "error"
+                    status.error = (
+                        f"Could not acquire enough free VRAM after waiting "
+                        f"{int(admit_deadline_s)}s: {e}"
+                    )
+                    status.end_time = datetime.now()
+                    self._set_stage(status, "done", save=False)
+                    self._save_metadata(status)
+                    logger.error(
+                        "Batch %s VRAM wait deadline exceeded: %s",
+                        batch_request.batch_id,
+                        e,
+                    )
+                    return
+
+                logger.warning(
+                    "Batch %s VRAM resident/busy (%s) — reclaiming and retrying "
+                    "in %.0fs (%.0fs left)",
+                    batch_request.batch_id,
+                    e,
+                    min(backoff_s, remaining),
+                    remaining,
                 )
-        except GpuBusyError as e:
-            status.status = "error"
-            status.error = f"Could not acquire GPU after waiting: {e}"
-            status.end_time = datetime.now()
-            self._save_metadata(status)
-            logger.error(f"Batch {batch_request.batch_id} blocked by GPU session: {e}")
+                try:
+                    settled = reclaim_and_settle(
+                        evict_ollama=True, free_comfyui=True, settle_s=3.0
+                    )
+                    status.metadata["vram_free_mb"] = settled.get("free_mb")
+                    status.metadata["gpu_wait_reason"] = (
+                        f"Waiting for VRAM — "
+                        f"{(settled.get('free_mb') or 0) / 1024:.1f}GB free, "
+                        f"need ~{need_mb / 1024:.1f}GB"
+                    )
+                    self._save_metadata(status)
+                except Exception as reclaim_err:
+                    logger.debug("reclaim_and_settle failed: %s", reclaim_err)
+
+                sleep_for = min(backoff_s, max(0.5, deadline - time.time()))
+                # Wake early on cancel.
+                end_sleep = time.time() + sleep_for
+                while time.time() < end_sleep:
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    time.sleep(min(1.0, end_sleep - time.time()))
+                backoff_s = min(15.0, backoff_s * 1.5)
+
 
     def _run_batch_inner(
         self,
@@ -572,7 +807,7 @@ class BatchVideoGenerator:
         try:
             status.start_time = datetime.now()
             status.status = "running"
-            self._save_metadata(status)
+            self._set_stage(status, "generate", current_item=None)
 
             batch_dir = Path(batch_request.output_dir)
             batch_dir.mkdir(parents=True, exist_ok=True)
@@ -675,8 +910,10 @@ class BatchVideoGenerator:
             if getattr(batch_request, "storyboard_concept", None):
                 # Storyboard is intentional expansion of a concept into N shots — still
                 # allowed under verbatim for the concept→shots step; per-shot enhance is off.
+                self._set_stage(status, "storyboard")
                 self._apply_storyboard(batch_request)
             elif getattr(batch_request, "director_mode", False):
+                self._set_stage(status, "director")
                 self._apply_director(batch_request)
 
             # Parallel processing of items within the batch (major P0 perf win).
@@ -712,6 +949,7 @@ class BatchVideoGenerator:
                                           or bool(cast_lora_paths)
                                           or bool(cast_keyframe_image))
                         if (want_cinematic and not item.image_path and (item.prompt or "").strip()):
+                            self._set_stage(status, "keyframe", current_item=item.id)
                             if cast_keyframe_image:
                                 # Q1: the user picked an APPROVED reference still — animate
                                 # THAT exact high-quality image (no re-render, no model/res
@@ -764,6 +1002,7 @@ class BatchVideoGenerator:
                                     return (br, 0, 1, False)
                                 # else: non-cast keyframe failed -> fall through to T2V
 
+                        self._set_stage(status, "generate", current_item=item.id)
                         gen_request = VideoGenerationRequest(
                             prompt=item.prompt or "",
                             negative_prompt=batch_request.negative_prompt,
@@ -799,8 +1038,20 @@ class BatchVideoGenerator:
                             frame_paths=result.frame_paths,
                             thumbnail_path=result.thumbnail_path,
                             error=result.error,
-                            metadata=result.metadata,
+                            metadata=dict(result.metadata or {}),
                         )
+                        if result.success and result.video_path:
+                            self._set_stage(status, "post", current_item=item.id, save=False)
+                            self._attach_quality_metrics(
+                                br,
+                                video_path=result.video_path,
+                                keyframe_path=meta.get("image_path"),
+                                cinematic=bool(meta.get("cinematic_keyframe")),
+                                high_consistency=bool(
+                                    (batch_request.metadata or {}).get("high_consistency")
+                                    or getattr(batch_request, "director_mode", False)
+                                ),
+                            )
                         return (br, 1 if result.success else 0, 0 if result.success else 1, False)
                     except Exception as e:  # pragma: no cover
                         err_str = str(e)
@@ -832,6 +1083,7 @@ class BatchVideoGenerator:
                 # _process_item, so this is a pure optimization.
                 _warm_cinematic = bool(getattr(batch_request, "cinematic_keyframe", False) or cast_lora_paths)
                 if _warm_cinematic and not cast_keyframe_image:
+                    self._set_stage(status, "keyframe")
                     from backend.services.gpu_resource_policy import free_comfyui_vram as _free_comfy
                     for _it in items:
                         if cancel_event and cancel_event.is_set():
@@ -902,7 +1154,7 @@ class BatchVideoGenerator:
             if status.status != "cancelled":
                 status.status = "completed" if status.failed_videos == 0 else "error"
             status.end_time = datetime.now()
-            self._save_metadata(status)
+            self._set_stage(status, "register" if status.completed_videos > 0 else "done")
 
             # Register videos into Documents/Files system
             if status.completed_videos > 0:
@@ -935,6 +1187,8 @@ class BatchVideoGenerator:
                             _db.session.remove()
                 except Exception as reg_err:
                     logger.error(f"Failed to register batch videos: {reg_err}")
+
+            self._set_stage(status, "done")
 
         finally:
             logger.info(f"Batch {batch_request.batch_id} finished render phase")
@@ -1032,6 +1286,8 @@ class BatchVideoGenerator:
             total_videos=len(items),
             output_dir=str(batch_dir),
             metadata=params.get("metadata", {}),
+            stage="queued",
+            progress_pct=0,
         )
 
         # Persist enough info to allow one-click retry for failed batches without
@@ -1160,6 +1416,9 @@ class BatchVideoGenerator:
                     output_dir=data.get("output_dir"),
                     metadata=data.get("metadata", {}),
                     retry_data=data.get("retry_data"),
+                    stage=data.get("stage") or "done",
+                    current_item=data.get("current_item"),
+                    progress_pct=data.get("progress_pct"),
                 )
             except Exception as e:  # pragma: no cover
                 logger.error(f"Failed to load batch status for {batch_id}: {e}")
@@ -1412,6 +1671,9 @@ class BatchVideoGenerator:
                 "position": position,
                 "batch_id": batch_id,
                 "status": status.status,
+                "stage": getattr(status, "stage", None),
+                "current_item": getattr(status, "current_item", None),
+                "progress_pct": getattr(status, "progress_pct", None),
                 "total_videos": status.total_videos,
                 "completed_videos": status.completed_videos,
                 "failed_videos": status.failed_videos,

@@ -41,28 +41,26 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _check_gpu_availability():
-    """
-    Pre-flight check for GPU availability before starting video generation.
-    Returns (is_available, error_response_or_None).
-    """
+def _gpu_queue_hint():
+    """Non-blocking snapshot for enqueue responses — never rejects the job."""
     if not gpu_coordinator_available or not get_gpu_coordinator:
-        return True, None  # No coordinator, allow request to proceed
-
+        return {"gpu_busy": False, "owner": None}
     try:
-        coordinator = get_gpu_coordinator()
-        status = coordinator.get_gpu_status()
-
-        if not status.get("available"):
-            owner = status.get("owner", "unknown")
-            return False, error_response(
-                f"GPU currently in use by {owner}. Please wait for current operation to complete or check /api/gpu/status.",
-                409
-            )
-        return True, None
+        status = get_gpu_coordinator().get_gpu_status()
+        available = bool(status.get("available", True))
+        return {
+            "gpu_busy": not available,
+            "owner": status.get("owner"),
+            "message": (
+                None if available
+                else f"GPU currently in use by {status.get('owner', 'unknown')}; "
+                     "your batch is queued and will start when the GPU is free."
+            ),
+        }
     except Exception as e:
-        logger.warning(f"GPU availability check failed: {e}")
-        return True, None  # Allow request on check failure
+        logger.warning(f"GPU queue hint failed: {e}")
+        return {"gpu_busy": False, "owner": None}
+
 
 batch_video_bp = Blueprint("batch_video", __name__, url_prefix="/api/batch-video")
 
@@ -156,7 +154,6 @@ def generate_text_to_video_batch():
             "frames_per_batch": int(data.get("frames_per_batch", 1)),
             "combine_frames": str(data.get("combine_frames", "false")).lower() == "true",
             "interpolation_multiplier": int(data.get("interpolation_multiplier", 2)),
-            "frames_per_batch": int(data.get("frames_per_batch", 1)),
             "prompt_style": data.get("prompt_style", "cinematic"),
             "enhance_prompt": str(data.get("enhance_prompt", "true")).lower() != "false",
             "fidelity_mode": str(data.get("fidelity_mode", data.get("preserve_text_fidelity", "false"))).lower() == "true",
@@ -180,6 +177,7 @@ def generate_text_to_video_batch():
                 "upscale": str(data.get("upscale", "false")).lower() == "true",
                 "teacache_threshold": float(data.get("teacache_threshold")) if data.get("teacache_threshold") else None,
                 "feta_weight": float(data.get("feta_weight")) if data.get("feta_weight") else None,
+                "high_consistency": str(data.get("high_consistency", "false")).lower() == "true",
             },
         }
 
@@ -187,8 +185,14 @@ def generate_text_to_video_batch():
         if not generator.service_available:
             return error_response("Video generation service not available", 503)
 
+        gpu_hint = _gpu_queue_hint()
         status = generator.start_batch_from_prompts(prompts=prompts, **params)
-        return success_response({"batch_id": status.batch_id, "status": status.status})
+        return success_response({
+            "batch_id": status.batch_id,
+            "status": status.status,
+            "stage": getattr(status, "stage", "queued"),
+            "gpu": gpu_hint,
+        })
     except Exception as e:
         logger.error(f"Failed to start text-to-video batch: {e}")
         return error_response(str(e), 500)
@@ -228,7 +232,6 @@ def generate_image_to_video_batch():
             "frames_per_batch": int(data.get("frames_per_batch", 1)),
             "combine_frames": str(data.get("combine_frames", "false")).lower() == "true",
             "interpolation_multiplier": int(data.get("interpolation_multiplier", 2)),
-            "frames_per_batch": int(data.get("frames_per_batch", 1)),
             "prompt_style": data.get("prompt_style", "cinematic"),
             "enhance_prompt": str(data.get("enhance_prompt", "true")).lower() != "false",
             "fidelity_mode": str(data.get("fidelity_mode", data.get("preserve_text_fidelity", "false"))).lower() == "true",
@@ -247,6 +250,7 @@ def generate_image_to_video_batch():
                 "upscale": str(data.get("upscale", "false")).lower() == "true",
                 "teacache_threshold": float(data.get("teacache_threshold")) if data.get("teacache_threshold") else None,
                 "feta_weight": float(data.get("feta_weight")) if data.get("feta_weight") else None,
+                "high_consistency": str(data.get("high_consistency", "false")).lower() == "true",
             },
         }
 
@@ -254,8 +258,14 @@ def generate_image_to_video_batch():
         if not generator.service_available:
             return error_response("Video generation service not available", 503)
 
+        gpu_hint = _gpu_queue_hint()
         status = generator.start_batch_from_images(image_paths=image_paths, **params)
-        return success_response({"batch_id": status.batch_id, "status": status.status})
+        return success_response({
+            "batch_id": status.batch_id,
+            "status": status.status,
+            "stage": getattr(status, "stage", "queued"),
+            "gpu": gpu_hint,
+        })
     except Exception as e:
         logger.error(f"Failed to start image-to-video batch: {e}")
         return error_response(str(e), 500)
@@ -356,6 +366,9 @@ def get_batch_status(batch_id: str):
             {
                 "batch_id": status.batch_id,
                 "status": status.status,
+                "stage": getattr(status, "stage", None),
+                "current_item": getattr(status, "current_item", None),
+                "progress_pct": getattr(status, "progress_pct", None),
                 "total_videos": status.total_videos,
                 "completed_videos": status.completed_videos,
                 "failed_videos": status.failed_videos,
@@ -365,6 +378,7 @@ def get_batch_status(batch_id: str):
                 "metadata": status.metadata,
                 "output_dir": status.output_dir,
                 "retry_data": getattr(status, "retry_data", None),
+                "error": getattr(status, "error", None),
             }
         )
     except Exception as e:
@@ -845,6 +859,9 @@ def list_video_models():
                 "type": info["type"],
                 "size_gb": info["size_gb"],
                 "vram_mb": info["vram_mb"],
+                # UI/SSOT dimension helpers (mirror videoGeneratorPresets MODEL_OPTIONS).
+                "dimension_alignment": info.get("dimension_alignment"),
+                "max_pixel_area": info.get("max_pixel_area"),
                 # is_downloaded = this model's own files present.
                 # is_ready = model + every required companion present (truly usable).
                 "is_downloaded": _check_model_downloaded(model_id),

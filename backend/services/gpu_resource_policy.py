@@ -206,6 +206,47 @@ def _ensure_fits_or_busy(
     )
 
 
+def is_capacity_overflow_error(exc: BaseException) -> bool:
+    """True when GpuBusyError means the estimate can never fit this card."""
+    msg = str(exc) or ""
+    return "estimate exceeds GPU capacity" in msg
+
+
+def vram_probe_snapshot(*, margin_mb: int = 1024, reserve_mb: int = 0) -> dict:
+    """Best-effort free/need snapshot for UI gpu_wait messaging. Never raises."""
+    out = {"free_mb": None, "total_mb": None, "util_pct": None, "success": False}
+    try:
+        from backend.services.gpu_resource_coordinator import get_gpu_coordinator
+        info = get_gpu_coordinator().get_available_vram()
+        if not info.get("success"):
+            return out
+        free = int(info.get("available_mb") or 0)
+        total = int(info.get("total_mb") or 0)
+        reserve_mb = max(0, int(reserve_mb))
+        out.update({
+            "success": True,
+            "free_mb": free,
+            "free_eff_mb": max(0, free - reserve_mb),
+            "total_mb": total,
+            "util_pct": float(info.get("utilization_percent") or 0),
+            "margin_mb": int(margin_mb),
+            "reserve_mb": reserve_mb,
+        })
+    except Exception as e:  # noqa: BLE001
+        log.debug("vram_probe_snapshot failed: %s", e)
+    return out
+
+
+def reclaim_and_settle(*, evict_ollama: bool = True, free_comfyui: bool = True, settle_s: float = 3.0) -> dict:
+    """Unload residents, then sleep so the driver reports freed VRAM before re-admit."""
+    reclaim_gpu(evict_ollama=evict_ollama, free_comfyui=free_comfyui)
+    settle = max(0.0, float(settle_s))
+    if settle:
+        import time as _t
+        _t.sleep(settle)
+    return vram_probe_snapshot()
+
+
 import threading as _threading
 
 # Per-thread reentrancy flag: set while THIS thread holds a gpu_session slot, so a nested

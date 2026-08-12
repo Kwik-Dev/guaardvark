@@ -616,8 +616,8 @@ def _initialize_app_components(app):
             TERMINAL_STATUSES = {'complete', 'error', 'cancelled', 'end'}
             STALE_THRESHOLD = 2700  # 45 minutes - indexing can take 15-25 min per doc
             REDIS_LOSS_STALE = 300    # 5 min aggressive when Redis relay is down (loss detection)
-            VIDEO_RENDER_STALE_HIGH = 900   # 15 min at >=95% (encoding hang)
-            VIDEO_RENDER_STALE_MID = 1800   # 30 min mid-render (denoising)
+            VIDEO_RENDER_STALE_HIGH = 3600  # 60 min at >=95% (long encode still OK)
+            VIDEO_RENDER_STALE_MID = 7200   # 120 min mid-render (maxed Wan denoising)
 
             def _comfyui_is_down() -> bool:
                 try:

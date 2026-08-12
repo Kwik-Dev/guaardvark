@@ -342,9 +342,24 @@ def adapt_video_gen(status) -> Job:
 
     status_enum = map_status(JobKind.VIDEO_GEN, native_status)
     display = metadata.get("display_name") or batch_id
+    stage = None
+    progress_pct = None
+    if isinstance(status, dict):
+        stage = status.get("stage")
+        progress_pct = status.get("progress_pct")
+    else:
+        stage = getattr(status, "stage", None)
+        progress_pct = getattr(status, "progress_pct", None)
     label = f"VideoGen: {display}"
+    if stage and stage not in ("queued", "done"):
+        label = f"VideoGen [{stage}]: {display}"
     progress = None
-    if total > 0:
+    if progress_pct is not None:
+        try:
+            progress = float(progress_pct)
+        except (TypeError, ValueError):
+            progress = None
+    if progress is None and total > 0:
         progress = round((completed + failed) / total * 100, 1)
 
     return Job(
@@ -368,6 +383,7 @@ def adapt_video_gen(status) -> Job:
             "model": metadata.get("model"),
             "is_running": is_running,
             "queue_position": metadata.get("queue_position"),
+            "stage": stage,
         },
     )
 

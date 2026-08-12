@@ -28,7 +28,7 @@ One style prompt and a short narrative, then **go**. Guaardvark wrote every shot
 
 ## Highlights (as of latest release)
 
-- **Video & Audio Production** — Wan 2.2 (T2V + I2V), CogVideoX, SVD; ACE-Step full-song generation with LLM tag polish; Chatterbox/Kokoro neural voice + Piper; explicit consent-gated voice cloning; frame-by-frame 4K/8K upscaling.
+- **Video & Audio Production** — Wan 2.2 (T2V + I2V, 5B default + 14B MoE), CogVideoX-5B, LTX-2.3; ACE-Step full-song generation with LLM tag polish; Chatterbox/Kokoro neural voice + Piper; explicit consent-gated voice cloning; frame-by-frame 4K/8K upscaling.
 - **AgentBrain + Screen Agents** — Reflex/Instinct/Deliberation routing. Agents drive a real Ubuntu/XFCE desktop on a virtual display (`:99`), see with vision models (Gemma4 native `box_2d`), use closed-loop servo targeting, and stream per-step reasoning.
 - **Swarm Orchestrator & Film Crew** — Up to 20 parallel agents in isolated git worktrees with dependency-aware merging. Five-role production pipeline (Screenwriter → Casting (LoRAs) → Cinematographer → Storyboard → Editor).
 - **Self-Improvement & Safety** — Scheduled/reactive/directed bug detection + agent fixes with verification. Optional "Uncle Claude" (Anthropic) guardian review + codebase lock + Pending Fixes queue. Cross-machine learning via Interconnector.
@@ -42,7 +42,7 @@ One style prompt and a short narrative, then **go**. Guaardvark wrote every shot
 ## Marquee Capabilities
 
 **Generation & Editing (all local, no cloud APIs)**
-- Text-to-Video / Image-to-Video (Wan 2.2 14B MoE, CogVideoX 2B/5B, SVD-XT) with batch queues, quality tiers, frame interpolation, prompt enhancement, and one-click jump to ComfyUI for custom workflows.
+- Text-to-Video / Image-to-Video (Wan 2.2 5B + 14B MoE, CogVideoX-5B, LTX-2.3) with an in-process batch queue, quality tiers, frame interpolation, prompt enhancement, and one-click jump to ComfyUI for custom workflows.
 - Audio Studio (Audio Foundry plugin): ACE-Step 3.5B music (vocals or instrumental, Suno-style chips + LLM polish), Stable Audio Open FX/ambience, Chatterbox + Kokoro neural TTS, Piper fallback, consent-gated voice cloning.
 - Image gen (Stable Diffusion + batch + face/anatomy controls) + powerful 4K/8K GPU upscaling (Real-ESRGAN family, HAT-L, NMKD, Foolhardy, two-pass, video frame-by-frame).
 - Built-in Video Editor (Shotcut-lite 3-lane timeline: video/text/audio, real `ffmpeg drawtext` overlays, drag-and-drop from media library, visual trims, undo, keyboard shortcuts).
@@ -224,19 +224,20 @@ State-of-the-art video generation running entirely on your GPU. No cloud APIs, n
 
 | Model | Type | Max Duration | Native Resolution | VRAM |
 |-------|------|-------------|-------------------|------|
+| **Wan 2.2 TI2V-5B** (default) | Text + Image-to-Video | ~5s (up to 121 frames @ 24fps) | 1280x704 | ~11GB |
 | **Wan 2.2 (14B MoE)** | Text-to-Video | 5s (81 frames @ 16fps) | 832x480 | 11GB |
+| **Wan 2.2 14B I2V** | Image-to-Video | 5s (81 frames @ 16fps) | 832x480 | 11GB |
 | **CogVideoX-5B** | Text-to-Video | 6s (49 frames @ 8fps) | 720x480 | 16GB |
-| **CogVideoX-2B** | Text-to-Video | 6s (49 frames @ 8fps) | 720x480 | 12GB |
 | **CogVideoX-5B I2V** | Image-to-Video | 6s (49 frames @ 8fps) | 720x480 | 16GB |
-| **SVD XT** | Text-to-Video | 3.5s (25 frames @ 7fps) | 512x512 | <8GB |
+| **LTX-2.3 Distilled FP8** | Text + Image-to-Video | ~10s (161 frames @ 16fps) | 768x512 | ~14GB |
 
-- **Resolution options** — 512px, 576px, 720px, 1280px, 1920px (1080p), and custom dimensions (multiples of 8)
+- **Resolution options** — 512px, 576px, 720px, 1280px, 1920px (1080p), and custom dimensions (aligned per model)
 - **Quality tiers** — Fast (10 steps), Standard (30), High (40), Maximum (50)
 - **Frame interpolation** — 1x raw, 2x doubled FPS, 2x + upscale for cinema-quality output
 - **Prompt enhancement** — Cinematic, Realistic, Artistic, Anime, or raw
-- **Low VRAM mode** — automatically reduces resolution, frames, and inference steps for 8–12GB GPUs
-- **Batch processing** — queue multiple videos from a prompt list, processed by Celery workers
-- **ComfyUI integration** — one-click launch to the node editor for custom workflows
+- **Low VRAM mode** — automatically reduces resolution, frames, and inference steps for 8–12GB GPUs (mutually exclusive with High consistency)
+- **Batch processing** — queue multiple videos from a prompt list via an in-process worker (one batch at a time; ComfyUI primary, offline CogVideoX fallback)
+- **ComfyUI integration** — one-click launch to the node editor for custom workflows; Wan/LTX require ComfyUI
 
 ### Audio Studio — Music, FX, and Neural Voice
 

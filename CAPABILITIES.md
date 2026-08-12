@@ -296,15 +296,17 @@ Guaardvark speaks Model Context Protocol — both as a server (exposing its tool
 Full video generation pipeline running locally via ComfyUI with multiple model backends.
 
 #### Supported Models
-- **Wan2.2 14B MoE** — state-of-the-art text-to-video model using GGUF-quantized weights. Two-pass generation: HighNoise pass for the first half of steps, LowNoise pass for the second half. Produces high-quality 720p video at 16 FPS
-- **CogVideoX 2B / 5B** — THUDM's text-to-video diffusion models. Lighter weight alternative to Wan2.2, good for faster iteration
+- **Wan 2.2 TI2V-5B** (default) — single 5B text+image-to-video model built for 16GB cards; native ~1280×704 @ 24fps without MoE offload
+- **Wan2.2 14B MoE** — state-of-the-art text-to-video using GGUF-quantized weights. Two-pass generation: HighNoise pass for the first half of steps, LowNoise pass for the second half
+- **Wan2.2 14B I2V MoE** — image-to-video MoE variant for cinematic start-frame animation
+- **CogVideoX 5B** — THUDM text-to-video (ComfyUI or offline Diffusers fallback)
 - **CogVideoX 5B I2V** — image-to-video variant that animates a still image with text-guided motion
-- **Stable Video Diffusion (SVD)** — image-to-video generation for short clips from reference images
+- **LTX-2.3 Distilled FP8** — Lightricks LTX-2.3 for longer clips (~10s) on 16GB Ada; requires ComfyUI
 
 #### Generation Modes
 - **Text-to-Video** — describe a scene in natural language and generate video from scratch
 - **Image-to-Video** — upload a reference image and animate it with motion direction prompts
-- **Batch generation** — queue multiple prompts with different parameters for unattended rendering
+- **Batch generation** — queue multiple prompts via an in-process worker (one batch at a time; stage-level progress over WebSocket + HTTP poll)
 
 #### Quality Tiers (Post-Processing)
 - **Draft** — raw model output, fastest turnaround
@@ -701,7 +703,7 @@ Each plugin lives in `plugins/<name>/` with a `plugin.json` manifest declaring i
 | Plugin | Port | Purpose |
 |---|---|---|
 | **Ollama** | 11434 | Local LLM and embedding inference (chat, RAG, agents) |
-| **ComfyUI** | 8188 | Image + video generation (Wan2.2, CogVideoX, SVD, RIFE, Real-ESRGAN) |
+| **ComfyUI** | 8188 | Image + video generation (Wan2.2, CogVideoX, LTX-2.3, RIFE, Real-ESRGAN) |
 | **Audio Foundry** | — | Voiceover (Chatterbox / Kokoro / Piper), music (ACE-Step / Suno), SFX/ambience (Stable Audio Open). Dual-venv with torch isolation |
 | **Upscaling** | 8202 | GPU image/video upscaling via spandrel + torch.compile |
 | **Vision Pipeline** | 8201 | Real-time scene narration, camera feed, video chat input |
@@ -753,7 +755,7 @@ Plugins can register:
 - **Celery + Redis** — async task processing with two worker pools (main + training/GPU)
 - **LlamaIndex** — RAG pipeline with vector storage, entity extraction, hybrid retrieval
 - **Ollama** — local LLM and embedding model inference (managed plugin)
-- **ComfyUI** — video/image generation server supporting Wan2.2, CogVideoX, SVD, RIFE, Real-ESRGAN (managed plugin)
+- **ComfyUI** — video/image generation server supporting Wan2.2, CogVideoX, LTX-2.3, RIFE, Real-ESRGAN (managed plugin)
 - **Socket.IO** — real-time bidirectional communication for streaming and progress
 - **Ariadne** — GraphQL API layer
 

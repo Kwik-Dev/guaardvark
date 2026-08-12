@@ -303,11 +303,16 @@ class UnifiedProgressSystem:
         if self._file_based_enabled:
             self._create_file_tracking(safe_process_id, event)
         
-        # Schedule initial timeout for stuck processes (10 minutes)
-        # This ensures even newly created processes that never update will timeout
-        self._schedule_timeout_timer(safe_process_id, 2400.0)  # 40 minutes — indexing can take 15-25 min per doc
-        
-        logger.info(f"Created progress process: {safe_process_id} ({process_type.value}) with 40min timeout")
+        # Schedule initial timeout for stuck processes.
+        # Video renders (maxed Wan) can run 1–3h; activity-aware Comfy wait
+        # keeps them alive — the footer must not declare error at 40min.
+        initial_ttl = 10800.0 if process_type == ProcessType.VIDEO_RENDER else 2400.0
+        self._schedule_timeout_timer(safe_process_id, initial_ttl)
+
+        logger.info(
+            f"Created progress process: {safe_process_id} ({process_type.value}) "
+            f"with {int(initial_ttl // 60)}min timeout"
+        )
         return safe_process_id
     
     def update_process(
@@ -367,9 +372,10 @@ class UnifiedProgressSystem:
         if self._file_based_enabled:
             self._update_file_tracking(process_id, event)
         
-        # Reschedule timeout timer for this process (5 minutes from now)
-        # This extends the timeout each time the process is updated
-        self._schedule_timeout_timer(process_id, 2400.0)  # 40 minutes — reset on each update
+        # Reschedule timeout timer — video_render uses a long TTL so maxed Wan
+        # jobs are not marked error while Comfy is still at 99% util.
+        ttl = 10800.0 if event.process_type == ProcessType.VIDEO_RENDER else 2400.0
+        self._schedule_timeout_timer(process_id, ttl)
         
         return True
     

@@ -566,9 +566,9 @@ class VideoGeneratorTool(BaseTool):
 
     name = "generate_video"
     description = (
-        "Generate a video clip from a text prompt using the local video model "
-        "(Wan text-to-video). Takes one to several minutes; the finished video "
-        "is shown inline in chat and saved to the media library. Use when the "
+        "Queue a video clip from a text prompt using the local video model "
+        "(Wan text-to-video). Returns immediately with a batch id and Studio "
+        "deep-link so long cinema/Wan jobs are not false-timeouted. Use when the "
         "user asks to create, generate, or make a video. For short looping "
         "frame-morph animations use generate_animation instead."
     )
@@ -593,17 +593,28 @@ class VideoGeneratorTool(BaseTool):
             required=False,
             default=25,
         ),
+        "wait_for_result": ToolParameter(
+            name="wait_for_result",
+            type="boolean",
+            description=(
+                "If true, poll until the clip finishes (or timeout). Default false: "
+                "enqueue and return a Studio Video Gen / Jobs link immediately."
+            ),
+            required=False,
+            default=False,
+        ),
     }
 
-    # Batch queue can stack behind another render; poll generously.
+    # Optional short preview wait only — cinema/Wan can exceed 30+ minutes.
     POLL_INTERVAL_S = 3
-    MAX_WAIT_S = 900
+    MAX_WAIT_S = 1800
 
     def __init__(self):
         super().__init__()
 
     def execute(self, prompt: str, duration_frames: int = 49,
-                num_inference_steps: int = 25, **kwargs) -> ToolResult:
+                num_inference_steps: int = 25, wait_for_result: bool = False,
+                **kwargs) -> ToolResult:
         import time as _time
 
         prompt = (prompt or "").strip()
@@ -618,8 +629,10 @@ class VideoGeneratorTool(BaseTool):
         except (TypeError, ValueError):
             num_inference_steps = 25
 
-        logger.info("VideoGeneratorTool: frames=%s steps=%s prompt=%r",
-                    duration_frames, num_inference_steps, prompt[:100])
+        wait_for_result = str(wait_for_result).lower() in ("1", "true", "yes")
+
+        logger.info("VideoGeneratorTool: frames=%s steps=%s wait=%s prompt=%r",
+                    duration_frames, num_inference_steps, wait_for_result, prompt[:100])
         try:
             from backend.services.batch_video_generator import get_batch_video_generator
             from backend.services.video_model_registry import (
@@ -642,6 +655,30 @@ class VideoGeneratorTool(BaseTool):
                 metadata={"source": "chat"},
             )
             batch_id = status.batch_id
+            studio_url = f"/video?batch={batch_id}"
+            jobs_url = "/tasks"
+
+            if not wait_for_result:
+                stage = getattr(status, "stage", "queued") or "queued"
+                return ToolResult(
+                    success=True,
+                    output="\n".join([
+                        f"Video generation queued as batch {batch_id} (stage: {stage}).",
+                        f"Prompt: {prompt}",
+                        f"Frames: {duration_frames} | Steps: {num_inference_steps}",
+                        f"Open Video Gen: {studio_url}",
+                        f"Jobs: {jobs_url}",
+                        "The clip will appear in Studio → Video Gen when finished.",
+                    ]),
+                    metadata={
+                        "prompt": prompt,
+                        "batch_id": batch_id,
+                        "queued": True,
+                        "stage": stage,
+                        "studio_url": studio_url,
+                        "jobs_url": jobs_url,
+                    },
+                )
 
             deadline = _time.monotonic() + self.MAX_WAIT_S
             while _time.monotonic() < deadline:
@@ -649,6 +686,9 @@ class VideoGeneratorTool(BaseTool):
                 status = generator.get_batch_status(batch_id)
                 if status is None:
                     return ToolResult(success=False, error=f"Video batch {batch_id} disappeared")
+                stage = getattr(status, "stage", None)
+                if stage:
+                    logger.info("VideoGeneratorTool batch %s stage=%s", batch_id, stage)
                 if status.status == "completed":
                     break
                 if status.status in ("error", "cancelled"):
@@ -659,11 +699,20 @@ class VideoGeneratorTool(BaseTool):
                     return ToolResult(success=False, error=f"Video generation failed: {err}")
             else:
                 return ToolResult(
-                    success=False,
-                    error=(
+                    success=True,
+                    output="\n".join([
                         f"Video generation still running after {self.MAX_WAIT_S // 60} minutes "
-                        f"(batch {batch_id}). Check the Video Generator page for the result."
-                    ),
+                        f"(batch {batch_id}).",
+                        f"Open Video Gen: {studio_url}",
+                        "It will finish in the background — this is not a failure.",
+                    ]),
+                    metadata={
+                        "prompt": prompt,
+                        "batch_id": batch_id,
+                        "queued": True,
+                        "still_running": True,
+                        "studio_url": studio_url,
+                    },
                 )
 
             result = next((r for r in status.results if r.success and r.video_path), None)
@@ -681,12 +730,14 @@ class VideoGeneratorTool(BaseTool):
                 f"Prompt: {prompt}",
                 f"Frames: {duration_frames} | Steps: {num_inference_steps} | Batch: {batch_id}",
                 f"Video: {video_url}",
+                f"Open Video Gen: {studio_url}",
             ]
             metadata = {
                 "prompt": prompt,
                 "batch_id": batch_id,
                 "video_url": video_url,
                 "generation_time": gen_seconds,
+                "studio_url": studio_url,
             }
             if result.thumbnail_path:
                 metadata["thumbnail_url"] = f"/api/batch-video/video/{batch_id}/{result.thumbnail_path}"
