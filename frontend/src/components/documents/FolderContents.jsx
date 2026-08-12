@@ -23,9 +23,10 @@ import { Folder, Code } from 'lucide-react';
 import axios from 'axios';
 import { TableVirtuoso, VirtuosoGrid } from 'react-virtuoso';
 import { useSnackbar } from '../common/SnackbarProvider';
-import { API_BASE, getFileIcon, getFileIconSmall, FolderIndexIndicator, formatBytes, formatDate, getItemKey, isMediaFile } from './fileUtils.jsx';
+import { API_BASE, getFileIcon, getFileIconSmall, FolderIndexIndicator, formatBytes, formatDate, getItemKey } from './fileUtils.jsx';
 import MediaView from './MediaView';
 import CodeRepoDashboard from './CodeRepoDashboard';
+import { folderHasVisualMedia } from './folderViewPolicy';
 
 // Stable grid components (must be defined outside render to avoid Virtuoso remounts)
 const GridItemWrapper = React.forwardRef(({ children, ...props }, ref) => (
@@ -177,10 +178,9 @@ const FolderContents = ({
       setHasMore(data.has_more ?? false);
       setTotalItems((data.total_folders ?? 0) + (data.total_documents ?? 0));
 
-      // Let parent know whether this folder has media content
+      // Let parent know whether this folder has visual media (images/videos)
       if (onMediaDetected) {
-        const hasMedia = newFiles.some(f => isMediaFile(f.filename));
-        onMediaDetected(hasMedia);
+        onMediaDetected(folderHasVisualMedia(newFiles));
       }
     } catch (err) {
       setError('Failed to load folder contents');
@@ -484,7 +484,7 @@ const FolderContents = ({
           onClick={(e) => h.handleItemClick(e, item, item.itemType)}
           onDoubleClick={(e) => {
             if (isFolder) h.handleFolderDoubleClick(e, item);
-            else if (onFileOpen) onFileOpen(e, item);
+            else if (onFileOpen) onFileOpen(e, item, { siblings: h.items.files });
           }}
           draggable
           onDragStart={(e) => h.handleDragStart(e, item, item.itemType)}
@@ -739,6 +739,7 @@ const FolderContents = ({
         folder={folder}
         onContextMenu={onContextMenu}
         onFileOpen={onFileOpen}
+        onNavigateToPath={onNavigateToPath}
       />
     );
   }
@@ -847,7 +848,7 @@ const FolderContents = ({
             >
               <CardActionArea
                 onClick={(e) => handleItemClick(e, item, type)}
-                onDoubleClick={(e) => { if (isFolder) handleFolderDoubleClick(e, item); else if (onFileOpen) onFileOpen(e, item); }}
+                onDoubleClick={(e) => { if (isFolder) handleFolderDoubleClick(e, item); else if (onFileOpen) onFileOpen(e, item, { siblings: items.files }); }}
                 draggable
                 onDragStart={(e) => handleDragStart(e, item, type)}
                 onDragOver={(e) => e.preventDefault()}

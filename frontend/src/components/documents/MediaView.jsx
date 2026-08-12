@@ -1,6 +1,5 @@
-// Media View — large preview on top, thumbnail strip below
-// Handles both images and videos in the same layout.
-// Modeled after the batch video player in ImagesPage.
+// Gallery layout — large preview on top, then every folder item.
+// Visual media drive the preview; folders and other files stay visible and clickable.
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
@@ -8,6 +7,7 @@ import {
   Typography,
   IconButton,
   Button,
+  Tooltip,
   useTheme,
 } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
@@ -15,28 +15,39 @@ import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import DownloadIcon from '@mui/icons-material/Download';
 import ImageIcon from '@mui/icons-material/Image';
 import VideocamIcon from '@mui/icons-material/Videocam';
-import { API_BASE, isImageFile, isVideoFile } from './fileUtils';
+import { Folder } from 'lucide-react';
+import { API_BASE, getFileIconSmall, isImageFile, isVideoFile } from './fileUtils';
+import { isVisualMediaFile } from './folderViewPolicy';
 
-const MediaView = ({ items, _folder, onContextMenu, _onFileOpen }) => {
-  const _theme = useTheme();
+const MediaView = ({
+  items,
+  _folder,
+  onContextMenu,
+  onFileOpen,
+  onNavigateToPath,
+  initialFileId = null,
+}) => {
+  const theme = useTheme();
   const [currentIndex, setCurrentIndex] = useState(0);
 
-  // Collect all media files (images + videos), skip folders
   const mediaFiles = useMemo(() => {
     const files = items?.files || [];
-    return files.filter(f => isImageFile(f.filename) || isVideoFile(f.filename));
+    return files.filter((f) => isVisualMediaFile(f.filename || f.name));
   }, [items]);
 
-  // Non-media files (shown in a compact list below thumbnails)
-  const _otherFiles = useMemo(() => {
+  const otherFiles = useMemo(() => {
     const files = items?.files || [];
-    return files.filter(f => !isImageFile(f.filename) && !isVideoFile(f.filename));
+    return files.filter((f) => !isVisualMediaFile(f.filename || f.name));
   }, [items]);
 
-  // Subfolders
-  const _subfolders = useMemo(() => items?.folders || [], [items]);
+  const subfolders = useMemo(() => items?.folders || [], [items]);
 
-  // Clamp index when media list changes
+  useEffect(() => {
+    if (initialFileId == null) return;
+    const idx = mediaFiles.findIndex((f) => f.id === initialFileId);
+    if (idx >= 0) setCurrentIndex(idx);
+  }, [mediaFiles, initialFileId]);
+
   useEffect(() => {
     if (currentIndex >= mediaFiles.length && mediaFiles.length > 0) {
       setCurrentIndex(mediaFiles.length - 1);
@@ -44,8 +55,8 @@ const MediaView = ({ items, _folder, onContextMenu, _onFileOpen }) => {
   }, [mediaFiles.length, currentIndex]);
 
   const currentFile = mediaFiles[currentIndex] || null;
-  const isVideo = currentFile ? isVideoFile(currentFile.filename) : false;
-  const isImage = currentFile ? isImageFile(currentFile.filename) : false;
+  const isVideo = currentFile ? isVideoFile(currentFile.filename || currentFile.name) : false;
+  const isImage = currentFile ? isImageFile(currentFile.filename || currentFile.name) : false;
 
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < mediaFiles.length - 1;
@@ -53,22 +64,31 @@ const MediaView = ({ items, _folder, onContextMenu, _onFileOpen }) => {
     if (idx >= 0 && idx < mediaFiles.length) setCurrentIndex(idx);
   }, [mediaFiles.length]);
 
-  // Build URLs for the current file
   const fileUrl = currentFile
     ? `${API_BASE}/document/${currentFile.id}/download?v=${currentFile.updated_at || Date.now()}`
     : null;
-  const _thumbnailUrl = currentFile
-    ? `${API_BASE}/thumbnail?path=${encodeURIComponent(currentFile.path)}`
-    : null;
 
-  if (mediaFiles.length === 0) {
+  const hasOtherItems = subfolders.length > 0 || otherFiles.length > 0;
+  const isEmpty = mediaFiles.length === 0 && !hasOtherItems;
+
+  if (isEmpty) {
     return (
       <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'text.secondary', gap: 1, py: 4 }}>
         <ImageIcon sx={{ fontSize: 48, opacity: 0.3 }} />
-        <Typography variant="body2">No media files in this folder</Typography>
+        <Typography variant="body2">This folder is empty</Typography>
       </Box>
     );
   }
+
+  const handleOtherFileClick = (e, file) => {
+    onFileOpen?.(e, file, { siblings: items?.files || [] });
+  };
+
+  const handleFolderClick = (e, folder) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onNavigateToPath?.(folder.path);
+  };
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', bgcolor: 'grey.900', borderRadius: 1, overflow: 'hidden' }}>
@@ -88,13 +108,17 @@ const MediaView = ({ items, _folder, onContextMenu, _onFileOpen }) => {
           <Box
             component="img"
             src={fileUrl}
-            alt={currentFile.filename}
+            alt={currentFile.filename || currentFile.name}
             sx={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
             onError={(e) => { e.target.style.display = 'none'; }}
           />
         )}
+        {!currentFile && (
+          <Typography variant="body2" sx={{ color: 'grey.500' }}>
+            Select a file
+          </Typography>
+        )}
 
-        {/* Prev overlay */}
         {hasPrev && (
           <IconButton
             onClick={() => navigateTo(currentIndex - 1)}
@@ -106,7 +130,6 @@ const MediaView = ({ items, _folder, onContextMenu, _onFileOpen }) => {
             <PlayArrowIcon sx={{ transform: 'rotate(180deg)' }} />
           </IconButton>
         )}
-        {/* Next overlay */}
         {hasNext && (
           <IconButton
             onClick={() => navigateTo(currentIndex + 1)}
@@ -120,80 +143,139 @@ const MediaView = ({ items, _folder, onContextMenu, _onFileOpen }) => {
         )}
       </Box>
 
-      {/* Thumbnail strip */}
-      <Box sx={{
-        display: 'flex', gap: 0.5, px: 1, py: 1,
-        overflowX: 'auto', bgcolor: 'grey.900', flexShrink: 0,
-        '&::-webkit-scrollbar': { height: 4 },
-        '&::-webkit-scrollbar-thumb': { bgcolor: 'grey.700', borderRadius: 2 },
-      }}>
-        {mediaFiles.map((file, idx) => {
-          const isVid = isVideoFile(file.filename);
-          const thumbSrc = `${API_BASE}/thumbnail?path=${encodeURIComponent(file.path)}`;
-          return (
-            <Box
-              key={file.id || idx}
-              onClick={() => navigateTo(idx)}
-              onContextMenu={(e) => onContextMenu?.(e, file, 'file')}
-              sx={{
-                flexShrink: 0, width: 80, height: 45,
-                borderRadius: 1, overflow: 'hidden', cursor: 'pointer',
-                border: 2, borderColor: idx === currentIndex ? 'primary.main' : 'transparent',
-                opacity: idx === currentIndex ? 1 : 0.6,
-                transition: 'opacity 0.2s, border-color 0.2s',
-                '&:hover': { opacity: 1 },
-                bgcolor: 'grey.800',
-                position: 'relative',
-              }}
-            >
-              <Box component="img" src={thumbSrc} alt={file.filename}
-                sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                onError={(e) => { e.target.style.display = 'none'; }}
-              />
-              {/* Small video indicator badge */}
-              {isVid && (
-                <VideocamIcon sx={{
-                  position: 'absolute', bottom: 2, right: 2,
-                  fontSize: 12, color: 'white',
-                  filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))',
-                }} />
-              )}
-            </Box>
-          );
-        })}
-      </Box>
+      {/* Visual-media thumbnail strip */}
+      {mediaFiles.length > 0 && (
+        <Box sx={{
+          display: 'flex', gap: 0.5, px: 1, py: 1,
+          overflowX: 'auto', bgcolor: 'grey.900', flexShrink: 0,
+          '&::-webkit-scrollbar': { height: 4 },
+          '&::-webkit-scrollbar-thumb': { bgcolor: 'grey.700', borderRadius: 2 },
+        }}>
+          {mediaFiles.map((file, idx) => {
+            const isVid = isVideoFile(file.filename || file.name);
+            const thumbSrc = `${API_BASE}/thumbnail?path=${encodeURIComponent(file.path)}`;
+            return (
+              <Box
+                key={file.id || idx}
+                onClick={() => navigateTo(idx)}
+                onContextMenu={(e) => onContextMenu?.(e, file, 'file')}
+                sx={{
+                  flexShrink: 0, width: 80, height: 45,
+                  borderRadius: 1, overflow: 'hidden', cursor: 'pointer',
+                  border: 2, borderColor: idx === currentIndex ? 'primary.main' : 'transparent',
+                  opacity: idx === currentIndex ? 1 : 0.6,
+                  transition: 'opacity 0.2s, border-color 0.2s',
+                  '&:hover': { opacity: 1 },
+                  bgcolor: 'grey.800',
+                  position: 'relative',
+                }}
+              >
+                <Box component="img" src={thumbSrc} alt={file.filename || file.name}
+                  sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  onError={(e) => { e.target.style.display = 'none'; }}
+                />
+                {isVid && (
+                  <VideocamIcon sx={{
+                    position: 'absolute', bottom: 2, right: 2,
+                    fontSize: 12, color: 'white',
+                    filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))',
+                  }} />
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+      )}
+
+      {/* Folders + non-visual files — always listed, never hidden by gallery */}
+      {hasOtherItems && (
+        <Box sx={{
+          display: 'flex', gap: 0.75, px: 1, py: 0.75,
+          overflowX: 'auto', flexShrink: 0,
+          bgcolor: 'grey.800',
+          borderTop: 1, borderColor: 'grey.700',
+          '&::-webkit-scrollbar': { height: 4 },
+          '&::-webkit-scrollbar-thumb': { bgcolor: 'grey.600', borderRadius: 2 },
+        }}>
+          {subfolders.map((folder) => (
+            <Tooltip key={folder.id || folder.path} title={folder.name}>
+              <Box
+                onClick={(e) => handleFolderClick(e, folder)}
+                onDoubleClick={(e) => handleFolderClick(e, folder)}
+                onContextMenu={(e) => onContextMenu?.(e, folder, 'folder')}
+                sx={{
+                  flexShrink: 0, minWidth: 88, maxWidth: 120,
+                  display: 'flex', flexDirection: 'column', alignItems: 'center',
+                  gap: 0.25, px: 0.75, py: 0.5, borderRadius: 1, cursor: 'pointer',
+                  '&:hover': { bgcolor: 'grey.700' },
+                }}
+              >
+                <Folder size={22} color={theme.palette.warning.light} strokeWidth={1.5} />
+                <Typography variant="caption" noWrap sx={{ color: 'grey.200', width: '100%', textAlign: 'center' }}>
+                  {folder.name}
+                </Typography>
+              </Box>
+            </Tooltip>
+          ))}
+          {otherFiles.map((file) => {
+            const name = file.filename || file.name;
+            return (
+              <Tooltip key={file.id || name} title={name}>
+                <Box
+                  onClick={(e) => handleOtherFileClick(e, file)}
+                  onDoubleClick={(e) => handleOtherFileClick(e, file)}
+                  onContextMenu={(e) => onContextMenu?.(e, file, 'file')}
+                  sx={{
+                    flexShrink: 0, minWidth: 88, maxWidth: 120,
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    gap: 0.25, px: 0.75, py: 0.5, borderRadius: 1, cursor: 'pointer',
+                    '&:hover': { bgcolor: 'grey.700' },
+                  }}
+                >
+                  {getFileIconSmall(name, false, theme, file.index_status, file.path)}
+                  <Typography variant="caption" noWrap sx={{ color: 'grey.200', width: '100%', textAlign: 'center' }}>
+                    {name}
+                  </Typography>
+                </Box>
+              </Tooltip>
+            );
+          })}
+        </Box>
+      )}
 
       {/* Action bar — filename, index, open/download */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', px: 2, py: 0.75, bgcolor: 'grey.900', borderTop: 1, borderColor: 'grey.800', flexShrink: 0 }}>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-          <Button size="small" disabled={!hasPrev} onClick={() => navigateTo(currentIndex - 1)} sx={{ color: 'grey.400', minWidth: 'auto' }}>
-            Previous
-          </Button>
-          <Button size="small" disabled={!hasNext} onClick={() => navigateTo(currentIndex + 1)} sx={{ color: 'grey.400', minWidth: 'auto' }}>
-            Next
-          </Button>
-          <Typography variant="caption" sx={{ color: 'grey.500', ml: 1 }}>
-            {currentFile?.filename}
-            <Typography component="span" variant="caption" sx={{ ml: 1, color: 'grey.600' }}>
-              {currentIndex + 1} / {mediaFiles.length}
+      {currentFile && (
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', px: 2, py: 0.75, bgcolor: 'grey.900', borderTop: 1, borderColor: 'grey.800', flexShrink: 0 }}>
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+            <Button size="small" disabled={!hasPrev} onClick={() => navigateTo(currentIndex - 1)} sx={{ color: 'grey.400', minWidth: 'auto' }}>
+              Previous
+            </Button>
+            <Button size="small" disabled={!hasNext} onClick={() => navigateTo(currentIndex + 1)} sx={{ color: 'grey.400', minWidth: 'auto' }}>
+              Next
+            </Button>
+            <Typography variant="caption" sx={{ color: 'grey.500', ml: 1 }}>
+              {currentFile?.filename || currentFile?.name}
+              <Typography component="span" variant="caption" sx={{ ml: 1, color: 'grey.600' }}>
+                {currentIndex + 1} / {mediaFiles.length}
+              </Typography>
             </Typography>
-          </Typography>
+          </Box>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button size="small" onClick={() => fileUrl && window.open(fileUrl, '_blank')} startIcon={<OpenInNewIcon />} sx={{ color: 'grey.400' }}>
+              Open
+            </Button>
+            <Button size="small" onClick={() => {
+              if (!fileUrl) return;
+              const a = document.createElement('a');
+              a.href = fileUrl;
+              a.download = currentFile.filename || currentFile.name;
+              a.click();
+            }} startIcon={<DownloadIcon />} sx={{ color: 'grey.400' }}>
+              Download
+            </Button>
+          </Box>
         </Box>
-        <Box sx={{ display: 'flex', gap: 1 }}>
-          <Button size="small" onClick={() => fileUrl && window.open(fileUrl, '_blank')} startIcon={<OpenInNewIcon />} sx={{ color: 'grey.400' }}>
-            Open
-          </Button>
-          <Button size="small" onClick={() => {
-            if (!fileUrl) return;
-            const a = document.createElement('a');
-            a.href = fileUrl;
-            a.download = currentFile.filename;
-            a.click();
-          }} startIcon={<DownloadIcon />} sx={{ color: 'grey.400' }}>
-            Download
-          </Button>
-        </Box>
-      </Box>
+      )}
     </Box>
   );
 };

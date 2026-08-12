@@ -7,18 +7,25 @@ import {
   NavigateNext as NavigateNextIcon,
 } from "@mui/icons-material";
 
-const BreadcrumbNav = ({ currentPath, onNavigate }) => {
-  const pathParts = currentPath ? currentPath.split("/").filter(Boolean) : [];
-  
+const normalizePath = (path) => {
+  if (!path || path === "/") return "/";
+  return `/${String(path).split("/").filter(Boolean).join("/")}`;
+};
+
+const BreadcrumbNav = ({ currentPath, onNavigate, rootPath = "/" }) => {
+  const root = normalizePath(rootPath);
+  const current = normalizePath(currentPath);
+  const rootParts = root === "/" ? [] : root.split("/").filter(Boolean);
+  const currentParts = current === "/" ? [] : current.split("/").filter(Boolean);
+  const pathParts = currentParts.slice(rootParts.length);
+
   const handleClick = (index) => {
     if (index === -1) {
-      // Navigate to root
-      onNavigate("/");
-    } else {
-      // Navigate to specific folder - add leading slash to match DB storage format
-      const newPath = "/" + pathParts.slice(0, index + 1).join("/");
-      onNavigate(newPath);
+      onNavigate(root);
+      return;
     }
+    const newPath = "/" + [...rootParts, ...pathParts.slice(0, index + 1)].join("/");
+    onNavigate(newPath);
   };
 
   return (

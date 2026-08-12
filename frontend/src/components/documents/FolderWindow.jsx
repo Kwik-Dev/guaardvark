@@ -1,13 +1,14 @@
 // Complete folder window component
 // Combines FolderWindowWrapper (chrome) and FolderContents (file list)
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
 import { ToggleButtonGroup, ToggleButton, Tooltip, Box, Accordion, AccordionSummary, AccordionDetails, Chip, Typography } from '@mui/material';
 import { ViewList as ViewListIcon, ViewModule as ViewModuleIcon, ViewComfy as ViewComfyIcon, ExpandMore as ExpandMoreIcon } from '@mui/icons-material';
 import FolderWindowWrapper from './FolderWindowWrapper';
 import FolderContents from './FolderContents';
 import BreadcrumbNav from '../filesystem/BreadcrumbNav';
+import { persistListingView, readStoredListingView } from './folderViewPolicy';
 
 const FolderWindow = React.forwardRef(({
   _id,
@@ -30,44 +31,47 @@ const FolderWindow = React.forwardRef(({
 }, ref) => {
   // Track current path within this folder window for subfolder navigation
   const [currentPath, setCurrentPath] = useState(folder.path);
-  // Whether this folder's contents contain media files (images/videos)
+  // Whether this folder's contents contain visual media (images/videos)
   const [hasMedia, setHasMedia] = useState(false);
-  const autoSwitchedRef = useRef(false);
-  // Per-window view mode — seeded from the last user-toggled default in localStorage.
-  // Keeping this local is what stops one window from hijacking every other window's view.
-  const [viewMode, setViewMode] = useState(() =>
-    localStorage.getItem('documentsPageViewMode') || 'list'
-  );
+  // Per-window view mode — seeded from the last listing preference. Gallery is
+  // opt-in for this window only and is never written back as a default.
+  const [viewMode, setViewMode] = useState(() => readStoredListingView());
 
-  // Reset currentPath when folder changes
+  const fallBackFromGallery = useCallback(() => {
+    setHasMedia(false);
+    setViewMode((prev) => (prev === 'media' ? readStoredListingView() : prev));
+  }, []);
+
+  // Reset path and leave gallery when the opened folder identity changes
   useEffect(() => {
     setCurrentPath(folder.path);
-    autoSwitchedRef.current = false;
-  }, [folder.id, folder.path]);
+    fallBackFromGallery();
+  }, [folder.id, folder.path, fallBackFromGallery]);
 
-  // Auto-switch to media view when media is detected (only once per folder open).
-  // Does NOT persist to localStorage — auto-switches are content-driven, not a preference.
+  // Detection only drives the Media toggle. Content never hijacks the view.
   const handleMediaDetected = useCallback((detected) => {
     setHasMedia(detected);
-    if (detected && !autoSwitchedRef.current) {
-      autoSwitchedRef.current = true;
-      setViewMode((prev) => (prev === 'media' ? prev : 'media'));
+    if (!detected) {
+      setViewMode((prev) => (prev === 'media' ? readStoredListingView() : prev));
     }
   }, []);
 
-  // User toggle — update this window only, and remember the choice as the new
-  // default for future folder windows via localStorage.
-  const handleViewModeToggle = (event, newViewMode) => {
-    if (newViewMode !== null) {
-      setViewMode(newViewMode);
-      localStorage.setItem('documentsPageViewMode', newViewMode);
+  // User toggle — persist list/grid as the default for future windows.
+  // Gallery stays local to this window.
+  const handleViewModeToggle = (_event, newViewMode) => {
+    if (newViewMode === null) return;
+    if (newViewMode === 'media') {
+      setViewMode('media');
+      return;
     }
+    setViewMode(persistListingView(newViewMode));
   };
 
   // Handle navigation within folder window (for subfolder double-clicks and breadcrumb clicks)
   const handleNavigateToPath = (newPath) => {
+    if (newPath === currentPath) return;
     setCurrentPath(newPath);
-    autoSwitchedRef.current = false; // allow re-detection on navigate
+    fallBackFromGallery();
   };
 
   const titleBarActions = (
@@ -101,7 +105,7 @@ const FolderWindow = React.forwardRef(({
   return (
     <FolderWindowWrapper
       ref={ref}
-      title={folder.name}
+      title={currentPath.split('/').filter(Boolean).pop() || folder.name}
       isMinimized={isMinimized}
       onToggleMinimize={onToggleMinimize}
       onClose={onClose}
@@ -116,6 +120,7 @@ const FolderWindow = React.forwardRef(({
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
           <BreadcrumbNav
             currentPath={currentPath}
+            rootPath={folder.path}
             onNavigate={handleNavigateToPath}
           />
         </Box>
