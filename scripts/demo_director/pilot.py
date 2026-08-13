@@ -135,8 +135,8 @@ BEATS = [
             "You're looking at the dashboard. Live cards for the G P U, "
             "jobs, and projects.",
             "",
-            "Ninety seconds. Two of my favorite things.",
-            "Go.",
+            "This is the pilot. A quick taste, before the full series.",
+            "Let me show you two things.",
         ],
         action=act_dashboard,
         verify=verify_dashboard,
