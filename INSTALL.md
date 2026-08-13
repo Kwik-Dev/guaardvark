@@ -6,11 +6,13 @@
 
 ## Install (Linux)
 
-**One-liner (from GitHub):**
+**One-liner:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guaardvark/guaardvark/main/install.sh | bash
+curl -fsSL https://guaardvark.com/install.sh | bash
 ```
+
+(The domain 302-redirects to `raw.githubusercontent.com/guaardvark/guaardvark/main/install.sh`; use that URL directly if you prefer to pin the source.)
 
 Clones to `~/guaardvark` (override with `GUAARDVARK_HOME=/path`) and hands off to `./start.sh`. Re-running updates an existing install; `GUAARDVARK_NO_START=1` clones without launching.
 

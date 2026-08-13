@@ -355,7 +355,7 @@ The sections above cover the experience and differentiators. The rest of this RE
 > installs: use a 3.12 interpreter only.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guaardvark/guaardvark/main/install.sh | bash
+curl -fsSL https://guaardvark.com/install.sh | bash
 ```
 
 This clones to `~/guaardvark` (override with `GUAARDVARK_HOME=/path`) and launches `./start.sh`. Re-running it updates an existing install. Prefer doing it by hand? Same thing:
