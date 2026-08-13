@@ -185,7 +185,11 @@ class Stage:
         # playwright's node driver, and launch(env=...) does not reliably
         # reach the main chrome process (observed: window opened on :0).
         os.environ["DISPLAY"] = display
+        # big, high-visibility cursor for the camera. XCURSOR_SIZE alone is
+        # ignored on bare Xvfb — an explicit theme must be named too.
         os.environ["XCURSOR_SIZE"] = CURSOR_SIZE
+        os.environ["XCURSOR_THEME"] = os.environ.get("DEMO_CURSOR_THEME",
+                                                     "DMZ-White")
         # Host session is Wayland: chromium's ozone would auto-pick wayland and
         # open on the REAL desktop, ignoring DISPLAY. Force X11 and scrub the
         # wayland handles so the window can only land on the Xvfb display.
@@ -200,18 +204,47 @@ class Stage:
         time.sleep(0.8)
         self._pw = sync_playwright().start()
         w, h = display_size(display)
-        self.browser = self._pw.chromium.launch(
+        # persistent context: --kiosk only applies to the browser's INITIAL
+        # window, and launch()+new_page() would open a second, non-kiosk
+        # window (observed: tab bar + URL bar on camera). The persistent
+        # context's first page IS the kiosk window.
+        import tempfile
+        self._profile_dir = tempfile.mkdtemp(prefix="demo_stage_chrome_")
+        self.browser = self._pw.chromium.launch_persistent_context(
+            user_data_dir=self._profile_dir,
             headless=False,
+            no_viewport=True,
             args=[
                 "--ozone-platform=x11",
                 "--kiosk", f"--window-position=0,0", f"--window-size={w},{h}",
                 "--hide-crash-restore-bubble", "--disable-infobars",
             ],
         )
-        self.page = self.browser.new_page(no_viewport=True)
+        self.page = (self.browser.pages[0] if self.browser.pages
+                     else self.browser.new_page())
         self.cursor = Cursor(display)
         time.sleep(1.0)
         self._assert_on_display()
+        self._ensure_fullscreen()
+
+    def _ensure_fullscreen(self):
+        """--kiosk under openbox still leaves browser chrome (tab + URL bar)
+        visible; F11 is what actually fullscreens the content. Verify by
+        measuring the viewport against the display and retry once."""
+        w, h = display_size(self.display)
+        for _ in range(3):
+            size = self.page.evaluate(
+                "() => [window.innerWidth, window.innerHeight]")
+            if size[0] >= w - 4 and size[1] >= h - 4:
+                return
+            self.cursor.jump(w // 2, h // 2)
+            self.cursor.click()          # window must be focused for F11
+            time.sleep(0.3)
+            self.cursor._xdo("key", "--clearmodifiers", "F11")
+            time.sleep(1.2)
+        size = self.page.evaluate("() => [window.innerWidth, window.innerHeight]")
+        raise RuntimeError(f"could not fullscreen the stage: viewport={size}, "
+                           f"display={w}x{h}")
 
     def _assert_on_display(self):
         """Hard-fail unless a window is actually mapped on the recording display."""

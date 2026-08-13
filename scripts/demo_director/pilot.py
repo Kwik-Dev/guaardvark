@@ -44,6 +44,23 @@ def verify_dashboard(st: Stage):
     assert st.path() in ("/", "/dashboard"), st.path()
 
 
+def reset_files(st: Stage):
+    """Folder-window state persists per user across sessions — close any
+    leftover windows OFF-CAMERA (native clicks, before recording starts)."""
+    st.page.goto(FRONTEND + "/documents", wait_until="load", timeout=30_000)
+    st.page.wait_for_timeout(1500)
+    for _ in range(6):
+        closes = st.page.locator("svg[data-testid='CloseIcon']")
+        if closes.count() == 0:
+            break
+        try:
+            closes.first.locator("xpath=ancestor::button[1]").click(timeout=3000)
+        except Exception:
+            break
+        st.page.wait_for_timeout(400)
+    reset_home(st)
+
+
 def act_files(st: Stage):
     st.nav_via_sidebar("Files", "/documents",
                        st.page.get_by_text("Videos", exact=True))
@@ -132,7 +149,7 @@ BEATS = [
         ),
         action=act_files,
         verify=verify_files,
-        reset=reset_home,
+        reset=reset_files,
     ),
     Beat(
         name="theme",
@@ -159,7 +176,7 @@ def main():
         stage.page.wait_for_timeout(2500)  # let cards hydrate before take 1
         size = stage.page.evaluate("() => [window.innerWidth, window.innerHeight]")
         print(f"stage viewport: {size}")
-        if size[0] < 1900:
+        if size[0] < 1900 or size[1] < 1070:
             raise RuntimeError(f"not fullscreen ({size}) — is openbox running on :98?")
         # warm the Vite dev server: first visit to a lazy route can take >10s
         # to transform — never pay that cost on camera
