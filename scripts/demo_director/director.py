@@ -228,6 +228,20 @@ def generate_narration(text, dest: Path, voice: str = "libritts",
         return p
 
     for i, line in enumerate(lines):
+        # {"play": path} = insert an existing recording INTO the narration
+        # timeline (demo clips the audience must hear in full). Never overlay
+        # foreground speech — voices overlap (observed: the narrator talking
+        # over her own reference clip). Overlays are for background audio.
+        if isinstance(line, dict) and "play" in line:
+            raw = Path(line["play"])
+            norm = workdir / f"seg_{i:02d}_play.wav"
+            _run(["ffmpeg", "-y", "-i", str(raw), "-ar", "24000", "-ac", "1",
+                  "-sample_fmt", "s16", str(norm)])
+            if parts:
+                parts.append(_silence(0.45 + pending_pause, i))
+            pending_pause = 0.0
+            parts.append(norm)
+            continue
         if not line.strip():                 # blank line = extra breathing room
             pending_pause += line_pause
             continue
@@ -592,7 +606,10 @@ class Episode:
         for k, (opath, start_s) in enumerate(b.audio_overlays):
             cmd += ["-i", str(opath)]
             ms = int(float(start_s) * 1000)
-            filters.append(f"[{k + 2}:a]adelay={ms}|{ms}[ov{k}]")
+            # ducked: overlays are background (music beds, ambience) and must
+            # sit under the narration, never compete with it
+            filters.append(
+                f"[{k + 2}:a]volume=0.55,adelay={ms}|{ms}[ov{k}]")
             mix_inputs += f"[ov{k}]"
         n = 1 + len(b.audio_overlays)
         filters.append(

@@ -244,14 +244,14 @@ BEATS = [
             "right now.",
             "",
             "This thirteen-second clip is her entire origin story.",
-            "The words are strange on purpose. Azure. Measured. Thirty "
-            "birds. Together, they cover nearly every sound in English.",
+            "The words are strange on purpose. They cover nearly every "
+            "sound in English.",
+            "Listen.",
+            {"play": REF},              # in-timeline: narration never overlaps
         ],
         action=act_reference,
         verify=v_audio,
         reset=reset_audio,
-        audio_overlays=[(REF, 14.0)],   # the reference itself, after the setup
-        min_hold=28.0,
     ),
     Beat(
         name="consent",
@@ -272,16 +272,15 @@ BEATS = [
             "Here's the same sentence, three ways.",
             "",
             "Piper. Fast, flat, dependable.",
-            "",
+            {"play": AB_PIPER},
             "Kokoro. Smoother, still fixed voices.",
-            "",
-            "And the Chatterbox clone. Same identity. New range.",
+            {"play": AB_KOKORO},
+            "And the Chatterbox clone.",
+            {"play": AB_CLONE},
         ],
         action=act_clone_ab,
         verify=v_audio,
         reset=reset_audio,
-        audio_overlays=[(AB_PIPER, 4.5), (AB_KOKORO, 9.5), (AB_CLONE, 15.0)],
-        min_hold=22.0,
     ),
     Beat(
         name="selfcheck",
