@@ -96,14 +96,17 @@ def _narrate_piper(text: str, dest: Path, voice: str = "libritts") -> None:
     dest.write_bytes(audio.content)
 
 
-def _narrate_chatterbox(text: str, dest: Path) -> None:
+def _narrate_chatterbox(text: str, dest: Path, seed: int | None = None) -> None:
     ref = Path(NARRATOR_REF)
     if not ref.is_absolute():
         ref = Path(__file__).resolve().parents[2] / ref
+    payload = {"text": text, "backend": "chatterbox",
+               "reference_clip_path": str(ref)}
+    if seed is not None:
+        payload["seed"] = seed
     r = requests.post(
         f"{API}/api/audio-foundry/generate/voice",
-        json={"text": text, "backend": "chatterbox",
-              "reference_clip_path": str(ref)},
+        json=payload,
         timeout=600,
     )
     r.raise_for_status()
@@ -123,14 +126,80 @@ def _narrate_chatterbox(text: str, dest: Path) -> None:
     dest.write_bytes(src.read_bytes())
 
 
+def _letters(s: str) -> str:
+    import re as _re
+    return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _stt(path: Path) -> str:
+    """Transcribe via the backend venv's faster-whisper directly — the HTTP
+    /speech-to-text route rate-limits after a handful of calls (429s observed
+    mid-episode), and narration prep makes one call per line."""
+    repo = Path(__file__).resolve().parents[2]
+    py = repo / "backend" / "venv" / "bin" / "python"
+    code = (
+        "import sys\n"
+        "from backend.utils.faster_whisper_utils import transcribe_audio_faster\n"
+        "print(transcribe_audio_faster(sys.argv[1], model_size='tiny.en')[0] or '')\n"
+    )
+    r = subprocess.run([str(py), "-c", code, str(path)],
+                       capture_output=True, text=True, cwd=str(repo),
+                       timeout=120)
+    if r.returncode == 0:
+        return r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    # fallback: the HTTP route (may rate-limit, but better than nothing)
+    with open(path, "rb") as f:
+        resp = requests.post(f"{API}/api/voice/speech-to-text",
+                             files={"audio": (path.name, f, "audio/wav")},
+                             timeout=120)
+    resp.raise_for_status()
+    return resp.json().get("text", "") or ""
+
+
+def _line_matches(expected: str, wav: Path) -> tuple[bool, str]:
+    """Whisper-verify a synthesized line: catches Chatterbox babble-repeats
+    (observed: 'This is Guaardvark' spoken twice), drops, and garble."""
+    import difflib
+    heard = _stt(wav)
+    e, h = _letters(speakable(expected)), _letters(heard)
+    if not e:
+        return True, heard
+    if len(h) > 1.6 * len(e):                      # said too much = repeated
+        return False, heard
+    sim = difflib.SequenceMatcher(None, e, h).ratio()
+    return sim >= 0.55, heard
+
+
 def _synth_one(text: str, dest: Path, voice: str) -> None:
-    if NARRATOR_ENGINE == "chatterbox":
+    if NARRATOR_ENGINE != "chatterbox":
+        _narrate_piper(text, dest, voice)
+        return
+    # chatterbox occasionally repeats/garbles short lines — verify each take
+    # against the script via whisper and re-roll the seed until it reads clean
+    best: tuple[float, bytes] | None = None
+    for attempt in range(3):
         try:
-            _narrate_chatterbox(text, dest)
-            return
+            _narrate_chatterbox(text, dest,
+                                seed=None if attempt == 0 else attempt * 7919)
         except Exception as e:
             print(f"  narrator: chatterbox failed ({e}) — falling back to piper")
-    _narrate_piper(text, dest, voice)
+            _narrate_piper(text, dest, voice)
+            return
+        try:
+            ok, heard = _line_matches(text, dest)
+        except Exception as e:
+            print(f"  narrator: STT check unavailable ({e}) — accepting take")
+            return
+        if ok:
+            return
+        print(f"  narrator: line failed read-check (attempt {attempt + 1}) — "
+              f"expected {text[:40]!r}, heard {heard[:60]!r}")
+        size_penalty = abs(len(_letters(heard)) - len(_letters(speakable(text))))
+        if best is None or size_penalty < best[0]:
+            best = (size_penalty, dest.read_bytes())
+    if best is not None:                     # all takes flawed — keep closest
+        dest.write_bytes(best[1])
+        print("  narrator: kept closest take after 3 attempts")
 
 
 def generate_narration(text, dest: Path, voice: str = "libritts",
