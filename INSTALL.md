@@ -6,6 +6,16 @@
 
 ## Install (Linux)
 
+**One-liner (from GitHub):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/guaardvark/guaardvark/main/install.sh | bash
+```
+
+Clones to `~/guaardvark` (override with `GUAARDVARK_HOME=/path`) and hands off to `./start.sh`. Re-running updates an existing install; `GUAARDVARK_NO_START=1` clones without launching.
+
+**Or from a release zip:**
+
 1. **Extract:**
    ```bash
    unzip guaardvark-release.zip
