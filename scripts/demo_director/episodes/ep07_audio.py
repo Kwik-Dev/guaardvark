@@ -194,7 +194,7 @@ def act_music(st: Stage):
     # off-camera: free Ollama before ACE-Step loads (16GB card)
     import requests as rq
     try:
-        rq.post("http://localhost:5000/api/model/unload", json={}, timeout=30)
+        rq.post("http://localhost:5000/api/model/unload", json={"all": True}, timeout=30)
     except Exception:
         pass
     gen = st.page.get_by_role("button", name=re.compile("compose", re.I))
