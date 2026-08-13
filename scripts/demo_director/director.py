@@ -123,24 +123,64 @@ def _narrate_chatterbox(text: str, dest: Path) -> None:
     dest.write_bytes(src.read_bytes())
 
 
-def generate_narration(text: str, dest: Path, voice: str = "libritts") -> float:
-    """Synthesize narration to dest (client-side name: collision-proof).
-
-    Engine per DEMO_NARRATOR: 'chatterbox' (series default — cloned female
-    narrator) with automatic Piper fallback, or 'piper'. Returns duration s.
-    """
-    text = speakable(text)
+def _synth_one(text: str, dest: Path, voice: str) -> None:
     if NARRATOR_ENGINE == "chatterbox":
         try:
             _narrate_chatterbox(text, dest)
+            return
         except Exception as e:
             print(f"  narrator: chatterbox failed ({e}) — falling back to piper")
-            _narrate_piper(text, dest, voice)
-    else:
-        _narrate_piper(text, dest, voice)
+    _narrate_piper(text, dest, voice)
+
+
+def generate_narration(text, dest: Path, voice: str = "libritts",
+                       line_pause: float = 0.55) -> float:
+    """Synthesize narration to dest. Returns duration in seconds.
+
+    `text` may be a single string, or a LIST of lines: each line is
+    synthesized as its own take (consistent prosody, no TTS chunk seams) and
+    the lines are joined with `line_pause` seconds of real silence — pauses
+    are constructed, not hoped for. An empty-string line doubles the pause.
+    Engine per DEMO_NARRATOR: 'chatterbox' (series default — cloned female
+    narrator) with automatic Piper fallback, or 'piper'.
+    """
+    lines = [text] if isinstance(text, str) else list(text)
+    workdir = dest.parent / f".{dest.stem}_parts"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    parts: list[Path] = []          # normalized 24k mono segments, in order
+    pending_pause = 0.0
+
+    def _silence(seconds: float, idx: int) -> Path:
+        p = workdir / f"sil_{idx:02d}.wav"
+        _run(["ffmpeg", "-y", "-f", "lavfi",
+              "-i", "anullsrc=r=24000:cl=mono",
+              "-t", f"{seconds:.2f}", "-sample_fmt", "s16", str(p)])
+        return p
+
+    for i, line in enumerate(lines):
+        if not line.strip():                 # blank line = extra breathing room
+            pending_pause += line_pause
+            continue
+        raw = workdir / f"raw_{i:02d}.wav"
+        _synth_one(speakable(line), raw, voice)
+        norm = workdir / f"seg_{i:02d}.wav"  # engines differ in rate — unify
+        _run(["ffmpeg", "-y", "-i", str(raw), "-ar", "24000", "-ac", "1",
+              "-sample_fmt", "s16", str(norm)])
+        if parts:
+            parts.append(_silence(line_pause + pending_pause, i))
+        pending_pause = 0.0
+        parts.append(norm)
+
+    if not parts:
+        raise RuntimeError("narration had no speakable lines")
+    concat = workdir / "concat.txt"
+    concat.write_text("".join(f"file '{p.resolve()}'\n" for p in parts))
+    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
+          "-c", "copy", str(dest)])
     dur = ffprobe_duration(dest)
     if dur <= 0.2:
-        raise RuntimeError(f"narration suspiciously short ({dur}s) for: {text[:60]}")
+        raise RuntimeError(f"narration suspiciously short ({dur}s)")
     return dur
 
 

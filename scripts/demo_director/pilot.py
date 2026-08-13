@@ -127,40 +127,58 @@ def verify_theme(st: Stage):
 BEATS = [
     Beat(
         name="dashboard",
-        narration=(
-            "This is Guaardvark: a complete AI studio that runs on one desktop "
-            "G P U. No cloud. No subscriptions. Nothing leaves this room. "
-            "You're looking at the dashboard: live cards for the G P U, jobs, "
-            "and projects. Ninety seconds. Two of my favorite things. Go."
-        ),
+        narration=[
+            "This is Guaardvark.",
+            "A complete AI studio that runs on one desktop G P U.",
+            "No cloud. No subscriptions. Nothing leaves this room.",
+            "",
+            "You're looking at the dashboard. Live cards for the G P U, "
+            "jobs, and projects.",
+            "",
+            "Ninety seconds. Two of my favorite things.",
+            "Go.",
+        ],
         action=act_dashboard,
         verify=verify_dashboard,
         reset=reset_home,
     ),
     Beat(
         name="files",
-        narration=(
-            "First: your files get a real desktop, inside a browser tab. "
-            "These are folders, on a desktop surface. Double click, and a "
-            "folder opens as a window. A real window: I can drag it around, "
-            "resize it, stack it with others. P D Fs, documents, audio, video: "
-            "everything opens right here, in the app. Nothing gets downloaded, "
-            "nothing gets uploaded. It's already home."
-        ),
+        narration=[
+            "First. Your files get a real desktop, inside a browser tab.",
+            "These are folders, sitting on a desktop surface.",
+            "",
+            "Double click.",
+            "And a folder opens as a window.",
+            "A real window. I can drag it around, resize it, stack it "
+            "with others.",
+            "",
+            "P D Fs. Documents. Audio. Video.",
+            "Everything opens right here, in the app.",
+            "Nothing gets downloaded. Nothing gets uploaded.",
+            "It's already home.",
+        ],
         action=act_files,
         verify=verify_files,
         reset=reset_files,
     ),
     Beat(
         name="theme",
-        narration=(
-            "And because this is your machine, it looks how you want. "
-            "Settings. Change theme. One click, and the whole studio goes "
-            "Fallout green. One more, and we're back. That's the pilot. "
-            "Twelve full episodes are coming: chat with three brains, a film "
-            "crew of five A I agents, voice cloning with consent built in, and "
-            "a system that fixes its own code overnight. One machine. No cloud."
-        ),
+        narration=[
+            "And because this is your machine, it looks how you want.",
+            "Settings. Change theme.",
+            "",
+            "One click, and the whole studio goes Fallout green.",
+            "One more, and we're back.",
+            "",
+            "That's the pilot.",
+            "Twelve full episodes are coming.",
+            "Chat with three brains. A film crew of five AI agents. "
+            "Voice cloning, with consent built in. And a system that fixes "
+            "its own code, overnight.",
+            "",
+            "One machine. No cloud.",
+        ],
         action=act_theme,
         verify=verify_theme,
         reset=reset_home,
