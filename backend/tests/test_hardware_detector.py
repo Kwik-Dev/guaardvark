@@ -108,3 +108,51 @@ def test_nvidia_probe_includes_compute_cap(monkeypatch):
     assert gpu["vendor"] == "nvidia"
     assert gpu["vram_mb"] == 16311
     assert gpu["compute_cap"] == "12.0"
+
+
+def test_network_probe_flags_e1000e_quirk(tmp_path):
+    """A physical NIC on the e1000e driver carries the tx_unit_hang quirk;
+    virtual interfaces (no device entry) are skipped."""
+    sysnet = tmp_path / "net"
+    # Physical NIC on e1000e: net/eno1/device/driver -> .../drivers/e1000e
+    drv_dir = tmp_path / "drivers" / "e1000e"
+    drv_dir.mkdir(parents=True)
+    dev = sysnet / "eno1" / "device"
+    dev.mkdir(parents=True)
+    (dev / "driver").symlink_to(drv_dir)
+    # Virtual interface: no device entry
+    (sysnet / "lo").mkdir(parents=True)
+
+    d = HardwareDetector()
+    nics = d._probe_network(sys_class_net=str(sysnet))
+    assert len(nics) == 1
+    nic = nics[0]
+    assert nic["interface"] == "eno1"
+    assert nic["driver"] == "e1000e"
+    assert nic["quirk"] == "tx_unit_hang"
+    assert "tso off gso off gro off" in nic["mitigation"]
+
+
+def test_network_probe_benign_driver_has_no_quirk(tmp_path):
+    sysnet = tmp_path / "net"
+    drv_dir = tmp_path / "drivers" / "igc"
+    drv_dir.mkdir(parents=True)
+    dev = sysnet / "enp5s0" / "device"
+    dev.mkdir(parents=True)
+    (dev / "driver").symlink_to(drv_dir)
+
+    d = HardwareDetector()
+    nics = d._probe_network(sys_class_net=str(sysnet))
+    assert nics == [{"interface": "enp5s0", "driver": "igc"}]
+
+
+def test_network_probe_missing_sysfs_returns_empty(tmp_path):
+    d = HardwareDetector()
+    assert d._probe_network(sys_class_net=str(tmp_path / "nope")) == []
+
+
+def test_detect_includes_network_key():
+    d = HardwareDetector()
+    profile = d.detect()
+    assert "network" in profile
+    assert isinstance(profile["network"], list)

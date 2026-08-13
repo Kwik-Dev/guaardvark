@@ -1643,6 +1643,54 @@ else
     vader_info "Hardware profile probe (non-fatal; will retry after venv bootstrap)"
 fi
 
+# Known-quirk NIC mitigation — BEFORE any heavy downloads (pip/npm/ollama/models).
+#
+# Intel I217/I218/I219 NICs (kernel driver e1000e — the PCH-integrated port on
+# most Intel desktop boards) have a years-old, Intel-acknowledged TX engine bug:
+# under sustained transmit load the NIC hangs ("Detected Hardware Unit Hang" in
+# dmesg), the driver resets it, and the interface drops mid-transfer. Our
+# bootstrap is exactly that load profile. ALPACA (ASRock Z390 Pro4, I219-V)
+# 2026-08-13: repeated bootstrap deaths (read timeouts, DNS gone, BrokenPipe),
+# CURED by disabling offloads — install completed first try afterwards. BIOS
+# ASPM settings do not govern this NIC (it is not a PCIe device); the offload
+# fix is the real one. Runtime-only (no persistent host change): reapplied on
+# every start, skipped once ethtool already reports TSO off. Opt out with
+# GUAARDVARK_SKIP_NIC_FIX=1. hardware_detector.py mirrors this knowledge in
+# hardware.json ("network" section, KNOWN_NIC_QUIRKS).
+mitigate_nic_quirks() {
+    if [ "${GUAARDVARK_SKIP_NIC_FIX:-0}" = "1" ]; then
+        vader_info "Skipping NIC quirk mitigation (GUAARDVARK_SKIP_NIC_FIX=1)."
+        return 0
+    fi
+    local netdir iface drv _sudo="sudo"
+    # Never hang a non-interactive boot (systemd/cron) on a sudo password prompt.
+    [ -t 0 ] || _sudo="sudo -n"
+    for netdir in /sys/class/net/*; do
+        [ -e "$netdir/device" ] || continue   # skip lo/veth/docker/bridges
+        drv="$(basename "$(readlink -f "$netdir/device/driver" 2>/dev/null)" 2>/dev/null)"
+        [ "$drv" = "e1000e" ] || continue
+        iface="$(basename "$netdir")"
+        if command_exists ethtool \
+           && ethtool -k "$iface" 2>/dev/null | grep -q "^tcp-segmentation-offload: off"; then
+            continue   # already mitigated (by us earlier, or by the operator)
+        fi
+        vader_warn "NIC $iface is an Intel e1000e (I217/I218/I219 family) — known to hang under sustained download load."
+        vader_info "Applying known fix: disabling TSO/GSO/GRO offloads + EEE on $iface (runtime-only, reapplied each start; skip with GUAARDVARK_SKIP_NIC_FIX=1)."
+        if ! command_exists ethtool; then
+            $_sudo apt-get install -y ethtool >> "$SETUP_LOG" 2>&1 \
+                || { vader_warn "ethtool unavailable — cannot apply NIC fix. Manual: sudo ethtool -K $iface tso off gso off gro off"; continue; }
+        fi
+        if $_sudo ethtool -K "$iface" tso off gso off gro off >> "$SETUP_LOG" 2>&1; then
+            $_sudo ethtool --set-eee "$iface" eee off >> "$SETUP_LOG" 2>&1 || true
+            vader_success "NIC offload fix applied to $iface (prevents e1000e 'Hardware Unit Hang' drops)."
+        else
+            vader_warn "Could not apply NIC fix on $iface (sudo unavailable?). Manual: sudo ethtool -K $iface tso off gso off gro off"
+        fi
+    done
+    return 0
+}
+mitigate_nic_quirks
+
 vader_separator
 
 vader_step 3 "Ensuring Redis service is running..."

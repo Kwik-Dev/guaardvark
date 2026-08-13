@@ -27,6 +27,30 @@ KNOWN_SERVICES = (
     "celery", "postgres", "redis", "mcp",
 )
 
+# NIC drivers with known Linux failure modes that affect Guaardvark's heavy
+# sustained downloads (pip/npm/ollama/model pulls). Keyed by kernel driver
+# name as it appears at /sys/class/net/<iface>/device/driver.
+#
+# e1000e (Intel I217/I218/I219, the PCH-integrated NIC on most Intel desktop
+# boards): years-old, Intel-acknowledged TX engine hang under sustained load —
+# dmesg shows "Detected Hardware Unit Hang", driver resets the adapter, the
+# interface drops mid-transfer. Diagnosed on ALPACA (ASRock Z390 Pro4, I219-V)
+# 2026-08-13: repeated bootstrap deaths; fix CONFIRMED by disabling offloads.
+# BIOS ASPM settings do NOT govern this NIC (it is not a PCIe device).
+KNOWN_NIC_QUIRKS: dict[str, dict[str, str]] = {
+    "e1000e": {
+        "quirk": "tx_unit_hang",
+        "description": (
+            "Intel I217/I218/I219 (e1000e) NICs can hang and reset under "
+            "sustained transmit load until hardware offloads are disabled"
+        ),
+        "mitigation": (
+            "ethtool -K <iface> tso off gso off gro off; "
+            "ethtool --set-eee <iface> eee off"
+        ),
+    },
+}
+
 
 class HardwareDetector:
     def __init__(self, node_id_path: str = DEFAULT_NODE_ID_PATH):
@@ -46,6 +70,7 @@ class HardwareDetector:
             "benchmark_score": None,
             "disk": self._probe_disk(),
             "services": self._probe_services(),
+            "network": self._probe_network(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -59,7 +84,7 @@ class HardwareDetector:
         if prev == curr:
             return {}
         diff = {}
-        for key in ("cpu", "ram", "gpu", "disk", "services"):
+        for key in ("cpu", "ram", "gpu", "disk", "services", "network"):
             if prev.get(key) != curr.get(key):
                 diff[key] = {"before": prev.get(key), "after": curr.get(key)}
         return diff
@@ -250,6 +275,34 @@ class HardwareDetector:
             return out.stdout.strip().split()[-1] if out.stdout else None
         except (FileNotFoundError, subprocess.SubprocessError):
             return None
+
+    def _probe_network(self, sys_class_net: str = "/sys/class/net") -> list[dict[str, Any]]:
+        """Physical NICs with their kernel driver, flagging known-quirky ones.
+
+        Virtual interfaces (lo, docker, veth, bridges) have no `device` entry
+        under /sys/class/net and are skipped. Non-Linux platforms (no sysfs)
+        return an empty list.
+        """
+        nics: list[dict[str, Any]] = []
+        try:
+            entries = sorted(os.listdir(sys_class_net))
+        except OSError:
+            return nics
+        for name in entries:
+            dev = os.path.join(sys_class_net, name, "device")
+            if not os.path.exists(dev):
+                continue
+            driver = ""
+            try:
+                driver = os.path.basename(os.path.realpath(os.path.join(dev, "driver")))
+            except OSError:
+                pass
+            entry: dict[str, Any] = {"interface": name, "driver": driver}
+            quirk = KNOWN_NIC_QUIRKS.get(driver)
+            if quirk:
+                entry.update(quirk)
+            nics.append(entry)
+        return nics
 
 
 def main():
