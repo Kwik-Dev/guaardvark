@@ -10,7 +10,7 @@ output:
 registration:
   # POST each generated file to this endpoint on the main Guaardvark backend
   # so it lands as a Document row and shows up in DocumentsPage.
-  backend_url: http://localhost:5002
+  backend_url: http://localhost:5000
   folder: Audio
   enabled: true
 

@@ -514,6 +514,10 @@ class Beat:
     min_hold: float = 2.0       # extra floor beyond narration
     lead_in: float = 0.8        # settle time recorded before actions start
     retakes: int = 3
+    # Demo audio mixed into the beat at mux time: [(wav_path, start_s), ...].
+    # x11grab records VIDEO ONLY — anything the UI "plays" is silent unless
+    # it is scheduled here (essential for the audio episodes).
+    audio_overlays: list = field(default_factory=list)
     audio_path: Path = field(default=None, repr=False)
     audio_dur: float = 0.0
 
@@ -572,13 +576,32 @@ class Episode:
 
     def _mux_beat(self, i: int, b: Beat, raw: Path) -> Path:
         out = self.dir / f"beat_{i:02d}_{b.name}.mp4"
-        _run([
-            "ffmpeg", "-y", "-i", str(raw), "-i", str(b.audio_path),
-            "-filter_complex", "[1:a]apad[a]",
-            "-map", "0:v:0", "-map", "[a]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
-            "-shortest", str(out),
-        ])
+        if not b.audio_overlays:
+            _run([
+                "ffmpeg", "-y", "-i", str(raw), "-i", str(b.audio_path),
+                "-filter_complex", "[1:a]apad[a]",
+                "-map", "0:v:0", "-map", "[a]",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+                "-shortest", str(out),
+            ])
+            return out
+        # narration + scheduled demo audio (adelay to its start time, amix)
+        cmd = ["ffmpeg", "-y", "-i", str(raw), "-i", str(b.audio_path)]
+        filters = ["[1:a]apad[nar]"]
+        mix_inputs = "[nar]"
+        for k, (opath, start_s) in enumerate(b.audio_overlays):
+            cmd += ["-i", str(opath)]
+            ms = int(float(start_s) * 1000)
+            filters.append(f"[{k + 2}:a]adelay={ms}|{ms}[ov{k}]")
+            mix_inputs += f"[ov{k}]"
+        n = 1 + len(b.audio_overlays)
+        filters.append(
+            f"{mix_inputs}amix=inputs={n}:duration=first:normalize=0[a]")
+        cmd += ["-filter_complex", ";".join(filters),
+                "-map", "0:v:0", "-map", "[a]",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+                "-shortest", str(out)]
+        _run(cmd)
         return out
 
     def produce(self, stage: Stage) -> Path:

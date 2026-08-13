@@ -90,12 +90,18 @@ class ACEStepBackend(AudioBackend):
             raise RuntimeError(f"ACE-Step runner script missing at {_RUNNER_SCRIPT}")
 
         logger.info("Spawning ACE-Step daemon: %s %s", _MUSIC_VENV_PYTHON, _RUNNER_SCRIPT)
+        # encoding pinned: the service often runs without a locale (LANG
+        # unset), where text-mode pipes default to ascii — ACE-Step's tqdm
+        # progress bars emit UTF-8 box characters, which killed the stderr
+        # pump thread with UnicodeDecodeError and hung the request.
         self._proc = subprocess.Popen(
             [str(_MUSIC_VENV_PYTHON), "-u", str(_RUNNER_SCRIPT)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             cwd=str(_PLUGIN_ROOT),
         )
