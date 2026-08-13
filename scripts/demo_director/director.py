@@ -51,6 +51,28 @@ def display_size(display: str = DISPLAY) -> tuple[int, int]:
 
 # ---------------------------------------------------------------- narration
 
+# Spoken-text substitutions applied to narration ONLY (on-screen text keeps
+# the real spelling). Piper and Chatterbox both read "Guaardvark" as
+# "gwaaardvark"; the respelling lands the intended "GARD-vark".
+PRONUNCIATIONS = {
+    "Guaardvark": "Guard-vark",
+    "guaardvark": "Guard-vark",
+}
+
+# Series narrator: Chatterbox clone of the Piper female voice (more dynamic
+# prosody, same identity). Reference clip lives in the consent-gated store.
+NARRATOR_ENGINE = os.environ.get("DEMO_NARRATOR", "chatterbox")
+NARRATOR_REF = os.environ.get(
+    "DEMO_NARRATOR_REF",
+    "data/uploads/voice_references/piper-female-series-narrator.wav")
+
+
+def speakable(text: str) -> str:
+    for word, spoken in PRONUNCIATIONS.items():
+        text = text.replace(word, spoken)
+    return text
+
+
 def ffprobe_duration(path: Path) -> float:
     out = _run([
         "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
@@ -59,8 +81,7 @@ def ffprobe_duration(path: Path) -> float:
     return float(out)
 
 
-def generate_narration(text: str, dest: Path, voice: str = "libritts") -> float:
-    """Synthesize narration to dest (client-side name: collision-proof). Returns duration s."""
+def _narrate_piper(text: str, dest: Path, voice: str = "libritts") -> None:
     r = requests.post(
         f"{API}/api/voice/narrate",
         json={"script": text, "voice": voice, "output_format": "wav"},
@@ -73,6 +94,50 @@ def generate_narration(text: str, dest: Path, voice: str = "libritts") -> float:
         audio = requests.get(f"{API}{info['audio_url']}", timeout=60)
     audio.raise_for_status()
     dest.write_bytes(audio.content)
+
+
+def _narrate_chatterbox(text: str, dest: Path) -> None:
+    ref = Path(NARRATOR_REF)
+    if not ref.is_absolute():
+        ref = Path(__file__).resolve().parents[2] / ref
+    r = requests.post(
+        f"{API}/api/audio-foundry/generate/voice",
+        json={"text": text, "backend": "chatterbox",
+              "reference_clip_path": str(ref)},
+        timeout=600,
+    )
+    r.raise_for_status()
+    res = r.json()
+    if "job_id" in res and "path" not in res:
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline:
+            j = requests.get(f"{API}/api/audio-foundry/jobs/{res['job_id']}",
+                             timeout=30).json()
+            if j.get("status") in ("done", "completed"):
+                res = j.get("result", j)
+                break
+            if j.get("status") in ("failed", "error"):
+                raise RuntimeError(f"chatterbox job failed: {j}")
+            time.sleep(2)
+    src = Path(res["path"])  # service runs on this machine
+    dest.write_bytes(src.read_bytes())
+
+
+def generate_narration(text: str, dest: Path, voice: str = "libritts") -> float:
+    """Synthesize narration to dest (client-side name: collision-proof).
+
+    Engine per DEMO_NARRATOR: 'chatterbox' (series default — cloned female
+    narrator) with automatic Piper fallback, or 'piper'. Returns duration s.
+    """
+    text = speakable(text)
+    if NARRATOR_ENGINE == "chatterbox":
+        try:
+            _narrate_chatterbox(text, dest)
+        except Exception as e:
+            print(f"  narrator: chatterbox failed ({e}) — falling back to piper")
+            _narrate_piper(text, dest, voice)
+    else:
+        _narrate_piper(text, dest, voice)
     dur = ffprobe_duration(dest)
     if dur <= 0.2:
         raise RuntimeError(f"narration suspiciously short ({dur}s) for: {text[:60]}")
