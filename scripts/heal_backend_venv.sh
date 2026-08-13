@@ -94,22 +94,40 @@ ensure_python_headers() {
     return 0   # non-fatal here — the pip step below fails loudly if it matters
 }
 
+# Same pip network hardening as start.sh: default 15s socket timeout is too
+# tight for multi-hundred-MB wheels; a transient read timeout must not kill
+# the heal (ALPACA 2026-08-13). PIP_RESUME_RETRIES is ignored by pip < 25.1.
+export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-60}"
+export PIP_RETRIES="${PIP_RETRIES:-5}"
+export PIP_RESUME_RETRIES="${PIP_RESUME_RETRIES:-5}"
+
 # pip install -r with the failure surfaced instead of silently killing the
 # script (set -euo pipefail turned the old `pip | tail -5` into a message-less
-# death on the first bad wheel).
+# death on the first bad wheel). Transient network faults retry with backoff —
+# completed wheels are cached, so each retry resumes where the last stopped.
 pip_install_req() {
-    local req="$1" scratch="$LOG_DIR/.heal_pip_last.log"
+    local req="$1" scratch="$LOG_DIR/.heal_pip_last.log" attempt max_attempts=4
     log "pip install -r $(basename "$req")"
-    if ! "$VENV_PIP" install -r "$req" > "$scratch" 2>&1; then
-        tail -n 30 "$scratch"
-        if grep -q "Python\.h: No such file or directory" "$scratch"; then
-            log "ERROR: a native wheel build needs Python dev headers."
-            log "Fix:   sudo apt-get install -y python3.12-dev python3.12-venv   — then re-run this script."
+    for attempt in $(seq 1 "$max_attempts"); do
+        if "$VENV_PIP" install -r "$req" > "$scratch" 2>&1; then
+            tail -n 5 "$scratch"
+            return 0
         fi
-        log "ERROR: pip install -r $(basename "$req") FAILED — nothing from this file was installed. Full output: $scratch"
-        exit 1
+        if [ "$attempt" -lt "$max_attempts" ] \
+           && grep -qE "Read timed out|ReadTimeoutError|Connection broken|ConnectionResetError|Connection aborted|NewConnectionError|ProtocolError|IncompleteRead|Temporary failure in name resolution|Network is unreachable" "$scratch"; then
+            log "Transient network fault (attempt $attempt/$max_attempts) — retrying in $((attempt * 10))s..."
+            sleep $((attempt * 10))
+            continue
+        fi
+        break
+    done
+    tail -n 30 "$scratch"
+    if grep -q "Python\.h: No such file or directory" "$scratch"; then
+        log "ERROR: a native wheel build needs Python dev headers."
+        log "Fix:   sudo apt-get install -y python3.12-dev python3.12-venv   — then re-run this script."
     fi
-    tail -n 5 "$scratch"
+    log "ERROR: pip install -r $(basename "$req") FAILED — nothing from this file was installed. Full output: $scratch"
+    exit 1
 }
 
 repin_numpy_setuptools() {

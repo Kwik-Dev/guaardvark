@@ -1159,6 +1159,18 @@ backend_venv_healthy() {
 # requirements-base.txt / requirements.txt installs run FIRST and were the
 # actual casualty. Same convention (data/piptmp) so both share one cache.
 ensure_pip_tmpdir() {
+    # Network hardening for EVERY pip call this process spawns (requirements
+    # installs, requirements-cv, install_pytorch.sh, dep_reconciler). pip's
+    # default socket timeout is 15s — too tight for multi-hundred-MB wheels on
+    # links that stall under sustained load. ALPACA 2026-08-13: a mid-download
+    # read timeout on files.pythonhosted.org (fetching the 35MB av wheel)
+    # aborted the whole bootstrap. Operator-set values win.
+    export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-60}"
+    export PIP_RETRIES="${PIP_RETRIES:-5}"
+    # pip >= 25.1 resumes incomplete downloads instead of failing the run;
+    # older pips have no such option and silently ignore this env var.
+    export PIP_RESUME_RETRIES="${PIP_RESUME_RETRIES:-5}"
+
     # Respect an explicit TMPDIR from the operator/caller.
     if [ -n "${GUAARDVARK_PIP_TMPDIR_SET:-}" ]; then
         return 0
@@ -1204,22 +1216,40 @@ ensure_pip_tmpdir() {
 # Install one requirements file into the active venv. NEVER '|| true' this:
 # a single failed sdist build (evdev) makes pip install NOTHING from the run,
 # which is how the 24.04 install died with numpy missing while setup.log said
-# the error 800 lines earlier. On failure: scan for known-fixable signatures,
-# remediate once, retry; else fail LOUD with the actual first pip error.
+# the error 800 lines earlier. On failure: scan THIS attempt's output for
+# known-fixable signatures (missing dev headers → apt once; transient network
+# fault → back off and retry, downloads resume from PIP_CACHE_DIR so every
+# retry makes forward progress); else fail LOUD with the actual first error.
+# ALPACA 2026-08-13: one PyPI read timeout mid-wheel aborted the entire
+# bootstrap because nothing retried at this level.
+PIP_NET_FAULT_RE="Read timed out|ReadTimeoutError|Connection broken|ConnectionResetError|Connection aborted|NewConnectionError|ProtocolError|IncompleteRead|Temporary failure in name resolution|Network is unreachable"
 pip_install_requirements() {
-    local req="$1" attempt
-    for attempt in 1 2; do
+    local req="$1" attempt max_attempts=4 devheaders_fixed=0 log_mark attempt_out
+    for attempt in $(seq 1 "$max_attempts"); do
+        log_mark=$(wc -c < "$SETUP_LOG" 2>/dev/null || echo 0)
         if pip install -r "$req" >> "$SETUP_LOG" 2>&1; then
+            [ "$attempt" -gt 1 ] && vader_success "$(basename "$req") installed on retry $attempt."
             return 0
         fi
-        if [ "$attempt" -eq 1 ] \
-           && tail -n 400 "$SETUP_LOG" | grep -q "Python\.h: No such file or directory"; then
+        # Scope diagnostics to THIS attempt — setup.log is append-only across
+        # runs, so a plain tail can match a stale error from a previous attempt.
+        attempt_out="$(tail -c +$((log_mark + 1)) "$SETUP_LOG")"
+        if [ "$devheaders_fixed" -eq 0 ] \
+           && grep -q "Python\.h: No such file or directory" <<< "$attempt_out"; then
             vader_warn "pip failed building a native wheel: Python dev headers missing (Python.h)."
             if command_exists apt-get; then
                 vader_info "Auto-fix: installing python3.12-dev via apt, then retrying $(basename "$req")..."
                 sudo apt-get install -y python3.12-dev python3.12-venv >> "$SETUP_LOG" 2>&1 || true
+                devheaders_fixed=1
                 continue
             fi
+        fi
+        if [ "$attempt" -lt "$max_attempts" ] \
+           && grep -qE "$PIP_NET_FAULT_RE" <<< "$attempt_out"; then
+            vader_warn "pip hit a transient network fault downloading $(basename "$req") (attempt $attempt/$max_attempts) — retrying in $((attempt * 10))s..."
+            vader_info "Completed wheels are cached; the retry resumes where this attempt stopped."
+            sleep $((attempt * 10))
+            continue
         fi
         break
     done
@@ -1227,14 +1257,19 @@ pip_install_requirements() {
     # ENOSPC gets its own message: the raw pip traceback points at urllib3 and
     # reads like a network fault ("Connection broken"), which sends you chasing
     # the wrong bug. Name the real filesystem and its free space.
-    if tail -n 400 "$SETUP_LOG" | grep -q "No space left on device"; then
+    if grep -q "No space left on device" <<< "$attempt_out"; then
         vader_error "CAUSE: ran out of disk in pip's scratch space (TMPDIR=${TMPDIR:-/tmp})."
         df -Ph "${TMPDIR:-/tmp}" 2>/dev/null | sed 's/^/      /'
         vader_error "If that filesystem is a small tmpfs, point TMPDIR at real disk:"
         vader_error "      TMPDIR=$SCRIPT_DIR/data/piptmp ./start.sh"
+    elif grep -qE "$PIP_NET_FAULT_RE" <<< "$attempt_out"; then
+        vader_error "CAUSE: network kept failing mid-download across $max_attempts attempts."
+        vader_error "This is the box's connection (or NIC) dropping under sustained load, not PyPI."
+        vader_error "Check the adapter (ip link / dmesg | grep -iE 'link|eth|enp'), then re-run ./start.sh —"
+        vader_error "already-downloaded wheels are cached, so it resumes where it stopped."
     fi
     vader_error "First error in $SETUP_LOG:"
-    tail -n 400 "$SETUP_LOG" | grep -m1 -E "fatal error:|error: subprocess-exited-with-error|ERROR: " | sed 's/^/      /'
+    grep -m1 -E "fatal error:|error: subprocess-exited-with-error|ERROR: " <<< "$attempt_out" | sed 's/^/      /'
     vader_info "After fixing, re-run ./start.sh (or: ./scripts/heal_backend_venv.sh)"
     return 1
 }
@@ -1593,7 +1628,12 @@ fi
 # is populated and independent of any Python package state. The later call in step 8
 # will refresh it with the project venv when available.
 mkdir -p "$HOME/.guaardvark"
-if PYTHONPATH="$SCRIPT_DIR" python3 -m backend.services.hardware_detector \
+# Invoke by FILE PATH, not `-m backend.services...`: -m imports backend/__init__.py,
+# which pulls socketio_events → numpy. Pre-venv (system python3, no numpy) that
+# GUARANTEED a "ModuleNotFoundError: numpy" traceback at the top of setup.log on
+# every fresh box — the red herring that derailed the ALPACA install diagnosis.
+# The detector itself is pure stdlib and needs no package context.
+if python3 "$SCRIPT_DIR/backend/services/hardware_detector.py" \
         --output "$HOME/.guaardvark/hardware.json" >> "$SETUP_LOG" 2>&1; then
     # Only print on success the first time or when it actually wrote something useful
     if [ -f "$HOME/.guaardvark/hardware.json" ]; then
@@ -2199,17 +2239,19 @@ ensure_hardware_profile() {
     mkdir -p "$HOME/.guaardvark"
     local wrote=0
 
-    # Prefer the project venv python (full context) if it exists and works
+    # File-path invocation on purpose (NOT -m): -m imports backend/__init__.py →
+    # socketio_events → numpy, so on a half-installed venv the probe crashes with
+    # a numpy traceback in setup.log. The detector is pure stdlib.
     if [ -x "$VENV_DIR/bin/python" ]; then
-        if (cd "$SCRIPT_DIR" && PYTHONPATH="$SCRIPT_DIR" "$VENV_DIR/bin/python" -m backend.services.hardware_detector \
-                --output "$HOME/.guaardvark/hardware.json") >> "$SETUP_LOG" 2>&1; then
+        if "$VENV_DIR/bin/python" "$SCRIPT_DIR/backend/services/hardware_detector.py" \
+                --output "$HOME/.guaardvark/hardware.json" >> "$SETUP_LOG" 2>&1; then
             wrote=1
         fi
     fi
 
-    # Fallback to system python3 + PYTHONPATH (the detector is mostly stdlib + subprocess)
+    # Fallback to system python3 (works pre-venv)
     if [ "$wrote" -eq 0 ]; then
-        if PYTHONPATH="$SCRIPT_DIR" python3 -m backend.services.hardware_detector \
+        if python3 "$SCRIPT_DIR/backend/services/hardware_detector.py" \
                 --output "$HOME/.guaardvark/hardware.json" >> "$SETUP_LOG" 2>&1; then
             wrote=1
         fi
