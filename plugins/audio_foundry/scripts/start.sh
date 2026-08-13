@@ -205,6 +205,9 @@ echo "Service port: $SERVICE_PORT"
 echo "Log: $LOG_FILE"
 
 cd "$PLUGIN_ROOT"
+# Xet-backed HF transfers flake on this network (observed: partial ACE-Step
+# snapshot, SAO CAS client errors) — classic HTTP downloads are reliable.
+export HF_HUB_DISABLE_XET=1
 PYTHONPATH="$PLUGIN_ROOT:$PYTHONPATH" \
 python -m uvicorn service.app:app --host 0.0.0.0 --port "$SERVICE_PORT" --workers 1 \
     >> "$LOG_FILE" 2>&1 &

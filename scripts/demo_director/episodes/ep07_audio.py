@@ -71,16 +71,24 @@ def reset_audio(st: Stage):
 
 # ---------------------------------------------------------------- beats
 
+def pick_reference_clip(st: Stage):
+    """Open the reference-clip picker ('...or pick a previously imported
+    clip') and select the series narrator clip. (Calibrated 2026-08-13.)"""
+    pick = st.page.locator(
+        "xpath=(//*[contains(text(),'previously imported clip')]"
+        "/following::*[@role='combobox'])[1]")
+    st.glide_click(pick, dur=0.9)
+    opt = st.page.locator("li[role='option']").filter(
+        has_text=re.compile("piper-female", re.I))
+    opt.first.wait_for(state="visible", timeout=8_000)
+    st.glide_click(opt.first, dur=0.6)
+    time.sleep(1.2)
+
+
 def act_reference(st: Stage):
-    # CALIBRATE: clip library row for the narrator reference; play control
     nav_audio(st)
-    row = st.page.get_by_text("piper-female-series-narrator")
-    st.hover_over(row.first, dur=1.0)
-    time.sleep(1.0)
-    play = row.first.locator(
-        "xpath=ancestor::*[position()<=3]//button").first
-    st.glide_click(play, dur=0.6)
-    time.sleep(2.0)
+    pick_reference_clip(st)
+    time.sleep(1.0)  # the audience hears the clip via the audio overlay
 
 
 def act_consent(st: Stage):
@@ -99,11 +107,11 @@ def act_consent(st: Stage):
 
 
 def act_clone_ab(st: Stage):
-    # on-camera generation: type a line into the Voice tab and generate with
-    # chatterbox; the three-way A/B plays via audio_overlays (see BEATS)
+    # on-camera generation: pick the narrator clip, type a line, generate
+    # ("GENERATE VOICEOVER"); the three-way A/B plays via audio_overlays
     nav_audio(st)
-    # CALIBRATE: voice text input + generate button names
-    box = st.page.get_by_role("textbox").first
+    pick_reference_clip(st)
+    box = st.page.get_by_role("textbox").first   # "Enter script for narration..."
     st.glide_click(box, dur=0.8)
     st.cursor.type_text("Same identity. New range.", delay_ms=40)
     time.sleep(0.5)
@@ -121,7 +129,7 @@ def act_selfcheck(st: Stage):
         "import sys; sys.path.insert(0, '.'); "
         "from director import _line_matches; from pathlib import Path; "
         "ok, heard = _line_matches('This is Guaardvark.', "
-        "Path('/tmp/demo_doubled_line.wav')); "
+        "Path('/home/llamax1/GX1/data/demo_assets/ep07/doubled_line.wav')); "
         "print('expected: This is Guaardvark.'); "
         "print('heard:   ', heard); "
         "print('verdict: ', 'ACCEPT' if ok else 'REJECT - re-rolling seed')\""
