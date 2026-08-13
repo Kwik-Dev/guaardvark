@@ -605,19 +605,49 @@ class Episode:
         return out
 
     def produce(self, stage: Stage) -> Path:
+        # DEMO_RESUME_DIR: reuse finished beat mp4s from a prior run of the
+        # same episode — good takes are never re-shot after a later beat fails
+        resume = os.environ.get("DEMO_RESUME_DIR")
+        resume_dir = Path(resume) if resume else None
         print(f"[{self.slug}] narration…")
-        self.prepare_audio()
-        print(f"[{self.slug}] recording {len(self.beats)} beats…")
         parts = []
+        reused: set[int] = set()
         for i, b in enumerate(self.beats):
+            prev = (resume_dir / f"beat_{i:02d}_{b.name}.mp4"
+                    if resume_dir else None)
+            if prev and prev.exists():
+                dst = self.dir / prev.name
+                dst.write_bytes(prev.read_bytes())
+                b.audio_dur = ffprobe_duration(dst)
+                reused.add(i)
+                print(f"  beat {b.name}: REUSED from {resume_dir.name}")
+                continue
+            b.audio_path = self.dir / f"beat_{i:02d}_{b.name}.wav"
+            b.audio_dur = generate_narration(b.narration, b.audio_path)
+            print(f"  audio {b.name}: {b.audio_dur:.1f}s")
+        print(f"[{self.slug}] recording {len(self.beats)} beats…")
+        for i, b in enumerate(self.beats):
+            if i in reused:
+                parts.append(self.dir / f"beat_{i:02d}_{b.name}.mp4")
+                continue
             print(f" beat {i + 1}/{len(self.beats)}: {b.name}")
             raw = self._record_beat(stage, i, b)
             parts.append(self._mux_beat(i, b, raw))
-        concat = self.dir / "concat.txt"
-        concat.write_text("".join(f"file '{p.resolve()}'\n" for p in parts))
+        # filter-graph concat (decode + re-encode): stream-copy concat
+        # stitched AAC loosely and audio ran ~15s past video over 8 beats —
+        # exact timestamps beat fast copies here
         final = self.dir / f"{self.slug}.mp4"
-        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
-              "-c", "copy", str(final)])
+        cmd = ["ffmpeg", "-y"]
+        fl = ""
+        for k, p in enumerate(parts):
+            cmd += ["-i", str(p)]
+            fl += f"[{k}:v][{k}:a]"
+        fl += f"concat=n={len(parts)}:v=1:a=1[v][a]"
+        cmd += ["-filter_complex", fl, "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                str(final)]
+        _run(cmd)
         report = {
             "final": str(final),
             "duration_s": ffprobe_duration(final),

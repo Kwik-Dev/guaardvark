@@ -69,6 +69,47 @@ def reset_audio(st: Stage):
     st.page.wait_for_timeout(300)
 
 
+def _foundry_evict(intent: str):
+    """Off-camera VRAM choreography: the on-camera generate clicks are real,
+    and chatterbox (4.5GB) + ACE-Step (8.9GB) + SAO (6GB) cannot coexist on
+    16GB. Wait for any in-flight job, then evict the named backend."""
+    import requests as rq
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        try:
+            jobs = rq.get("http://127.0.0.1:8206/jobs", timeout=10).json()
+            running = [j for j in jobs.get("jobs", [])
+                       if j.get("status") in ("running", "queued")]
+            if not running:
+                break
+        except Exception:
+            break
+        time.sleep(3)
+    try:
+        rq.post(f"http://127.0.0.1:8206/evict/{intent}", timeout=30)
+    except Exception as e:
+        print(f"  evict {intent} failed (continuing): {e}")
+
+
+def reset_before_music(st: Stage):
+    _foundry_evict("voice")
+    # pre-warm Ollama so the on-camera Polish pass actually rewrites instead
+    # of showing the "rewriter unavailable" fallback banner
+    import requests as rq
+    try:
+        rq.post("http://localhost:11434/api/generate",
+                json={"model": "gemma4:latest", "prompt": "ok",
+                      "stream": False}, timeout=120)
+    except Exception as e:
+        print(f"  ollama pre-warm failed (polish will fall back): {e}")
+    reset_audio(st)
+
+
+def reset_before_fx(st: Stage):
+    _foundry_evict("music")
+    reset_audio(st)
+
+
 # ---------------------------------------------------------------- beats
 
 def pick_reference_clip(st: Stage):
@@ -149,8 +190,14 @@ def act_music(st: Stage):
     polish = st.page.get_by_role("button", name=re.compile("polish", re.I))
     if polish.count():
         st.glide_click(polish.first, dur=0.6)
-        time.sleep(3.0)
-    gen = st.page.get_by_role("button", name=re.compile("generate", re.I))
+        time.sleep(6.0)  # Ollama pre-warmed in reset; rewrite takes a few s
+    # off-camera: free Ollama before ACE-Step loads (16GB card)
+    import requests as rq
+    try:
+        rq.post("http://localhost:5000/api/model/unload", json={}, timeout=30)
+    except Exception:
+        pass
+    gen = st.page.get_by_role("button", name=re.compile("compose", re.I))
     st.glide_click(gen.first, dur=0.7)
     time.sleep(4.0)  # progress appears; the RESULT beat plays the real bed
 
@@ -265,7 +312,7 @@ BEATS = [
         ],
         action=act_music,
         verify=v_audio,
-        reset=reset_audio,
+        reset=reset_before_music,
     ),
     Beat(
         name="music_result",
@@ -294,7 +341,7 @@ BEATS = [
         ],
         action=act_fx,
         verify=v_audio,
-        reset=reset_audio,
+        reset=reset_before_fx,
         audio_overlays=[(FX_RAIN, 6.0)],
         min_hold=16.0,
     ),
