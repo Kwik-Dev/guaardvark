@@ -971,6 +971,7 @@ def create_full_backup(name: str | None = None) -> str:
                 "start_postgres.sh",
                 "start-docker.sh",
                 "setup.sh",
+                "install.sh",
                 "killswitch.sh",
                 "manager",
                 "VERSION",
@@ -1390,6 +1391,7 @@ def create_code_release(name: str | None = None) -> str:
                 "start_postgres.sh",
                 "start-docker.sh",
                 "setup.sh",
+                "install.sh",
                 "killswitch.sh",
                 # NOTE: "manager" is a symlink to scripts/system-manager/system-manager
                 # which is already included via "scripts/" below. start.sh recreates
@@ -1610,6 +1612,15 @@ To restore data, use a separate data backup or start with a fresh installation.
 - **Type:** Code Release (no data — database and files are created fresh on first run)
 
 ## Install (Linux)
+
+**On a fresh machine with internet access**, the one-liner installs the latest
+Guaardvark release straight from GitHub (no zip needed):
+
+```bash
+curl -fsSL https://guaardvark.com/install.sh | bash
+```
+
+**To install THIS zip's exact code snapshot** (offline, or to pin this version):
 
 1. **Extract:**
    ```bash

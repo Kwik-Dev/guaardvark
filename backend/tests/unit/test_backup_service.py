@@ -245,6 +245,8 @@ def test_code_release_includes_platform_and_docker_essentials(app):
         assert "Ubuntu 26.04" in install
         assert "start-docker.sh" in install
         assert "backend/venv" in install  # wrong-venv troubleshooting tip
+        assert "curl -fsSL https://guaardvark.com/install.sh | bash" in install
+        assert "install.sh" in names  # bootstrap installer ships in the zip
 
 
 def test_sanitize_preserves_unrelated_lines():
