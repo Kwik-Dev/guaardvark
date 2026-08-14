@@ -130,7 +130,7 @@ BEATS = [
         narration=[
             "This is Guaardvark.",
             "A complete AI studio that runs on one desktop G P U.",
-            "No cloud. No subscriptions. Nothing leaves this room.",
+            "No cloud. No subscriptions. Nothing leaves your machine.",
             "",
             "You're looking at the dashboard. Live cards for the G P U, "
             "jobs, and projects.",

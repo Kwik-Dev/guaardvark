@@ -126,6 +126,20 @@ def act_models(st: Stage):
     time.sleep(0.6)
 
 
+def reset_before_infographic(st: Stage):
+    """Free the card for flux-schnell: evict foundry voice contexts (kokoro
+    reloads lazily; narration is already generated) + unload Ollama — the
+    12GB reservation once missed admission by 18MB of idle CUDA contexts."""
+    import requests as rq
+    for intent in ("voice", "music", "fx"):
+        try:
+            rq.post(f"http://127.0.0.1:8206/evict/{intent}", timeout=30)
+        except Exception:
+            pass
+    unload_ollama()
+    reset_home(st)
+
+
 def act_infographic(st: Stage):
     st.nav_via_sidebar("Media", "/images", st.page.get_by_role("tab").first)
     time.sleep(1.0)
@@ -255,7 +269,7 @@ BEATS = [
         ],
         action=act_infographic,
         verify=v_media,
-        reset=reset_home,
+        reset=reset_before_infographic,
     ),
     Beat(
         name="upscale",

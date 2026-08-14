@@ -190,7 +190,11 @@ def act_music(st: Stage):
     polish = st.page.get_by_role("button", name=re.compile("polish", re.I))
     if polish.count():
         st.glide_click(polish.first, dur=0.6)
-        time.sleep(6.0)  # Ollama pre-warmed in reset; rewrite takes a few s
+        # a REAL polish replaces the compose button with a POLISHING… spinner
+        # until the Ollama rewrite finishes — wait for it, don't guess
+        st.page.get_by_role("button", name=re.compile("compose", re.I)) \
+            .first.wait_for(state="visible", timeout=120_000)
+        time.sleep(2.0)  # let the polished-prompt panel read on camera
     # off-camera: free Ollama before ACE-Step loads (16GB card)
     import requests as rq
     try:
