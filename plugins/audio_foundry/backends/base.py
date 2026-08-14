@@ -58,6 +58,16 @@ class AudioBackend(ABC):
     # card is the canonical case; voice/FX backends at ~3 GB can coexist.
     requires_exclusive_vram: bool = False
 
+    def availability(self) -> tuple[bool, str | None]:
+        """Whether this backend can run on the current machine.
+
+        Returns (True, None) when runnable, or (False, reason) when a hardware
+        or environment requirement is missing. The dispatcher checks this
+        before accepting a job so requests fail fast with a clear message
+        instead of erroring mid-load.
+        """
+        return True, None
+
     @abstractmethod
     def load(self) -> None:
         """Pull weights into VRAM. Idempotent — calling twice is a no-op."""

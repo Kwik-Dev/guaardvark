@@ -44,10 +44,29 @@ class StableAudioOpenBackend(AudioBackend):
         self._sample_rate = int(sample_rate)
         self._max_duration_s = float(max_duration_s)
         self._pipeline: Any = None
+        self._availability: tuple[bool, str | None] | None = None
 
     @property
     def is_loaded(self) -> bool:
         return self._pipeline is not None
+
+    def availability(self) -> tuple[bool, str | None]:
+        # Cached: the first probe pays the torch import, after that it's free.
+        if self._availability is None:
+            try:
+                import torch
+            except Exception as e:
+                self._availability = (False, f"PyTorch unavailable: {e}")
+            else:
+                if torch.cuda.is_available():
+                    self._availability = (True, None)
+                else:
+                    self._availability = (False, (
+                        "Sound FX generation (Stable Audio Open) requires an "
+                        "NVIDIA GPU with CUDA — no CUDA device was detected on "
+                        "this machine."
+                    ))
+        return self._availability
 
     def load(self) -> None:
         if self._pipeline is not None:

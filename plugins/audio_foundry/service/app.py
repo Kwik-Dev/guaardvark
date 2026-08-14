@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 from service.bootstrap import bootstrap
 from service.config_loader import load_config, resolve_backend_url
-from service.dispatcher import Dispatcher, Intent, NotWired
+from service.dispatcher import BackendUnavailable, Dispatcher, Intent, NotWired
 from service.jobs import JobManager
 from service.orchestrator_client import OrchestratorClient
 from service.registration import register_output
@@ -168,6 +168,14 @@ def _estimate_seconds(intent: Intent, params: dict) -> float:
 
 def _dispatch(intent: Intent, req) -> Any:
     """Inline if short / async not requested; otherwise queue a job and 202."""
+    # Fail fast before accepting a job: a backend that can't run on this
+    # machine (e.g. SAO without CUDA) must 503 here, not crash the job later.
+    try:
+        _dispatcher.check_available(intent)
+    except NotWired as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except BackendUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
     params = req.model_dump(exclude_none=True)
     want_async = bool(params.pop("async_mode", False))
     est = _estimate_seconds(intent, params)
@@ -386,6 +394,8 @@ def _run(intent: Intent, params: dict[str, Any]) -> dict[str, Any]:
     except NotWired as e:
         # Valid intent, no backend registered yet (skeleton for voice/music).
         raise HTTPException(status_code=501, detail=str(e))
+    except BackendUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.exception("Generation failed for intent=%s", intent.value)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")

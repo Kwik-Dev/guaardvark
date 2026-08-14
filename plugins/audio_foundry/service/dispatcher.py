@@ -47,6 +47,12 @@ class NotWired(NotImplementedError):
     """
 
 
+class BackendUnavailable(RuntimeError):
+    """Raised when a backend is wired but can't run on this machine
+    (e.g. Stable Audio Open without a CUDA GPU). Service layer maps to HTTP 503.
+    Checked before a job is accepted so callers get the reason up front."""
+
+
 class Dispatcher:
     """Single source of truth for which backend is loaded and which isn't.
 
@@ -85,16 +91,34 @@ class Dispatcher:
         with self._state_lock:
             import time
             now = time.monotonic()
-            return {
-                intent.value: {
+            snapshot: dict[str, dict[str, Any]] = {}
+            for intent, backend in self._backends.items():
+                available, reason = backend.availability() if backend else (False, None)
+                snapshot[intent.value] = {
                     "backend": backend.name if backend else None,
                     "loaded": backend.is_loaded if backend else False,
+                    "available": available,
+                    "unavailable_reason": reason,
                     "vram_mb_estimate": backend.vram_mb_estimate if backend else 0,
                     "last_vram_mb": backend.last_vram_mb if backend else 0,
                     "idle_seconds": round(now - self._last_used[intent], 1) if intent in self._last_used else None,
                 }
-                for intent, backend in self._backends.items()
-            }
+            return snapshot
+
+    def check_available(self, intent: Intent) -> None:
+        """Raise NotWired / BackendUnavailable if the intent can't run here.
+
+        Cheap (no model load) — the service layer calls this before accepting
+        or queueing a job."""
+        with self._state_lock:
+            backend = self._backends.get(intent)
+        if backend is None:
+            raise NotWired(f"No backend registered for intent: {intent.value}")
+        available, reason = backend.availability()
+        if not available:
+            raise BackendUnavailable(
+                reason or f"Backend {backend.name} is unavailable on this machine"
+            )
 
     def generate(
         self,
@@ -119,6 +143,12 @@ class Dispatcher:
                 backend = self._backends.get(intent)
                 if backend is None:
                     raise NotWired(f"No backend registered for intent: {intent.value}")
+
+                available, reason = backend.availability()
+                if not available:
+                    raise BackendUnavailable(
+                        reason or f"Backend {backend.name} is unavailable on this machine"
+                    )
 
                 if not backend.is_loaded:
                     self._load_with_orchestrator(intent, backend)
@@ -165,6 +195,12 @@ class Dispatcher:
                 backend = self._backends.get(intent)
                 if backend is None:
                     raise NotWired(f"No backend registered for intent: {intent.value}")
+
+                available, reason = backend.availability()
+                if not available:
+                    raise BackendUnavailable(
+                        reason or f"Backend {backend.name} is unavailable on this machine"
+                    )
 
                 if not backend.is_loaded:
                     self._load_with_orchestrator(intent, backend)

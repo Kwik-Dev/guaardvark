@@ -216,6 +216,26 @@ const AudioFoundryPage = () => {
     return () => { cancelled = true; };
   }, []);
 
+  // Per-backend availability from /status — e.g. FX (Stable Audio Open)
+  // requires a CUDA GPU and reports unavailable on machines without one.
+  // Unknown (plugin offline / older plugin) leaves everything enabled.
+  const [fxUnavailableReason, setFxUnavailableReason] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    axios.get(`${API_BASE}/audio-foundry/status`)
+      .then((res) => {
+        if (cancelled) return;
+        const fx = res.data?.backends?.fx;
+        if (fx && fx.available === false) {
+          setFxUnavailableReason(
+            fx.unavailable_reason || "Sound FX generation is unavailable on this machine."
+          );
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   const handleTabChange = (event, newValue) => {
     setActiveTab(newValue);
     setResult(null);
@@ -809,6 +829,11 @@ const AudioFoundryPage = () => {
                 {activeTab === 2 && (
                   <Stack spacing={3}>
                     <Typography variant="h6" fontWeight="bold">FX & Foley Generator</Typography>
+                    {fxUnavailableReason && (
+                      <Alert severity="info" sx={{ borderRadius: 2 }}>
+                        {fxUnavailableReason}
+                      </Alert>
+                    )}
                     <TextField
                       fullWidth
                       variant="filled"
@@ -831,7 +856,7 @@ const AudioFoundryPage = () => {
                       variant="contained"
                       size="large"
                       startIcon={loading ? <CircularProgress size={20} color="inherit" /> : <FxIcon />}
-                      disabled={loading || !fxPrompt}
+                      disabled={loading || !fxPrompt || !!fxUnavailableReason}
                       onClick={() => generateAudio("fx")}
                       sx={{ py: 1.5, borderRadius: 2, backgroundColor: "#ff9800", "&:hover": { backgroundColor: "#e68a00" } }}
                     >

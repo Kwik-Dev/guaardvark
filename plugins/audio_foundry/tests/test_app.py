@@ -129,3 +129,30 @@ def test_generate_fx_with_mock_backend_returns_200(tmp_path):
         assert body["path"].endswith("mock.wav")
     finally:
         _dispatcher._backends[Intent.FX] = prev
+
+
+def test_status_reports_availability_fields():
+    r = client.get("/status")
+    assert r.status_code == 200
+    for state in r.json()["backends"].values():
+        assert "available" in state
+        assert "unavailable_reason" in state
+
+
+def test_generate_fx_returns_503_when_backend_unavailable():
+    """A wired backend that can't run here (e.g. SAO without CUDA) must be
+    rejected before the job is accepted — 503 with the reason, never a queued
+    job that crashes mid-load."""
+    from unittest.mock import patch
+
+    import service.app as app_module
+    from service.dispatcher import BackendUnavailable
+
+    with patch.object(
+        app_module._dispatcher,
+        "check_available",
+        side_effect=BackendUnavailable("Sound FX generation requires an NVIDIA GPU"),
+    ):
+        r = client.post("/generate/fx", json={"prompt": "rain", "duration_s": 5, "async": True})
+    assert r.status_code == 503
+    assert "NVIDIA GPU" in r.json()["detail"]

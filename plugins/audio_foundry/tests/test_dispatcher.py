@@ -137,3 +137,31 @@ def test_dispatcher_works_without_orchestrator():
 
     assert result.meta["stub"] is True
     assert backend.is_loaded is True
+
+
+def test_unavailable_backend_raises_BackendUnavailable_without_loading():
+    from service.dispatcher import BackendUnavailable
+
+    orch = _make_orch_mock()
+    backend = _StubBackend()
+    backend.availability = lambda: (False, "needs CUDA")
+    d = Dispatcher(orchestrator=orch)
+    d.register(Intent.FX, backend)
+
+    with pytest.raises(BackendUnavailable, match="needs CUDA"):
+        d.generate(Intent.FX, prompt="rain")
+
+    assert backend.load_calls == 0
+    orch.request_vram.assert_not_called()
+
+
+def test_check_available_passes_for_runnable_backend():
+    d = Dispatcher(orchestrator=_make_orch_mock())
+    d.register(Intent.FX, _StubBackend())
+    d.check_available(Intent.FX)
+
+
+def test_check_available_raises_NotWired_for_unwired_intent():
+    d = Dispatcher(orchestrator=_make_orch_mock())
+    with pytest.raises(NotWired):
+        d.check_available(Intent.FX)
