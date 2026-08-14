@@ -329,3 +329,5 @@ backend/tools/voice/whisper.cpp/
 plugins/comfyui/.custom_nodes_installed
 data/embedding_meta.json
 data/documents_windows_v2_state.json
+# Per-install plugin manifest overrides (merged over plugin.json at load)
+plugins/*/plugin.local.json

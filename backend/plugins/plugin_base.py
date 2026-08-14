@@ -97,7 +97,22 @@ class PluginMetadata:
         try:
             with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
+
+            # Per-install overrides: an untracked plugin.local.json next to the
+            # manifest wins over the git-tracked plugin.json, so operator edits
+            # (e.g. a custom port for an external ComfyUI) survive updates.
+            local_path = json_path.with_name('plugin.local.json')
+            if local_path.exists():
+                try:
+                    with open(local_path, 'r', encoding='utf-8') as f:
+                        local = json.load(f)
+                    local_config = local.pop('config', {})
+                    data.update(local)
+                    if local_config:
+                        data.setdefault('config', {}).update(local_config)
+                except (OSError, ValueError) as e:
+                    logger.warning(f"Ignoring invalid {local_path}: {e}")
+
             config_data = data.pop('config', {})
             config = PluginConfig.from_dict(config_data)
             

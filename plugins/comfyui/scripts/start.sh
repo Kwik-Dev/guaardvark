@@ -8,7 +8,17 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$PLUGIN_ROOT/../.." && pwd)"
 COMFYUI_DIR="$PLUGIN_ROOT/ComfyUI"
 VENV_PYTHON="$PROJECT_ROOT/backend/venv/bin/python"
-PORT=8188
+# Port from plugin.local.json (untracked per-install override) or plugin.json; 8188 fallback.
+PORT=$(python3 -c '
+import json, sys
+for name in ("plugin.local.json", "plugin.json"):
+    try:
+        print(int(json.load(open(sys.argv[1] + "/" + name))["port"])); break
+    except Exception:
+        continue
+else:
+    print(8188)
+' "$PLUGIN_ROOT" 2>/dev/null || echo 8188)
 
 # Errors go to stderr so plugin_manager can surface them (it used to only
 # show stderr; blank UI failures were start.sh writing only to stdout).

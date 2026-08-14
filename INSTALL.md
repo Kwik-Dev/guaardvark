@@ -79,6 +79,16 @@ Docker runs the **core stack** (API, UI, PostgreSQL, Redis, Ollama). It does not
 
 Stop: `docker compose down`
 
+## Custom plugin ports
+
+To run a plugin on a non-default port (e.g. an existing ComfyUI Desktop on 8000), create a `plugin.local.json` next to the plugin's `plugin.json`:
+
+```bash
+echo '{"port": 8000}' > plugins/comfyui/plugin.local.json
+```
+
+The file is gitignored and merged over the manifest at load, so the override survives updates. Any manifest key can be overridden the same way. The backend's ComfyUI clients follow the effective port automatically (or set `GUAARDVARK_COMFYUI_URL` to point somewhere else entirely).
+
 ## Troubleshooting
 
 - Permission issues: `chmod +x *.sh`

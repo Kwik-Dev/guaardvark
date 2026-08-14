@@ -51,7 +51,25 @@ LOG_DIR = _resolve_path("GUAARDVARK_LOG_DIR", "logs")
 BACKUP_DIR = _resolve_path("GUAARDVARK_BACKUP_DIR", "backups")
 
 # Video Generation / ComfyUI configuration
-COMFYUI_URL = os.environ.get("GUAARDVARK_COMFYUI_URL", "http://127.0.0.1:8188")
+def _comfyui_default_url() -> str:
+    """Effective ComfyUI URL from the plugin manifest.
+
+    plugin.local.json (untracked per-install override) beats plugin.json,
+    so a custom port — e.g. an external ComfyUI Desktop on 8000 — set once
+    survives updates and drives every backend consumer.
+    """
+    import json as _json
+    for name in ("plugin.local.json", "plugin.json"):
+        manifest = os.path.join(GUAARDVARK_ROOT, "plugins", "comfyui", name)
+        try:
+            with open(manifest, "r", encoding="utf-8") as f:
+                port = int(_json.load(f).get("port"))
+        except (OSError, ValueError, TypeError):
+            continue
+        return f"http://127.0.0.1:{port}"
+    return "http://127.0.0.1:8188"
+
+COMFYUI_URL = os.environ.get("GUAARDVARK_COMFYUI_URL") or _comfyui_default_url()
 COMFYUI_DIR = os.environ.get("GUAARDVARK_COMFYUI_DIR", os.path.join(GUAARDVARK_ROOT, "plugins", "comfyui", "ComfyUI"))
 COMFYUI_VENV = os.environ.get("GUAARDVARK_COMFYUI_VENV", os.path.join(GUAARDVARK_ROOT, "backend", "venv"))
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", os.path.join(OUTPUT_DIR, "video"))

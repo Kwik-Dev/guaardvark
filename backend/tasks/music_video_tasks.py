@@ -182,7 +182,10 @@ def _cut_length_bounds(s: dict) -> tuple[float, float]:
     return min_cut_s, max_cut_s
 
 
-COMFYUI_URL = "http://127.0.0.1:8188"
+try:
+    from backend.config import COMFYUI_URL
+except Exception:
+    COMFYUI_URL = "http://127.0.0.1:8188"
 
 
 def _comfyui_free_vram():
