@@ -51,13 +51,10 @@ def display_size(display: str = DISPLAY) -> tuple[int, int]:
 
 # ---------------------------------------------------------------- narration
 
-# Spoken-text substitutions applied to narration ONLY (on-screen text keeps
-# the real spelling). Piper and Chatterbox both read "Guaardvark" as
-# "gwaaardvark"; the respelling lands the intended "GARD-vark".
-PRONUNCIATIONS = {
-    "Guaardvark": "Guard-vark",
-    "guaardvark": "Guard-vark",
-}
+# Spoken-text rendering lives in voice_style.spoken() — the engine-aware
+# voice-personality layer (phoneme overrides for kokoro, respellings for
+# piper/chatterbox). On-screen text always keeps the real spelling.
+from voice_style import spoken as _spoken  # noqa: E402
 
 # Series narrator (Dean's pick 2026-08-13): Kokoro af_heart, direct.
 # Alternatives: DEMO_NARRATOR=chatterbox with DEMO_NARRATOR_REF pointing at
@@ -71,9 +68,7 @@ NARRATOR_REF = os.environ.get(
 
 
 def speakable(text: str) -> str:
-    for word, spoken in PRONUNCIATIONS.items():
-        text = text.replace(word, spoken)
-    return text
+    return _spoken(text, NARRATOR_ENGINE)
 
 
 def ffprobe_duration(path: Path) -> float:
