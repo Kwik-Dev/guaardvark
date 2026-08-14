@@ -37,6 +37,33 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+_I2V_CAPTION_PROMPT = (
+    "Describe this image for a video generator in 1-2 sentences: the subject's "
+    "identity or species, costume/clothing with colors and materials, pose, "
+    "setting, and lighting. Describe exactly what is shown — do not invent "
+    "details that are not visible."
+)
+
+
+def _caption_image_for_i2v(image_path: str) -> str:
+    """VLM caption of an I2V source image, or "" when the VLM is unavailable.
+
+    Uses the shared offline VisionAnalyzer (same model as character_captioner /
+    film_curator). Never raises — I2V must proceed with a generic prompt rather
+    than fail the item over captioning."""
+    try:
+        from PIL import Image
+        from backend.utils.vision_analyzer import VisionAnalyzer
+        img = Image.open(str(image_path)).convert("RGB")
+        res = VisionAnalyzer().analyze(img, _I2V_CAPTION_PROMPT, think=False)
+        if getattr(res, "success", False) and (getattr(res, "description", "") or "").strip():
+            return res.description.strip()
+        logger.warning("I2V auto-caption: VLM gave no description for %s", image_path)
+    except Exception as e:
+        logger.warning("I2V auto-caption failed for %s: %s", image_path, e)
+    return ""
+
+
 def _derive_display_name(text: str, max_len: int = 40) -> str:
     """Trim a prompt down to something the Media Library card can show."""
     cleaned = " ".join((text or "").split())
@@ -1002,6 +1029,24 @@ class BatchVideoGenerator:
                                     return (br, 0, 1, False)
                                 # else: non-cast keyframe failed -> fall through to T2V
 
+                        # I2V with no user prompt: caption the source image so the
+                        # text conditioning describes what's actually in the frame.
+                        # A contentless prompt lets the model reinvent the subject
+                        # during the full-res stage of two-stage pipelines.
+                        if item.image_path and not (item.prompt or "").strip():
+                            self._set_stage(status, "caption", current_item=item.id)
+                            caption = _caption_image_for_i2v(item.image_path)
+                            item.prompt = (
+                                f"{caption} Subtle natural motion; keep the subject, "
+                                f"outfit, and scene exactly as shown."
+                                if caption else
+                                "Animate this image with subtle natural motion. Keep "
+                                "the subject, outfit, and scene exactly as shown."
+                            )
+                            logger.info(
+                                "I2V auto-caption for %s: %s", item.id, item.prompt[:120]
+                            )
+
                         self._set_stage(status, "generate", current_item=item.id)
                         gen_request = VideoGenerationRequest(
                             prompt=item.prompt or "",
@@ -1221,7 +1266,10 @@ class BatchVideoGenerator:
         items = [
             BatchVideoItem(
                 id=str(uuid.uuid4()),
-                prompt=user_prompt or f"Image-to-video: {Path(path).name}",
+                # Left empty on purpose: the render worker auto-captions the
+                # image so the prompt describes the actual content (a filename
+                # placeholder here used to drive identity drift in LTX I2V).
+                prompt=user_prompt or "",
                 image_path=path,
                 metadata={"source": "image", "image_path": path},
             )

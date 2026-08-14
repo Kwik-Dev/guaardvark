@@ -1197,7 +1197,7 @@ class ComfyUIVideoWorkflowMixin:
 
     # Official LTX-2.5 distilled sigma schedules (ComfyUI 0.32 T2V/I2V templates).
     _LTX25_STAGE1_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
-    _LTX25_STAGE2_SIGMAS = "0.85, 0.7250, 0.4219, 0.0"
+    _LTX25_STAGE2_SIGMAS = "0.909375, 0.725, 0.421875, 0.0"
 
     @staticmethod
     def _ltx25_stage1_size(width: int, height: int, align: int = 32) -> tuple[int, int]:
@@ -1316,16 +1316,16 @@ class ComfyUIVideoWorkflowMixin:
                 },
             },
             "12": {
-                "class_type": "LTXVDualCFGGuider",
+                "class_type": "CFGGuider",
                 "inputs": {
                     "model": ["1", 0],
                     "positive": ["11", 0],
                     "negative": ["11", 1],
-                    "video_cfg": cfg,
-                    "audio_cfg": cfg,
+                    "cfg": cfg,
                 },
             },
-            "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}},
+            "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+            "13b": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "gradient_estimation"}},
             "14": {
                 "class_type": "ManualSigmas",
                 "inputs": {"sigmas": self._LTX25_STAGE1_SIGMAS},
@@ -1366,14 +1366,14 @@ class ComfyUIVideoWorkflowMixin:
             },
             "20b": {
                 "class_type": "RandomNoise",
-                "inputs": {"noise_seed": seed},
+                "inputs": {"noise_seed": (seed + 1) % (2**31)},
             },
             "21": {
                 "class_type": "SamplerCustomAdvanced",
                 "inputs": {
                     "noise": ["20b", 0],
                     "guider": ["12", 0],
-                    "sampler": ["13", 0],
+                    "sampler": ["13b", 0],
                     "sigmas": ["20", 0],
                     "latent_image": ["19", 0],
                 },
@@ -1501,16 +1501,16 @@ class ComfyUIVideoWorkflowMixin:
                 },
             },
             "14": {
-                "class_type": "LTXVDualCFGGuider",
+                "class_type": "CFGGuider",
                 "inputs": {
                     "model": ["1", 0],
                     "positive": ["13", 0],
                     "negative": ["13", 1],
-                    "video_cfg": cfg,
-                    "audio_cfg": cfg,
+                    "cfg": cfg,
                 },
             },
-            "15": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}},
+            "15": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+            "15b": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "gradient_estimation"}},
             "16": {
                 "class_type": "ManualSigmas",
                 "inputs": {"sigmas": self._LTX25_STAGE1_SIGMAS},
@@ -1541,9 +1541,22 @@ class ComfyUIVideoWorkflowMixin:
                     "vae": ["3", 0],
                 },
             },
+            # Re-anchor the source image on the upscaled latent before stage-2
+            # sampling (official distilled-I2V structure) — without this, stage 2
+            # re-paints full-res detail guided by text alone and identity drifts.
+            "20b": {
+                "class_type": "LTXVImgToVideoInplace",
+                "inputs": {
+                    "vae": ["3", 0],
+                    "image": ["9", 0],
+                    "latent": ["20", 0],
+                    "strength": float(strength),
+                    "bypass": False,
+                },
+            },
             "21": {
                 "class_type": "LTXVConcatAVLatent",
-                "inputs": {"video_latent": ["20", 0], "audio_latent": ["19", 1]},
+                "inputs": {"video_latent": ["20b", 0], "audio_latent": ["19", 1]},
             },
             "22": {
                 "class_type": "ManualSigmas",
@@ -1551,14 +1564,14 @@ class ComfyUIVideoWorkflowMixin:
             },
             "22b": {
                 "class_type": "RandomNoise",
-                "inputs": {"noise_seed": seed},
+                "inputs": {"noise_seed": (seed + 1) % (2**31)},
             },
             "23": {
                 "class_type": "SamplerCustomAdvanced",
                 "inputs": {
                     "noise": ["22b", 0],
                     "guider": ["14", 0],
-                    "sampler": ["15", 0],
+                    "sampler": ["15b", 0],
                     "sigmas": ["22", 0],
                     "latent_image": ["21", 0],
                 },
