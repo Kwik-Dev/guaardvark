@@ -34,6 +34,22 @@ def reset_home(st: Stage):
     st.page.wait_for_timeout(300)
 
 
+def sweep_windows(st: Stage):
+    """Close persisted folder windows off-camera — they survive sessions and
+    cover the desktop icons (a stale VIDEOS window ate the Images dclick)."""
+    st.page.goto(FRONTEND + "/documents", wait_until="load", timeout=30_000)
+    st.page.wait_for_timeout(1500)
+    for _ in range(6):
+        closes = st.page.locator("svg[data-testid='CloseIcon']")
+        if closes.count() == 0:
+            break
+        try:
+            closes.first.locator("xpath=ancestor::button[1]").click(timeout=3000)
+        except Exception:
+            break
+        st.page.wait_for_timeout(400)
+
+
 def unload_ollama():
     import requests as rq
     try:
@@ -54,23 +70,47 @@ def act_director(st: Stage):
     st.glide_click(box, dur=0.8)
     st.cursor.type_text(CONCEPT, delay_ms=28)
     time.sleep(0.6)
-    expand = st.page.get_by_role(
-        "button", name=re.compile("director|expand", re.I))
-    st.glide_click(expand.first, dur=0.7)
-    time.sleep(10.0)   # Ollama pre-warmed in reset; plan renders on screen
+    preview = st.page.get_by_role(
+        "button", name=re.compile("preview prompts", re.I))
+    st.glide_click(preview.first, dur=0.7)
+    time.sleep(6.0)    # prompt preview renders while the VO tells the story
 
 
 def act_wall(st: Stage):
-    st.nav_via_sidebar("Media", "/images",
-                       st.page.get_by_role("tab").first)
-    time.sleep(1.5)
-    # CALIBRATE: media library grid; open the lighthouse batch, arrow through
-    thumb = st.page.locator("img").first
-    st.glide_click(thumb, dur=0.9)
-    time.sleep(1.5)
-    for _ in range(4):                      # lightbox keyboard nav
+    # proven Files-window path — the Media Library's section state is not
+    # deterministic (a stale Videos view put Joker test renders on camera)
+    st.nav_via_sidebar("Files", "/documents",
+                       st.page.get_by_text("Images", exact=True))
+    icon = st.page.get_by_text("Images", exact=True).first
+    lx, ly = st.screen_xy(icon)
+    st.cursor.glide(lx, ly - 38, dur=0.9)
+    time.sleep(0.3)
+    st.cursor.double_click()
+    st.page.get_by_text("Home", exact=True).first.wait_for(
+        state="visible", timeout=10_000)
+    time.sleep(1.2)
+    # the list is VIRTUALIZED and sorts name-ascending — the newest batch row
+    # is never rendered. Sort by Date (desc) so it lands at the top.
+    for _ in range(2):
+        if st.page.get_by_text("ImageBatch_08-13-2026_195115_088").count():
+            break
+        st.glide_click(st.page.get_by_text("Date", exact=True).first, dur=0.6)
+        time.sleep(1.0)
+    row = st.page.get_by_text("ImageBatch_08-13-2026_195115_088").first
+    rx, ry = st.screen_xy(row)
+    st.cursor.glide(rx, ry, dur=0.8)
+    time.sleep(0.3)
+    st.cursor.double_click()
+    time.sleep(1.8)
+    first = st.page.get_by_text(re.compile(r"ImageGen_.*_001", re.I)).first
+    fx, fy = st.screen_xy(first)
+    st.cursor.glide(fx, fy, dur=0.7)
+    time.sleep(0.3)
+    st.cursor.double_click()
+    time.sleep(2.0)                          # fullscreen preview overlay
+    for _ in range(4):                       # sibling paging
         st.cursor._xdo("key", "Right")
-        time.sleep(1.4)
+        time.sleep(1.5)
     st.cursor._xdo("key", "Escape")
     time.sleep(0.8)
 
@@ -150,6 +190,7 @@ def reset_with_ollama(st: Stage):
 
 def reset_no_ollama(st: Stage):
     unload_ollama()
+    sweep_windows(st)
     reset_home(st)
 
 
@@ -186,7 +227,7 @@ BEATS = [
             "G P U.",
         ],
         action=act_wall,
-        verify=v_media,
+        verify=v_files,
         reset=reset_no_ollama,
     ),
     Beat(
@@ -241,7 +282,7 @@ BEATS = [
         ],
         action=act_files,
         verify=v_files,
-        reset=reset_home,
+        reset=reset_no_ollama,
     ),
 ]
 
