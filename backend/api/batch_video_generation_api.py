@@ -989,16 +989,31 @@ def start_video_model_download(model_id):
                     # placed at the exact name ComfyUI's loaders expect.
                     for spec in einfo["files"]:
                         dst = local_dir / spec["dst"]
-                        if dst.exists() and dst.stat().st_size > 0:
-                            continue
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        got = Path(hf_hub_download(
-                            repo_id=einfo["hf_repo"],
-                            filename=spec["src"],
-                            local_dir=str(local_dir),
-                        ))
-                        if got.resolve() != dst.resolve():
-                            shutil.move(str(got), str(dst))
+                        if not (dst.exists() and dst.stat().st_size > 0):
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            got = Path(hf_hub_download(
+                                repo_id=einfo["hf_repo"],
+                                filename=spec["src"],
+                                local_dir=str(local_dir),
+                            ))
+                            if got.resolve() != dst.resolve():
+                                shutil.move(str(got), str(dst))
+                        # Some ComfyUI loaders enumerate a DIFFERENT directory
+                        # than where the file canonically lives (e.g.
+                        # LTXVAudioVAELoader reads checkpoints/, audio VAEs
+                        # live in vae/). also_link hardlinks the file there —
+                        # previously a by-hand step that fresh installs missed,
+                        # failing workflow validation ('Value not in list').
+                        extra = spec.get("also_link")
+                        if extra and dst.exists():
+                            link_dst = models_dir / extra / dst.name
+                            if not link_dst.exists():
+                                link_dst.parent.mkdir(parents=True,
+                                                      exist_ok=True)
+                                try:
+                                    os.link(str(dst), str(link_dst))
+                                except OSError:
+                                    shutil.copy2(str(dst), str(link_dst))
                 elif "hf_filename" in einfo:
                     hf_hub_download(
                         repo_id=einfo["hf_repo"],

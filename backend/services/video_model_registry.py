@@ -399,14 +399,15 @@ VIDEO_MODEL_REGISTRY = {
     "ltx-audio-vae": {
         "name": "LTX-2.3 Audio VAE",
         "description": "Required companion — LTX-2.3 is an AV model; empty audio latents "
-                       "must be concatenated before sampling. Also hardlinked into "
-                       "checkpoints/ for LTXVAudioVAELoader.",
+                       "must be concatenated before sampling. also_link places it in "
+                       "checkpoints/ where LTXVAudioVAELoader enumerates.",
         "hf_repo": "Kijai/LTX2.3_comfy",
         "local_subdir": "vae",
         "files": [
             {
                 "src": "vae/LTX23_audio_vae_bf16.safetensors",
                 "dst": "LTX23_audio_vae_bf16.safetensors",
+                "also_link": "checkpoints",
             },
         ],
         "size_gb": 0.36,
@@ -495,13 +496,17 @@ VIDEO_MODEL_REGISTRY = {
     "ltx25-audio-vae": {
         "name": "LTX-2.5 Audio VAE",
         "description": "Required companion — LTX-2.5 is an AV model; empty audio "
-                       "latents must be concatenated before sampling.",
+                       "latents must be concatenated before sampling. also_link "
+                       "places it in checkpoints/ where LTXVAudioVAELoader "
+                       "enumerates (2026-08-14: fresh installs failed ComfyUI "
+                       "validation because only vae/ received the file).",
         "hf_repo": "Lightricks/LTX-2.5",
         "local_subdir": "vae",
         "files": [
             {
                 "src": "vae/ltx-2.5-audio-vae-bf16.safetensors",
                 "dst": "ltx-2.5-audio-vae-bf16.safetensors",
+                "also_link": "checkpoints",
             },
         ],
         "size_gb": 0.34,
