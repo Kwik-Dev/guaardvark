@@ -59,12 +59,15 @@ PRONUNCIATIONS = {
     "guaardvark": "Guard-vark",
 }
 
-# Series narrator: Chatterbox clone of the Piper female voice (more dynamic
-# prosody, same identity). Reference clip lives in the consent-gated store.
-NARRATOR_ENGINE = os.environ.get("DEMO_NARRATOR", "chatterbox")
+# Series narrator (Dean's pick 2026-08-13): Kokoro af_heart, direct.
+# Alternatives: DEMO_NARRATOR=chatterbox with DEMO_NARRATOR_REF pointing at
+# the kokoro-female reference = "Chatterbox performing AS Kokoro" (same
+# TTS-to-TTS trick as the earlier Piper clone); or piper as plain fallback.
+NARRATOR_ENGINE = os.environ.get("DEMO_NARRATOR", "kokoro")
+NARRATOR_VOICE = os.environ.get("DEMO_NARRATOR_VOICE", "af_heart")
 NARRATOR_REF = os.environ.get(
     "DEMO_NARRATOR_REF",
-    "data/uploads/voice_references/piper-female-series-narrator.wav")
+    "data/uploads/voice_references/kokoro-female-series-narrator.wav")
 
 
 def speakable(text: str) -> str:
@@ -170,7 +173,37 @@ def _line_matches(expected: str, wav: Path) -> tuple[bool, str]:
     return sim >= 0.55, heard
 
 
+def _narrate_kokoro(text: str, dest: Path) -> None:
+    r = requests.post(
+        "http://127.0.0.1:8206/generate/voice",
+        json={"text": text, "backend": "kokoro", "voice_id": NARRATOR_VOICE},
+        timeout=600,
+    )
+    r.raise_for_status()
+    res = r.json()
+    if "job_id" in res and "path" not in res:
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline:
+            j = requests.get(f"{API}/api/audio-foundry/jobs/{res['job_id']}",
+                             timeout=30).json()
+            if j.get("status") in ("done", "completed"):
+                res = j.get("result", j)
+                break
+            if j.get("status") in ("failed", "error"):
+                raise RuntimeError(f"kokoro job failed: {j}")
+            time.sleep(2)
+    dest.write_bytes(Path(res["path"]).read_bytes())
+
+
 def _synth_one(text: str, dest: Path, voice: str) -> None:
+    if NARRATOR_ENGINE == "kokoro":
+        try:
+            _narrate_kokoro(text, dest)
+            return
+        except Exception as e:
+            print(f"  narrator: kokoro failed ({e}) — falling back to piper")
+            _narrate_piper(text, dest, voice)
+            return
     if NARRATOR_ENGINE != "chatterbox":
         _narrate_piper(text, dest, voice)
         return
