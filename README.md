@@ -8,6 +8,14 @@
 
 The self-hosted, offline-first AI workstation. Autonomous agents that see a real virtual desktop and control apps. A three-tier neural router (AgentBrain). Parallel coding agent swarms in isolated git worktrees. Local video (Wan 2.2, CogVideoX), 4K/8K upscaling, full-song music + neural voice, RAG over your documents, voice chat, and a 70+ tool engine — everything on your hardware. Your machine. Your data. Your rules.
 
+**Install with one command:**
+
+```bash
+curl -fsSL https://guaardvark.com/install.sh | bash
+```
+
+See [Quick Start](#quick-start) for details and manual install options.
+
 > **For the exhaustive feature list, models, surfaces, and plugin details, see [CAPABILITIES.md](CAPABILITIES.md).** This README focuses on the marquee experience, quick start, and what makes Guaardvark different.
 
 ## ▶ Watch Guaardvark build a music video — end to end, on one local GPU
