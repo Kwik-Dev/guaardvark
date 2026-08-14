@@ -79,7 +79,17 @@ class KokoroBackend(AudioBackend):
             ) from e
 
         logger.info("Loading Kokoro pipeline for lang_code=%r", lang_code)
-        pipeline = KPipeline(lang_code=lang_code)
+        try:
+            pipeline = KPipeline(lang_code=lang_code)
+        except RuntimeError as e:
+            if "CUDA" not in str(e):
+                raise
+            # Kokoro-82M is tiny — when a render owns the card (observed:
+            # 12.4GB ComfyUI job left 39MB free), narration must not die.
+            # CPU synthesis is near-realtime for this model.
+            logger.warning(
+                "Kokoro CUDA init failed (%s) — retrying on CPU", e)
+            pipeline = KPipeline(lang_code=lang_code, device="cpu")
         self._pipelines[lang_code] = pipeline
         return pipeline
 
