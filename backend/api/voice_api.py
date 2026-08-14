@@ -898,27 +898,46 @@ def ensure_whisper_model_downloaded(model_config):
     # Try to download the model
     try:
         model_name = os.path.basename(model_config["path"]).replace("ggml-", "").replace(".bin", "")
-        download_script = os.path.join(backend_path, "tools/voice/whisper.cpp/models/download-ggml-model.sh")
-        
-        if not os.path.exists(download_script):
-            return False, model_path, f"Download script not found: {download_script}"
-        
         logger.info(f"Downloading Whisper model: {model_name}")
-        cmd = ["bash", download_script, model_name]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=backend_path)
-        
-        if result.returncode == 0 and os.path.exists(model_path):
-            logger.info(f"Successfully downloaded Whisper model: {model_name}")
-            return True, model_path, None
-        else:
-            error_msg = f"Failed to download model {model_name}: {result.stderr}"
-            logger.error(error_msg)
-            return False, model_path, error_msg
-            
-    except (subprocess.CalledProcessError, OSError, RuntimeError) as e:
+        _download_ggml_model_direct(model_name, model_path)
+        logger.info(f"Successfully downloaded Whisper model: {model_name}")
+        return True, model_path, None
+    except (OSError, RuntimeError) as e:
         error_msg = f"Error downloading model: {str(e)}"
         logger.error(error_msg)
         return False, model_path, error_msg
+
+
+def _download_ggml_model_direct(model_name, model_path):
+    """Download a ggml whisper model straight from Hugging Face.
+
+    The old path shelled out to whisper.cpp/models/download-ggml-model.sh,
+    which only exists after the whisper.cpp repo has been cloned — on a
+    machine where step 7 of start.sh never ran (or ran --no-voice), every
+    model download failed with 'Download script not found'. The script is
+    just a wget wrapper around this exact URL, so depend on the URL, not
+    the clone. (Recurring issue — this removes the dependency for good.)
+    """
+    from urllib.request import urlopen, Request
+
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    url = ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+           f"ggml-{model_name}.bin")
+    tmp_path = model_path + ".download"
+    req = Request(url, headers={"User-Agent": "guaardvark-voice/1.0"})
+    with urlopen(req, timeout=60) as resp, open(tmp_path, "wb") as f:
+        while True:
+            chunk = resp.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+    size = os.path.getsize(tmp_path)
+    if size < 1024 * 1024:  # every ggml whisper model is >1MB
+        os.unlink(tmp_path)
+        raise RuntimeError(
+            f"Downloaded ggml-{model_name}.bin is suspiciously small "
+            f"({size} bytes) — aborting")
+    os.replace(tmp_path, model_path)
 
 def get_backend_path():
     """Get the absolute path to the backend directory."""
@@ -2374,18 +2393,9 @@ def _do_whisper_download(backend_path, model_id, model_config):
         return  # Already exists
 
     model_name = os.path.basename(model_config["path"]).replace("ggml-", "").replace(".bin", "")
-    download_script = os.path.join(backend_path, "tools/voice/whisper.cpp/models/download-ggml-model.sh")
-
-    if not os.path.exists(download_script):
-        raise FileNotFoundError(f"Download script not found: {download_script}")
-
-    result = subprocess.run(
-        ["bash", download_script, model_name],
-        capture_output=True, text=True, timeout=600, cwd=backend_path
-    )
-
-    if result.returncode != 0 or not os.path.exists(model_path):
-        raise RuntimeError(f"Failed to download Whisper model {model_name}: {result.stderr}")
+    # direct HF download — no dependency on the whisper.cpp clone's helper
+    # script (see _download_ggml_model_direct)
+    _download_ggml_model_direct(model_name, model_path)
 
 
 @voice_bp.route("/models/all", methods=["GET"])
