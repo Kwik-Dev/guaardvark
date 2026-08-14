@@ -490,16 +490,29 @@ class Stage:
         return int(m[0]), int(m[1])
 
     def screen_xy(self, locator) -> tuple[int, int]:
-        locator.first.wait_for(state="visible", timeout=10_000)
-        # off-screen elements (e.g. sidebar items below the fold) would clamp
-        # the cursor at the display edge — scroll them into view first
-        locator.first.scroll_into_view_if_needed(timeout=5_000)
-        time.sleep(0.3)
-        box = locator.first.bounding_box()
-        if not box:
-            raise RuntimeError("element has no bounding box")
-        ox, oy = self._offsets()
-        return int(box["x"] + box["width"] / 2 + ox), int(box["y"] + box["height"] / 2 + oy)
+        # React re-renders detach nodes between locate and measure (desktop
+        # icons re-mount while folder counts stream in) — re-resolve and
+        # retry instead of dying on 'Element is not attached to the DOM'
+        last_err = None
+        for _ in range(4):
+            try:
+                locator.first.wait_for(state="visible", timeout=10_000)
+                # off-screen elements (e.g. sidebar items below the fold)
+                # would clamp the cursor at the display edge — scroll first
+                locator.first.scroll_into_view_if_needed(timeout=5_000)
+                time.sleep(0.3)
+                box = locator.first.bounding_box()
+                if not box:
+                    raise RuntimeError("element has no bounding box")
+                ox, oy = self._offsets()
+                return (int(box["x"] + box["width"] / 2 + ox),
+                        int(box["y"] + box["height"] / 2 + oy))
+            except Exception as e:
+                last_err = e
+                if "not attached" not in str(e) and "bounding box" not in str(e):
+                    raise
+                time.sleep(0.8)
+        raise RuntimeError(f"element never stabilized: {last_err}")
 
     # -- camera-visible actions
     def glide_click(self, locator, dur: float = 0.7, double: bool = False):

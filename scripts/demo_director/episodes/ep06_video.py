@@ -127,12 +127,16 @@ def _open_batch_preview(st: Stage, batch: str):
             break
         st.glide_click(st.page.get_by_text("Date", exact=True).first, dur=0.6)
         time.sleep(1.0)
-    row = st.page.get_by_text(batch).first
-    rx, ry = st.screen_xy(row)
-    st.cursor.glide(rx, ry, dur=0.7)
-    time.sleep(0.3)
-    st.cursor.double_click()
-    time.sleep(1.6)
+    def _dclick_row(locator):
+        x, y = st.screen_xy(locator)
+        st.cursor.glide(x, y, dur=0.7)
+        time.sleep(0.3)
+        st.cursor.double_click()
+        time.sleep(1.6)
+
+    _dclick_row(st.page.get_by_text(batch).first)
+    # the Files UI FLATTENS the batch — the mp4 lists directly (the on-disk
+    # uuid/videos nesting is hidden by the app's virtual hierarchy)
     clip = st.page.get_by_text(re.compile(r"\.mp4$", re.I)).first
     cx, cy = st.screen_xy(clip)
     st.cursor.glide(cx, cy, dur=0.6)
