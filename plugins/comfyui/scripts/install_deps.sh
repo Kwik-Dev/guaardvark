@@ -198,6 +198,23 @@ install_comfyui_python_deps() {
         fi
     fi
 
+    # LTX-2.5 audio VAE lives in models/vae/, but LTXVAudioVAELoader only lists
+    # models/checkpoints/ — bridge with a symlink so folder copies to new
+    # machines don't fail workflow validation on a missing checkpoints entry.
+    local LTX_AUDIO_VAE="ltx-2.5-audio-vae-bf16.safetensors"
+    local MODELS_DIR="$COMFYUI_DIR/models"
+    local CKPT_LINK="$MODELS_DIR/checkpoints/$LTX_AUDIO_VAE"
+    if [ -f "$MODELS_DIR/vae/$LTX_AUDIO_VAE" ]; then
+        # A dangling link (e.g. from a partial copy) blocks ln -s; replace it.
+        [ -L "$CKPT_LINK" ] && [ ! -e "$CKPT_LINK" ] && rm -f "$CKPT_LINK"
+        if [ ! -e "$CKPT_LINK" ]; then
+            echo "Linking LTX-2.5 audio VAE into checkpoints/ (loader lists that folder only)..."
+            mkdir -p "$MODELS_DIR/checkpoints"
+            ln -s "../vae/$LTX_AUDIO_VAE" "$CKPT_LINK" \
+                || echo "Warning: could not create audio VAE symlink"
+        fi
+    fi
+
     # facerestore_cf node + weights (video face-restore path)
     local FACERESTORE_DIR FR_MODELS_DIR
     FACERESTORE_DIR="$CN_DIR/facerestore_cf"

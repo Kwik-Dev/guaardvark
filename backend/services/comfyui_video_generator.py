@@ -17,11 +17,12 @@ import requests
 logger = logging.getLogger(__name__)
 
 try:
-    from backend.config import CACHE_DIR, COMFYUI_URL, COMFYUI_OUTPUT_DIR
+    from backend.config import CACHE_DIR, COMFYUI_URL, COMFYUI_OUTPUT_DIR, COMFYUI_DIR
     config_available = True
 except ImportError:
     config_available = False
     CACHE_DIR = "/tmp/guaardvark_cache"
+    COMFYUI_DIR = None
 
 # Wan loader filenames are DERIVED from the shared registry (issue #36) so the
 # generator always loads exactly what the downloader wrote — no third hand-edited
@@ -502,6 +503,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             # progress bridge can hear this generation. (server.py:883)
             if client_id:
                 payload["client_id"] = client_id
+            self._last_queue_error = None
             response = requests.post(
                 f"{self.comfy_url}/prompt",
                 json=payload,
@@ -525,9 +527,24 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                             detail = err.get("message") or str(err)
                         else:
                             detail = str(err)
+                        # node_errors carry the actionable part (e.g. which
+                        # model file failed a loader's value check).
+                        node_errors = body.get("node_errors")
+                        if isinstance(node_errors, dict) and node_errors:
+                            specifics = []
+                            for node in node_errors.values():
+                                for ne in (node or {}).get("errors", []):
+                                    msg = ne.get("message", "")
+                                    det = ne.get("details", "")
+                                    specifics.append(
+                                        f"{msg}: {det}" if det else msg
+                                    )
+                            if specifics:
+                                detail += " — " + "; ".join(s for s in specifics[:3] if s)
             except Exception:
                 if e.response is not None:
                     detail = (e.response.text or "")[:500]
+            self._last_queue_error = detail or str(e)
             logger.error(
                 "Failed to queue workflow in ComfyUI: %s%s",
                 e,
@@ -535,8 +552,37 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             )
             return None
         except Exception as e:
+            self._last_queue_error = str(e)
             logger.error(f"Failed to queue workflow in ComfyUI: {e}")
             return None
+
+    # Which ComfyUI models/ subfolder each LTX-2.5 loader input reads from.
+    # audio_vae is checkpoints/ because LTXVAudioVAELoader only lists that
+    # folder; the file's real home is vae/, bridged by a symlink.
+    _LTX25_MODEL_SUBDIRS = {
+        "unet": "diffusion_models",
+        "clip": "text_encoders",
+        "vae": "vae",
+        "audio_vae": "checkpoints",
+        "upscale_model": "latent_upscale_models",
+    }
+
+    def _ltx25_missing_files(self, model_key: str) -> List[str]:
+        """Relative paths of required LTX-2.5 files absent from the local
+        ComfyUI models tree. Empty when all present — or when the tree isn't
+        local (remote ComfyUI), where ComfyUI's own validation is the check."""
+        if not COMFYUI_DIR:
+            return []
+        models_root = Path(COMFYUI_DIR) / "models"
+        if not models_root.is_dir():
+            return []
+        files = self._ltx25_loader_cfg(model_key)
+        missing = []
+        for key, subdir in self._LTX25_MODEL_SUBDIRS.items():
+            name = files.get(key)
+            if name and not (models_root / subdir / name).exists():
+                missing.append(f"{subdir}/{name}")
+        return missing
 
     def _comfyui_alive(self) -> bool:
         """Quick liveness probe — distinct from service_available cache."""
@@ -1131,6 +1177,18 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 use_ltx25 = str(model_key).startswith("ltx25") or bool(
                     (self.LTX_MODELS.get(model_key) or {}).get("upscale_model")
                 )
+                if use_ltx25:
+                    missing = self._ltx25_missing_files(model_key)
+                    if missing:
+                        result.error = (
+                            f"LTX-2.5 model files missing on this machine: "
+                            f"{', '.join(missing)}. Transfer or download them into "
+                            f"the ComfyUI models tree, then retry. (The audio VAE "
+                            f"must be reachable from models/checkpoints/ — a symlink "
+                            f"to ../vae/ works and is created automatically on "
+                            f"plugin start when the vae/ copy exists.)"
+                        )
+                        return result
                 # Distilled defaults: 8 steps, CFG=1. Don't silently inherit Cog/Wan defaults.
                 ltx_steps = request.num_inference_steps or 8
                 ltx_cfg = request.guidance_scale if request.guidance_scale is not None else 1.0
@@ -1380,7 +1438,11 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
 
             if not prompt_id:
                 progress_bridge.stop()
-                result.error = "Failed to queue workflow in ComfyUI"
+                queue_detail = getattr(self, "_last_queue_error", None)
+                result.error = (
+                    f"Failed to queue workflow in ComfyUI: {queue_detail}"
+                    if queue_detail else "Failed to queue workflow in ComfyUI"
+                )
                 return result
 
             # Soft budget scaled to what the GPU actually needs. Activity-aware
