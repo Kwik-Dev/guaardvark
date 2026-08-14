@@ -72,7 +72,7 @@ def test_unwired_intent_raises_NotWired():
 
 
 def test_cold_load_calls_orchestrator_in_request_then_load_then_mark_order():
-    """Cold path: request_vram BEFORE load, mark_loaded AFTER. evict NOT called."""
+    """Cold path: request_vram BEFORE load, mark_loaded AFTER, release on success. evict NOT called."""
     orch = _make_orch_mock()
     backend = _StubBackend()
     d = Dispatcher(orchestrator=orch)
@@ -81,9 +81,9 @@ def test_cold_load_calls_orchestrator_in_request_then_load_then_mark_order():
     result = d.generate(Intent.FX, prompt="rain")
 
     assert result.meta["stub"] is True
-    # Order: request_vram, mark_loaded
+    # Order: request_vram, mark_loaded, release (release resets the idle-evict timer)
     method_order = [c[0] for c in orch.method_calls]
-    assert method_order == ["request_vram", "mark_loaded"]
+    assert method_order == ["request_vram", "mark_loaded", "release"]
     orch.evict.assert_not_called()
     # Backend was actually loaded once
     assert backend.load_calls == 1

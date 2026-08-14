@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 from service.bootstrap import bootstrap
-from service.config_loader import load_config
+from service.config_loader import load_config, resolve_backend_url
 from service.dispatcher import Dispatcher, Intent, NotWired
 from service.jobs import JobManager
 from service.orchestrator_client import OrchestratorClient
@@ -85,7 +85,7 @@ _config = load_config()
 _gpu_cfg = _config.get("runtime", {}).get("gpu", {})
 _reg_cfg = _config.get("runtime", {}).get("registration", {})
 _orch_client = OrchestratorClient(
-    backend_url=_reg_cfg.get("backend_url", "http://localhost:5002"),
+    backend_url=resolve_backend_url(_reg_cfg.get("backend_url")),
     enabled=_gpu_cfg.get("orchestrator_enabled", True),
 )
 
@@ -115,19 +115,31 @@ def _finalize(result) -> dict:
     path and the async worker so the shape is identical."""
     reg_cfg = _config.get("runtime", {}).get("registration", {})
     doc = None
+    registration_error = None
     if reg_cfg.get("enabled", True):
+        backend_url = resolve_backend_url(reg_cfg.get("backend_url"))
         doc = register_output(
             result,
-            backend_url=reg_cfg.get("backend_url", "http://localhost:5002"),
+            backend_url=backend_url,
             folder=reg_cfg.get("folder", "Audio"),
         )
-    return {
+        if doc is None:
+            registration_error = (
+                f"Audio generated and saved to {result.path}, but registering it "
+                f"with the Guaardvark backend at {backend_url} failed — it won't "
+                f"appear in the media library until the backend is reachable "
+                f"(check FLASK_PORT in .env matches the running backend)."
+            )
+    response = {
         "path": str(result.path),
         "duration_s": result.duration_s,
         "sample_rate": result.sample_rate,
         "meta": result.meta,
         "document_id": doc.get("id") if doc else None,
     }
+    if registration_error:
+        response["registration_error"] = registration_error
+    return response
 
 
 def _job_runner(intent_value: str, params: dict, progress_cb, cancel_event) -> dict:

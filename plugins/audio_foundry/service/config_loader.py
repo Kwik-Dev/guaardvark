@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,23 @@ import yaml
 logger = logging.getLogger(__name__)
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+def resolve_backend_url(explicit: str | None = None) -> str:
+    """Resolve the main Guaardvark backend's base URL.
+
+    Precedence: explicit config.yaml value > GUAARDVARK_BACKEND_URL env >
+    http://localhost:{FLASK_PORT}. The plugin launcher sources the project
+    root .env, so FLASK_PORT tracks wherever the backend actually listens
+    (it moves off 5000 on e.g. macOS, where AirPlay Receiver claims that port).
+    """
+    if explicit:
+        return explicit
+    env_url = os.environ.get("GUAARDVARK_BACKEND_URL")
+    if env_url:
+        return env_url
+    port = os.environ.get("FLASK_PORT", "5000")
+    return f"http://localhost:{port}"
 
 
 def load_config() -> dict[str, Any]:

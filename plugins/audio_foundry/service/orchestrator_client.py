@@ -18,9 +18,9 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from service.config_loader import resolve_backend_url
 
-DEFAULT_BACKEND_URL = "http://localhost:5002"
+logger = logging.getLogger(__name__)
 
 # Hard kill switch — overrides config.yaml's orchestrator_enabled. Set by the
 # pytest conftest so test runs never accidentally talk to a real backend.
@@ -28,15 +28,18 @@ _ENV_DISABLE = "AUDIO_FOUNDRY_DISABLE_ORCHESTRATOR"
 
 
 class OrchestratorClient:
-    """Thin HTTP wrapper around backend.api.gpu_orchestrator_api endpoints."""
+    """Thin HTTP wrapper around backend.api.gpu_orchestrator_api endpoints.
+
+    `backend_url=None` resolves via config_loader.resolve_backend_url().
+    """
 
     def __init__(
         self,
-        backend_url: str = DEFAULT_BACKEND_URL,
+        backend_url: str | None = None,
         timeout_s: float = 5.0,
         enabled: bool = True,
     ) -> None:
-        self._url = backend_url.rstrip("/")
+        self._url = resolve_backend_url(backend_url).rstrip("/")
         self._timeout = float(timeout_s)
         # Env var hard-disables regardless of constructor arg — for tests.
         if os.environ.get(_ENV_DISABLE) == "1":

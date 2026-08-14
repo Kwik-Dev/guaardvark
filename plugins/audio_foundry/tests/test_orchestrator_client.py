@@ -72,7 +72,9 @@ def test_request_vram_posts_correct_payload():
     mock_post.assert_called_once()
     args, kwargs = mock_post.call_args
     assert args[0].endswith("/api/gpu/memory/preload")
-    assert kwargs["json"] == {"slot_id": "audio_foundry:fx", "vram_mb": 6000, "priority": 72}
+    assert kwargs["json"] == {
+        "slot_id": "audio_foundry:fx", "vram_mb": 6000, "priority": 72, "exclusive": False,
+    }
 
 
 def test_mark_loaded_posts_correct_payload():

@@ -16,17 +16,16 @@ from typing import Any
 import httpx
 
 from backends.base import GenerationResult
+from service.config_loader import resolve_backend_url
 
 logger = logging.getLogger(__name__)
 
-# Module-level defaults; overridden per-call by bootstrap-injected config.
-_DEFAULT_BACKEND_URL = "http://localhost:5002"
 _DEFAULT_FOLDER = "Audio"
 
 
 def register_output(
     result: GenerationResult,
-    backend_url: str = _DEFAULT_BACKEND_URL,
+    backend_url: str | None = None,
     folder: str = _DEFAULT_FOLDER,
     timeout_s: float = 5.0,
 ) -> dict[str, Any] | None:
@@ -34,7 +33,9 @@ def register_output(
 
     The backend uses the file's actual location on disk — we don't move it here.
     `folder` must match one of the DEFAULT_FOLDERS the backend knows about.
+    `backend_url=None` resolves via config_loader.resolve_backend_url().
     """
+    backend_url = resolve_backend_url(backend_url)
     payload = {
         "physical_path": str(Path(result.path).resolve()),
         "folder_name": folder,

@@ -241,6 +241,7 @@ const AudioFoundryPage = () => {
     const docId = data.document_id;
     if (!docId) {
       setError(
+        data.registration_error ||
         "Audio was generated but couldn't be registered as a Document. " +
         "Check audio_foundry.log — the POST to /api/outputs/register may have failed."
       );
