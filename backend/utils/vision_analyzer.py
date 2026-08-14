@@ -97,10 +97,21 @@ class VisionAnalyzer:
             if tags_resp.status_code == 200:
                 available = {m["name"] for m in tags_resp.json().get("models", [])}
                 
-                # Dynamic priority: check gemma4 first (our primary brain)
-                if "gemma4:e4b" in available:
-                    return "gemma4:e4b"
-                    
+                # Dynamic priority: gemma4 first (our primary brain). Every
+                # gemma4 tag is multimodal, so accept whichever variant this
+                # machine has rather than requiring one specific tag.
+                for model in ("gemma4:e4b", "gemma4:12b", "gemma4:latest", "gemma4:e2b"):
+                    if model in available:
+                        logger.info(f"[VISION] Auto-detected vision model: {model}")
+                        return model
+                gemma_any = next(
+                    (m for m in sorted(available) if m.rsplit("/", 1)[-1].startswith("gemma4")),
+                    None,
+                )
+                if gemma_any:
+                    logger.info(f"[VISION] Auto-detected vision model: {gemma_any}")
+                    return gemma_any
+
                 # Then check the fallback list
                 for model in self._VISION_MODEL_PRIORITY:
                     if model in available:
