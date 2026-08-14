@@ -1,0 +1,30 @@
+One concept in. The Media Director — an LLM art director — writes a dozen distinct, connected prompts. Not the same image with different seeds. Different images that belong together.
+
+Episode 5 covers offline image generation end to end: the Media Director expanding one concept into a connected prompt set, a live turbo-model batch, browsing a large pre-rendered batch, the model registry with live download speed, one-click infographics, anatomy/face-restore fixes with a VRAM calibration honesty beat, natural-language Kontext edits, and upscaling to 8K.
+
+One machine. No cloud. This is Episode 5 of 12.
+
+CHAPTERS (add exact timestamps after the final edit)
+0:00 One concept in, a dozen connected prompts out
+[__:__] Media Director — an LLM art director
+[__:__] Live batch — four images, turbo model
+[__:__] The wall — the pre-rendered batch
+[__:__] Model registry & downloads
+[__:__] Fix Anatomy / face restore
+[__:__] Kontext — natural-language image edit
+[__:__] Upscaling to 8K
+[__:__] Auto-filing into Files
+[__:__] Closer — make them move (Ep 6), give them a face (Ep 9)
+
+FEATURED IN THIS EPISODE
+▸ Ep 6: Hollywood on One GPU — Video Gen — {EP06}
+▸ Ep 9: A Film Crew That Never Sleeps — Film Crew — {EP09}
+▸ Ep 3: Your Files Have a Desktop — File Desktop — {EP03}
+
+Full playlist: {PLAYLIST}
+
+Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
+
+Source & docs: https://github.com/guaardvark/guaardvark
+
+#Guaardvark #localAI #selfhostedAI #opensourceAI #offlineAI #AIvideogeneration #onemachinenocloud #imagegen #AIimagegeneration #texttoimage #ZImage #FLUX

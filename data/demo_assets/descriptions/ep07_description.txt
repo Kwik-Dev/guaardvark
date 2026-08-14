@@ -1,0 +1,28 @@
+The narrator of this series isn't a person. She started as a tiny local text-to-speech model, then this feature cloned her into the voice you're hearing right now — including the part where the system demanded consent before it would speak a word.
+
+Episode 7 is the true story of how this series got its narrator: a 13-second phonetic reference clip, a consent flow that returns a hard 403 on an unconsented voice path, a three-way clone comparison, whisper-based self-checking that rejects a babbled take before it ever reaches you, and the session that generated the series' own music bed and sound effects.
+
+One machine. No cloud. This is Episode 7 of 12.
+
+CHAPTERS (add exact timestamps after the final edit)
+0:00 The narrator isn't a person
+[__:__] The 13-second reference clip
+[__:__] Consent required — 403 on camera
+[__:__] The clone — three voices compared
+[__:__] Self-check — it listens to itself first
+[__:__] Music — instrumental generation
+[__:__] FX Lab — sound effects from text
+[__:__] Auto-filing into Files
+[__:__] Closer — one song, one video, made from each other
+
+FEATURED IN THIS EPISODE
+▸ Ep 3: Your Files Have a Desktop — File Desktop — {EP03}
+▸ Ep 8: Drop a Song, Get a Music Video — Music Video — {EP08}
+
+Full playlist: {PLAYLIST}
+
+Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
+
+Source & docs: https://github.com/guaardvark/guaardvark
+
+#Guaardvark #localAI #selfhostedAI #opensourceAI #offlineAI #AIvideogeneration #onemachinenocloud #voiceclone #voicecloning #texttospeech #AImusicgeneration

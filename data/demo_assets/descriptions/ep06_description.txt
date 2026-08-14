@@ -1,0 +1,28 @@
+Seven video models. Wan. CogVideoX. LTX. Text to video, image to video — on the same card that ran your chat in episode two.
+
+Episode 6 tours video generation: seven backend models behind one interface, the quality/duration/motion/aspect preset system, instant prompt styles, a live Fast-tier render with staged progress, the gpu_wait queue (renders wait for the card instead of failing), a Draft-vs-Cinema comparison, and one-click access to the underlying ComfyUI graph.
+
+One machine. No cloud. This is Episode 6 of 12.
+
+CHAPTERS (add exact timestamps after the final edit)
+0:00 Seven video models, one GPU
+[__:__] Model menu — Wan, CogVideoX, LTX...
+[__:__] Preset tour — Quality, Duration, Motion, Aspect
+[__:__] Prompt styles — Cinematic, Anime, Claymation, Ghibli
+[__:__] Live render — Queued → Storyboard → Director → Keyframe → Generating → Post
+[__:__] Renders wait for the card, not fail
+[__:__] Draft vs Cinema (2× RIFE + 2× ESRGAN)
+[__:__] Advanced Editor — one click into ComfyUI
+[__:__] Closer — next, a beat-synced music video
+
+FEATURED IN THIS EPISODE
+▸ Ep 8: Drop a Song, Get a Music Video — Music Video — {EP08}
+▸ Ep 2: A Brain With Three Speeds — Chat Brain — {EP02}
+
+Full playlist: {PLAYLIST}
+
+Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
+
+Source & docs: https://github.com/guaardvark/guaardvark
+
+#Guaardvark #localAI #selfhostedAI #opensourceAI #offlineAI #AIvideogeneration #onemachinenocloud #videogen #AIvideogeneration #texttovideo #imagetovideo #ComfyUI

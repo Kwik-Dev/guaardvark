@@ -1,0 +1,27 @@
+Screenwriter. Casting director. Cinematographer. Storyboard artist. Editor. Five AI crew members, one three-line logline — and the only person on set is you, exactly twice.
+
+Episode 9 covers the full AI production pipeline: a screenwriter breaking a logline into scenes and shots, a human casting gate, character LoRA training from reference photos, an AI cinematographer, storyboard generation with a vision model auto-approving on-model shots and escalating the doubtful ones, single-shot regeneration, and a second human approval gate before rendering.
+
+One machine. No cloud. This is Episode 9 of 12.
+
+CHAPTERS (add exact timestamps after the final edit)
+0:00 Five AI crew members, one logline
+[__:__] Screenwriter — scene/shot breakdown
+[__:__] Casting gate (human #1)
+[__:__] Cast & LoRA — reference photos to trained identity
+[__:__] Cinematographer — camera, framing, lens
+[__:__] Storyboard + Curator — the AI reviews its own work
+[__:__] Regenerate one shot
+[__:__] Approval gate (human #2) → rendering
+[__:__] Closer — that file is a real editing project
+
+FEATURED IN THIS EPISODE
+▸ Ep 10: The Editor That Shows Its Work — Video Editor — {EP10}
+
+Full playlist: {PLAYLIST}
+
+Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
+
+Source & docs: https://github.com/guaardvark/guaardvark
+
+#Guaardvark #localAI #selfhostedAI #opensourceAI #offlineAI #AIvideogeneration #onemachinenocloud #filmcrew #AIfilmmaking #LoRAtraining #AIstoryboard
