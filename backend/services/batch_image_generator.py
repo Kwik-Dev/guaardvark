@@ -374,11 +374,11 @@ class BatchImageGenerator:
             gen = self.image_generator
             if gen:
                 # Match offline auto-router: zimage first on consumer cards
-                for preferred in ("zimage-turbo", "krea2-turbo", "sd-xl", gen.default_model):
-                    if preferred and gen.available_models.get(preferred):
+                for preferred in ("zimage-turbo", "krea2-turbo", "sd-xl"):
+                    if gen.available_models.get(preferred):
                         if gen._is_model_downloaded(gen.available_models[preferred]):
                             return preferred
-                return gen.default_model or "sd-1.5"
+                return "zimage-turbo"
             return "zimage-turbo"
         return model_key
 
