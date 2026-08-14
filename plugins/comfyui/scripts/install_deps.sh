@@ -172,6 +172,15 @@ install_comfyui_python_deps() {
         REQS_HASH=$(md5sum "$COMFYUI_REQS" 2>/dev/null | cut -d' ' -f1)
         STAMP_HASH=""
         [ -f "$REQS_STAMP" ] && STAMP_HASH=$(cat "$REQS_STAMP" 2>/dev/null)
+        # The stamp records requirements CONTENT, not which venv it landed in.
+        # A copied plugin folder brings the stamp to a machine whose venv never
+        # installed these deps — probe imports ComfyUI hard-requires and clear
+        # the stamp when they're missing (same pattern as the custom-nodes probe).
+        if [ -f "$REQS_STAMP" ] && ! "$VENV_PYTHON" -c 'import comfy_aimdo, blake3, alembic, av' >/dev/null 2>&1; then
+            echo "Requirements stamp present but core imports missing (copied venv/stamp?) — reinstalling..."
+            rm -f "$REQS_STAMP"
+            STAMP_HASH=""
+        fi
         if [ "$REQS_HASH" != "$STAMP_HASH" ]; then
             echo "Installing ComfyUI requirements..."
             "$VENV_PYTHON" -m pip install -r "$COMFYUI_REQS" --quiet 2>&1 | tail -5
