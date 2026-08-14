@@ -5,6 +5,7 @@
 // - Integrated with Progress Footer Bar for processing tasks
 // - Cleaner, more useful interface
 
+import { formatUiError } from "../utils/uiError";
 import {
   Alert,
   Box,
@@ -181,7 +182,7 @@ const TaskPage = () => {
       });
       setVideoGenJobs(data?.jobs || []);
     } catch (err) {
-      setVideoGenError(err.response?.data?.error || err.message || "Failed to load video batch jobs");
+      setVideoGenError(formatUiError(err.response?.data?.error) || err.message || "Failed to load video batch jobs");
     } finally {
       setVideoGenLoading(false);
     }
@@ -207,7 +208,7 @@ const TaskPage = () => {
     } catch (err) {
       setFeedback({
         open: true,
-        message: err.response?.data?.error || err.message || "Cancel failed",
+        message: formatUiError(err.response?.data?.error) || err.message || "Cancel failed",
         severity: "error",
       });
     }

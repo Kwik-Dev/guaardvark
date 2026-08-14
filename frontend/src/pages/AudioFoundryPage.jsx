@@ -1,5 +1,6 @@
 // frontend/src/pages/AudioFoundryPage.jsx
 import React, { useCallback, useEffect, useState, useRef } from "react";
+import { formatUiError } from "../utils/uiError";
 import {
   Box,
   Typography,
@@ -188,7 +189,7 @@ const AudioFoundryPage = () => {
       refreshVoiceClips();
     } catch (err) {
       console.error("Voice clip upload failed:", err);
-      setError(err.response?.data?.error || "Import failed.");
+      setError(formatUiError(err.response?.data?.error) || "Import failed.");
     } finally {
       setUploadingClip(false);
     }
@@ -426,7 +427,7 @@ const AudioFoundryPage = () => {
       // still generate without the LLM in the loop.
       setMusicPreview({
         fallback: true,
-        reason: err.response?.data?.error || "Polish service unreachable",
+        reason: formatUiError(err.response?.data?.error) || "Polish service unreachable",
         style_prompt: intent,
         negative_prompt: "",
         tags_used: [],
@@ -475,7 +476,7 @@ const AudioFoundryPage = () => {
       finishWithResult(res.data);  // inline (short song) — unchanged behavior
     } catch (err) {
       console.error("Music generation failed:", err);
-      setError(err.response?.data?.detail || err.response?.data?.error || "Generation failed. Please check backend logs.");
+      setError(err.response?.data?.detail || formatUiError(err.response?.data?.error) || "Generation failed. Please check backend logs.");
       setLoading(false);
     } finally {
       if (!pollRef.current) setLoading(false);

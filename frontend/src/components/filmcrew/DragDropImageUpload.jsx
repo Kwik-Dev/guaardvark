@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { formatUiError } from "../../utils/uiError";
 import {
   Box, Typography, Chip, IconButton, CircularProgress, Alert,
   Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button,
@@ -130,7 +131,7 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
       if (onUploaded) onUploaded(res.data?.ref_image_paths || []);
       setConfirmIdx(null);
     } catch (e) {
-      setError(e.response?.data?.error || "Failed to delete image.");
+      setError(formatUiError(e.response?.data?.error) || "Failed to delete image.");
     } finally {
       setDeleting(false);
     }
@@ -171,7 +172,7 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
         if (onUploaded) onUploaded(res.data?.subject?.ref_image_paths || []);
         return res.data;
       } catch (e) {
-        setError(e.response?.data?.error || "Upload failed.");
+        setError(formatUiError(e.response?.data?.error) || "Upload failed.");
         throw e;
       } finally {
         setUploading(false);

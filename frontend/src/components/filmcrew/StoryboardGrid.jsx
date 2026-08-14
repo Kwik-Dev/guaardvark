@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { formatUiError } from "../../utils/uiError";
 import {
   Grid,
   Card,
@@ -46,7 +47,7 @@ const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApp
     } catch (err) {
       // Keep dialog open with the error visible — closing silently and not
       // regenerating leaves the user wondering why nothing happened.
-      setRegenError(err.response?.data?.error || 'Regeneration failed. Try again.');
+      setRegenError(formatUiError(err.response?.data?.error) || 'Regeneration failed. Try again.');
     } finally {
       setLoading(false);
     }

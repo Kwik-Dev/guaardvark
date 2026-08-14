@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { formatUiError } from "../utils/uiError";
 import {
   Box,
   Typography,
@@ -159,7 +160,7 @@ const FilmCrewPage = () => {
       await fetchDetail(id);
       await fetchProductions();
     } catch (err) {
-      setError(err?.response?.data?.error || 'Failed to retry production');
+      setError(formatUiError(err?.response?.data?.error) || 'Failed to retry production');
     } finally {
       setRetrying(false);
     }
@@ -179,7 +180,7 @@ const FilmCrewPage = () => {
       }
       await fetchProductions();
     } catch (err) {
-      setError(err?.response?.data?.error || 'Failed to delete production');
+      setError(formatUiError(err?.response?.data?.error) || 'Failed to delete production');
     } finally {
       setDeleting(false);
     }

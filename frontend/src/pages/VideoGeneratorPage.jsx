@@ -88,23 +88,7 @@ import {
   FullscreenExit as FullscreenExitIcon,
 } from "@mui/icons-material";
 
-/** Coerce API/error payloads to a string safe for <Alert> children. */
-function formatUiError(err) {
-  if (err == null || err === "") return "";
-  if (typeof err === "string") return err;
-  if (typeof err === "number" || typeof err === "boolean") return String(err);
-  if (typeof err === "object") {
-    if (typeof err.message === "string" && err.message) return err.message;
-    if (typeof err.error === "string" && err.error) return err.error;
-    if (typeof err.detail === "string" && err.detail) return err.detail;
-    try {
-      return JSON.stringify(err);
-    } catch {
-      return "An error occurred";
-    }
-  }
-  return String(err);
-}
+import { formatUiError } from "../utils/uiError";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -2412,7 +2396,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         )}
                         {q.error && (
                           <Typography variant="caption" color="error" sx={{ mt: 0.5, display: 'block' }}>
-                            {q.error}
+                            {formatUiError(q.error)}
                           </Typography>
                         )}
                       </Box>
@@ -2647,7 +2631,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                           </Stack>
                           {res.error && (
                             <Typography variant="caption" color="error" display="block" sx={{ mt: 0.5 }}>
-                              {res.error}
+                              {formatUiError(res.error)}
                             </Typography>
                           )}
                         </CardContent>

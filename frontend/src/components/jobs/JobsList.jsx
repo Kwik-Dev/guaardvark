@@ -7,6 +7,7 @@
 // Reads from /api/jobs/* (Phase 3) and listens to the canonical jobs:*
 // socket channel via UnifiedProgressContext.unifiedJobs (Phase 4).
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { formatUiError } from "../../utils/uiError";
 import {
   Box,
   Paper,
@@ -103,7 +104,7 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
       await refreshHistory();
     } catch (e) {
       console.error("JobsList: clear history failed:", e);
-      setError(e.response?.data?.error || e.message || "Failed to clear history");
+      setError(formatUiError(e.response?.data?.error) || e.message || "Failed to clear history");
       setLoading(false);
     }
     setClearMenuAnchorEl(null);
@@ -119,7 +120,7 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
       setActiveRows(data?.jobs || []);
     } catch (e) {
       console.error("JobsList: list failed:", e);
-      setError(e.response?.data?.error || e.message || "Failed to load jobs");
+      setError(formatUiError(e.response?.data?.error) || e.message || "Failed to load jobs");
     } finally {
       setLoading(false);
     }
@@ -142,7 +143,7 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
       setHistoryRows(all);
     } catch (e) {
       console.error("JobsList: history failed:", e);
-      setError(e.response?.data?.error || e.message || "Failed to load history");
+      setError(formatUiError(e.response?.data?.error) || e.message || "Failed to load history");
     } finally {
       setLoading(false);
     }
@@ -486,7 +487,7 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
                         setError(res?.reason || "Cancel refused");
                       }
                     } catch (e) {
-                      setError(e.response?.data?.error || e.message || "Cancel failed");
+                      setError(formatUiError(e.response?.data?.error) || e.message || "Cancel failed");
                     }
                   }}
                 >

@@ -44,6 +44,7 @@ import { getAvailableModels } from "../api/modelService";
 import GpuGateBanner from "../components/common/GpuGateBanner";
 import useJobsGate from "../hooks/useJobsGate";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
+import { formatUiError } from "../utils/uiError";
 
 const POLL_MS = 5000;
 const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
@@ -134,7 +135,7 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
         return next;
       });
     } catch (e) {
-      const msg = e?.response?.data?.error || e?.message || 'Regen failed';
+      const msg = formatUiError(e?.response?.data?.error) || e?.message || 'Regen failed';
       setRegenErrors(prev => ({ ...prev, [index]: msg }));
       // do not re-throw; parent already surfaced global error
     }
@@ -860,7 +861,7 @@ const MusicVideoPage = () => {
       await refreshList();
       setSelectedId(mv.id);
     } catch (e) {
-      setError(e?.response?.data?.error || e.message || "Failed to create music video.");
+      setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to create music video.");
     } finally {
       setBusy(false);
     }
@@ -875,7 +876,7 @@ const MusicVideoPage = () => {
       setDetail(updated);
       await refreshList();
     } catch (e) {
-      setError(e?.response?.data?.error || e.message || "Failed to start analysis.");
+      setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to start analysis.");
     } finally {
       setBusy(false);
     }
@@ -890,7 +891,7 @@ const MusicVideoPage = () => {
       setDetail(updated);
       await refreshList();
     } catch (e) {
-      setError(e?.response?.data?.error || e.message || "Approve failed.");
+      setError(formatUiError(e?.response?.data?.error) || e.message || "Approve failed.");
     } finally {
       setBusy(false);
     }
@@ -910,7 +911,7 @@ const MusicVideoPage = () => {
       setDetail(updated);
       await refreshList();
     } catch (e) {
-      setError(e?.response?.data?.error || e.message || "Cancel failed.");
+      setError(formatUiError(e?.response?.data?.error) || e.message || "Cancel failed.");
     } finally {
       setBusy(false);
     }
@@ -929,7 +930,7 @@ const MusicVideoPage = () => {
       }
       await refreshList();
     } catch (e) {
-      setError(e?.response?.data?.error || e.message || "Delete failed.");
+      setError(formatUiError(e?.response?.data?.error) || e.message || "Delete failed.");
     }
   };
 
@@ -954,7 +955,7 @@ const MusicVideoPage = () => {
       }
       await refreshList();
     } catch (e) {
-      setError(e?.response?.data?.error || e.message || "Clear failed.");
+      setError(formatUiError(e?.response?.data?.error) || e.message || "Clear failed.");
     }
   };
 
@@ -1195,7 +1196,7 @@ const MusicVideoPage = () => {
                 </Stack>
               </Collapse>
 
-              {error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
+              {error && <Alert severity="error" onClose={() => setError(null)}>{formatUiError(error)}</Alert>}
               <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
               <Button variant="contained" onClick={handleCreate} disabled={busy || gpuSubmitBlocked}>
                 {busy ? <CircularProgress size={20} /> : (hasActiveGeneration ? "Add another to queue" : "Create & Analyze")}
@@ -1293,7 +1294,7 @@ const MusicVideoPage = () => {
                           await replanMusicVideo(detail.id);
                           await refreshDetail(detail.id);
                         } catch (e) {
-                          setError(e?.response?.data?.error || e.message || "Failed to re-plan");
+                          setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to re-plan");
                         } finally {
                           setBusy(false);
                         }
@@ -1382,7 +1383,7 @@ const MusicVideoPage = () => {
                       await updateMusicVideoPlan(detail.id, payload);
                       await refreshDetail(detail.id);
                     } catch (e) {
-                      setError(e?.response?.data?.error || e.message || "Failed to save plan edits");
+                      setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to save plan edits");
                     } finally {
                       setBusy(false);
                     }
@@ -1398,7 +1399,7 @@ const MusicVideoPage = () => {
                         await refreshDetail(detail.id);
                       }
                     } catch (e) {
-                      setError(e?.response?.data?.error || e.message || "Failed to generate storyboards");
+                      setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to generate storyboards");
                     } finally {
                       setBusy(false);
                     }
@@ -1409,7 +1410,7 @@ const MusicVideoPage = () => {
                       await regenMusicVideoStoryboard(detail.id, index, data);
                       await refreshDetail(detail.id);
                     } catch (e) {
-                      setError(e?.response?.data?.error || e.message || "Failed to regen storyboard");
+                      setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to regen storyboard");
                       throw e;  // re-throw so local handler in PlanViewer can show per-cut error and still bump version for re-fetch
                     } finally {
                       setBusy(false);
@@ -1425,7 +1426,7 @@ const MusicVideoPage = () => {
                       await regenerateMusicVideoPlan(detail.id, payload);
                       await refreshDetail(detail.id);
                     } catch (e) {
-                      setError(e?.response?.data?.error || e.message || "Failed to regenerate plan");
+                      setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to regenerate plan");
                     } finally {
                       setBusy(false);
                     }

@@ -1,5 +1,6 @@
 // frontend/src/components/modals/ImageModelsModal.jsx
 import React, { useState, useEffect, useCallback } from "react";
+import { formatUiError } from "../../utils/uiError";
 import {
   Dialog,
   DialogTitle,
@@ -115,7 +116,7 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
       if (err.response?.status === 409) {
         showMessage?.("A download is already in progress.", "warning");
       } else {
-        showMessage?.(err.response?.data?.error || err.message || "Error starting download", "error");
+        showMessage?.(formatUiError(err.response?.data?.error) || err.message || "Error starting download", "error");
       }
     }
   };

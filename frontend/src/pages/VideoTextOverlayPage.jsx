@@ -32,6 +32,7 @@ import {
 } from "@mui/icons-material";
 import PageLayout from "../components/layout/PageLayout";
 import { listVideoDocuments, overlayText } from "../api/videoOverlayService";
+import { formatUiError } from "../utils/uiError";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -248,7 +249,7 @@ const VideoTextOverlayPage = () => {
                   />
                 </Box>
 
-                {error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
+                {error && <Alert severity="error" onClose={() => setError(null)}>{formatUiError(error)}</Alert>}
 
                 <Button
                   variant="contained"

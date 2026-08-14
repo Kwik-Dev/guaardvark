@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { formatUiError } from "../utils/uiError";
 import { useParams, useNavigate } from 'react-router-dom';
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
 import {
@@ -319,7 +320,7 @@ const CastMemberPage = () => {
       await loadSubject();
       setSavedNote(true);
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to save changes.');
+      setError(formatUiError(e.response?.data?.error) || 'Failed to save changes.');
     } finally {
       setSaving(false);
     }
@@ -346,7 +347,7 @@ const CastMemberPage = () => {
     } catch (e) {
       setError(
         e.response?.data?.message
-        || e.response?.data?.error
+        || formatUiError(e.response?.data?.error)
         || 'Sync identity from photos failed (is Ollama up?).',
       );
     } finally {
@@ -374,7 +375,7 @@ const CastMemberPage = () => {
       // (plan response only returns the new sheet rows).
       await loadSamples();
     } catch (e) {
-      setError(e.response?.data?.error || 'Planning failed (the LLM may be offline).');
+      setError(formatUiError(e.response?.data?.error) || 'Planning failed (the LLM may be offline).');
     } finally {
       setPlanning(false);
     }
@@ -396,7 +397,7 @@ const CastMemberPage = () => {
       startPolling();
     } catch (e) {
       setGenerateActive(false);
-      setError(e.response?.data?.error || 'Failed to start sample generation.');
+      setError(formatUiError(e.response?.data?.error) || 'Failed to start sample generation.');
     } finally {
       setBusy(false);
     }
@@ -415,7 +416,7 @@ const CastMemberPage = () => {
       startPolling();
     } catch (e) {
       setGenerateActive(false);
-      setError(e.response?.data?.error || 'Failed to regenerate sample.');
+      setError(formatUiError(e.response?.data?.error) || 'Failed to regenerate sample.');
     }
   };
 
@@ -424,7 +425,7 @@ const CastMemberPage = () => {
       await approveSamples(subjectId, [sample.id], !sample.approved);
       await loadSamples();
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to update approval.');
+      setError(formatUiError(e.response?.data?.error) || 'Failed to update approval.');
     }
   };
 
@@ -439,7 +440,7 @@ const CastMemberPage = () => {
       });
       await loadSamples();
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to delete sample.');
+      setError(formatUiError(e.response?.data?.error) || 'Failed to delete sample.');
     }
   };
 
@@ -453,7 +454,7 @@ const CastMemberPage = () => {
       await approveSamples(subjectId, ids, true);
       await loadSamples();
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to approve set.');
+      setError(formatUiError(e.response?.data?.error) || 'Failed to approve set.');
     }
   };
 
@@ -478,7 +479,7 @@ const CastMemberPage = () => {
       await loadSubject();
       setTrainingSettingsSaved(true);
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to save training settings.');
+      setError(formatUiError(e.response?.data?.error) || 'Failed to save training settings.');
     } finally {
       setSavingTrainingSettings(false);
     }
@@ -517,7 +518,7 @@ const CastMemberPage = () => {
       setTrainingJob(null);
       await loadSubject();
     } catch (e) {
-      setError(e.response?.data?.reason || e.response?.data?.error || 'Failed to cancel training.');
+      setError(e.response?.data?.reason || formatUiError(e.response?.data?.error) || 'Failed to cancel training.');
     } finally {
       setBusy(false);
     }

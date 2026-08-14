@@ -7,6 +7,7 @@
 // - Multi-select with CTRL+Click and drag-to-select
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { formatUiError } from "../../utils/uiError";
 import { BASE_URL } from '../../api/apiClient';
 import {
   Box,
@@ -2585,7 +2586,7 @@ const FileManager = () => {
             }
           } catch (err) {
             showMessage(
-              err.response?.data?.message || err.response?.data?.error || 'Failed to reindex document',
+              err.response?.data?.message || formatUiError(err.response?.data?.error) || 'Failed to reindex document',
               'error'
             );
           } finally {

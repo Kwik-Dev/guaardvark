@@ -4,6 +4,7 @@
 // WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
 
 import React, { useState, useEffect, useCallback } from "react";
+import { formatUiError } from "../utils/uiError";
 import {
   Box,
   Typography,
@@ -384,7 +385,7 @@ const FileGenerationPage = () => {
       console.error("Batch CSV generation error:", error);
       const errMsg =
         error.response?.data?.details ||
-        error.response?.data?.error ||
+        formatUiError(error.response?.data?.error) ||
         error.message ||
         "Unknown batch processing error.";
       setBatchFeedback({
