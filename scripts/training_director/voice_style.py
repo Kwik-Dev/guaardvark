@@ -151,11 +151,17 @@ def _decimal_measure(match: re.Match) -> str:
 
 
 def spoken(text: str, terms: dict[str, str] | None = None,
-           spelled_acronyms: tuple[str, ...] = ()) -> str:
-    """Render written guide text as Chatterbox-speakable text.
+           spelled_acronyms: tuple[str, ...] = (),
+           backend: str = "chatterbox") -> str:
+    """Render written guide text as speakable text for `backend`.
 
     `terms` and `spelled_acronyms` come from the active project and are applied
     on top of the common table.
+
+    Letter-spacing an acronym helps Chatterbox and Piper, which otherwise read
+    it as a word. It actively harms Kokoro: its frontend reads all-caps
+    acronyms correctly on its own, and the inserted spaces destroy the
+    sentence's pause structure.
     """
     # Codes before any other numeric rule — they contain periods and digits
     # that the fraction and decimal rules would otherwise claim.
@@ -197,7 +203,8 @@ def spoken(text: str, terms: dict[str, str] | None = None,
     for written, said in table.items():
         text = re.sub(rf"(?<![\w-]){re.escape(written)}(?![\w-])", said, text)
 
-    for acronym in spelled_acronyms:
-        text = re.sub(rf"\b{acronym}\b", " ".join(acronym), text)
+    if backend != "kokoro":
+        for acronym in spelled_acronyms:
+            text = re.sub(rf"\b{acronym}\b", " ".join(acronym), text)
 
     return re.sub(r"[ \t]{2,}", " ", text).strip()

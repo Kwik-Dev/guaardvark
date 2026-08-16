@@ -44,7 +44,11 @@ class Project:
     accent: Color = (198, 156, 74)
     rule: Color = (176, 190, 208)
 
-    # Narrator reference clip and delivery preset.
+    # Narrator. 'kokoro' speaks a catalogue voice named by voice_id and needs
+    # no recording; 'chatterbox' clones voice_reference, and voice_emotion
+    # selects its delivery preset (Chatterbox only — Kokoro ignores it).
+    voice_backend: str = "kokoro"
+    voice_id: str = "am_onyx"
     voice_reference: str | None = None
     voice_emotion: str = "narration"
 

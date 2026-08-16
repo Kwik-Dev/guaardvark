@@ -86,8 +86,12 @@ def cmd_voicetest() -> None:
     out.mkdir(parents=True, exist_ok=True)
     lines = voice_test_lines()
     print(f"project : {proj.name}")
-    print(f"clip    : {voice_reference()}")
-    print(f"delivery: {proj.voice_emotion}")
+    print(f"narrator: {proj.voice_backend}")
+    if proj.voice_backend == "chatterbox":
+        print(f"clip    : {voice_reference()}")
+        print(f"delivery: {proj.voice_emotion}")
+    else:
+        print(f"voice   : {proj.voice_id}")
     print(f"foundry : {FOUNDRY}\n")
 
     failures = 0
@@ -104,8 +108,8 @@ def cmd_voicetest() -> None:
     print(f"{len(lines) - failures}/{len(lines)} lines passed the read-check")
     print(f"listen: {out}")
     if failures:
-        print("\nFailures are usually respellings, not clone quality — add the "
-              "term to the project's TERMS table and re-run.")
+        print("\nFailures are usually respellings rather than narrator quality "
+              "— add the term to the project's TERMS table and re-run.")
 
 
 def cmd_list() -> None:

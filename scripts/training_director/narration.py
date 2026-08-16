@@ -50,7 +50,7 @@ BASE_SEED = int(os.environ.get("TD_VOICE_SEED", "20260815"))
 def spoken(text: str) -> str:
     """Project-aware written-to-spoken rendering."""
     proj = context.current()
-    return _spoken(text, proj.terms, proj.spelled_acronyms)
+    return _spoken(text, proj.terms, proj.spelled_acronyms, proj.voice_backend)
 
 
 def voice_reference() -> Path:
@@ -78,11 +78,13 @@ def ensure_narrator_ready() -> None:
     Shipping a video in the wrong voice is worse than not shipping one, so this
     refuses to continue rather than falling back to a stock voice.
     """
-    ref = voice_reference()
-    if not ref.exists():
-        raise RuntimeError(
-            f"voice reference clip not found: {ref}\n"
-            "Check voice_reference in the project's project.py.")
+    # Only a cloning backend needs a recording; a catalogue voice does not.
+    if context.current().voice_backend == "chatterbox":
+        ref = voice_reference()
+        if not ref.exists():
+            raise RuntimeError(
+                f"voice reference clip not found: {ref}\n"
+                "Check voice_reference in the project's project.py.")
     # The stills pass stops audio_foundry to reclaim its CUDA context, so the
     # service being down here is expected rather than an error.
     for attempt in range(2):
@@ -106,13 +108,16 @@ def ensure_narrator_ready() -> None:
 
 
 def _synthesize(text: str, dest: Path, seed: int | None = None) -> None:
-    """One Chatterbox take of `text` into `dest`."""
-    payload = {
-        "text": text,
-        "backend": "chatterbox",
-        "reference_clip_path": str(voice_reference()),
-        "emotion": context.current().voice_emotion,
-    }
+    """One take of `text` into `dest`, through the project's narrator."""
+    proj = context.current()
+    payload: dict = {"text": text, "backend": proj.voice_backend}
+    if proj.voice_backend == "chatterbox":
+        # Cloning: the reference clip carries the identity, and the emotion
+        # preset drives the sampling controls behind it.
+        payload["reference_clip_path"] = str(voice_reference())
+        payload["emotion"] = proj.voice_emotion
+    else:
+        payload["voice_id"] = proj.voice_id
     if seed is not None:
         payload["seed"] = seed
     r = requests.post(f"{FOUNDRY}/generate/voice", json=payload, timeout=600)
@@ -133,8 +138,31 @@ def _synthesize(text: str, dest: Path, seed: int | None = None) -> None:
     dest.write_bytes(Path(res["path"]).read_bytes())
 
 
+_NUMBER_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+    "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+    "eighteen": "18", "nineteen": "19", "twenty": "20",
+}
+
+
+def _numeric_normalize(s: str) -> str:
+    """Put spoken and transcribed numbers into the same form.
+
+    Whisper renders a spoken "one and a half" as "1.5", so a correct take would
+    otherwise score as a mismatch and burn its retakes.
+    """
+    s = s.lower()
+    s = re.sub(r"\b(" + "|".join(_NUMBER_WORDS) + r") and a half\b",
+               lambda m: f"{_NUMBER_WORDS[m.group(1)]}.5", s)
+    s = re.sub(r"\b(" + "|".join(_NUMBER_WORDS) + r")\b",
+               lambda m: _NUMBER_WORDS[m.group(1)], s)
+    return s
+
+
 def _letters(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", s.lower())
+    return re.sub(r"[^a-z0-9]", "", _numeric_normalize(s))
 
 
 def transcribe(path: Path) -> str:
