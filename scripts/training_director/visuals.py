@@ -104,7 +104,7 @@ def wait_for_batch(batch_id: str, timeout_s: int = 3600) -> list[Path]:
 def release_voice_vram() -> None:
     """Unload the voice model before an image batch.
 
-    Chatterbox and the image models do not co-resident on a single consumer
+    Chatterbox and the image models do not co-reside on a single consumer
     card; a batch that starts while the narrator is loaded fails its VRAM
     headroom check outright.
     """
@@ -112,6 +112,22 @@ def release_voice_vram() -> None:
         requests.post(f"{FOUNDRY}/evict/voice", timeout=60)
     except Exception as e:
         print(f"  could not evict the voice model ({e}) — continuing")
+
+
+def stop_voice_service() -> None:
+    """Stop audio_foundry outright to reclaim its CUDA context.
+
+    Evicting a backend frees its weights but not the process's context, which
+    is several hundred megabytes — enough to keep a large image model from
+    clearing its headroom check. narration.ensure_narrator_ready restarts the
+    service when the narration pass needs it.
+    """
+    try:
+        requests.post(f"{API}/api/plugins/audio_foundry/stop", timeout=120)
+        print("  stopped audio_foundry to free its CUDA context")
+        time.sleep(3)
+    except Exception as e:
+        print(f"  could not stop audio_foundry ({e}) — continuing")
 
 
 def _collect(data: dict) -> list[Path]:
@@ -146,7 +162,13 @@ def _dispatch_with_retry(prompts: list[str], variants: int) -> list[Path]:
                 raise
             print(f"  VRAM not free yet (attempt {attempt}/{HEADROOM_RETRIES})"
                   f" — retrying in {HEADROOM_WAIT_S}s")
-            release_voice_vram()
+            # Waiting only helps a transient spike. A persistent shortfall of a
+            # few hundred megabytes is the voice service's context, which has
+            # to be stopped rather than evicted.
+            if attempt == 1:
+                release_voice_vram()
+            else:
+                stop_voice_service()
             time.sleep(HEADROOM_WAIT_S)
     raise RuntimeError("unreachable")
 

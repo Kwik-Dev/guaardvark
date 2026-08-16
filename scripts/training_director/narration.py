@@ -24,7 +24,7 @@ from pathlib import Path
 import requests
 
 import context
-from config import BACKEND_VENV_PY, FOUNDRY, REPO, WHISPER_MODEL
+from config import API, BACKEND_VENV_PY, FOUNDRY, REPO, WHISPER_MODEL
 from voice_style import spoken as _spoken
 
 # Whisper similarity below this fails the line. Technical narration transcribes
@@ -83,14 +83,26 @@ def ensure_narrator_ready() -> None:
         raise RuntimeError(
             f"voice reference clip not found: {ref}\n"
             "Check voice_reference in the project's project.py.")
-    try:
-        r = requests.get(f"{FOUNDRY}/health", timeout=8)
-        r.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(
-            f"audio_foundry is not answering at {FOUNDRY} ({e}). Start the "
-            "audio_foundry plugin, or point TD_FOUNDRY at a host running it."
-        ) from e
+    # The stills pass stops audio_foundry to reclaim its CUDA context, so the
+    # service being down here is expected rather than an error.
+    for attempt in range(2):
+        try:
+            r = requests.get(f"{FOUNDRY}/health", timeout=8)
+            if r.ok:
+                return
+        except Exception:
+            pass
+        if attempt == 0:
+            print("  narrator: audio_foundry is down — starting it")
+            try:
+                requests.post(f"{API}/api/plugins/audio_foundry/start",
+                              timeout=300)
+                time.sleep(3)
+            except Exception as e:
+                print(f"  narrator: could not start audio_foundry: {e}")
+    raise RuntimeError(
+        f"audio_foundry is not answering at {FOUNDRY}. Start the plugin, or "
+        "point TD_FOUNDRY at a host running it.")
 
 
 def _synthesize(text: str, dest: Path, seed: int | None = None) -> None:

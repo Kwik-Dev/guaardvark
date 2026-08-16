@@ -17,7 +17,8 @@ import cards
 import context
 import visuals
 from config import FPS, HEIGHT, OUT_ROOT, WIDTH
-from narration import ffprobe_duration, generate_narration, run
+from narration import (ensure_narrator_ready, ffprobe_duration,
+                       generate_narration, run)
 
 # Trailing picture after the last word, so a cut never lands on a hard stop.
 TAIL_S = 0.9
@@ -174,6 +175,11 @@ def produce(script: TrainingScript, only: list[str] | None = None,
 
     print(f"[{script.slug}] stills for {len(shots)} shot(s)…")
     library = visuals.stills_for([s.prompt for s in shots])
+
+    # After the stills pass, which may have stopped the voice service to free
+    # VRAM. Restarting here also means a missing clip fails before any picture
+    # work rather than at the first line of narration.
+    ensure_narrator_ready()
 
     parts: list[Path] = []
     if not only:

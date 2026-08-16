@@ -58,7 +58,9 @@ UNBRANDED = Project(name="Training", series_label="Training")
 def load(project_dir: str | os.PathLike | None = None) -> Project:
     """Load ``project.py`` from a project directory and return its PROJECT.
 
-    Also puts the directory on ``sys.path`` so ``guides.<name>`` resolves.
+    The project directory is deliberately NOT added to ``sys.path``: it holds a
+    ``project.py`` of its own, which would shadow this module. Guides are loaded
+    by file path instead — see ``produce.load_guide``.
     """
     raw = project_dir or os.environ.get("TD_PROJECT")
     if not raw:
@@ -79,7 +81,16 @@ def load(project_dir: str | os.PathLike | None = None) -> Project:
     if not isinstance(project, Project):
         raise SystemExit(f"{module_path} must define PROJECT = Project(...)")
 
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
     object.__setattr__(project, "root", root)
     return project
+
+
+def load_module(path: Path, name: str):
+    """Import a single file as a module without touching ``sys.path``."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module

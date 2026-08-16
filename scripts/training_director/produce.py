@@ -18,7 +18,6 @@ has a working default. See config.py.
 from __future__ import annotations
 
 import argparse
-import importlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -59,7 +58,8 @@ def load_guide(name: str):
     if name not in available_guides():
         sys.exit(f"unknown guide '{name}'; available: "
                  f"{', '.join(available_guides()) or '(none)'}")
-    module = importlib.import_module(f"guides.{name}")
+    module = project_mod.load_module(guides_dir() / f"{name}.py",
+                                     f"td_guide_{name}")
     script = getattr(module, "SCRIPT", None)
     if script is None:
         sys.exit(f"guides/{name}.py must define SCRIPT = TrainingScript(...)")
@@ -69,14 +69,10 @@ def load_guide(name: str):
 def voice_test_lines() -> list[str]:
     module_path = context.current().root / "project.py"
     if module_path.is_file():
-        spec = importlib.util.spec_from_file_location("td_project_lines",
-                                                      module_path)
-        if spec and spec.loader:
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            lines = getattr(mod, "VOICE_TEST_LINES", None)
-            if lines:
-                return list(lines)
+        mod = project_mod.load_module(module_path, "td_project_lines")
+        lines = getattr(mod, "VOICE_TEST_LINES", None)
+        if lines:
+            return list(lines)
     return DEFAULT_VOICE_TEST_LINES
 
 

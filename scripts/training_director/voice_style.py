@@ -172,6 +172,14 @@ def spoken(text: str, terms: dict[str, str] | None = None,
     # unit ("fifteen thirty-seconds-inch").
     text = re.sub(r"(?<=[a-z])-(?=inch|foot|feet|pound|gauge|thick)", " ", text)
 
+    # Fractions read conversationally ("a half"), which collides with a
+    # determiner already in the sentence: "the 1/2 inch" would become
+    # "the a half inch".
+    text = re.sub(
+        r"\b(a|an|the|this|that|those|these|its|their|each|every|one)\s+an?\s+"
+        r"(?=half|quarter|third|eighth|sixteenth|twelfth)",
+        r"\1 ", text, flags=re.IGNORECASE)
+
     # Keys carry '.' and '-', so \b cannot delimit them: an explicit
     # non-word-or-hyphen boundary keeps 'high-temp' out of 'high-temperature'.
     table = {**COMMON_TERMS, **(terms or {})}
