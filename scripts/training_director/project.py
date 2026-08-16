@@ -1,0 +1,85 @@
+"""The customer-project contract for the training-video engine.
+
+The engine is generic: it turns structured procedure guides into narrated video.
+Everything that makes the output belong to a particular company — palette,
+series wording, trade vocabulary, the narrator's reference clip, and the guides
+themselves — lives in that company's own repository and arrives through here.
+
+A project directory contains::
+
+    project.py      defines PROJECT = Project(...)
+    guides/         one module per guide, each exposing SCRIPT
+
+and is selected with the ``TD_PROJECT`` environment variable or ``--project``.
+With neither, the engine runs unbranded, which is only useful for smoke tests.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+Color = tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class Project:
+    """Everything the engine needs to speak in one company's voice."""
+
+    name: str
+    series_label: str
+
+    # Written -> spoken overrides for this trade. The engine owns the numeric
+    # and code-citation machinery; the vocabulary is the customer's.
+    terms: dict[str, str] = field(default_factory=dict)
+    # Acronyms this trade expects spelled out letter by letter.
+    spelled_acronyms: tuple[str, ...] = ()
+
+    # Brand palette used by every composited card.
+    ink: Color = (14, 27, 48)
+    paper: Color = (247, 249, 252)
+    accent: Color = (198, 156, 74)
+    rule: Color = (176, 190, 208)
+
+    # Narrator reference clip and delivery preset.
+    voice_reference: str | None = None
+    voice_emotion: str = "narration"
+
+    # Resolved by the loader; not set by hand.
+    root: Path = Path(".")
+
+
+UNBRANDED = Project(name="Training", series_label="Training")
+
+
+def load(project_dir: str | os.PathLike | None = None) -> Project:
+    """Load ``project.py`` from a project directory and return its PROJECT.
+
+    Also puts the directory on ``sys.path`` so ``guides.<name>`` resolves.
+    """
+    raw = project_dir or os.environ.get("TD_PROJECT")
+    if not raw:
+        return UNBRANDED
+
+    root = Path(raw).expanduser().resolve()
+    module_path = root / "project.py"
+    if not module_path.is_file():
+        raise SystemExit(f"no project.py in {root}")
+
+    spec = importlib.util.spec_from_file_location("td_project", module_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"could not load {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    project = getattr(module, "PROJECT", None)
+    if not isinstance(project, Project):
+        raise SystemExit(f"{module_path} must define PROJECT = Project(...)")
+
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    object.__setattr__(project, "root", root)
+    return project
