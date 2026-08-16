@@ -49,6 +49,9 @@ _FRACTIONS: dict[str, str] = {
     "3/16": "three sixteenths",
     "7/16": "seven sixteenths",
     "9/16": "nine sixteenths",
+    "11/16": "eleven sixteenths",
+    "13/16": "thirteen sixteenths",
+    "15/16": "fifteen sixteenths",
     "15/32": "fifteen thirty-seconds",
     "1/12": "a twelfth",
 }
@@ -65,6 +68,9 @@ _FRACTIONS_MIXED: dict[str, str] = {
     "5/8": "five eighths",
     "7/8": "seven eighths",
     "7/16": "seven sixteenths",
+    "9/16": "nine sixteenths",
+    "11/16": "eleven sixteenths",
+    "15/16": "fifteen sixteenths",
     "15/32": "fifteen thirty-seconds",
 }
 
@@ -173,11 +179,16 @@ def spoken(text: str, terms: dict[str, str] | None = None,
     text = re.sub(r"(?<=[a-z])-(?=inch|foot|feet|pound|gauge|thick)", " ", text)
 
     # Fractions read conversationally ("a half"), which collides with a
-    # determiner already in the sentence: "the 1/2 inch" would become
-    # "the a half inch".
+    # determiner already in the sentence. Which article survives depends on
+    # which determiner it was: an article defers to the fraction's own, so
+    # "a 1/8 inch" reads "an eighth inch" and not "a eighth inch"; any other
+    # determiner keeps itself and drops the fraction's.
+    _frac_head = r"(?:half|quarter|third|eighth|sixteenth|twelfth)"
+    text = re.sub(rf"\ban?\s+(?=an?\s+{_frac_head})", "", text,
+                  flags=re.IGNORECASE)
     text = re.sub(
-        r"\b(a|an|the|this|that|those|these|its|their|each|every|one)\s+an?\s+"
-        r"(?=half|quarter|third|eighth|sixteenth|twelfth)",
+        rf"\b(the|this|that|those|these|its|their|each|every|one)\s+an?\s+"
+        rf"(?={_frac_head})",
         r"\1 ", text, flags=re.IGNORECASE)
 
     # Keys carry '.' and '-', so \b cannot delimit them: an explicit
