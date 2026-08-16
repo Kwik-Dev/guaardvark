@@ -14,6 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
+# Names only — this module keeps torch inside its methods, so importing it
+# here does not pull the ML stack into service startup.
+from backends.voice_gen_chatterbox import EMOTION_PRESETS
 from service.bootstrap import bootstrap
 from service.config_loader import load_config, resolve_backend_url
 from service.dispatcher import BackendUnavailable, Dispatcher, Intent, NotWired
@@ -22,6 +25,8 @@ from service.orchestrator_client import OrchestratorClient
 from service.registration import register_output
 
 logger = logging.getLogger(__name__)
+
+_EMOTION_PATTERN = "^(" + "|".join(sorted(EMOTION_PRESETS)) + ")$"
 
 # ---------- request models ---------------------------------------------------
 # Kept lenient at skeleton phase. Each backend tightens its own fields when wired.
@@ -41,7 +46,18 @@ class VoiceRequest(BaseModel):
     backend: str = Field("auto", pattern="^(auto|chatterbox|kokoro)$")
     reference_clip_path: Optional[str] = None
     voice_id: Optional[str] = None
-    emotion: Optional[str] = None
+    # Chatterbox only: a named preset over the sampling controls below.
+    # Validated here rather than in the backend because the dispatcher's 'auto'
+    # mode falls back to Kokoro on any Chatterbox error — a typo would
+    # otherwise return a completely different voice instead of an error.
+    emotion: Optional[str] = Field(None, pattern=_EMOTION_PATTERN)
+    # Chatterbox only; each overrides the preset when set.
+    exaggeration: Optional[float] = Field(None, ge=0.0, le=2.0)
+    cfg_weight: Optional[float] = Field(None, ge=0.0, le=1.0)
+    temperature: Optional[float] = Field(None, gt=0.0, le=2.0)
+    # Reproduces a take exactly. The backend has always honoured this; it was
+    # missing here, so callers could not reach it.
+    seed: Optional[int] = None
     output_format: str = Field("wav", pattern="^(wav|mp3)$")
     async_mode: bool = Field(False, alias="async")
 

@@ -21,6 +21,24 @@ from backends.base import AudioBackend, GenerationResult
 
 logger = logging.getLogger(__name__)
 
+# Chatterbox has no "emotion" input. Delivery is shaped by three sampling
+# controls, so the named emotions callers ask for are presets over those:
+#   exaggeration — emotional intensity of the read
+#   cfg_weight   — adherence to the reference clip; lower loosens pacing
+#   temperature  — sampling randomness, and the main source of take-to-take
+#                  drift on long passages
+EMOTION_PRESETS: dict[str, dict[str, float]] = {
+    "flat":      {"exaggeration": 0.25, "cfg_weight": 0.6, "temperature": 0.5},
+    "narration": {"exaggeration": 0.40, "cfg_weight": 0.5, "temperature": 0.6},
+    "neutral":   {"exaggeration": 0.50, "cfg_weight": 0.5, "temperature": 0.8},
+    "warm":      {"exaggeration": 0.60, "cfg_weight": 0.45, "temperature": 0.8},
+    "emphatic":  {"exaggeration": 0.75, "cfg_weight": 0.4, "temperature": 0.9},
+    "dramatic":  {"exaggeration": 1.00, "cfg_weight": 0.3, "temperature": 1.0},
+}
+
+# Matches Chatterbox's own defaults, so callers who pass nothing are unaffected.
+DEFAULT_EMOTION = "neutral"
+
 
 class ChatterboxBackend(AudioBackend):
     """Chatterbox TTS — 24 kHz mono, optional reference-clip cloning."""
@@ -76,13 +94,28 @@ class ChatterboxBackend(AudioBackend):
             torch.cuda.empty_cache()
         logger.info("Chatterbox unloaded")
 
+    def _supported_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Keep only the keywords this build's ``generate`` actually declares."""
+        import inspect
+
+        try:
+            accepted = set(
+                inspect.signature(self._model.generate).parameters)
+        except (TypeError, ValueError):
+            return kwargs
+        dropped = sorted(set(kwargs) - accepted)
+        if dropped:
+            logger.warning(
+                "Chatterbox build does not accept %s — ignoring", ", ".join(dropped))
+        return {k: v for k, v in kwargs.items() if k in accepted}
+
     def generate(self, **params: Any) -> GenerationResult:
         if self._model is None:
             raise RuntimeError("Chatterbox not loaded; call load() first")
 
         text: str = params["text"]
         reference_clip = params.get("reference_clip_path")
-        emotion = params.get("emotion")  # not all Chatterbox builds support this
+        emotion = params.get("emotion")
         seed = params.get("seed")
         requested_format = params.get("output_format", "wav")
         # Injected by the dispatcher for async jobs; absent (None) on the inline path.
@@ -98,17 +131,35 @@ class ChatterboxBackend(AudioBackend):
         # last sentence end inside the chunk window.
         chunks = self._split_for_synthesis(text)
 
-        gen_kwargs: dict[str, Any] = {}
+        gen_kwargs: dict[str, Any] = dict(EMOTION_PRESETS[DEFAULT_EMOTION])
+        if emotion:
+            preset = EMOTION_PRESETS.get(str(emotion).lower())
+            if preset is None:
+                raise ValueError(
+                    f"unknown emotion '{emotion}'; choose one of "
+                    f"{', '.join(sorted(EMOTION_PRESETS))}")
+            gen_kwargs.update(preset)
+        # Explicit values win over the preset, so a caller can nudge one knob
+        # without restating the rest.
+        for knob in ("exaggeration", "cfg_weight", "temperature"):
+            if params.get(knob) is not None:
+                gen_kwargs[knob] = float(params[knob])
         if reference_clip:
             gen_kwargs["audio_prompt_path"] = str(reference_clip)
-        if emotion:
-            gen_kwargs["emotion"] = emotion
         if seed is not None:
             torch.manual_seed(int(seed))
 
+        # Chatterbox builds differ in which sampling controls they accept, and
+        # an unknown keyword is a TypeError mid-generation rather than a
+        # warning. Drop anything this build does not declare.
+        gen_kwargs = self._supported_kwargs(gen_kwargs)
+
         logger.info(
-            "Chatterbox generate: chars=%d chunks=%d ref=%s emotion=%s",
-            len(text), len(chunks), bool(reference_clip), emotion,
+            "Chatterbox generate: chars=%d chunks=%d ref=%s emotion=%s "
+            "exaggeration=%s cfg_weight=%s temperature=%s seed=%s",
+            len(text), len(chunks), bool(reference_clip), emotion or DEFAULT_EMOTION,
+            gen_kwargs.get("exaggeration"), gen_kwargs.get("cfg_weight"),
+            gen_kwargs.get("temperature"), seed,
         )
 
         self._output_root.mkdir(parents=True, exist_ok=True)
@@ -171,7 +222,11 @@ class ChatterboxBackend(AudioBackend):
                 "text": text,
                 "chunks": total,
                 "reference_clip_path": str(reference_clip) if reference_clip else None,
-                "emotion": emotion,
+                "emotion": emotion or DEFAULT_EMOTION,
+                # Recorded so a take that reads well can be reproduced exactly.
+                "exaggeration": gen_kwargs.get("exaggeration"),
+                "cfg_weight": gen_kwargs.get("cfg_weight"),
+                "temperature": gen_kwargs.get("temperature"),
                 "seed": seed,
                 "requested_output_format": requested_format,
                 "actual_output_format": actual_format,
