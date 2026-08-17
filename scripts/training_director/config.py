@@ -48,8 +48,17 @@ IMAGE_MODEL = os.environ.get("TD_IMAGE_MODEL", "zimage-turbo")
 IMAGE_W = int(os.environ.get("TD_IMAGE_W", "1600"))
 IMAGE_H = int(os.environ.get("TD_IMAGE_H", "896"))
 
-# Image-to-video. WAN 2.2 is the verified default; LTX is opt-in.
-VIDEO_MODEL = os.environ.get("TD_VIDEO_MODEL", "wan22-i2v")
+# Image-to-video. Must name a key in backend/services/video_model_registry.py;
+# preflight rejects anything else. The 14B MoE is chosen over the 5B for product
+# and material detail; it needs a 16GB card. LTX renders better still but
+# re-injects the start frame between its two stages, which drifts the subject.
+VIDEO_MODEL = os.environ.get("TD_VIDEO_MODEL", "wan22-14b-i2v")
+
+# Clip requested from the I2V model. 81 frames at 24 fps is Wan 2.2's native
+# window; assemble._clip_segment loops or trims it to the narration length, so
+# this need not cover the whole shot.
+VIDEO_FPS = int(os.environ.get("TD_VIDEO_FPS", "24"))
+VIDEO_FRAMES = int(os.environ.get("TD_VIDEO_FRAMES", "81"))
 
 FPS = int(os.environ.get("TD_FPS", "30"))
 WIDTH = int(os.environ.get("TD_WIDTH", "1920"))

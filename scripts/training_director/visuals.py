@@ -21,8 +21,8 @@ from pathlib import Path
 
 import requests
 
-from config import (API, CACHE_ROOT, FOUNDRY, IMAGE_H, IMAGE_MODEL, IMAGE_W,
-                    VIDEO_MODEL)
+from config import (API, CACHE_ROOT, FOUNDRY, HEIGHT, IMAGE_H, IMAGE_MODEL,
+                    IMAGE_W, VIDEO_FPS, VIDEO_FRAMES, VIDEO_MODEL, WIDTH)
 
 CACHE_DIR = CACHE_ROOT
 INDEX_FILE = CACHE_DIR / "index.json"
@@ -146,9 +146,22 @@ def _collect(data: dict) -> list[Path]:
 # The service reports a VRAM shortfall as a batch error and invites a retry.
 # The narrator's CUDA context survives eviction, so a shortfall of a few
 # hundred megabytes clears on its own once the allocator settles.
-_HEADROOM_HINTS = ("headroom", "free vram", "gpu short", "try again")
+_HEADROOM_HINTS = ("headroom", "free vram", "gpu short", "try again",
+                   "out of memory", "oom", "allocat")
 HEADROOM_RETRIES = 4
 HEADROOM_WAIT_S = 45
+
+
+def _free_vram(attempt: int) -> None:
+    """Escalate VRAM recovery between retries.
+
+    Eviction drops the voice weights; the process's CUDA context survives it and
+    has to be stopped outright to release the last few hundred megabytes.
+    """
+    if attempt == 1:
+        release_voice_vram()
+    else:
+        stop_voice_service()
 
 
 def _dispatch_with_retry(prompts: list[str], variants: int) -> list[Path]:
@@ -162,13 +175,7 @@ def _dispatch_with_retry(prompts: list[str], variants: int) -> list[Path]:
                 raise
             print(f"  VRAM not free yet (attempt {attempt}/{HEADROOM_RETRIES})"
                   f" — retrying in {HEADROOM_WAIT_S}s")
-            # Waiting only helps a transient spike. A persistent shortfall of a
-            # few hundred megabytes is the voice service's context, which has
-            # to be stopped rather than evicted.
-            if attempt == 1:
-                release_voice_vram()
-            else:
-                stop_voice_service()
+            _free_vram(attempt)
             time.sleep(HEADROOM_WAIT_S)
     raise RuntimeError("unreachable")
 
@@ -206,41 +213,85 @@ def stills_for(prompts: list[str], variants: int = 2) -> dict[str, list[Path]]:
     return {p: [Path(f) for f in index[_key(p)]] for p in prompts}
 
 
-def animate(still: Path, prompt: str, dest: Path, seconds: float = 4.0) -> Path:
-    """Render motion from a still via image-to-video. Falls back to the still.
+def i2v_payload(still: Path, prompt: str) -> dict:
+    """Build the /api/batch-video/generate/image body for one start frame."""
+    return {
+        # The endpoint takes paths the backend can already read, not an upload.
+        "image_paths": [str(still)],
+        "prompt": full_prompt(prompt),
+        "negative_prompt": NEGATIVE,
+        "model": VIDEO_MODEL,
+        "duration_frames": VIDEO_FRAMES,
+        "fps": VIDEO_FPS,
+        # Oversize frames are clamped to the model's pixel budget and snapped to
+        # its alignment server-side.
+        "width": WIDTH,
+        "height": HEIGHT,
+        # The server-side enhancer rewrites prompts toward cinematic detail,
+        # which is exactly what the prompt discipline above excludes.
+        "enhance_prompt": False,
+    }
 
-    Motion is an enhancement: a failed I2V render must never block a production,
-    because `assemble.py` gives every still a slow push anyway.
-    """
-    try:
-        with open(still, "rb") as fh:
-            r = requests.post(
-                f"{API}/api/batch-video/generate/image",
-                files={"image": (still.name, fh, "image/png")},
-                data={"prompt": full_prompt(prompt), "model": VIDEO_MODEL,
-                      "duration": str(seconds)},
-                timeout=120)
-        r.raise_for_status()
-        batch_id = r.json()["data"]["batch_id"]
-    except Exception as e:
-        print(f"  i2v dispatch failed ({e}) — using the still")
-        return still
 
-    deadline = time.monotonic() + 3600
+def _dispatch_i2v(still: Path, prompt: str) -> str:
+    """Queue one image-to-video batch; returns the batch id."""
+    r = requests.post(f"{API}/api/batch-video/generate/image",
+                      json=i2v_payload(still, prompt), timeout=120)
+    if not r.ok:
+        # Carries the model preflight message, which names a missing checkpoint
+        # outright.
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+    return r.json()["data"]["batch_id"]
+
+
+def _collect_i2v(batch_id: str, dest: Path, timeout_s: int = 3600) -> Path | None:
+    """Block until the batch settles; returns the copied clip, or None."""
+    deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         s = requests.get(f"{API}/api/batch-video/status/{batch_id}", timeout=30)
         data = s.json().get("data", {})
         state = (data.get("status") or "").lower()
-        if state in ("completed", "complete", "done", "finished"):
-            for r in data.get("results") or []:
-                path = r.get("video_path") or r.get("output_path")
+        if state in _TERMINAL_OK:
+            for result in data.get("results") or []:
+                path = result.get("video_path") or result.get("output_path")
                 if path and Path(path).exists():
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(Path(path).read_bytes())
                     return dest
-            break
-        if state in ("failed", "cancelled"):
-            break
+            return None
+        if state in _TERMINAL_BAD:
+            raise RuntimeError(
+                f"batch {batch_id} ended '{state}': "
+                f"{data.get('error') or 'no detail returned'}")
         time.sleep(10)
-    print(f"  i2v produced nothing for {still.name} — using the still")
+    raise RuntimeError(f"batch {batch_id} did not finish within {timeout_s}s")
+
+
+def animate(still: Path, prompt: str, dest: Path) -> Path:
+    """Render motion from a still via image-to-video. Falls back to the still.
+
+    Motion is an enhancement: a failed I2V render must never block a production,
+    because `assemble.py` gives every still a slow push anyway.
+
+    The I2V models are the largest thing the engine loads — the Wan 2.2 MoE
+    holds two experts — so the narrator is evicted first and a headroom failure
+    escalates the same way an image batch does.
+    """
+    release_voice_vram()
+    for attempt in range(1, HEADROOM_RETRIES + 1):
+        try:
+            clip = _collect_i2v(_dispatch_i2v(still, prompt), dest)
+            if clip:
+                return clip
+            print(f"  i2v produced nothing for {still.name} — using the still")
+            return still
+        except Exception as e:
+            transient = any(h in str(e).lower() for h in _HEADROOM_HINTS)
+            if not transient or attempt == HEADROOM_RETRIES:
+                print(f"  i2v failed ({e}) — using the still")
+                return still
+            print(f"  VRAM not free yet (attempt {attempt}/{HEADROOM_RETRIES})"
+                  f" — retrying in {HEADROOM_WAIT_S}s")
+            _free_vram(attempt)
+            time.sleep(HEADROOM_WAIT_S)
     return still
