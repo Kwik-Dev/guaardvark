@@ -331,3 +331,8 @@ data/embedding_meta.json
 data/documents_windows_v2_state.json
 # Per-install plugin manifest overrides (merged over plugin.json at load)
 plugins/*/plugin.local.json
+
+# Code-editor and dashboard layout — per-install UI state, not source.
+data/code_editor_state.json
+data/code_editor_session.json
+data/dashboard_state.json
