@@ -253,7 +253,9 @@ class Editor:
     # --- internals ----------------------------------------------------------
 
     def _render_clip(self, shot: ShotInput, clips_dir: Path) -> str:
-        clip_path = str(clips_dir / f"shot_{shot.shot_number}.mp4")
+        clip_path = str(
+            clips_dir / f"shot_{shot.scene_number or 1}_{shot.shot_number}.mp4"
+        )
         return self.i2v.i2v_from_image(
             image_path=shot.storyboard_image_path,
             prompt=shot.image_prompt,
@@ -265,7 +267,9 @@ class Editor:
     def _render_voiceover(self, shot: ShotInput, audio_dir: Path, voice: str) -> str | None:
         if not shot.dialogue_text or self.audio_foundry is None:
             return None
-        vo_path = str(audio_dir / f"shot_{shot.shot_number}_vo.wav")
+        vo_path = str(
+            audio_dir / f"shot_{shot.scene_number or 1}_{shot.shot_number}_vo.wav"
+        )
         try:
             return self.audio_foundry.tts(
                 text=shot.dialogue_text, voice=voice, output_path=vo_path,

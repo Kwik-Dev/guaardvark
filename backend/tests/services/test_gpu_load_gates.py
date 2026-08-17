@@ -152,7 +152,7 @@ def test_run_storyboard_artist_uses_gpu_gate(monkeypatch):
         def commit(self):
             pass
     monkeypatch.setattr(pst, "db", type("DB", (), {"session": _FakeSession()})())
-    monkeypatch.setattr(pst, "_storyboard_path", lambda prod_id, n: "/tmp/sb.png")
+    monkeypatch.setattr(pst, "_storyboard_path", lambda *a, **k: "/tmp/sb.png")
 
     class _Gen:
         def generate_image(self, **kw):

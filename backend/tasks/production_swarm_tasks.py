@@ -435,11 +435,11 @@ def _shot_loras_and_prompt(shot) -> tuple[list[str], str]:
     return lora_paths, base
 
 
-def _storyboard_path(prod_id: int, shot_number: int) -> str:
+def _storyboard_path(prod_id: int, scene_number: int, shot_number: int) -> str:
     from backend.config import STORAGE_DIR
     out_dir = Path(STORAGE_DIR) / "outputs" / "storyboards" / str(prod_id)
     out_dir.mkdir(parents=True, exist_ok=True)
-    return str(out_dir / f"shot_{shot_number}.png")
+    return str(out_dir / f"shot_{scene_number}_{shot_number}.png")
 
 
 def run_storyboard_artist(prod_id: int, image_generator=None):
@@ -466,7 +466,11 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
         ):
             for i, shot in enumerate(shots):
                 lora_paths, prompt = _shot_loras_and_prompt(shot)
-                output_path = _storyboard_path(prod_id, shot.shot_number or (i + 1))
+                output_path = _storyboard_path(
+                    prod_id,
+                    shot.scene_number or 1,
+                    shot.shot_number or (i + 1),
+                )
                 subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
                 if lora_paths or image_generator is None:
                     still = render_character_still(
@@ -675,7 +679,11 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
 
     lora_paths, base_prompt = _shot_loras_and_prompt(shot)
     prompt = prompt_override if prompt_override else base_prompt
-    output_path = _storyboard_path(shot.production_id, shot.shot_number or shot.id)
+    output_path = _storyboard_path(
+        shot.production_id,
+        shot.scene_number or 1,
+        shot.shot_number or shot.id,
+    )
     from backend.services.job_types import JobKind
     from backend.services.gpu_resource_policy import gpu_session
     from backend.services.character_still_pipeline import render_character_still
