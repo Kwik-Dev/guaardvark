@@ -57,6 +57,61 @@ fi
 source "$SCRIPT_DIR/install_deps.sh"
 install_comfyui_python_deps
 
+# Comfy-Org/ComfyUI#15441: comfy-kitchen>=0.2.28 annotates torch.library
+# custom ops with PEP 585 list[int] / X | None. infer_schema accepts those
+# only from torch 2.7+. This venv is 2.6+cu124, so a raw 0.2.31 import
+# crashed main.py before --listen bound the plugin port. Rewrite those
+# annotations in site-packages (re-applied after pip). Do not downgrade
+# kitchen — current ComfyUI needs 0.2.31 APIs (int8_attention_is_available).
+"$VENV_PYTHON" - <<'PY'
+import importlib.metadata as m, sys
+from pathlib import Path
+def ver(name):
+    try:
+        return tuple(int(x) for x in m.version(name).split(".")[:3])
+    except Exception:
+        return (0, 0, 0)
+if ver("torch") >= (2, 7):
+    sys.exit(0)
+# Do not import comfy_kitchen here — 0.2.31 crashes on torch<2.7 before we patch.
+root = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "comfy_kitchen"
+if not root.is_dir():
+    sys.exit(0)
+changed = 0
+for path in root.rglob("*.py"):
+    src = path.read_text(encoding="utf-8")
+    if "custom_op" not in src:
+        continue
+    new = src
+    new = new.replace("list[int]", "List[int]")
+    new = new.replace("list[bool]", "List[bool]")
+    new = new.replace("float | None", "Optional[float]")
+    new = new.replace("torch.Tensor | None", "Optional[torch.Tensor]")
+    new = new.replace("int | None", "Optional[int]")
+    new = new.replace("str | None", "Optional[str]")
+    new = new.replace("torch.dtype | None", "Optional[torch.dtype]")
+    new = new.replace("torch.device | int | None", "Optional[object]")
+    if new == src:
+        continue
+    if "from typing import" in new:
+        line = [ln for ln in new.splitlines() if ln.startswith("from typing import")][0]
+        extras = [n for n in ("List", "Optional") if n not in line]
+        if extras:
+            new = new.replace(line, line.rstrip() + ", " + ", ".join(extras), 1)
+    else:
+        lines = new.splitlines(keepends=True)
+        insert_at = 0
+        for i, ln in enumerate(lines):
+            if ln.startswith("from __future__"):
+                insert_at = i + 1
+        lines.insert(insert_at, "from typing import List, Optional\n")
+        new = "".join(lines)
+    path.write_text(new, encoding="utf-8")
+    changed += 1
+if changed:
+    print(f"Patched {changed} comfy_kitchen file(s) for torch<2.7 custom-op schemas")
+PY
+
 # Upstream leak (Comfy-Org/ComfyUI#13109, open as of 0.30.0): unpatch_model()
 # clears self.backup but never self.patches, and offloaded weights hold a live
 # reference to that dict — so on the lowvram path (any 16GB card running Wan)
@@ -80,6 +135,23 @@ if src.count(needle) != 1:
 src = src.replace(needle, needle + "            self.patches.clear()\n")
 open(path, "w").write(src)
 print("Applied ComfyUI#13109 leak patch (self.patches.clear() in unpatch_model)")
+PYEOF
+
+# Comfy-Org/ComfyUI#15441: comfy_kitchen 0.2.28+ crashes torch<=2.6 on import
+# (PEP 585 list[int] vs infer_schema). quant_ops.py only caught ImportError, so
+# main.py died before --listen bound the plugin port. Widen to Exception.
+# Re-applied here because ComfyUI/ is restore_app.sh-cloned.
+"$VENV_PYTHON" - "$COMFYUI_DIR/comfy/quant_ops.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+old = "except ImportError as e:\n    logging.error(f\"Failed to import comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.\")"
+new = "except Exception as e:\n    logging.error(f\"Failed to import comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.\")"
+if old not in src:
+    sys.exit(0)  # already patched or upstream changed
+src = src.replace(old, new, 1)
+open(path, "w").write(src)
+print("Applied ComfyUI#15441 kitchen-import guard (except Exception)")
 PYEOF
 
 # Log file
