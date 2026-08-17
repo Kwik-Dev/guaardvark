@@ -80,9 +80,9 @@ _ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven",
 _TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
          "eighty", "ninety"]
 
-# Words that already identify a ratio as a pitch, so one need not be added.
-_PITCH_CONTEXT = {"pitch", "pitches", "slope", "slopes", "roof", "grade",
-                  "ratio"}
+# Generic words that already identify what a ratio measures. A project adds
+# its own trade's terms through Project.ratio_context.
+_RATIO_CONTEXT = {"ratio", "grade", "gradient", "scale"}
 
 
 def _int_words(n: int) -> str:
@@ -112,21 +112,27 @@ def _code_citation(match: re.Match) -> str:
     return spoken_code.strip()
 
 
-def _ratio(match: re.Match) -> str:
-    """A pitch '4:12' is spoken 'four in twelve'.
+def _make_ratio(noun: str | None, context: frozenset[str]):
+    """Build the ratio renderer for one project's vocabulary.
 
-    Bare, that is heard as 'four AND twelve'; a trailing noun is what makes it
-    unambiguous, so one is supplied when the surrounding text lacks it. The
-    first mention in a guide should still be spelled out in full — 'rises four
-    inches for every twelve inches of run'.
+    A ratio like '4:12' is spoken 'four in twelve'. Bare, that is heard as
+    'four AND twelve'; a trailing noun is what makes it unambiguous, so one is
+    supplied when the surrounding text lacks it. Which noun — and which words
+    already imply it — is the trade's business, not the engine's. A project
+    that sets no noun gets the digits read plainly.
     """
-    rise, run_ = _int_words(int(match.group(1))), _int_words(int(match.group(2)))
-    spoken_ratio = f"{rise} in {run_}"
-    before = match.string[:match.start()].lower().split()[-3:]
-    after = match.string[match.end():].lower().split()[:1]
-    if set(before + after) & _PITCH_CONTEXT:
-        return spoken_ratio
-    return f"{spoken_ratio} pitch"
+    def _ratio(match: re.Match) -> str:
+        rise = _int_words(int(match.group(1)))
+        run_ = _int_words(int(match.group(2)))
+        spoken_ratio = f"{rise} in {run_}"
+        if not noun:
+            return spoken_ratio
+        before = match.string[:match.start()].lower().split()[-3:]
+        after = match.string[match.end():].lower().split()[:1]
+        if set(before + after) & context:
+            return spoken_ratio
+        return f"{spoken_ratio} {noun}"
+    return _ratio
 
 
 def _mixed_number(match: re.Match) -> str:
@@ -152,7 +158,9 @@ def _decimal_measure(match: re.Match) -> str:
 
 def spoken(text: str, terms: dict[str, str] | None = None,
            spelled_acronyms: tuple[str, ...] = (),
-           backend: str = "chatterbox") -> str:
+           backend: str = "chatterbox",
+           ratio_noun: str | None = None,
+           ratio_context: tuple[str, ...] = ()) -> str:
     """Render written guide text as speakable text for `backend`.
 
     `terms` and `spelled_acronyms` come from the active project and are applied
@@ -167,7 +175,9 @@ def spoken(text: str, terms: dict[str, str] | None = None,
     # that the fraction and decimal rules would otherwise claim.
     text = re.sub(r"\b(?P<letter>[A-Z])?(?P<num>\d{3,4}(?:\.\d+){1,3})\b",
                   _code_citation, text)
-    text = re.sub(r"\b(\d{1,2}):(\d{1,2})\b", _ratio, text)
+    text = re.sub(r"\b(\d{1,2}):(\d{1,2})\b",
+                  _make_ratio(ratio_noun,
+                              _RATIO_CONTEXT | set(ratio_context)), text)
     text = re.sub(r"\b(\d{1,2})-(\d{1,2}/\d{1,2})\b", _mixed_number, text)
     text = re.sub(r"\b(\d+)\.(\d+)(?=\s*-?\s*inch)", _decimal_measure, text)
     text = re.sub(r"\b\d{1,2}/\d{1,2}\b", _bare_fraction, text)

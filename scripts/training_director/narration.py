@@ -50,7 +50,8 @@ BASE_SEED = int(os.environ.get("TD_VOICE_SEED", "20260815"))
 def spoken(text: str) -> str:
     """Project-aware written-to-spoken rendering."""
     proj = context.current()
-    return _spoken(text, proj.terms, proj.spelled_acronyms, proj.voice_backend)
+    return _spoken(text, proj.terms, proj.spelled_acronyms,
+                   proj.voice_backend, proj.ratio_noun, proj.ratio_context)
 
 
 def voice_reference() -> Path:

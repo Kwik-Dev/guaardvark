@@ -191,7 +191,7 @@ def stills_for(prompts: list[str], variants: int = 2) -> dict[str, list[Path]]:
         if len(produced) < len(missing):
             raise RuntimeError(
                 f"batch returned {len(produced)} images for {len(missing)} "
-                f"prompts x{variants} variants — check {batch_id}")
+                f"prompt(s) x{variants} variants — check the image service log")
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         for i, prompt in enumerate(missing):
             chunk = produced[i * variants:(i + 1) * variants]

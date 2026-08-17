@@ -38,11 +38,19 @@ class Project:
     # Acronyms this trade expects spelled out letter by letter.
     spelled_acronyms: tuple[str, ...] = ()
 
-    # Brand palette used by every composited card.
-    ink: Color = (14, 27, 48)
-    paper: Color = (247, 249, 252)
-    accent: Color = (198, 156, 74)
-    rule: Color = (176, 190, 208)
+    # What a bare ratio like "4:12" measures in this trade, e.g. "pitch".
+    # Left unset, ratios are read as plain digits. ratio_context lists words
+    # that already imply the noun, so it is not said twice.
+    ratio_noun: str | None = None
+    ratio_context: tuple[str, ...] = ()
+
+    # Brand palette used by every composited card. These defaults are a
+    # deliberately neutral greyscale — a project supplies its own, and an
+    # unbranded run should not render in some other company's colours.
+    ink: Color = (28, 30, 34)
+    paper: Color = (247, 248, 250)
+    accent: Color = (120, 124, 132)
+    rule: Color = (176, 180, 188)
 
     # Narrator. 'kokoro' speaks a catalogue voice named by voice_id and needs
     # no recording; 'chatterbox' clones voice_reference, and voice_emotion

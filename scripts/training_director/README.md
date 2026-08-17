@@ -9,11 +9,11 @@ makes a video belong to a particular customer lives in that customer's own
 repository and reaches the engine through a **project**.
 
 ```
-produce.py --project ~/RB1/training list        guides and their sections
-produce.py --project ~/RB1/training voicetest   clone-check on trade language
-produce.py --project ~/RB1/training snaplock --dry-run
-produce.py --project ~/RB1/training snaplock --section s09c
-produce.py --project ~/RB1/training snaplock
+produce.py --project <project-dir> list        guides and their sections
+produce.py --project <project-dir> voicetest   clone-check on trade language
+produce.py --project <project-dir> <guide> --dry-run
+produce.py --project <project-dir> <guide> --section s09c
+produce.py --project <project-dir> <guide>
 ```
 
 `TD_PROJECT` sets the project directory if you would rather not pass `--project`.
@@ -44,7 +44,7 @@ voice/          the narrator's reference clip
 `project.py` supplies the palette, the trade's `TERMS` table and
 `SPELLED_ACRONYMS`, the series label, and the narrator. It may also define
 `VOICE_TEST_LINES` to exercise its own vocabulary. See `project.py` here for
-the full contract; `~/RB1/training/project.py` is a worked example.
+the full contract; `<project-dir>/project.py` is a worked example.
 
 ## How a video is built
 
