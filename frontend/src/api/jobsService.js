@@ -23,6 +23,7 @@ export const JOB_KINDS = {
   VIDEO_RENDER: "video_render",
   OUTREACH: "outreach",
   WEBSITE: "website",
+  PUBLISH: "publish",
   UNIFIED_PROGRESS: "unified",
 };
 
@@ -45,6 +46,7 @@ export const JOB_KINDS_FOR_ACTIVITY_PAGE = [
   JOB_KINDS.OUTREACH,
   JOB_KINDS.WEBSITE,
   JOB_KINDS.UNIFIED_PROGRESS,
+  JOB_KINDS.PUBLISH,
   'production',
   'lora_train',
 ];

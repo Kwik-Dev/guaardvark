@@ -25,6 +25,7 @@ import SmartToyIcon from "@mui/icons-material/SmartToy";
 import StickyNote2Icon from "@mui/icons-material/StickyNote2";
 import ExtensionIcon from "@mui/icons-material/Extension";
 import HubIcon from "@mui/icons-material/Hub";
+import RuleIcon from "@mui/icons-material/Rule";
 import HiveIcon from "@mui/icons-material/Hive";
 import CampaignIcon from "@mui/icons-material/Campaign";
 import TextFieldsIcon from "@mui/icons-material/TextFields";
@@ -102,6 +103,13 @@ const navGroups = [
       { text: "Autoresearch", icon: <ScienceIcon />, path: "/autoresearch" },
       { text: "Plugins", icon: <ExtensionIcon />, path: "/plugins" },
       { text: "Connections", icon: <HubIcon />, path: "/connections" },
+      // badge: the Sidebar resolves this key to a live count.
+      {
+        text: "Approvals",
+        icon: <RuleIcon />,
+        path: "/approvals",
+        badge: "pendingApprovals",
+      },
       { text: "System Map", icon: <BubbleChartIcon />, path: "/system-map" },
       { text: "Settings", icon: <SettingsIcon />, path: "/settings" },
     ],

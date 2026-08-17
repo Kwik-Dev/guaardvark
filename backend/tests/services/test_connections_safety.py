@@ -42,6 +42,29 @@ def test_supervised_mode_gates_the_ui_too(settings):
     assert gates.requires_approval("ui") is True
 
 
+# --- source attribution ------------------------------------------------------
+# requested_by arrives in an unauthenticated request body, so it is a claim.
+# Claiming an agent source only raises supervision; anything else must fail safe.
+@pytest.mark.parametrize("claimed", ["ui", "chat", "mcp", "schedule"])
+def test_known_sources_are_preserved(claimed):
+    assert gates.normalize_source(claimed) == claimed
+
+
+@pytest.mark.parametrize("claimed", [None, "", "   ", "api", "cron", "UI-ish", "🙂"])
+def test_unrecognised_sources_become_unknown(claimed):
+    assert gates.normalize_source(claimed) == "unknown"
+
+
+def test_source_matching_ignores_case_and_padding():
+    assert gates.normalize_source("  MCP  ") == "mcp"
+
+
+def test_an_unattributed_publish_is_supervised(settings):
+    """A caller that omits its source must not land on the unsupervised branch."""
+    assert gates.publish_supervised() is False
+    assert gates.requires_approval(gates.normalize_source(None)) is True
+
+
 def test_disabled_publishing_blocks_the_gate(settings):
     settings[gates.PUBLISH_ENABLED_KEY] = "false"
     allowed, reason = gates.check_can_publish("bluesky")
@@ -147,3 +170,36 @@ def test_publish_status_maps_like_a_task():
     assert map_status(JobKind.PUBLISH, "running") == JobStatus.RUNNING
     assert map_status(JobKind.PUBLISH, "completed") == JobStatus.COMPLETED
     assert map_status(JobKind.PUBLISH, "failed") == JobStatus.FAILED
+
+
+# --- publish lifecycle -------------------------------------------------------
+class _Record:
+    """Minimal stand-in for PublishRecord; only status is exercised here."""
+
+    def __init__(self, status):
+        self.status = status
+        self.error_message = None
+
+
+@pytest.mark.parametrize("status", ["posted", "failed", "cancelled", "rejected"])
+def test_terminal_records_cannot_be_cancelled(status):
+    from backend.services.connections import publish_service
+
+    with pytest.raises(ValueError):
+        publish_service.cancel(_Record(status))
+
+
+def test_a_publish_already_being_sent_cannot_be_cancelled():
+    """Flipping a mid-flight record would report a cancellation that never happened."""
+    from backend.services.connections import publish_service
+
+    with pytest.raises(ValueError, match="already being sent"):
+        publish_service.cancel(_Record("processing"))
+
+
+@pytest.mark.parametrize("status", ["posted", "failed", "cancelled", "rejected", "processing"])
+def test_reject_is_refused_once_the_decision_has_passed(status):
+    from backend.services.connections import publish_service
+
+    with pytest.raises(ValueError):
+        publish_service.reject(_Record(status), "no")

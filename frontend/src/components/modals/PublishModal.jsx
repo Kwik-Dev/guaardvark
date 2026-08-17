@@ -179,7 +179,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
       onFeedback?.({
         open: true,
         message: result.requires_approval
-          ? `Queued ${result.count} publish(es) for approval.`
+          ? `Queued ${result.count} publish(es) — review them under Approvals.`
           : `Publishing to ${result.count} destination(s).`,
         severity: "success",
       });

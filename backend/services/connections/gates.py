@@ -16,7 +16,24 @@ PUBLISH_ENABLED_KEY = "connections_publish_enabled"
 PUBLISH_SUPERVISED_KEY = "connections_publish_supervised"
 
 # Requests from an agent always require a human click, regardless of settings.
-ALWAYS_SUPERVISED_SOURCES = ("chat", "mcp", "schedule")
+# "unknown" is here so an unattributed request fails safe: a caller that omits
+# its source is supervised rather than silently treated as a human click.
+ALWAYS_SUPERVISED_SOURCES = ("chat", "mcp", "schedule", "unknown")
+
+# Sources a caller may claim for itself. Anything else becomes "unknown", so a
+# typo or a new agent path cannot land on the unsupervised branch by accident.
+KNOWN_SOURCES = ("ui", "chat", "mcp", "schedule")
+
+
+def normalize_source(requested_by: str | None) -> str:
+    """Map a caller-supplied source onto a known one, defaulting to supervised.
+
+    The value arrives in a request body and is not authenticated, so it is a
+    claim rather than a fact. Claiming an agent source only ever increases
+    supervision, which is safe; anything unrecognised is treated as unknown.
+    """
+    candidate = (requested_by or "").strip().lower()
+    return candidate if candidate in KNOWN_SOURCES else "unknown"
 
 _TRUTHY = ("1", "true", "yes", "on")
 

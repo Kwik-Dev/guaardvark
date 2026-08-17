@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
+  Badge,
   Drawer,
   Box,
   List,
@@ -23,6 +24,7 @@ import { spacing } from "../../theme/tokens";
 
 import { BrandLogo } from "../branding";
 import brand from "../../config/brand";
+import { usePendingApprovals } from "../../hooks/usePendingApprovals";
 import BarChartIcon from "@mui/icons-material/BarChart";
 import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
@@ -52,6 +54,9 @@ const Sidebar = () => {
   const agentScreenOpen = useAppStore((s) => s.agentScreenOpen);
   const setAgentScreenOpen = useAppStore((s) => s.setAgentScreenOpen);
   const isBelowMd = useMediaQuery(theme.breakpoints.down("md"));
+  // Live counts for nav items that declare a `badge` key.
+  const { count: pendingApprovals } = usePendingApprovals();
+  const badgeCounts = { pendingApprovals };
 
   useEffect(() => {
     if (isBelowMd && isExpanded) {
@@ -213,13 +218,26 @@ const Sidebar = () => {
                       : location.pathname === item.path ||
                         location.pathname.startsWith(item.path + "/");
 
+                    // A nav item may carry a live count. Collapsed, the badge is
+                    // the only signal there is, so it rides the icon in both
+                    // states rather than the label.
+                    const badgeCount = item.badge ? badgeCounts[item.badge] || 0 : 0;
+
                     const button = (
                       <ListItemButton
                         component={NavLink}
                         to={item.path}
                         sx={() => getNavLinkStyle(isActive)}
                       >
-                        <ListItemIcon>{item.icon}</ListItemIcon>
+                        <ListItemIcon>
+                          {badgeCount > 0 ? (
+                            <Badge badgeContent={badgeCount} color="warning">
+                              {item.icon}
+                            </Badge>
+                          ) : (
+                            item.icon
+                          )}
+                        </ListItemIcon>
                         {isExpanded && (
                           <ListItemText
                             primary={item.text}

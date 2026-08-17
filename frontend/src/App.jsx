@@ -54,6 +54,7 @@ const StickyNotesPage = lazy(() => import("./pages/StickyNotesPage"));
 const DevToolsPage = lazy(() => import("./pages/DevToolsPage"));
 const PluginsPage = lazy(() => import("./pages/PluginsPage"));
 const ConnectionsPage = lazy(() => import("./pages/ConnectionsPage"));
+const ApprovalsPage = lazy(() => import("./pages/ApprovalsPage"));
 const SwarmPage = lazy(() => import("./pages/SwarmPage"));
 const AutoresearchPage = lazy(() => import("./pages/AutoresearchPage"));
 const OutreachPage = lazy(() => import("./pages/OutreachPage"));
@@ -463,6 +464,16 @@ const AppContainer = () => {
                           <AppLayout>
                             <ErrorBoundary>
                               <ConnectionsPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/approvals"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <ApprovalsPage />
                             </ErrorBoundary>
                           </AppLayout>
                         }

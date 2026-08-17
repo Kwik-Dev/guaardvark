@@ -229,5 +229,14 @@ def cancel(record) -> None:
 
     if record.status in ("posted", "failed", "cancelled", "rejected"):
         raise ValueError(f"Cannot cancel a record that is '{record.status}'.")
+    # The runner checks status once, on entry. Flipping a record that is
+    # already mid-flight would report a cancellation that never happened — the
+    # publish can still go out and then overwrite itself to 'posted'. Cancel
+    # the underlying job instead, which can actually revoke the work.
+    if record.status == "processing":
+        raise ValueError(
+            "This publish is already being sent. Cancel its job from Activity "
+            "to stop it."
+        )
     record.status = "cancelled"
     db.session.commit()

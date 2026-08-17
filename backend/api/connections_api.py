@@ -259,7 +259,11 @@ def publish_preflight():
 @connections_bp.route("/publish", methods=["POST"])
 def publish_route():
     from backend.models import db
-    from backend.services.connections import media as media_util, publish_service
+    from backend.services.connections import (
+        gates,
+        media as media_util,
+        publish_service,
+    )
 
     payload = request.get_json(silent=True) or {}
     try:
@@ -271,7 +275,7 @@ def publish_route():
             link_url=payload.get("link_url"),
             tags=payload.get("tags") or [],
             visibility=payload.get("visibility"),
-            requested_by=payload.get("requested_by") or "ui",
+            requested_by=gates.normalize_source(payload.get("requested_by")),
         )
     except (ValueError, media_util.MediaResolveError) as e:
         return _error(str(e), 400)
