@@ -38,6 +38,45 @@ WHAT_IS = (
 TAGS_COMMON = ["Guaardvark", "local AI", "self-hosted AI", "open source AI",
                "offline AI", "AI video generation", "one machine no cloud"]
 
+# Real cut points measured (ffprobe) from the actual EP0N_FINAL.mp4 renders —
+# not the finer-grained SERIES.md beat plan, which the production consolidated
+# during editing. Overrides the placeholder chapters below for these episodes.
+REAL_CHAPTERS = {
+    5: [
+        (0, "Hook — the Media Director"),
+        (27, "The wall — browsing the pre-rendered batch"),
+        (52, "Model registry & downloads"),
+        (68, "Infographic & anatomy fixes"),
+        (88, "Upscaling to 8K"),
+        (99, "Closer — auto-filing into Files"),
+    ],
+    6: [
+        (0, "Hook — seven video models, one GPU"),
+        (22, "Preset tour — Quality, Duration, Motion, Aspect"),
+        (43, "Live render — Queued → Storyboard → Director → Generating"),
+        (72, "Draft-tier render"),
+        (93, "Cinema-tier render — 2× RIFE + 2× ESRGAN"),
+        (111, "Advanced Editor — one click into ComfyUI"),
+    ],
+    7: [
+        (0, "Hook — the 13-second reference clip"),
+        (39, "Consent required — 403 on camera"),
+        (56, "The clone — voices compared side by side"),
+        (84, "Self-check — it listens to itself first"),
+        (105, "Music generation — style chips to instrumental"),
+        (155, "The finished track"),
+        (176, "FX Lab — sound effects from text"),
+        (193, "Closer — auto-filing into Files"),
+    ],
+    8: [
+        (0, "Hook — drop in an MP3"),
+        (24, "Energy arc — tempo & beats read automatically"),
+        (44, "The plan — cost gate & per-cut shots"),
+        (70, "The finished music video"),
+        (97, "Closer — what's next"),
+    ],
+}
+
 EPISODES = {
     1: dict(
         title="Meet Guaardvark — Full Tour",
@@ -427,10 +466,15 @@ def render(num):
     lines.append("")
     lines.append(f"{MANTRA} This is Episode {num} of 12.")
     lines.append("")
-    lines.append("CHAPTERS (add exact timestamps after the final edit)")
-    lines.append(f"0:00 {ep['chapters'][0]}")
-    for label in ep["chapters"][1:]:
-        lines.append(f"[__:__] {label}")
+    if num in REAL_CHAPTERS:
+        lines.append("CHAPTERS")
+        for seconds, label in REAL_CHAPTERS[num]:
+            lines.append(f"{seconds // 60}:{seconds % 60:02d} {label}")
+    else:
+        lines.append("CHAPTERS (add exact timestamps after the final edit)")
+        lines.append(f"0:00 {ep['chapters'][0]}")
+        for label in ep["chapters"][1:]:
+            lines.append(f"[__:__] {label}")
     lines.append("")
     lines.append("FEATURED IN THIS EPISODE")
     for n in ep["links"]:
@@ -456,25 +500,42 @@ def build(_args):
         print(out)
 
 
+TOKEN_RE = re.compile(r"\{(EP\d\d|PLAYLIST)\}")
+
+
 def resolve(args):
+    """Substitute {EPxx}/{PLAYLIST} tokens with real URLs. A line whose token
+    has no entry in the map is dropped outright — a raw "{EP03}" placeholder
+    shipped into a live description reads as broken, not as a TODO."""
     mapping = json.loads(Path(args.map).read_text())
+
+    def resolved(key):
+        if key == "PLAYLIST":
+            return mapping.get("PLAYLIST")
+        vid = mapping.get(str(int(key[2:])))
+        return f"https://youtu.be/{vid}" if vid else None
+
     for n in EPISODES:
         src = OUT_DIR / f"ep{n:02d}_description.txt"
         if not src.exists():
             continue
-        text = src.read_text()
-
-        def sub(m):
-            key = m.group(1)
-            if key == "PLAYLIST":
-                return mapping.get("PLAYLIST", "{PLAYLIST}")
-            ep_num = int(key[2:])
-            vid = mapping.get(str(ep_num))
-            return f"https://youtu.be/{vid}" if vid else m.group(0)
-
-        text = re.sub(r"\{(EP\d\d|PLAYLIST)\}", sub, text)
+        out_lines = []
+        for line in src.read_text().splitlines():
+            tokens = TOKEN_RE.findall(line)
+            if not tokens:
+                out_lines.append(line)
+                continue
+            values = {t: resolved(t) for t in tokens}
+            if any(v is None for v in values.values()):
+                continue
+            out_lines.append(TOKEN_RE.sub(lambda m: values[m.group(1)], line))
+        text = "\n".join(out_lines)
+        # A section whose every bullet got dropped leaves a bare heading.
+        text = re.sub(r"\nFEATURED IN THIS EPISODE\n(?=\n)", "\n", text)
+        # Collapse a run of blank lines left by a dropped line.
+        text = re.sub(r"\n{3,}", "\n\n", text)
         out = OUT_DIR / f"ep{n:02d}_description_final.txt"
-        out.write_text(text)
+        out.write_text(text.strip() + "\n")
         print(out)
 
 

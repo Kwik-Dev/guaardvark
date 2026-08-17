@@ -8,7 +8,7 @@ GPU cast: none during the shoot (everything pre-rendered; kokoro narration
 only). Shoot AFTER the asset run completes.
 
 Run from scripts/demo_director/:  venv/bin/python episodes/ep08_musicvideo.py
-CALIBRATE markers pending the /music-video page probe (run it post-asset).
+Requires Xvfb :98 @ 1920x1080, music_video id 1 complete with output_document_id.
 """
 
 from __future__ import annotations
@@ -55,30 +55,35 @@ def act_hook(st: Stage):
 
 def act_arc(st: Stage):
     open_run(st)
-    # CALIBRATE: the energy-arc strip — hover across it left to right
-    arc = st.page.get_by_text(re.compile("energy|arc", re.I))
-    if arc.count():
-        x, y = st.screen_xy(arc.first)
-        st.cursor.glide(x - 250, y + 30, dur=0.8)
-        st.cursor.glide(x + 250, y + 30, dur=2.6)   # sweep the strip
+    # thin colored strip: title="Energy arc (left-to-right = cuts)…"
+    arc = st.page.locator('[title^="Energy arc"]')
+    arc.first.wait_for(state="visible", timeout=8_000)
+    x, y = st.screen_xy(arc.first)
+    st.cursor.glide(x - 280, y, dur=0.8)
+    st.cursor.glide(x + 280, y, dur=2.6)
     time.sleep(1.5)
 
 
 def act_plan(st: Stage):
     open_run(st)
-    # CALIBRATE: the per-cut plan list — scroll through a few prompts
-    plan = st.page.get_by_text(re.compile("plan|cut", re.I)).first
-    x, y = st.screen_xy(plan)
-    st.cursor.glide(x, y + 100, dur=0.8)
-    for _ in range(3):
+    heading = st.page.get_by_text("Video Plan", exact=True)
+    heading.first.wait_for(state="visible", timeout=8_000)
+    x, y = st.screen_xy(heading.first)
+    st.cursor.glide(x, y + 220, dur=0.8)            # into the cut-prompt list
+    time.sleep(0.4)
+    for _ in range(4):
         st.cursor._xdo("click", "5")                # wheel down
-        time.sleep(1.4)
+        time.sleep(1.3)
 
 
 def act_result(st: Stage):
     open_run(st)
-    # CALIBRATE: final video player on the completed run — click play
-    play = st.page.locator("video, [aria-label*='play' i]").first
+    label = st.page.get_by_text("Done — your music video:", exact=False)
+    if label.count():
+        label.first.scroll_into_view_if_needed(timeout=5_000)
+        time.sleep(0.4)
+    play = st.page.locator("video").first
+    play.wait_for(state="visible", timeout=8_000)
     st.glide_click(play, dur=0.9)
     time.sleep(3.0)                                 # audio via overlay below
 

@@ -190,12 +190,57 @@ def _narrate_kokoro(text: str, dest: Path) -> None:
     dest.write_bytes(Path(res["path"]).read_bytes())
 
 
+ALLOW_FALLBACK = os.environ.get("DEMO_ALLOW_FALLBACK") == "1"
+
+
+def ensure_narrator_ready() -> None:
+    """Hard preflight: the configured narrator engine must actually answer.
+
+    EP05/EP06 shipped with the wrong (piper) voice because audio_foundry was
+    down, the per-line fallback only PRINTED a warning, and the launch
+    command's `| tail` swallowed the prints. Dean heard it. Never again:
+    auto-start the foundry if needed, and refuse to narrate on fallback
+    unless DEMO_ALLOW_FALLBACK=1.
+    """
+    if NARRATOR_ENGINE not in ("kokoro", "chatterbox"):
+        return
+    for attempt in range(2):
+        try:
+            r = requests.get("http://127.0.0.1:8206/health", timeout=8)
+            if r.ok:
+                return
+        except Exception:
+            pass
+        if attempt == 0:
+            print("  narrator: audio_foundry down — starting the plugin…")
+            try:
+                requests.post(f"{API}/api/plugins/audio_foundry/enable",
+                              json={"enabled": True}, timeout=30)
+                requests.post(f"{API}/api/plugins/audio_foundry/start",
+                              timeout=180)
+                time.sleep(3)
+            except Exception as e:
+                print(f"  narrator: plugin start failed: {e}")
+    if ALLOW_FALLBACK:
+        print("  narrator: foundry unavailable — DEMO_ALLOW_FALLBACK=1, "
+              "piper will be used")
+        return
+    raise RuntimeError(
+        f"narrator engine '{NARRATOR_ENGINE}' unavailable (audio_foundry not "
+        "healthy on :8206) and DEMO_ALLOW_FALLBACK is not set — refusing to "
+        "record with the wrong voice")
+
+
 def _synth_one(text: str, dest: Path, voice: str) -> None:
     if NARRATOR_ENGINE == "kokoro":
         try:
             _narrate_kokoro(text, dest)
             return
         except Exception as e:
+            if not ALLOW_FALLBACK:
+                raise RuntimeError(
+                    f"kokoro narration failed ({e}) — refusing piper "
+                    "fallback (set DEMO_ALLOW_FALLBACK=1 to override)")
             print(f"  narrator: kokoro failed ({e}) — falling back to piper")
             _narrate_piper(text, dest, voice)
             return
@@ -662,11 +707,77 @@ class Episode:
         _run(cmd)
         return out
 
+    def _pad_raw_to_audio(self, raw: Path, audio_dur: float, dest: Path) -> Path:
+        """Clone the last frame so video covers narration. Re-encodes (tpad)."""
+        vdur = ffprobe_duration(raw)
+        if vdur + 0.05 >= audio_dur:
+            return raw
+        pad = audio_dur - vdur + 0.3
+        _run([
+            "ffmpeg", "-y", "-i", str(raw),
+            "-vf", f"tpad=stop_mode=clone:stop_duration={pad:.2f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-an", str(dest),
+        ])
+        return dest
+
+    def _concat_parts(self, parts: list[Path]) -> Path:
+        final = self.dir / f"{self.slug}.mp4"
+        cmd = ["ffmpeg", "-y"]
+        fl = ""
+        for k, p in enumerate(parts):
+            cmd += ["-i", str(p)]
+            fl += f"[{k}:v][{k}:a]"
+        fl += f"concat=n={len(parts)}:v=1:a=1[v][a]"
+        cmd += ["-filter_complex", fl, "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                str(final)]
+        _run(cmd)
+        report = {
+            "final": str(final),
+            "duration_s": ffprobe_duration(final),
+            "beats": [
+                {"name": b.name, "audio_s": round(b.audio_dur, 2)}
+                for b in self.beats
+            ],
+        }
+        (self.dir / "report.json").write_text(json.dumps(report, indent=2))
+        print(f"[{self.slug}] DONE → {final}  ({report['duration_s']:.1f}s)")
+        return final
+
+    def revoice(self, src_dir: Path) -> Path:
+        """Regenerate Kokoro narration and mux onto existing per-beat raw video.
+
+        Used when the picture is good and only the voice is wrong (EP05 Piper
+        fallback). Does not open a Stage. Pads the last frame if the new
+        narration is longer than the take.
+        """
+        src_dir = Path(src_dir)
+        if not src_dir.is_dir():
+            raise RuntimeError(f"revoice src is not a directory: {src_dir}")
+        ensure_narrator_ready()
+        print(f"[{self.slug}] revoice from {src_dir.name}…")
+        parts = []
+        for i, b in enumerate(self.beats):
+            raw = src_dir / f"beat_{i:02d}_{b.name}.raw.mp4"
+            if not raw.exists():
+                raise RuntimeError(f"missing raw take: {raw}")
+            b.audio_path = self.dir / f"beat_{i:02d}_{b.name}.wav"
+            b.audio_dur = generate_narration(b.narration, b.audio_path)
+            print(f"  audio {b.name}: {b.audio_dur:.1f}s "
+                  f"(raw video {ffprobe_duration(raw):.1f}s)")
+            padded = self.dir / f"beat_{i:02d}_{b.name}.raw.mp4"
+            raw_for_mux = self._pad_raw_to_audio(raw, b.audio_dur, padded)
+            parts.append(self._mux_beat(i, b, raw_for_mux))
+        return self._concat_parts(parts)
+
     def produce(self, stage: Stage) -> Path:
         # DEMO_RESUME_DIR: reuse finished beat mp4s from a prior run of the
         # same episode — good takes are never re-shot after a later beat fails
         resume = os.environ.get("DEMO_RESUME_DIR")
         resume_dir = Path(resume) if resume else None
+        ensure_narrator_ready()
         print(f"[{self.slug}] narration…")
         parts = []
         reused: set[int] = set()
@@ -691,29 +802,4 @@ class Episode:
             print(f" beat {i + 1}/{len(self.beats)}: {b.name}")
             raw = self._record_beat(stage, i, b)
             parts.append(self._mux_beat(i, b, raw))
-        # filter-graph concat (decode + re-encode): stream-copy concat
-        # stitched AAC loosely and audio ran ~15s past video over 8 beats —
-        # exact timestamps beat fast copies here
-        final = self.dir / f"{self.slug}.mp4"
-        cmd = ["ffmpeg", "-y"]
-        fl = ""
-        for k, p in enumerate(parts):
-            cmd += ["-i", str(p)]
-            fl += f"[{k}:v][{k}:a]"
-        fl += f"concat=n={len(parts)}:v=1:a=1[v][a]"
-        cmd += ["-filter_complex", fl, "-map", "[v]", "-map", "[a]",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
-                str(final)]
-        _run(cmd)
-        report = {
-            "final": str(final),
-            "duration_s": ffprobe_duration(final),
-            "beats": [
-                {"name": b.name, "audio_s": round(b.audio_dur, 2)}
-                for b in self.beats
-            ],
-        }
-        (self.dir / "report.json").write_text(json.dumps(report, indent=2))
-        print(f"[{self.slug}] DONE → {final}  ({report['duration_s']:.1f}s)")
-        return final
+        return self._concat_parts(parts)

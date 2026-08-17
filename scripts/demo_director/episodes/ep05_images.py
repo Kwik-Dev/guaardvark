@@ -302,8 +302,14 @@ BEATS = [
 
 
 def main():
+    import os
     ep = Episode("ep05_images", BEATS,
                  out_root=REPO / "data" / "outputs" / "demos")
+    revoice_dir = os.environ.get("DEMO_REVOICE_DIR")
+    if revoice_dir:
+        final = ep.revoice(Path(revoice_dir))
+        print(f"\nEP05 REVOICE COMPLETE: {final}")
+        return
     stage = Stage()
     try:
         stage.page.goto(FRONTEND + "/", wait_until="load", timeout=30_000)

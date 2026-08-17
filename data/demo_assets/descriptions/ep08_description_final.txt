@@ -11,11 +11,6 @@ CHAPTERS
 1:10 The finished music video
 1:37 Closer — what's next
 
-FEATURED IN THIS EPISODE
-▸ Ep 9: A Film Crew That Never Sleeps — Film Crew — {EP09}
-
-Full playlist: {PLAYLIST}
-
 Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
 
 Source & docs: https://github.com/guaardvark/guaardvark
