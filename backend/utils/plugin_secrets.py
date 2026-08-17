@@ -26,7 +26,11 @@ def secret_field_names(plugin_id: str) -> frozenset:
     return frozenset(PLUGIN_SECRET_FIELDS.get(plugin_id, {}).keys())
 
 
-def _is_masked_or_empty(value: Any) -> bool:
+def is_masked_or_empty(value: Any) -> bool:
+    """True when *value* carries no new secret — blank, or a mask echoed back.
+
+    Callers use this to implement "leave blank to keep the existing token".
+    """
     if value is None:
         return True
     if not isinstance(value, str):
@@ -45,7 +49,8 @@ def _is_masked_or_empty(value: Any) -> bool:
     return False
 
 
-def _mask_hint(value: str) -> str:
+def mask_hint(value: str) -> str:
+    """Render a secret as ``••••`` plus its last four characters."""
     if len(value) <= 4:
         return "••••"
     return f"••••{value[-4:]}"
@@ -85,7 +90,7 @@ def get_secret_status(
         if value:
             status[field] = {
                 "configured": True,
-                "hint": _mask_hint(value),
+                "hint": mask_hint(value),
                 "env_key": env_key,
             }
         else:
@@ -133,7 +138,7 @@ def apply_secret_updates(
             continue
         saw_secret_key = True
         raw = payload.pop(field)
-        if _is_masked_or_empty(raw):
+        if is_masked_or_empty(raw):
             continue
         to_write[env_key] = raw.strip()
 

@@ -648,6 +648,17 @@ def execute_unified_task(self, task_id: int):
                 logger.warning(f"Social outreach handler failed: {e}", exc_info=True)
                 output = {"error": str(e)}
 
+        # Publish a generated asset to a configured social connection.
+        if output is None and task_type == 'connection_publish':
+            try:
+                from backend.services.connections import publish_runner
+                update_progress(5, "Preparing publish…")
+                output = publish_runner.run(task, update_progress)
+                handler_used = 'connection_publish'
+            except Exception as e:
+                logger.warning(f"Connection publish handler failed: {e}", exc_info=True)
+                output = {"error": str(e)}
+
         # Website crawl — walk the sitemap and persist each page as a WebsitePage.
         if output is None and task_type == 'website_crawl':
             try:

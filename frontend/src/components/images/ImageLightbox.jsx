@@ -9,6 +9,7 @@ import {
   ArrowForward as NextIcon,
   Download as DownloadIcon,
   Edit as EditIcon,
+  IosShare as ShareIcon,
 } from '@mui/icons-material';
 import ImageEditor from './ImageEditor';
 import { guardedMediaSrc } from '../../utils/assetGuard';
@@ -21,6 +22,7 @@ const ImageLightbox = ({
   onPrev,
   onNext,
   onDownload,
+  onPublish,
   onImageEdited,
   hasPrev = false,
   hasNext = false,
@@ -34,7 +36,8 @@ const ImageLightbox = ({
     else if (e.key === 'ArrowLeft' && hasPrev) onPrev?.();
     else if (e.key === 'ArrowRight' && hasNext) onNext?.();
     else if (e.key === 'e') setEditMode(true);
-  }, [onClose, onPrev, onNext, hasPrev, hasNext, editMode]);
+    else if (e.key === 's') onPublish?.();
+  }, [onClose, onPrev, onNext, onPublish, hasPrev, hasNext, editMode]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -102,6 +105,13 @@ const ImageLightbox = ({
             <Tooltip title="Edit image (E)">
               <IconButton onClick={() => setEditMode(true)} sx={{ color: 'white' }} size="small">
                 <EditIcon />
+              </IconButton>
+            </Tooltip>
+          )}
+          {onPublish && (
+            <Tooltip title="Share / Publish (S)">
+              <IconButton onClick={onPublish} sx={{ color: 'white' }} size="small">
+                <ShareIcon />
               </IconButton>
             </Tooltip>
           )}

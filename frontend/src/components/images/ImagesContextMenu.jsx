@@ -18,6 +18,7 @@ import {
   Fullscreen as ViewIcon,
   Edit as EditIcon,
   Check as CheckIcon,
+  IosShare as ShareIcon,
 } from '@mui/icons-material';
 
 const FOLDER_COLORS = [
@@ -37,6 +38,7 @@ const ImagesContextMenu = ({
   onDownload,
   onViewFullSize,
   onEdit,
+  onPublish,
   onColorChange,
   onSelectAll,
   onSortBy,
@@ -162,6 +164,10 @@ const ImagesContextMenu = ({
         <MenuItem key="edit" onClick={() => { onEdit?.(); onClose(); }}>
           <ListItemIcon><EditIcon fontSize="small" /></ListItemIcon>
           <ListItemText>Edit</ListItemText>
+        </MenuItem>,
+        <MenuItem key="publish" onClick={() => { onPublish?.(); onClose(); }}>
+          <ListItemIcon><ShareIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Share / Publish…</ListItemText>
         </MenuItem>,
         <Divider key="d0" />,
         <MenuItem key="cut" onClick={() => { onCut?.(); onClose(); }}>

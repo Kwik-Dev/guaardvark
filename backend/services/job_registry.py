@@ -56,6 +56,37 @@ def adapt_task(row, *, started_at: datetime | None = None) -> Job:
     )
 
 
+def adapt_publish_task(row) -> Job:
+    """Connection publish Task row → Job."""
+    progress = float(row.progress) if row.progress is not None else None
+    status = map_status(JobKind.PUBLISH, row.status)
+
+    platform = None
+    handler_config = getattr(row, "handler_config", None)
+    if isinstance(handler_config, dict):
+        platform = handler_config.get("platform")
+
+    return Job(
+        id=f"publish:{row.id}",
+        kind=JobKind.PUBLISH,
+        native_id=row.id,
+        status=status,
+        label=row.name or f"Publish #{row.id}",
+        progress=progress,
+        started_at=row.created_at,
+        finished_at=row.updated_at if status.is_terminal else None,
+        duration_s=_compute_duration(row.created_at, row.updated_at if status.is_terminal else None),
+        cancellable=status.is_active,
+        error_message=getattr(row, "error_message", None),
+        metadata={
+            "type": row.type,
+            "task_id": row.id,
+            "task_job_id": getattr(row, "job_id", None),
+            "platform": platform,
+        },
+    )
+
+
 def adapt_outreach_task(row) -> Job:
     """Social Outreach Task row → Job."""
     progress = float(row.progress) if row.progress is not None else None
@@ -468,6 +499,7 @@ def _load_music_video(native_id):
 REGISTRY: dict[JobKind, tuple[LoaderFn, AdapterFn]] = {
     JobKind.TASK: (_load_task, adapt_task),
     JobKind.OUTREACH: (_load_task, adapt_outreach_task),
+    JobKind.PUBLISH: (_load_task, adapt_publish_task),
     JobKind.WEBSITE: (_load_task, adapt_website_task),
     JobKind.TRAINING: (_load_training, adapt_training_job),
     JobKind.SELF_IMPROVEMENT: (_load_self_improvement, adapt_self_improvement),

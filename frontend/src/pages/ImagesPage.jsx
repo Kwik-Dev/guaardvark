@@ -57,6 +57,7 @@ import BreadcrumbNav from '../components/filesystem/BreadcrumbNav';
 import ImageThumbnailGrid from '../components/images/ImageThumbnailGrid';
 import ImagesContextMenu from '../components/images/ImagesContextMenu';
 import ImageLightbox from '../components/images/ImageLightbox';
+import PublishModal from '../components/modals/PublishModal';
 import PageLayout from '../components/layout/PageLayout';
 import { useLayout } from '../contexts/LayoutContext';
 import { useSnackbar } from '../components/common/SnackbarProvider';
@@ -136,6 +137,7 @@ const ImagesPage = () => {
 
   // Lightbox
   const [lightbox, setLightbox] = useState(null);
+  const [publishDocuments, setPublishDocuments] = useState([]);
 
   // Dialogs
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -1061,6 +1063,16 @@ const ImagesPage = () => {
       fileList: [item],
     });
   }, [contextMenuItem]);
+
+  const handlePublishFromMenu = useCallback(() => {
+    setContextMenu(null);
+    if (contextMenuItem) setPublishDocuments([contextMenuItem]);
+  }, [contextMenuItem]);
+
+  const handlePublishFromLightbox = useCallback(() => {
+    const file = lightbox?.fileList?.[lightbox.fileIndex];
+    if (file) setPublishDocuments([file]);
+  }, [lightbox]);
 
   const handleEditImage = useCallback(() => {
     setContextMenu(null);
@@ -2277,6 +2289,7 @@ const ImagesPage = () => {
         onDownload={handleDownload}
         onViewFullSize={handleViewFullSize}
         onEdit={handleEditImage}
+        onPublish={handlePublishFromMenu}
         onColorChange={handleColorChange}
         onSelectAll={handleSelectAll}
         onSortBy={handleSortBy}
@@ -2302,6 +2315,7 @@ const ImagesPage = () => {
           onPrev={handleLightboxPrev}
           onNext={handleLightboxNext}
           onDownload={handleLightboxDownload}
+          onPublish={handlePublishFromLightbox}
           onImageEdited={() => {
             setLightbox(null);
             refreshData();
@@ -2310,6 +2324,13 @@ const ImagesPage = () => {
           hasNext={lightbox.fileIndex < lightbox.fileList.length - 1}
         />
       )}
+
+      <PublishModal
+        open={publishDocuments.length > 0}
+        documents={publishDocuments}
+        onClose={() => setPublishDocuments([])}
+        onFeedback={({ message, severity }) => showMessage?.(message, severity)}
+      />
 
       {/* New Folder Dialog */}
       <Dialog

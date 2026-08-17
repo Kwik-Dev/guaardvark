@@ -265,6 +265,7 @@ def _cancel_video_render(native_id: str) -> bool:
 CANCEL_DISPATCH: dict[JobKind, Callable[[str], bool]] = {
     JobKind.TASK: _cancel_task,
     JobKind.WEBSITE: _cancel_task,  # website_* runs are Task rows; native_id is the Task id
+    JobKind.PUBLISH: _cancel_task,  # connection_publish runs are Task rows too
     JobKind.TRAINING: _cancel_training,
     JobKind.SELF_IMPROVEMENT: _cancel_self_improvement,
     JobKind.EXPERIMENT: _cancel_experiment,

@@ -53,6 +53,7 @@ const WordPressPagesPage = lazy(() => import("./pages/WordPressPagesPage"));
 const StickyNotesPage = lazy(() => import("./pages/StickyNotesPage"));
 const DevToolsPage = lazy(() => import("./pages/DevToolsPage"));
 const PluginsPage = lazy(() => import("./pages/PluginsPage"));
+const ConnectionsPage = lazy(() => import("./pages/ConnectionsPage"));
 const SwarmPage = lazy(() => import("./pages/SwarmPage"));
 const AutoresearchPage = lazy(() => import("./pages/AutoresearchPage"));
 const OutreachPage = lazy(() => import("./pages/OutreachPage"));
@@ -452,6 +453,16 @@ const AppContainer = () => {
                           <AppLayout>
                             <ErrorBoundary>
                               <PluginsPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/connections"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <ConnectionsPage />
                             </ErrorBoundary>
                           </AppLayout>
                         }

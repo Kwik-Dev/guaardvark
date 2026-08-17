@@ -1934,6 +1934,195 @@ class WordPressSite(db.Model):
         }
 
 
+# --- Outbound Connection Models ---
+class Connection(db.Model):
+    """A configured outbound endpoint: a social account, AI provider or MCP server.
+
+    Metadata only. Secrets live in the 0600 credential store keyed by
+    ``credential_ref`` — see ``backend.utils.credential_store``.
+    """
+    __tablename__ = "connections"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "family", "provider", "account_slug",
+            name="uq_connection_family_provider_account",
+        ),
+        db.Index("ix_connection_family_status", "family", "status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    family = db.Column(db.String(24), nullable=False, index=True)  # social/ai_provider/mcp_server
+    provider = db.Column(db.String(50), nullable=False, index=True)  # youtube/bluesky/mastodon
+    account_slug = db.Column(db.String(64), nullable=False, default="default")
+    display_name = db.Column(db.String(255), nullable=True)
+    handle = db.Column(db.String(255), nullable=True)  # @handle / channel id / instance URL
+    auth_kind = db.Column(db.String(24), nullable=False, default="api_token")
+    credential_ref = db.Column(db.String(255), nullable=True, unique=True)
+    credential_source = db.Column(db.String(16), nullable=False, default="file")  # file/env/none
+    scopes = db.Column(db.Text, nullable=True)  # JSON array
+    config = db.Column(db.Text, nullable=True)  # JSON, non-secret options only
+    capabilities_cache = db.Column(db.Text, nullable=True)  # JSON snapshot of the provider spec
+    status = db.Column(db.String(24), nullable=False, default="unconfigured", index=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    token_expires_at = db.Column(db.DateTime, nullable=True)
+    last_test_at = db.Column(db.DateTime, nullable=True)
+    last_used_at = db.Column(db.DateTime, nullable=True)
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now())
+    updated_at = db.Column(
+        db.DateTime,
+        default=lambda: datetime.now(),
+        onupdate=lambda: datetime.now(),
+    )
+
+    def __repr__(self):
+        return f"<Connection {self.id}: {self.family}/{self.provider}/{self.account_slug}>"
+
+    @property
+    def ref(self):
+        """Credential-store key for this connection."""
+        return self.credential_ref or f"{self.family}:{self.provider}:{self.account_slug}"
+
+    def _json_field(self, raw, fallback):
+        if not raw:
+            return fallback
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return fallback
+
+    def to_dict(self, *, env_keys=()):
+        """Serialise for the API. Never emits a secret value."""
+        status = {
+            "configured": False,
+            "hint": "",
+            "source": "none",
+            "fields": [],
+            "encrypted": False,
+        }
+        try:
+            from backend.utils.credential_store import get_status
+
+            status = get_status(self.ref, env_keys=env_keys)
+        except Exception:  # noqa: BLE001 - a broken store must not 500 the list
+            pass
+
+        return {
+            "id": self.id,
+            "family": self.family,
+            "provider": self.provider,
+            "account_slug": self.account_slug,
+            "display_name": self.display_name,
+            "handle": self.handle,
+            "auth_kind": self.auth_kind,
+            "credential_source": status.get("source", self.credential_source),
+            "has_credentials": bool(status.get("configured")),
+            "credential_hint": status.get("hint", ""),
+            "credential_fields": status.get("fields", []),
+            "credential_encrypted": bool(status.get("encrypted")),
+            "credential_env_key": status.get("env_key"),
+            "scopes": self._json_field(self.scopes, []),
+            "config": self._json_field(self.config, {}),
+            "capabilities": self._json_field(self.capabilities_cache, {}),
+            "status": self.status,
+            "enabled": self.enabled,
+            "token_expires_at": self.token_expires_at.isoformat() if self.token_expires_at else None,
+            "last_test_at": self.last_test_at.isoformat() if self.last_test_at else None,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PublishRecord(db.Model):
+    """State machine and audit row for one publish attempt.
+
+    Distinct from ``SocialOutreachLog``: that table is "comment on someone
+    else's thread", this is "post my own asset". They share the Redis cadence
+    budget so the two paths cannot collectively exceed one per-platform limit.
+    """
+    __tablename__ = "publish_records"
+
+    id = db.Column(db.Integer, primary_key=True)
+    connection_id = db.Column(
+        db.Integer,
+        db.ForeignKey("connections.id", name="fk_publish_connection_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # Denormalised so history survives deleting the connection.
+    platform = db.Column(db.String(50), nullable=False, index=True)
+    document_id = db.Column(
+        db.Integer,
+        db.ForeignKey("documents.id", name="fk_publish_document_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    media_refs = db.Column(db.Text, nullable=True)  # JSON [{document_id, path, mime, bytes}]
+    title = db.Column(db.String(512), nullable=True)
+    body = db.Column(db.Text, nullable=True)
+    link_url = db.Column(db.String(2048), nullable=True)
+    tags = db.Column(db.Text, nullable=True)  # JSON array
+    visibility = db.Column(db.String(24), nullable=False, default="private")
+    status = db.Column(db.String(24), nullable=False, default="queued", index=True)
+    remote_id = db.Column(db.String(255), nullable=True)
+    remote_url = db.Column(db.String(2048), nullable=True)
+    task_id = db.Column(
+        db.Integer,
+        db.ForeignKey("tasks.id", name="fk_publish_task_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    attempt_count = db.Column(db.Integer, nullable=False, default=0)
+    error_message = db.Column(db.Text, nullable=True)
+    requested_by = db.Column(db.String(64), nullable=False, default="ui")  # ui/chat/mcp/schedule
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(), index=True)
+    updated_at = db.Column(
+        db.DateTime,
+        default=lambda: datetime.now(),
+        onupdate=lambda: datetime.now(),
+    )
+    posted_at = db.Column(db.DateTime, nullable=True)
+
+    connection = db.relationship("Connection", backref=db.backref("publishes", lazy="dynamic"))
+
+    def __repr__(self):
+        return f"<PublishRecord {self.id}: {self.platform} {self.status}>"
+
+    def to_dict(self):
+        def _json(raw, fallback):
+            if not raw:
+                return fallback
+            try:
+                return json.loads(raw)
+            except (ValueError, TypeError):
+                return fallback
+
+        return {
+            "id": self.id,
+            "connection_id": self.connection_id,
+            "platform": self.platform,
+            "document_id": self.document_id,
+            "media_refs": _json(self.media_refs, []),
+            "title": self.title,
+            "body": self.body,
+            "link_url": self.link_url,
+            "tags": _json(self.tags, []),
+            "visibility": self.visibility,
+            "status": self.status,
+            "remote_id": self.remote_id,
+            "remote_url": self.remote_url,
+            "task_id": self.task_id,
+            "attempt_count": self.attempt_count,
+            "error_message": self.error_message,
+            "requested_by": self.requested_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "posted_at": self.posted_at.isoformat() if self.posted_at else None,
+        }
+
+
 class WordPressPage(db.Model):
     """Store pulled WordPress content for processing and improvement."""
     __tablename__ = "wordpress_pages"
