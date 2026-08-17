@@ -5,7 +5,6 @@
 narrator with whisper read-checks, constructed pauses). This file is the
 source each `episodes/epNN_*.py` beat file is written from.
 
-Full background: `/home/llamax1/.claude/plans/review-the-guaardvark-system-dapper-leaf.md`
 Ledger: `docs/local-workspace-only/MASTER_TASKS.md` (walkthrough-videos entry)
 
 ---

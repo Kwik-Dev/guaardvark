@@ -54,6 +54,9 @@ jobs:
           source backend/venv/bin/activate
           python scripts/quality_gate.py --mode static
 
+      - name: No machine-specific paths
+        run: bash scripts/check_portable.sh
+
       - name: Check Python syntax
         run: |
           source backend/venv/bin/activate

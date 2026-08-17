@@ -56,7 +56,7 @@ def display_size(display: str = DISPLAY) -> tuple[int, int]:
 # piper/chatterbox). On-screen text always keeps the real spelling.
 from voice_style import spoken as _spoken  # noqa: E402
 
-# Series narrator (Dean's pick 2026-08-13): Kokoro af_heart, direct.
+# Series narrator: Kokoro af_heart, direct.
 # Alternatives: DEMO_NARRATOR=chatterbox with DEMO_NARRATOR_REF pointing at
 # the kokoro-female reference = "Chatterbox performing AS Kokoro" (same
 # TTS-to-TTS trick as the earlier Piper clone); or piper as plain fallback.
@@ -198,8 +198,8 @@ def ensure_narrator_ready() -> None:
 
     EP05/EP06 shipped with the wrong (piper) voice because audio_foundry was
     down, the per-line fallback only PRINTED a warning, and the launch
-    command's `| tail` swallowed the prints. Dean heard it. Never again:
-    auto-start the foundry if needed, and refuse to narrate on fallback
+    command's `| tail` swallowed the prints, so it shipped unnoticed.
+    Auto-start the foundry if needed, and refuse to narrate on fallback
     unless DEMO_ALLOW_FALLBACK=1.
     """
     if NARRATOR_ENGINE not in ("kokoro", "chatterbox"):

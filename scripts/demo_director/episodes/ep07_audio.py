@@ -164,13 +164,15 @@ def act_clone_ab(st: Stage):
 def act_selfcheck(st: Stage):
     # the whisper read-check rejecting a doubled take — real checker, real
     # rejection, staged input (a line concatenated with itself)
+    # Built from REPO so this runs wherever the repo is checked out; the shell
+    # needs absolute paths because the recorded terminal starts elsewhere.
     check = (
-        "cd /home/llamax1/GX1/scripts/demo_director && "
+        f"cd {REPO}/scripts/demo_director && "
         "./venv/bin/python -c \""
         "import sys; sys.path.insert(0, '.'); "
         "from director import _line_matches; from pathlib import Path; "
         "ok, heard = _line_matches('This is Guaardvark.', "
-        "Path('/home/llamax1/GX1/data/demo_assets/ep07/doubled_line.wav')); "
+        f"Path('{REPO}/data/demo_assets/ep07/doubled_line.wav')); "
         "print('expected: This is Guaardvark.'); "
         "print('heard:   ', heard); "
         "print('verdict: ', 'ACCEPT' if ok else 'REJECT - re-rolling seed')\""

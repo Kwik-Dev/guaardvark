@@ -23,7 +23,8 @@ import json
 import re
 from pathlib import Path
 
-OUT_DIR = Path("/home/llamax1/GX1/data/demo_assets/descriptions")
+REPO = Path(__file__).resolve().parents[2]
+OUT_DIR = REPO / "data/demo_assets/descriptions"
 
 GITHUB = "https://github.com/guaardvark/guaardvark"
 MANTRA = "One machine. No cloud."

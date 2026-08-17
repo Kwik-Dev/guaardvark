@@ -31,5 +31,11 @@ else
 fi
 
 echo "-----------------------------------"
+echo "Checking for machine-specific paths and hosts..."
+if ! bash "$DIR/scripts/check_portable.sh"; then
+    exit 1
+fi
+
+echo "-----------------------------------"
 echo "✓ All pre-flight checks passed."
 exit 0

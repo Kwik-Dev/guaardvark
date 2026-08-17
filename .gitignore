@@ -339,3 +339,6 @@ data/dashboard_state.json
 
 # Episode render output — regenerable from the pipeline; fixtures beside it are tracked.
 data/demo_assets/*/render/
+
+# Episode production notes are working documents, not shipped docs.
+data/demo_assets/*/README.md

@@ -1,8 +1,8 @@
 """Voice personality / speech-markup layer for the series narrator.
 
 This is the single place where WRITTEN script text becomes SPOKEN text, per
-engine — the seed of the system-wide "Voice Personality" Dean wants (terms,
-pacing, pronunciation under one controllable structure).
+engine — the seed of a system-wide "Voice Personality" layer holding terms,
+pacing and pronunciation under one controllable structure.
 
 Engine control surfaces (researched + verified empirically 2026-08-13):
 

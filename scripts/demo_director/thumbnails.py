@@ -12,11 +12,12 @@ Usage:
   thumbnails.py composite [N ...] build thumbnails from generated backgrounds
   thumbnails.py status            show dispatched batch states
 
-Outputs land in ~/Videos/guaardvark-demos/thumbnails/.
+Outputs land in data/outputs/demos/thumbnails/ (DEMO_THUMBNAIL_OUT overrides).
 """
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -24,12 +25,16 @@ from pathlib import Path
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-API = "http://localhost:5000/api/batch-image"
-REPO = Path("/home/llamax1/GX1")
+API = os.environ.get("GUAARDVARK_API", "http://localhost:5000") + "/api/batch-image"
+REPO = Path(__file__).resolve().parents[2]
 ASSET_DIR = REPO / "data/demo_assets/thumbnails"
 FONT_PATH = ASSET_DIR / "fonts/Inter-Variable.ttf"
-MASCOT_SRC = Path("/home/llamax1/DEV1/guaardvark.com/PRODUCTION/guaardvark.png")
-OUT_DIR = Path("/home/llamax1/Videos/guaardvark-demos/thumbnails")
+MASCOT_SRC = Path(
+    os.environ.get("DEMO_MASCOT", ASSET_DIR / "mascot.png")
+).expanduser()
+OUT_DIR = Path(
+    os.environ.get("DEMO_THUMBNAIL_OUT", REPO / "data/outputs/demos/thumbnails")
+).expanduser()
 STATE_FILE = ASSET_DIR / "dispatch_state.json"
 
 W, H = 1920, 1080
