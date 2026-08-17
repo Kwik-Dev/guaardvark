@@ -336,3 +336,6 @@ plugins/*/plugin.local.json
 data/code_editor_state.json
 data/code_editor_session.json
 data/dashboard_state.json
+
+# Episode render output — regenerable from the pipeline; fixtures beside it are tracked.
+data/demo_assets/*/render/
