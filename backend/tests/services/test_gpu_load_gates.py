@@ -129,6 +129,7 @@ def test_run_storyboard_artist_uses_gpu_gate(monkeypatch):
     monkeypatch.setattr(pst, "_agent_run", _fake_agent_run)
 
     class _Shot:
+        scene_number = 1
         shot_number = 1
         description = "a shot"
         shot_subjects = []
