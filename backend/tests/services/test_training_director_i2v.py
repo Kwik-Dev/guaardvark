@@ -102,6 +102,51 @@ class TestConfiguredModel(unittest.TestCase):
         self.assertEqual(entry["dimension_alignment"] % 8, 0)
 
 
+class TestRenderedClipLookup(unittest.TestCase):
+    """Mirrors a settled batch's status payload.
+
+    The batch reports its clip under `frame_paths`, relative to `output_dir`.
+    Reading only `video_path` finds nothing and the shot silently keeps the
+    still even though the render succeeded.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.clip = self.root / "item-1" / "videos" / "wan22_5b_00031.mp4"
+        self.clip.parent.mkdir(parents=True)
+        self.clip.write_bytes(b"\x00")
+
+    def _payload(self, **result):
+        return {"output_dir": str(self.root), "results": [result]}
+
+    def test_relative_frame_paths_resolve_against_output_dir(self):
+        data = self._payload(
+            frame_paths=["item-1/videos/wan22_5b_00031.mp4"])
+        self.assertEqual(visuals._rendered_clip(data), self.clip)
+
+    def test_absolute_video_path_still_works(self):
+        data = self._payload(video_path=str(self.clip))
+        self.assertEqual(visuals._rendered_clip(data), self.clip)
+
+    def test_a_missing_file_is_not_returned(self):
+        data = self._payload(frame_paths=["item-1/videos/gone.mp4"])
+        self.assertIsNone(visuals._rendered_clip(data))
+
+    def test_non_video_artifacts_are_skipped(self):
+        thumb = self.root / "item-1" / "t.jpg"
+        thumb.write_bytes(b"\x00")
+        data = self._payload(frame_paths=["item-1/t.jpg",
+                                          "item-1/videos/wan22_5b_00031.mp4"])
+        self.assertEqual(visuals._rendered_clip(data), self.clip)
+
+    def test_empty_results(self):
+        self.assertIsNone(visuals._rendered_clip({"output_dir": str(self.root),
+                                                  "results": []}))
+
+
 class TestAnimateNeverBlocksAProduction(unittest.TestCase):
     """A failed I2V render must degrade to the still, never raise."""
 

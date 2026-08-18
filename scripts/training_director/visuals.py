@@ -244,6 +244,26 @@ def _dispatch_i2v(still: Path, prompt: str) -> str:
     return r.json()["data"]["batch_id"]
 
 
+def _rendered_clip(data: dict) -> Path | None:
+    """Locate the rendered clip in a settled batch.
+
+    The batch reports `frame_paths` relative to the batch's `output_dir`; the
+    singular keys only appear on some generators, so both are tried.
+    """
+    root = Path(data.get("output_dir") or ".")
+    for result in data.get("results") or []:
+        candidates = list(result.get("frame_paths") or [])
+        candidates += [result[k] for k in ("video_path", "output_path")
+                       if result.get(k)]
+        for candidate in candidates:
+            path = Path(candidate)
+            if not path.is_absolute():
+                path = root / path
+            if path.suffix.lower() == ".mp4" and path.exists():
+                return path
+    return None
+
+
 def _collect_i2v(batch_id: str, dest: Path, timeout_s: int = 3600) -> Path | None:
     """Block until the batch settles; returns the copied clip, or None."""
     deadline = time.monotonic() + timeout_s
@@ -252,12 +272,11 @@ def _collect_i2v(batch_id: str, dest: Path, timeout_s: int = 3600) -> Path | Non
         data = s.json().get("data", {})
         state = (data.get("status") or "").lower()
         if state in _TERMINAL_OK:
-            for result in data.get("results") or []:
-                path = result.get("video_path") or result.get("output_path")
-                if path and Path(path).exists():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(Path(path).read_bytes())
-                    return dest
+            clip = _rendered_clip(data)
+            if clip:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(clip.read_bytes())
+                return dest
             return None
         if state in _TERMINAL_BAD:
             raise RuntimeError(
