@@ -7,6 +7,7 @@ indefinitely, so the request shape is asserted here rather than discovered in a
 render.
 """
 
+import importlib.util
 import os
 import sys
 import unittest
@@ -17,11 +18,31 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 os.environ["GUAARDVARK_MODE"] = "test"
 
-# The director's modules import their siblings by bare name.
-sys.path.insert(0, str(REPO / "scripts" / "training_director"))
 
-import visuals  # noqa: E402
-from config import VIDEO_FPS, VIDEO_FRAMES, VIDEO_MODEL  # noqa: E402
+def _load_director_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# The director's modules import their siblings by bare name, and `config` is
+# already taken by backend/config.py once anything else has imported it. Load
+# them from their paths and hand the name back, so import order cannot decide
+# which `config` visuals binds to.
+_TD = REPO / "scripts" / "training_director"
+_displaced = sys.modules.get("config")
+td_config = _load_director_module("config", _TD / "config.py")
+visuals = _load_director_module("visuals", _TD / "visuals.py")
+if _displaced is not None:
+    sys.modules["config"] = _displaced
+else:
+    sys.modules.pop("config", None)
+
+VIDEO_FPS = td_config.VIDEO_FPS
+VIDEO_FRAMES = td_config.VIDEO_FRAMES
+VIDEO_MODEL = td_config.VIDEO_MODEL
 
 from backend.services.video_model_registry import (  # noqa: E402
     VIDEO_MODEL_REGISTRY,
