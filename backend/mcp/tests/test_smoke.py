@@ -138,6 +138,9 @@ async def _stdio_roundtrip(timeout: float = 45.0) -> dict:
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        # One JSON-RPC message per line, and a full tools/list already exceeds
+        # asyncio's 64 KiB default readline limit.
+        limit=4 * 1024 * 1024,
     )
     assert proc.stdin and proc.stdout
 
@@ -217,3 +220,73 @@ async def test_stdio_initialize_and_list_tools():
     assert resources is not None, "no response to resources/list"
     assert "result" in resources
     assert isinstance(resources["result"]["resources"], list)
+
+
+# ─────────────────────── tools/call dispatch ───────────────────────
+
+
+class _CaptureServer:
+    """Minimal stand-in for the low-level Server: keeps the handlers it is given."""
+
+    def __init__(self):
+        self.call_tool_handler = None
+        self.list_tools_handler = None
+
+    def list_tools(self):
+        def deco(fn):
+            self.list_tools_handler = fn
+            return fn
+        return deco
+
+    def call_tool(self):
+        def deco(fn):
+            self.call_tool_handler = fn
+            return fn
+        return deco
+
+
+def _register_fake_tool(monkeypatch, execute):
+    """Wire register_tools onto a capture server exposing a single fake tool."""
+    import mcp.types as mcp_types
+    from backend.mcp import tools_adapter
+    from backend.mcp.config import MCPConfig
+    from backend.services.agent_tools import BaseTool
+
+    class _Fake(BaseTool):
+        name = "fake_echo"
+        description = "echo"
+        parameters = {}
+
+        def execute(self, **kwargs):
+            return execute(**kwargs)
+
+    base = _Fake()
+    pair = (base, mcp_types.Tool(name="fake_echo", description="echo",
+                                 inputSchema={"type": "object", "properties": {}}))
+    monkeypatch.setattr(tools_adapter, "collect_exposed_tools", lambda cfg: [pair])
+
+    server = _CaptureServer()
+    tools_adapter.register_tools(server, MCPConfig())
+    return server
+
+
+@pytest.mark.asyncio
+async def test_tools_call_returns_output_on_success(monkeypatch):
+    from backend.services.agent_tools import ToolResult
+
+    server = _register_fake_tool(monkeypatch, lambda **kw: ToolResult(success=True, output="pong"))
+    blocks = await server.call_tool_handler("fake_echo", {})
+
+    assert [b.text for b in blocks] == ["pong"]
+
+
+@pytest.mark.asyncio
+async def test_tools_call_reports_tool_exception_without_crashing(monkeypatch):
+    def _boom(**kwargs):
+        raise ValueError("kaboom")
+
+    server = _register_fake_tool(monkeypatch, _boom)
+    blocks = await server.call_tool_handler("fake_echo", {})
+
+    assert "ValueError" in blocks[0].text
+    assert "kaboom" in blocks[0].text

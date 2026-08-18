@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from itertools import count
 from typing import Any
 
 import mcp.types as mcp_types
@@ -139,6 +140,9 @@ def register_tools(server: Any, config: MCPConfig) -> int:
     by_name = {mcp_tool.name: (base_tool, mcp_tool) for base_tool, mcp_tool in exposed}
     # Per-session guard so repeated failures trip the breaker across a run.
     guard = ToolExecutionGuard(max_failures_per_tool=2, max_duplicate_calls=1)
+    # An MCP call is one-shot: there is no ReACT loop to number it, so the guard's
+    # iteration field carries call order within the session instead.
+    call_seq = count(1)
 
     @server.list_tools()
     async def _list_tools() -> list[mcp_types.Tool]:
@@ -173,7 +177,10 @@ def register_tools(server: Any, config: MCPConfig) -> int:
             try:
                 tool_result = base_tool.execute(**(arguments or {}))
             except Exception as exc:
-                guard.record_result(name, arguments or {}, success=False, error=str(exc))
+                guard.record_result(
+                    name, arguments or {}, success=False, error=str(exc),
+                    iteration=next(call_seq),
+                )
                 rec["outcome"] = "error"
                 rec["error_code"] = exc.__class__.__name__
                 return [mcp_types.TextContent(
@@ -186,6 +193,7 @@ def register_tools(server: Any, config: MCPConfig) -> int:
                 arguments or {},
                 success=bool(getattr(tool_result, "success", True)),
                 error=getattr(tool_result, "error", None),
+                iteration=next(call_seq),
             )
             if not getattr(tool_result, "success", True):
                 rec["outcome"] = "error"
