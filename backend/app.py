@@ -415,6 +415,25 @@ except ImportError as e:
     )
 
 
+def dev_allowed_origins(frontend_url: str) -> list[str]:
+    """Browser origins the dev backend accepts, including Socket.IO handshakes.
+
+    A sibling install moves its dev server and backend off the default ports so
+    the two can run at once, so both are read from the environment: a hardcoded
+    list refuses every websocket from a relocated frontend.
+    """
+    flask_port = os.getenv("FLASK_PORT", os.getenv("PORT", "5000"))
+    dev_ports = sorted({os.getenv("VITE_PORT", "5173"), "3000", "5173", "5175"})
+    return [
+        f"http://{host}:{port}"
+        for port in dev_ports
+        for host in ("localhost", "127.0.0.1")
+    ] + [frontend_url] + [
+        f"http://localhost:{flask_port}",
+        f"http://127.0.0.1:{flask_port}",
+    ]
+
+
 # Re-entry guard. create_app() must run exactly once per Python process.
 # A second call would re-register all 80 blueprints, re-init BrainState, re-discover
 # plugins, and spawn duplicate background threads — corrupting all the singletons
@@ -520,20 +539,7 @@ def _initialize_app_components(app):
         supports_credentials = True
         app.logger.info(f"Production CORS: Allowing only {FRONTEND_URL}")
     else:
-        _flask_port = os.getenv("FLASK_PORT", os.getenv("PORT", "5000"))
-        _backend_origins = [
-            f"http://localhost:{_flask_port}",
-            f"http://127.0.0.1:{_flask_port}",
-        ]
-        allowed_origins = [
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://localhost:5175",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
-            "http://127.0.0.1:5175",
-            FRONTEND_URL,
-        ] + _backend_origins
+        allowed_origins = dev_allowed_origins(FRONTEND_URL)
         supports_credentials = True
         app.logger.info(f"Development CORS: Allowing {len(allowed_origins)} origins")
 

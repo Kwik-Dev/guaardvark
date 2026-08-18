@@ -819,7 +819,7 @@ relaunch_backend_if_dead() {
     fi
     vader_warn "Backend not responding and port $port is free — attempting a one-shot relaunch..."
     rm -f "$SCRIPT_DIR/pids/backend.pid" 2>/dev/null
-    nohup env GUAARDVARK_ROOT="$SCRIPT_DIR" FLASK_PORT="$port" GUAARDVARK_MIGRATIONS_VERIFIED="${GUAARDVARK_MIGRATIONS_VERIFIED:-}" "$VENV_DIR/bin/python" -m backend.app >> "$BACKEND_STARTUP_LOG_FILE" 2>&1 &
+    nohup env GUAARDVARK_ROOT="$SCRIPT_DIR" FLASK_PORT="$port" VITE_PORT="$VITE_PORT" GUAARDVARK_MIGRATIONS_VERIFIED="${GUAARDVARK_MIGRATIONS_VERIFIED:-}" "$VENV_DIR/bin/python" -m backend.app >> "$BACKEND_STARTUP_LOG_FILE" 2>&1 &
     local spawned=$!
     if ! is_port_listening "$port" 90 "Backend (self-heal)"; then
         if [ -n "$spawned" ] && kill -0 "$spawned" 2>/dev/null; then
@@ -2557,7 +2557,7 @@ if [ "$BACKEND_ADOPTED" -eq 0 ]; then
     ulimit -n 65535
     vader_info "File descriptor limit set to: $(ulimit -n)"
 
-    nohup env GUAARDVARK_ROOT="$SCRIPT_DIR" FLASK_PORT="$FLASK_PORT" GUAARDVARK_MIGRATIONS_VERIFIED="${GUAARDVARK_MIGRATIONS_VERIFIED:-}" "$VENV_DIR/bin/python" -m backend.app >> "$BACKEND_STARTUP_LOG_FILE" 2>&1 &
+    nohup env GUAARDVARK_ROOT="$SCRIPT_DIR" FLASK_PORT="$FLASK_PORT" VITE_PORT="$VITE_PORT" GUAARDVARK_MIGRATIONS_VERIFIED="${GUAARDVARK_MIGRATIONS_VERIFIED:-}" "$VENV_DIR/bin/python" -m backend.app >> "$BACKEND_STARTUP_LOG_FILE" 2>&1 &
     BACKEND_PID=$!
     echo "$BACKEND_PID" > "$SCRIPT_DIR/pids/backend.pid"
 
