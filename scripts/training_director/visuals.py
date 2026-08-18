@@ -31,10 +31,16 @@ INDEX_FILE = CACHE_DIR / "index.json"
 # rendered text out of the frame (all text is composited).
 STYLE_SUFFIX = (
     "documentary photograph, natural daylight, realistic materials, "
-    "shallow depth of field, no text, no watermark, no people facing camera"
+    "shallow depth of field, no text, no watermark"
 )
 
-NEGATIVE = "text, watermark, logo, caption, diagram, illustration, cartoon"
+# A generated worker cannot be trusted to wear the right protection or hold
+# the right stance, and in a safety module a wrong one reads as instruction.
+# Note this only binds on models that use classifier-free guidance: the
+# distilled turbo models run at CFG 0 and ignore it, so emptiness has to be
+# stated positively in the prompt itself.
+NEGATIVE = ("text, watermark, logo, caption, diagram, illustration, cartoon, "
+            "person, people, portrait, face, headshot")
 
 
 def _key(prompt: str) -> str:
