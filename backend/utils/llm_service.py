@@ -127,6 +127,27 @@ def get_llm_instance(
             logger.warning("Per-model LLM construction failed for %r: %s", model, e)
             return None
 
+    # Cloud provider routing: when the master cloud toggle is on AND a cloud
+    # provider (e.g. Mistral) is the active selection, hand back a cloud-backed
+    # LlamaIndex LLM so every .chat()/.complete() caller routes to the API.
+    # Resolved per-call (cheap) so the toggle takes effect without a restart.
+    # Falls through to the local Ollama instance otherwise (and on any error).
+    try:
+        from backend.services import llm_provider as _llm_provider
+        _provider = _llm_provider.get_active_provider()
+        if _provider != _llm_provider.OLLAMA:
+            cloud_model = _llm_provider.get_active_cloud_model()
+            if _provider == _llm_provider.MISTRAL:
+                from backend.services import mistral_provider
+                cloud_llm = mistral_provider.make_llamaindex_llm(cloud_model)
+            else:
+                from backend.services import openai_provider
+                cloud_llm = openai_provider.make_llamaindex_llm(cloud_model)
+            if cloud_llm is not None:
+                return cloud_llm  # type: ignore
+    except Exception as e:  # noqa: BLE001 - never let provider logic break LLM access
+        logger.warning("Cloud provider resolution failed, falling back to Ollama: %s", e)
+
     if not current_app:
         logger.error("Flask current_app context not available.")
         return None
