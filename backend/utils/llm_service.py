@@ -91,9 +91,15 @@ def get_llm_instance(model: Optional[str] = None) -> Optional[LLM]:
     # Falls through to the local Ollama instance otherwise (and on any error).
     try:
         from backend.services import llm_provider as _llm_provider
-        if _llm_provider.is_mistral_active():
-            from backend.services import mistral_provider
-            cloud_llm = mistral_provider.make_llamaindex_llm(_llm_provider.get_mistral_model())
+        _provider = _llm_provider.get_active_provider()
+        if _provider != _llm_provider.OLLAMA:
+            cloud_model = _llm_provider.get_active_cloud_model()
+            if _provider == _llm_provider.MISTRAL:
+                from backend.services import mistral_provider
+                cloud_llm = mistral_provider.make_llamaindex_llm(cloud_model)
+            else:
+                from backend.services import openai_provider
+                cloud_llm = openai_provider.make_llamaindex_llm(cloud_model)
             if cloud_llm is not None:
                 return cloud_llm  # type: ignore
     except Exception as e:  # noqa: BLE001 - never let provider logic break LLM access
