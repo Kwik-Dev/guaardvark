@@ -2750,6 +2750,41 @@ fi
 cd "$SCRIPT_DIR"
 vader_separator
 
+# ── Optional MCP integration (GUAARDVARK_START_MCP=1) ──────────────────────
+# Guaardvark's MCP server (backend/mcp) is STDIo-only: an MCP client (Claude
+# Code, Cursor, Zed, ...) spawns `python -m backend.mcp` as its own child and
+# talks over pipes. A detached background process cannot be reached by clients,
+# so when enabled we (1) smoke-test that the server boots and exposes tools, and
+# (2) print the ready-to-paste config snippet for each requested client.
+#   GUAARDVARK_START_MCP=1          enable this block (default: off)
+#   GUAARDVARK_MCP_CLIENTS="..."    space/comma list, default: claude-code cursor zed claude-desktop
+if [ "${GUAARDVARK_START_MCP:-0}" = "1" ] || [ "${GUAARDVARK_START_MCP:-0}" = "true" ]; then
+    if [ -x "$VENV_DIR/bin/python" ]; then
+        vader_info "GUAARDVARK_START_MCP=1 — verifying MCP server and printing client config..."
+        if "$VENV_DIR/bin/python" -m backend.mcp list-tools >/dev/null 2>>"$LOGS_DIR/mcp.log"; then
+            vader_success "MCP server boots and exposes tools (smoke test OK)."
+        else
+            vader_error "MCP server smoke test FAILED — see $LOGS_DIR/mcp.log"
+        fi
+        MCP_CLIENTS="${GUAARDVARK_MCP_CLIENTS:-claude-code cursor zed claude-desktop}"
+        for _c in ${MCP_CLIENTS//,/ }; do
+            [ -n "$_c" ] || continue
+            case "$_c" in
+                claude-code|claude-desktop|cursor|zed)
+                    vader_info "── $_c MCP config (paste into your client) ──"
+                    if ! "$VENV_DIR/bin/python" -m backend.mcp config --client "$_c" 2>>"$LOGS_DIR/mcp.log"; then
+                        vader_warn "No config snippet for client '$_c' (see $LOGS_DIR/mcp.log)."
+                    fi
+                    ;;
+                *) vader_warn "Unknown MCP client '$_c' (ignored). Valid: claude-code, claude-desktop, cursor, zed." ;;
+            esac
+        done
+    else
+        vader_error "MCP requested but $VENV_DIR/bin/python not found (backend venv missing)."
+    fi
+    vader_separator
+fi
+
 vader_info "Running health checks..."
 if [ "$TEST_MODE" -eq 1 ]; then
     run_health_checks
