@@ -470,12 +470,33 @@ def get_default_llm() -> Ollama:
 
 
 def get_llm_for_startup() -> Ollama:
-    """Return an Ollama instance using the last active model if available.
+    """Return the LLM used for the main chat engine at startup.
 
-    Validates the chosen model is actually pulled in Ollama before returning.
-    If the saved model is missing (common after machine migration / restore),
-    fall through to the first installed model rather than warming up a ghost.
+    When ``GUAARDVARK_OPENAI_BASE_URL`` and ``GUAARDVARK_OPENAI_MODEL`` are both set
+    in .env, the main chat is routed through the OpenAI-compatible endpoint instead
+    of Ollama. Otherwise, fall back to an Ollama instance using the last active
+    model (validating it's actually pulled before returning; on a stale/missing
+    model, fall through to the first installed model rather than warming a ghost).
     """
+    # Route main chat through the OpenAI-compatible endpoint when both env vars
+    # are configured in .env. Falls back to Ollama if the LLM can't be built.
+    if os.environ.get("GUAARDVARK_OPENAI_BASE_URL") and os.environ.get("GUAARDVARK_OPENAI_MODEL"):
+        try:
+            from backend.services import openai_provider
+            openai_llm = openai_provider.make_llamaindex_llm()
+            if openai_llm is not None:
+                logger.info(
+                    "[LLM-Init] Main chat routed to OpenAI-compatible LLM (model=%s)",
+                    os.environ.get("GUAARDVARK_OPENAI_MODEL"),
+                )
+                return openai_llm  # type: ignore[return-value]
+            logger.warning(
+                "[LLM-Init] GUAARDVARK_OPENAI_BASE_URL/MODEL set but OpenAI-compatible "
+                "LLM unavailable; falling back to Ollama"
+            )
+        except Exception as e:
+            logger.warning("[LLM-Init] OpenAI-compatible LLM init failed (%s); falling back to Ollama", e)
+
     from backend.config import LLM_REQUEST_TIMEOUT, get_chat_keep_alive
 
     # Probe what Ollama actually has pulled — ground truth beats stored config.
