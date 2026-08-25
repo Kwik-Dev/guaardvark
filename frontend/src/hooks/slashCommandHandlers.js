@@ -198,6 +198,14 @@ const KONTEXT_EDIT_OPTION = {
   is_downloaded: true,
 };
 
+// Generic ComfyUI backend — always selectable in chat even when no ComfyUI
+// assets are installed yet, since it routes to whatever engine ComfyUI has.
+const COMFYUI_MODEL_OPTION = {
+  id: "comfyui",
+  name: "ComfyUI (auto backend)",
+  is_downloaded: true,
+};
+
 async function handleImageModel(args, { addMessage }) {
   if (!args) {
     try {
@@ -209,6 +217,7 @@ async function handleImageModel(args, { addMessage }) {
       const models = data?.data?.models || data?.models || [];
       const downloaded = [
         KONTEXT_EDIT_OPTION,
+        COMFYUI_MODEL_OPTION,
         ...models.filter((m) => m.is_downloaded),
       ];
       addMessage({
@@ -239,6 +248,19 @@ async function handleImageModel(args, { addMessage }) {
     return { handled: true };
   }
 
+  // "comfyui" is a backend selector, not a downloadable model — accept it
+  // regardless of asset status (the backend picks whatever engine is installed).
+  if (modelName === "comfyui") {
+    await saveImageModelChoice("comfyui");
+    addMessage({
+      role: "system",
+      content: "Image model switched to **comfyui** (ComfyUI auto backend). Generation will use the installed Z-Image or FLUX engine.",
+      tempId: `imgmodel-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+
   try {
     const res = await fetch("/api/batch-image/models");
     const data = await res.json();
@@ -262,7 +284,7 @@ async function handleImageModel(args, { addMessage }) {
         });
       }
     } else {
-      const available = ["kontext", ...models.filter((m) => m.is_downloaded).map((m) => m.id)].join(", ");
+      const available = ["kontext", "comfyui", ...models.filter((m) => m.is_downloaded).map((m) => m.id)].join(", ");
       addMessage({
         role: "system",
         content: `Model \`${modelName}\` not found. Available: ${available}`,
