@@ -358,13 +358,34 @@ def _build_shots_only_user(
 
 def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int, rich: bool,
                    sampling: dict | None = None, num_ctx: int | None = None):
-    """One ``ollama.chat(format='json')`` with a small transient-error retry loop (connection
-    refused / server just came up). Returns ``(parsed_dict, raw_content)``. Raises only if all
-    transient retries are exhausted; an unparseable-but-returned response yields empty prompts.
+    """One JSON-shape director call with a small transient-error retry loop.
+
+    Prefers the OpenAI-compatible provider (same cloud/remote model the chat bot uses via
+    GUAARDVARK_OPENAI_BASE_URL / GUAARDVARK_OPENAI_MODEL) when configured; otherwise falls
+    back to ``ollama.chat(format='json')``. Returns ``(parsed_dict, raw_content)``. Raises
+    only if the Ollama transient retries are exhausted; an unparseable-but-returned response
+    yields empty prompts.
 
     ``sampling`` (optional) overrides the sampling knobs (e.g. CREATIVE profile); window/budget
     keys stay authoritative — see ``_director_options``.
     ``num_ctx`` (optional) is the orchestrator-computed context window for this model run."""
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+    # ── OpenAI-compatible provider (cloud/remote model the chat bot uses) ──
+    try:
+        from backend.services import openai_provider
+        if openai_provider.available():
+            from backend.config import OPENAI_DEFAULT_MODEL
+            resp = openai_provider.chat(model=OPENAI_DEFAULT_MODEL, messages=messages, stream=False)
+            content = (resp.get("message", {}) or {}).get("content", "") or ""
+            if content.strip():
+                return _parse_full_director_output(content, batch_len), content
+    except Exception as e:  # noqa: BLE001 — provider failure falls back to Ollama
+        log.warning("director OpenAI-compatible chat failed (%s); falling back to Ollama %s", e, model)
+
     import time
     opts = _director_options(batch_len, rich=rich, sampling=sampling, num_ctx_override=num_ctx)
     resp = None
@@ -373,10 +394,7 @@ def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int
             resp = ollama.chat(
                 model=model,
                 format="json",
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
+                messages=messages,
                 options=opts,
             )
             break
