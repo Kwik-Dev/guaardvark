@@ -80,14 +80,34 @@ def _default_ollama_llm(*, system: str, user: str, model: str = "gemma4:e4b") ->
     from backend.services.plugin_bridge import ensure_plugins_for_stage
     ensure_plugins_for_stage("film-crew", "screenwriting")  # or cinematography etc.; uses phased non-persist
     ensure_plugins_for_stage("film-crew", "cinematography")
+    import logging
+    log = logging.getLogger(__name__)
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+    # Prefer the OpenAI-compatible provider (the same cloud/remote model the
+    # chat bot uses via GUAARDVARK_OPENAI_BASE_URL / GUAARDVARK_OPENAI_MODEL)
+    # when it is configured. Fall back to the local Ollama model otherwise.
+    try:
+        from backend.services import openai_provider
+        if openai_provider.available():
+            from backend.config import OPENAI_DEFAULT_MODEL
+            resp = openai_provider.chat(
+                model=OPENAI_DEFAULT_MODEL,
+                messages=messages,
+                stream=False,
+            )
+            content = (resp.get("message", {}) or {}).get("content", "") or ""
+            if content.strip():
+                return content
+    except Exception as e:
+        log.warning("OpenAI-compatible Film Crew LLM failed (%s); falling back to Ollama %s", e, model)
+
     import ollama
-    response = ollama.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
+    response = ollama.chat(model=model, messages=messages)
     return response["message"]["content"]
 
 
