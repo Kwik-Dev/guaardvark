@@ -449,57 +449,20 @@ class OfflineImageGenerator:
         return all(p.is_file() and p.stat().st_size > 0 for p in (unet, vae, clip)) and t5_ok
 
     @staticmethod
-    def _zimage_assets_present() -> bool:
-        """True when the Z-Image Turbo ComfyUI graph can run."""
-        try:
-            from backend.config import COMFYUI_DIR
-            root = Path(COMFYUI_DIR) / "models"
-        except Exception:
-            root = Path("plugins/comfyui/ComfyUI/models")
-        try:
-            from backend.services.comfyui_image_generator import (
-                ZIMAGE_UNET, ZIMAGE_CLIP, ZIMAGE_VAE,
-            )
-        except Exception:
-            return False
-        unet = root / "unet" / ZIMAGE_UNET
-        clip = root / "clip" / ZIMAGE_CLIP
-        vae = root / "vae" / ZIMAGE_VAE
-        return all(p.is_file() and p.stat().st_size > 0 for p in (unet, clip, vae))
-
-    @staticmethod
-    def _flux_schnell_assets_present() -> bool:
-        """True when the FLUX-schnell ComfyUI graph can run."""
-        try:
-            from backend.config import COMFYUI_DIR
-            root = Path(COMFYUI_DIR) / "models"
-        except Exception:
-            root = Path("plugins/comfyui/ComfyUI/models")
-        try:
-            from backend.services.comfyui_image_generator import (
-                FLUX_UNET, FLUX_T5, FLUX_CLIP, FLUX_VAE,
-            )
-        except Exception:
-            return False
-        unet = root / "unet" / FLUX_UNET
-        vae = root / "vae" / FLUX_VAE
-        clip = root / "clip" / FLUX_CLIP
-        t5_candidates = [
-            root / "clip" / FLUX_T5,
-            root / "clip" / "t5" / FLUX_T5,
-            root / "text_encoders" / FLUX_T5,
-        ]
-        t5_ok = any(p.is_file() and p.stat().st_size > 0 for p in t5_candidates)
-        return all(p.is_file() and p.stat().st_size > 0 for p in (unet, vae, clip)) and t5_ok
-
-    @staticmethod
     def _comfyui_assets_present() -> bool:
-        """True when ComfyUI has at least one usable image engine installed."""
-        return (
-            OfflineImageGenerator._zimage_assets_present()
-            or OfflineImageGenerator._flux_dev_assets_present()
-            or OfflineImageGenerator._flux_schnell_assets_present()
-        )
+        """True when ComfyUI has at least one usable image engine installed.
+
+        Queries the live server's /object_info (authoritative about model locations
+        — works for an external Comfy Desktop install, not just the bundled dir).
+        """
+        try:
+            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+            gen = ComfyUIImageGenerator()
+            if not gen._available():
+                return False
+            return bool(gen.comfyui_installed_engines())
+        except Exception:
+            return False
 
     def is_comfy_only_model(self, model_key: str) -> bool:
         key = (model_key or "").strip().lower()

@@ -498,20 +498,20 @@ def _comfyui_backend_choice() -> tuple[str, str] | None:
     """
     try:
         from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-        from backend.services.offline_image_generator import OfflineImageGenerator
 
         gen = ComfyUIImageGenerator()
         if not gen._available():
             return None
 
-        # Prefer Z-Image Turbo if its assets are installed, then FLUX-dev, then
-        # FLUX-schnell. This makes /imagemodel comfyui an honest auto-backend.
-        if OfflineImageGenerator._zimage_assets_present():
-            return ("zimage", "zimage")
-        if OfflineImageGenerator._flux_dev_assets_present():
-            return ("flux-dev", "flux-dev")
-        if OfflineImageGenerator._flux_schnell_assets_present():
-            return ("flux-schnell", "flux")
+        # Authoritative check against the live server's /object_info — this finds
+        # engines on an external Comfy Desktop install as well as the bundled one.
+        for engine in gen.comfyui_installed_engines():
+            if engine == "zimage":
+                return ("zimage", "zimage")
+            if engine == "flux-dev":
+                return ("flux-dev", "flux-dev")
+            if engine == "flux-schnell":
+                return ("flux-schnell", "flux")
         return None
     except Exception:
         return None

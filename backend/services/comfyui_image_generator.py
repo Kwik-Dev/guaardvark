@@ -114,6 +114,50 @@ class ComfyUIImageGenerator:
         except requests.exceptions.RequestException:
             return False
 
+    def comfyui_installed_engines(self) -> list[str]:
+        """Which image engines can the reachable ComfyUI actually run?
+
+        Queries the running server's ``/object_info`` — the authoritative source
+        for where the live models are (an external Comfy Desktop install, not the
+        bundled plugin dir). Returns engine tags like ``['zimage', 'flux-dev']``.
+        """
+        try:
+            resp = requests.get(f"{self.comfy_url}/object_info", timeout=5)
+            resp.raise_for_status()
+            info = resp.json()
+        except Exception as e:
+            logger.warning("ComfyUI object_info probe failed: %s", e)
+            return []
+
+        def _choices(node: str, key: str) -> list[str]:
+            try:
+                lst = info.get(node, {}).get("input", {}).get("required", {}).get(key, [])
+                if isinstance(lst, list) and lst and isinstance(lst[0], list):
+                    return [str(x) for x in lst[0]]
+                if isinstance(lst, list) and lst and isinstance(lst[0], str):
+                    return [str(x) for x in lst]
+            except Exception:
+                pass
+            return []
+
+        unet = set(_choices("UNETLoader", "unet_name"))
+        unet_gguf = set(_choices("UnetLoaderGGUF", "unet_name"))
+        all_unet = unet | unet_gguf
+        clip = set(_choices("CLIPLoader", "clip_name"))
+        dual = set(_choices("DualCLIPLoader", "clip_name1"))
+        vae = set(_choices("VAELoader", "vae_name"))
+
+        engines: list[str] = []
+        if ZIMAGE_UNET in all_unet and ZIMAGE_CLIP in clip and ZIMAGE_VAE in vae:
+            engines.append("zimage")
+        if (FLUX_DEV_UNET in all_unet and FLUX_DEV_T5 in dual
+                and FLUX_CLIP in dual and FLUX_VAE in vae):
+            engines.append("flux-dev")
+        if (FLUX_UNET in all_unet and FLUX_T5 in dual
+                and FLUX_CLIP in dual and FLUX_VAE in vae):
+            engines.append("flux-schnell")
+        return engines
+
     # ── workflow ──────────────────────────────────────────────────────
     def _build_workflow(
         self, *, prompt: str, negative: str, lora_names: list[str],
