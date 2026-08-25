@@ -18,6 +18,7 @@ from typing import Any
 # guidance_scale=0.0 (CFG distilled out).
 _FAMILY_DEFAULTS: dict[str, dict[str, Any]] = {
     "zimage": {"width": 1024, "height": 1024, "steps": 9, "guidance": 0.0},
+    "comfyui": {"width": 1024, "height": 1024, "steps": 9, "guidance": 0.0},
     "krea2-turbo": {"width": 1024, "height": 1024, "steps": 8, "guidance": 0.0},
     "krea2-raw": {"width": 1024, "height": 1024, "steps": 52, "guidance": 3.5},
     "sdxl": {"width": 1024, "height": 1024, "steps": 25, "guidance": 7.0},
@@ -35,6 +36,8 @@ _LEGACY_GUIDANCE = 7.5
 def model_family(model: str | None) -> str:
     """Map catalog key / HF id / auto to a sampling family key."""
     mid = (model or "").strip().lower()
+    if mid == "comfyui":
+        return "comfyui"
     if not mid or mid == "auto":
         # Product daily driver family for unresolved auto.
         try:
