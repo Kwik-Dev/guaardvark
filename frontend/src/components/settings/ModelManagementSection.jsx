@@ -21,8 +21,8 @@ import {
   Divider,
   Alert
 } from '@mui/material';
-import { useSnackbar } from '../../contexts/SnackbarProvider';
-import apiService from '../../api/apiService';
+import { useSnackbar } from '../common/SnackbarProvider';
+import * as apiService from '../../api';
 import {
   getLlmProvider,
   setCloudModelsEnabled,
@@ -286,7 +286,7 @@ const ModelManagementSection = ({
 
   const handleRefreshModelsClick = () => {
     handleActionClick(
-      apiService.refreshModels,
+      apiService.getAvailableModels,
       [],
       null,
       "Refreshing available models...",
@@ -532,11 +532,14 @@ const ModelManagementSection = ({
               label="Select Model"
               onChange={(e) => setSelectedModel(e.target.value)}
             >
-              {availableModels.map((model) => (
-                <MenuItem key={model} value={model}>
-                  {model}
-                </MenuItem>
-              ))}
+              {availableModels.map((model) => {
+                const label = model?.name || model;
+                return (
+                  <MenuItem key={label} value={label}>
+                    {label}
+                  </MenuItem>
+                );
+              })}
             </Select>
           </FormControl>
         </Grid>
