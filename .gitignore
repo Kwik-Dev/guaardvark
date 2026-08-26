@@ -342,3 +342,9 @@ data/demo_assets/*/render/
 
 # Episode production notes are working documents, not shipped docs.
 data/demo_assets/*/README.md
+pi-session-2026-08-20T02-33-29-665Z_01a01d04-3341-7759-87e3-9760017597c3.html
+docs/guaarvark_guide_jp.html
+
+# Runtime RAG/LLM indices + transient UI state — regenerable, not source of truth.
+data/indexes/
+data/images_windows_state.json
