@@ -167,13 +167,13 @@ class ComfyUIImageGenerator:
                     )
                     effective_model = tag
                     ml = tag
-                elif info.get("family") == "zimage":
-                    # Z-Image LoRAs are not applied via this Comfy SDXL/FLUX graph yet.
+                elif info.get("family") == "zimage" and "zimage" not in ml and "z-image" not in ml:
                     logger.warning(
-                        "Z-Image LoRAs cannot use Comfy SDXL/FLUX graph (base=%s); "
-                        "caller should use offline Z-Image path.",
-                        info.get("base_model_id"),
+                        "LoRAs are Z-Image (base=%s) but model=%r — overriding to zimage so identity applies.",
+                        info.get("base_model_id"), effective_model,
                     )
+                    effective_model = "zimage"
+                    ml = "zimage"
             except Exception as e:
                 # Pre-registry LoRAs / basename-only: fall back to historic SDXL force
                 # when flux-schnell would drop LoRAs entirely.
@@ -259,6 +259,11 @@ class ComfyUIImageGenerator:
             # Flow-matching: ModelSamplingAuraFlow (shift) wraps the UNet, the
             # distilled model is CFG-free (cfg=1.0) with the negative zeroed via
             # ConditioningZeroOut, and latents use EmptySD3LatentImage.
+            # Z-Image character LoRAs train only the transformer (not the text
+            # encoder), so they are applied model-only via LoraLoaderModelOnly —
+            # the same node the FLUX-dev branch uses. The chain feeds the UNet
+            # into the AuraFlow sampler; the CLIP is untouched and the trigger
+            # word in the prompt does the identity work.
             wf = {
                 "unet": {
                     "class_type": "UNETLoader",
@@ -288,33 +293,43 @@ class ComfyUIImageGenerator:
                     "class_type": "EmptySD3LatentImage",
                     "inputs": {"width": width, "height": height, "batch_size": 1},
                 },
-                "sampling": {
-                    "class_type": "ModelSamplingAuraFlow",
-                    "inputs": {"shift": ZIMAGE_SHIFT, "model": ["unet", 0]},
+            }
+            # Chain LoraLoaderModelOnly nodes (model-only): each wraps the previous
+            # node's MODEL so multiple LoRAs stack; the CLIP is not touched.
+            model_src = ["unet", 0]
+            for i, name in enumerate(lora_names):
+                nid = f"lora_{i}"
+                wf[nid] = {
+                    "class_type": "LoraLoaderModelOnly",
+                    "inputs": {"model": model_src, "lora_name": name, "strength_model": self.lora_strength},
+                }
+                model_src = [nid, 0]
+            wf["sampling"] = {
+                "class_type": "ModelSamplingAuraFlow",
+                "inputs": {"shift": ZIMAGE_SHIFT, "model": model_src},
+            }
+            wf["sampler"] = {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["sampling", 0],
+                    "seed": seed,
+                    "steps": steps,
+                    "cfg": 1.0,
+                    "sampler_name": ZIMAGE_SAMPLER,
+                    "scheduler": ZIMAGE_SCHEDULER,
+                    "positive": ["pos", 0],
+                    "negative": ["neg_zero", 0],
+                    "latent_image": ["latent", 0],
+                    "denoise": 1.0,
                 },
-                "sampler": {
-                    "class_type": "KSampler",
-                    "inputs": {
-                        "model": ["sampling", 0],
-                        "seed": seed,
-                        "steps": steps,
-                        "cfg": 1.0,
-                        "sampler_name": ZIMAGE_SAMPLER,
-                        "scheduler": ZIMAGE_SCHEDULER,
-                        "positive": ["pos", 0],
-                        "negative": ["neg_zero", 0],
-                        "latent_image": ["latent", 0],
-                        "denoise": 1.0,
-                    },
-                },
-                "vae": {
-                    "class_type": "VAEDecode",
-                    "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]},
-                },
-                "save": {
-                    "class_type": "SaveImage",
-                    "inputs": {"filename_prefix": "guaardvark-zimage", "images": ["vae", 0]},
-                },
+            }
+            wf["vae"] = {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]},
+            }
+            wf["save"] = {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "guaardvark-zimage", "images": ["vae", 0]},
             }
             return wf
 
@@ -645,11 +660,8 @@ class ComfyUIImageGenerator:
                 info = resolve_inference_for_loras(lora_paths)
                 if info.get("comfy_model_tag"):
                     effective_model = info["comfy_model_tag"]
-                if info.get("family") == "zimage":
-                    raise RuntimeError(
-                        "Z-Image character LoRAs must run on the offline Z-Image path, "
-                        "not ComfyUI SDXL/FLUX. (base_model_id=zimage-turbo)"
-                    )
+                # Z-Image family is applied via the model-only LoRA chain in the
+                # Z-Image workflow branch; no refusal needed.
             except RuntimeError:
                 raise
             except Exception:
