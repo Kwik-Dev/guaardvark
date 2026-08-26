@@ -204,6 +204,10 @@ def _stream_chat(payload: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
         timeout=config.MISTRAL_REQUEST_TIMEOUT,
     ) as resp:
         resp.raise_for_status()
+        # Force UTF-8 (same reason as openai_provider): without it requests
+        # defaults to ISO-8859-1, turning UTF-8 em-dashes/smart quotes into
+        # mojibake in streamed tokens.
+        resp.encoding = "utf-8"
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw:
                 continue
