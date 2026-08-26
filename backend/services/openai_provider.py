@@ -191,6 +191,10 @@ def _stream_chat(payload: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
         timeout=config.OPENAI_REQUEST_TIMEOUT,
     ) as resp:
         resp.raise_for_status()
+        # Force UTF-8: the SSE body is JSON. requests defaults resp.encoding to
+        # ISO-8859-1 when the server sends no charset, which mangles every
+        # non-ASCII UTF-8 char (em-dash —, smart quotes) into mojibake.
+        resp.encoding = "utf-8"
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw:
                 continue
