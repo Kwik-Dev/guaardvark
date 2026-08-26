@@ -71,6 +71,7 @@ import {
 import IndexProfileChips from "../components/settings/IndexProfileChips";
 import RebuildIndexDialog from "../components/settings/RebuildIndexDialog";
 import IndexProfileEditDialog from "../components/settings/IndexProfileEditDialog";
+import ModelManagementSection from "../components/settings/ModelManagementSection";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { useTheme, useMediaQuery } from "@mui/material";
 import { useSnackbar } from "../components/common/SnackbarProvider";
@@ -2705,6 +2706,23 @@ const SettingsPage = () => {
     </SettingsPanel>
   );
 
+  const modelManagementPanel = (
+    <SettingsPanel
+      id="settings-model-management"
+      title="Model Management"
+      description="Cloud and local chat model providers."
+    >
+      <ModelManagementSection
+        availableModels={availableModels}
+        selectedModel={selectedModel}
+        setSelectedModel={setSelectedModel}
+        activeModel={activeModel}
+        isLoading={isLoading}
+        refreshActiveModel={refreshActiveModel}
+      />
+    </SettingsPanel>
+  );
+
   const chatPanel = (
     <SettingsPanel
       id="settings-chat"
@@ -3421,7 +3439,7 @@ const SettingsPage = () => {
     columns === 3
       ? [
           [generalPanel, chatPanel, dataPanel, aboutPanel],
-          [modelsPanel, knowledgePanel, dangerPanel],
+          [modelsPanel, modelManagementPanel, knowledgePanel, dangerPanel],
           [generationPanel, agentsPanel, syncPanel, developerPanel],
         ]
       : columns === 2
@@ -3435,6 +3453,7 @@ const SettingsPage = () => {
             ],
             [
               modelsPanel,
+              modelManagementPanel,
               knowledgePanel,
               syncPanel,
               dataPanel,
@@ -3446,6 +3465,7 @@ const SettingsPage = () => {
             [
               generalPanel,
               modelsPanel,
+              modelManagementPanel,
               chatPanel,
               generationPanel,
               knowledgePanel,
