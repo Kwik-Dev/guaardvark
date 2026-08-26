@@ -53,10 +53,14 @@ FLUX_VAE = os.environ.get("GUAARDVARK_FLUX_VAE", "ae.safetensors")
 # object_info). Overridable so a different Z-Image build / Qwen CLIP / VAE works.
 ZIMAGE_UNET = os.environ.get("GUAARDVARK_ZIMAGE_UNET", "z_image_turbo_bf16.safetensors")
 ZIMAGE_CLIP = os.environ.get("GUAARDVARK_ZIMAGE_CLIP", "qwen_3_4b.safetensors")
-ZIMAGE_CLIP_TYPE = os.environ.get("GUAARDVARK_ZIMAGE_CLIP_TYPE", "qwen_image")
+ZIMAGE_CLIP_TYPE = os.environ.get("GUAARDVARK_ZIMAGE_CLIP_TYPE", "lumina2")
 ZIMAGE_VAE = os.environ.get("GUAARDVARK_ZIMAGE_VAE", "ae.safetensors")
-ZIMAGE_SAMPLER = os.environ.get("GUAARDVARK_ZIMAGE_SAMPLER", "euler")
+ZIMAGE_SAMPLER = os.environ.get("GUAARDVARK_ZIMAGE_SAMPLER", "res_multistep")
 ZIMAGE_SCHEDULER = os.environ.get("GUAARDVARK_ZIMAGE_SCHEDULER", "simple")
+# Flow-matching shift for Z-Image Turbo (ModelSamplingAuraFlow). The distilled
+# model is CFG-free: positive conditioning drives the sampler, the negative is
+# zeroed via ConditioningZeroOut, and cfg stays 1.0.
+ZIMAGE_SHIFT = float(os.environ.get("GUAARDVARK_ZIMAGE_SHIFT", "3"))
 
 # FLUX-dev (full transformer) keyframe path — the identity-lock route for trained
 # character LoRAs. Unlike the schnell GGUF branch, this one ACTUALLY chains LoRAs
@@ -251,7 +255,10 @@ class ComfyUIImageGenerator:
             return wf
 
         if "zimage" in ml or "z-image" in ml:
-            # Z-Image Turbo via ComfyUI — UNETLoader + Qwen CLIP (qwen_image) + ae VAE.
+            # Z-Image Turbo via ComfyUI — UNETLoader + Lumina2 CLIP + ae VAE.
+            # Flow-matching: ModelSamplingAuraFlow (shift) wraps the UNet, the
+            # distilled model is CFG-free (cfg=1.0) with the negative zeroed via
+            # ConditioningZeroOut, and latents use EmptySD3LatentImage.
             wf = {
                 "unet": {
                     "class_type": "UNETLoader",
@@ -273,21 +280,29 @@ class ComfyUIImageGenerator:
                     "class_type": "CLIPTextEncode",
                     "inputs": {"text": negative, "clip": ["clip", 0]},
                 },
+                "neg_zero": {
+                    "class_type": "ConditioningZeroOut",
+                    "inputs": {"conditioning": ["neg", 0]},
+                },
                 "latent": {
-                    "class_type": "EmptyLatentImage",
+                    "class_type": "EmptySD3LatentImage",
                     "inputs": {"width": width, "height": height, "batch_size": 1},
+                },
+                "sampling": {
+                    "class_type": "ModelSamplingAuraFlow",
+                    "inputs": {"shift": ZIMAGE_SHIFT, "model": ["unet", 0]},
                 },
                 "sampler": {
                     "class_type": "KSampler",
                     "inputs": {
-                        "model": ["unet", 0],
+                        "model": ["sampling", 0],
                         "seed": seed,
                         "steps": steps,
-                        "cfg": cfg,
+                        "cfg": 1.0,
                         "sampler_name": ZIMAGE_SAMPLER,
                         "scheduler": ZIMAGE_SCHEDULER,
                         "positive": ["pos", 0],
-                        "negative": ["neg", 0],
+                        "negative": ["neg_zero", 0],
                         "latent_image": ["latent", 0],
                         "denoise": 1.0,
                     },
