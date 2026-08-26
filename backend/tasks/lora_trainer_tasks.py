@@ -273,7 +273,17 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
 
 
 def create_lora_trainer_tasks(celery_app: Celery):
-    @celery_app.task(name="lora_trainer.train_lora")
+    @celery_app.task(
+        name="lora_trainer.train_lora",
+        # Deliberately larger than the global defaults (task_time_limit=2400s).
+        # The daemon budget is _LOAD_TIMEOUT_S (60 min cold HF download) +
+        # _TRAIN_TIMEOUT_S (30 min train) = up to 90 min. The global 40-min cap
+        # would hard-kill the task mid-load/train — an abrupt kill the task body
+        # cannot catch, which silently wedges the Subject in 'training'. These
+        # bounds keep the real daemon watchdogs authoritative.
+        soft_time_limit=6000,   # 100 min soft
+        time_limit=6300,        # 105 min hard
+    )
     def train_lora_task(subject_id: int, job_id: str | None = None):
         with current_app.app_context():
             train_subject_lora_for_subject(subject_id, job_id=job_id)
@@ -504,14 +514,15 @@ def reap_stuck_training_subjects() -> dict:
     'failed' so the UI re-enables the Train button. A worker that dies mid-run
     (its trainer daemon now reaped by PR_SET_PDEATHSIG) loses the Celery task, so
     nothing marks the Subject failed — it would otherwise stay 'training' forever.
-    The 45-minute cutoff is deliberately > the 30-min _TRAIN_TIMEOUT_S, so a job
-    that is genuinely still running is never reaped. Uses the DB clock to avoid
-    process/DB timezone skew."""
+    The cutoff is deliberately > the train_lora task's own time_limit (105 min) so
+    a job that is genuinely still running (cold HF model download up to 60 min +
+    30 min training, plus daemon overhead) is never reaped as a false positive.
+    Uses the DB clock to avoid process/DB timezone skew."""
     from sqlalchemy import text
     stale = (
         Subject.query
         .filter(Subject.training_status == "training",
-                Subject.updated_at < text("now() - interval '45 minutes'"))
+                Subject.updated_at < text("now() - interval '120 minutes'"))
         .all()
     )
     for s in stale:
