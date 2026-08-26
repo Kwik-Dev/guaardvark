@@ -67,6 +67,7 @@ import AgentDisplaySection from "../components/settings/AgentDisplaySection";
 import KillSwitchModal from "../components/modals/KillSwitchModal";
 import RebootProgressModal from "../components/modals/RebootProgressModal";
 import RAGDebugSection from "../components/settings/RAGDebugSection";
+import ModelManagementSection from "../components/settings/ModelManagementSection";
 import ImageModelsModal from "../components/modals/ImageModelsModal";
 import InfographicModelsModal from "../components/modals/InfographicModelsModal";
 import VideoModelsModal from "../components/modals/VideoModelsModal";
@@ -3179,8 +3180,19 @@ const SettingsPage = () => {
               </SettingsRow>
           </SettingsCardWrapper>
 
+          <SettingsCardWrapper title="Model Management">
+              <ModelManagementSection
+                availableModels={availableModels}
+                selectedModel={selectedModel}
+                setSelectedModel={setSelectedModel}
+                activeModel={activeModel}
+                isLoading={isLoading}
+                refreshActiveModel={refreshActiveModel}
+              />
+          </SettingsCardWrapper>
+
           <SettingsCardWrapper title="RAG Performance">
-              <RAGDebugSection ragDebugEnabled={ragDebug} />
+            <RAGDebugSection ragDebugEnabled={ragDebug} />
           </SettingsCardWrapper>
 
           <SettingsCardWrapper title="Uncle Claude">
