@@ -62,12 +62,27 @@ class VisionAnalyzer:
 
     def _detect_vision_model(self) -> str:
         """Auto-detect best available vision model from Ollama.
-        
+
         Prioritizes:
+        0. A Qwen model (confirmed vision-capable on this MLX setup) — preferred
+           over gemma4 tags that may be text-only builds (gemma4:26b-mlx returns
+           400 "does not support image input").
         1. Any vision-capable model ALREADY in VRAM (/api/ps)
         2. Configured gemma4 if available
         3. Hardcoded priority list (gemma4, moondream)
         """
+        try:
+            # 0. Prefer a Qwen model from the available set (works for vision on
+            #    this MLX setup; gemma4:26b-mlx is text-only despite the name).
+            tags_resp = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
+            if tags_resp.status_code == 200:
+                available = [m["name"] for m in tags_resp.json().get("models", [])]
+                qwen = next((m for m in sorted(available) if "qwen" in m.lower()), None)
+                if qwen:
+                    logger.info(f"[VISION] Auto-detected vision model: {qwen}")
+                    return qwen
+        except Exception:
+            pass
         try:
             # 1. Check what's ALREADY in VRAM. If a vision model is active, USE IT.
             # This prevents loading a second model and blowing up VRAM.
