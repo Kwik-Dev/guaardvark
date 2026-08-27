@@ -38,18 +38,44 @@ drop-in swap.
 The abstraction boundary is the `train_subject_lora()` contract. Add a third
 backend value and a new driver implementing the same method.
 
-### 2.1 Backend selection — `lora_trainer_tasks.py:122`
+### 2.1 Plugin separation & mutual exclusion (REQUIREMENT)
 
-Extend `GUAARDVARK_LORA_BACKEND` with `runpod` (and allow `auto` to prefer remote
-when configured):
+The remote trainer is a **separate plugin**, not a fork of `lora_trainer`.
+When the RunPod plugin is enabled/used, the local `lora_trainer` plugin is
+turned **off**.
 
-```
-backend == "runpod"  → use RemoteLoraTrainer
-```
+- **New plugin dir**: `plugins/runpod_lora_trainer/` with its own `plugin.json`
+  (`id: "runpod_lora_trainer"`, `type: "tool"`, `category: "training"`,
+  `port: null`). Contains `remote_trainer.py` + `pod/` image. Its `config` holds
+  `default_backend: "runpod"`, `output_dir`, `poll_interval_seconds`.
+- **Mutual-exclusion is a NEW plugin-system concept** — today there is *no*
+  "one plugin disables a sibling" mechanism. The only existing exclusivity is
+  `GPU_EXCLUSIVE_PLUGIN_IDS = {'ollama','comfyui'}` (`plugin_manager.py:49`),
+  which serializes start/stop operations; it does **not** disable one when the
+  other is enabled. So this requirement needs a small, focused addition.
 
-Lazy import, same as `RealLoraTrainer`.
+**Design — manifest `excludes` field:**
 
-### 2.2 New driver — `plugins/lora_trainer/remote_trainer.py`
+- Add an optional `excludes: [plugin_id, ...]` array to `PluginMetadata`
+  (`plugin_base.py`) and to the JSON manifest. Semantics: this plugin is an
+  **alternative** to the listed plugins — enabling it disables them.
+- `runpod_lora_trainer/plugin.json`:
+  `"excludes": ["lora_trainer"]`
+- In `PluginManager.enable_plugin()` (`plugin_manager.py:877`), after persisting
+  the enable, resolve the mutual-exclusion set (both the new plugin's own
+  `excludes` AND any plugin that lists this id in its `excludes`) and
+  `disable_plugin()` each sibling (which stops it first if running). Log a clear
+  "disabled X because Y is now the active trainer" message.
+- Backend selection is then driven by **plugin state**, not just env: in
+  `_train_impl` (`lora_trainer_tasks.py:122`), `auto` → use the remote trainer
+  if `runpod_lora_trainer` is effectively enabled and configured, else fall back
+  to `RealLoraTrainer.is_available()`. Enabling the RunPod plugin therefore both
+  disables the local one and routes training to RunPod.
+
+This keeps the two plugins independently toggleable in the Plugins UI, with the
+mutual exclusion enforcing that only one trainer is active at a time.
+
+### 2.2 New driver — `plugins/runpod_lora_trainer/remote_trainer.py`
 
 A class exposing the **same signature** as `RealLoraTrainer.train_subject_lora()`
 (subject_id, name, ref_image_paths, output_dir, trigger_word, resolution,
@@ -120,25 +146,53 @@ No required changes — the UI already reads `Subject.training_status` + unified
 progress, which the remote path emits the same way. Optional later: a backend
 indicator on the training row.
 
+**Mutual-exclusion UI (included in scope):** the two trainer plugins appear
+side-by-side in the Plugins page (`frontend/src/pages/PluginsPage.jsx`). The
+existing plugin system has no "this replaces that" UI — only the VRAM-heavy
+conflict warning (`findGpuConflict`, `PluginsPage.jsx:756`). Add an `excludes`
+aware behavior:
+
+1. **Backend surfaces `excludes`**: `PluginManager.list_plugins()` /
+   `plugin_registry.list_plugins()` include each plugin's `excludes` array (so
+   the frontend knows the relationship without hardcoding ids).
+2. **Render**: when a plugin lists another as `excludes`, and that sibling is
+   currently enabled, render the sibling's toggle as **disabled** with a tooltip
+   "Disabled because <active trainer> is the active LoRA trainer" and its card
+   dimmed/annotated. Enabling the RunPod trainer therefore visibly turns off the
+   local `lora_trainer` switch in the same view.
+3. **Conflict message**: reuse the `showMessage` pattern (as `findGpuConflict`
+   does at `PluginsPage.jsx:774-781`) to tell the operator which trainer was
+   swapped out when they flip either toggle.
+4. This is generic (driven by the manifest `excludes` field), so it also covers
+   any future alternative-plugin pairs, not just the LoRA trainers.
+
 ### 2.6 Files touched
 
 | File | Change |
 |---|---|
-| `backend/tasks/lora_trainer_tasks.py` | select `runpod` backend; skip local `gpu_session` for remote |
-| `plugins/lora_trainer/remote_trainer.py` | **new** driver (upload → dispatch → poll → ingest) |
+| `backend/tasks/lora_trainer_tasks.py` | select `runpod` backend via plugin state; skip local `gpu_session` for remote |
+| `plugins/runpod_lora_trainer/plugin.json` | **new** manifest, `id: runpod_lora_trainer`, `excludes: ["lora_trainer"]` |
+| `plugins/runpod_lora_trainer/remote_trainer.py` | **new** driver (upload → dispatch → poll → ingest) |
+| `plugins/runpod_lora_trainer/pod/` (Dockerfile, entry.sh, requirements) | runnable RunPod pod image |
+| `backend/plugins/plugin_base.py` | add `excludes: List[str]` to `PluginMetadata` + manifest parsing |
+| `backend/plugins/plugin_manager.py` | `enable_plugin()` resolves `excludes` and disables sibling(s) |
 | `backend/config.py` | `GUAARDVARK_RUNPOD_*` + `RUNPOD_TARGET_URL` resolution |
 | `plugins/lora_trainer/scripts/run_trainer.py`, `run_zimage_trainer.py` | optional `--remote` mode + push-artifact |
-| `plugins/lora_trainer/pod/` (Dockerfile, entry.sh, requirements) | runnable RunPod pod image |
-| `docs/GUAARDVARK_GUIDE.md`, `AGENTS.md` | document the backend + env |
+| `docs/GUAARDVARK_GUIDE.md`, `AGENTS.md` | document the plugin + env |
 
 ### 2.7 Suggested implementation order (each independently mergeable)
 
-1. Config block + `RemoteLoraTrainer` skeleton with a **dry-run/mock-remote**
-   (fake poll returning `done` + a local copy of a pre-made safetensor) — proves
-   the dispatch→ingest→persist wiring and the backend env selection, under pytest.
-2. Real RunPod SDK integration + upload/poll/ingest.
-3. Runner scripts `--remote` mode + pod image.
-4. Docs.
+1. Add `excludes` field to `PluginMetadata` + `PluginManager.enable_plugin()`
+   mutual-exclusion (generic, testable independently).
+2. New `runpod_lora_trainer` plugin: manifest (`excludes: ["lora_trainer"]`),
+   `remote_trainer.py` skeleton with a **dry-run/mock-remote** (fake poll
+   returning `done` + a local copy of a pre-made safetensor) — proves the
+   dispatch→ingest→persist wiring, plugin-state-driven backend selection, and
+   that enabling it disables `lora_trainer`, all under pytest.
+3. Config block + `RemoteLoraTrainer` real RunPod SDK integration
+   (upload/poll/ingest).
+4. Runner scripts `--remote` mode + pod image.
+5. Docs (`GUAARDVARK_GUIDE.md`, `AGENTS.md`).
 
 ---
 
