@@ -1,0 +1,8 @@
+runpod~=1.7.6
+accelerate
+diffusers
+peft
+bitsandbytes
+boto3
+transformers
+safetensors
