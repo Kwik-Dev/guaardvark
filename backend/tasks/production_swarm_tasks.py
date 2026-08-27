@@ -417,22 +417,77 @@ def run_cinematographer(prod_id: int, llm=None):
         db.session.commit()
 
 
-def _shot_loras_and_prompt(shot) -> tuple[list[str], str]:
-    """Collect a shot's character LoRA paths and the raw *scene* prompt.
+def _lora_file_exists(path: str | None) -> bool:
+    """Quick on-disk check for a LoRA file. Mirrors the pre-cast freshness gate."""
+    if not path:
+        return False
+    p = Path(path)
+    try:
+        return p.is_file() and p.stat().st_size > 100_000
+    except OSError:
+        return False
+
+
+def _refresh_subjects_for_loras(subjects: list) -> list:
+    """Refresh subjects from the DB so detached/stale objects pick up lora_path.
+
+    Storyboard generation runs in a Celery worker with its own app context.
+    SQLAlchemy objects loaded in the web request and carried through Celery can
+    be detached or stale, causing subjects_to_lock to see lora_path=None even
+    though the row is trained. Refreshing re-reads the live row.
+    """
+    out = []
+    for subj in subjects:
+        if subj is None:
+            continue
+        try:
+            db.session.refresh(subj)
+        except Exception:
+            # Refresh can fail on truly detached objects; keep the original.
+            pass
+        out.append(subj)
+    return out
+
+
+def _shot_loras_and_prompt(shot) -> tuple[list[str], list, str]:
+    """Collect a shot's character LoRA paths, usable subjects, and the raw
+    *scene* prompt.
 
     Identity lock (trigger + class + short marks) is applied once inside
     ``render_character_still`` when subjects are passed — do not pre-lock here
     or the core is doubled.
+
+    Subjects without a real LoRA file on disk are dropped with a warning so a
+    single stale/untrained cast member can't fail the whole storyboard stage.
     """
     from backend.services.cast_lock import subjects_to_lock
+    import logging
+    log = logging.getLogger(__name__)
+
     subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
-    lora_paths, _lock = subjects_to_lock(subjects, include_bible=False)
+    subjects = _refresh_subjects_for_loras(subjects)
+
+    # Drop subjects whose LoRA is missing/stale; keep those with a real file.
+    usable_subjects = []
+    for subj in subjects:
+        if _lora_file_exists(getattr(subj, "lora_path", None)):
+            usable_subjects.append(subj)
+        else:
+            log.warning(
+                "Shot %s.%s: dropping subject '%s' (no usable LoRA at %s)",
+                shot.scene_number,
+                shot.shot_number,
+                getattr(subj, "name", "?"),
+                getattr(subj, "lora_path", None),
+            )
+
+    lora_paths, _lock = subjects_to_lock(usable_subjects, include_bible=False)
     base = (
         getattr(shot, "image_prompt", None)
         or getattr(shot, "description", None)
         or ""
     ).strip()
-    return lora_paths, base
+    return lora_paths, usable_subjects, base
 
 
 def _storyboard_path(prod_id: int, scene_number: int, shot_number: int) -> str:
@@ -498,13 +553,12 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
         ):
             _update_progress(0, f"Starting storyboard generation for {total} shots")
             for i, shot in enumerate(shots):
-                lora_paths, prompt = _shot_loras_and_prompt(shot)
+                lora_paths, subjects, prompt = _shot_loras_and_prompt(shot)
                 output_path = _storyboard_path(
                     prod_id,
                     shot.scene_number or 1,
                     shot.shot_number or (i + 1),
                 )
-                subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
                 _update_progress(i, f"Generating storyboard shot {i + 1}/{total}")
                 if lora_paths or image_generator is None:
                     still = render_character_still(
@@ -719,7 +773,7 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
         logging.warning("Regen storyboard shot called when not awaiting approval")
         return
 
-    lora_paths, base_prompt = _shot_loras_and_prompt(shot)
+    lora_paths, subjects, base_prompt = _shot_loras_and_prompt(shot)
     prompt = prompt_override if prompt_override else base_prompt
     output_path = _storyboard_path(
         shot.production_id,
@@ -743,7 +797,6 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
                 prompt=prompt, loras=lora_paths, output_path=output_path,
             )
         else:
-            subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
             still = render_character_still(
                 prompt,
                 subjects=subjects,
