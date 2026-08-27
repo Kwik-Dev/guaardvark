@@ -104,6 +104,16 @@ class VisionAnalyzer:
                     if model in available:
                         logger.info(f"[VISION] Auto-detected vision model: {model}")
                         return model
+                # Prefer a Qwen model (qwen3.8 / qwen-vl are confirmed vision-capable
+                # on this MLX setup) over a gemma4 tag that may be a text-only build
+                # (e.g. gemma4:26b-mlx returns 400 "does not support image input").
+                qwen_any = next(
+                    (m for m in sorted(available) if "qwen" in m.lower()),
+                    None,
+                )
+                if qwen_any:
+                    logger.info(f"[VISION] Auto-detected vision model: {qwen_any}")
+                    return qwen_any
                 gemma_any = next(
                     (m for m in sorted(available) if m.rsplit("/", 1)[-1].startswith("gemma4")),
                     None,
