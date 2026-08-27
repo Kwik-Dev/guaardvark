@@ -101,6 +101,59 @@ DEFAULT_NEGATIVE = (
 )
 
 
+def _comfyui_loras_dir() -> Optional[Path]:
+    """Locate the running ComfyUI's ``models/loras`` directory (best-effort).
+
+    The configured ``COMFYUI_DIR`` may point at a bundled/plugins copy that does
+    not exist, while the actually-running ComfyUI lives elsewhere (e.g.
+    ``~/ComfyUI-Installs/ComfyUI/ComfyUI``). Probe the configured path plus the
+    common install locations and return the first that exists.
+    """
+    candidates: list[Path] = []
+    try:
+        from backend.config import COMFYUI_DIR
+        candidates.append(Path(COMFYUI_DIR) / "models" / "loras")
+    except Exception:
+        pass
+    candidates.append(
+        Path(__file__).resolve().parents[3] / "plugins" / "comfyui" / "ComfyUI" / "models" / "loras"
+    )
+    candidates.append(Path.home() / "ComfyUI-Installs" / "ComfyUI" / "ComfyUI" / "models" / "loras")
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def ensure_lora_in_comfyui(lora_path: str) -> bool:
+    """Symlink a trained LoRA into ComfyUI's ``models/loras`` so a
+    ``LoraLoaderModelOnly`` node can resolve it by basename.
+
+    Only acts when Z-Image is routed through ComfyUI
+    (``GUAARDVARK_ZIMAGE_USE_COMFYUI=1``). Returns True if the LoRA is present in
+    ComfyUI's loras dir (linked now, or already there). Best-effort: never raises.
+    """
+    if os.environ.get("GUAARDVARK_ZIMAGE_USE_COMFYUI", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    p = Path(lora_path)
+    if not p.exists():
+        return False
+    loras_dir = _comfyui_loras_dir()
+    if loras_dir is None:
+        logger.warning("ensure_lora_in_comfyui: could not locate ComfyUI loras dir for %s", p.name)
+        return False
+    target = loras_dir / p.name
+    if target.exists():
+        return True
+    try:
+        target.symlink_to(p.resolve())
+        logger.info("Linked LoRA %s into ComfyUI loras dir %s", p.name, loras_dir)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not link LoRA %s into ComfyUI: %s", p.name, e)
+        return False
+
+
 class ComfyUIImageGenerator:
     """Implements the storyboard ImageGenerator protocol with real LoRA support.
 
@@ -620,6 +673,12 @@ class ComfyUIImageGenerator:
         for p in lora_paths:
             if not p:
                 continue
+            # When Z-Image is routed through ComfyUI, make sure the trained LoRA is
+            # linked into ComfyUI's models/loras so LoraLoaderModelOnly can find it.
+            try:
+                ensure_lora_in_comfyui(p)
+            except Exception:
+                pass
             pth = Path(p)
             found = pth.exists()
             if not found:
