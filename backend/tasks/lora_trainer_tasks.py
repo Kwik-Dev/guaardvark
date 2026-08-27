@@ -127,8 +127,24 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
     # So the mock is reachable only under pytest; everywhere else we FAIL LOUD.
     _under_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     use_real = False
+    use_remote = False
     allow_mock = False
-    if backend == "real":
+
+    def _remote_enabled() -> bool:
+        """True if the runpod_lora_trainer plugin is effectively enabled (user
+        pref wins over manifest default). Plugin state is the source of truth for
+        which trainer is active; enabling the RunPod plugin in the Plugins UI
+        both disables the local trainer (via its `excludes`) and routes here."""
+        try:
+            from backend.plugins.plugin_manager import get_plugin_manager
+            return get_plugin_manager().is_effectively_enabled("runpod_lora_trainer")
+        except Exception as e:
+            logger.warning("lora_trainer: could not read plugin state for runpod_lora_trainer: %s", e)
+            return False
+
+    if backend == "runpod":
+        use_remote = True
+    elif backend == "real":
         use_real = True
     elif backend == "mock":
         if _under_pytest:
@@ -140,8 +156,50 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
             logger.error("lora_trainer: %s", msg)
             return {"status": "failed", "error": msg, "used_images": train_images}
     elif backend == "auto":
-        from plugins.lora_trainer.real_trainer import RealLoraTrainer
-        use_real = RealLoraTrainer.is_available()
+        # Plugin state decides: if the user has the RunPod trainer enabled, use it;
+        # otherwise fall back to the local RealLoraTrainer accelerator probe.
+        if _remote_enabled():
+            use_remote = True
+        else:
+            from plugins.lora_trainer.real_trainer import RealLoraTrainer
+            use_real = RealLoraTrainer.is_available()
+
+    if use_remote:
+        from plugins.runpod_lora_trainer.remote_trainer import RemoteLoraTrainer, _TRAINER as _REMOTE_TRAINER
+        logger.info(f"lora_trainer: using RUNPOD (remote) backend for subject {subject_id}")
+        if job_id:
+            try:
+                get_unified_progress().update_process(job_id, 20, "Starting RunPod remote LoRA trainer")
+            except Exception:
+                pass
+        # Remote training holds NO local GPU, so gpu_session() is intentionally
+        # skipped here — no VRAM claim, no local daemon, nothing to evict.
+        if job_id:
+            try:
+                get_unified_progress().update_process(
+                    job_id, 25,
+                    f"Training {train_profile.get('name')} LoRA on RunPod "
+                    f"(base={train_profile.get('id')})",
+                )
+            except Exception:
+                pass
+        remote_result = _REMOTE_TRAINER.train_subject_lora(
+            subject_id=s.id,
+            subject_name=s.name,
+            trigger_word=s.trigger_word,
+            ref_image_paths=train_images,
+            output_dir=_output_dir(),
+            image_prompts=image_captions,
+            resolution=train_settings["resolution"],
+            rank=train_settings["rank"],
+            alpha=train_settings["alpha"],
+            learning_rate=train_settings["learning_rate"],
+            steps=train_settings["steps"],
+            base_model_id=train_profile.get("id"),
+        )
+        if isinstance(remote_result, dict):
+            remote_result.setdefault("used_images", train_images)
+        return remote_result
 
     if use_real:
         from plugins.lora_trainer.real_trainer import RealLoraTrainer, _TRAINER

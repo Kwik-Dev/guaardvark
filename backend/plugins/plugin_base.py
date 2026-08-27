@@ -88,6 +88,10 @@ class PluginMetadata:
     vram_estimate_mb: int = 0
     core: bool = False
     dependencies: List[str] = field(default_factory=list)
+    # Alternative-plugin relationship: enabling this plugin disables every plugin
+    # listed here. Used for mutually-exclusive trainers (e.g. runpod_lora_trainer
+    # excludes lora_trainer). Generic — any future "one replaces another" pair.
+    excludes: List[str] = field(default_factory=list)
     config: PluginConfig = field(default_factory=PluginConfig)
     requirements: Dict[str, bool] = field(default_factory=dict)
     endpoints: Dict[str, str] = field(default_factory=dict)
@@ -128,6 +132,7 @@ class PluginMetadata:
                 vram_estimate_mb=data.get('vram_estimate_mb', 0),
                 core=data.get('core', False),
                 dependencies=data.get('dependencies', []),
+                excludes=data.get('excludes', []),
                 config=config,
                 requirements=data.get('requirements', {}),
                 endpoints=data.get('endpoints', {}),
@@ -149,6 +154,7 @@ class PluginMetadata:
             'vram_estimate_mb': self.vram_estimate_mb,
             'core': self.core,
             'dependencies': self.dependencies,
+            'excludes': list(self.excludes or []),
             'config': self.config.to_dict(),
             'requirements': self.requirements,
             'endpoints': self.endpoints,

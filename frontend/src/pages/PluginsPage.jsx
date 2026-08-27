@@ -277,7 +277,7 @@ const LogViewer = ({ pluginId, open }) => {
 };
 
 // ── Plugin Card ────────────────────────────────────────────────────────
-const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
+const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = null }) => {
   const [expanded, setExpanded] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [actionLoading, setActionLoading] = useState(null);
@@ -419,11 +419,13 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
       <CardActions sx={{ justifyContent: 'space-between', px: 2 }}>
         <Tooltip
           title={
-            (plugin.cooldown_remaining || 0) > 0
-              ? `Cooling down — wait ${Math.ceil(plugin.cooldown_remaining)}s before toggling again`
-              : !plugin.enabled
-                ? 'Currently disabled. Toggling on will both start it AND re-enable it across restarts.'
-                : 'Preference saved across restarts'
+            excludedBy
+              ? `Disabled because ${excludedBy.name || excludedBy.id} is the active trainer.`
+              : (plugin.cooldown_remaining || 0) > 0
+                ? `Cooling down — wait ${Math.ceil(plugin.cooldown_remaining)}s before toggling again`
+                : !plugin.enabled
+                  ? 'Currently disabled. Toggling on will both start it AND re-enable it across restarts.'
+                  : 'Preference saved across restarts'
           }
           arrow
         >
@@ -438,7 +440,8 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage }) => {
                 // drives the Chip and card opacity instead.
                 onChange={() => handleAction(plugin.enabled ? 'disable' : 'start')}
                 disabled={
-                  isLoading
+                  !!excludedBy
+                  || isLoading
                   || plugin.status === 'starting'
                   || plugin.status === 'stopping'
                   || (plugin.cooldown_remaining || 0) > 0
@@ -761,6 +764,23 @@ const PluginsPage = () => {
     );
   }, [plugins]);
 
+  // Mutual exclusion: a plugin that lists another in its `excludes` replaces it.
+  // Returns the currently-enabled sibling that blocks this plugin's toggle, or
+  // null. Enabling the RunPod trainer disables the local lora_trainer and vice
+  // versa; this surfaces that relationship in the same card view.
+  const findExclusionConflict = useCallback((pluginId) => {
+    const plugin = plugins.find((p) => p.id === pluginId);
+    if (!plugin) return null;
+    const excluded = plugin.excludes || [];
+    if (excluded.length === 0) return null;
+    // Reverse edge too: any enabled plugin that lists this one as excluded.
+    const reverse = plugins.find(
+      (p) => p.id !== pluginId && (p.excludes || []).includes(pluginId) && !!p.enabled
+    );
+    if (reverse) return reverse;
+    return plugins.find((p) => excluded.includes(p.id) && !!p.enabled) || null;
+  }, [plugins]);
+
   const handlePluginAction = async (pluginId, action) => {
     try {
       let response;
@@ -818,11 +838,23 @@ const PluginsPage = () => {
         // status after start completes, cooldowns, etc.).
         if (action === 'enable' || action === 'disable') {
           const newEnabled = action === 'enable';
-          setPlugins((prev) => prev.map((p) =>
-            p.id === pluginId
-              ? { ...p, enabled: newEnabled, status: newEnabled ? 'stopped' : 'disabled', running: false }
-              : p
-          ));
+          // When enabling, also flip any mutually-exclusive siblings off so the
+          // toggle updates without waiting for the socket round-trip. Mirrors the
+          // backend's `excludes` handling in PluginManager.enable_plugin.
+          const enablingPlugin = action === 'enable'
+            ? plugins.find((p) => p.id === pluginId) : null;
+          const excludedIds = enablingPlugin
+            ? (enablingPlugin.excludes || []).filter((id) => id !== pluginId)
+            : [];
+          setPlugins((prev) => prev.map((p) => {
+            if (p.id === pluginId) {
+              return { ...p, enabled: newEnabled, status: newEnabled ? 'stopped' : 'disabled', running: false };
+            }
+            if (enablingPlugin && excludedIds.includes(p.id)) {
+              return { ...p, enabled: false, status: 'disabled', running: false };
+            }
+            return p;
+          }));
         } else if (action === 'start') {
           setPlugins((prev) => prev.map((p) =>
             p.id === pluginId ? { ...p, status: 'starting', running: false } : p
@@ -950,6 +982,7 @@ const PluginsPage = () => {
                 onAction={handlePluginAction}
                 onConfigOpen={setConfigPlugin}
                 showMessage={showMessage}
+                excludedBy={findExclusionConflict(plugin.id)}
               />
             </Grid>
           ))}

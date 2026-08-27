@@ -76,6 +76,25 @@ COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", os.path.join(OUTPUT_DI
 VIDEO_GENERATION_BACKEND = os.environ.get("GUAARDVARK_VIDEO_BACKEND", "auto")  # "comfyui" | "offline" | "auto"
 COMFYUI_IDLE_TIMEOUT = int(os.environ.get("GUAARDVARK_COMFYUI_IDLE_TIMEOUT", "1800"))
 
+# ── Remote LoRA training (RunPod) ───────────────────────────────────────────
+# The runpod_lora_trainer plugin trains LoRAs on a remote RunPod serverless
+# endpoint instead of the local GPU. All values come from the repo-root .env
+# (secrets are never hardcoded / logged). Only the API key is mandatory to
+# dispatch; the rest have safe defaults.
+RUNPOD_API_KEY = os.environ.get("GUAARDVARK_RUNPOD_API_KEY", "").strip()
+# Serverless endpoint id (e.g. "abcd1234-...") — required to dispatch jobs.
+RUNPOD_ENDPOINT_ID = os.environ.get("GUAARDVARK_RUNPOD_ENDPOINT_ID", "").strip()
+# Optional S3-compatible bucket creds used to stage inputs / retrieve the
+# trained LoRA. When empty the SDK falls back to presigned URLs from the pod.
+RUNPOD_S3_ENDPOINT_URL = os.environ.get("GUAARDVARK_RUNPOD_S3_ENDPOINT_URL", "")
+RUNPOD_S3_ACCESS_KEY = os.environ.get("GUAARDVARK_RUNPOD_S3_ACCESS_KEY", "")
+RUNPOD_S3_SECRET_KEY = os.environ.get("GUAARDVARK_RUNPOD_S3_SECRET_KEY", "")
+RUNPOD_OUTPUT_BUCKET = os.environ.get("GUAARDVARK_RUNPOD_OUTPUT_BUCKET", "guaardvark-loras")
+RUNPOD_POLL_INTERVAL = int(os.environ.get("GUAARDVARK_RUNPOD_POLL_INTERVAL", "15"))
+# Hard ceiling for a single training job (seconds). Sized to cover a full
+# Z-Image schedule; the Celery task limits must be strictly larger than this.
+RUNPOD_MAX_JOB_SECONDS = int(os.environ.get("GUAARDVARK_RUNPOD_MAX_JOB_SECONDS", "10800"))
+
 # Google Indexing API (Search Console URL submission)
 # Path to the service-account JSON key. Defaults inside the project; override
 # with GOOGLE_INDEXING_KEY_PATH to point at an existing key elsewhere.

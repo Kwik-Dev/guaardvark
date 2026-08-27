@@ -874,6 +874,27 @@ class PluginManager:
         time.sleep(1)
         return self.start_plugin(plugin_id)
     
+    def _resolve_excluded(self, plugin_id: str) -> List[str]:
+        """Return the plugin ids that must be disabled because `plugin_id` is being
+        enabled. This is the union of:
+          1. plugin_id's OWN `excludes` (this plugin replaces those), and
+          2. every plugin whose `excludes` lists plugin_id (reverse edge — any
+             plugin that declared itself an alternative to this one).
+        Only ids that are currently registered come back."""
+        excluded: List[str] = []
+        metadata = self.registry.get_plugin(plugin_id)
+        if metadata is not None:
+            for pid in metadata.excludes or []:
+                if self.registry.is_registered(pid) and pid not in excluded:
+                    excluded.append(pid)
+        for other_id, other_meta in self.registry.get_all_plugins().items():
+            if other_id == plugin_id:
+                continue
+            if plugin_id in (other_meta.excludes or []):
+                if other_id not in excluded:
+                    excluded.append(other_id)
+        return excluded
+
     def enable_plugin(self, plugin_id: str) -> Dict[str, Any]:
         """Enable a plugin via the user_enabled overlay (does NOT mutate plugin.json)."""
         if not self.registry.is_registered(plugin_id):
@@ -930,6 +951,30 @@ class PluginManager:
         self._plugin_status[plugin_id] = PluginStatus.STOPPED
         logger.info(f"Plugin enabled (user pref): {plugin_id}")
         self._broadcast_plugins_status(f"enable:{plugin_id}")
+
+        # Mutual exclusion: enabling an alternative plugin disables (and stops)
+        # the siblings it replaces. Kept after the enable persists so a failure
+        # here never leaves the newly-enabled plugin half-registered.
+        excluded = self._resolve_excluded(plugin_id)
+        for sibling_id in excluded:
+            sibling_meta = self.registry.get_plugin(sibling_id)
+            sibling_name = sibling_meta.name if sibling_meta else sibling_id
+            logger.info(
+                "Plugin '%s' enabled → disabling excluded sibling '%s' (%s)",
+                plugin_id, sibling_id, sibling_name,
+            )
+            self.disable_plugin(sibling_id)
+        if excluded:
+            names = ", ".join(
+                (self.registry.get_plugin(s).name if self.registry.get_plugin(s) else s)
+                for s in excluded
+            )
+            return {
+                'success': True,
+                'message': f'Plugin enabled (disabled alternative(s): {names})',
+                'disabled_alternatives': excluded,
+            }
+
         return {'success': True, 'message': 'Plugin enabled'}
 
     def disable_plugin(self, plugin_id: str) -> Dict[str, Any]:

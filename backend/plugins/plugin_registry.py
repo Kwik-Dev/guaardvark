@@ -121,6 +121,7 @@ class PluginRegistry:
                 'enabled': metadata.config.enabled,
                 'port': metadata.port,
                 'vram_estimate_mb': metadata.vram_estimate_mb,
+                'excludes': list(metadata.excludes or []),
                 'plugin_dir': str(self._plugin_dirs.get(plugin_id, '')),
                 'config': metadata.config.to_dict(),
             })
