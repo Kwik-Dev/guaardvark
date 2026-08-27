@@ -152,7 +152,7 @@ Take a Fountain-style script (or visual novel text with `SFX`, `MUSIC`, `CHARACT
 See the converted sample script at:
 
 ```text
-docs/film-crew-scripts/the_last_spark.txt
+docs/film-crew-scripts/the_last_spark.tmplt.txt
 ```
 
 It demonstrates:
