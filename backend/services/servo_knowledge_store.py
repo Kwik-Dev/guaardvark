@@ -134,7 +134,12 @@ _DEFAULT_VISION_CONFIG = {
 
 # Name heuristics for families known to accept images (when not in MODEL_VISION_CONFIGS).
 _VISION_NAME_MARKERS = (
-    "gemma4",
+    # Gemma 4 vision tags only — NOT bare "gemma4", which would also match
+    # text-only MLX builds like gemma4:26b-mlx (returns 400 on image input).
+    "gemma4:e4b",
+    "gemma4:e2b",
+    "gemma4:12b",
+    "gemma4:latest",
     "moondream",
     "llava",
     "bakllava",

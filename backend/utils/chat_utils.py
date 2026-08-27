@@ -30,8 +30,10 @@ VISION_MODEL_PATTERNS = [
     "llama.*vision", "granite.*vision", "gemma.*vision",
     "cogvlm", "internvl", "phi.*vision", "deepseek.*vl",
     "pixtral", "molmo",
-    # Gemma 4 integrates vision natively — match even without "vision" suffix
-    "gemma4", "gemma-4",
+    # Gemma 4 vision tags only — NOT bare "gemma4"/"gemma-4", which would also
+    # match text-only MLX builds like gemma4:26b-mlx (returns 400 on image input).
+    "gemma4:(e4b|e2b|12b|latest)",
+    "gemma-4:(e4b|e2b|12b|latest)",
     # Qwen 3.8 / qwen-vl are vision-capable on this MLX setup (confirmed).
     "qwen",
 ]
