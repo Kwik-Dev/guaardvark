@@ -12,6 +12,7 @@ import {
 import StageProgress from './StageProgress';
 import CastingPanel from './CastingPanel';
 import StoryboardGrid from './StoryboardGrid';
+import StoryboardProgress from './StoryboardProgress';
 
 const ProductionDetail = ({
   production,
@@ -133,15 +134,20 @@ const ProductionDetail = ({
       )}
 
       {['storyboard_gen', 'awaiting_approval', 'rendering', 'complete'].includes(production.current_stage) && (
-        <Paper sx={{ p: 2, mb: 3 }}>
-          <StoryboardGrid
-            currentStage={production.current_stage}
-            shots={production.shots || []}
-            onRegenerate={onRegenerateShot}
-            onApproveAll={onApproveStoryboard}
-            isApproving={approving}
-          />
-        </Paper>
+        <>
+          {production.current_stage === 'storyboard_gen' && !isFailed && (
+            <StoryboardProgress productionId={production.id} />
+          )}
+          <Paper sx={{ p: 2, mb: 3 }}>
+            <StoryboardGrid
+              currentStage={production.current_stage}
+              shots={production.shots || []}
+              onRegenerate={onRegenerateShot}
+              onApproveAll={onApproveStoryboard}
+              isApproving={approving}
+            />
+          </Paper>
+        </>
       )}
 
       <Paper sx={{ p: 2 }}>
