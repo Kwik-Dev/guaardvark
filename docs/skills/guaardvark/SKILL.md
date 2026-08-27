@@ -112,6 +112,63 @@ Running bare `guaardvark` starts a REPL:
 /help                  full command reference
 ```
 
+## Film Crew: converting a Fountain/visual-novel script
+
+Use the **Film Crew** page in the web UI (not the CLI) for the sequential Screenwriter → Casting → Cinematographer → Storyboard → Editor pipeline.
+
+### Goal
+Take a Fountain-style script (or visual novel text with `SFX`, `MUSIC`, `CHARACTER`, `IMAGE`, and choice branches) and rewrite it into a linear Guaardvark Film Crew script the Screenwriter can break into scenes, shots, and subjects.
+
+### Step-by-step conversion rules
+
+1. **Remove Fountain metadata.** Keep Title/Author/Credit as plain text at the top if useful, but strip Fountain syntax like `INT.`, `EXT.`, scene headings, and slugline parentheses.
+2. **Linearize the story.** Film Crew renders a single video timeline, so convert choice branches (`* Fight it!`, `* Run!`) into one chosen path or into separate productions. Do not leave branching choices in the script.
+3. **Mark recurring visual identities with `[[Name]]`.**
+   - `[[Elara]]` → the Screenwriter extracts Elara as a `character` and sets `cast_required = True`. The production pauses at the Casting stage until you assign or train a LoRA for her so she looks consistent in every shot.
+   - `[[Corrupted Wolf]]` → same, for any creature/prop you want visually locked.
+4. **Mark inline/generated assets with `{{Name:kind}}`.**
+   - `{{Lumin Seed:prop}}`, `{{Satchel:prop}}`, `{{Knife:prop}}` → generated per shot, no LoRA gate.
+   - `{{Old Cabin:environment}}`, `{{Forest Path:environment}}` → generated as set dressing per shot.
+5. **Add explicit shot lines.** Replace free prose with `SHOT # - ANGLE: description` lines so the Cinematographer gets clear camera setups, e.g.:
+   - `SHOT 1 - WIDE: ...`
+   - `SHOT 2 - MEDIUM: ...`
+   - `SHOT 3 - CLOSE-UP: ...`
+6. **Preserve audio cues.** Keep `SFX:` and `MUSIC:` notes; the Editor can use them for sound design and scoring.
+7. **Add a `FADE IN:` / `FADE OUT.` bookend.** Optional but helps the pipeline infer the production boundaries.
+
+### Markup quick reference
+
+| Markup | Meaning |
+|--------|---------|
+| `[[Name]]` | Pin as a recurring cast member (trainable LoRA). Default kind is `character`. |
+| `[[Name:prop]]` | Pin as a recurring prop/trainable subject (e.g., a hero prop you want consistent). |
+| `[[Name:environment]]` | Pin as a recurring location/set. |
+| `{{Name:character}}` | Force kind override to `character` without pinning (no LoRA gate). |
+| `{{Name:prop}}` | Force kind override to `prop`, generated inline. |
+| `{{Name:environment}}` | Force kind override to `environment`, generated inline. |
+
+### Example: "The Last Spark"
+
+See the converted sample script at:
+
+```text
+docs/film-crew-scripts/the_last_spark.txt
+```
+
+It demonstrates:
+- `[[Elara]]` and `[[Corrupted Wolf]]` as trainable cast members.
+- `{{...:prop}}` and `{{...:environment}}` for inline assets.
+- Reordered scenes (forest confrontation first for tension, cabin as optional prelude).
+- Explicit `SHOT # - ANGLE:` breakdowns.
+
+### How to run it
+
+1. Open the Guaardvark web UI → **Film Crew**.
+2. Click **New Production**.
+3. Paste the converted script into **Script Text**.
+4. Set the production name and click **Roll Cameras**.
+5. The Screenwriter extracts scenes/shots/subjects. Resolve any `[[...]]` cast members in the Casting stage, then approve the storyboard.
+
 ## Notes
 
 - The CLI reads model/provider settings from the backend (e.g. the active LLM provider — local Ollama, Mistral, or OpenAI-compatible — configured in the web UI or via `POST /api/llm/provider`).
