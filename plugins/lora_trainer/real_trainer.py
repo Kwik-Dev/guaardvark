@@ -50,8 +50,14 @@ class RealLoraTrainer:
     _ZIMAGE_RUNNER = _PLUGIN_ROOT / "scripts" / "run_zimage_trainer.py"
     _VENV_PYTHON = _PLUGIN_ROOT / "venv-torch" / "bin" / "python"
     _BACKEND_PYTHON = _REPO_ROOT / "backend" / "venv" / "bin" / "python"
-    _LOAD_TIMEOUT_S = 900    # first download / cold load
-    _TRAIN_TIMEOUT_S = 1800  # 30 min cap per subject
+    _LOAD_TIMEOUT_S = 3600   # first download / cold load (slow HF fetch can exceed 15m)
+    # Z-Image training on Apple Silicon/MPS stages each heavy module and runs
+    # ~11s/step, so the default 640-step schedule takes ~2h. A 30-min cap (the
+    # old CUDA-era assumption) kills a healthy run mid-training — see the Elara
+    # run that failed at step 151/640. Raised to cover a full schedule with
+    # margin. (The Celery task time_limit in lora_trainer_tasks.py and the
+    # reap_stuck_training cutoff are sized to be strictly larger than this.)
+    _TRAIN_TIMEOUT_S = 10800  # 3h cap per train call (MPS is slow; do not lower)
 
     def __init__(self):
         self._proc: subprocess.Popen | None = None
