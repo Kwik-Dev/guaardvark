@@ -123,16 +123,29 @@ def _parse_consensus_json(raw: str) -> dict[str, str]:
     return {}
 
 
-def _default_consensus_llm(*, system: str, user: str, model: str = "gemma4:12b") -> str:
-    import ollama
-    resp = ollama.chat(
-        model=model,
+def _default_consensus_llm(*, system: str, user: str, model: str = None) -> str:
+    """Consensus LLM for merging per-photo descriptions into a bible.
+
+    Text-only (no images), so it can use the configured OpenAI-compatible cloud
+    model (e.g. deepseek-v4-flash:cloud) rather than a local Ollama model.
+    """
+    from backend import config
+    from backend.services import openai_provider
+    m = model or config.OPENAI_DEFAULT_MODEL
+    resp = openai_provider.chat(
+        model=m,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        format="json",
-        options={"temperature": 0.2, "num_predict": 400},
+        stream=False,
+        options={
+            "temperature": 0.2,
+            # deepseek-v4-flash:cloud spends tokens on reasoning before the JSON,
+            # so a small budget (400) returns empty content. Give it room.
+            "num_predict": 2000,
+            "response_format": {"type": "json_object"},
+        },
     )
     return (resp.get("message") or {}).get("content") or ""
 
@@ -142,7 +155,7 @@ def consensus_identity_from_descriptions(
     *,
     name: str = "",
     llm=None,
-    model: str = "gemma4:12b",
+    model: str = None,
 ) -> dict[str, str]:
     """Merge open per-photo descriptions into class_token / marks / bible."""
     cleaned = [d.strip() for d in descriptions if (d or "").strip()]
@@ -268,7 +281,7 @@ def rebuild_bible_from_refs(
     analyzer=None,
     min_tag_count: int = 1,  # noqa: ARG001 — kept for call-site compat
     llm=None,
-    consensus_model: str = "gemma4:12b",
+    consensus_model: str = None,
 ) -> dict[str, Any]:
     """Scan refs with open vision + consensus; return grounded bible dict.
 

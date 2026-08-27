@@ -32,6 +32,8 @@ VISION_MODEL_PATTERNS = [
     "pixtral", "molmo",
     # Gemma 4 integrates vision natively — match even without "vision" suffix
     "gemma4", "gemma-4",
+    # Qwen 3.8 / qwen-vl are vision-capable on this MLX setup (confirmed).
+    "qwen",
 ]
 
 # Cache for dynamic model detection (5 minute cache)

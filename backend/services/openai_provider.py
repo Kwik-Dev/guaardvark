@@ -73,6 +73,8 @@ def _map_options(options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     np = options.get("num_predict")
     if isinstance(np, int) and np > 0:
         out["max_tokens"] = np
+    if options.get("response_format") is not None:
+        out["response_format"] = options["response_format"]
     return out
 
 
