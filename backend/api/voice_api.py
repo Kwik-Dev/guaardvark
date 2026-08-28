@@ -1029,6 +1029,28 @@ def _transcribe_via_whisper_server(audio_path: str) -> str:
 
 
 @voice_bp.route("/speech-to-text", methods=["POST"])
+def _transcribe_via_whisper_server(audio_path: str) -> str:
+    """Transcribe an audio file via a running whisper.cpp HTTP server.
+
+    The whisper.cpp server exposes POST /inference with a JSON body containing
+    ``filename`` (a path on the server's filesystem). We save the uploaded audio
+    to a temp file, POST its path, and return the transcribed text.
+    """
+    try:
+        resp = requests.post(
+            f"{WHISPER_SERVER_URL}/inference",
+            json={"filename": audio_path, "temperature": 0.0},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = (data.get("text") or "").strip()
+        return text
+    except Exception as e:
+        logger.error(f"Voice API: whisper-server transcription failed: {e}")
+        raise
+
+
 def speech_to_text():
     """Convert uploaded audio file to text using local Whisper.cpp with performance optimizations."""
     logger.info("Voice API: Received speech-to-text request (LOCAL) - PERFORMANCE OPTIMIZED")
