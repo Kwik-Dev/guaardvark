@@ -2863,10 +2863,15 @@ class Wan22I2VGenerator:
         self, *, image_path: str, prompt: str, loras: list[str],
         duration_seconds: float, output_path: str,
     ) -> str:
-        # Clamp to a short clip — long I2V drifts the face and blows 16 GB.
+        # Clamp to a short clip — long Wan I2V drifts the face and blows 16 GB.
         # Snap to the model's declared frame rule (Wan/Hunyuan 4n+1, LTX 8n+1).
+        # Frame cap / resolution / steps / interpolation are tunable via env vars
+        # (GUAARDVARK_FILM_I2V_*) to trade render time vs. quality.
+        from backend.config import (
+            FILM_I2V_MAX_FRAMES, FILM_I2V_RESOLUTION, FILM_I2V_STEPS, FILM_I2V_INTERPOLATION,
+        )
         from backend.services.video_model_registry import snap_frames
-        raw = max(17, min(49, int(round(duration_seconds * self.fps)) or 25))
+        raw = max(17, min(FILM_I2V_MAX_FRAMES, int(round(duration_seconds * self.fps)) or 25))
         frames = snap_frames(self.model, raw)
         if frames < 17:
             # Snapping down left too short a clip; take the next grid point up.
@@ -2881,6 +2886,10 @@ class Wan22I2VGenerator:
             fps=self.fps,
             enhance_prompt=False,
             output_dir=out_dir,                      # known base → result path resolves
+            width=FILM_I2V_RESOLUTION,
+            height=FILM_I2V_RESOLUTION,
+            num_inference_steps=FILM_I2V_STEPS,
+            interpolation_multiplier=FILM_I2V_INTERPOLATION,
             # NOTE: the Wan GGUF backbone applies NO LoRA (no loader hook — see
             # _build_workflow). Identity comes from the LoRA-locked init frame, not
             # from this. lora_name is passed through inert for forward-compat only.
