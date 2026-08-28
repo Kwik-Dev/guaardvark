@@ -273,6 +273,36 @@ Runs **up to N coding agents in parallel**, each in an isolated **git worktree**
 ### Film Crew (sequential media pipeline)
 Five role agents turn a logline into a finished video: **Screenwriter → Casting (LoRAs) → Cinematographer → Storyboard → Editor**. Runs in `/backend/services/swarm/` + `production_swarm_tasks.py`.
 
+#### Pausing & Resuming a Film Crew render
+Long video renders (e.g. a multi-shot Wan 2.2 I2V film) can take hours on Apple Silicon. If you need to interrupt one — to carry the machine elsewhere, to close the lid, or because the machine slept — the render is **resumable**: you don't have to start over.
+
+**How it works**
+- Each shot's rendered video clip is **saved to the database the moment it finishes**, not all at the end.
+- When you re-run the render (or hit **Retry**), Film Crew **skips any shot that already has a finished clip on disk** and only re-generates the missing ones, then re-stitches the final film from all clips (existing + new).
+- The `/film-crew` detail view shows a live per-shot **Rendering Production** progress bar (shot *N* / *M*), the same style as the storyboard bar.
+
+**Pausing (interrupting) a render**
+1. **To let it finish first (preferred):** wait for the current shot's progress bar to reach 100%. The machine can then be stopped safely.
+2. **To interrupt now:**
+   - Stop ComfyUI to halt the active denoise:
+     ```bash
+     bash plugins/comfyui/scripts/stop.sh
+     ```
+   - Or run `./stop.sh` to tear down the whole stack.
+
+**Resuming after an interruption**
+1. Start the stack again (if you stopped it):
+   ```bash
+   ./start.sh
+   ```
+2. In the **/film-crew** UI, open the production and click **Retry** (or re-run the rendering stage).
+3. Film Crew detects which shots already have clips and resumes from the first unfinished one.
+
+**Important notes**
+- **Closing the lid** puts a MacBook to sleep unless it is plugged into an external display + power (clamshell mode) — macOS does not allow keeping a lid-closed laptop awake otherwise. A lid-close sleep freezes and then resumes all processes together, and the render's wait loop tolerates it (it has a multi-hour ceiling), so the render generally *survives* the sleep. If it does fail on wake, the resume feature means you only lose the in-flight shot, not the whole render.
+- The resume feature activates after the backend + Celery workers have been restarted once with this code. Renders started before the restart do not have their clips saved.
+- If you want to avoid *idle* sleep while the lid is open, run `caffeinate -d` in a terminal (this does **not** override lid-close sleep).
+
 ### Interconnector (multi-machine sync)
 A master/client layer that **syncs data across Guaardvark instances**:
 - syncs **chat history**, **learnings** (self-improvement fixes), **images**, **files**, **backups**, **hardware profiles**
