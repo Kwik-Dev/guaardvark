@@ -13,6 +13,7 @@ import StageProgress from './StageProgress';
 import CastingPanel from './CastingPanel';
 import StoryboardGrid from './StoryboardGrid';
 import StoryboardProgress from './StoryboardProgress';
+import RenderProgress from './RenderProgress';
 
 const ProductionDetail = ({
   production,
@@ -137,6 +138,9 @@ const ProductionDetail = ({
         <>
           {production.current_stage === 'storyboard_gen' && !isFailed && (
             <StoryboardProgress productionId={production.id} />
+          )}
+          {production.current_stage === 'rendering' && !isFailed && (
+            <RenderProgress productionId={production.id} />
           )}
           <Paper sx={{ p: 2, mb: 3 }}>
             <StoryboardGrid
