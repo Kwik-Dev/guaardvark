@@ -110,6 +110,17 @@ AGENT_BROWSER = os.environ.get("GUAARDVARK_AGENT_BROWSER", "")  # firefox|chromi
 FILM_CREW_LIPSYNC_ENABLED = os.environ.get("GUAARDVARK_FILM_CREW_LIPSYNC", "false").lower() == "true"
 FILM_CREW_PARALLEL_RENDER = os.environ.get("GUAARDVARK_FILM_CREW_PARALLEL", "false").lower() == "true"
 
+# Film Crew I2V speed/quality knobs (Wan 2.2). Lower values = faster render at
+# the cost of quality. Tune via env vars to trade render time vs. fidelity.
+#   GUAARDVARK_FILM_I2V_FRAMES        max frames per shot (default 25; was 49)
+#   GUAARDVARK_FILM_I2V_RESOLUTION    square resolution in px (default 384; was 512)
+#   GUAARDVARK_FILM_I2V_STEPS         denoise steps, split High/LowNoise (default 8; was 25)
+#   GUAARDVARK_FILM_I2V_INTERPOLATION 1 = off, 2 = double fps (default 1; was 2)
+FILM_I2V_MAX_FRAMES = int(os.environ.get("GUAARDVARK_FILM_I2V_FRAMES", "25"))
+FILM_I2V_RESOLUTION = int(os.environ.get("GUAARDVARK_FILM_I2V_RESOLUTION", "384"))
+FILM_I2V_STEPS = int(os.environ.get("GUAARDVARK_FILM_I2V_STEPS", "8"))
+FILM_I2V_INTERPOLATION = int(os.environ.get("GUAARDVARK_FILM_I2V_INTERPOLATION", "1"))
+
 ALLOWED_AUTOMATION_PATHS = [
     str(GUAARDVARK_ROOT / "data"),
     os.path.expanduser("~/Documents"),

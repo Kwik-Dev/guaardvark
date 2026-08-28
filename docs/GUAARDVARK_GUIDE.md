@@ -333,6 +333,39 @@ Long video renders (e.g. a multi-shot Wan 2.2 I2V film) can take hours on Apple 
 - The resume feature activates after the backend + Celery workers have been restarted once with this code. Renders started before the restart do not have their clips saved.
 - If you want to avoid *idle* sleep while the lid is open, run `caffeinate -d` in a terminal (this does **not** override lid-close sleep).
 
+#### Speeding up the render (speed vs. quality)
+Film Crew renders each shot with **Wan 2.2 I2V**. The default settings are tuned for **speed** (fast previews). You can trade render time against quality with four env vars in the repo-root `.env`:
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `GUAARDVARK_FILM_I2V_FRAMES` | `25` | Max frames per shot. Lower = faster (was 49). |
+| `GUAARDVARK_FILM_I2V_RESOLUTION` | `384` | Square resolution in px. Lower = faster (was 512). |
+| `GUAARDVARK_FILM_I2V_STEPS` | `8` | Denoise steps (split High/LowNoise). Lower = faster (was 25). |
+| `GUAARDVARK_FILM_I2V_INTERPOLATION` | `1` | `1` = off, `2` = double fps. `1` is faster (was 2). |
+
+**Speed vs. quality presets** (set in `.env`, then restart the backend with `./stop.sh && ./start.sh`):
+
+- **Default (fast)** — ~15–20 min per shot:
+  ```
+  GUAARDVARK_FILM_I2V_FRAMES=25
+  GUAARDVARK_FILM_I2V_RESOLUTION=384
+  GUAARDVARK_FILM_I2V_STEPS=8
+  GUAARDVARK_FILM_I2V_INTERPOLATION=1
+  ```
+- **Balanced** (the pre-change defaults) — ~40 min per shot:
+  ```
+  GUAARDVARK_FILM_I2V_FRAMES=49
+  GUAARDVARK_FILM_I2V_RESOLUTION=512
+  GUAARDVARK_FILM_I2V_STEPS=25
+  GUAARDVARK_FILM_I2V_INTERPOLATION=2
+  ```
+
+Lowering frames/resolution/steps cuts render time roughly proportionally; interpolation off skips the frame-doubling pass.
+
+**Worked example — “The Last Spark” (7 shots, 4/3/2.5/3/4/2/4 s):**
+- **Default (fast):** ~15–20 min per shot → **~2 hours** for all 7 shots.
+- **Balanced:** ~40 min per shot → **~4.5–5 hours** for all 7 shots.
+
 ### Interconnector (multi-machine sync)
 A master/client layer that **syncs data across Guaardvark instances**:
 - syncs **chat history**, **learnings** (self-improvement fixes), **images**, **files**, **backups**, **hardware profiles**
