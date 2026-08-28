@@ -20,7 +20,7 @@ import requests
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from enum import Enum
 
 logger = logging.getLogger(__name__)
