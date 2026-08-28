@@ -706,11 +706,27 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
 
         progress = get_unified_progress()
         render_id = f"prod_{prod_id}"
+        _total_shots = len(shot_inputs)
         job_id = progress.create_process(
             ProcessType.VIDEO_RENDER,
             f"Rendering production {prod_id}: {ctx.production.name}",
-            additional_data={"production_id": prod_id},
+            # Deterministic id so the Film Crew UI can look up live render
+            # progress (mirrors filmcrew_storyboard_<prod_id>).
+            process_id=f"filmcrew_render_{prod_id}",
+            additional_data={"production_id": prod_id, "total_shots": _total_shots, "completed_shots": 0},
         )
+
+        # RESUME: any shot that already has a rendered clip on disk is reused
+        # instead of re-rendered. Lets a render interrupted by sleep/shutdown pick
+        # up where it left off — only the missing clips are generated, then the
+        # final film is re-stitched from all (existing + new) clips.
+        existing_clips: dict[int, str] = {}
+        for s in shots:
+            if s.video_clip_path and os.path.exists(s.video_clip_path):
+                existing_clips[s.shot_number] = s.video_clip_path
+        shot_by_number = {s.shot_number: s for s in shots}
+        # Recovered shots count toward the bar even though they aren't re-rendered.
+        _resume_base = len(existing_clips)
         # Claim the GPU exclusively for the render via the unified front door.
         # gpu_session delegates to the in-memory gate (same fail-fast GpuBusyError,
         # caught below -> progress.error_process; _agent_run marks the stage failed)
@@ -732,11 +748,42 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
                 cross_process=True,
             ):
                 progress.update_process(job_id, 5, f"Rendering {len(shot_inputs)} shots")
+
+                # Per-shot render progress — advances the Film Crew bar shot-by-shot
+                # (mirrors the storyboard per-shot counter). Best-effort only.
+                # Also persists each finished clip to the DB incrementally, so an
+                # interrupted render keeps completed shots and can be resumed.
+                def _render_progress(completed: int, total: int, shot_number: int, clip_path: str | None = None):
+                    try:
+                        from backend.utils.unified_progress_system import get_unified_progress as _gup
+                        pct = int(((completed + _resume_base) / max(total, 1)) * 100)
+                        _gup().update_process(
+                            job_id, pct,
+                            f"Rendered shot {completed}/{total}",
+                            additional_data={
+                                "production_id": prod_id,
+                                "total_shots": total,
+                                "completed_shots": completed + _resume_base,
+                            },
+                        )
+                        if clip_path:
+                            shot = shot_by_number.get(shot_number)
+                            if shot:
+                                shot.video_clip_path = clip_path
+                                try:
+                                    db.session.commit()
+                                except Exception:
+                                    db.session.rollback()
+                    except Exception:
+                        pass
+
                 res = editor.render(
                     production_id=prod_id,
                     production_name=ctx.production.name,
                     shots=shot_inputs,
                     output_dir=output_dir,
+                    progress_cb=_render_progress,
+                    existing_clips=existing_clips,
                 )
 
                 for i, shot in enumerate(shots):
