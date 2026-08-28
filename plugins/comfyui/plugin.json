@@ -12,7 +12,7 @@
   "dependencies": [],
   "config": {
     "default_enabled": true,
-    "default_auto_start": false,
+    "default_auto_start": true,
     "service_url": "http://127.0.0.1:8188",
     "timeout": 60,
     "fallback_enabled": true
