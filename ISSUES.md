@@ -54,6 +54,67 @@ WITH fix:     em-dash — end
   renders as `—` not `â`.
 - Confirm streaming path (`openai_provider`/`mistral_provider`) header/charset behavior.
 
+
+## [RESOLVED] AudioFoundry FX (stable-audio) — `RecursionError` on Apple Silicon MPS
+
+- **Status:** Resolved. FX generation now works on MPS via a scheduler override.
+- **Area:** `plugins/audio_foundry/backends/audio_fx_sao.py` (Stable Audio Open FX backend).
+
+### Symptom
+On Apple Silicon (MPS), the FX backend reported `available=True` and loaded, but a
+`/generate/fx` request failed with:
+```
+RecursionError: maximum recursion depth exceeded
+  File ".../numpy/core/_ufunc_config.py", line 111, in seterr
+    old = geterr()
+```
+
+### Root cause
+Not the SAO backend's generator. The model's default scheduler
+(`CosineDPMSolverMultistepScheduler`) drives an **SDE solver via `torchsde`**, and
+`torchsde`'s Brownian-motion path (`brownian_interval._split` →
+`generator.generate_state(4)` → numpy `seterr`/`geterr`) recurses infinitely on
+Apple MPS. It is a true infinite recursion, so raising `sys.setrecursionlimit()`
+does **not** help.
+
+### Fix applied
+- `audio_fx_sao.py` and `run_acestep.py` use a `_pick_device()` helper
+  (CUDA > MPS > cpu) so both FX and music load on MPS.
+- `audio_fx_sao.py` swaps the pipeline scheduler to
+  **`EDMDPMSolverMultistepScheduler`** (a non-SDE multistep scheduler) after load,
+  which avoids `torchsde` entirely. Music (ACE-Step) and FX (stable-audio) both
+  now generate valid WAVs on MPS.
+
+### Verification
+- `curl -X POST http://127.0.0.1:8206/generate/fx -H "Content-Type: application/json" -d '{"prompt":"thunder rumble","duration_s":5,"output_format":"wav"}'`
+  → returns a valid 5.0s WAV (16-bit stereo 44.1 kHz).
+- All three backends report `available=True` on MPS.
+- Direct helper check passes: `_make_generator(123, "mps", fake_torch)` returns
+  `None` after calling `torch.manual_seed(123)`, while CUDA still uses an
+  explicit device generator.
+
+
+## Committed
+| Commit | Files | Branch |
+|---|---|---|
+| `qsz` `fix: force UTF-8 decoding in cloud LLM provider streaming (mojibake)` | `kl`, `om`, `su` | `feat/llm-providers` |
+| `ywy` `feat: model-management UI + cloud model in status bar` | `lt`, `ux`, `ny` | `feat/llm-providers` |
+| `rty` `docs: add guides, Interconnector, JP guide, film-crew script memo, LoRA memo` | `sv`, `yl`, `lw`, `ov`, `lk` | `docs/guides` (new) |
+| `tlu` `chore: ignore runtime RAG indices and transient UI state` | `pu` | `docs/guides` |
+| `nwk` `fix: don't free ComfyUI resident models when rendering through ComfyUI` | `qq` | `feat/zimage-comfyui` |
+
+## Discarded
+- `qk` (docs/README.md) — the leaked agent transcript junk, reverted to the clean 3-line README.
+- The 5 runtime files (`data/images_windows_state.json`, `data/indexes/*.json`) — now git-ignored (still on disk, regenerable; say the word if you want them physically deleted).
+
+## Left uncommitted (intentionally — another session's active work)
+- `xw` `backend/services/comfyui_image_generator.py`
+- `uk` `backend/tests/services/test_comfyui_image_lora_branch.py`
+
+These two appeared mid-task and are clearly part of the in-progress Z-Image/ComfyUI LoRA work another session is actively committing, so I left them untouched rather than splitting or misplacing them.
+
+**Note:** the mojibake fix and model-management UI both landed on `feat/llm-providers` (not a standalone `fix/llm-mojibake`) because `openai_provider.py` only exists on that branch — a standalone branch off the base was impossible. Nothing was pushed; all branches are local.
+
 ---
 
 
@@ -109,3 +170,4 @@ needed) or  "train_from_uploads"  (with photos).
 2. Wait for LoRA training to complete → subject gets  training_status: "trained"  and a
 lora_path .
 3. Then generate — the LoRA path will resolve.
+
