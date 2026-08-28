@@ -619,11 +619,23 @@ def _initialize_app_components(app):
             last_modified_times = {}
             terminal_files = set()  # file_keys we've already classified terminal/reaped
             poll_count = 0
+            comfyui_down_streak = 0  # consecutive probes where ComfyUI looked down
             TERMINAL_STATUSES = {'complete', 'error', 'cancelled', 'end'}
             STALE_THRESHOLD = 2700  # 45 minutes - indexing can take 15-25 min per doc
             REDIS_LOSS_STALE = 300    # 5 min aggressive when Redis relay is down (loss detection)
             VIDEO_RENDER_STALE_HIGH = 3600  # 60 min at >=95% (long encode still OK)
             VIDEO_RENDER_STALE_MID = 7200   # 120 min mid-render (maxed Wan denoising)
+            # Grace period before a video_render job is orphaned when ComfyUI is
+            # briefly unreachable. A restart / slow probe / transient blip must not
+            # kill a multi-hour render — only orphan it if ComfyUI stays down for
+            # this long (5 min). Previously 0.0, which false-orphaned renders the
+            # moment ComfyUI blinked, releasing the GPU gate and losing all clips.
+            VIDEO_RENDER_COMFYUI_DOWN_GRACE = 300
+            # Consecutive failed liveness probes before ComfyUI is treated as down
+            # for reaping. The reaper polls ~1/s while a job is in flight, so 60
+            # probes ≈ 60s of sustained outage. A busy/slow ComfyUI (GPU saturated
+            # mid-render) must NOT orphan a long render on a single slow probe.
+            COMFYUI_DOWN_STREAK = 60
 
             def _comfyui_is_down() -> bool:
                 try:
@@ -660,7 +672,7 @@ def _initialize_app_components(app):
                     return float(REDIS_LOSS_STALE)
                 if metadata.get("process_type") == "video_render":
                     if comfyui_down and metadata.get("status") == "processing":
-                        return 0.0
+                        return float(VIDEO_RENDER_COMFYUI_DOWN_GRACE)
                     progress = int(metadata.get("progress") or 0)
                     if progress >= 95:
                         return float(VIDEO_RENDER_STALE_HIGH)
@@ -740,7 +752,14 @@ def _initialize_app_components(app):
                     active_jobs = 0
 
                     progress_dir = Path(config.OUTPUT_DIR) / ".progress_jobs"
-                    comfyui_down = _comfyui_is_down()
+                    if _comfyui_is_down():
+                        comfyui_down_streak += 1
+                    else:
+                        comfyui_down_streak = 0
+                    # Only treat ComfyUI as down for reaping after a sustained run of
+                    # failed probes. A single slow response (busy GPU) must not orphan
+                    # a multi-hour render.
+                    comfyui_down = comfyui_down_streak >= COMFYUI_DOWN_STREAK
                     if progress_dir.exists():
                         metadata_files = list(progress_dir.glob("*/metadata.json"))
 
