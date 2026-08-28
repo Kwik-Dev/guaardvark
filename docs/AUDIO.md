@@ -7,7 +7,9 @@ and how to use your own audio files in a video render.
 
 Audio generation is provided by the **AudioFoundry plugin**
 (`plugins/audio_foundry`, port **8206**). Its runtime config lives in
-`plugins/audio_foundry/config.yaml`.
+`plugins/audio_foundry/config.yaml`. For a visual map of how Audio Foundry
+sits alongside ComfyUI, Ollama, and whisper/Piper in the generation stack
+(and where models + outputs live), see [`GENERATION_DIAGRAM.md`](GENERATION_DIAGRAM.md).
 
 ### Audio models
 
@@ -229,6 +231,13 @@ There are two different video features, and they differ:
 - Film Crew **always generates** music (from `scene_mood`) and VO (from TTS).
 - There is no field to point it at your own music/VO file.
 
+> **FX and other audio files are in the same boat as music — none of them have a
+> built-in injection point in the Film Crew render.** The editor mixes only two
+> audio layers (generated VO + generated music); there is no FX/extra-audio
+> track. The AudioFoundry FX endpoint (`/generate/fx`, `stable-audio-open-1.0`)
+> exists and works, but **no render path calls it** — it is an unused hook. See
+> `ISSUES.md` → “[OPEN] Film Crew editor has no audio-FX / custom-audio layer”.
+
 **To use your own audio in a Film Crew render**, choose one of:
 
 1. **Post-process (simplest, no code):** render the film, then replace the audio
@@ -242,12 +251,20 @@ There are two different video features, and they differ:
    ffmpeg -i final.mp4 -i your_vo.wav \
      -filter_complex "[1:a]adelay=2000|2000[vo];[0:a][vo]amix=inputs=2:duration=longest[aout]" \
      -map 0:v -map "[aout]" -c:v copy -c:a aac output.mp4
+
+   # Mix a sound-effects (FX) or other audio track onto the finished film
+   ffmpeg -i final.mp4 -i my_fx.wav \
+     -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest[aout]" \
+     -map 0:v -map "[aout]" -c:v copy -c:a aac output.mp4
    ```
 
 2. **Add a code feature:** extend the Film Crew editor to accept a **custom music
    track path** (e.g., a `music_file` field or config) so it uses your file
    instead of generating one. This is a small, clean change to
    `backend/services/swarm/agents/editor.py` + `backend/tasks/production_swarm_tasks.py`.
+   The same change can add an **FX/extra-audio layer** (`fx_track` parameter on
+   `Editor.render` + `FfmpegRunner.concat_with_audio`) and optionally call the
+   existing `/generate/fx` endpoint to generate FX per shot.
 
 ## 5. Checking audio status
 
