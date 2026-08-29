@@ -416,9 +416,17 @@ export default function SystemMapPage() {
           height: "calc(100vh - 64px)",
           display: "flex",
           flexDirection: "column",
-          bgcolor: "background.default", // inherits the active theme
+          // The System Map is a dark "constellation" visualization — every node/
+          // edge/panel color is pale blue tuned for a dark surface, and the canvas
+          // is transparent (page bg shows through). On a light-mode background
+          // those pale-blue pixels wash out to near-invisible. Fix: give the map
+          // its own fixed dark navy backdrop in BOTH themes, so the palette is
+          // always readable. This is on-brand for an X-ray/dependency map and
+          // avoids re-tuning dozens of hardcoded light-blue-on-dark values.
           position: "relative",
           overflow: "hidden",
+          background:
+            "radial-gradient(1200px 600px at 50% 20%, #132033 0%, #0b1420 45%, #060b14 100%)",
         }}
       >
         {/* Top HUD strip */}

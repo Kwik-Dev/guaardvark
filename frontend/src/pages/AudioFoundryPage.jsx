@@ -533,9 +533,18 @@ const AudioFoundryPage = () => {
                           clickable
                           sx={{
                             fontWeight: "bold",
-                            backgroundColor: voiceBackend === b ? "#9c27b0" : "rgba(255,255,255,0.05)",
-                            color: "white",
-                            "&:hover": { backgroundColor: "#7b1fa2" }
+                            // Active = purple/white. Inactive uses theme tokens
+                            // (action.selected / action.hover / text.primary /
+                            // divider) so the chips stay **visible in BOTH light
+                            // and dark mode** — the old rgba(255,255,255,0.05) +
+                            // white-text combo was invisible on a light background.
+                            backgroundColor: voiceBackend === b ? "#9c27b0" : "action.selected",
+                            color: voiceBackend === b ? "white" : "text.primary",
+                            border: voiceBackend === b ? "none" : "1px solid",
+                            borderColor: voiceBackend === b ? "transparent" : "divider",
+                            "&:hover": {
+                              backgroundColor: voiceBackend === b ? "#7b1fa2" : "action.hover",
+                            },
                           }}
                           onClick={() => setVoiceBackend(b)}
                         />
