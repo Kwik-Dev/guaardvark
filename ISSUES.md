@@ -185,6 +185,80 @@ WITH fix:     em-dash — end
 - Confirm streaming path (`openai_provider`/`mistral_provider`) header/charset behavior.
 
 
+## [OPEN] Film Crew editor has no audio-FX / custom-audio layer (only generated VO + music)
+
+- **Status:** Open — no fix applied. Documented in `docs/AUDIO.md` §4 B.
+- **Area:** `backend/services/swarm/agents/editor.py`, `backend/services/swarm/clients.py`, `backend/tasks/production_swarm_tasks.py`.
+
+### Symptom
+A Film Crew (sequential pipeline) render mixes exactly two audio layers — per-shot
+**voiceover** (dialogue → TTS) and one **generated music** track (from `scene_mood`).
+There is **no way to inject your own FX or other audio file** (or to have FX generated
+per shot) into the final MP4. The AudioFoundry `/generate/fx` endpoint exists
+(`stable-audio-open-1.0`, works on MPS) but **no render path calls it** — it is
+effectively an unused hook.
+
+### Root cause
+- `FfmpegRunner.concat_with_audio` (`backend/services/swarm/clients.py`) signature only
+  accepts `video_clips`, `voiceovers`, `music_track` — no FX/extra-audio parameter.
+- `Editor.render` (`backend/services/swarm/agents/editor.py`) only calls
+  `_render_voiceover()` and `_render_music()`; no FX hook.
+- `run_editor` (`production_swarm_tasks.py`) builds `ShotInput` without an FX field, and
+  never calls the plugin's `/generate/fx`.
+
+The situation for FX/other audio is the same as for music (see `docs/AUDIO.md` §4 B):
+no built-in option; must post-process or add code.
+
+### Proposed fix (not yet implemented)
+1. Add an `fx_track` (or generic `extra_audio`) parameter to
+   `Editor.render` and `FfmpegRunner.concat_with_audio`; mix it alongside VO + music
+   in the `amix` bed (with a volume/offset, like the `volume=0.35` music track).
+2. Thread a per-shot FX path/description through `ShotInput` construction in
+   `production_swarm_tasks.py`.
+3. Optionally call the existing AudioFoundry `/generate/fx` endpoint per shot so the
+   Art Director can *generate* FX instead of importing.
+
+### Current workaround (no code)
+Render the film, then overlay/replace audio with ffmpeg:
+```bash
+# Mix an FX/other track onto the finished film
+ffmpeg -i final.mp4 -i my_fx.wav \
+  -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest[aout]" \
+  -map 0:v -map "[aout]" -c:v copy -c:a aac output.mp4
+# Replace the audio bed entirely
+ffmpeg -i final.mp4 -i my_audio.wav \
+  -map 0:v -map 1:a -c:v copy -c:a aac -shortest output.mp4
+```
+
+## [FEATURE] Multilingual voice support — Japanese and 22+ other languages for Chatterbox TTS
+
+- **Status:** Open (feature request) — not implemented. English is the only officially supported output today.
+- **Area:** `plugins/audio_foundry/backends/voice_gen_chatterbox.py`, the voice dispatcher, and `frontend/src/pages/AudioFoundryPage.jsx`. Documented in `docs/AUDIO_EDITOR.md` §1.
+
+### Requested behavior
+Audio Studio's **Voice** tab should speak non-English text — e.g. **Japanese** — in both the fixed-voice and voice-clone paths, instead of falling back to (or garbling) English.
+
+### Why it's English-only today (root cause)
+The backend loads the **base (English) model** and never passes a `language_id`:
+- `voice_gen_chatterbox.py` does `from chatterbox.tts import ChatterboxTTS` and `ChatterboxTTS.from_pretrained(...)`, then calls `generate(text, audio_prompt_path=...)` with **no `language_id`**.
+- The **Kokoro** fallback uses English-only voice IDs from the `/voices` catalog.
+- The frontend has no language picker and always sends plain `text`.
+
+### The model already supports it — it's just not wired
+Chatterbox ships a **multilingual** variant, `ChatterboxMultilingualTTS` (0.5B, **23+ languages** incl. Japanese, Chinese, Korean, and many European languages), plus a **Single Language Pack** (dedicated finetunes for Chinese, LatAm/Spain Spanish, Brazilian/Portugal Portuguese, Hindi). See the ResembleAI/chatterbox model card. It is not used here.
+
+### Proposed implementation (not started)
+1. **Backend (`voice_gen_chatterbox.py`)** — load `ChatterboxMultilingualTTS.from_pretrained(t3_model="v3")` (or a Single Language Pack) and pass a `language_id` derived from the request/script.
+2. **Dispatcher / API** — accept an optional `language_id` on `/generate/voice`; default it from the text or a per-request override.
+3. **Frontend (`AudioFoundryPage.jsx`)** — add a language selector to the Voice tab; send `language_id`; keep English as the default.
+4. **Reference-clip cloning** — when cloning, match the reference clip's language to the requested `language_id` (the model card notes clips inherit the reference language/accent).
+5. **Fallback** — keep the English `ChatterboxTTS` (or Kokoro) as the default so existing behavior is unchanged unless a language is requested.
+
+### Notes / caveats
+- The multilingual checkpoint is the same 0.5B size, but the app currently pins `ResembleAI/chatterbox`; switching models changes the default voice behavior — verify English output parity before rollout.
+- Model download: the multilingual weights would be a new HF download on first use.
+- Tracked alongside `docs/AUDIO_EDITOR.md` §1 “Language support — English vs Japanese”.
+
 ## [RESOLVED] AudioFoundry FX (stable-audio) — `RecursionError` on Apple Silicon MPS
 
 - **Status:** Resolved. FX generation now works on MPS via a scheduler override.
@@ -301,3 +375,24 @@ needed) or  "train_from_uploads"  (with photos).
 lora_path .
 3. Then generate — the LoRA path will resolve.
 
+---
+
+## The rendered video path 
+
+The reason you don't see the final video on the **Production page**—and why the video won't play in the browser—is due to a difference in how "Film" productions and "Music Videos" are handled in the system's current architecture:
+
+1.  **Missing Link in the Database**: Unlike Music Videos, which have a direct link to their output file in the database (`output_document_id`), **Film Productions** (like yours) do not have a direct field in the `Production` table to point to the final video. Instead, the system uses a "Folder Hierarchy" method to register the file.
+2.  **UI Limitation**: Because the link isn't directly on the `Production` record, the **Production page** currently doesn't know it needs to look inside the `orphan/productions/3/final/` folder to find your video. It only sees the script and the shots.
+3.  **Browser Playback Issue**: The "open" button in the UI is likely trying to access a path that the web server isn't configured to "serve" directly as a playable stream, or the browser is blocking the request because it's looking at a temporary system path that hasn't been fully "published" to the web-accessible area of the site.
+
+### How to watch your video right now:
+
+Since the file is sitting in a temporary system folder, you can view it by using the **Documents** page in the Web UI:
+
+1.  Navigate to the **Documents** (or Files) page.
+2.  Drill down through these folders: **`orphan`** $\rightarrow$ **`productions`** $\rightarrow$ **`3`** $\rightarrow$ **`final`**.
+3.  Click on **`final.mp4`**.
+
+***
+
+*Note for developers: To fix this so it shows up on the Production page automatically, we would need to update the `Production` database model to include an `output_document_id` and update the `Editor` agent to populate it upon completion.*
