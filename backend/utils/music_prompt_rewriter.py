@@ -24,7 +24,8 @@ from typing import Optional, TypedDict
 
 import requests
 
-from backend.config import OLLAMA_BASE_URL
+from backend.config import OLLAMA_BASE_URL, OPENAI_DEFAULT_MODEL
+from backend.services import openai_provider
 from backend.utils.llm_service import get_saved_active_model_name
 
 logger = logging.getLogger(__name__)
@@ -118,42 +119,76 @@ def rewrite_music_prompt(
         # default behavior, but lets the caller flip it.
         user_msg = f"{text}\n\n[The user wants vocals — do NOT include 'no vocals' in negative_prompt.]"
 
-    payload = {
-        "model": chosen_model,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        # Ollama's native JSON mode — guarantees the response.message.content
-        # is parseable JSON without us having to strip ```json fences.
-        "format": "json",
-        "stream": False,
-        "options": {
-            "temperature": 0.3,  # Low — we want consistent tag output, not creative drift
-            "num_ctx": 2048,     # Plenty for the system prompt + a short user line
-        },
-    }
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
 
+    # Prefer the OpenAI-compatible chat provider — the same one the chat bot
+    # and Film Crew use (driven by GUAARDVARK_OPENAI_BASE_URL /
+    # GUAARDVARK_OPENAI_MODEL). This makes "Polish & Preview" work even when the
+    # local Ollama instance is down or not installed. Local Ollama remains the
+    # fallback.
+    content: str | None = None
     try:
-        resp = requests.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-            timeout=_REWRITE_TIMEOUT_S,
+        if openai_provider.available():
+            resp = openai_provider.chat(
+                model=OPENAI_DEFAULT_MODEL,
+                messages=messages,
+                stream=False,
+                options={"temperature": 0.3},  # Low — consistent tag output, not creative drift
+            )
+            content = ((resp or {}).get("message") or {}).get("content") or ""
+            if content.strip():
+                logger.info(
+                    "Music prompt rewrite — using OpenAI-compatible provider (model=%s)",
+                    OPENAI_DEFAULT_MODEL,
+                )
+    except Exception as e:  # noqa: BLE001 — provider failure shouldn't sink the rewrite
+        logger.warning(
+            "Music prompt rewrite — OpenAI-compatible provider failed (%s); trying Ollama", e
         )
-        resp.raise_for_status()
-    except (requests.ConnectionError, requests.Timeout) as e:
-        logger.warning("Music prompt rewrite — Ollama unreachable: %s", e)
-        return None
-    except requests.HTTPError as e:
-        logger.warning("Music prompt rewrite — Ollama returned %s: %s", resp.status_code, e)
-        return None
+        content = None
 
-    try:
-        body = resp.json()
-        content = body["message"]["content"]
-    except (ValueError, KeyError) as e:
-        logger.warning("Music prompt rewrite — bad response shape: %s", e)
-        return None
+    if not (content or "").strip():
+        payload = {
+            "model": chosen_model,
+            "messages": messages,
+            # Ollama's native JSON mode — guarantees the response.message.content
+            # is parseable JSON.
+            "format": "json",
+            "stream": False,
+            "options": {
+                "temperature": 0.3,
+                "num_ctx": 2048,     # Plenty for the system prompt + a short user line
+            },
+        }
+        try:
+            resp = requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json=payload,
+                timeout=_REWRITE_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning("Music prompt rewrite — Ollama unreachable: %s", e)
+            return None
+        except requests.HTTPError as e:
+            logger.warning("Music prompt rewrite — Ollama returned %s: %s", resp.status_code, e)
+            return None
+        try:
+            content = resp.json()["message"]["content"]
+        except (ValueError, KeyError) as e:
+            logger.warning("Music prompt rewrite — bad response shape: %s", e)
+            return None
+
+    content = (content or "").strip()
+    # Some OpenAI-compatible providers wrap the JSON in ```json fences.
+    if content.startswith("```"):
+        content = content.strip("`")
+        if content.lower().startswith("json"):
+            content = content[4:]
+        content = content.strip()
 
     try:
         parsed = json.loads(content)

@@ -68,6 +68,26 @@ def _respond(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+def _progress(progress: float, stage: str) -> None:
+    """Emit an interim progress event (JSON `kind:"progress"`) on stdout.
+
+    Out-of-band from the final `{"ok": ...}` response line. The parent daemon
+    client (`music_gen_acestep._send`) reads these to drive the async job's
+    progress bar. `progress` is a float in 0.0..1.0.
+    """
+    try:
+        sys.stdout.write(
+            json.dumps({
+                "kind": "progress",
+                "progress": round(float(progress), 4),
+                "stage": stage,
+            }) + "\n"
+        )
+        sys.stdout.flush()
+    except OSError:
+        pass
+
+
 def _do_load(model_id: str) -> dict[str, Any]:
     global _pipeline, _torch
     if _pipeline is not None:
@@ -144,6 +164,24 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
     # `negative_prompt` may not be supported by every ACE-Step release — older
     # checkpoints raise TypeError if we pass an unknown kwarg. Try-with then
     # fall back keeps us forward-compatible without breaking pinned setups.
+    _progress(0.10, "composing")
+
+    # Per-step diffusion progress. Only the diffusers-flavoured ACE-Step
+    # accepts a `callback` kwarg; the `acestep` package variant raises
+    # TypeError if we pass one. Introspect so we NEVER crash, and fall back
+    # to coarse phase progress when a callback isn't supported.
+    callback_fn = None
+    if steps > 0:
+        try:
+            import inspect
+            if "callback" in inspect.signature(_pipeline.__call__).parameters:
+                def _step_cb(step_idx: int, _ts: Any, _xt: Any) -> None:
+                    frac = min(step_idx / max(steps, 1), 1.0)
+                    _progress(0.10 + 0.80 * frac, "composing")
+                callback_fn = _step_cb
+        except Exception:  # noqa: BLE001 — introspection failure → coarse progress
+            callback_fn = None
+
     pipeline_kwargs = dict(
         prompt=style_prompt,
         lyrics=effective_lyrics,
@@ -154,6 +192,9 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
         save_path=out_path,
         format="wav",
     )
+    if callback_fn is not None:
+        pipeline_kwargs["callback"] = callback_fn
+        pipeline_kwargs["callback_steps"] = 1
     if negative_prompt:
         pipeline_kwargs["negative_prompt"] = negative_prompt
     try:
@@ -169,6 +210,7 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
         else:
             raise
     _eprint(f"[run_acestep] pipeline returned: type={type(result).__name__}")
+    _progress(0.95, "rendering")
 
     import os
     # If ACE-Step wrote the file directly, we're done — read its shape via

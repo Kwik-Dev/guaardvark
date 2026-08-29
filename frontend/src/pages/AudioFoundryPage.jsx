@@ -903,7 +903,9 @@ const AudioFoundryPage = () => {
                   <Typography variant="h5" fontWeight="bold">Synthesizing Waves...</Typography>
                   <Typography color="text.secondary">
                     {progress && progress.total > 0
-                      ? `Chunk ${progress.current}/${progress.total} (~${Math.round((progress.current / progress.total) * 100)}%)`
+                      ? progress.stage && progress.stage !== "synthesizing"
+                        ? `${progress.stage.charAt(0).toUpperCase() + progress.stage.slice(1)}… ${Math.round((progress.current / progress.total) * 100)}%`
+                        : `Chunk ${progress.current}/${progress.total} (~${Math.round((progress.current / progress.total) * 100)}%)`
                       : progress && progress.status === "queued"
                         ? "Queued… waiting for the GPU."
                         : "Generating high-fidelity audio on local GPU."}
