@@ -62,6 +62,37 @@ def _shot_to_dict(shot):
     }
 
 
+def _production_final_video(production):
+    """Return the final rendered film Document for a production, if one exists.
+
+    The editor registers the finished MP4 via ``register_production_output``,
+    which drops a Document into the folder hierarchy
+    ``{project_<id>|orphan}/productions/<prod_id>/final``. This helper finds
+    that Document so the UI can play the finished film on the production page.
+    Returns None when the production hasn't rendered yet (or the file is gone).
+    """
+    from backend.models import Document, Folder
+
+    root_name = (
+        f"project_{production.project_id}"
+        if production.project_id is not None
+        else "orphan"
+    )
+    final_folder = Folder.query.filter_by(
+        path=f"{root_name}/productions/{production.id}/final"
+    ).first()
+    if final_folder is None:
+        return None
+    doc = Document.query.filter_by(folder_id=final_folder.id).first()
+    if doc is None:
+        return None
+    return {
+        "id": doc.id,
+        "filename": doc.filename,
+        "url": f"/api/files/document/{doc.id}/download",
+    }
+
+
 @bp.post("")
 def create():
     body = request.get_json(silent=True) or {}
@@ -162,6 +193,7 @@ def get_production(prod_id):
         "settings_json": p.settings_json,
         "error_blob": p.error_blob,
         "shots": shots,
+        "final_video": _production_final_video(p),
     })
 
 

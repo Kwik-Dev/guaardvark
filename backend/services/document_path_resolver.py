@@ -55,9 +55,14 @@ def _candidates_for_doc(doc) -> list[Path]:
     if not raw_path and not filename:
         return candidates
 
-    # 1. Absolute path stored as-is.
-    if raw_path.startswith("/"):
-        candidates.append(Path(raw_path))
+    # 1. Absolute path stored as-is. NOTE: check the ORIGINAL doc.path, not
+    # the lstripped raw_path — lstrip("/") turns an absolute path like
+    # "/var/folders/.../final.mp4" into "var/folders/...", which would make
+    # this branch never match and the resolver would 404 on a file that
+    # exists. Production outputs (register_production_output) store absolute
+    # temp paths, so this branch is load-bearing.
+    if (doc.path or "").startswith("/"):
+        candidates.append(Path(doc.path))
 
     # 2. UPLOAD_BASE join — use existing helper if available.
     try:
