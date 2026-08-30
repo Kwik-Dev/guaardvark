@@ -42,6 +42,15 @@ This is automatic when `GUAARDVARK_ZIMAGE_USE_COMFYUI=1`:
 `ensure_lora_in_comfyui()` symlinks each trained LoRA into ComfyUI's
 `models/loras/` after training and before generation.
 
+Beyond the LoRA, the ComfyUI guaardvark talks to must also have the **Z-Image
+base models registered** — `z_image_turbo_bf16.safetensors` (in `unet`/
+`diffusion_models`), `qwen_3_4b.safetensors` (in `clip`/`text_encoders`), and
+`ae.safetensors` (in `vae`). If `plugins/comfyui/ComfyUI/models/` only holds
+WAN video files, a Z-Image still fails with `unet_name/clip_name/vae_name ...
+not in []` node_errors. To reuse a Comfy Desktop install's models `~/ComfyUI-Shared`
+via the bundled server, add an `extra_model_paths.yaml` (see
+`docs/GUAARDVARK_GUIDE.md` §7) and restart ComfyUI.
+
 ---
 
 ## 2. Sync identity from photos (Overview)
@@ -178,6 +187,7 @@ identity lock (trigger + class + short marks) is applied inside the render.
 |---|---|---|
 | Identity sync / angle verify fail with "does not support image input" | Vision model is a text-only gemma4 (`gemma4:26b-mlx`) | Use `qwen3.8` (auto-preferred) or pull a vision-capable gemma4 tag; restart worker |
 | Generate fails with ComfyUI `lora_name '...' not in []` | Trained LoRA not linked into ComfyUI `models/loras/` | Ensure `GUAARDVARK_ZIMAGE_USE_COMFYUI=1` (auto-links); or symlink manually |
+| Generate fails with ComfyUI `unet_name/clip_name/vae_name '...' not in []` | ComfyUI has the LoRA but not the Z-Image base models (`z_image_turbo_bf16`, `qwen_3_4b`, `ae.safetensors`) | Add an `extra_model_paths.yaml` bridging a Comfy-Desktop/`ComfyUI-Shared` tree and restart ComfyUI |
 | Wrong-facing shots not fixed | Angle classifier using broken vision model | Restart worker after switching to `qwen3.8`, then regenerate |
 | LoRA training killed at ~30 min | Daemon train timeout too low | `_TRAIN_TIMEOUT_S` should be 3h for MPS |
 
