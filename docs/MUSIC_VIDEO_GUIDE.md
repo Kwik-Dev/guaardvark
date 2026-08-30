@@ -4,6 +4,9 @@ This guide walks through creating and rendering a **Music Video** in Guaardvark,
 **"The Last Spark Theme"** as a concrete worked example, including realistic render-time
 estimates measured on an Apple-Silicon (MPS) machine.
 
+
+![](img/2026-08-30-17-37-48.png)
+
 ---
 
 ## 1. What a Music Video is
@@ -154,3 +157,5 @@ PGPASSWORD=guaardvark psql -h localhost -U guaardvark -d guaardvark -t -A -c \
 - `docs/CHARACTER_GENERATION.md` — Z-Image keyframes + LoRA identity.
 - `docs/GENERATION_DIAGRAM.md` — generation stack / model locations.
 - `ISSUES.md` — ComfyUI upgrade + known issues.
+
+
