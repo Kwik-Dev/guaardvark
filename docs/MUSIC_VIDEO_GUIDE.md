@@ -106,6 +106,34 @@ muxes clips + the song into the final video.
   resumes from the first incomplete one. A render interrupted by sleep/shutdown picks up
   where it left off.
 
+### Manual resume after a ComfyUI outage
+
+If the render fails with `ComfyUI not reachable at http://127.0.0.1:8188`, ComfyUI went down
+mid-render. Completed clips are preserved; you can resume from the first incomplete one:
+
+```bash
+# 1) Check if ComfyUI is up (200 = up, 000/refused = down)
+curl -s -m3 http://127.0.0.1:8188/ -o /dev/null -w "%{http_code}\n"
+
+# 2) If down, restart it and wait until it's back
+bash plugins/comfyui/scripts/stop.sh
+bash plugins/comfyui/scripts/start.sh
+until curl -s -m2 http://127.0.0.1:8188/ -o /dev/null; do sleep 3; done; echo "ComfyUI up"
+
+# 3) Resume the render (crash-resumable — skips done clips, then assembles when all done)
+source backend/venv/bin/activate
+GUAARDVARK_MODE=default python3 -c "from backend.celery_app import celery; celery.send_task('music_video.run_clip_generator', args=[2])"
+
+# 4) Verify progress
+PGPASSWORD=guaardvark psql -h localhost -U guaardvark -d guaardvark -t -A -c \
+  "SELECT clips FROM music_videos WHERE id=2;" | \
+  python3 -c "import sys,json;c=json.load(sys.stdin);print('done',sum(1 for x in c if x.get('status')=='done'),'/',len(c))"
+```
+
+> The render is safe to resume any number of times — completed clips are kept on disk and
+> never re-rendered. If ComfyUI keeps dropping, investigate a crash/OOM or plugin-manager
+> restart rather than just resuming.
+
 ---
 
 ## 6. Troubleshooting
