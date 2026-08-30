@@ -445,7 +445,12 @@ def browse_repo_path(path: str = "", repo_root: str | Path | None = None) -> dic
         child_rel = _normalized_relative(child, root)
         if forbidden_path_reason(child_rel):
             continue
-        stat = child.stat()
+        try:
+            stat = child.stat()
+        except OSError:
+            # Broken symlink / unreadable entry (e.g. the repo-root `manager`
+            # symlink) — skip it rather than fail the whole folder listing.
+            continue
         item_id = f"repo:{child_rel}"
         if child.is_dir():
             folders.append({
