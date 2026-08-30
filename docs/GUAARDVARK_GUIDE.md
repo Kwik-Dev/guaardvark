@@ -215,16 +215,46 @@ Guaaardvark's "skills" are called **agent recipes** — deterministic, reusable 
 |Area|What's built in|
 |---|---|
 |**Images**|Offline diffusers generator (Z-Image Turbo, SDXL) + ComfyUI/FLUX via ComfyUI + batch + face/anatomy controls|
-|**Video**|Wan 2.2, CogVideoX, LTX; resolution tiers, frame interpolation, prompt enhancement, ComfyUI + offline fallbacks|
+|**Video**|Wan 2.2, CogVideoX, LTX; resolution tiers, frame interpolation, prompt enhancement, ComfyUI + offline fallbacks. **Apple-Silicon/MPS tip:** prefer `wan22-5b` (or LTX/CogVideoX) over the 14B A14B, which needs 16GB CUDA (see §7)|
 |**Audio/music**|ACE-Step full-song generation, Stable Audio Open FX, neural voice (Chatterbox/Kokoro/Piper), consent-gated voice cloning|
 |**Upscaling**|Real-ESRGAN family, HAT-L, NMKD, etc. → 4K/8K, two-pass, video frame-by-frame|
 |**Editing**|built-in Shotcut-lite timeline editor (video/text/audio lanes)|
 
-**Z-Image via ComfyUI (reuse your ComfyUI instead of re-downloading):**
+**Z-Image via ComfyUI (reuse a ComfyUI that has the Z-Image models):**
 ```
 GUAARDVARK_ZIMAGE_USE_COMFYUI=1   # in .env
 ```
-When set, plain Z-Image generation routes to your running ComfyUI (reusing its `z_image_turbo_bf16.safetensors`) instead of the offline download path. Model filenames overridable via `GUAARDVARK_ZIMAGE_UNET/_CLIP/_VAE/_SAMPLER/_SCHEDULER`, and cfg via `GUAARDVARK_ZIMAGE_CFG` (default 1.0 — a ComfyUI KSampler needs `cfg ≥ 1.0`; `cfg 0` yields junk).
+When set, plain Z-Image generation (and music-video / cast **keyframe stills**) routes to the ComfyUI at `COMFYUI_URL` (reusing its `z_image_turbo_bf16.safetensors`) instead of the offline download path (which is CUDA-only and fails on Apple Silicon/MPS). Model filenames overridable via `GUAARDVARK_ZIMAGE_UNET/_CLIP/_VAE/_SAMPLER/_SCHEDULER`, and cfg via `GUAARDVARK_ZIMAGE_CFG` (default 1.0 — a ComfyUI KSampler needs `cfg ≥ 1.0`; `cfg 0` yields junk).
+
+**That ComfyUI must have the Z-Image stack registered.** It needs `z_image_turbo_bf16.safetensors` (in `unet`/`diffusion_models`), `qwen_3_4b.safetensors` (in `clip`/`text_encoders`), and `ae.safetensors` (in `vae`). If `plugins/comfyui/ComfyUI/models/` only contains WAN video files, a Z-Image request fails with a ComfyUI `400 ... Prompt outputs failed validation` and `node_errors` like `unet_name: 'z_image_turbo_bf16.safetensors' not in []` / `clip_name: 'qwen_3_4b.safetensors' not in [...]` / `vae_name: 'ae.safetensors' not in [...]`.
+
+**Two ComfyUI installs on one box.** `./start.sh` launches the **bundled plugin** server (`plugins/comfyui/ComfyUI`, port 8188). A separate **Comfy Desktop** install may also exist (`~/ComfyUI-Installs`, with shared models in `~/ComfyUI-Shared/models/`) that already has the Z-Image files. To make guaardvark use the Comfy Desktop models **without running the Desktop app**, drop an `extra_model_paths.yaml` into `plugins/comfyui/ComfyUI/` that bridges the shared tree, e.g.:
+```yaml
+comfy-desktop:
+    base_path: /Users/ymmtny/ComfyUI-Shared
+    checkpoints: models/checkpoints/
+    loras: models/loras/
+    vae: models/vae/
+    clip: models/clip/
+    text_encoders: |
+        models/text_encoders/
+        models/clip/
+    diffusion_models: |
+        models/diffusion_models/
+        models/unet/
+    unet: models/unet/
+```
+then restart ComfyUI (`bash plugins/comfyui/scripts/stop.sh` + `bash plugins/comfyui/scripts/start.sh`). After restart, `ComfyUIImageGenerator.comfyui_installed_engines()` should report `['zimage']` and a Z-Image generation should succeed instead of 400-ing.
+
+**Where guaardvark installs models.** The **Manage Video Models** installer and install checks write into `COMFYUI_DIR/models`. Point that root at the shared tree by setting `GUAARDVARK_COMFYUI_DIR` in `.env`, e.g. `GUAARDVARK_COMFYUI_DIR=/Users/ymmtny/ComfyUI-Shared`, so downloads land in `~/ComfyUI-Shared/models` and guaardvark + Comfy Desktop share the same weights (no duplication). Restart the backend to pick it up. The bundled server still serves those files via `extra_model_paths.yaml`, so both keep working.
+
+**Music-video / Film `i2v_model`: MPS-friendly vs 14B.** On Apple Silicon (MPS — no NVIDIA CUDA), the **Wan 2.2 A14B** (`wan22-14b`, `wan22-14b-i2v`) is heavy: a two-expert MoE (HighNoise + LowNoise, ~22GB) built for 16GB CUDA cards, and on MPS it CPU-offload-thrashes / is very slow. Prefer a lighter single-piece model on MPS:
+- **`wan22-5b`** — Wan 2.2 TI2V-5B (fp16, ~9.5GB / ~11GB VRAM), one model, no MoE/CPU offload, native 1280×704@24fps. **Recommended MPS default.** Pulls `wan22-vae` + `wan-umt5` automatically.
+- **LTX** (`ltx2x`) and **CogVideoX** (`cogvideox-2b/5b`) are lighter alternatives.
+
+Defaults today: the registry global default is **`wan22-5b`**, but **Music Video** sets `wan22-14b-i2v` (engine=wan → `wan22-14b-i2v`; engine=cogvideox → `cogvideox-5b-i2v`) and **Film Crew** (`Wan22I2VGenerator`) also uses `wan22-14b-i2v`. Override per-video via settings `i2v_model` (music video) or env `GUAARDVARK_FILM_I2V` (film crew). Install `wan22-5b` from **Manage Video Models**; generation preflight (`preflight_video_model`) will tell you if a model is missing.
+
+**Model downloads (Hugging Face hub).** guaardvark downloads video/image models with the standard `huggingface_hub` path — the **default is fine to use** and needs no extra setup. If a download hangs at 0 bytes because HF's Xet CDN (`cas.xethub.io`) is unreachable on a particular (firewalled/slow) network, set `HF_HUB_DISABLE_XET=1` in `.env` and restart the backend to force the plain-HTTP download path. That is an optional workaround only; it is **not** a required default.
 
 ---
 
@@ -398,6 +428,7 @@ Covered in Section 5 — a compact summary:
 - **Python 3.12 required.** The ML stack has no wheels for 3.13/3.14. On macOS, `brew install python@3.12` (the bootstrap does this automatically).
 - **ComfyUI "not installed" is about the bundled plugin**, not your external ComfyUI — routing just needs `COMFYUI_URL` to point at a reachable server.
 - **Z-Image through ComfyUI:** set `GUAARDVARK_ZIMAGE_USE_COMFYUI=1`; keep the ComfyUI KSampler cfg ≥ 1.0.
+- **Z-Image keyframe 400s `... not in []`:** the running ComfyUI has the **WAN video** models but not the **Z-Image image** stack (`z_image_turbo_bf16`, `qwen_3_4b`, `ae.safetensors`). Bridge a Comfy-Desktop/`ComfyUI-Shared` model tree in via `extra_model_paths.yaml` in `plugins/comfyui/ComfyUI/`, then restart ComfyUI (see §7).
 - **Smart escalation** previously listed "auto when local fails" but wasn't implemented; that behavior is now implemented (local failure → escalation provider).
 - **The main chat LLM** supports Ollama / Mistral / OpenAI-compatible. OpenAI/OpenRouter as the *main* chat model requires the OpenAI-compatible provider + base URL.
 - **Pillars** are separate: `Rules & Prompts` (prompt bundles), `recipes/skills` (deterministic screen actions), `plugins` (runnable functionality), `MCP` (agent protocol).
