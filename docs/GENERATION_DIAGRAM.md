@@ -47,7 +47,7 @@ flowchart LR
     P3 -->|"VRAM request / evict"| ORCH
 
     subgraph MODELS["Model locations"]
-        M1["ComfyUI models<br/>plugins/comfyui/ComfyUI/models/<br/>(checkpoints, loras, vae, clip,<br/>diffusion_models)"]
+        M1["ComfyUI models<br/>~/ComfyUI-Shared/models/<br/>(GUAARDVARK_COMFYUI_DIR sets this<br/>shared install root;<br/>served by bundled server via<br/>extra_model_paths.yaml + Comfy Desktop)"]
         M2["Audio Foundry models<br/>~/.cache/huggingface/hub/<br/>(chatterbox, kokoro,<br/>ace-step, stable-audio)"]
         M3["Ollama models<br/>~/.ollama/models/<br/>(qwen3.8:27b-mlx, gemma4,<br/>embeddings)"]
         M4["whisper ggml models<br/>tools/voice/whisper.cpp/models/"]
@@ -120,7 +120,7 @@ flowchart LR
 | Component | Port | Started by | Models | Output |
 |-----------|------|-----------|--------|--------|
 | Backend Flask | 5000 | `start.sh` | — | — |
-| ComfyUI (img/video) | 8188 | `plugins/comfyui/scripts/start.sh` | `plugins/comfyui/ComfyUI/models/` | `plugins/comfyui/ComfyUI/output/` |
+| ComfyUI (img/video) | 8188 | `plugins/comfyui/scripts/start.sh` | `~/ComfyUI-Shared/models/` (via `GUAARDVARK_COMFYUI_DIR`) | `plugins/comfyui/ComfyUI/output/` |
 | Audio Foundry (voice/music/fx) | 8206 | `plugins/audio_foundry/scripts/start.sh` | `~/.cache/huggingface/hub/` | `data/uploads/Audio/` |
 | Ollama (local, Qwen vision) | 11434 | `start.sh` (systemd / `ollama serve`) | `~/.ollama/models/` (qwen3.8:27b-mlx, gemma4, embeddings) | — |
 | Ollama-cloud (DeepSeek V4) | — | backend cloud provider (OpenAI-compatible) | remote | — |
