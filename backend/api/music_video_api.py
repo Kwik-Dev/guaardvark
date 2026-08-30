@@ -309,9 +309,24 @@ def update_plan(mv_id):
         s["director_treatment"] = body["treatment"].strip()
         mv.settings_json = s
 
+    # Optional I2V model override (approval-panel dropdown). Persisted to settings_json
+    # so the clip generator uses it when the operator hits Approve & Generate.
+    new_i2v = body.get("i2v_model")
+    if new_i2v is not None:
+        if not isinstance(new_i2v, str) or not new_i2v.strip():
+            return jsonify({"error": "i2v_model must be a non-empty string"}), 400
+        new_i2v = new_i2v.strip()
+        from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
+        if new_i2v not in VIDEO_MODEL_REGISTRY:
+            return jsonify({"error": f"Unknown i2v_model: {new_i2v}"}), 400
+        s = dict(mv.settings_json or {})
+        s["i2v_model"] = new_i2v
+        mv.settings_json = s
+
     if updated is None:
         # Shouldn't happen because we checked stage above, but be defensive.
         updated = mv
+    db.session.commit()
     db.session.refresh(updated)
     return jsonify(_mv_dict(updated))
 
