@@ -21,7 +21,7 @@ output:
   renders_dir: data/outputs/videos/editor-renders
 
 registration:
-  backend_url: http://localhost:5002
+  backend_url: http://localhost:5055
   folder: Videos
   enabled: true
 
