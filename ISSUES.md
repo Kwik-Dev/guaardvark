@@ -5,6 +5,29 @@ symptom, root cause, and any partial fix already applied.
 
 ---
 
+## [OPEN] Upgrade bundled ComfyUI (v0.32.0 → latest v0.34.x)
+
+- **Status:** Open — no fix applied. Deferred; will handle later (ComfyUI version bump).
+- **Area:** `plugins/comfyui/ComfyUI` git checkout; `plugins/comfyui/scripts/restore_app.sh` (pins `COMFYUI_REF`); `plugins/comfyui/custom_nodes.manifest`; `plugins/comfyui/scripts/start.sh`.
+
+### Context
+The bundled ComfyUI plugin is a git checkout of `comfyanonymous/ComfyUI` pinned to **v0.32.0** via `COMFYUI_REF` in `restore_app.sh`. Latest upstream release tags are now **v0.33.x – v0.34.2**. Updating is not a blind `git pull` — see the caveats below.
+
+### Caveats / why it's not a naive update
+- **Custom nodes are pinned to SHAs** (`custom_nodes.manifest`: VideoHelperSuite, GGUF, Frame-Interpolation, KJNodes, CogVideoXWrapper, facerestore) **tested against v0.32.0**. A core bump can break them and requires re-pin + re-test.
+- **`start.sh` applies version-sensitive patches** (`model_patcher.py`, `quant_ops.py`, and the `comfy-kitchen` PEP-585 annotation rewrite for torch ≤ 2.6) written for the 0.32 era — a large jump may need re-verification.
+- **`restore_app.sh` rsyncs with `--delete`** and preserves **only** `models/`, `custom_nodes/`, `user/`, `input/`, `output/`, `temp/`. A restore therefore **wipes `extra_model_paths.yaml`** (the Z-Image ← Comfy-Desktop / `~/ComfyUI-Shared` bridge). Back it up first.
+- Prefer a **tagged release** (e.g. `v0.34.2`) over unpinned HEAD; `COMFYUI_REF=` (empty = master HEAD) is deliberately flagged as risky in the script.
+
+### Remaining work / steps
+1. Back up `plugins/comfyui/ComfyUI/extra_model_paths.yaml` (and `plugin.local.json` if present).
+2. `COMFYUI_REF=v0.34.2 bash plugins/comfyui/scripts/restore_app.sh`
+3. Restore `extra_model_paths.yaml`.
+4. Re-pin / re-test the custom-node SHAs in `custom_nodes.manifest` against the new core; `install_deps.sh` + restart.
+5. Verify: `ComfyUIImageGenerator.comfyui_installed_engines()` still returns `['zimage']`, the WAN i2v loaders still register, and smoke-test one Z-Image still + one WAN i2v queue.
+
+---
+
 ## [OPEN] Chat responses contain mojibake for non-ASCII UTF-8 characters (em-dash → `â`)
 
 - **Status:** Root cause fixed in source (code change applied, NOT yet active on a running instance); data repair of existing messages still outstanding.
