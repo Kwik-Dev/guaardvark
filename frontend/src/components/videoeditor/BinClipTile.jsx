@@ -40,31 +40,36 @@ function KeptRangesStrip({ keptRanges, durationSeconds }) {
   );
 }
 
-const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, durationSeconds, onReorder, isDragOver, onDragOverChange }) => {
+const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, durationSeconds, onReorder, isDragOver, draggingId, onDragStartChange, onDragEndChange, onDragOverChange }) => {
   const handleDragStart = (e) => {
     e.stopPropagation();
     e.dataTransfer.setData("text/plain", clip.clipId);
     e.dataTransfer.effectAllowed = "move";
+    onDragStartChange?.(clip.clipId);  // track in state — getData() is empty during dragover
   };
   const handleDragOver = (e) => {
-    // Allow drop if we're dragging another clip over this one.
-    const dragging = e.dataTransfer.getData("text/plain");
-    if (dragging && dragging !== clip.clipId) {
-      e.preventDefault();
+    // Only allow the drop when we're dragging an existing clip onto another tile.
+    if (draggingId && draggingId !== clip.clipId) {
+      e.preventDefault();            // required so a drop can happen
       e.dataTransfer.dropEffect = "move";
       onDragOverChange?.(clip.clipId);
     }
   };
   const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    onDragOverChange?.(null);
-    const fromId = e.dataTransfer.getData("text/plain");
-    if (fromId && fromId !== clip.clipId && typeof onReorder === "function") {
-      onReorder(fromId, clip.clipId);
+    // Internal reorder: drop on a different tile moves it into this slot.
+    if (draggingId && draggingId !== clip.clipId) {
+      e.preventDefault();
+      e.stopPropagation();          // don't let the bin's add-drop also fire
+      onDragEndChange?.();
+      onDragOverChange?.(null);
+      onReorder?.(draggingId, clip.clipId);
     }
+    // External library/file drops bubble to the panel's add handler.
   };
-  const handleDragEnd = () => onDragOverChange?.(null);
+  const handleDragEnd = () => {
+    onDragEndChange?.();
+    onDragOverChange?.(null);
+  };
   return (
     <Box
       draggable

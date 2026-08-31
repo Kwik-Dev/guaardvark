@@ -19,8 +19,11 @@ const BinPanel = ({
   warningsByClipId = {},  // {clipId: warning text}
   planDecorationsByClipId = {},
 }) => {
-  // Drag-over highlight state for drag-to-reorder of existing bin clips.
+  // Drag-over + drag-source state for drag-to-reorder of existing bin clips.
+  // We track the source id in React state because dataTransfer.getData() is
+  // empty during dragover — only reliable on drop.
   const [dragOverId, setDragOverId] = useState(null);
+  const [draggingId, setDraggingId] = useState(null);
 
   // OS file drop: upload → Document → bin tile.
   const { onDrop, onDragOver, uploading, progress, error } = useExternalDrop({
@@ -107,6 +110,9 @@ const BinPanel = ({
                 onRemove={onRemove}
                 onReorder={onReorder}
                 isDragOver={dragOverId === c.clipId}
+                draggingId={draggingId}
+                onDragStartChange={setDraggingId}
+                onDragEndChange={() => setDraggingId(null)}
                 onDragOverChange={setDragOverId}
                 warning={warningsByClipId[c.clipId]}
                 keptRanges={planDecorationsByClipId[c.clipId]?.keptRanges}
