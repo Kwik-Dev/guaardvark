@@ -144,6 +144,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     height: 720,
     focus_x: 0.5,
     focus_y: 0.5,
+    pan_direction: "left-to-right",
   });
   const [ffGenerating, setFfGenerating] = useState(false);
   const [ffResults, setFfResults] = useState(null); // { pattern, results: [] }
@@ -1365,6 +1366,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         height: Number(ffConfig.height),
         focus_x: Number(ffConfig.focus_x),
         focus_y: Number(ffConfig.focus_y),
+        pan_direction: ffConfig.pan_direction,
       };
       const res = await fetch(`${API_BASE}/batch-video/ffmpeg/stills`, {
         method: "POST",
@@ -1845,9 +1847,32 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         <Typography variant="caption" color="text.secondary">
                           {ffConfig.pattern === "static" && "Holds the image still — pixel-perfect, no movement."}
                           {ffConfig.pattern === "ken_burns_zoom" && "Slow camera push-in (zoom)."}
-                          {ffConfig.pattern === "ken_burns_pan" && "Slow left-to-right camera pan."}
+                          {ffConfig.pattern === "ken_burns_pan" && "Slow camera pan."}
                         </Typography>
                       </Box>
+
+                      {/* Pan direction — only for the Pan pattern */}
+                      {ffConfig.pattern === "ken_burns_pan" && (
+                        <Box>
+                          <Typography variant="caption" fontWeight="bold" color="text.secondary">
+                            Pan direction
+                          </Typography>
+                          <Box sx={{ mt: 0.5 }}>
+                            <ChoiceChips
+                              ariaLabel="FFmpeg pan direction"
+                              value={ffConfig.pan_direction}
+                              onChange={(v) => setFfConfig((c) => ({ ...c, pan_direction: v }))}
+                              options={[
+                                { value: "left-to-right", label: "Left → Right" },
+                                { value: "right-to-left", label: "Right → Left" },
+                                { value: "top-to-bottom", label: "Top → Bottom" },
+                                { value: "bottom-to-top", label: "Bottom → Top" },
+                                { value: "random", label: "Random" },
+                              ]}
+                            />
+                          </Box>
+                        </Box>
+                      )}
 
                       <Box>
                         <Typography variant="caption" fontWeight="bold" color="text.secondary">
@@ -1980,6 +2005,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   )}
                 </Box>
               )}
+              {inputMode !== "ffmpeg" && (
+                <>
               <TextField
                 label="Look & Feel"
                 multiline
@@ -2045,8 +2072,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   InputProps={{ readOnly: true }}
                 />
               )}
+                </>
+              )}
             </SettingsPanel>
 
+            {inputMode !== "ffmpeg" && (
             <SettingsPanel
               id="videogen-pipeline"
               title="Pipeline"
@@ -2144,7 +2174,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   : "LoRA + prompt invent each keyframe still, then animate."}
               </Hint>
             </SettingsPanel>
+            )}
 
+            {inputMode !== "ffmpeg" && (
             <SettingsPanel id="videogen-clip" title="Clip">
               <Cluster label="Model">
                 <Line nowrap>
@@ -2299,6 +2331,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 />
               </Cluster>
             </SettingsPanel>
+            )}
 
             <SettingsPanel id="videogen-finish" title="Finish">
               <Line>
@@ -2497,6 +2530,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   />
                 </Line>
               </Cluster>
+              {inputMode !== "ffmpeg" && (
+                <>
               <VideoGenEffectiveSettings
                 model={model}
                 computedParams={computedParams}
@@ -2509,6 +2544,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 freeu={advancedParams.freeu}
               />
               <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+                </>
+              )}
               <ActionButton
                 kind={canQueue ? "primary" : "neutral"}
                 onClick={handleGenerate}

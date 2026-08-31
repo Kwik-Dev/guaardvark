@@ -19,10 +19,17 @@ rather than regenerating it.
 
 ## Focus point
 
-For **Zoom** (and the vertical axis of **Pan**), you can pick the **focus point** the
-camera stays centered on while zooming — a `0.0–1.0` fraction of the image. Default is
+For **Zoom** (and the fixed axis of **Pan**), you can pick the **focus point** the
+camera keeps centered on while zooming — a `0.0–1.0` fraction of the image. Default is
 `0.5, 0.5` (**center**). e.g. `focus-x 0.7, focus-y 0.3` keeps the zoom centered on the
 upper-right of the frame.
+
+## Pan directions
+
+The **Pan** pattern can travel in any direction:
+- `left-to-right` (default), `right-to-left`, `top-to-bottom`, `bottom-to-top`.
+- `random` — picks a **different** direction per image, for variety across a batch.
+- Set with `pan_direction` (API / UI / `--pan-direction` in the CLI).
 
 ## Where to use it
 
