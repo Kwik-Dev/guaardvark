@@ -471,6 +471,20 @@ const VideoEditorPage = () => {
     clearPlanResult();
   }, [commitTimeline, clearPlanResult]);
 
+  // Move a bin clip up/down one slot (arrow-button reorder — deterministic,
+  // unlike HTML5 drag which react-grid-layout can swallow).
+  const handleBinMove = useCallback((clipId, dir) => {
+    commitTimeline((prev) => {
+      const idx = prev.bin.findIndex((c) => c.clipId === clipId);
+      const to = idx + dir;
+      if (idx === -1 || to < 0 || to >= prev.bin.length) return prev;
+      const next = [...prev.bin];
+      [next[idx], next[to]] = [next[to], next[idx]];
+      return { ...prev, bin: next };
+    });
+    clearPlanResult();
+  }, [commitTimeline, clearPlanResult]);
+
   // Master soundtrack = the one audio bin clip flagged isMasterSong. Toggling
   // one on clears the others (single-flag invariant); Plan reads the flagged clip.
   const handleSetMasterSong = useCallback((clipId, on) => {
@@ -922,6 +936,7 @@ const VideoEditorPage = () => {
             onAddMany={handleBinAddMany}
             onRemove={handleBinRemove}
             onReorder={handleBinReorder}
+            onMove={handleBinMove}
             warningsByClipId={warningsByClipId}
             planDecorationsByClipId={planDecorationsByClipId}
           />
