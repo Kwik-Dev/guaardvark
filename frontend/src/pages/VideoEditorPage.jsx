@@ -454,6 +454,23 @@ const VideoEditorPage = () => {
     clearPlanResult();
   }, [commitTimeline, clearPlanResult]);
 
+  // Drag-to-reorder a bin clip: move `fromClipId` into the slot occupied by
+  // `toClipId` (dropped on its tile).
+  const handleBinReorder = useCallback((fromClipId, toClipId) => {
+    commitTimeline((prev) => {
+      if (fromClipId === toClipId) return prev;
+      const fromIdx = prev.bin.findIndex((c) => c.clipId === fromClipId);
+      const toIdx = prev.bin.findIndex((c) => c.clipId === toClipId);
+      if (fromIdx === -1 || toIdx === -1) return prev;
+      const next = [...prev.bin];
+      const [moved] = next.splice(fromIdx, 1);
+      // After removal, insert into the target's now-current slot.
+      next.splice(toIdx, 0, moved);
+      return { ...prev, bin: next };
+    });
+    clearPlanResult();
+  }, [commitTimeline, clearPlanResult]);
+
   // Master soundtrack = the one audio bin clip flagged isMasterSong. Toggling
   // one on clears the others (single-flag invariant); Plan reads the flagged clip.
   const handleSetMasterSong = useCallback((clipId, on) => {
@@ -904,6 +921,7 @@ const VideoEditorPage = () => {
             onAdd={handleBinAdd}
             onAddMany={handleBinAddMany}
             onRemove={handleBinRemove}
+            onReorder={handleBinReorder}
             warningsByClipId={warningsByClipId}
             planDecorationsByClipId={planDecorationsByClipId}
           />
