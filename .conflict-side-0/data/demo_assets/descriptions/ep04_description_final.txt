@@ -1,0 +1,23 @@
+The hardest thing we ever built is a mouse. This agent has its own desktop, its own eyes, its own hands — and when its eye isn't good enough yet, it refuses to pretend otherwise.
+
+Episode 4 is the only vision-driven episode in the series: a screen agent on its own virtual desktop, the SEE-THINK-ACT-VERIFY loop live and unedited, teach-by-demonstration in the Interactive Trainer, a guided replay where the agent asks permission before every step, and the series' central honesty beat — we run the agent's eye against ground truth and publish the mean miss distance, from this very machine, the night this was filmed.
+
+One machine. No cloud. This is Episode 4 of 12.
+
+Chapters
+0:00 The glass — its own desktop, eyes, hands
+0:18 /agent mode
+0:27 SEE → THINK → ACT → VERIFY, live (no reporting intent as reality)
+1:51 Teach by demonstration — the Interactive Trainer
+3:00 The guided attempt — permission before every step
+4:39 Eye bake-off — we publish our own miss distance
+4:56 Closer — next, it makes pictures and movies
+
+FEATURED IN THIS EPISODE
+▸ Ep 6: Hollywood on One GPU — Video Gen — https://youtu.be/9wwjwxlSFKQ
+
+Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
+
+Source & docs: https://github.com/guaardvark/guaardvark
+
+#Guaardvark #localAI #selfhostedAI #opensourceAI #offlineAI #AIvideogeneration #onemachinenocloud #screenagent #computeruseagent #AIscreenautomation #visionagent

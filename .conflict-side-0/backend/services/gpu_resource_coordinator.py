@@ -1,0 +1,910 @@
+"""
+GPU Resource Coordinator - Mutual Exclusion for GPU-intensive services.
+
+Manages exclusive access to GPU resources between:
+- Ollama (LLM/RAG operations)
+- CogVideoX (Video generation)
+
+Uses file-based locking with PID tracking for crash recovery.
+"""
+
+import logging
+import os
+import platform
+from contextlib import contextmanager
+import json
+import time
+import subprocess
+import threading
+import requests
+from pathlib import Path
+from dataclasses import dataclass, asdict, field
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+
+class GPUOwner(Enum):
+    """Who currently owns the GPU resource."""
+    NONE = "none"
+    OLLAMA = "ollama"
+    VIDEO_GENERATION = "video_generation"
+
+
+@dataclass
+class GPULockInfo:
+    """Information about the current GPU lock."""
+    owner: str
+    acquired_at: str
+    pid: int
+    lease_expires_at: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class GPUResourceCoordinator:
+    """
+    Singleton coordinator for GPU resource mutual exclusion.
+
+    Ensures only one GPU-intensive service runs at a time:
+    - Ollama for LLM/RAG
+    - CogVideoX for video generation
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    # Default lease duration for video generation (prevents indefinite lock)
+    DEFAULT_LEASE_SECONDS = 3600  # 1 hour max
+
+    # Ollama management
+    OLLAMA_SERVICE_NAME = "ollama"
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+
+        self._internal_lock = threading.RLock()
+        self._initialized = True
+
+        # Set lock file location relative to project root
+        project_root = Path(__file__).parent.parent.parent
+        self.LOCK_FILE = project_root / "pids" / "gpu_lock.json"
+
+        # Ensure pids directory exists
+        self.LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        # Cleanup stale locks on startup
+        self._cleanup_stale_lock()
+
+        logger.info("GPU Resource Coordinator initialized")
+
+    def _cleanup_stale_lock(self):
+        """Remove lock if owning process is dead or lease expired."""
+        if not self.LOCK_FILE.exists():
+            return
+
+        try:
+            with open(self.LOCK_FILE, 'r') as f:
+                lock_data = json.load(f)
+
+            pid = lock_data.get('pid')
+            lease_expires = lock_data.get('lease_expires_at')
+
+            # Check if process is dead
+            if pid and not self._is_process_alive(pid):
+                logger.warning(f"Removing stale GPU lock from dead process {pid}")
+                self._release_lock_file()
+                return
+
+            # Check if lease expired
+            if lease_expires:
+                expires_dt = datetime.fromisoformat(lease_expires)
+                if datetime.now() > expires_dt:
+                    logger.warning("Removing expired GPU lock lease")
+                    self._release_lock_file()
+                    return
+
+        except Exception as e:
+            logger.error(f"Error cleaning up stale lock: {e}")
+            # If lock file is corrupted, remove it
+            self._release_lock_file()
+
+    def _is_process_alive(self, pid: int) -> bool:
+        """Check if a process with given PID is still running."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
+    def _read_lock_file(self) -> Optional[GPULockInfo]:
+        """Read current lock state from file."""
+        if not self.LOCK_FILE.exists():
+            return None
+
+        try:
+            with open(self.LOCK_FILE, 'r') as f:
+                data = json.load(f)
+            return GPULockInfo(**data)
+        except Exception as e:
+            logger.error(f"Error reading GPU lock file: {e}")
+            return None
+
+    def _write_lock_file(self, lock_info: GPULockInfo):
+        """Write lock state to file atomically."""
+        temp_file = self.LOCK_FILE.with_suffix('.tmp')
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(lock_info.to_dict(), f, indent=2)
+            temp_file.rename(self.LOCK_FILE)
+        except Exception as e:
+            logger.error(f"Error writing GPU lock file: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
+            raise
+
+    def _release_lock_file(self):
+        """Remove lock file."""
+        try:
+            if self.LOCK_FILE.exists():
+                self.LOCK_FILE.unlink()
+        except Exception as e:
+            logger.error(f"Error removing GPU lock file: {e}")
+
+    def get_gpu_status(self) -> Dict[str, Any]:
+        """Get current GPU resource status."""
+        with self._internal_lock:
+            lock_info = self._read_lock_file()
+
+            if lock_info is None:
+                return {
+                    "owner": GPUOwner.NONE.value,
+                    "available": True,
+                    "ollama_running": self._is_ollama_running(),
+                    "lock_info": None
+                }
+
+            # Check if lock is still valid
+            if lock_info.lease_expires_at:
+                expires = datetime.fromisoformat(lock_info.lease_expires_at)
+                if datetime.now() > expires:
+                    self._release_lock_file()
+                    return {
+                        "owner": GPUOwner.NONE.value,
+                        "available": True,
+                        "ollama_running": self._is_ollama_running(),
+                        "lock_info": None,
+                        "note": "Previous lock expired"
+                    }
+
+            return {
+                "owner": lock_info.owner,
+                "available": False,
+                "ollama_running": self._is_ollama_running(),
+                "lock_info": lock_info.to_dict()
+            }
+
+    def _is_ollama_running(self) -> bool:
+        """Check if Ollama service is running."""
+        try:
+            # Check systemctl user service first
+            result = subprocess.run(
+                ["systemctl", "--user", "is-active", self.OLLAMA_SERVICE_NAME],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return True
+
+            # Check system service
+            result = subprocess.run(
+                ["systemctl", "is-active", self.OLLAMA_SERVICE_NAME],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return True
+
+            # Check for ollama process directly
+            result = subprocess.run(
+                ["pgrep", "-x", "ollama"],
+                capture_output=True, timeout=5
+            )
+            return result.returncode == 0
+
+        except Exception as e:
+            logger.warning(f"Error checking Ollama status: {e}")
+            return False
+
+    def _notify_vision_pipeline(self, action: str, source: str):
+        """Best-effort notification to vision pipeline plugin. Fire and forget."""
+        try:
+            requests.post(
+                "http://localhost:8201/gpu/contention",
+                json={"source": source, "action": action},
+                timeout=1
+            )
+        except Exception:
+            pass  # Plugin not running — that's fine
+
+    def _stop_ollama(self) -> bool:
+        """Stop Ollama service to free GPU memory."""
+        logger.info("Stopping Ollama service for video generation...")
+
+        try:
+            # Try passwordless sudo first (Ollama is a system service under /etc/systemd/system/)
+            result = subprocess.run(
+                ["sudo", "-n", "systemctl", "stop", self.OLLAMA_SERVICE_NAME],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                logger.info("Ollama system service stopped via sudo -n")
+                time.sleep(2)  # Give time for GPU memory to be released
+                return True
+
+            # Try user-level service (unlikely but possible)
+            result = subprocess.run(
+                ["systemctl", "--user", "stop", self.OLLAMA_SERVICE_NAME],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                logger.info("Ollama user service stopped successfully")
+                time.sleep(2)
+                return True
+
+            # Try killing ollama process directly
+            result = subprocess.run(
+                ["pkill", "-x", "ollama"],
+                capture_output=True, timeout=10
+            )
+            if result.returncode == 0:
+                logger.info("Ollama process killed successfully")
+                time.sleep(2)
+                return True
+
+            # Check if it's even running
+            if not self._is_ollama_running():
+                logger.info("Ollama was not running")
+                return True
+
+            logger.warning("Could not stop Ollama service")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error stopping Ollama: {e}")
+            return False
+
+    def _start_ollama(self) -> bool:
+        """Start Ollama service."""
+        logger.info("Starting Ollama service...")
+
+        try:
+            # Try passwordless sudo first (Ollama is a system service under /etc/systemd/system/)
+            result = subprocess.run(
+                ["sudo", "-n", "systemctl", "start", self.OLLAMA_SERVICE_NAME],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                logger.info("Ollama system service started via sudo -n")
+                time.sleep(3)  # Give time for Ollama to initialize
+                return True
+
+            # Try user-level service
+            result = subprocess.run(
+                ["systemctl", "--user", "start", self.OLLAMA_SERVICE_NAME],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                logger.info("Ollama user service started successfully")
+                time.sleep(3)
+                return True
+
+            # Try starting ollama serve directly
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            time.sleep(3)
+
+            if self._is_ollama_running():
+                logger.info("Ollama started via direct command")
+                return True
+
+            logger.warning("Could not start Ollama service")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error starting Ollama: {e}")
+            return False
+
+    def acquire_for_video_generation(
+        self,
+        batch_id: str = None,
+        lease_seconds: int = None,
+        require_ollama_stopped: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Acquire GPU lock for video generation.
+
+        This will:
+        1. Check if GPU is already locked
+        2. Check if Ollama is running (and fail if require_ollama_stopped is True)
+        3. Acquire the lock
+
+        Note: Ollama is NOT automatically stopped anymore. User must manually stop it
+        via the UI toggle before starting video generation.
+
+        Returns dict with success status and any relevant info.
+        """
+        with self._internal_lock:
+            lease_seconds = lease_seconds or self.DEFAULT_LEASE_SECONDS
+
+            # Check current lock status
+            current_lock = self._read_lock_file()
+
+            if current_lock is not None:
+                # Check if lock holder is still alive
+                if not self._is_process_alive(current_lock.pid):
+                    logger.warning(f"Stale lock detected from PID {current_lock.pid}, cleaning up")
+                    self._release_lock_file()
+                    current_lock = None
+                # Check if lease expired
+                elif current_lock.lease_expires_at:
+                    expires = datetime.fromisoformat(current_lock.lease_expires_at)
+                    if datetime.now() > expires:
+                        logger.warning("Previous lock lease expired, cleaning up")
+                        self._release_lock_file()
+                        current_lock = None
+
+            if current_lock is not None:
+                return {
+                    "success": False,
+                    "error": f"GPU already locked by {current_lock.owner}",
+                    "lock_info": current_lock.to_dict()
+                }
+
+            # Auto-stop Ollama if running — GPU is shared, can't run both
+            ollama_was_running = self._is_ollama_running()
+            if ollama_was_running:
+                logger.info("Ollama is running — auto-stopping for video generation...")
+                self._stop_ollama()
+
+            # Acquire lock
+            now = datetime.now()
+            expires = now + timedelta(seconds=lease_seconds)
+
+            lock_info = GPULockInfo(
+                owner=GPUOwner.VIDEO_GENERATION.value,
+                acquired_at=now.isoformat(),
+                pid=os.getpid(),
+                lease_expires_at=expires.isoformat(),
+                metadata={
+                    "batch_id": batch_id,
+                    "ollama_was_running": ollama_was_running,
+                }
+            )
+
+            self._write_lock_file(lock_info)
+
+            logger.info(f"GPU lock acquired for video generation (batch: {batch_id})")
+            self._notify_vision_pipeline("start", "video_gen")
+
+            return {
+                "success": True,
+                "lock_info": lock_info.to_dict(),
+                "ollama_stopped": False
+            }
+
+    def release_video_generation_lock(self, restart_ollama: bool = False) -> Dict[str, Any]:
+        """
+        Release GPU lock after video generation completes.
+
+        Note: Ollama is NOT automatically restarted anymore. User must manually start it
+        via the UI if needed.
+
+        Args:
+            restart_ollama: Ignored for now (kept for API compatibility)
+        """
+        with self._internal_lock:
+            current_lock = self._read_lock_file()
+
+            if current_lock is None:
+                return {
+                    "success": True,
+                    "message": "No lock to release"
+                }
+
+            if current_lock.owner != GPUOwner.VIDEO_GENERATION.value:
+                return {
+                    "success": False,
+                    "error": f"Cannot release lock owned by {current_lock.owner}"
+                }
+
+            # Check if we're the owner (allow release if original process is dead)
+            if current_lock.pid != os.getpid():
+                logger.warning(f"Lock PID mismatch: {current_lock.pid} vs {os.getpid()}")
+                if self._is_process_alive(current_lock.pid):
+                    return {
+                        "success": False,
+                        "error": "Lock owned by different process"
+                    }
+
+            # Release the lock
+            self._release_lock_file()
+            logger.info("GPU lock released from video generation")
+            self._notify_vision_pipeline("stop", "video_gen")
+
+            # Notify GPU orchestrator so it can re-sync and preload models
+            try:
+                from backend.services.gpu_memory_orchestrator import get_orchestrator
+                get_orchestrator().on_exclusive_lock_released()
+            except Exception:
+                pass
+
+            # Don't restart Ollama automatically - user controls it via UI
+            return {
+                "success": True,
+                "ollama_restarted": False
+            }
+
+    # --- Generic cross-process GPU lease -------------------------------------
+    # Used by gpu_session() so ANY heavy GPU op (chat image gen / edit / infographic /
+    # music-video) arbitrates cross-process against video generation on the SAME single-
+    # holder lock file. Interoperates with acquire_for_video_generation: each acquire
+    # refuses if *anything* already holds the lock, so a generic op and a video render
+    # mutually exclude. Unlike acquire_for_video_generation this does NOT stop the Ollama
+    # service (gpu_session evicts models via keep_alive=0 and lets them lazily reload) and
+    # does not touch the vision pipeline. Non-blocking: returns success=False if held.
+    GENERIC_LEASE_SECONDS = 900  # 15 min — ample for any single image/edit/render
+
+    @contextmanager
+    def _cross_process_critical_section(self):
+        """Serialize read-check-write of the lock file across processes.
+
+        The JSON lock file alone is racy: two processes can both read "free"
+        and both write. An advisory flock on a sidecar file closes that window;
+        platforms without fcntl fall back to the in-process lock only.
+        """
+        try:
+            import fcntl
+        except ImportError:
+            yield
+            return
+        flock_path = self.LOCK_FILE.with_suffix(".flock")
+        with open(flock_path, "a+") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def renew_generic(self, label: str, lease_seconds: int = None) -> bool:
+        """Extend the lease of a lock this process holds under ``label``."""
+        lease_seconds = lease_seconds or self.GENERIC_LEASE_SECONDS
+        with self._internal_lock, self._cross_process_critical_section():
+            current_lock = self._read_lock_file()
+            if current_lock is None or current_lock.owner != label or current_lock.pid != os.getpid():
+                return False
+            current_lock.lease_expires_at = (datetime.now() + timedelta(seconds=lease_seconds)).isoformat()
+            self._write_lock_file(current_lock)
+            return True
+
+    def acquire_generic(self, label: str, lease_seconds: int = None) -> Dict[str, Any]:
+        """Acquire the cross-process GPU lock for a generic heavy op (non-blocking)."""
+        with self._internal_lock, self._cross_process_critical_section():
+            lease_seconds = lease_seconds or self.GENERIC_LEASE_SECONDS
+            current_lock = self._read_lock_file()
+            if current_lock is not None:
+                # Stale-PID / expired-lease cleanup (mirror acquire_for_video_generation).
+                if not self._is_process_alive(current_lock.pid):
+                    logger.warning(f"Stale GPU lock from dead PID {current_lock.pid}, cleaning up")
+                    self._release_lock_file()
+                    current_lock = None
+                elif current_lock.lease_expires_at:
+                    expires = datetime.fromisoformat(current_lock.lease_expires_at)
+                    if datetime.now() > expires:
+                        logger.warning("Previous GPU lock lease expired, cleaning up")
+                        self._release_lock_file()
+                        current_lock = None
+            if current_lock is not None:
+                return {
+                    "success": False,
+                    "error": f"GPU already locked by {current_lock.owner}",
+                    "lock_info": current_lock.to_dict(),
+                }
+            now = datetime.now()
+            lock_info = GPULockInfo(
+                owner=label,
+                acquired_at=now.isoformat(),
+                pid=os.getpid(),
+                lease_expires_at=(now + timedelta(seconds=lease_seconds)).isoformat(),
+                metadata={"kind": "generic"},
+            )
+            self._write_lock_file(lock_info)
+            logger.info(f"GPU lock acquired (generic: {label})")
+            return {"success": True, "lock_info": lock_info.to_dict()}
+
+    def release_generic(self, label: str) -> Dict[str, Any]:
+        """Release a generic GPU lock previously acquired by THIS process under `label`."""
+        with self._internal_lock, self._cross_process_critical_section():
+            current_lock = self._read_lock_file()
+            if current_lock is None:
+                return {"success": True, "message": "No lock to release"}
+            if current_lock.owner != label:
+                # Not ours (e.g. a video lock, or a different op) — never release it.
+                return {"success": False, "error": f"Lock owned by {current_lock.owner}, not {label}"}
+            if current_lock.pid != os.getpid() and self._is_process_alive(current_lock.pid):
+                return {"success": False, "error": "Lock owned by a different live process"}
+            self._release_lock_file()
+            logger.info(f"GPU lock released (generic: {label})")
+            return {"success": True}
+
+    # Class-level cache: once we confirm there's no NVIDIA hardware on this host,
+    # stop retrying on every poll. Saves ~120 ERROR lines per hour in backend.log
+    # on CPU-only machines. Reset on process restart — if a GPU is hot-plugged or
+    # drivers are installed, the next boot picks it up.
+    _no_gpu_detected = False
+
+    def get_available_vram(self) -> Dict[str, Any]:
+        """
+        Get available VRAM. Probes Apple MPS first on macOS, then NVIDIA.
+
+        Returns dict with:
+            - available_mb: Available VRAM in MB
+            - total_mb: Total VRAM in MB
+            - used_mb: Used VRAM in MB
+            - gpu_name: GPU device name
+            - success: Whether query succeeded
+        """
+        # Apple Silicon: MPS is the only accelerator. Probe it first so the
+        # NVIDIA machinery (pynvml import + nvidia-smi exec) never runs on a
+        # Mac and the sticky `_no_gpu_detected` flag is never touched.
+        if platform.system() == "Darwin":
+            mps_result = self._get_vram_via_mps()
+            if mps_result:
+                return mps_result
+            # Intel Mac (no MPS) — fall through to the NVIDIA path below.
+
+        # Fast path for CPU-only hosts — skip the probe entirely once we know.
+        if GPUResourceCoordinator._no_gpu_detected:
+            return {
+                "success": False,
+                "available_mb": 0,
+                "total_mb": 0,
+                "used_mb": 0,
+                "reason": "no_gpu_hardware",
+            }
+
+        # 1) NVIDIA probe (existing)
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            name = pynvml.nvmlDeviceGetName(handle)
+
+            # Convert bytes to MB
+            total_mb = info.total // (1024 * 1024)
+            used_mb = info.used // (1024 * 1024)
+            available_mb = info.free // (1024 * 1024)
+
+            pynvml.nvmlShutdown()
+
+            return {
+                "success": True,
+                "available_mb": available_mb,
+                "total_mb": total_mb,
+                "used_mb": used_mb,
+                "gpu_name": name if isinstance(name, str) else name.decode('utf-8'),
+                "utilization_percent": round((used_mb / total_mb) * 100, 1)
+            }
+
+        except ImportError:
+            if not getattr(GPUResourceCoordinator, '_pynvml_warned', False):
+                logger.warning("pynvml not installed, falling back to nvidia-smi")
+                GPUResourceCoordinator._pynvml_warned = True
+            nv_result = self._get_vram_via_nvidia_smi()
+            if nv_result.get("success"):
+                return nv_result
+            mps_result = self._get_vram_via_mps()
+            if mps_result:
+                # MPS is a real accelerator — clear the sticky no-GPU flag so
+                # later calls don't short-circuit before the MPS probe runs.
+                GPUResourceCoordinator._no_gpu_detected = False
+                return mps_result
+            return nv_result
+        except Exception as e:
+            if not getattr(GPUResourceCoordinator, '_pynvml_error_logged', False):
+                logger.warning(f"pynvml probe failed ({e}), trying nvidia-smi fallback")
+                GPUResourceCoordinator._pynvml_error_logged = True
+            nv_result = self._get_vram_via_nvidia_smi()
+            if nv_result.get("success"):
+                return nv_result
+            mps_result = self._get_vram_via_mps()
+            if mps_result:
+                GPUResourceCoordinator._no_gpu_detected = False
+                return mps_result
+            return nv_result
+
+    def _get_vram_via_mps(self) -> Optional[Dict[str, Any]]:
+        """Apple Silicon MPS fallback: report a share of unified memory as GPU budget.
+
+        MPS has no separate VRAM, so we report total system RAM and a heuristic
+        "available" budget. This lets the preflight gate pass on Apple Silicon
+        while still guarding against genuinely CPU-only hosts.
+        """
+        try:
+            import platform
+            if platform.system() != "Darwin" or platform.machine() != "arm64":
+                return None
+
+            import torch
+            if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+                return None
+
+            import subprocess
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            total_bytes = int(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip().isdigit() else 0
+            if total_bytes <= 0:
+                return None
+
+            total_mb = total_bytes // (1024 * 1024)
+            # Heuristic: leave 8 GB for the OS / other apps; rest is GPU-addressable.
+            reserved_mb = 8 * 1024
+            available_mb = max(1024, total_mb - reserved_mb)
+
+            return {
+                "success": True,
+                "available_mb": available_mb,
+                "total_mb": total_mb,
+                "used_mb": 0,
+                "gpu_name": "Apple Silicon MPS",
+                "utilization_percent": 0.0,
+                "accel": "mps",
+            }
+        except Exception as e:
+            logger.debug(f"MPS VRAM probe failed: {e}")
+            return None
+
+    def _get_vram_via_nvidia_smi(self) -> Dict[str, Any]:
+        """Fallback VRAM query using nvidia-smi command."""
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free,memory.total,memory.used,name",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode != 0:
+                return {
+                    "success": False,
+                    "error": "nvidia-smi command failed",
+                    "available_mb": 0
+                }
+
+            parts = result.stdout.strip().split(", ")
+            if len(parts) >= 4:
+                available_mb = int(parts[0])
+                total_mb = int(parts[1])
+                used_mb = int(parts[2])
+                gpu_name = parts[3]
+
+                return {
+                    "success": True,
+                    "available_mb": available_mb,
+                    "total_mb": total_mb,
+                    "used_mb": used_mb,
+                    "gpu_name": gpu_name,
+                    "utilization_percent": round((used_mb / total_mb) * 100, 1)
+                }
+
+            return {
+                "success": False,
+                "error": "Could not parse nvidia-smi output",
+                "available_mb": 0
+            }
+
+        except FileNotFoundError:
+            # No nvidia-smi binary AND pynvml failed earlier → no NVIDIA stack
+            # present on this host. Flip the class-level flag so future calls
+            # short-circuit without spamming ERROR lines.
+            if not GPUResourceCoordinator._no_gpu_detected:
+                logger.info(
+                    "No NVIDIA hardware detected on this host "
+                    "(pynvml unavailable, nvidia-smi not installed). "
+                    "Skipping future VRAM probes until restart."
+                )
+                GPUResourceCoordinator._no_gpu_detected = True
+            return {
+                "success": False,
+                "available_mb": 0,
+                "reason": "no_gpu_hardware",
+            }
+        except Exception as e:
+            if not getattr(GPUResourceCoordinator, '_nvidia_smi_error_logged', False):
+                logger.warning(f"nvidia-smi probe failed once ({e}); will not repeat this warning")
+                GPUResourceCoordinator._nvidia_smi_error_logged = True
+            return {
+                "success": False,
+                "error": str(e),
+                "available_mb": 0
+            }
+
+    def unload_ollama_models(self, ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
+        """
+        Unload all models from Ollama to free GPU memory.
+
+        Uses Ollama API to set keep_alive=0 for each loaded model,
+        which causes Ollama to immediately unload them from GPU.
+
+        Returns dict with:
+            - success: Whether unload succeeded
+            - models_unloaded: List of models that were unloaded
+            - vram_freed_mb: Approximate VRAM freed (if available)
+        """
+        models_unloaded = []
+        initial_vram = self.get_available_vram()
+
+        try:
+            # Get list of currently loaded models
+            response = requests.get(f"{ollama_url}/api/ps", timeout=10)
+
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"Failed to get Ollama status: HTTP {response.status_code}",
+                    "models_unloaded": []
+                }
+
+            data = response.json()
+            models = data.get("models", [])
+
+            if not models:
+                logger.info("No Ollama models currently loaded")
+                return {
+                    "success": True,
+                    "models_unloaded": [],
+                    "message": "No models were loaded"
+                }
+
+            # Unload each model by sending a minimal request with keep_alive=0
+            for model_info in models:
+                model_name = model_info.get("name", model_info.get("model", "unknown"))
+
+                try:
+                    # Send a generate request with keep_alive=0 to unload.
+                    # Use num_ctx=1 to prevent large KV cache allocation during unload.
+                    unload_response = requests.post(
+                        f"{ollama_url}/api/generate",
+                        json={
+                            "model": model_name,
+                            "prompt": "",
+                            "keep_alive": 0,  # Immediately unload after response
+                            "options": {"num_ctx": 1}
+                        },
+                        timeout=30
+                    )
+
+                    if unload_response.status_code == 200:
+                        models_unloaded.append(model_name)
+                        logger.info(f"Unloaded Ollama model: {model_name}")
+                    else:
+                        logger.warning(f"Failed to unload {model_name}: HTTP {unload_response.status_code}")
+
+                except Exception as e:
+                    logger.warning(f"Error unloading model {model_name}: {e}")
+
+            # Give GPU time to free memory
+            time.sleep(2)
+
+            # Check how much VRAM was freed
+            final_vram = self.get_available_vram()
+            vram_freed = 0
+            if initial_vram.get("success") and final_vram.get("success"):
+                vram_freed = final_vram["available_mb"] - initial_vram["available_mb"]
+
+            return {
+                "success": True,
+                "models_unloaded": models_unloaded,
+                "vram_freed_mb": max(0, vram_freed),
+                "vram_available_mb": final_vram.get("available_mb", 0)
+            }
+
+        except requests.exceptions.ConnectionError:
+            logger.info("Ollama not running, no models to unload")
+            return {
+                "success": True,
+                "models_unloaded": [],
+                "message": "Ollama is not running"
+            }
+        except Exception as e:
+            logger.error(f"Error unloading Ollama models: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "models_unloaded": models_unloaded
+            }
+
+    def force_release_lock(self, restart_ollama: bool = False) -> Dict[str, Any]:
+        """
+        Force release GPU lock (admin operation).
+
+        Use with caution - may interrupt running operations.
+        """
+        with self._internal_lock:
+            current_lock = self._read_lock_file()
+
+            if current_lock is None:
+                return {
+                    "success": True,
+                    "message": "No lock to release"
+                }
+
+            owner = current_lock.owner
+            self._release_lock_file()
+            logger.warning(f"GPU lock force-released (was held by {owner})")
+
+            ollama_restarted = False
+            if restart_ollama:
+                ollama_restarted = self._start_ollama()
+
+            return {
+                "success": True,
+                "previous_owner": owner,
+                "ollama_restarted": ollama_restarted
+            }
+
+
+# Global singleton accessor
+_gpu_coordinator: Optional[GPUResourceCoordinator] = None
+
+
+def get_gpu_coordinator() -> GPUResourceCoordinator:
+    """Get the global GPU resource coordinator instance."""
+    global _gpu_coordinator
+    if _gpu_coordinator is None:
+        _gpu_coordinator = GPUResourceCoordinator()
+    return _gpu_coordinator
+
+
+# Convenience functions for direct access
+def get_available_vram() -> Dict[str, Any]:
+    """Get available VRAM. Convenience wrapper for get_gpu_coordinator().get_available_vram()"""
+    return get_gpu_coordinator().get_available_vram()
+
+
+def has_gpu() -> bool:
+    """Canonical GPU-presence check for the whole backend.
+
+    nvidia-smi/pynvml based (via the coordinator) — deliberately NOT torch.cuda, because
+    `CUDA_VISIBLE_DEVICES` is set at import time in indexing_service / llama_index_local_config,
+    which makes torch's view unreliable. Cheap after the first call (the coordinator caches the
+    no-GPU verdict). Returns False on any probe failure (conservative: callers treat "unknown"
+    as no-GPU and keep models resident rather than churn).
+    """
+    try:
+        return bool(get_gpu_coordinator().get_available_vram().get("success"))
+    except Exception:
+        return False
+
+
+def unload_ollama_models(ollama_url: str = "http://127.0.0.1:11434") -> Dict[str, Any]:
+    """Unload Ollama models. Convenience wrapper for get_gpu_coordinator().unload_ollama_models()"""
+    return get_gpu_coordinator().unload_ollama_models(ollama_url)

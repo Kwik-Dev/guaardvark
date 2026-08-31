@@ -1,0 +1,2613 @@
+
+
+import importlib
+import os
+import shutil
+import subprocess
+import sys
+import time
+from typing import Optional
+
+# Prevent dual-import when running as `python -m backend.app`.
+# Python sets __name__ = '__main__' but doesn't add 'backend.app' to sys.modules,
+# so any `from backend.app import X` would re-import the module, creating a second
+# Flask app and corrupting shared state (socketio, db._app_engines WeakKeyDict, etc).
+if __name__ == "__main__" and "backend.app" not in sys.modules:
+    sys.modules["backend.app"] = sys.modules["__main__"]
+
+# Under memory pressure the kernel must kill THIS process, never the desktop
+# (2026-08-04 client box lockups). Early, before any heavy allocation.
+try:
+    from backend.oom_priority import apply_oom_score_adj
+    apply_oom_score_adj()
+except Exception:
+    pass
+
+import redis
+from celery import Celery
+from flask import Flask, jsonify, request, redirect
+from flask_executor import Executor
+from flask_socketio import SocketIO
+
+try:
+    from flask_cors import CORS
+except Exception:
+
+    def CORS(*_args, **_kwargs):
+        return None
+
+
+from flask_sqlalchemy import SQLAlchemy
+
+try:
+    from flask_migrate import Migrate
+except Exception:
+
+    class Migrate:
+        def __init__(self, *a, **k):
+            pass
+
+
+import json
+import logging
+import warnings
+from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
+
+# ── Silence known-cosmetic dev-only log noise ─────────────────────────────
+# These run at module import so they're in place before any request fires.
+#
+#  1. pydub SyntaxWarnings — invalid escape sequences in the library's own
+#     regex patterns. They're the library's problem, not ours; silence the
+#     noise so voice processing doesn't emit 4 warnings per first-use.
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"pydub\..*")
+
+#  2. Werkzeug "write() before start_response" AssertionError — dev-server-
+#     only artifact (gunicorn doesn't have this check). Happens when a WSGI
+#     handler finalizes without calling start_response — usually streaming
+#     generators that error before yield. Fires as ERROR via the werkzeug
+#     logger with exc_info. Downgrade to DEBUG so it stays diagnosable
+#     without spamming the main log.
+class _SilenceWriteBeforeStartResponse(logging.Filter):
+    def filter(self, record):
+        try:
+            if record.exc_info and record.exc_info[1]:
+                if "write() before start_response" in str(record.exc_info[1]):
+                    # Still capture a one-line trace under a dedicated logger
+                    # so we can re-enable it for deeper debugging later.
+                    logging.getLogger("guaardvark.dev_noise").debug(
+                        "Suppressed werkzeug write() before start_response on %s",
+                        getattr(record, "args", None) or "<unknown request>",
+                    )
+                    return False  # suppress the ERROR-level werkzeug emission
+        except Exception:
+            pass
+        return True
+logging.getLogger("werkzeug").addFilter(_SilenceWriteBeforeStartResponse())
+# ──────────────────────────────────────────────────────────────────────────
+
+import click
+import requests
+import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
+
+# ── Spawn the plugin-runner sidecar BEFORE any backend.* import ──
+# Some backend modules (notably backend.api.voice_api) transitively import
+# torch, and we MUST spawn the sidecar in a process where torch has not yet
+# been loaded. The sidecar runs all future plugin start.sh / stop.sh scripts,
+# so the main backend never has to fork() after CUDA is initialized — fork()
+# while CUDA is loaded silently corrupts the parent's CUDA state and eventually
+# crashes the interpreter (observed on 2026-04-11, two PIDs killed this way).
+#
+# This is the EARLIEST safe point: stdlib + third-party (sqlalchemy, requests,
+# flask) are loaded, but no backend.* code has run yet.
+try:
+    from backend.services.plugin_runner import PluginRunnerClient as _PluginRunnerClient
+    _PluginRunnerClient.get().start()
+    logging.getLogger(__name__).info(
+        "Plugin-runner sidecar started (clean fork environment, no torch)"
+    )
+
+    # Ensure the sidecar (and any mp resources it manages) are cleaned on exit.
+    # This prevents "leaked semaphore" warnings from the resource_tracker at
+    # interpreter shutdown (the exact class of bug that motivated the sidecar).
+    import atexit
+    def _shutdown_plugin_runner():
+        try:
+            _PluginRunnerClient.get().shutdown()
+            logging.getLogger(__name__).debug("Plugin-runner sidecar shutdown complete")
+        except Exception as _e:
+            logging.getLogger(__name__).debug(f"Plugin-runner shutdown (non-fatal): {_e}")
+    atexit.register(_shutdown_plugin_runner)
+except Exception as _e:
+    logging.getLogger(__name__).warning(f"Plugin-runner sidecar failed to start: {_e}")
+    # Non-fatal — plugin_manager will fall back to direct subprocess.run
+
+from backend.utils.chat_utils import (
+    DEFAULT_FALLBACK_SYSTEM_PROMPT,
+    GLOBAL_DEFAULT_SYSTEM_PROMPT_RULE_NAME,
+)
+
+import backend.api.voice_api
+
+try:
+    from dotenv import load_dotenv
+except Exception:
+
+    def load_dotenv(*_args, **_kwargs):
+        return False
+
+
+import numpy as _np
+
+import backend.config as config
+from backend import rule_utils
+from backend.utils.project_config import load_config
+
+from packaging import version
+if version.parse(_np.__version__) < version.parse("1.26.0"):
+    logging.getLogger(__name__).warning(
+        f"NumPy version {_np.__version__} may be incompatible; recommended 1.26.4+"
+    )
+
+try:
+    import torch
+    if torch.cuda.is_available():
+        from backend.cuda_config import configure_cuda_optimizations
+        cuda_status = configure_cuda_optimizations(verbose=True)
+        logging.getLogger(__name__).info(
+            "CUDA optimizations applied: "
+            f"{', '.join(cuda_status.get('optimizations_applied', []))}"
+        )
+    else:
+        logging.getLogger(__name__).info("CUDA not available - running in CPU mode")
+except ImportError as e:
+    logging.getLogger(__name__).info(f"PyTorch not available or CUDA config import failed: {e}")
+except Exception as e:
+    logging.getLogger(__name__).warning(f"CUDA optimization failed (non-critical): {e}")
+
+# Version is sourced from the repo-root VERSION file (single source of truth).
+# Read via a path relative to this file so it is independent of GUAARDVARK_ROOT,
+# which may be overridden to a writable data dir. Falls back if the file is absent.
+try:
+    with open(
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION"),
+        encoding="utf-8",
+    ) as _vf:
+        __version__ = _vf.read().strip()
+except OSError:
+    __version__ = "2.6.2"
+
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = str(config.GUAARDVARK_ROOT)
+load_dotenv(os.path.join(project_root, ".env"), override=False)
+PROJECT_CONFIG = load_config()
+
+LOG_DIR = str(config.LOG_DIR)
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE_PATH = os.path.join(LOG_DIR, "backend.log")
+
+root_logger = logging.getLogger()
+
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+    handler.close()
+
+file_event_handler = TimedRotatingFileHandler(
+    LOG_FILE_PATH,
+    when="midnight",
+    interval=1,
+    backupCount=10,
+    encoding="utf-8",
+    delay=False,
+    utc=False,
+)
+formatter = logging.Formatter(
+    "%(asctime)s %(levelname)s %(name)s [PID:%(process)d TID:%(thread)d] : %(message)s"
+)
+file_event_handler.setFormatter(formatter)
+_adv_debug = os.getenv("ADVANCED_DEBUG", "false").lower() == "true"
+debug_env = os.getenv("FLASK_DEBUG", "false").lower() == "true" or _adv_debug
+log_level_env = os.getenv("BACKEND_LOG_LEVEL")
+base_log_level = (
+    getattr(logging, log_level_env.upper(), logging.INFO)
+    if log_level_env
+    else (logging.DEBUG if debug_env else logging.WARNING)
+)
+file_event_handler.setLevel(base_log_level)
+
+root_logger.addHandler(file_event_handler)
+root_logger.setLevel(base_log_level)
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(formatter)
+console_handler.setLevel(base_log_level)
+root_logger.addHandler(console_handler)
+
+werkzeug_level = os.getenv("WERKZEUG_LOG_LEVEL")
+if werkzeug_level:
+    logging.getLogger("werkzeug").setLevel(
+        getattr(logging, werkzeug_level.upper(), logging.WARNING)
+    )
+
+root_logger.info(f"[STARTUP] Logging initialized. Log file: {LOG_FILE_PATH}")
+
+# LLM Debug logger — separate file, always DEBUG level (gated by setting check in helper)
+LLM_DEBUG_LOG_PATH = os.path.join(LOG_DIR, "llm_debug.log")
+_llm_debug_handler = TimedRotatingFileHandler(
+    LLM_DEBUG_LOG_PATH, when="midnight", interval=1, backupCount=10,
+    encoding="utf-8", delay=False, utc=False,
+)
+_llm_debug_handler.setLevel(logging.DEBUG)
+_llm_debug_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(message)s"
+))
+_llm_debug_logger = logging.getLogger("guaardvark.llm_debug")
+_llm_debug_logger.addHandler(_llm_debug_handler)
+_llm_debug_logger.setLevel(logging.DEBUG)
+_llm_debug_logger.propagate = False
+root_logger.info(f"[STARTUP] LLM debug logger initialized. Log file: {LLM_DEBUG_LOG_PATH}")
+werkzeug_log_level = os.getenv("WERKZEUG_LOG_LEVEL", "WARNING").upper()
+werkzeug_logger = logging.getLogger("werkzeug")
+werkzeug_logger.setLevel(getattr(logging, werkzeug_log_level, logging.WARNING))
+
+# Alembic's MigrationContext logs "Context impl PostgresqlImpl" + "Will assume
+# transactional DDL" at INFO every time it's configured. The /health migration
+# check (migration_utils.get_health) runs on every frontend health poll (~10s),
+# so at INFO this floods backend.log endlessly. Nothing actionable lives in those
+# lines — pin the alembic loggers to WARNING.
+logging.getLogger("alembic.runtime.migration").setLevel(logging.WARNING)
+logging.getLogger("alembic").setLevel(logging.WARNING)
+
+# Suppress "Werkzeug appears to be used in a production deployment" warning —
+# Flask-SocketIO requires Werkzeug in threading mode for dev; not actionable.
+class _WerkzeugProductionFilter(logging.Filter):
+    def filter(self, record):
+        return "production deployment" not in record.getMessage()
+werkzeug_logger.addFilter(_WerkzeugProductionFilter())
+
+try:
+    from backend.utils.llama_index_local_config import force_local_llama_index_config
+    force_local_llama_index_config()
+    root_logger.info(" Forced local LlamaIndex configuration before imports")
+except ImportError as e:
+    root_logger.error(f"Could not import local LlamaIndex config: {e}")
+except Exception as e:
+    root_logger.error(f"Failed to force local LlamaIndex config: {e}")
+
+try:
+    from llama_index.core import (
+        PromptTemplate,
+        Settings,
+        StorageContext,
+        VectorStoreIndex,
+        load_index_from_storage,
+    )
+    from llama_index.llms.ollama import Ollama
+
+    llama_index_imported_successfully = True
+except ImportError as e:
+    root_logger.critical(f"Failed to import LlamaIndex components: {e}")
+    sys.exit("CRITICAL: LlamaIndex is not installed or failed to import. The application cannot start.")
+
+root_logger.info("Using LlamaIndex local embeddings only")
+
+logger_module = logging.getLogger(__name__)
+
+
+def _ensure_redis_running(redis_url: str, fatal: bool = True) -> None:
+    if not redis or not redis_url.startswith("redis://"):
+        return
+    import socket as _socket
+    try:
+        redis.from_url(redis_url, socket_connect_timeout=3).ping()
+        return
+    except redis.exceptions.AuthenticationError as err:
+        # Auth mismatch — REDIS_URL doesn't match the running redis-server's password.
+        # Spawning a second redis-server here would clobber the running one (or fail to bind),
+        # so refuse and surface clearly.
+        root_logger.critical(
+            "Redis authentication failed: %s. "
+            "Check that REDIS_URL in .env matches the running redis-server's `requirepass`.",
+            err,
+        )
+        if fatal:
+            raise SystemExit("Redis authentication failed — fix REDIS_URL in .env")
+        return
+    except Exception as err:
+        root_logger.error(
+            "Redis ping failed (%s): %s. URL host=%s",
+            type(err).__name__,
+            err,
+            redis_url.rsplit("@", 1)[-1] if "@" in redis_url else redis_url,
+        )
+    # If port 6379 is already bound, redis IS running but our URL can't reach it.
+    # Spawning a second redis-server would either fail to bind (port in use) or
+    # succeed without auth on a different port — neither helps and both confuse.
+    port_in_use = False
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            port_in_use = s.connect_ex(("127.0.0.1", 6379)) == 0
+    except Exception:
+        pass
+    started = False
+    if port_in_use:
+        root_logger.critical(
+            "Port 6379 is already bound — redis is running but unreachable with the configured URL. "
+            "This is almost always an auth or URL mismatch. Verify REDIS_URL in .env."
+        )
+    elif shutil.which("redis-server"):
+        try:
+            subprocess.Popen(
+                ["redis-server", "--daemonize", "yes"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(1)
+            redis.from_url(redis_url, socket_connect_timeout=3).ping()
+            started = True
+            root_logger.info("redis-server started automatically")
+        except Exception as err:
+            root_logger.error("Failed to start redis-server automatically: %s", err)
+    else:
+        root_logger.error("redis-server command not found")
+    if not started and fatal:
+        root_logger.critical("Redis unavailable and could not be started")
+        raise SystemExit("Redis server required but not running")
+
+
+def _ensure_redis_client():
+    try:
+        redis_url = os.environ.get(
+            "CELERY_BROKER_URL",
+            os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        )
+
+        client = redis.from_url(redis_url, socket_connect_timeout=3)
+        client.ping()
+        return client
+
+    except Exception as e:
+        root_logger.error(f"Failed to create Redis client: {e}")
+        return None
+
+
+try:
+    from backend.config import (
+        CLIENT_LOGO_FOLDER,
+        DATABASE_URL,
+        DEFAULT_EMBEDDING_MODEL,
+        DEFAULT_LLM,
+        LLM_REQUEST_TIMEOUT,
+        OLLAMA_BASE_URL,
+        OUTPUT_DIR,
+        SECRET_KEY,
+        STORAGE_DIR,
+        UPLOAD_FOLDER,
+    )
+
+    logger_module.info(
+        f"LLM request timeout configured for {LLM_REQUEST_TIMEOUT} seconds"
+    )
+
+    from backend.models import Model, Rule, Setting, db
+    from backend.services.indexing_service import get_or_create_index
+    from backend.utils import index_manager, llm_service, prompt_utils, progress_manager
+except ImportError as e:
+    logger_module.critical(
+        f"CRITICAL: Failed to load core config or utilities: {e}", exc_info=True
+    )
+    sys.exit(
+        "CRITICAL: App initialization failed due to config/model/util import errors."
+    )
+
+
+def dev_allowed_origins(frontend_url: str) -> list[str]:
+    """Browser origins the dev backend accepts, including Socket.IO handshakes.
+
+    A sibling install moves its dev server and backend off the default ports so
+    the two can run at once, so both are read from the environment: a hardcoded
+    list refuses every websocket from a relocated frontend.
+    """
+    flask_port = os.getenv("FLASK_PORT", os.getenv("PORT", "5000"))
+    dev_ports = sorted({os.getenv("VITE_PORT", "5173"), "3000", "5173", "5175"})
+    return [
+        f"http://{host}:{port}"
+        for port in dev_ports
+        for host in ("localhost", "127.0.0.1")
+    ] + [frontend_url] + [
+        f"http://localhost:{flask_port}",
+        f"http://127.0.0.1:{flask_port}",
+    ]
+
+
+# Re-entry guard. create_app() must run exactly once per Python process.
+# A second call would re-register all 80 blueprints, re-init BrainState, re-discover
+# plugins, and spawn duplicate background threads — corrupting all the singletons
+# and eventually crashing the interpreter (this exact bug killed PID 3047360 on
+# 2026-04-11 after 5 accumulated re-inits left orphaned multiprocessing semaphores).
+_create_app_called = False
+
+
+def create_app():
+    global _create_app_called
+    if _create_app_called:
+        existing = globals().get("app")
+        if existing is not None:
+            import traceback
+            logging.getLogger(__name__).error(
+                "create_app() called more than once! Returning existing singleton "
+                "instead of corrupting state. Caller stack:\n"
+                + "".join(traceback.format_stack(limit=10))
+            )
+            return existing
+    _create_app_called = True
+
+    app = Flask(__name__)
+    app.url_map.strict_slashes = False
+
+    _initialize_app_components(app)
+
+    return app
+
+
+def get_or_create_app():
+    """Return the existing Flask app singleton.
+
+    Use this from worker threads that don't have request context but need
+    `app.app_context()` for DB/config access. NEVER call `create_app()` directly
+    from worker code — it rebuilds the entire app from scratch and corrupts state.
+
+    Works in:
+    - The main Flask process: returns the singleton created at module load (line 759).
+    - Celery worker processes: returns the singleton created when Celery imports
+      backend.app (also at line 759, but in a fresh process).
+    """
+    return globals()["app"]
+
+def _initialize_app_components(app):
+    global start_time, executor, socketio, celery
+
+    start_time = time.time()
+    executor = Executor(app)
+    app.executor = executor
+    from backend.socketio_instance import socketio, FRONTEND_URL
+    from backend.celery_app import celery as shared_celery
+    celery = shared_celery
+    
+    app.logger.setLevel(
+        root_logger.level
+    )  # Ensure app.logger respects the root logger's level
+
+    flask_env = os.getenv("FLASK_ENV", "development")
+    if flask_env == "production":
+        app.debug = False
+        app.logger.info("Debug mode forcefully disabled in production environment")
+    else:
+        app.debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+        if app.debug:
+            app.logger.warning("Debug mode is enabled - this should only be used in development")
+    
+    app.logger.info(f"Using database URL: {DATABASE_URL}")
+    
+    app.config.update(
+        {
+            "SQLALCHEMY_DATABASE_URI": DATABASE_URL,
+            "SQLALCHEMY_TRACK_MODIFICATIONS": False,
+            "SQLALCHEMY_ENGINE_OPTIONS": {
+                "pool_size": 20,
+                "max_overflow": 30,
+                "pool_recycle": 300,
+                "pool_pre_ping": True,
+                "pool_timeout": 30,
+            },
+            "SECRET_KEY": os.getenv("SECRET_KEY", "dev-secret-key"),
+            "UPLOAD_FOLDER": config.UPLOAD_DIR,
+            "CLIENT_LOGO_FOLDER": config.CLIENT_LOGO_FOLDER,
+            "STORAGE_DIR": config.STORAGE_DIR,
+            "OUTPUT_DIR": config.OUTPUT_DIR,
+            "CACHE_DIR": config.CACHE_DIR,
+            "LLM_REQUEST_TIMEOUT": LLM_REQUEST_TIMEOUT,
+            "MAX_CONTENT_LENGTH": 100 * 1024 * 1024,
+            "CLUSTER_ENABLED": config.CLUSTER_ENABLED,
+            "CLUSTER_ROLE": config.CLUSTER_ROLE,
+            "CLUSTER_NODE_ID": config.CLUSTER_NODE_ID,
+        }
+    )
+    app.logger.info(
+        f"Backend application version {__version__} starting..."
+    )
+    app.logger.info(
+        f"CORS policy configured to allow specific origins."
+    )
+
+    if flask_env == "production":
+        allowed_origins = [FRONTEND_URL]
+        supports_credentials = True
+        app.logger.info(f"Production CORS: Allowing only {FRONTEND_URL}")
+    else:
+        allowed_origins = dev_allowed_origins(FRONTEND_URL)
+        supports_credentials = True
+        app.logger.info(f"Development CORS: Allowing {len(allowed_origins)} origins")
+
+    # Always allow LAN private-IP origins for local workstation access from phones,
+    # tablets, or other browsers on the same network. This is the primary enabler for
+    # "go to the printed LAN IP + VITE_PORT and use chat/voice". The patterns were
+    # previously only added in interconnector master mode; we now include them
+    # unconditionally (additive) because this is a personal offline AI machine, not
+    # a public service. The interconnector block below may still run for cluster cases.
+    lan_patterns = [
+        r"http://192\.168\.\d+\.\d+:\d+",
+        r"http://10\.\d+\.\d+\.\d+:\d+",
+        r"http://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
+        r"https://192\.168\.\d+\.\d+:\d+",
+        r"https://10\.\d+\.\d+\.\d+:\d+",
+        r"https://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
+    ]
+    allowed_origins = lan_patterns + allowed_origins
+
+    interconnector_master_mode = False
+    try:
+        from backend.api.interconnector_api import _get_config
+        interconnector_config = _get_config()
+        if interconnector_config:
+            if interconnector_config.get("node_mode") == "master":
+                interconnector_master_mode = True
+                # (patterns already prepended above for general LAN UI access)
+                supports_credentials = False
+                app.logger.info("CORS: Master mode active for interconnector (LAN patterns already enabled)")
+            master_url = interconnector_config.get("master_url")
+            if master_url:
+                from urllib.parse import urlparse
+                parsed = urlparse(master_url)
+                master_origin = f"{parsed.scheme}://{parsed.netloc}"
+                if master_origin not in allowed_origins:
+                    allowed_origins.append(master_origin)
+                    app.logger.info(f"CORS: Added master origin {master_origin}")
+    except Exception as cors_err:
+        if "application context" not in str(cors_err).lower():
+            app.logger.warning(f"Could not load interconnector config for CORS: {cors_err}")
+
+    CORS(
+        app,
+        # Apply CORS to everything. The security boundary is the `allowed_origins` list
+        # (localhost variants + VITE_FRONTEND_URL + private LAN IP regex patterns).
+        # This is required because the frontend (when using an absolute VITE_API_BASE_URL
+        # pointing at the backend on a different port or LAN IP) makes direct calls to many
+        # top-level routes that are *not* under /api/* (e.g. some /voice/*, /model, /clients,
+        # /tasks, /meta/*, /gpu/*, /settings/*, /enhanced-chat/*, /plugins, /memory, /projects,
+        # /claude/*, /self-improvement/*, /autoresearch/*, /agent-control/*, /interconnector/*,
+        # /system/*, /files/*, etc.). Previously only /api/* and /health* were covered, so
+        # cross-origin requests from a LAN-loaded (or localhost + baked-LAN) frontend hit
+        # "CORS header ‘Access-Control-Allow-Origin’ missing".
+        resources={r"/*": {"origins": allowed_origins}},
+        supports_credentials=supports_credentials,
+        allow_headers=["Content-Type", "Authorization", "X-API-Key"],
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    )
+
+    socketio.init_app(app)
+    app.logger.info("CORS and SocketIO configured with secure origins")
+
+    try:
+        from backend.utils.unified_progress_system import get_unified_progress
+        unified_progress = get_unified_progress()
+        unified_progress.initialize(output_dir=config.OUTPUT_DIR, socketio=socketio, flask_app=app)
+        app.logger.info("Unified Progress System initialized with SocketIO and Flask app context")
+        
+        import threading
+        import glob
+        import json
+        from pathlib import Path
+        
+        def poll_celery_progress():
+            from datetime import timezone as _tz
+
+            last_modified_times = {}
+            terminal_files = set()  # file_keys we've already classified terminal/reaped
+            poll_count = 0
+            TERMINAL_STATUSES = {'complete', 'error', 'cancelled', 'end'}
+            STALE_THRESHOLD = 2700  # 45 minutes - indexing can take 15-25 min per doc
+            REDIS_LOSS_STALE = 300    # 5 min aggressive when Redis relay is down (loss detection)
+            VIDEO_RENDER_STALE_HIGH = 3600  # 60 min at >=95% (long encode still OK)
+            VIDEO_RENDER_STALE_MID = 7200   # 120 min mid-render (maxed Wan denoising)
+
+            # A single missed 2 s probe is normal while ComfyUI's HTTP thread
+            # starves behind a pegged GPU; only sustained silence counts as down.
+            COMFYUI_DOWN_GRACE = 30  # seconds of consecutive failed probes
+            comfy_fail_since = {"t": None}
+
+            def _comfyui_is_down() -> bool:
+                try:
+                    from backend.config import config as _cfg
+                    import requests as _requests
+                    url = getattr(_cfg, "COMFYUI_URL", None) or os.environ.get(
+                        "GUAARDVARK_COMFYUI_URL", "http://127.0.0.1:8188"
+                    )
+                    resp = _requests.get(url, timeout=2)
+                    failed = resp.status_code != 200
+                except Exception:
+                    failed = True
+                if not failed:
+                    comfy_fail_since["t"] = None
+                    return False
+                if comfy_fail_since["t"] is None:
+                    comfy_fail_since["t"] = time.time()
+                return (time.time() - comfy_fail_since["t"]) >= COMFYUI_DOWN_GRACE
+
+            def _job_age_seconds(metadata: dict, file_mtime: float) -> float:
+                last_raw = (
+                    metadata.get("last_update_utc")
+                    or metadata.get("last_update")
+                    or metadata.get("timestamp")
+                )
+                if last_raw:
+                    try:
+                        last_dt = datetime.fromisoformat(str(last_raw).replace("Z", "+00:00"))
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.replace(tzinfo=_tz.utc)
+                        return (datetime.now(_tz.utc) - last_dt).total_seconds()
+                    except ValueError:
+                        pass
+                return max(0.0, time.time() - file_mtime)
+
+            def _stale_threshold_seconds(metadata: dict, redis_healthy: bool, comfyui_down: bool) -> float:
+                if metadata.get("status") in TERMINAL_STATUSES:
+                    return float("inf")
+                if metadata.get("process_type") == "video_render":
+                    # Renders report through ComfyUI polling, not the Redis
+                    # relay, so a relay outage says nothing about their health.
+                    if comfyui_down and metadata.get("status") == "processing":
+                        return 0.0
+                    progress = int(metadata.get("progress") or 0)
+                    if progress >= 95:
+                        return float(VIDEO_RENDER_STALE_HIGH)
+                    return float(VIDEO_RENDER_STALE_MID)
+                if not redis_healthy:
+                    return float(REDIS_LOSS_STALE)
+                return float(STALE_THRESHOLD)
+
+            def _stale_error_message(metadata: dict, comfyui_down: bool) -> str:
+                if metadata.get("process_type") == "video_render":
+                    if comfyui_down:
+                        return "ComfyUI connection lost — job orphaned"
+                    if int(metadata.get("progress") or 0) >= 95:
+                        return "Video encode stalled — ComfyUI did not complete"
+                    return "Video generation stalled — worker likely crashed"
+                return "Timed out — worker likely crashed"
+
+            def _cleanup_orphaned_video_job(metadata: dict) -> None:
+                extra = metadata.get("additional_data") or {}
+                batch_id = extra.get("batch_id") or ""
+                if batch_id:
+                    try:
+                        from backend.services.batch_video_generator import get_batch_video_generator
+                        get_batch_video_generator().cancel_batch(str(batch_id))
+                    except Exception:
+                        pass
+                # The batch worker owns the GPU gate and releases it when its
+                # session exits; taking it away while that thread is alive hands
+                # the card to a second job mid-render. Only a dead worker leaves
+                # the gate orphaned.
+                worker_alive = any(
+                    t.name == "batch-video-worker" and t.is_alive()
+                    for t in threading.enumerate()
+                )
+                if worker_alive:
+                    return
+                try:
+                    from backend.services.job_operation_gate import get_gate
+                    from backend.services.job_types import JobKind
+                    gate = get_gate()
+                    holder = (gate.snapshot().get("gpu_holder") or {})
+                    native_id = str(holder.get("native_id", ""))
+                    if batch_id and native_id == str(batch_id):
+                        gate.release_gpu_exclusive(JobKind.VIDEO_RENDER, native_id)
+                except Exception:
+                    pass
+
+            def _reap_if_stale(metadata_file, metadata: dict, file_mtime: float,
+                               file_key: str, comfyui_down: bool) -> bool:
+                """Mark job error if stale. Returns True if reaped (caller should continue)."""
+                redis_ok = getattr(app, "_redis_healthy", True)
+                age_s = _job_age_seconds(metadata, file_mtime)
+                threshold = _stale_threshold_seconds(metadata, redis_ok, comfyui_down)
+                if age_s <= threshold:
+                    return False
+                if metadata.get("status") in TERMINAL_STATUSES:
+                    return False
+                metadata["status"] = "error"
+                metadata["message"] = _stale_error_message(metadata, comfyui_down)
+                metadata["is_complete"] = True
+                metadata["completion_time_utc"] = datetime.utcnow().isoformat()
+                with open(metadata_file, "w") as f:
+                    json.dump(metadata, f, indent=4)
+                if metadata.get("process_type") == "video_render":
+                    _cleanup_orphaned_video_job(metadata)
+                app.logger.info(
+                    "Marked stale job as error: %s (age=%.0fs, threshold=%.0fs)",
+                    metadata.get("job_id", "unknown"),
+                    age_s,
+                    threshold,
+                )
+                last_modified_times[file_key] = file_mtime
+                terminal_files.add(file_key)
+                return True
+            # Adaptive cadence: this loop is also the ONLY stale-job reaper, so
+            # it must keep running forever. But on an idle, offline box the old
+            # fixed 1s sleep was a per-second stat storm for nothing. So we poll
+            # fast (ACTIVE_INTERVAL) only while there is at least one live
+            # (non-terminal) job, and back off to IDLE_INTERVAL otherwise. The
+            # idle interval still comfortably beats the 45-min stale threshold,
+            # and the Redis pub/sub relay (below) already delivers live progress
+            # promptly, so backing off here costs no responsiveness.
+            ACTIVE_INTERVAL = 1     # seconds, while jobs are in flight
+            IDLE_INTERVAL = 15      # seconds, when nothing is running
+
+            while True:
+                try:
+                    poll_count += 1
+                    active_jobs = 0
+
+                    progress_dir = Path(config.OUTPUT_DIR) / ".progress_jobs"
+                    comfyui_down = _comfyui_is_down()
+                    if progress_dir.exists():
+                        metadata_files = list(progress_dir.glob("*/metadata.json"))
+
+                        for metadata_file in metadata_files:
+                            try:
+                                current_mtime = metadata_file.stat().st_mtime
+                                file_key = str(metadata_file)
+
+                                if file_key in terminal_files:
+                                    continue
+
+                                with open(metadata_file, 'r') as f:
+                                    metadata = json.load(f)
+
+                                if _reap_if_stale(
+                                    metadata_file, metadata, current_mtime, file_key, comfyui_down
+                                ):
+                                    continue
+
+                                # Unchanged mtime: still an in-flight job unless terminal.
+                                if (
+                                    file_key in last_modified_times
+                                    and last_modified_times[file_key] == current_mtime
+                                ):
+                                    job_status = metadata.get('status', 'unknown')
+                                    if job_status not in TERMINAL_STATUSES:
+                                        active_jobs += 1
+                                    continue
+
+                                # Skip terminal statuses — no need to re-emit completed/errored jobs
+                                job_status = metadata.get('status', 'unknown')
+                                if job_status in TERMINAL_STATUSES:
+                                    last_modified_times[file_key] = current_mtime
+                                    terminal_files.add(file_key)
+                                    continue
+
+                                # Non-terminal, freshly-changed job: it's live.
+                                active_jobs += 1
+                                terminal_files.discard(file_key)
+
+                                event_data = {
+                                    'job_id': metadata.get('job_id', 'unknown'),
+                                    'progress': metadata.get('progress', 0),
+                                    'message': metadata.get('message', ''),
+                                    'status': job_status,
+                                    'process_type': metadata.get('process_type', 'unknown'),
+                                    'timestamp': metadata.get('last_update_utc', metadata.get('timestamp', '')),
+                                    **metadata.get('additional_data', {})
+                                }
+
+                                socketio.emit("job_progress", event_data, to="global_progress")
+                                app.logger.info(f"Polled and emitted progress: {metadata.get('job_id')} at {event_data['progress']}%")
+
+                                last_modified_times[file_key] = current_mtime
+
+                            except (json.JSONDecodeError, KeyError, OSError) as e:
+                                continue
+
+                            except Exception as e:
+                                app.logger.warning(f"Error processing progress file {metadata_file}: {e}")
+
+                        # Drop tracking state for progress files that no longer
+                        # exist so these dicts/sets don't grow without bound.
+                        present = {str(mf) for mf in metadata_files}
+                        for stale_key in [k for k in last_modified_times if k not in present]:
+                            last_modified_times.pop(stale_key, None)
+                            terminal_files.discard(stale_key)
+
+                    if poll_count % 30 == 0:
+                        app.logger.debug(
+                            f"Celery progress polling active - monitoring {len(last_modified_times)} files, "
+                            f"{active_jobs} live"
+                        )
+
+                    # Adaptive cadence: only stat every second while work is in
+                    # flight; otherwise back off so an idle box stays quiet. The
+                    # stale reaper still runs every IDLE_INTERVAL, well under the
+                    # 45-min threshold.
+                    time.sleep(ACTIVE_INTERVAL if active_jobs > 0 else IDLE_INTERVAL)
+                except Exception as e:
+                    app.logger.error(f"Error in Celery progress polling: {e}")
+                    time.sleep(5)
+        
+        polling_thread = threading.Thread(target=poll_celery_progress, daemon=True)
+        polling_thread.start()
+        app.logger.info("Started Celery progress polling thread")
+
+        # Redis pub/sub relay: Celery workers publish progress to Redis,
+        # this thread subscribes and re-emits via SocketIO
+        # Guard: only start one relay thread per process
+        app._redis_healthy = True
+        if not getattr(app, '_redis_relay_started', False):
+            app._redis_relay_started = True
+
+            def relay_redis_progress():
+                """Redis pub/sub relay with reconnect on loss (infra rec: detect loss faster than 45min FS stale)."""
+                redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+                reconnect_delay = 5
+                while True:
+                    try:
+                        r = redis.Redis.from_url(redis_url)
+                        # Probe connection
+                        r.ping()
+                        app._redis_healthy = True
+                        pubsub = r.pubsub()
+                        pubsub.subscribe('guaardvark:progress')
+                        app.logger.info("Redis progress relay subscribed to guaardvark:progress")
+                        reconnect_delay = 5
+                        for msg in pubsub.listen():
+                            if msg['type'] == 'message':
+                                try:
+                                    event_data = json.loads(msg['data'])
+                                    process_id = event_data.get('job_id', '')
+                                    if process_id:
+                                        socketio.emit('job_progress', event_data, to=process_id, namespace='/')
+                                    socketio.emit('job_progress', event_data, to='global_progress', namespace='/')
+                                except (json.JSONDecodeError, KeyError) as e:
+                                    app.logger.warning(f"Bad progress message from Redis: {e}")
+                    except Exception as e:
+                        app._redis_healthy = False
+                        app.logger.warning(f"Redis progress relay lost (will reconnect): {e}")
+                        time.sleep(reconnect_delay)
+                        reconnect_delay = min(30, reconnect_delay * 2)  # backoff
+
+            def relay_redis_preview():
+                """Independent of the progress relay so a bad JPEG cannot stall percents."""
+                from backend.utils.preview_emitter import REDIS_CHANNEL, SOCKET_EVENT
+                redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+                reconnect_delay = 5
+                while True:
+                    try:
+                        r = redis.Redis.from_url(redis_url)
+                        r.ping()
+                        pubsub = r.pubsub()
+                        pubsub.subscribe(REDIS_CHANNEL)
+                        app.logger.info("Redis preview relay subscribed to %s", REDIS_CHANNEL)
+                        reconnect_delay = 5
+                        for msg in pubsub.listen():
+                            if msg['type'] != 'message':
+                                continue
+                            try:
+                                event_data = json.loads(msg['data'])
+                            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                                app.logger.warning(f"Bad preview message from Redis: {e}")
+                                continue
+                            process_id = event_data.get('job_id', '')
+                            if process_id:
+                                socketio.emit(SOCKET_EVENT, event_data, to=process_id, namespace='/')
+                            socketio.emit(SOCKET_EVENT, event_data, to='global_progress', namespace='/')
+                    except Exception as e:
+                        app.logger.warning(f"Redis preview relay lost (will reconnect): {e}")
+                        time.sleep(reconnect_delay)
+                        reconnect_delay = min(30, reconnect_delay * 2)
+
+            relay_thread = threading.Thread(target=relay_redis_progress, daemon=True)
+            relay_thread.start()
+            preview_relay_thread = threading.Thread(target=relay_redis_preview, daemon=True)
+            preview_relay_thread.start()
+            app.logger.info("Started Redis progress and preview relay threads")
+        else:
+            app.logger.info("Redis progress relay thread already running, skipping")
+
+    except Exception as e:
+        app.logger.error(f"Failed to initialize Unified Progress System: {e}")
+
+    def perform_startup_security_checks():
+        security_warnings = []
+        
+        if app.debug:
+            security_warnings.append(" Debug mode is enabled - disable in production")
+        
+        if app.config.get("SECRET_KEY") == "dev-secret-key":
+            security_warnings.append(" Using default secret key - change in production")
+        
+        if flask_env == "production" and len(allowed_origins) > 1:
+            security_warnings.append(" Multiple CORS origins in production - restrict to single domain")
+        
+        max_upload = app.config.get("MAX_CONTENT_LENGTH", 0)
+        if max_upload > 500 * 1024 * 1024:
+            security_warnings.append(" Large file upload limit - consider reducing for security")
+        
+        if "sqlite" in app.config.get("SQLALCHEMY_DATABASE_URI", ""):
+            security_warnings.append(" Using SQLite in production - consider PostgreSQL for production")
+        
+        if security_warnings:
+            app.logger.warning("SECURITY WARNINGS DETECTED:")
+            for warning in security_warnings:
+                app.logger.warning(f"   {warning}")
+            app.logger.warning("Please address these security issues before deploying to production")
+        else:
+            app.logger.info("Startup security checks passed")
+
+    perform_startup_security_checks()
+
+    @app.before_request
+    def enforce_https():
+        if flask_env == "production" and not request.is_secure:
+            url = request.url.replace("http://", "https://", 1)
+            return redirect(url, code=301)
+
+    @app.before_request
+    def log_request_info_flask():
+        app.logger.debug(
+            f"Incoming {request.method} request to {request.path} from {request.remote_addr}"
+        )
+
+    # Protect sensitive endpoints (code execution, backup restore/delete)
+    from backend.utils.auth_guard import check_endpoint_auth
+    app.before_request(check_endpoint_auth)
+
+    @app.before_request
+    def track_user_activity():
+        """Update activity timestamp for autoresearch idle detection."""
+        from flask import request as req
+        if req.path.startswith('/api/autoresearch') or req.path.startswith('/api/health'):
+            return
+        try:
+            from backend.services.rag_autoresearch_service import get_autoresearch_service
+            get_autoresearch_service().record_activity()
+        except Exception:
+            pass
+
+    @app.after_request
+    def set_security_headers_flask(response):
+        # Skip header injection on Socket.IO requests — they use websocket
+        # upgrade responses that are already finalized; modifying them causes
+        # werkzeug "write() before start_response" assertion failures.
+        if request.path.startswith('/socket.io'):
+            return response
+
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+        if request.path.startswith('/api/'):
+            response.headers['X-CSRF-Token-Required'] = 'true'
+
+        return response
+
+    @app.after_request
+    def log_response_info(response):
+        if request.path.startswith('/socket.io'):
+            return response
+        app.logger.debug(
+            f"Response {response.status_code} for {request.method} {request.path}"
+        )
+        return response
+
+    @app.after_request
+    def record_route_liveness(response):
+        """B5 route-liveness: record which Flask routes ACTUALLY served traffic.
+
+        Feeds the runtime-liveness layer (symbol_hits) with route hits the same
+        way Celery tasks are recorded, so the liveness consensus can tell a
+        dormant-looking route from a never-hit one. In-memory only on the hot
+        path; never fails a request.
+        """
+        try:
+            path = request.path or ""
+            # Skip noise: socket.io upgrades, health polls, and 404s (no endpoint).
+            if (path.startswith('/socket.io')
+                    or path.startswith('/api/health')
+                    or request.endpoint is None
+                    or response.status_code == 404):
+                return response
+            from backend.services.execution_context_tracker import (
+                get_tracker, MODE_FLASK_ROUTE,
+            )
+            blueprint = request.blueprint or ""
+            endpoint = request.endpoint or ""
+            symbol_id = f"route:{blueprint}.{endpoint}"
+            # The view function's module, best-effort.
+            module = ""
+            try:
+                view = app.view_functions.get(endpoint)
+                module = getattr(view, "__module__", "") or ""
+            except Exception:
+                module = ""
+            get_tracker().record_hit(
+                symbol_id, "route", endpoint, module, MODE_FLASK_ROUTE,
+            )
+        except Exception:  # never fail a request over an audit record
+            logger.warning("Failed to record route liveness (non-fatal)", exc_info=True)
+            pass
+        return response
+
+    @app.after_request
+    def cleanup_database_session(response):
+        if request.path.startswith('/socket.io'):
+            return response
+        try:
+            if hasattr(db, 'session') and db.session:
+                try:
+                    db.session.remove()
+                except Exception as session_check_error:
+                    app.logger.debug(f"Session cleanup failed: {session_check_error}")
+
+        except Exception as e:
+            app.logger.debug(f"Failed to cleanup database session: {e}")
+
+        return response
+
+    @app.teardown_appcontext
+    def shutdown_session(exception=None):
+        """Safety net: ensure DB session is always returned to pool."""
+        try:
+            if hasattr(db, 'session'):
+                db.session.remove()
+        except Exception:
+            pass
+
+    try:
+        if app.config["SQLALCHEMY_DATABASE_URI"].startswith("sqlite:///"):
+            db_path_cfg = app.config["SQLALCHEMY_DATABASE_URI"].replace("sqlite:///", "")
+            if not os.path.isabs(db_path_cfg):
+                db_path_cfg = os.path.join(project_root, db_path_cfg)
+            app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path_cfg}"
+            os.makedirs(os.path.dirname(os.path.abspath(db_path_cfg)), exist_ok=True)
+            app.logger.info(f"DB directory ensured: {db_path_cfg}")
+            expected_final_path = str(config.GUAARDVARK_ROOT / "data" / "database" / "system_analysis.db")
+            if os.path.abspath(db_path_cfg) != expected_final_path:
+                app.logger.error(
+                    f"CRITICAL: Database path mismatch! Expected: {expected_final_path}, "
+                    f"Got: {os.path.abspath(db_path_cfg)}. Database isolation may be broken!"
+                )
+
+        for key_dir in ["UPLOAD_FOLDER", "CLIENT_LOGO_FOLDER", "STORAGE_DIR", "OUTPUT_DIR"]:
+            path_val = app.config.get(key_dir)
+            if not path_val:
+                raise KeyError(f"Configuration key '{key_dir}' not found.")
+            if not os.path.isabs(path_val):
+                full_path_val = os.path.join(project_root, path_val)
+            else:
+                full_path_val = path_val
+            os.makedirs(full_path_val, exist_ok=True)
+            app.logger.info(f"Directory ensured: {full_path_val} (from {key_dir})")
+            app.config[key_dir] = full_path_val
+
+    except Exception as e:
+        app.logger.error(f"Failed to setup directories: {e}")
+        raise
+
+    db.init_app(app)
+
+    # Extensions (extensions/<id>/): models must exist before create_all(),
+    # so this is the first of their hook points. See backend/extensions.
+    from backend import extensions as _ext
+    _extensions = _ext.discover()
+    for _ext_id, _err in _ext.import_models(_extensions).items():
+        _ext.record(_ext_id, "models", _err is None, _err)
+
+    for _ext_id, _err in _ext.register_models(_extensions).items():
+        _ext.record(_ext_id, "media_models", _err is None, _err)
+    try:
+        from backend.tools import initialize_all_tools, get_registered_tools
+        tool_registry = initialize_all_tools()
+        app.tool_registry = tool_registry
+        app.logger.info(f"Tool Registry initialized with {len(get_registered_tools())} tools: {', '.join(get_registered_tools())}")
+    except Exception as e:
+        app.logger.warning(f"Tool Registry initialization failed (non-critical): {e}")
+        app.tool_registry = None
+
+    # Initialize AgentBrain's BrainState singleton (pre-computes tool schemas,
+    # system prompts, model capabilities, reflex table, and warm-up ping).
+    try:
+        from backend.config import AGENT_BRAIN_ENABLED
+        if AGENT_BRAIN_ENABLED:
+            from backend.services.brain_state import BrainState
+            brain_state = BrainState.get_instance()
+            # BrainState init touches the DB (active model lookup, memory context),
+            # so it needs an app context — create_app() doesn't push one for us.
+            with app.app_context():
+                brain_state.initialize(lite_mode=False)
+            app.brain_state = brain_state
+            app.logger.info(f"AgentBrain initialized | health={brain_state.health.to_dict()}")
+        else:
+            app.brain_state = None
+            app.logger.info("AgentBrain disabled (GUAARDVARK_AGENT_BRAIN=false)")
+    except Exception as e:
+        app.logger.warning(f"AgentBrain initialization failed (non-critical, falling back to legacy): {e}")
+        app.brain_state = None
+
+    # The Flask app-factory boot stack (torch + llama_index + brain_state +
+    # blueprint discovery, all nested under create_app) runs deep — close to
+    # CPython's default recursion limit of 1000. Plugin boot-restore then does
+    # synchronous requests.get() health probes on top of that stack, which could
+    # tip a healthy call over into RecursionError. That false failure masked a
+    # serving Ollama as "down" and surfaced as the 500-on-relaunch. Give the
+    # boot path real headroom before plugin init.
+    if sys.getrecursionlimit() < 3000:
+        sys.setrecursionlimit(3000)
+
+    try:
+        from backend.plugins import get_plugin_manager, get_plugin_registry
+        registry = get_plugin_registry()
+        app.logger.info(f"Plugin Registry initialized, discovered {len(registry.get_all_plugins())} plugins")
+
+        manager = get_plugin_manager()
+        app.plugin_manager = manager
+        app.logger.info("Plugin Manager initialized successfully")
+    except Exception as e:
+        app.logger.warning(f"Plugin Manager initialization failed (non-critical): {e}", exc_info=True)
+        app.plugin_manager = None
+
+    from backend.utils.blueprint_discovery import auto_register_blueprints
+    auto_register_blueprints(app, extension_directories=_ext.blueprint_directories(_extensions))
+    for _e in _extensions:
+        _missing = _ext.missing_url_prefixes(app, _e)
+        _ext.record(_e.id, "blueprints", not _missing, _missing or None)
+        if _missing:
+            # A blueprint import error becomes a warning in discovery; without
+            # this, a vertical's every route 404s behind a clean startup.
+            app.logger.error("extension %s: no routes mounted under %s — check its api/ imports", _e.id, ", ".join(_missing))
+
+    # Resume any in-flight video projects (productions + music videos, + future kinds)
+    # after a crash. DB-driven — no in-memory state to lose. One registry-driven pass,
+    # per-kind isolated so one kind's failure can't strand another. The music-video
+    # generating stage's per-clip tail-call rides this: a re-dispatched clip_generator
+    # no-ops past already-done clips and continues from the cursor.
+    # Note: `db` is the module-level import (line 401). Importing it locally here
+    # would silently make every other `db` reference in create_app() local-by-assignment
+    # and break the function. Don't re-import.
+    try:
+        from backend.services.video_project_registry import resume_all_kinds, VIDEO_KINDS
+        with app.app_context():
+            for kind, resumed in resume_all_kinds(db.session).items():
+                if resumed:
+                    app.logger.info(
+                        f"{VIDEO_KINDS[kind].label} pipeline resumed {resumed} in-flight run(s) from DB state"
+                    )
+    except Exception as e:
+        app.logger.warning(f"Video project resume failed (non-critical): {e}")
+
+    try:
+        from backend.middleware.cluster_proxy_middleware import cluster_proxy_before_request
+        app.before_request(cluster_proxy_before_request)
+    except ImportError as e:
+        app.logger.warning("Cluster proxy middleware unavailable (sync backend/middleware/): %s", e)
+
+    try:
+        from backend.services.browser_automation_service import register_browser_shutdown
+        register_browser_shutdown(app)
+    except Exception as e:
+        app.logger.debug(f"Browser shutdown registration skipped: {e}")
+
+    # Unload heavy generators (torch/diffusers pipelines) on exit to release
+    # any associated IPC semaphores / CUDA graphs tracked by the mp resource_tracker.
+    # Prevents "leaked semaphore" warnings at shutdown.
+    import atexit
+    def _unload_heavy_generators():
+        try:
+            from backend.services.offline_image_generator import get_image_generator
+            gen = get_image_generator()
+            if hasattr(gen, "_unload_pipeline"):
+                gen._unload_pipeline()
+            if hasattr(gen, "clear_cache"):
+                gen.clear_cache()
+        except Exception:
+            pass  # best effort; generator may not be initialized
+        try:
+            from backend.utils.thread_pool_manager import shutdown_all_pools
+            shutdown_all_pools(wait=False)
+        except Exception:
+            pass
+    atexit.register(_unload_heavy_generators)
+
+    return app
+
+app = create_app()
+
+
+try:
+    if app.config["SQLALCHEMY_DATABASE_URI"].startswith("sqlite:///"):
+        db_path_cfg = app.config["SQLALCHEMY_DATABASE_URI"].replace("sqlite:///", "")
+        if not os.path.isabs(db_path_cfg):
+            db_path_cfg = os.path.join(project_root, db_path_cfg)
+        app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path_cfg}"
+        os.makedirs(os.path.dirname(os.path.abspath(db_path_cfg)), exist_ok=True)
+        app.logger.info(f"DB directory ensured: {db_path_cfg}")
+
+    for key_dir in ["UPLOAD_FOLDER", "CLIENT_LOGO_FOLDER", "STORAGE_DIR", "OUTPUT_DIR"]:
+
+        path_val = app.config.get(key_dir)
+        if not path_val:
+            raise KeyError(f"Configuration key '{key_dir}' not found.")
+        full_path_val = (
+            os.path.abspath(os.path.join(project_root, path_val))
+            if not os.path.isabs(path_val)
+            else path_val
+        )
+        os.makedirs(full_path_val, exist_ok=True)
+        app.logger.info(f"Directory ensured: {full_path_val} (from {key_dir})")
+        app.config[key_dir] = full_path_val
+
+    migrations_dir = os.path.join(project_root, "backend", "migrations")
+    if os.path.isdir(migrations_dir):
+        Migrate(app, db, directory=migrations_dir)
+    else:
+        Migrate(app, db)
+
+    # Skip migration checks if start.sh already verified them
+    migrations_already_verified = os.environ.get("GUAARDVARK_MIGRATIONS_VERIFIED")
+
+    # Schema-first approach: models.py is the source of truth.
+    # db.create_all() creates/syncs schema; we stamp Alembic to head.
+    # No migration replay needed.
+    with app.app_context():
+        try:
+            app.logger.info("Creating/verifying database tables...")
+            db.create_all()
+            app.logger.info("Database tables created/verified successfully.")
+
+            # db.create_all() doesn't ALTER existing tables — it only creates
+            # missing ones. For columns added after the base schema was stamped,
+            # we reconcile them here so legacy databases catch up. Same pattern
+            # as _ensure_document_folder_column() in backup_service.py.
+            try:
+                from sqlalchemy import text as _sa_text
+                existing = db.session.execute(_sa_text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'tasks' AND column_name = 'result'"
+                )).fetchone()
+                if existing is None:
+                    app.logger.warning("Adding missing tasks.result column (legacy DB)")
+                    db.session.execute(_sa_text("ALTER TABLE tasks ADD COLUMN result TEXT"))
+                    db.session.commit()
+            except Exception as col_err:
+                app.logger.warning(f"Failed to ensure tasks.result column: {col_err}")
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+
+            # Same pattern for llm_sessions.mode (added 2026-05-05 for agent-mode).
+            try:
+                from sqlalchemy import text as _sa_text
+                existing = db.session.execute(_sa_text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'llm_sessions' AND column_name = 'mode'"
+                )).fetchone()
+                if existing is None:
+                    app.logger.warning("Adding missing llm_sessions.mode column (legacy DB)")
+                    db.session.execute(_sa_text(
+                        "ALTER TABLE llm_sessions ADD COLUMN mode VARCHAR(20) "
+                        "NOT NULL DEFAULT 'chat'"
+                    ))
+                    db.session.commit()
+            except Exception as col_err:
+                app.logger.warning(f"Failed to ensure llm_sessions.mode column: {col_err}")
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+
+            # Film Crew columns added after the base schema was stamped. These
+            # ride migrations f63d6ff26f29 + a1b2c3d4e5f6, but since we stamp
+            # (not replay) migrations, existing/interconnector DBs never get the
+            # ALTERs — they drift and 500. Reconcile idempotently here.
+            for _tbl, _col, _ddl in (
+                ("subjects", "voice_id", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS voice_id VARCHAR(128)"),
+                ("subjects", "trigger_word", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS trigger_word VARCHAR(64)"),
+                ("subjects", "cast_required", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS cast_required BOOLEAN"),
+                # Added for CastMemberPage last-trained tracking + job queue linkage (amend/catch-up, delete purge).
+                ("subjects", "current_training_job_id", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS current_training_job_id VARCHAR(64)"),
+                ("subjects", "last_trained_image_paths", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS last_trained_image_paths JSON NOT NULL DEFAULT '[]'::json"),
+                ("subjects", "last_trained_at", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS last_trained_at TIMESTAMP"),
+                # Cast failure reason + bible/hyperparams — were in models.py but
+                # missing from this reconcile list; stamped/legacy client DBs then
+                # 500'd lora_trainer.reap_stuck_training on subjects.training_error.
+                ("subjects", "training_error", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS training_error TEXT"),
+                ("subjects", "bible", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS bible TEXT"),
+                ("subjects", "training_settings_json", "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS training_settings_json JSON"),
+                # Generated samples graduate into Training Data after successful train.
+                ("subject_samples", "promoted_to_training", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_to_training BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("subject_samples", "promoted_at", "ALTER TABLE subject_samples ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMP"),
+                ("production_shots", "scene_mood", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS scene_mood VARCHAR(64)"),
+                ("production_shots", "character_name", "ALTER TABLE production_shots ADD COLUMN IF NOT EXISTS character_name VARCHAR(255)"),
+                # Local source folder for swarm/agent code runs (added Phase 2).
+                ("websites", "local_path", "ALTER TABLE websites ADD COLUMN IF NOT EXISTS local_path VARCHAR(2048)"),
+                # Autoresearch 2.0 (2026-08-10): honest eval pairs + experiment
+                # provenance + candidate/promoted config lifecycle.
+                ("eval_pairs", "is_active", "ALTER TABLE eval_pairs ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("eval_pairs", "source_chunk_hashes", "ALTER TABLE eval_pairs ADD COLUMN IF NOT EXISTS source_chunk_hashes JSON"),
+                ("eval_pairs", "stale_reason", "ALTER TABLE eval_pairs ADD COLUMN IF NOT EXISTS stale_reason VARCHAR(100)"),
+                ("experiment_runs", "proposal_source", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS proposal_source VARCHAR(20)"),
+                ("experiment_runs", "proposer_model", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS proposer_model VARCHAR(100)"),
+                ("experiment_runs", "judge_model", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS judge_model VARCHAR(100)"),
+                ("experiment_runs", "retrieval_metrics", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS retrieval_metrics JSON"),
+                ("research_configs", "status", "ALTER TABLE research_configs ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'promoted'"),
+            ):
+                try:
+                    from sqlalchemy import text as _sa_text
+                    existing = db.session.execute(_sa_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = :t AND column_name = :c"
+                    ), {"t": _tbl, "c": _col}).fetchone()
+                    if existing is None:
+                        app.logger.warning(f"Adding missing {_tbl}.{_col} column (legacy DB)")
+                        db.session.execute(_sa_text(_ddl))
+                        db.session.commit()
+                except Exception as col_err:
+                    app.logger.warning(f"Failed to ensure {_tbl}.{_col} column: {col_err}")
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+
+            # Agent memory scope/curation fields added after the base schema.
+            # Existing Postgres databases need additive ALTERs because
+            # db.create_all() does not change existing tables.
+            for _col, _ddl in (
+                ("project_id", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS project_id INTEGER"),
+                ("user_id", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS user_id VARCHAR(80)"),
+                ("workspace_root", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS workspace_root VARCHAR(1024)"),
+                ("lesson_id", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS lesson_id VARCHAR(36)"),
+                ("confidence", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION DEFAULT 1.0"),
+                ("status", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS status VARCHAR(32) DEFAULT 'active'"),
+                ("access_count", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS access_count INTEGER DEFAULT 0"),
+                ("last_accessed_at", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS last_accessed_at TIMESTAMP"),
+                ("metadata", "ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS metadata JSONB"),
+            ):
+                try:
+                    from sqlalchemy import text as _sa_text
+                    existing = db.session.execute(_sa_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'agent_memories' AND column_name = :c"
+                    ), {"c": _col}).fetchone()
+                    if existing is None:
+                        app.logger.warning(f"Adding missing agent_memories.{_col} column (legacy DB)")
+                        db.session.execute(_sa_text(_ddl))
+                        db.session.commit()
+                except Exception as col_err:
+                    app.logger.warning(f"Failed to ensure agent_memories.{_col} column: {col_err}")
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+
+            # Extension schema additions (create_all never alters), then seeds.
+            # This block runs at module level after create_app() has returned,
+            # so the loader is bound again here; discovery is a directory scan
+            # and the load report it records into is module-level.
+            from backend import extensions as _ext
+            _extensions = _ext.discover()
+            try:
+                for _ext_id, _cols in _ext.run_migrations(_extensions, db, app.logger).items():
+                    _ext.record(_ext_id, "migrations", True, _cols)
+            except Exception as ext_err:
+                app.logger.error(f"Extension migrations failed: {ext_err}")
+
+            # Create default OS-style folders (Images/, Videos/, Code/) so
+            # generated outputs land somewhere DocumentsPage can see them
+            try:
+                from backend.services.output_registration import ensure_default_folders
+                ensure_default_folders()
+                app.logger.info("Default folders verified (Images, Videos, Code)")
+            except Exception as folder_err:
+                app.logger.warning(f"Default folder setup skipped: {folder_err}")
+
+            try:
+                for _ext_id, _outcome in _ext.run_seeds(_extensions, app).items():
+                    _ext.record(_ext_id, "seed", not _outcome.startswith("error"), _outcome)
+            except Exception as ext_err:
+                app.logger.error(f"Extension seeds failed: {ext_err}")
+            if _extensions:
+                _summary = ", ".join(f"{e.id} v{e.version}" + ("" if _ext.load_report().get(e.id, {}).get("ok", True) else " (ERRORS)") for e in _extensions)
+                app.logger.info(f"Extensions loaded: {_summary}")
+
+            # Stamp Alembic to head (so health checks pass)
+            if not os.environ.get("GUAARDVARK_SKIP_MIGRATIONS") and not migrations_already_verified:
+                try:
+                    from backend.utils.migration_utils import stamp_to_head
+                    if os.path.isdir(migrations_dir):
+                        result = stamp_to_head(migrations_dir)
+                        app.logger.info(f"Alembic stamp: {result.get('message', 'ok')}")
+                except Exception as stamp_err:
+                    app.logger.warning(f"Alembic stamp skipped: {stamp_err}")
+
+            app.logger.info(
+                "Global system prompt rule creation disabled - using hardcoded default"
+            )
+
+            # ---- Cluster: seed FleetMap from DB + initial routing recompute --------
+            if config.CLUSTER_ENABLED and config.CLUSTER_ROLE == "master":
+                try:
+                    import json as _json
+                    from backend.models import InterconnectorNode
+                    from backend.services.fleet_map import get_fleet_map
+                    fm = get_fleet_map()
+                    for node in InterconnectorNode.query.all():
+                        if node.hardware_profile:
+                            try:
+                                fm.register(node.node_id, _json.loads(node.hardware_profile),
+                                            online=node.online)
+                                fm.set_address(node.node_id, node.host, node.port)
+                            except _json.JSONDecodeError:
+                                app.logger.warning(
+                                    "[CLUSTER] skipping node %s — malformed profile",
+                                    node.node_id)
+                    from backend.services.cluster_routing import recompute_and_broadcast
+                    recompute_and_broadcast(reason="startup")
+                    app.logger.info("[CLUSTER] startup recompute complete")
+                except Exception as e:
+                    app.logger.warning("[CLUSTER] startup recompute failed: %s", e)
+
+        except OperationalError as op_err:
+            app.logger.error(f"Database operation error during create_all: {op_err}")
+            app.logger.error("Check database connection and configuration.")
+except Exception as e_init:
+    app.logger.critical(f"Initialization error (DB/Dirs): {e_init}", exc_info=True)
+    sys.exit("CRITICAL: App initialization failed (DB/Dirs).")
+
+def initialize_llm_and_index_async():
+    import time
+    time.sleep(2)
+
+    try:
+        with app.app_context():
+            app.logger.info("[LLM-Init] Setting up LLM and index (background thread)...")
+
+            app.logger.info("[LLM-Init] Step 1/6: Loading LLM...")
+            llm = llm_service.get_llm_for_startup()
+            app.logger.info("[LLM-Init] Step 2/6: Loading embedding model...")
+            embed_model = llm_service.get_default_embed_model()
+            app.logger.info("[LLM-Init] Step 3/6: Configuring global settings...")
+            index_manager.configure_global_settings(llm=llm, embed_model=embed_model)
+
+            app.logger.info("[LLM-Init] Step 4/6: Loading/creating index...")
+            get_or_create_index()
+            app.logger.info("[LLM-Init] Step 4/6: Index loaded successfully")
+
+            from backend.services.indexing_service import index as llama_index_from_service
+            from backend.services.indexing_service import (
+                storage_context as storage_context_from_service,
+            )
+
+            if llama_index_from_service is None:
+                app.logger.error("CRITICAL: Index initialization failed - llama_index_from_service is None")
+                raise RuntimeError("Failed to initialize LlamaIndex during startup")
+
+            if storage_context_from_service is None:
+                app.logger.error("CRITICAL: Storage context initialization failed - storage_context_from_service is None")
+                raise RuntimeError("Failed to initialize storage context during startup")
+
+            app.config["LLAMA_INDEX_LLM"] = llm
+            app.config["LLAMA_INDEX_EMBED_MODEL"] = embed_model
+            app.config["LLAMA_INDEX_INDEX"] = llama_index_from_service
+            app.config["LLAMA_INDEX_STORAGE_CONTEXT"] = storage_context_from_service
+            app.config["LLAMA_INDEX_QUERY_ENGINE"] = None
+            app.config["LLAMA_INDEX_CHAT_ENGINE"] = None
+
+            # Only persist if there's no saved choice yet — never overwrite
+            # the user's saved model on startup (would silently revert their selection
+            # if get_llm_for_startup() fell back to the preference list).
+            try:
+                loaded_model = getattr(llm, "model", None)
+                saved_model = llm_service.get_saved_active_model_name()
+                if loaded_model and not saved_model:
+                    llm_service.persist_active_model_name(loaded_model)
+            except Exception as e:
+                app.logger.warning(f"[LLM-Init] Failed to persist active model on startup: {e}")
+
+            # Step 5: warm up the model into VRAM. Skipped when the user has
+            # disabled the Ollama plugin in /plugins — otherwise we'd burn ~10
+            # GB of VRAM at boot for a service the user explicitly turned off.
+            # When skipped, the first chat message triggers an on-demand load
+            # (~5s slower for that one message). This honors the user_enabled
+            # overlay in data/plugin_state.json with a fallback to ollama's
+            # plugin.json default for fresh installs.
+            try:
+                from backend.plugins.plugin_manager import get_plugin_manager
+                _ollama_enabled = get_plugin_manager().is_effectively_enabled("ollama")
+            except Exception:
+                _ollama_enabled = True  # Fail-open — better to warm up than leave a real user without chat
+
+            if _ollama_enabled:
+                app.logger.info("[LLM-Init] Step 5/6: Warming up model...")
+                try:
+                    model_name = getattr(llm, "model", "unknown")
+                    app.logger.info(f"[LLM-Init] Warming up model '{model_name}' (loading into GPU)...")
+                    warmup_start = time.time()
+                    llm.complete("warmup")
+                    warmup_duration = time.time() - warmup_start
+                    app.logger.info(f"[LLM-Init] Model warmup completed in {warmup_duration:.1f}s — ready for chat")
+                except Exception as e:
+                    app.logger.error(f"[LLM-Init] Model warmup FAILED: {e} — first chat will be slow", exc_info=True)
+            else:
+                app.logger.info(
+                    "[LLM-Init] Step 5/6: Skipping model warmup — Ollama plugin is disabled in user prefs. "
+                    "First chat call will load the model on demand (~5s slower)."
+                )
+
+            app.config["LLM_READY"] = True
+            app.logger.info("[LLM-Init] Step 6/6: LLM and index initialization completed successfully")
+    except Exception as e:
+        app.config["LLM_READY"] = True  # Mark ready even on failure so chat isn't blocked forever
+        app.logger.error(f"[LLM-Init] FAILED to initialize LLM and index: {e}", exc_info=True)
+
+import threading
+llm_init_thread = threading.Thread(target=initialize_llm_and_index_async, daemon=True, name="LLM-Index-Init")
+llm_init_thread.start()
+app.logger.info("LLM and index initialization started in background thread - Flask will start immediately")
+
+try:
+    from backend.api.cache_api import cache_bp
+    from backend.api.generation_api import generation_bp
+    from backend.api.entity_indexing_api import entity_indexing_bp
+    from backend.api.entity_links_api import entity_links_bp
+    from backend.api.rag_debug_api import rag_debug_bp
+    from backend.api.automation_api import automation_bp
+
+    early_blueprints_imported = True
+except ImportError as e:
+    logger_module.critical(
+        f"CRITICAL: Failed to import core blueprints (generation_bp, cache_bp, entity_indexing_bp, entity_links_bp): {e}",
+        exc_info=True,
+    )
+    early_blueprints_imported = False
+    generation_bp = None
+    cache_bp = None
+    entity_indexing_bp = None
+    entity_links_bp = None
+    rag_debug_bp = None
+
+app.logger.info("[ROUTING] Registering blueprints with automated discovery...")
+
+
+is_celery_worker = os.environ.get('CELERY_WORKER_MODE', 'false').lower() == 'true'
+
+if is_celery_worker:
+    app.logger.info("Running in Celery worker mode - skipping blueprint registration")
+    registration_summary = {
+        'registration': {
+            'total_discovered': 0,
+            'registered': 0,
+            'skipped': 0,
+            'errors': 0
+        },
+        'errors': []
+    }
+else:
+    app.logger.info("Blueprint registration completed during app creation")
+
+if not is_celery_worker:
+    critical_blueprints = [
+        ("backend.api.enhanced_chat_api.enhanced_chat_bp", "enhanced_chat_bp"),
+        ("backend.api.voice_api.voice_bp", "voice_bp"),
+        ("backend.api.bulk_generation_api.bulk_gen_bp", "bulk_gen_bp"),
+        ("backend.api.batch_image_generation_api.batch_image_bp", "batch_image_bp"),
+        ("backend.api.backup_api.backup_bp", "backup_bp"),
+    ]
+    
+    for bp_path_str, bp_expected_name in critical_blueprints:
+        try:
+            module_name, blueprint_attr_name = bp_path_str.rsplit(".", 1)
+            module = __import__(module_name, fromlist=[blueprint_attr_name])
+            blueprint_obj = getattr(module, blueprint_attr_name)
+            if blueprint_obj.name not in app.blueprints:
+                app.register_blueprint(blueprint_obj)
+                app.logger.info(f"Fallback registered: {blueprint_attr_name}")
+        except Exception as fallback_error:
+            app.logger.error(f"Fallback registration failed for {bp_expected_name}: {fallback_error}")
+
+
+blueprints_to_register_list = []
+
+
+app.logger.info("Blueprint registration method: AUTOMATED DISCOVERY")
+app.logger.info(" Manual maintenance eliminated - blueprints auto-discovered from filesystem")
+
+try:
+    if early_blueprints_imported:
+        if generation_bp:
+            if generation_bp.name not in app.blueprints:
+                app.register_blueprint(generation_bp)
+                app.logger.debug("Registered early imported blueprint: generation_bp")
+        else:
+            app.logger.error(
+                "generation_bp was not imported successfully, cannot register."
+            )
+        if cache_bp:
+            if cache_bp.name not in app.blueprints:
+                app.register_blueprint(cache_bp)
+                app.logger.debug("Registered early imported blueprint: cache_bp")
+        else:
+            app.logger.error("cache_bp was not imported successfully, cannot register.")
+        if entity_indexing_bp:
+            if entity_indexing_bp.name not in app.blueprints:
+                app.register_blueprint(entity_indexing_bp)
+                app.logger.debug("Registered early imported blueprint: entity_indexing_bp")
+        else:
+            app.logger.error("entity_indexing_bp was not imported successfully, cannot register.")
+        if entity_links_bp:
+            if entity_links_bp.name not in app.blueprints:
+                app.register_blueprint(entity_links_bp)
+                app.logger.debug("Registered early imported blueprint: entity_links_bp")
+        else:
+            app.logger.error("entity_links_bp was not imported successfully, cannot register.")
+        if rag_debug_bp:
+            if rag_debug_bp.name not in app.blueprints:
+                app.register_blueprint(rag_debug_bp)
+                app.logger.debug("Registered early imported blueprint: rag_debug_bp")
+        else:
+            app.logger.error("rag_debug_bp was not imported successfully, cannot register.")
+        if automation_bp:
+            if automation_bp.name not in app.blueprints:
+                app.register_blueprint(automation_bp)
+                app.logger.debug("Registered early imported blueprint: automation_bp")
+        else:
+            app.logger.error("automation_bp was not imported successfully, cannot register.")
+    else:
+        app.logger.warning(
+            "Skipping registration of generation_bp and cache_bp due to earlier import failure."
+        )
+    # RAG Autoresearch blueprint
+    try:
+        from backend.api.rag_autoresearch_api import autoresearch_bp
+        if autoresearch_bp.name not in app.blueprints:
+            app.register_blueprint(autoresearch_bp)
+            app.logger.debug("Registered autoresearch_bp")
+    except Exception as e_ar:
+        app.logger.warning(f"Could not register autoresearch_bp: {e_ar}")
+
+    # Node registry slot endpoints (hardware-profile, live-state, cluster fleet)
+    try:
+        from backend.api.node_api import node_api_bp
+        if node_api_bp.name not in app.blueprints:
+            app.register_blueprint(node_api_bp)
+            app.logger.debug("Registered node_api_bp")
+    except Exception as e_node:
+        app.logger.warning(f"Could not register node_api_bp: {e_node}")
+
+    # Master-only cluster management (routing-table inspection, recompute, metrics)
+    try:
+        from backend.api.cluster_api import cluster_api_bp
+        if cluster_api_bp.name not in app.blueprints:
+            app.register_blueprint(cluster_api_bp)
+            app.logger.debug("Registered cluster_api_bp")
+    except Exception as e_cluster:
+        app.logger.warning(f"Could not register cluster_api_bp: {e_cluster}")
+
+    app.logger.info("Blueprint registration process completed.")
+except Exception as e_bp_reg_block:
+    app.logger.error(
+        f"CRITICAL ERROR during blueprint registration block: {e_bp_reg_block}",
+        exc_info=True,
+    )
+
+# Reactive self-healing: dedup cooldown for error tracker (used in the 500 handler below)
+_si_error_cooldown = {}
+
+try:
+    from backend import socketio_events
+except Exception as e_events:
+    app.logger.error(f"Failed to import socketio events: {e_events}")
+
+try:
+    scheduler_spec = importlib.util.find_spec("backend.services.task_scheduler")
+    if scheduler_spec is not None:
+        task_sched_mod = importlib.import_module("backend.services.task_scheduler")
+        scheduler_instance = task_sched_mod.init_task_scheduler(app)
+        try:
+            from backend.services.resource_manager import ResourceManager
+
+            resource_manager = ResourceManager(scheduler_instance)
+            resource_manager.start()
+        except Exception as e_rm:
+            app.logger.error(f"Failed to start resource manager: {e_rm}")
+    else:
+        app.logger.warning("Task scheduler not found; skipping.")
+except Exception as e_sched:
+    app.logger.error(f"Failed to start task scheduler: {e_sched}")
+
+    try:
+        from backend.services.distributed_coordinator import (
+            init_distributed_coordinator,
+        )
+        from backend.services.node_registry import (
+            NodeCapability,
+            NodeType,
+            create_node_info,
+            init_node_registry,
+        )
+
+        node_type = NodeType.MASTER
+        capabilities = [
+            NodeCapability.CHAT,
+            NodeCapability.INDEXING,
+            NodeCapability.GENERATION,
+            NodeCapability.SEARCH,
+            NodeCapability.COMPUTE,
+            NodeCapability.STORAGE,
+        ]
+
+        node_type_env = os.getenv("GUAARDVARK_NODE_TYPE", "master").lower()
+        if node_type_env in [nt.value for nt in NodeType]:
+            node_type = NodeType(node_type_env)
+
+            if node_type == NodeType.RASPBERRY_PI:
+                capabilities = [
+                    NodeCapability.VOICE,
+                    NodeCapability.MONITORING,
+                    NodeCapability.CHAT,
+                ]
+            elif node_type == NodeType.TRADING:
+                capabilities = [
+                    NodeCapability.TRADING,
+                    NodeCapability.MONITORING,
+                    NodeCapability.COMPUTE,
+                ]
+            elif node_type == NodeType.MONITOR:
+                capabilities = [NodeCapability.MONITORING, NodeCapability.SCRAPING]
+            elif node_type == NodeType.INFERENCE:
+                capabilities = [
+                    NodeCapability.CHAT,
+                    NodeCapability.GENERATION,
+                    NodeCapability.COMPUTE,
+                ]
+            elif node_type == NodeType.STORAGE:
+                capabilities = [
+                    NodeCapability.STORAGE,
+                    NodeCapability.INDEXING,
+                    NodeCapability.BACKUP,
+                ]
+
+        port = int(os.getenv("PORT", 5000))
+        node_info = create_node_info(
+            node_type=node_type,
+            capabilities=capabilities,
+            port=port,
+            metadata={
+                "version": __version__,
+                "startup_time": datetime.now().isoformat(),
+            },
+        )
+
+        redis_client = _ensure_redis_client()
+        if redis_client:
+            app.redis = redis_client
+
+            node_registry = init_node_registry(redis_client, node_info)
+            distributed_coordinator = init_distributed_coordinator(
+                redis_client, node_registry
+            )
+
+            node_registry.start()
+            distributed_coordinator.start()
+
+            app.logger.info(
+                f"Distributed system initialized as {node_type.value} node with capabilities: {[c.value for c in capabilities]}"
+            )
+        else:
+            app.logger.warning("Redis not available, distributed system disabled")
+
+    except Exception as e_distributed:
+        app.logger.error(f"Failed to initialize distributed system: {e_distributed}")
+
+    startup_duration = time.time() - start_time
+    app.logger.info("Application startup completed in %.2fs", startup_duration)
+
+except Exception as e_bp_reg_block:
+    app.logger.error(
+        f"CRITICAL ERROR during blueprint registration block: {e_bp_reg_block}",
+        exc_info=True,
+    )
+
+
+@app.route("/api/debug/env", methods=["GET"])
+def debug_env():
+    try:
+        import os
+        import re as _re
+        from backend.config import GUAARDVARK_ROOT, DATABASE_URL, STORAGE_DIR
+
+        # Mask password in database URL for display
+        masked_db_url = _re.sub(r'://([^:]+):([^@]+)@', r'://\1:***@', DATABASE_URL)
+        masked_sqlalchemy_uri = _re.sub(
+            r'://([^:]+):([^@]+)@', r'://\1:***@',
+            app.config.get("SQLALCHEMY_DATABASE_URI", "NOT SET")
+        )
+
+        env_info = {
+            "guaardvark_root": {
+                "from_config": str(GUAARDVARK_ROOT),
+                "from_env": os.environ.get("GUAARDVARK_ROOT", "NOT SET"),
+                "match": str(GUAARDVARK_ROOT) == os.environ.get("GUAARDVARK_ROOT", ""),
+            },
+            "database": {
+                "database_url": masked_db_url,
+                "sqlalchemy_uri": masked_sqlalchemy_uri,
+            },
+            "storage": {
+                "storage_dir": STORAGE_DIR,
+                "from_config": app.config.get("STORAGE_DIR", "NOT SET"),
+            },
+            "working_directory": os.getcwd(),
+            "process_id": os.getpid(),
+        }
+        
+        return jsonify(env_info), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Both prefixes are valid — Docker/k8s probes and the legacy frontend
+# client expect /health, while the rest of the API lives under /api.
+@app.route("/api/health")
+@app.route("/health")
+def health_check():
+    uptime_seconds = time.time() - start_time if "start_time" in globals() else 0
+    started_by = os.environ.get("GUAARDVARK_STARTED_BY")
+    if not started_by:
+        try:
+            runtime_path = os.path.join(os.path.expanduser("~"), ".guaardvark", "runtime.json")
+            if os.path.isfile(runtime_path):
+                with open(runtime_path, encoding="utf-8") as f:
+                    started_by = json.load(f).get("started_by")
+        except Exception:
+            started_by = None
+    payload = {
+        "status": "ok",
+        "uptime_seconds": round(uptime_seconds, 2),
+        "version": __version__,
+        "index_loaded": bool(app.config.get("LLAMA_INDEX_INDEX")),
+    }
+    if started_by:
+        payload["started_by"] = started_by
+    return jsonify(payload), 200
+
+@app.route("/api/health/db")
+def health_db():
+    from backend.utils import migration_utils
+
+    status = migration_utils.get_health()
+    return jsonify(status), 200
+
+
+@app.route("/api/health/frontend")
+def health_frontend():
+    """Report the built frontend's version and build timestamp.
+
+    Version is the shared repo-root VERSION (frontend and backend ship from one
+    tree). Build time is derived from the mtime of the Vite build's index.html.
+    Returns 503 if no build output exists (e.g. running the dev server only).
+    """
+    from datetime import datetime, timezone
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    index_path = os.path.join(repo_root, "frontend", "dist", "index.html")
+    if not os.path.exists(index_path):
+        return (
+            jsonify(
+                {
+                    "status": "unavailable",
+                    "error": "no frontend build found (frontend/dist/index.html missing)",
+                }
+            ),
+            503,
+        )
+    build_dt = datetime.fromtimestamp(os.path.getmtime(index_path), tz=timezone.utc)
+    return (
+        jsonify(
+            {
+                "status": "ok",
+                "version": __version__,
+                "build_timestamp": build_dt.isoformat().replace("+00:00", "Z"),
+            }
+        ),
+        200,
+    )
+
+
+_celery_health_cache = {"data": None, "timestamp": 0}
+_HEALTH_CACHE_DURATION = 30
+
+
+def _celery_worker_snapshot(celery, timeout: float = 2.0) -> dict:
+    """Best-effort worker state for health/busy reporting."""
+    insp = celery.control.inspect(timeout=timeout)
+    stats = insp.stats() or {}
+    active = insp.active() or {}
+    scheduled = insp.scheduled() or {}
+    reserved = insp.reserved() or {}
+    active_count = sum(len(v or []) for v in active.values())
+    queued_count = sum(
+        len(v or []) for v in list(scheduled.values()) + list(reserved.values())
+    )
+    return {
+        "workers": list(stats.keys()),
+        "active_tasks": active_count,
+        "queued_tasks": queued_count,
+        "stats": stats,
+    }
+
+
+def _celery_workers_registered(celery) -> bool:
+    """True when at least one worker is registered (stats/ping), even if task queue is backed up."""
+    try:
+        snap = _celery_worker_snapshot(celery, timeout=2.0)
+        if snap.get("workers"):
+            return True
+        pings = celery.control.inspect(timeout=2).ping() or {}
+        return bool(pings)
+    except Exception:
+        return False
+
+
+@app.route("/api/health/celery")
+def health_celery():
+    import time
+
+    current_time = time.time()
+    if (_celery_health_cache["data"] is not None and
+        current_time - _celery_health_cache["timestamp"] < _HEALTH_CACHE_DURATION):
+        return _celery_health_cache["data"]
+
+    previous_status = None
+    if _celery_health_cache["data"] is not None:
+        try:
+            previous_status = _celery_health_cache["data"][0].get_json().get("status")
+        except Exception:
+            app.logger.warning("Failed to read previous celery health status (non-fatal)", exc_info=True)  # noqa: BLE001
+
+    def _cache_and_return(response_tuple, status_key: str):
+        if previous_status != status_key:
+            try:
+                from backend.socketio_events import emit_health_status_change
+                payload = response_tuple[0].get_json()
+                emit_health_status_change("celery", status_key, payload)
+            except Exception as e:
+                app.logger.warning(f"Failed to emit health status change: {e}")
+        _celery_health_cache["data"] = response_tuple
+        _celery_health_cache["timestamp"] = current_time
+        return response_tuple
+
+    try:
+        from backend.celery_app import celery
+        result = celery.send_task('backend.celery_tasks_isolated.ping', queue='health')
+        # Short timeout: if the worker is busy with a long task (LoRA train etc.) we don't want
+        # the health check itself to block the UI for 15s. We detect "busy" below.
+        status = result.get(timeout=3)
+
+        snap = _celery_worker_snapshot(celery)
+        worker_info = {
+            "active_tasks": snap["active_tasks"],
+            "queued_tasks": snap["queued_tasks"],
+            "workers": snap["workers"],
+            "result": status,
+        }
+
+        return _cache_and_return((jsonify({"status": "up", **worker_info}), 200), "up")
+    except Exception as exc:
+        error_msg = str(exc)
+
+        # Ping timeout with registered workers = backlog on solo-pool worker, not dead.
+        if "timeout" in error_msg.lower():
+            try:
+                from backend.celery_app import celery
+                snap = _celery_worker_snapshot(celery)
+                if snap.get("workers") or _celery_workers_registered(celery):
+                    worker_info = {
+                        "active_tasks": snap.get("active_tasks", 0),
+                        "queued_tasks": snap.get("queued_tasks", 0),
+                        "workers": snap.get("workers", []),
+                        "message": "Worker backlog — health ping queued behind long task(s)",
+                    }
+                    return _cache_and_return(
+                        (jsonify({"status": "busy", **worker_info}), 200), "busy"
+                    )
+                # Fallback: any visible queue work
+                has_work = snap.get("active_tasks", 0) > 0 or snap.get("queued_tasks", 0) > 0
+                if has_work:
+                    worker_info = {
+                        "active_tasks": snap.get("active_tasks", 0),
+                        "queued_tasks": snap.get("queued_tasks", 0),
+                        "message": "Worker processing long-running task",
+                    }
+                    return _cache_and_return(
+                        (jsonify({"status": "busy", **worker_info}), 200), "busy"
+                    )
+            except Exception:
+                pass
+            error_msg = f"Worker busy or overloaded: {error_msg}"
+
+        error_response = jsonify({
+            "status": "down",
+            "error": error_msg,
+            "suggestion": "Worker may be processing large tasks. Check /api/celery/tasks for details."
+        }), 503
+
+        return _cache_and_return(error_response, "down")
+
+
+@app.route("/api/version")
+def get_version():
+    from flask import jsonify
+    return jsonify({
+        "version": __version__,
+        "name": "guaardvark",
+        "description": "LLM-powered development environment",
+        "timestamp": "2025-09-27T07:15:00Z"
+    }), 200
+
+
+@app.route("/api/health/redis")
+def health_redis():
+    try:
+        redis_client = _ensure_redis_client()
+        redis_client.ping()
+        return jsonify({"status": "up"}), 200
+    except Exception as exc:
+        return jsonify({"status": "down", "error": str(exc)}), 503
+
+
+@app.route("/api/health/tools")
+def health_tools():
+    try:
+        from backend.tools.tool_registry_init import get_registered_tools, get_tools_by_category
+
+        tools = get_registered_tools()
+        categories = get_tools_by_category()
+
+        return jsonify({
+            "status": "up" if len(tools) > 0 else "degraded",
+            "total_tools": len(tools),
+            "tools": tools,
+            "categories": {cat: len(names) for cat, names in categories.items()}
+        }), 200
+    except Exception as exc:
+        return jsonify({
+            "status": "down",
+            "error": str(exc)
+        }), 503
+
+
+@app.route("/api/health/db-connections")
+def health_db_connections():
+    try:
+        from backend.utils.db_utils import get_db_connection_info
+        
+        connection_info = get_db_connection_info()
+        
+        if "error" in connection_info:
+            return jsonify({"status": "unhealthy", "error": connection_info["error"]}), 503
+        
+        checked_out = connection_info.get("checked_out", 0)
+        pool_size = connection_info.get("pool_size", 0)
+        
+        status = "healthy"
+        if checked_out >= pool_size * 0.8:
+            status = "warning"
+        
+        return jsonify({
+            "status": status,
+            "message": "Database connection pool information",
+            "connections": connection_info
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "error": str(e)}), 503
+
+
+@app.route("/api/db/cleanup-connections", methods=["POST"])
+def cleanup_db_connections():
+    try:
+        from backend.utils.db_utils import cleanup_idle_connections
+        
+        result = cleanup_idle_connections()
+        
+        if "error" in result:
+            return jsonify({"success": False, "error": result["error"]}), 500
+        
+        return jsonify({"success": True, "result": result}), 200
+        
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/routes")
+def list_routes_api():
+    routes = []
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint == "static":
+            continue
+        methods = ",".join(sorted(rule.methods - {"HEAD", "OPTIONS"}))
+        routes.append({"rule": rule.rule, "methods": methods})
+    return jsonify({"routes": routes}), 200
+
+
+@app.route("/api/api-docs")
+def api_docs():
+    docs = []
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint == "static":
+            continue
+        view = app.view_functions[rule.endpoint]
+        doc = (view.__doc__ or "").strip()
+        methods = ",".join(sorted(rule.methods - {"HEAD", "OPTIONS"}))
+        docs.append({"rule": rule.rule, "methods": methods, "doc": doc})
+    return jsonify({"docs": docs}), 200
+
+
+@app.errorhandler(400)
+def handle_bad_request(e):
+    msg = str(e.description) if hasattr(e, "description") else "Invalid request."
+    app.logger.warning(
+        f"Bad Request (400): {msg} for {request.url}",
+        exc_info=e if app.debug else False,
+    )
+    return jsonify({"error": "Bad Request", "message": msg}), 400
+
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    app.logger.warning(
+        f"Not Found (404): {request.url}", exc_info=e if app.debug else False
+    )
+    return jsonify({"error": "Not Found", "message": "Resource not found"}), 404
+
+
+@app.errorhandler(405)
+def handle_method_not_allowed(e):
+    app.logger.warning(
+        f"Method Not Allowed (405): {request.method} for {request.url}",
+        exc_info=e if app.debug else False,
+    )
+    return (
+        jsonify(
+            {
+                "error": "Method Not Allowed",
+                "message": f"{request.method} not allowed for this URL",
+            }
+        ),
+        405,
+    )
+
+
+@app.errorhandler(SQLAlchemyError)
+def handle_sqlalchemy_db_error(e):
+    app.logger.error(f"Database Error: {e}", exc_info=True)
+    try:
+        if db and db.session:
+            db.session.rollback()
+    except Exception as rb_err:
+        app.logger.error(f"Rollback failed: {rb_err}")
+    msg = (
+        "Database integrity error."
+        if isinstance(e, IntegrityError)
+        else "A database error occurred."
+    )
+    return jsonify({"error": "Database Error", "message": msg}), 500
+
+
+@app.errorhandler(500)
+def handle_internal_server_error(e):
+    # Reactive self-healing: feed error into SI tracker before rollback
+    try:
+        import traceback as _tb, sys, time as _time
+        exc_type, exc_value, exc_tb = sys.exc_info()
+        if exc_tb:
+            tb_frames = _tb.extract_tb(exc_tb)
+            if tb_frames:
+                last_frame = tb_frames[-1]
+                cooldown_key = f"{last_frame.filename}:{last_frame.lineno}"
+                now = _time.time()
+                if not (cooldown_key in _si_error_cooldown and (now - _si_error_cooldown[cooldown_key]) < 300):
+                    _si_error_cooldown[cooldown_key] = now
+                    tb_str = ''.join(_tb.format_exception(exc_type, exc_value, exc_tb))
+                    from backend.services.self_improvement_service import get_self_improvement_service
+                    get_self_improvement_service().track_error(
+                        file=last_frame.filename,
+                        line=last_frame.lineno,
+                        error_type=exc_type.__name__ if exc_type else "Unknown",
+                        traceback_str=tb_str[-2000:],
+                    )
+    except Exception:
+        app.logger.warning("Failed to record self-improvement error (non-fatal)", exc_info=True)  # noqa: BLE001
+    app.logger.error(f"Internal Server Error (500): {e}", exc_info=True)
+    try:
+        if db and db.session:
+            db.session.rollback()
+    except Exception as rb_err_500:
+        app.logger.error(f"Rollback failed in 500 handler: {rb_err_500}")
+    return (
+        jsonify(
+            {
+                "error": "Internal Server Error",
+                "message": "An unexpected error occurred. Check server logs.",
+            }
+        ),
+        500,
+    )
+
+
+@app.cli.command("load-rules")
+@click.argument("bundle_file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--enable", is_flag=True, help="Also switch the global rules toggle on.")
+def load_rules_cli(bundle_file, enable):
+    """Apply a rule bundle (persona + rules), upserting by name.
+
+    Bundles live in backend/rule_bundles/. The running server bakes the persona
+    into its prompts at startup; POST /api/brain/refresh picks the new one up
+    without a restart.
+    """
+    from backend.models import Setting
+    from backend.seed_data import load_rule_bundle
+
+    with app.app_context():
+        counts = load_rule_bundle(bundle_file)
+        if enable:
+            row = db.session.get(Setting, "rules_enabled")
+            if row is None:
+                db.session.add(Setting(key="rules_enabled", value="true"))
+            else:
+                row.value = "true"
+            db.session.commit()
+    click.echo(
+        f"{bundle_file}: inserted {counts['inserted']}, updated {counts['updated']}, "
+        f"deactivated {counts['deactivated']}"
+        + ("; rules_enabled=true" if enable else "")
+    )
+    click.echo("If the server is running: curl -X POST <host>/api/brain/refresh")
+
+
+@app.cli.command("load-lessons")
+@click.argument("bundle_file", type=click.Path(exists=True, dir_okay=False))
+def load_lessons_cli(bundle_file):
+    """Apply a lesson bundle, upserting procedures by title.
+
+    Bundles live in backend/lesson_bundles/. Lessons are stored as agent_memories
+    and surface in chat via get_memories_for_context.
+    """
+    from backend.seed_data import load_lesson_bundle
+
+    with app.app_context():
+        counts = load_lesson_bundle(bundle_file)
+    click.echo(
+        f"{bundle_file}: inserted {counts['inserted']}, updated {counts['updated']}, "
+        f"invalid {counts['invalid']}"
+    )
+
+
+@app.cli.command("seed-db")
+@click.option("--force", is_flag=True, help="Force seeding even if models exist.")
+def seed_database_cli(force):
+    logger_cli = app.logger
+    seeds = [
+        {"name": "llama3", "version": "latest", "quantized": False},
+        {"name": "codellama", "version": "latest", "quantized": False},
+    ]
+    added, skipped = 0, 0
+    try:
+        with app.app_context():
+            for mdl in seeds:
+                exists = db.session.query(Model).filter_by(name=mdl["name"]).first()
+                if exists and not force:
+                    skipped += 1
+                elif exists and force:
+                    logger_cli.info(f"Overwriting model: {mdl['name']}")
+                    exists.version = mdl.get("version", exists.version)
+                    exists.quantized = mdl.get("quantized", exists.quantized)
+                    added += 1
+                else:
+                    logger_cli.info(f"Adding model: {mdl['name']}")
+                    db.session.add(Model(**mdl))
+                    added += 1
+            db.session.commit()
+            logger_cli.info(f"Seed done: added/updated={added}, skipped={skipped}")
+            print(f"Seeded/Updated {added} models. Skipped {skipped}.")
+    except Exception as e_seed_db:
+        if db and db.session:
+            db.session.rollback()
+        logger_cli.error(f"Seeding failed: {e_seed_db}", exc_info=True)
+        print(f"Error during seeding: {e_seed_db}")
+
+
+@app.cli.command("seed-prompts")
+@click.option("--force", is_flag=True, help="Force update existing prompts.")
+def seed_prompts_cli(force):
+    logger_cli = app.logger
+    if not prompt_utils:
+        print("Error: prompt_utils module could not be imported for seed-prompts.")
+        return
+
+    default_qa_text = getattr(
+        prompt_utils,
+        "FALLBACK_QA_PROMPT_TEXT",
+        "Answer the question based on the context provided.",
+    )
+    default_cg_text = getattr(
+        prompt_utils,
+        "FALLBACK_CODE_GEN_PROMPT_TEXT",
+        "Generate code for the following task: {task_description}. Output filename should be {output_target_filename}",
+    )
+    default_cg_text = default_cg_text.replace(
+        "{output_filename}", "{output_target_filename}"
+    )
+
+    prompts_to_seed = [
+        {
+            "name": "qa_default",
+            "level": "SYSTEM",
+            "type": "QA_TEMPLATE",
+            "rule_text": default_qa_text,
+            "target_models_json": json.dumps(["__ALL__"]),
+            "is_active": True,
+        },
+        {
+            "name": "code_gen_default",
+            "level": "PROMPT",
+            "type": "PROMPT_TEMPLATE",
+            "rule_text": default_cg_text,
+            "target_models_json": json.dumps(["__ALL__"]),
+        },
+        {
+            "name": GLOBAL_DEFAULT_SYSTEM_PROMPT_RULE_NAME,
+            "level": "SYSTEM",
+            "type": "SYSTEM_PROMPT",
+            "rule_text": DEFAULT_FALLBACK_SYSTEM_PROMPT,
+            "target_models_json": json.dumps(["__ALL__"]),
+        },
+    ]
+    VALID_RULE_TYPES = [
+        "PROMPT_TEMPLATE",
+        "QA_TEMPLATE",
+        "COMMAND_RULE",
+        "FILTER_RULE",
+        "FORMATTING_RULE",
+        "SYSTEM_PROMPT",
+        "OTHER",
+    ]
+    added, updated, skipped = 0, 0, 0
+    if not Rule or not db:
+        print("Error: Rule model or DB session not available for seed-prompts.")
+        return
+
+    try:
+        with app.app_context():
+            for p_data in prompts_to_seed:
+                name = p_data.get("name")
+                db.session.query(Rule).filter(
+                    Rule.name == name, Rule.is_active == True
+                ).update({"is_active": False})
+                valid_types = {
+                    "PROMPT_TEMPLATE",
+                    "QA_TEMPLATE",
+                    "COMMAND_RULE",
+                    "FILTER_RULE",
+                    "FORMATTING_RULE",
+                    "SYSTEM_PROMPT",
+                    "OTHER",
+                }
+                if p_data.get("type") not in valid_types:
+                    logger_cli.warning(
+                        f"Skipping prompt {p_data.get('name')} with invalid type {p_data.get('type')}"
+                    )
+                    continue
+                if p_data["name"] == "qa_default":
+                    duplicates = (
+                        db.session.query(Rule)
+                        .filter(
+                            Rule.name == "qa_default",
+                            sa.or_(Rule.level != "SYSTEM", Rule.type != "QA_TEMPLATE"),
+                        )
+                        .all()
+                    )
+                    for dup in duplicates:
+                        if dup.is_active:
+                            logger_cli.info(
+                                f"Deactivating legacy qa_default rule ID {dup.id}"
+                            )
+                            dup.is_active = False
+                            updated += 1
+                existing_prompt = (
+                    db.session.query(Rule)
+                    .filter_by(
+                        level=p_data["level"], name=p_data["name"], type=p_data["type"]
+                    )
+                    .first()
+                )
+                if p_data["name"] == "qa_default" and existing_prompt:
+                    duplicates_same = (
+                        db.session.query(Rule)
+                        .filter(
+                            Rule.name == "qa_default",
+                            Rule.level == "SYSTEM",
+                            Rule.type == "QA_TEMPLATE",
+                            Rule.id != existing_prompt.id,
+                        )
+                        .all()
+                    )
+                    for dup in duplicates_same:
+                        if dup.is_active:
+                            logger_cli.info(
+                                f"Deactivating duplicate qa_default rule ID {dup.id}"
+                            )
+                            dup.is_active = False
+                            updated += 1
+                if existing_prompt and not force:
+                    skipped += 1
+                    logger_cli.info(f"Skipping existing prompt: {p_data['name']}")
+                elif existing_prompt and force:
+                    logger_cli.info(f"Updating existing prompt: {p_data['name']}")
+                    existing_prompt.rule_text = p_data["rule_text"]
+                    existing_prompt.target_models_json = p_data["target_models_json"]
+                    existing_prompt.is_active = p_data.get(
+                        "is_active", existing_prompt.is_active
+                    )
+                    updated += 1
+                else:
+                    if p_data["type"] not in VALID_RULE_TYPES:
+                        logger_cli.error(
+                            f"Invalid rule type '{p_data['type']}' for prompt {p_data['name']}. Skipping."
+                        )
+                        skipped += 1
+                        continue
+                    logger_cli.info(f"Adding new prompt: {p_data['name']}")
+                    new_prompt = Rule(
+                        name=p_data["name"],
+                        level=p_data["level"],
+                        type=p_data["type"],
+                        rule_text=p_data["rule_text"],
+                        target_models_json=p_data["target_models_json"],
+                        is_active=p_data.get("is_active", True),
+                    )
+                    db.session.add(new_prompt)
+                    added += 1
+            db.session.commit()
+            logger_cli.info(
+                f"Prompt seeding done: added={added}, updated={updated}, skipped={skipped}"
+            )
+            print(
+                f"Prompt seeding finished. Added: {added}, Updated: {updated}, Skipped: {skipped}."
+            )
+    except Exception as e_seed_prompts:
+        if db and db.session:
+            db.session.rollback()
+        logger_cli.error(f"Prompt seeding failed: {e_seed_prompts}", exc_info=True)
+        print(f"Error during prompt seeding: {e_seed_prompts}")
+
+
+@app.cli.command("db-health")
+def db_health_cli():
+    from backend.utils import migration_utils
+
+    status = migration_utils.get_health()
+    print(json.dumps(status, indent=2))
+
+
+@app.cli.command("celery-health")
+def celery_health_cli():
+    result = celery.send_task('backend.celery_tasks_isolated.ping', queue='health')
+    try:
+        response = result.get(timeout=5)
+    except Exception as exc:
+        print(json.dumps({"status": "down", "error": str(exc)}))
+        return
+    print(json.dumps({"status": "up", "result": response}))
+
+
+@app.cli.command("list-routes")
+def list_routes_cli():
+    output = []
+    for rule in app.url_map.iter_rules():
+        methods = ",".join(sorted(rule.methods - {"HEAD", "OPTIONS"}))
+        output.append({"endpoint": rule.rule, "methods": methods})
+    print(json.dumps(output, indent=2))
+
+
+@app.cli.command("scan-sql")
+def scan_sql_cli():
+    from backend.tools import sql_scan
+
+    sql_scan.main()
+
+
+@app.cli.command("dead-code-scan")
+def dead_code_cli():
+    from backend.tools import dead_code_scan
+
+    dead_code_scan.main()
+
+
+@app.cli.command("index-entities")
+@click.option("--force", is_flag=True, help="Force reindexing of all entities.")
+@click.option("--type", help="Index only specific entity type (client, project, website, task).")
+def index_entities_cli(force, type):
+    from backend.services.entity_indexing_service import get_entity_indexing_service
+    
+    try:
+        service = get_entity_indexing_service()
+        
+        if type:
+            if type not in ["client", "project", "website", "task"]:
+                print(f"Error: Invalid entity type '{type}'. Must be one of: client, project, website, task")
+                return
+            
+            print(f"Indexing {type} entities...")
+            
+            if type == "client":
+                from backend.models import Client
+                entities = db.session.query(Client).all()
+                success_count = sum(1 for entity in entities if service.index_client(entity))
+            elif type == "project":
+                from backend.models import Project
+                entities = db.session.query(Project).all()
+                success_count = sum(1 for entity in entities if service.index_project(entity))
+            elif type == "website":
+                from backend.models import Website
+                entities = db.session.query(Website).all()
+                success_count = sum(1 for entity in entities if service.index_website(entity))
+            elif type == "task":
+                from backend.models import Task
+                entities = db.session.query(Task).all()
+                success_count = sum(1 for entity in entities if service.index_task(entity))
+            
+            error_count = len(entities) - success_count
+            print(f"Indexed {success_count} {type} entities, {error_count} errors")
+            
+        else:
+            print("Indexing all entities...")
+            results = service.index_all_entities()
+            print(f"Entity indexing complete:")
+            print(f"  Clients: {results.get('clients', 0)}")
+            print(f"  Projects: {results.get('projects', 0)}")
+            print(f"  Websites: {results.get('websites', 0)}")
+            print(f"  Tasks: {results.get('tasks', 0)}")
+            print(f"  Errors: {results.get('errors', 0)}")
+        
+        if service.storage_context:
+            from backend.config import INDEX_ROOT
+            persist_dir = getattr(service.storage_context, "persist_dir", INDEX_ROOT)
+            if persist_dir and ("/storage" in persist_dir or "\\storage" in persist_dir or persist_dir.endswith("/storage") or persist_dir.endswith("\\storage")):
+                persist_dir = INDEX_ROOT
+                print(f"Prevented use of legacy storage folder, using {persist_dir} instead")
+            service.storage_context.persist(persist_dir=persist_dir)
+            print("Index changes persisted successfully")
+        
+    except Exception as e:
+        print(f"Error indexing entities: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    run_host = os.environ.get("FLASK_RUN_HOST", "0.0.0.0")
+    run_port = int(os.environ.get("FLASK_PORT", os.environ.get("FLASK_RUN_PORT", "5000")))
+    app.logger.info(
+        f"Starting Flask+SocketIO server on {run_host}:{run_port} "
+        f"(LLM timeout: {app.config.get('LLM_REQUEST_TIMEOUT', LLM_REQUEST_TIMEOUT)}s)"
+    )
+    socketio.run(app, host=run_host, port=run_port, debug=app.debug,
+                 allow_unsafe_werkzeug=True)
+else:
+    app.logger.info(
+        f"Application instance '{app.name}' version {__version__} created and configured for WSGI server."
+    )

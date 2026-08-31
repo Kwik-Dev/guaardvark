@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # librosa 1.x requires numpy>=2.1; the backend pins numpy<2.0 (see
+      # backend/requirements.txt), so the resolver falls back to building an
+      # old scipy from source and fails. Lift this with the numpy 2 migration.
+      - dependency-name: librosa
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: pip
+    directory: /cli
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # React 19 is refused at install time by @testing-library/react 14 and
+      # would also move MUI 5 and react-grid-layout with it. Take it as one
+      # deliberate upgrade, not a bot bump (PR #142 closed 2026-09-07).
+      - dependency-name: react
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-dom
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

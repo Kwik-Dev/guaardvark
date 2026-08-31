@@ -1,0 +1,34 @@
+{
+  "id": "gpu_embedding",
+  "name": "GPU Embedding Service",
+  "version": "1.0.0",
+  "description": "GPU-accelerated embedding generation for document indexing. Provides fast embedding generation using GPU acceleration while maintaining compatibility with CPU fallback.",
+  "author": "GUAARDVARK Team",
+  "type": "service",
+  "category": "indexing",
+  "port": 8204,
+  "vram_estimate_mb": 0,
+  "dependencies": [],
+  "config": {
+    "service_url": "http://localhost:8204",
+    "timeout": 30,
+    "fallback_enabled": true,
+    "model": "embeddinggemma:latest",
+    "use_system_model": true,
+    "batch_size": 32,
+    "max_text_length": 8192,
+    "default_enabled": false,
+    "default_auto_start": false
+  },
+  "requirements": {
+    "gpu": true,
+    "cuda": true,
+    "ollama": true
+  },
+  "endpoints": {
+    "health": "/health",
+    "embed": "/embed",
+    "embed_batch": "/embed_batch",
+    "models": "/models"
+  }
+}

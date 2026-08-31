@@ -1,0 +1,26 @@
+This is Guaardvark. It writes films, clones voices, edits video, trains characters, and fixes its own code — every bit of it on one desktop GPU, in one room, with the network cable out.
+
+Episode 1 is the whole system in four minutes: the eleven-step install, the dashboard, the sidebar tour across all four feature groups, theme switching, the plugin/GPU budget view, and a closing shot of nvidia-smi running with the cable unplugged. Everything you see here gets its own dedicated episode next.
+
+One machine. No cloud. This is Episode 1 of 12.
+
+CHAPTERS (add exact timestamps after the final edit)
+0:00 Cold open — one machine, no cloud
+[__:__] Install — eleven steps, one command
+[__:__] Dashboard
+[__:__] Sidebar tour — Main / Studio / Management / Configuration
+[__:__] Theme flip — Settings ▸ Appearance
+[__:__] Plugins & GPU budget
+[__:__] Closer — unplug the cable
+
+FEATURED IN THIS EPISODE
+▸ Ep 5: A Million Pictures, One Prompt — Image Gen — https://youtu.be/K4_d1far03I
+▸ Ep 6: Hollywood on One GPU — Video Gen — https://youtu.be/9wwjwxlSFKQ
+▸ Ep 7: The Voice Foundry — Voice Clone — https://youtu.be/JIkyV_b6IkY
+▸ Ep 8: Drop a Song, Get a Music Video — Music Video — https://youtu.be/lIZKtkYoeD0
+
+Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
+
+Source & docs: https://github.com/guaardvark/guaardvark
+
+#Guaardvark #localAI #selfhostedAI #opensourceAI #offlineAI #AIvideogeneration #onemachinenocloud #fulltour #AIsystemtour #selfhostedAIplatform
