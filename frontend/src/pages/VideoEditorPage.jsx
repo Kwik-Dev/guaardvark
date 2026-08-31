@@ -4,6 +4,7 @@
 // the Art Director arranges everything, Render produces a .mlt + .mp4.
 // Refine in Shotcut if needed. See plans/video-editor-bin-autoedit-vision.md.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Box,
   Typography,
@@ -13,6 +14,8 @@ import {
   Chip,
   CircularProgress,
   Tooltip,
+  Alert,
+  TextField,
 } from "@mui/material";
 import {
   PlayArrow as PlayIcon,
@@ -115,18 +118,40 @@ const VideoEditorPage = () => {
   // Plan pipeline state.
   const [scanMode, setScanMode] = useState("both-and");
   const [styleRecipeName, setStyleRecipeName] = useState("Default");
+  // Order clips by bin order (checkbox) + optional customer captions.
+  const [respectBinOrder, setRespectBinOrder] = useState(false);
+  const [customer, setCustomer] = useState(null);
+  const [customers, setCustomers] = useState([]);
+  // Global caption defaults {text, color, size, bgcolor, halign, valign} applied
+  // to every clip when the plan runs.
+  const [captionDefaults, setCaptionDefaults] = useState({});
   const [recipes, setRecipes] = useState([]);
   const planJob = usePlanJob();
   const {
     start: startPlan,
     clearResult: clearPlanResult,
     updateClipAnalysis,
+    updateAllArrangementClips,
     hydrate: hydratePlan,
   } = planJob;
 
   // --- Named-project state (file-per-project store on the backend). ---
   const [currentProjectId, setCurrentProjectId] = useState(null);
   const [projectName, setProjectName] = useState("Untitled");
+  const [captionFileName, setCaptionFileName] = useState("captions");
+  const captionFileNameTouched = useRef(false);
+  // Default the exported caption filename to "<projectName>_captions" so the
+  // captions match the name set in the Video Editor, unless the user typed a
+  // custom name for this export.
+  useEffect(() => {
+    if (captionFileNameTouched.current) return;
+    const base = (projectName && projectName.trim() && projectName !== "Untitled")
+      ? `${projectName.trim()}_captions`
+      : "captions";
+    setCaptionFileName(base);
+  }, [projectName]);
+  const [lastExportedDoc, setLastExportedDoc] = useState(null); // {id, name, path}
+  const navigate = useNavigate();
   const [isDirty, setIsDirty] = useState(false);
   const [openProjectDialog, setOpenProjectDialog] = useState(false);
   // Always-current id (for guarding in-flight autosave .then callbacks) and a
@@ -134,7 +159,24 @@ const VideoEditorPage = () => {
   const currentIdRef = useRef(null);
   const loadTokenRef = useRef(0);
   useEffect(() => { currentIdRef.current = currentProjectId; }, [currentProjectId]);
+
+  // Load the customer list for the caption select box.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/clients/`);
+        const data = await res.json();
+        const items = Array.isArray(data) ? data : (data?.clients || data?.items || []);
+        if (!cancelled) setCustomers(items);
+      } catch (e) {
+        console.warn("Could not load customers:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const [error, setError] = useState(null);
+  const [success, setSuccess] = useState("");
 
   // Director's Notes overrides — keyed by clip_id. Local until next Plan.
   // Each value is a Partial<ClipAnalysis> patch the user has applied on top
@@ -640,14 +682,63 @@ const VideoEditorPage = () => {
     if (!canPlan) return;
     setError(null);
     setRenderResult(null);
+    const customerContext = customer
+      ? {
+          name: customer.name,
+          intro: customer.notes || "",
+          brand: (customer.brand_voice_examples || "").split("\n")[0] || "",
+          products: customer.keywords || [],
+          usps: customer.unique_selling_points || [],
+        }
+      : null;
+    console.log("[VE] Plan submit → respectBinOrder:", respectBinOrder, "| customerContext:", customerContext);
     startPlan(buildPlanRequest({
       timeline,
       masterSong,
       scanMode,
       styleRecipeName,
       clipOverrides,
+      respectBinOrder,
+      customerContext,
+      captionDefaults,
     }));
-  }, [canPlan, startPlan, timeline, masterSong, scanMode, styleRecipeName, clipOverrides]);
+  }, [canPlan, startPlan, timeline, masterSong, scanMode, styleRecipeName, clipOverrides, respectBinOrder, customer, captionDefaults]);
+
+  // Debug: log the arrangement's captions whenever a Plan result lands.
+  useEffect(() => {
+    const clips = planJob.result?.arrangement?.clips;
+    if (clips) {
+      console.log("[VE] Plan result clips:", clips.map((c) => ({
+        clip_id: c.clip_id,
+        section: c.section_label,
+        caption: c.caption ?? null,
+      })));
+    }
+  }, [planJob.result]);
+
+  // Apply the global caption defaults (text/color/size/bgcolor/position) to every
+  // arranged clip the moment a Plan completes, so the per-caption settings in the
+  // Arrangement panel reflect the defaults (e.g. the default background color)
+  // instead of the backend's hardcoded fallbacks. Only runs on the transition into
+  // "done" so later per-caption edits aren't clobbered.
+  const prevPlanStatusRef = useRef(planJob.status);
+  useEffect(() => {
+    const prevStatus = prevPlanStatusRef.current;
+    prevPlanStatusRef.current = planJob.status;
+    if (planJob.status !== "done" || prevStatus === "done") return;
+    const clips = planJob.result?.arrangement?.clips;
+    if (!Array.isArray(clips) || clips.length === 0) return;
+    const d = captionDefaults || {};
+    const patch = {};
+    if (d.text != null) patch.caption = d.text;
+    if (d.color != null) patch.caption_color = d.color;
+    if (d.bgcolor != null) patch.caption_bgcolor = d.bgcolor;
+    if (d.size != null) patch.caption_size = d.size;
+    if (d.halign != null) patch.caption_halign = d.halign;
+    if (d.valign != null) patch.caption_valign = d.valign;
+    if (Object.keys(patch).length === 0) return;
+    updateAllArrangementClips(patch);
+  }, [planJob.status, planJob.result, captionDefaults, updateAllArrangementClips]);
 
   const handleQuickRender = useCallback(() => {
     if (!canPlan) return;
@@ -751,6 +842,87 @@ const VideoEditorPage = () => {
       setError(e.videoEditorMessage || getVideoEditorErrorMessage(e, "Could not launch Shotcut"));
     }
   }, [renderResult]);
+
+  // Export the arrangement's captions to an SRT file (saved as a Document) so the
+  // user can open/edit it in Guaardvark's Code Editor.
+  const handleExportCaptions = useCallback(async () => {
+    const arr = planJob.result?.arrangement;
+    if (!arr || !arr.clips?.some((c) => c.caption)) {
+      setError("No captions to export — run Plan with a customer selected first.");
+      return;
+    }
+    // Sanitize the user-chosen name down to a safe filename (no path separators).
+    const filename = (captionFileName || "captions")
+      .trim()
+      .replace(/[\\/]+/g, "_") || "captions";
+    try {
+      const res = await fetch(`${API_BASE}/video-editor/captions/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ arrangement: arr, filename }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || "Export failed"); return; }
+      setLastExportedDoc({
+        id: data.document_id,
+        name: (data.path || "captions.srt").split(/[\\/]/).pop(),
+        path: data.path,
+      });
+      setSuccess(`Captions exported → ${data.path} (Edit in Code Editor below, or Files → Captions)`);
+    } catch (e) {
+      setError(`Export failed: ${e.message}`);
+    }
+  }, [planJob.result, captionFileName]);
+
+  // Open the last exported caption document in the Code Editor.
+  const handleEditCaptionsInCodeEditor = useCallback(() => {
+    if (!lastExportedDoc?.id) return;
+    navigate("/code-editor", {
+      state: {
+        openFile: {
+          source: "document",
+          id: lastExportedDoc.id,
+          filename: lastExportedDoc.name,
+          content: null,
+          filePath: lastExportedDoc.path,
+        },
+      },
+    });
+  }, [navigate, lastExportedDoc]);
+
+  // Import captions from a JSON file (by document id or path) and apply them to
+  // the arrangement clips (matched by clip_id).
+  const handleImportCaptions = useCallback(async () => {
+    const input = window.prompt("Enter the caption file path or document id:");
+    if (!input) return;
+    const body = /^\d+$/.test(input.trim()) ? { document_id: Number(input.trim()) } : { path: input.trim() };
+    try {
+      const res = await fetch(`${API_BASE}/video-editor/captions/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || "Import failed"); return; }
+      const captions = data.captions || [];
+      const clips = planJob.result?.arrangement?.clips || [];
+      let applied = 0;
+      captions.forEach((cap) => {
+        // SRT has no clip_id — match by timecode: find the clip whose window
+        // overlaps the caption's start/end.
+        const idx = clips.findIndex((c) =>
+          cap.start >= (c.timeline_start ?? 0) - 0.05 && cap.start < (c.timeline_end ?? 0)
+        );
+        if (idx === -1) return;
+        planJob.updateArrangementClip(idx, { caption: cap.text });
+        applied += 1;
+      });
+      setSuccess(`Imported ${applied} caption(s).`);
+    } catch (e) {
+      setError(`Import failed: ${e.message}`);
+    }
+  }, [planJob.result, planJob.updateArrangementClip]);
+
 
   // HTML5 drag-and-drop. dataTransfer carries the media-library row id +
   // kind so BinPanel knows what kind of media is being dropped.
@@ -920,6 +1092,13 @@ const VideoEditorPage = () => {
             onSetVolume={handleSetClipVolume}
             onUpdateText={handleUpdateText}
             onDeleteText={handleDeleteText}
+            respectBinOrder={respectBinOrder}
+            setRespectBinOrder={setRespectBinOrder}
+            customers={customers}
+            customer={customer}
+            setCustomer={setCustomer}
+            captionDefaults={captionDefaults}
+            setCaptionDefaults={setCaptionDefaults}
             error={error}
             planError={planJob.error}
           />
@@ -953,7 +1132,34 @@ const VideoEditorPage = () => {
               warnings={planJob.result?.warnings || []}
             />
             <Box sx={{ flex: 1, overflow: "auto" }}>
-              <ArrangementPreview arrangement={planJob.result?.arrangement} />
+              <Stack direction="row" spacing={1} sx={{ mb: 1 }} alignItems="center" flexWrap="wrap">
+                <TextField
+                  size="small"
+                  label="Caption filename"
+                  value={captionFileName}
+                  onChange={(e) => {
+                    captionFileNameTouched.current = true;
+                    setCaptionFileName(e.target.value);
+                  }}
+                  sx={{ width: 200 }}
+                />
+                <Button size="small" variant="outlined" onClick={handleExportCaptions}>
+                  Export captions
+                </Button>
+                <Button size="small" variant="outlined" onClick={handleImportCaptions}>
+                  Import captions
+                </Button>
+                {lastExportedDoc && (
+                  <Button size="small" variant="contained" color="success" onClick={handleEditCaptionsInCodeEditor}>
+                    Edit captions
+                  </Button>
+                )}
+              </Stack>
+              {success && <Alert severity="success" sx={{ mb: 1, py: 0 }}>{success}</Alert>}
+              <ArrangementPreview
+                arrangement={planJob.result?.arrangement}
+                onUpdateCaption={planJob.updateArrangementClip}
+              />
             </Box>
           </Box>
         );

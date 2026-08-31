@@ -64,11 +64,15 @@ export const submitPlan = async ({
   style_recipe_name = "Default",
   seed = 0,
   clip_overrides = {},
+  respect_bin_order = false,
+  customer_context = null,
 }) => {
   const body = {
     bin_clips, scan_mode, audio_threshold, motion_threshold, margin,
     style_recipe_name, seed,
     clip_overrides,
+    respect_bin_order,
+    customer_context,
   };
   if (song_document_id) body.song_document_id = song_document_id;
   if (song_path) body.song_path = song_path;

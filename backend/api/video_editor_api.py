@@ -120,21 +120,24 @@ def _proxy_post(path: str, json_data: dict, timeout: int):
 
 
 def _resolve_document(doc_id: Any) -> Optional[str]:
-    """Resolve a Document row by id to its absolute path. Returns None if missing."""
+    """Resolve a Document row by id to its absolute on-disk path.
+
+    Uses the canonical uploads-aware resolver (which also handles legacy paths
+    like plugins/comfyui output) — NOT a bare cwd join. Returns None if the row
+    is missing or no candidate path exists on disk.
+    """
     if not doc_id:
         return None
     try:
         from backend.models import Document  # local import — avoid cycle on module load
+        from backend.services.document_path_resolver import resolve_document_path
     except ImportError:
         return None
     doc = Document.query.get(doc_id)
     if not doc:
         return None
-    path = getattr(doc, "file_path", None) or doc.path or doc.filename
-    if not path:
-        return None
-    p = Path(path)
-    return str(p.resolve() if p.is_absolute() else (Path.cwd() / p).resolve())
+    resolved = resolve_document_path(doc)
+    return str(resolved) if resolved else None
 
 
 def _expand_paths(payload: dict[str, Any]) -> dict[str, Any]:
@@ -238,7 +241,159 @@ def shotcut_compose_arrangement():
         if resolved:
             payload["audio_path"] = resolved
     body, status_code = _proxy_post("/shotcut/compose-arrangement", payload, timeout=RENDER_TIMEOUT)
+    if isinstance(body, dict):
+        # The plugin returns the rendered .mlt path + a `documents` list, but the
+        # Video Editor frontend addresses the finished video by the registered
+        # Document id (`rendered_mp4_doc_id`). Derive it from the returned docs
+        # (pick the one whose filename/path is the rendered .mp4) so the preview
+        # and download link resolve.
+        if body.get("rendered_mp4") and not body.get("rendered_mp4_doc_id"):
+            for doc in body.get("documents") or []:
+                fname = str(doc.get("filename") or doc.get("path") or "").lower()
+                if fname.endswith(".mp4"):
+                    body["rendered_mp4_doc_id"] = doc.get("id")
+                    break
     return jsonify(body), status_code
+
+
+@video_editor_bp.route("/captions/export", methods=["POST"])
+def export_captions():
+    """Write an arrangement's captions to an SRT file (registered as a Document).
+
+    SRT is human-editable: each caption is a numbered block with a timecode line
+    and the text. Body: { arrangement: {clips:[...]}, filename? }
+    Returns { path, document_id, captions }.
+    """
+    payload = flask_request.get_json(silent=True) or {}
+    arrangement = payload.get("arrangement") or {}
+    clips = arrangement.get("clips") or []
+    captions = []
+    for c in clips:
+        if not c.get("caption"):
+            continue
+        captions.append({
+            "clip_id": c.get("clip_id"),
+            "text": c.get("caption"),
+            "start": c.get("timeline_start"),
+            "end": c.get("timeline_end"),
+            "x": c.get("caption_x"),
+            "y": c.get("caption_y"),
+            "size": c.get("caption_size"),
+            "color": c.get("caption_color"),
+            "halign": c.get("caption_halign"),
+            "valign": c.get("caption_valign"),
+        })
+    if not captions:
+        return jsonify({"error": "No captions in the arrangement to export"}), 400
+
+    from backend.config import UPLOAD_DIR
+    from backend.services.output_registration import register_file
+
+    captions_dir = Path(UPLOAD_DIR) / "Captions"
+    captions_dir.mkdir(parents=True, exist_ok=True)
+    # Take only the basename so a user-supplied name can never point outside the
+    # Captions directory (path traversal). ".srt" is appended if not already there.
+    name = Path((payload.get("filename") or "captions").strip() or "captions").name
+    if not name.endswith(".srt"):
+        name += ".srt"
+    out_path = captions_dir / name
+    out_path.write_text(_captions_to_srt(captions), encoding="utf-8")
+
+    doc = register_file(
+        physical_path=str(out_path),
+        folder_name="Captions",
+        filename=out_path.name,
+        file_type=".srt",
+        file_metadata={"kind": "video_editor_captions", "count": len(captions)},
+    )
+    return jsonify({
+        "path": str(out_path),
+        "document_id": doc.id if doc else None,
+        "captions": captions,
+    })
+
+
+@video_editor_bp.route("/captions/import", methods=["POST"])
+def import_captions():
+    """Read an SRT caption file (by document_id or path) and return its captions.
+
+    Body: { document_id? | path? }
+    Returns { captions: [{text, start, end}] }.
+    """
+    payload = flask_request.get_json(silent=True) or {}
+    path = None
+    doc_id = payload.get("document_id")
+    if doc_id:
+        path = _resolve_document(doc_id)
+    if not path:
+        path = payload.get("path")
+    if not path:
+        return jsonify({"error": "Provide document_id or path"}), 400
+    p = Path(path)
+    if not p.exists():
+        return jsonify({"error": f"Caption file not found: {path}"}), 404
+    try:
+        text = p.read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"Could not read caption file: {e}"}), 400
+    captions = _parse_srt(text)
+    if not captions:
+        return jsonify({"error": "No captions parsed from the SRT file"}), 400
+    return jsonify({"captions": captions})
+
+
+def _to_srt_time(seconds: float) -> str:
+    """Format seconds as SRT timecode HH:MM:SS,mmm."""
+    ms = max(0, int(round(float(seconds) * 1000)))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _captions_to_srt(captions: list[dict]) -> str:
+    """Render captions as an SRT document."""
+    lines: list[str] = []
+    for i, c in enumerate(captions, 1):
+        start = _to_srt_time(c.get("start") or 0)
+        end = _to_srt_time(c.get("end") or 0)
+        lines.append(str(i))
+        lines.append(f"{start} --> {end}")
+        lines.append(str(c.get("text") or ""))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _srt_to_seconds(h: str, m: str, s: str, ms: str) -> float:
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+
+def _parse_srt(text: str) -> list[dict]:
+    """Parse an SRT document into [{text, start, end}] (order preserved)."""
+    import re
+
+    captions: list[dict] = []
+    blocks = re.split(r"\n\s*\n", text.strip())
+    for block in blocks:
+        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        if not lines:
+            continue
+        time_idx = next((i for i, ln in enumerate(lines) if "-->" in ln), None)
+        if time_idx is None:
+            continue
+        m = re.match(
+            r"(\d+):(\d+):(\d+)[,.]?(\d*)\s*-->\s*(\d+):(\d+):(\d+)[,.]?(\d*)",
+            lines[time_idx],
+        )
+        if not m:
+            continue
+        start = _srt_to_seconds(m.group(1), m.group(2), m.group(3), m.group(4) or "0")
+        end = _srt_to_seconds(m.group(5), m.group(6), m.group(7), m.group(8) or "0")
+        text = " ".join(lines[time_idx + 1:])
+        captions.append({"text": text, "start": start, "end": end})
+    return captions
+
+
 
 
 @video_editor_bp.route("/catalog/filters", methods=["GET"])
