@@ -142,6 +142,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     fps: 25,
     width: 1280,
     height: 720,
+    focus_x: 0.5,
+    focus_y: 0.5,
   });
   const [ffGenerating, setFfGenerating] = useState(false);
   const [ffResults, setFfResults] = useState(null); // { pattern, results: [] }
@@ -1361,6 +1363,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         fps: Number(ffConfig.fps),
         width: Number(ffConfig.width),
         height: Number(ffConfig.height),
+        focus_x: Number(ffConfig.focus_x),
+        focus_y: Number(ffConfig.focus_y),
       };
       const res = await fetch(`${API_BASE}/batch-video/ffmpeg/stills`, {
         method: "POST",

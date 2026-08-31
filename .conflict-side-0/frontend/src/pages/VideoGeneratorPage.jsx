@@ -22,6 +22,11 @@ import {
   Select,
   MenuItem,
   Alert,
+  Paper,
+  List,
+  ListItem,
+  ListItemText,
+  Slider,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -128,6 +133,19 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [dragActive, setDragActive] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef(null);
+
+  // FFmpeg still-clip mode (no GPU / no AI). Camera-motion patterns:
+  //   static / ken_burns_zoom / ken_burns_pan
+  const [ffConfig, setFfConfig] = useState({
+    pattern: "ken_burns_zoom",
+    duration_s: 5,
+    fps: 25,
+    width: 1280,
+    height: 720,
+  });
+  const [ffGenerating, setFfGenerating] = useState(false);
+  const [ffResults, setFfResults] = useState(null); // { pattern, results: [] }
+  const [ffError, setFfError] = useState("");
 
   // Gallery modal state
   const [galleryOpen, setGalleryOpen] = useState(false);
@@ -1185,6 +1203,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     setSuccess("");
     setBatchStatus(null);
 
+    if (inputMode === "ffmpeg") {
+      return handleFfmpegGenerate();
+    }
+
     if (inputMode === "text" && parsedPrompts.length === 0) {
       setError("Please enter at least one prompt.");
       return;
@@ -1317,6 +1339,49 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       setError(`Failed to queue batch: ${e.message}`);
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  // FFmpeg still-clip generation: converts stills to clips with camera-only
+  // motion (no GPU / no AI / no distortion). Results return synchronously.
+  const handleFfmpegGenerate = async () => {
+    setFfError("");
+    setFfResults(null);
+    const imagePaths = selectedImages.map((img) => img.path);
+    if (imagePaths.length === 0) {
+      setFfError("Please upload or select at least one image.");
+      return;
+    }
+    setFfGenerating(true);
+    try {
+      const body = {
+        image_paths: imagePaths,
+        pattern: ffConfig.pattern,
+        duration_s: Number(ffConfig.duration_s),
+        fps: Number(ffConfig.fps),
+        width: Number(ffConfig.width),
+        height: Number(ffConfig.height),
+      };
+      const res = await fetch(`${API_BASE}/batch-video/ffmpeg/stills`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const ed = await res.json().catch(() => ({}));
+        setFfError(formatUiError(ed.error || ed.message) || `HTTP ${res.status}`);
+        return;
+      }
+      const data = await res.json();
+      if (!data.success) {
+        setFfError(formatUiError(data.error || data.message) || "Generation failed");
+        return;
+      }
+      setFfResults(data.data);
+    } catch (e) {
+      setFfError(`Failed to generate clips: ${e.message}`);
+    } finally {
+      setFfGenerating(false);
     }
   };
 
