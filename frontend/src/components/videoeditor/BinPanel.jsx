@@ -2,7 +2,7 @@
 // MediaLibraryPanel (videos) and from the OS file browser. Drag-out is not
 // supported; the bin owns its clips. Remove via the X on each tile.
 
-import React, { useState } from "react";
+import React, { useRef } from "react";
 import { Box, Stack, Typography, LinearProgress, Alert } from "@mui/material";
 import { VideoLibrary as VideoIcon, FolderOpen as OpenFolderIcon } from "@mui/icons-material";
 import BinClipTile from "./BinClipTile";
@@ -19,11 +19,9 @@ const BinPanel = ({
   warningsByClipId = {},  // {clipId: warning text}
   planDecorationsByClipId = {},
 }) => {
-  // Drag-over + drag-source state for drag-to-reorder of existing bin clips.
-  // We track the source id in React state because dataTransfer.getData() is
-  // empty during dragover — only reliable on drop.
-  const [dragOverId, setDragOverId] = useState(null);
-  const [draggingId, setDraggingId] = useState(null);
+  // Ref (not state) holds the drag source id so dragging never re-renders the
+  // source tile (which would cancel the HTML5 drag before the drop fires).
+  const draggingIdRef = useRef(null);
 
   // OS file drop: upload → Document → bin tile.
   const { onDrop, onDragOver, uploading, progress, error } = useExternalDrop({
@@ -109,11 +107,7 @@ const BinPanel = ({
                 onSelect={onSelect}
                 onRemove={onRemove}
                 onReorder={onReorder}
-                isDragOver={dragOverId === c.clipId}
-                draggingId={draggingId}
-                onDragStartChange={setDraggingId}
-                onDragEndChange={() => setDraggingId(null)}
-                onDragOverChange={setDragOverId}
+                draggingIdRef={draggingIdRef}
                 warning={warningsByClipId[c.clipId]}
                 keptRanges={planDecorationsByClipId[c.clipId]?.keptRanges}
                 durationSeconds={planDecorationsByClipId[c.clipId]?.durationSeconds}
