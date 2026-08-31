@@ -19,6 +19,9 @@ Examples:
   # Zoom focused on the center-right of each image (focus is 0..1 fraction)
   python3 scripts/ffmpeg_stills.py logo.png --pattern ken_burns_zoom --focus-x 0.7 --focus-y 0.5
 
+  # Pan top to bottom on each image
+  python3 scripts/ffmpeg_stills.py images/*.png --pattern ken_burns_pan --pan-direction top-to-bottom
+
   # Generate all three patterns for one image
   python3 scripts/ffmpeg_stills.py logo.png --all-patterns
 
@@ -77,6 +80,10 @@ def main():
                     help="Zoom focus point X, 0..1 fraction (default 0.5 = center)")
     ap.add_argument("--focus-y", type=float, default=0.5,
                     help="Zoom focus point Y, 0..1 fraction (default 0.5 = center)")
+    ap.add_argument("--pan-direction", default="left-to-right",
+                    choices=ffmpeg_gen.PAN_CHOICES,
+                    help="Pan direction; 'random' picks a different one per image "
+                         "(default: left-to-right)")
     ap.add_argument("--out", default=None, help="Output directory (default: uploads/Videos/FFmpeg/<batch>)")
     ap.add_argument("--folder-name", default="Videos", help="Destination folder in the Media Library")
     ap.add_argument("--dry-run", action="store_true", help="Print what would happen, don't render")
@@ -118,6 +125,7 @@ def main():
                 subfolder_name=sub if args.out else None,
                 focus_x=args.focus_x,
                 focus_y=args.focus_y,
+                pan_direction=args.pan_direction,
             )
             for r in results:
                 if r["success"]:

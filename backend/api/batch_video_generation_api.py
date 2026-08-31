@@ -348,6 +348,15 @@ def generate_ffmpeg_still_videos():
         focus_x = max(0.0, min(1.0, focus_x))
         focus_y = max(0.0, min(1.0, focus_y))
 
+        # Pan travel direction (only used for the ken_burns_pan pattern).
+        # "random" picks a different direction per image in the batch.
+        pan_direction = data.get("pan_direction", "left-to-right")
+        if pan_direction not in ffmpeg_gen.PAN_CHOICES:
+            return error_response(
+                f"pan_direction must be one of {sorted(ffmpeg_gen.PAN_CHOICES)}",
+                400, "INVALID_PAN_DIRECTION",
+            )
+
         results = ffmpeg_gen.generate_still_clip_batch(
             image_paths=image_paths,
             pattern=pattern,
@@ -357,9 +366,11 @@ def generate_ffmpeg_still_videos():
             height=height,
             focus_x=focus_x,
             focus_y=focus_y,
+            pan_direction=pan_direction,
         )
         return success_response({
             "pattern": pattern,
+            "pan_direction": pan_direction,
             "focus": {"x": focus_x, "y": focus_y},
             "total": len(results),
             "created": sum(1 for r in results if r.get("success")),

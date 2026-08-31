@@ -139,6 +139,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     height: 720,
     focus_x: 0.5,
     focus_y: 0.5,
+    pan_direction: "left-to-right",
   });
   const [ffGenerating, setFfGenerating] = useState(false);
   const [ffResults, setFfResults] = useState(null); // { pattern, results: [] }
@@ -1089,6 +1090,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         height: Number(ffConfig.height),
         focus_x: Number(ffConfig.focus_x),
         focus_y: Number(ffConfig.focus_y),
+        pan_direction: ffConfig.pan_direction,
       };
       const res = await fetch(`${API_BASE}/batch-video/ffmpeg/stills`, {
         method: "POST",
@@ -1674,9 +1676,38 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     <Typography variant="caption" color="text.secondary">
                       {ffConfig.pattern === "static" && "Holds the image still — pixel-perfect, no movement."}
                       {ffConfig.pattern === "ken_burns_zoom" && "Slow camera push-in (zoom)."}
-                      {ffConfig.pattern === "ken_burns_pan" && "Slow left-to-right camera pan."}
+                      {ffConfig.pattern === "ken_burns_pan" && "Slow camera pan."}
                     </Typography>
                   </Box>
+
+                  {/* Pan direction — only for the Pan pattern */}
+                  {ffConfig.pattern === "ken_burns_pan" && (
+                    <Box>
+                      <Typography variant="caption" fontWeight="bold" color="text.secondary">
+                        Pan direction
+                      </Typography>
+                      <ToggleButtonGroup
+                        value={ffConfig.pan_direction}
+                        exclusive
+                        size="small"
+                        onChange={(e, v) => v && setFfConfig((c) => ({ ...c, pan_direction: v }))}
+                        fullWidth
+                        sx={{ mt: 0.5, flexWrap: "wrap" }}
+                      >
+                        {[
+                          ["left-to-right", "Left \u2192 Right"],
+                          ["right-to-left", "Right \u2192 Left"],
+                          ["top-to-bottom", "Top \u2192 Bottom"],
+                          ["bottom-to-top", "Bottom \u2192 Top"],
+                          ["random", "Random"],
+                        ].map(([val, label]) => (
+                          <ToggleButton key={val} value={val} sx={{ textTransform: "none" }}>
+                            <Typography variant="caption">{label}</Typography>
+                          </ToggleButton>
+                        ))}
+                      </ToggleButtonGroup>
+                    </Box>
+                  )}
 
                   {/* Duration */}
                   <Box>
@@ -1815,7 +1846,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
             </Box>
           )}
 
-          {/* Batch-wide prompt modifiers — apply to every prompt in the batch */}
+          {/* Batch-wide prompt modifiers — AI-only, hidden in FFmpeg mode */}
+          {inputMode !== "ffmpeg" && (
           <Stack spacing={2} sx={{ mt: 2 }}>
             <TextField
               label="Look & Feel (optional, applied to every prompt)"
@@ -2055,10 +2087,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               sx={{ maxWidth: 180 }}
             />
           </Stack>
+          )}
 
           <Divider sx={{ my: 3 }} />
 
-          {/* Video Settings Section */}
+          {/* Video Settings Section — hidden in FFmpeg mode (no model needed) */}
+          {inputMode !== "ffmpeg" && (
           <Box sx={{ mb: 3 }}>
             <Typography 
               variant="subtitle1" 
@@ -2514,24 +2548,29 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               </Alert>
             )}
           </Box>
+          )}
 
-          {/* Preview of computed settings */}
-          <VideoGenEffectiveSettings
-            model={model}
-            computedParams={computedParams}
-            cinematicKeyframe={cinematicKeyframe}
-            selectedSubjectIds={selectedSubjectIds}
-            keyframeModel={keyframeModel}
-            directorMode={directorMode}
-            faceRestore={advancedParams.face_restore}
-            freeu={advancedParams.freeu}
-          />
+          {/* Preview of computed settings — used only for AI models, hidden in FFmpeg mode */}
+          {inputMode !== "ffmpeg" && (
+            <>
+              <VideoGenEffectiveSettings
+                model={model}
+                computedParams={computedParams}
+                cinematicKeyframe={cinematicKeyframe}
+                selectedSubjectIds={selectedSubjectIds}
+                keyframeModel={keyframeModel}
+                directorMode={directorMode}
+                faceRestore={advancedParams.face_restore}
+                freeu={advancedParams.freeu}
+              />
 
-          {/* Model-mode mismatch is now prevented by filtering — no warning needed */}
+              {/* Model-mode mismatch is now prevented by filtering — no warning needed */}
 
-          <Divider />
+              <Divider />
 
-          <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+            </>
+          )}
 
           {/* Generate Button */}
           <Button

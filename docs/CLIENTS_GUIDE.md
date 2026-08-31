@@ -374,7 +374,7 @@ never re-renders the artwork, so there is **zero distortion and zero color chang
 |---|---|---|
 | `static` | **A · Static** | Holds the frame — no movement, pixel-perfect. |
 | `ken_burns_zoom` | **B · Zoom** | Slow camera push-in (zoom). |
-| `ken_burns_pan` | **C · Pan** | Slow left-to-right camera pan. |
+| `ken_burns_pan` | **C · Pan** | Slow camera pan — pick a direction (left/right/top/bottom). |
 
 **Web UI (`/video`):** click the **FFmpeg** toggle (🎬 icon, next to Image) → upload
 images → pick a pattern (A/B/C), duration (2–10s), FPS (24/25/30), resolution
@@ -387,9 +387,12 @@ python scripts/ffmpeg_stills.py images/*.png --pattern ken_burns_zoom --duration
   --width 1280 --height 720
 ```
 
-**Focus point:** Zoom (and the pan vertical axis) accept a focus `--focus-x` / `--focus-y`
+**Focus point:** Zoom (and the pan fixed axis) accept a focus `--focus-x` / `--focus-y`
 (`0–1` fraction, default `0.5` = center) so the camera stays centered on a chosen part
-of the image (e.g. a character) while zooming.
+of the image (e.g. a character) while zooming. **Pan direction:** `--pan-direction
+left-to-right|right-to-left|top-to-bottom|bottom-to-top|random` (default left-to-right).
+`random` picks a different direction per image for batch variety. In the web UI, FFmpeg
+mode hides all AI model settings (no model is needed).
 
 **Full reference:** see `docs/FFMPEG_STILL_VIDEO.md`. Generated clips are `video` clips,
 so they work directly in the Video Editor's **Plan** pipeline.
