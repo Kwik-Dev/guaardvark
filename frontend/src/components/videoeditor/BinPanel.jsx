@@ -2,7 +2,7 @@
 // MediaLibraryPanel (videos) and from the OS file browser. Drag-out is not
 // supported; the bin owns its clips. Remove via the X on each tile.
 
-import React from "react";
+import React, { useState } from "react";
 import { Box, Stack, Typography, LinearProgress, Alert } from "@mui/material";
 import { VideoLibrary as VideoIcon, FolderOpen as OpenFolderIcon } from "@mui/icons-material";
 import BinClipTile from "./BinClipTile";
@@ -15,9 +15,13 @@ const BinPanel = ({
   onAdd,        // (BinClip) => void   — single clip add (from library drag)
   onAddMany,    // (BinClip[]) => void — bulk add (from OS upload)
   onRemove,
+  onReorder,    // (fromClipId, toClipId) => void — drag-to-reorder
   warningsByClipId = {},  // {clipId: warning text}
   planDecorationsByClipId = {},
 }) => {
+  // Drag-over highlight state for drag-to-reorder of existing bin clips.
+  const [dragOverId, setDragOverId] = useState(null);
+
   // OS file drop: upload → Document → bin tile.
   const { onDrop, onDragOver, uploading, progress, error } = useExternalDrop({
     onUploaded: (docs) => {
@@ -101,6 +105,9 @@ const BinPanel = ({
                 selected={selectedClipId === c.clipId}
                 onSelect={onSelect}
                 onRemove={onRemove}
+                onReorder={onReorder}
+                isDragOver={dragOverId === c.clipId}
+                onDragOverChange={setDragOverId}
                 warning={warningsByClipId[c.clipId]}
                 keptRanges={planDecorationsByClipId[c.clipId]?.keptRanges}
                 durationSeconds={planDecorationsByClipId[c.clipId]?.durationSeconds}
