@@ -1,0 +1,3 @@
+# backend/services/swarm — Film Crew (sequential production pipeline)
+
+This directory is the **Film Crew** sequential production-pipeline agents (Screenwriter -> Casting -> Cinematographer -> Storyboard -> Editor), driven by `backend/tasks/production_swarm_tasks.py` and surfaced by the **/film-crew** UI page. The directory name `swarm` here is a legacy artifact and does **not** refer to parallel orchestration. This is **not** the parallel Swarm Orchestrator plugin in [`/plugins/swarm`](../../../plugins/swarm/README.md), which runs coding agents in parallel over isolated git worktrees (port 8210) and backs the **/swarm** UI page.

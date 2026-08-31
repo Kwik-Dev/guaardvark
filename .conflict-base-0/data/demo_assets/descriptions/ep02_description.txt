@@ -1,0 +1,30 @@
+Ask it to play a song — it answers in under a hundred milliseconds, zero AI calls. Ask it to research something and click through — it thinks in steps you can watch. Same chat box. Three different brains.
+
+Episode 2 walks the three-tier chat architecture: instant reflex commands, single-call instinct answers, and multi-step deliberation with a live thinking trail — including an honesty beat where the tool selector correctly declines to fire image generation on an ambiguous request. Also covers slash commands, inline /imagine, the floating chat window, the narrate button, and Lesson Pearls.
+
+One machine. No cloud. This is Episode 2 of 12.
+
+CHAPTERS (add exact timestamps after the final edit)
+0:00 One chat box, three brains
+[__:__] Tier 1 — Reflex (<100ms, zero LLM calls)
+[__:__] Tier 2 — Instinct
+[__:__] Tier 3 — Deliberation (honesty beat)
+[__:__] Slash commands
+[__:__] /imagine — inline image generation
+[__:__] Floating chat follows you everywhere
+[__:__] Narrate button
+[__:__] Lesson Pearls
+[__:__] Closer — where do files live?
+
+FEATURED IN THIS EPISODE
+▸ Ep 5: A Million Pictures, One Prompt — Image Gen — {EP05}
+▸ Ep 7: The Voice Foundry — Voice Clone — {EP07}
+▸ Ep 3: Your Files Have a Desktop — File Desktop — {EP03}
+
+Full playlist: {PLAYLIST}
+
+Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
+
+Source & docs: https://github.com/guaardvark/guaardvark
+
+#Guaardvark #localAI #selfhostedAI #opensourceAI #offlineAI #AIvideogeneration #onemachinenocloud #chatbrain #localLLMchat #AIagenttiers #toolcalling

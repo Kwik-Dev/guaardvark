@@ -1,0 +1,732 @@
+/**
+ * StreamingMessage - Builds up a message from Socket.IO streaming events.
+ * Shows thinking indicator, tool call cards, and final text as they arrive.
+ */
+import React, { useEffect, useState, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
+import PropTypes from "prop-types";
+import { guardedMediaSrc } from "../../utils/assetGuard";
+import {
+  Box,
+  Paper,
+  Avatar,
+  Typography,
+  CircularProgress,
+  Chip,
+  CardMedia,
+} from "@mui/material";
+import { BrandLogo } from "../branding";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { useAppStore } from "../../stores/useAppStore";
+import { BASE_URL } from "../../api/apiClient";
+import ToolCallCard from "./ToolCallCard";
+import ThinkingCard from "./ThinkingCard";
+import AgentThinkingTrail from "./AgentThinkingTrail";
+import ImageLightbox from "../images/ImageLightbox";
+import { debugLog } from "../../utils/debugLog";
+
+const UPLOAD_BASE_URL = BASE_URL + "/uploads";
+
+const formatTime = (timestamp) => {
+  if (!timestamp) return "";
+  try {
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) return "";
+    
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    
+    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (isToday) {
+      return timeStr;
+    } else {
+      const dateStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      return `${dateStr}, ${timeStr}`;
+    }
+  } catch (e) {
+    return "";
+  }
+};
+
+const joinReasoning = (segments) =>
+  segments.map((seg) => seg.text).filter(Boolean).join("\n\n");
+
+const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref) => {
+  const [status, setStatus] = useState("idle"); // idle | thinking | streaming | complete | error
+  const [startTime] = useState(() => new Date());
+  const [thinkingText, setThinkingText] = useState("");
+  // agentThinkingSteps captures the agent loop's per-iteration reasoning
+  // streamed via chat:thinking events from agent_control_service. Each entry:
+  // {iteration, label, reasoning}. Distinct from `thinkingText` which is the
+  // single-line live status (e.g. "Calling LLM...").
+  const [agentThinkingSteps, setAgentThinkingSteps] = useState([]);
+  // Model reasoning from chat:reasoning, one segment per LLM call. Distinct
+  // from agentThinkingSteps (agent-loop status) and thinkingText (status line).
+  const [reasoningText, setReasoningText] = useState("");
+  const [reasoningStreaming, setReasoningStreaming] = useState(false);
+  const [reasoningElapsedMs, setReasoningElapsedMs] = useState(null);
+  const [reasoningExpanded, setReasoningExpanded] = useState(true);
+  const [truncated, setTruncated] = useState(false);
+  debugLog('[StreamingMessage] RENDER: chatService=', !!chatService, 'status=', status, 'agentSteps.length=', agentThinkingSteps.length, 'sessionProp=', sessionId);
+  const [toolCalls, setToolCalls] = useState([]); // [{tool, params, result, durationMs, isPending, outputChunks, requiresApproval}]
+  const [content, setContent] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [tokenUsage, setTokenUsage] = useState(null); // {input_tokens, output_tokens} or null
+  const [images, setImages] = useState([]); // [{url, alt, caption}]
+  const [lightbox, setLightbox] = useState(null);
+  const [pendingApproval, setPendingApproval] = useState(false);
+  const mountedRef = useRef(true);
+  const imagesRef = useRef([]); // Keep a ref for images to avoid stale closure in onComplete
+  const logo = useAppStore((s) => s.systemLogo);
+  const logoUrl = logo ? `${UPLOAD_BASE_URL}/${logo}` : undefined;
+
+  // Use refs for values that change but shouldn't trigger listener re-registration
+  const sessionIdRef = useRef(sessionId);
+  const onCompleteRef = useRef(onComplete);
+  const contentRef = useRef(content);
+  const toolCallsRef = useRef(toolCalls);
+  const thinkingTextRef = useRef("");
+  const agentStepsRef = useRef([]);
+  const reasoningSegmentsRef = useRef([]); // [{iteration, text}]
+  const reasoningStartRef = useRef(null);
+  const reasoningElapsedRef = useRef(null);
+
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
+  useEffect(() => { contentRef.current = content; }, [content]);
+  useEffect(() => { toolCallsRef.current = toolCalls; }, [toolCalls]);
+  useEffect(() => { agentStepsRef.current = agentThinkingSteps; }, [agentThinkingSteps]);
+
+  useEffect(() => {
+    if (agentThinkingSteps.length > 0) {
+      debugLog('[StreamingMessage] agentThinkingSteps STATE UPDATED: now length=', agentThinkingSteps.length, 'last=', agentThinkingSteps[agentThinkingSteps.length-1]);
+    }
+  }, [agentThinkingSteps]);
+
+  // Explicit trace for chatService prop identity changes (a common source of mount/unmount or listener races)
+  useEffect(() => {
+    debugLog('[StreamingMessage] chatService PROP CHANGED (identity or ref):', !!chatService, '; this will cause listener useEffect re-run if in deps');
+  }, [chatService]);
+
+  useImperativeHandle(ref, () => ({
+    getPartialState: () => ({
+      content: contentRef.current,
+      toolCalls: toolCallsRef.current,
+      images: imagesRef.current || [],
+      agentThinkingSteps: agentStepsRef.current,
+      thinkingText: thinkingTextRef.current,
+      thinking: joinReasoning(reasoningSegmentsRef.current),
+      truncated: false,
+    })
+  }));
+
+  // Register socket listeners ONCE per chatService instance.
+  // Callbacks read from refs so they always have current values
+  // without causing the useEffect to re-run.
+  useEffect(() => {
+    debugLog('[StreamingMessage] useEffect RUN (listener attachment); chatService=', !!chatService, 'chatService===unified?', /*identity opaque*/ 'propSession=', sessionId, 'refSession=', sessionIdRef.current);
+    if (!chatService) {
+      debugLog('[StreamingMessage] useEffect EARLY RETURN: no chatService (render guard may have passed socket-only truthy)');
+      return;
+    }
+    mountedRef.current = true;
+    debugLog('[StreamingMessage] MOUNTED + listeners attaching for this chatService instance; mountedRef=true');
+
+    chatService.onThinking((data) => {
+      console.debug(`[SOCKET-CHAT] RECV chat:thinking (StreamingMessage cb) session=${data.session_id} iter=${data.iteration} status=${data.status} source=${data.source} (check vs join time)`);
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) {
+        debugLog('[StreamingMessage] onThinking IGNORED (not mounted or session mismatch): got session=', data.session_id, 'expected=', sessionIdRef.current, 'mounted=', mountedRef.current, 'source=', data.source);
+        return;
+      }
+      debugLog('[StreamingMessage] RECEIVED chat:thinking event: source=', data.source, 'iteration=', data.iteration, 'status=', data.status, 'has_reasoning=', !!data.reasoning, 'session=', data.session_id);
+      setStatus("thinking");
+      const text = data.status || `Iteration ${data.iteration}...`;
+      setThinkingText(text);
+      thinkingTextRef.current = text;
+      // Agent-loop reasoning gets appended as a step so the user sees the
+      // full chain ("step 8: clear address bar... step 9: previous attempt
+      // failed... step 10: try Backspace") instead of just the latest line.
+      if (data.source === "agent_loop" && data.reasoning) {
+        debugLog('[StreamingMessage] APPENDING agent_loop step: iteration=', data.iteration, 'label=', data.status || '', 'reasoningLen=', (data.reasoning||'').length, 'currentStepsBefore=', agentStepsRef.current.length);
+        setAgentThinkingSteps((prev) => [
+          ...prev,
+          {
+            iteration: data.iteration,
+            label: data.status || "",
+            reasoning: data.reasoning,
+          },
+        ]);
+      }
+    });
+
+    chatService.onReasoning((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      const segments = reasoningSegmentsRef.current;
+      const iteration = data.iteration ?? 0;
+      let current = segments.length > 0 ? segments[segments.length - 1] : null;
+      if (!current || current.iteration !== iteration) {
+        current = { iteration, text: "" };
+        segments.push(current);
+      }
+      if (data.done) {
+        if (typeof data.text === "string" && data.text) {
+          current.text = data.text;
+        }
+        setReasoningStreaming(false);
+        if (reasoningStartRef.current != null) {
+          reasoningElapsedRef.current = Date.now() - reasoningStartRef.current;
+          setReasoningElapsedMs(reasoningElapsedRef.current);
+        }
+      } else {
+        if (reasoningStartRef.current == null) {
+          reasoningStartRef.current = Date.now();
+        }
+        current.text += data.delta || "";
+        setReasoningStreaming(true);
+        setStatus("streaming");
+      }
+      setReasoningText(joinReasoning(segments));
+    });
+
+    chatService.onToolCall((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      setStatus("streaming");
+      setToolCalls((prev) => [
+        ...prev,
+        {
+          tool: data.tool,
+          params: data.params || data.arguments || data.args || {},
+          result: null,
+          durationMs: null,
+          isPending: true,
+          reasoning: data.reasoning,
+        },
+      ]);
+    });
+
+    chatService.onToolResult((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      setToolCalls((prev) => {
+        const updated = [...prev];
+        for (let i = updated.length - 1; i >= 0; i--) {
+          if (updated[i].tool === data.tool && updated[i].isPending) {
+            updated[i] = {
+              ...updated[i],
+              result: data.result,
+              durationMs: data.duration_ms,
+              isPending: false,
+              requiresApproval: false, // Clear approval state on result
+            };
+            break;
+          }
+        }
+        return updated;
+      });
+      // If we were waiting for approval and got a result, clear global pending state
+      setPendingApproval(false);
+    });
+
+    chatService.onToolOutputChunk((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      setToolCalls((prev) => {
+        const updated = [...prev];
+        for (let i = updated.length - 1; i >= 0; i--) {
+          if (updated[i].tool === data.tool && updated[i].isPending) {
+            updated[i] = {
+              ...updated[i],
+              outputChunks: (updated[i].outputChunks || "") + data.chunk,
+            };
+            break;
+          }
+        }
+        return updated;
+      });
+    });
+
+    chatService.onToolApprovalRequest((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      setPendingApproval(true);
+      setToolCalls((prev) => {
+        const updated = [...prev];
+        const approvalTools = new Set(data.tools || []);
+        return updated.map(tc => {
+          if (tc.isPending && approvalTools.has(tc.tool)) {
+            return { ...tc, requiresApproval: true };
+          }
+          return tc;
+        });
+      });
+    });
+
+    chatService.onToken((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      setStatus("streaming");
+      setReasoningExpanded(false);
+      setContent((prev) => prev + (data.content || ""));
+    });
+
+    chatService.onComplete((data) => {
+      console.debug(`[SOCKET-CHAT] RECV chat:complete (StreamingMessage cb) session=${data.session_id} hasResponse=${!!data.response}`);
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) {
+        debugLog('[StreamingMessage] onComplete IGNORED (not mounted or session mismatch): got=', data.session_id, 'expected=', sessionIdRef.current);
+        return;
+      }
+      debugLog('[StreamingMessage] RECEIVED chat:complete: responseLen=', (data.response||'').length, 'steps=', (data.steps||[]).length, 'agentStepsRefAtComplete=', agentStepsRef.current.length, 'session=', data.session_id);
+      setStatus("complete");
+      setReasoningStreaming(false);
+      setReasoningExpanded(false);
+      if (reasoningStartRef.current != null && reasoningElapsedRef.current == null) {
+        reasoningElapsedRef.current = Date.now() - reasoningStartRef.current;
+        setReasoningElapsedMs(reasoningElapsedRef.current);
+      }
+      const isTruncated = data.truncated === true;
+      setTruncated(isTruncated);
+      // The final answer call's reasoning is authoritative; the live
+      // segments only stand in when chat:complete carries none.
+      const finalThinking = typeof data.thinking === "string" && data.thinking
+        ? data.thinking
+        : joinReasoning(reasoningSegmentsRef.current);
+      if (finalThinking) {
+        setReasoningText(finalThinking);
+      }
+      if (data.response) {
+        setContent(data.response);
+      }
+      if (data.token_usage && (data.token_usage.input_tokens || data.token_usage.output_tokens)) {
+        setTokenUsage(data.token_usage);
+      }
+      if (onCompleteRef.current) {
+        // Merge images from socket events with any from the complete payload
+        const socketImages = imagesRef.current || [];
+        const backendImages = (data.generated_images || []).map((img) => ({
+          url: img.url,
+          alt: img.alt || "Generated image",
+          caption: img.caption || "",
+        }));
+        // Deduplicate by URL
+        const seenUrls = new Set(socketImages.map((i) => i.url));
+        const mergedImages = [
+          ...socketImages,
+          ...backendImages.filter((i) => !seenUrls.has(i.url)),
+        ];
+        // Use backend steps if available; fall back to streaming tool calls
+        // (converted to steps format) so cards survive the StreamingMessage → MessageItem handoff.
+        const backendSteps = data.steps && data.steps.length > 0 ? data.steps : null;
+        const streamingSteps = toolCallsRef.current.length > 0
+          ? [{
+              iteration: 1,
+              thoughts: thinkingTextRef.current || "",
+              tool_calls: toolCallsRef.current.map((tc) => ({
+                tool_name: tc.tool,
+                params: tc.params,
+                success: tc.result?.success,
+                duration_ms: tc.durationMs,
+                output_preview: tc.result?.success ? tc.result.output : tc.result?.error,
+                artifact: tc.result?.artifact || null,
+              })),
+            }]
+          : [];
+        debugLog('[StreamingMessage] CALLING onComplete prop with agentThinkingSteps.length=', agentStepsRef.current.length);
+        onCompleteRef.current({
+          content: data.response || "",
+          toolCalls: backendSteps || streamingSteps,
+          iterations: data.iterations || 0,
+          aborted: data.aborted || false,
+          sessionId: data.session_id,
+          tokenUsage: data.token_usage || null,
+          generatedImages: mergedImages,
+          // Cleared on completion — persisting the last "Calling LLM..."
+          // status into history caused MessageItem's live spinner to never
+          // stop, because its only guard is thinkingText && toolCalls.length.
+          thinkingText: "",
+          // The agent-loop reasoning trail. Persists so the user can scroll
+          // back and see what the agent was thinking on each step instead
+          // of only the post-loop summary.
+          agentThinkingSteps: agentStepsRef.current,
+          thinking: finalThinking,
+          truncated: isTruncated,
+        });
+      }
+    });
+
+    chatService.onError((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      setStatus("error");
+      setErrorMsg(data.error || "Unknown error");
+    });
+
+    chatService.onImage((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      const newImg = {
+        url: data.image_url,
+        alt: data.alt || "Generated image",
+        caption: data.caption || "",
+      };
+      setImages((prev) => {
+        const updated = [...prev, newImg];
+        imagesRef.current = updated;
+        return updated;
+      });
+    });
+
+    chatService.onVideo((data) => {
+      if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
+      const newVid = {
+        url: data.video_url,
+        alt: data.alt || "Generated video",
+        caption: data.caption || "",
+        type: "video",
+      };
+      setImages((prev) => {
+        const updated = [...prev, newVid];
+        imagesRef.current = updated;
+        return updated;
+      });
+    });
+
+    return () => {
+      debugLog('[StreamingMessage] useEffect CLEANUP running: set mountedRef=false; calling chatService.cleanup()');
+      mountedRef.current = false;
+      chatService.cleanup();
+      debugLog('[StreamingMessage] useEffect CLEANUP done');
+    };
+  }, [chatService]); // Only re-run when chatService instance changes
+
+  // Must be above any early returns to satisfy Rules of Hooks
+  const handleLightboxDownload = useCallback(() => {
+    if (!lightbox) return;
+    const img = lightbox.images[lightbox.index];
+    const link = document.createElement("a");
+    link.href = img.url;
+    link.download = img.name || "image";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [lightbox]);
+
+  // Don't render if idle (no events yet)
+  if (status === "idle") {
+    return (
+      <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
+        <Avatar sx={{ bgcolor: "primary.main", width: 32, height: 32 }}>
+          {logoUrl ? (
+            <Box component="img" src={logoUrl} sx={{ width: 32, height: 32 }} />
+          ) : (
+            <BrandLogo size={20} />
+          )}
+        </Avatar>
+        <Paper
+          elevation={2}
+          sx={{
+            p: 1.5,
+            maxWidth: "85%",
+            bgcolor: "background.paper",
+            borderRadius: 2,
+          }}
+        >
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <CircularProgress size={14} />
+            <Typography variant="body2" color="text.secondary">
+              Processing...
+            </Typography>
+          </Box>
+        </Paper>
+      </Box>
+    );
+  }
+
+  const isActive = status === "thinking" || status === "streaming";
+  const borderColor =
+    status === "error"
+      ? "error.main"
+      : status === "complete"
+      ? "divider"
+      : "warning.main";
+
+  const formattedTime = formatTime(startTime);
+
+  return (
+    <>
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        width: "100%",
+      }}
+    >
+      <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1, width: "100%" }}>
+      <Avatar
+        src={logoUrl}
+        sx={{
+          bgcolor: isActive ? "warning.main" : "primary.main",
+          width: 32,
+          height: 32,
+          border: 1,
+          borderColor: "divider",
+        }}
+      >
+        {isActive ? (
+          <BrandLogo size={20} variant="warning" animate />
+        ) : !logo ? (
+          <BrandLogo size={20} />
+        ) : null}
+      </Avatar>
+
+      <Paper
+        elevation={2}
+        sx={{
+          p: 1.5,
+          maxWidth: "85%",
+          bgcolor: "background.paper",
+          borderTopLeftRadius: 4,
+          borderTopRightRadius: 16,
+          borderBottomLeftRadius: 16,
+          borderBottomRightRadius: 16,
+          border: 1,
+          borderColor,
+          minWidth: 200,
+        }}
+      >
+        {/* Thinking indicator */}
+        {(status === "thinking" || pendingApproval) && (
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: toolCalls.length > 0 ? 1 : 0 }}>
+            <CircularProgress size={14} color={pendingApproval ? "error" : "warning"} />
+            <Typography variant="body2" color="text.secondary">
+              {pendingApproval ? "Waiting for your approval..." : thinkingText}
+            </Typography>
+          </Box>
+        )}
+
+        {/* Agent loop's per-iteration reasoning, streamed live from
+            agent_control_service. One collapsible holds every step so the
+            chat thread isn't dominated by a long stack of accordions. */}
+        {agentThinkingSteps.length > 0 && (
+          <Box sx={{ mb: 1, mt: 0.5 }}>
+            <AgentThinkingTrail steps={agentThinkingSteps} />
+          </Box>
+        )}
+
+        {/* Model reasoning, streamed live; collapses once the answer starts */}
+        {(reasoningText || reasoningStreaming) && (
+          <ThinkingCard
+            text={reasoningText}
+            streaming={reasoningStreaming}
+            elapsedMs={reasoningElapsedMs}
+            defaultExpanded={reasoningExpanded}
+          />
+        )}
+
+        {/* Parallel execution indicator */}
+        {isActive && toolCalls.filter(tc => tc.isPending).length > 1 && (
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+            <Chip 
+              label={`Executing ${toolCalls.filter(tc => tc.isPending).length} tools in parallel`}
+              size="small"
+              color="info"
+              variant="outlined"
+              sx={{ height: 18, fontSize: "0.6rem" }}
+            />
+          </Box>
+        )}
+
+        {/* Tool call cards */}
+        {toolCalls.map((tc, i) => (
+          <ToolCallCard
+            key={`${tc.tool}-${i}`}
+            toolName={tc.tool}
+            params={tc.params}
+            result={tc.result}
+            durationMs={tc.durationMs}
+            isPending={tc.isPending}
+            sessionId={sessionId}
+            outputChunks={tc.outputChunks}
+            requiresApproval={tc.requiresApproval}
+            onApproval={(approved) => chatService.sendToolApproval(sessionId, approved)}
+          />
+        ))}
+
+        {/* Inline images and videos (from tool results) */}
+        {images.length > 0 && (
+          <Box sx={{ mb: 1 }}>
+            {images.map((img, idx) => (
+              <Box key={idx} sx={{ mb: 1 }}>
+                {img.type === "video" ? (
+                  <Box
+                    component="video"
+                    controls
+                    autoPlay
+                    loop
+                    muted
+                    sx={{
+                      maxWidth: 400,
+                      maxHeight: 300,
+                      width: "auto",
+                      height: "auto",
+                      borderRadius: 1,
+                      border: "1px solid",
+                      borderColor: "divider",
+                      display: "block",
+                    }}
+                    src={guardedMediaSrc(img.url)}
+                  />
+                ) : (
+                  <CardMedia
+                    component="img"
+                    sx={{
+                      maxWidth: 400,
+                      maxHeight: 300,
+                      width: "auto",
+                      height: "auto",
+                      borderRadius: 1,
+                      border: "1px solid",
+                      borderColor: "divider",
+                      objectFit: "contain",
+                      cursor: "pointer",
+                    }}
+                    image={guardedMediaSrc(img.url)}
+                    alt={img.alt}
+                    onClick={() => {
+                      const imgList = images.filter(i => i.type !== "video").map(i => ({ url: i.url, name: i.alt || i.caption || "Image" }));
+                      const imgIdx = imgList.findIndex(i => i.url === img.url);
+                      setLightbox({ url: img.url, name: img.alt || "Image", images: imgList, index: Math.max(0, imgIdx) });
+                    }}
+                  />
+                )}
+                {img.caption && (
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ mt: 0.5, display: "block", fontStyle: "italic" }}
+                  >
+                    {img.caption}
+                  </Typography>
+                )}
+              </Box>
+            ))}
+          </Box>
+        )}
+
+        {/* Text content */}
+        {content && (
+          <Box
+            sx={{
+              mt: toolCalls.length > 0 ? 1 : 0,
+              fontSize: "0.75rem",
+              "& p": { fontSize: "0.75rem", margin: "0.25rem 0" },
+              "& pre": { fontSize: "0.7rem" },
+              "& code": { fontSize: "0.7rem" },
+              "& ul, & ol": { fontSize: "0.75rem", paddingLeft: "1.25rem" },
+              "& li": { fontSize: "0.75rem", margin: "0.125rem 0" },
+              "& h1, & h2, & h3, & h4, & h5, & h6": {
+                fontSize: "0.85rem",
+                fontWeight: "bold",
+                margin: "0.5rem 0",
+              },
+            }}
+          >
+            <ReactMarkdown remarkPlugins={[remarkGfm]}
+              components={{
+                // Offline-first: never load a remote image URL from message markdown.
+                img: (props) => <img {...props} src={guardedMediaSrc(props.src)} alt={props.alt || ""} />,
+                code({ inline, className, children, ...props }) {
+                  const match = /language-(\w+)/.exec(className || "");
+                  return !inline && match ? (
+                    <SyntaxHighlighter
+                      style={a11yDark}
+                      language={match[1]}
+                      PreTag="div"
+                      {...props}
+                    >
+                      {String(children).replace(/\n$/, "")}
+                    </SyntaxHighlighter>
+                  ) : (
+                    <code className={className} {...props}>
+                      {children}
+                    </code>
+                  );
+                },
+              }}
+            >
+              {content}
+            </ReactMarkdown>
+          </Box>
+        )}
+
+        {status === "complete" && truncated && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mt: 0.5, fontStyle: "italic", opacity: 0.8 }}
+          >
+            Response reached the output limit.
+          </Typography>
+        )}
+
+        {/* Error display */}
+        {status === "error" && (
+          <Typography variant="body2" color="error" sx={{ mt: 0.5 }}>
+            Error: {errorMsg}
+          </Typography>
+        )}
+
+        {/* Token usage */}
+        {status === "complete" && tokenUsage && (
+          <Box sx={{ mt: 0.75, display: "flex", gap: 0.5, flexWrap: "wrap" }}>
+            <Chip
+              label={`↑ ${tokenUsage.input_tokens.toLocaleString()} in`}
+              size="small"
+              variant="outlined"
+              sx={{ fontSize: "0.6rem", height: 18, color: "text.disabled", borderColor: "divider" }}
+            />
+            <Chip
+              label={`↓ ${tokenUsage.output_tokens.toLocaleString()} out`}
+              size="small"
+              variant="outlined"
+              sx={{ fontSize: "0.6rem", height: 18, color: "text.disabled", borderColor: "divider" }}
+            />
+          </Box>
+        )}
+      </Paper>
+      </Box>
+      {formattedTime && (
+        <Typography
+          variant="caption"
+          sx={{
+            fontSize: "0.65rem",
+            color: "text.secondary",
+            opacity: 0.65,
+            mt: 0.25,
+            ml: "40px",
+          }}
+        >
+          {formattedTime}
+        </Typography>
+      )}
+    </Box>
+    {lightbox && (
+      <ImageLightbox
+        imageUrl={lightbox.images[lightbox.index]?.url || lightbox.url}
+        imageName={lightbox.images[lightbox.index]?.name || lightbox.name}
+        onClose={() => setLightbox(null)}
+        onPrev={() => setLightbox(prev => ({ ...prev, index: Math.max(0, prev.index - 1) }))}
+        onNext={() => setLightbox(prev => ({ ...prev, index: Math.min(prev.images.length - 1, prev.index + 1) }))}
+        onDownload={handleLightboxDownload}
+        hasPrev={lightbox.index > 0}
+        hasNext={lightbox.index < lightbox.images.length - 1}
+      />
+    )}
+    </>
+  );
+});
+StreamingMessage.displayName = "StreamingMessage";
+
+StreamingMessage.propTypes = {
+  chatService: PropTypes.object.isRequired,
+  sessionId: PropTypes.string.isRequired,
+  onComplete: PropTypes.func,
+};
+
+export default StreamingMessage;

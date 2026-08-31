@@ -1,0 +1,3 @@
+ancestorEntries = ["frontend/src/pages/VideoGeneratorPage.jsx"]
+ourEntries = ["frontend/src/pages/VideoGeneratorPage.jsx"]
+theirEntries = ["frontend/src/pages/VideoGeneratorPage.jsx"]

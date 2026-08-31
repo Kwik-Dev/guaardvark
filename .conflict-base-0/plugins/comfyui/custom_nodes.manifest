@@ -1,0 +1,29 @@
+# REQUIRED ComfyUI custom nodes — name|git_url|pinned_sha
+#
+# Consumed by scripts/install_deps.sh:ensure_custom_nodes() on every ComfyUI
+# start: any node missing from ComfyUI/custom_nodes/ is fetched at the pinned
+# revision below. This file exists because a fresh box previously had NO way
+# to obtain these (plugins/comfyui/ComfyUI/ is excluded from Interconnector
+# sync, restore_app.sh deliberately never touches custom_nodes/, and
+# install_deps.sh only installed requirements for nodes already on disk) —
+# clients booted with facerestore_cf only and video generation died with
+# "missing VHS_VideoCombine" (Observed: client box, 2026-08-04).
+#
+# The set below covers every non-core class_type that
+# backend/services/comfyui_video_generator.py emits, plus face restoration:
+#   VHS_VideoCombine            -> ComfyUI-VideoHelperSuite
+#   UnetLoaderGGUF              -> ComfyUI-GGUF
+#   RIFE VFI                    -> ComfyUI-Frame-Interpolation
+#   ImageResizeKJ               -> ComfyUI-KJNodes
+#   CogVideo* / DownloadAndLoad -> ComfyUI-CogVideoXWrapper
+#   FaceRestoreCF*              -> facerestore_cf
+#
+# Pins are the master box's tested revisions (captured 2026-08-04). To bump:
+# update the node on master, test video generation, then update the SHA here.
+# Skip auto-install entirely with GUAARDVARK_COMFYUI_AUTONODES=0 (offline-first).
+ComfyUI-VideoHelperSuite|https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite|3234937ff5f3ca19068aaba5042771514de2429d
+ComfyUI-GGUF|https://github.com/city96/ComfyUI-GGUF|6ea2651e7df66d7585f6ffee804b20e92fb38b8a
+ComfyUI-Frame-Interpolation|https://github.com/Fannovel16/ComfyUI-Frame-Interpolation|c66ffe51b597e85e18514bae373c3ee391438301
+ComfyUI-KJNodes|https://github.com/kijai/ComfyUI-KJNodes|01d9fa9c983273532cacdf9532c74a93c7dc86d2
+ComfyUI-CogVideoXWrapper|https://github.com/kijai/ComfyUI-CogVideoXWrapper|fdb8abd2790b5459ddc7066c31861bb0b62e988b
+facerestore_cf|https://github.com/mav-rik/facerestore_cf.git|ff4d7a5c102441d8f058dd6135797ffb57b6c6ad

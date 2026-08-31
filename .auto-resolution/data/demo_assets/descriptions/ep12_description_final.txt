@@ -1,0 +1,31 @@
+Eleven episodes of AI doing whatever it wants would be terrifying — if you couldn't see everything, gate everything, and kill everything. Welcome to the command center.
+
+The series finale: live per-plugin VRAM budgeting, GPU conflict detection between services sharing one card, the difference between what you queued and what the system decided to do on its own, five kill switches (ending with a database-level killswitch script that works even when the app doesn't), codebase lock, the full `llx` CLI, MCP tool access with default-deny categories, Discord integration, second-node pairing, and schema-aware backup/restore — closing on a reprise of all 12 episodes.
+
+One machine. No cloud. This is Episode 12 of 12.
+
+CHAPTERS (add exact timestamps after the final edit)
+0:00 If you couldn't see everything, gate everything, kill everything
+[__:__] VRAM budget — live, per-plugin
+[__:__] Conflict detection — the system referees
+[__:__] Jobs vs Activity
+[__:__] Five kill switches
+[__:__] Codebase Lock
+[__:__] CLI — the whole platform from a shell
+[__:__] MCP — tool access, default deny
+[__:__] Discord integration
+[__:__] Interconnector — fixes propagate to the family
+[__:__] Backup — schema-aware restore
+[__:__] Series closer — everything linked below
+
+FEATURED IN THIS EPISODE
+▸ Ep 5: A Million Pictures, One Prompt — Image Gen — https://youtu.be/K4_d1far03I
+▸ Ep 6: Hollywood on One GPU — Video Gen — https://youtu.be/9wwjwxlSFKQ
+▸ Ep 7: The Voice Foundry — Voice Clone — https://youtu.be/JIkyV_b6IkY
+▸ Ep 8: Drop a Song, Get a Music Video — Music Video — https://youtu.be/lIZKtkYoeD0
+
+Guaardvark is a self-hosted AI system that writes, voices, shoots, and edits video — chat, image gen, video gen, voice cloning, an autonomous screen agent, and a full AI film crew — running on a single desktop GPU, no cloud API calls. This is one of 12 walkthrough episodes.
+
+Source & docs: https://github.com/guaardvark/guaardvark
+
+#Guaardvark #localAI #selfhostedAI #opensourceAI #offlineAI #AIvideogeneration #onemachinenocloud #commandcenter #AIsafety #killswitch #GPUresourcemanagement

@@ -1,0 +1,57 @@
+# backend/constraints.txt — global pip CONSTRAINTS for the shared backend venv.
+#
+# Applied via PIP_CONSTRAINT by start.sh's bootstrap passes,
+# scripts/heal_backend_venv.sh, scripts/install_pytorch.sh and
+# plugins/comfyui/scripts/install_deps.sh (guarded: only when this file exists
+# and PIP_CONSTRAINT isn't already set by the caller). Constraints never ADD
+# packages — they only cap versions when pip resolves something anyway.
+#
+# WHY: the ML stack pins numpy<2.0 (requirements-base/requirements.txt), but
+# two layers kept dragging numpy 2.4.x back in and forcing a downgrade cycle
+# on every install (Observed in the 24.04 client box setup.log: numpy 2.4.4 and
+# 2.4.6 installed, then force-reinstalled to 1.26.4 by the repin steps):
+#   1. install_pytorch.sh's `pip install --upgrade --force-reinstall torch...`
+#      re-resolves numpy from the pytorch index (hosts 2.x AND 1.26.4 — verified
+#      cp312 manylinux x86_64 present on cu128 + cpu indexes, 2026-08-04).
+#   2. ComfyUI custom-node requirements installed into this same venv.
+# With these constraints the resolver picks a compliant version up front; the
+# existing repin steps stay as no-op belt-and-braces.
+#
+# NOTE for isolated plugin venvs (scripts/dep_reconciler/reconcilers/
+# isolated_plugin_venv.py): NOT applied there on purpose — those venvs manage
+# their own stacks and may legitimately want numpy 2.x.
+
+numpy<2.0,>=1.26.4
+
+# OpenCV: the three distributions (opencv-python, -headless, -contrib) unpack
+# into ONE cv2/ directory and the last one installed wins. Different versions
+# of two of them in the same venv leave a cv2 that imports but does not match
+# either package's metadata (observed here 2026-09-02: opencv-python 4.8.1.78
+# beside -headless/-contrib 5.0.0.93, pip check failing on both). Lock every
+# name to the same version so whichever a dependency asks for, the files agree.
+# 4.11.0.86 is the last line that accepts numpy 1.x on py3.12 (4.12.0.88+ and
+# 5.x declare numpy>=2); it moves with the numpy line, never separately.
+# These constraints are inert during the torch pass: opencv is not in torch's
+# dependency graph, so the PyTorch index never has to serve it (see the
+# setuptools note below for why that matters).
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
+opencv-contrib-python==4.11.0.86
+
+# Transitive deps whose current releases hard-require numpy>=2 (py3.12 metadata,
+# checked against PyPI 2026-08-31). Once one of them lands in the venv, every
+# UNCONSTRAINED resolve that touches it upgrades numpy to 2.x, the next
+# constrained torch pass drags it back to 1.26.4, and bootstrap loops through a
+# full torch re-stage on every boot (observed in a client-box setup.log
+# 2026-08-31). tifffile arrives via scikit-image (ComfyUI custom nodes),
+# ml-dtypes via jax if a custom node pulls mediapipe. Both caps leave with the
+# numpy line:
+tifffile<2026.4              # 2026.3.3 last with unpinned numpy; 2026.4.11 needs >=2.0, later >=2.1
+ml-dtypes<0.6                # 0.5.4 allows numpy>=1.26 on py3.12; 0.6.0 needs >=2.0
+
+# setuptools<81,>=80.9.0  -- REMOVED: unsatisfiable from the PyTorch index.
+#   install_pytorch.sh installs with --index-url https://download.pytorch.org/whl/<ver>,
+#   which REPLACES PyPI. That index hosts only setuptools 70.0.0/70.2.0/78.1.0, so this
+#   pin made torch ResolutionImpossible on every fresh machine (no GPU support at all).
+#   start.sh already force-reinstalls setuptools>=80.9.0,<81 AFTER torch, so pinning it
+#   here was redundant as well as fatal.

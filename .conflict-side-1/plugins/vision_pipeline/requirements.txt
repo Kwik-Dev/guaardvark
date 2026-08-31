@@ -1,0 +1,18 @@
+# NOTE: torch*, xformers, flash-attn*, pynvml/nvidia-ml-py are managed exclusively by the
+# core backend/venv (scripts/install_pytorch.sh + start.sh post-torch cleans + dep_reconciler).
+# They are listed here for docs / if this plugin is ever bootstrapped in isolation.
+# The plugin's start.sh explicitly filters these lines before `pip install -r` into the
+# shared venv. Including them causes flash-attn 2.5.7 schema mismatches (philox vs rng_state)
+# on diffusers import (batch_image_generation_api etc), xformers build warnings, and
+# pynvml FutureWarnings. See plugins/comfyui/scripts/start.sh for the same problem from
+# custom nodes.
+fastapi==0.115.0
+uvicorn==0.30.0
+Pillow>=10.0.0
+imagehash>=4.3.0
+pynvml>=11.5.0
+requests>=2.31.0
+PyYAML>=6.0
+opencv-python-headless>=4.8.0
+pytest>=8.0.0
+httpx>=0.27.0

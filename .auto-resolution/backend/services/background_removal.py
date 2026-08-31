@@ -1,0 +1,133 @@
+"""Background removal on this machine: u2net or BiRefNet ONNX through onnxruntime.
+
+The weights are the ONNX files the rembg project publishes, installed from
+Manage Image Models -> Image editing (registry entries ``bgremove-birefnet``
+and ``bgremove-u2net``). Nothing here downloads. Pre- and post-processing
+mirror rembg's sessions (scale by the image maximum, ImageNet mean and std,
+LANCZOS resize, min-max on the prediction) so the same file gives the same
+mask rembg would, without rembg's own dependency set (opencv-python-headless,
+pymatting) next to the OpenCV build and numpy floor this backend pins.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+from PIL import Image
+
+logger = logging.getLogger(__name__)
+
+# Preference order: BiRefNet's 1024 px matting first, u2net's 320 px second.
+MODELS = {
+    "bgremove-birefnet": {
+        "file": "BiRefNet-general-epoch_244.onnx",
+        "size": (1024, 1024),
+        "sigmoid": True,
+    },
+    "bgremove-u2net": {
+        "file": "u2net.onnx",
+        "size": (320, 320),
+        "sigmoid": False,
+    },
+}
+PREFERENCE = ("bgremove-birefnet", "bgremove-u2net")
+_MEAN = (0.485, 0.456, 0.406)
+_STD = (0.229, 0.224, 0.225)
+
+_sessions: dict = {}
+_lock = threading.Lock()
+
+
+class BackgroundRemovalNotInstalled(RuntimeError):
+    """No background-removal weights on this machine; this code will not fetch them."""
+
+
+def model_path(model_id: str) -> Path:
+    from backend.services.video_model_registry import background_removal_dir
+    return background_removal_dir() / MODELS[model_id]["file"]
+
+
+def installed_model() -> Optional[str]:
+    """The best installed model id, or None."""
+    for mid in PREFERENCE:
+        p = model_path(mid)
+        try:
+            if p.is_file() and p.stat().st_size > 0:
+                return mid
+        except OSError:
+            continue
+    return None
+
+
+def _providers() -> list:
+    import onnxruntime as ort
+    available = ort.get_available_providers()
+    if "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
+def _session(model_id: str):
+    with _lock:
+        sess = _sessions.get(model_id)
+        if sess is not None:
+            return sess
+        import onnxruntime as ort
+        path = model_path(model_id)
+        if not path.is_file():
+            raise BackgroundRemovalNotInstalled(_missing_message())
+        sess = ort.InferenceSession(str(path), providers=_providers())
+        _sessions[model_id] = sess
+        logger.info("Background removal loaded %s (%s)", model_id, sess.get_providers()[0])
+        return sess
+
+
+def _missing_message() -> str:
+    from backend.services.image_editing_packs import missing_message
+    return missing_message("remove_background")
+
+
+def preprocess(img: Image.Image, size: tuple) -> np.ndarray:
+    """rembg's normalize(): resize, scale by the max, ImageNet mean/std, NCHW float32."""
+    im = img.convert("RGB").resize(size, Image.Resampling.LANCZOS)
+    arr = np.asarray(im, dtype=np.float32)
+    arr = arr / max(float(arr.max()), 1e-6)
+    out = np.empty_like(arr)
+    for c in range(3):
+        out[:, :, c] = (arr[:, :, c] - _MEAN[c]) / _STD[c]
+    return np.expand_dims(out.transpose((2, 0, 1)), 0).astype(np.float32)
+
+
+def postprocess(pred: np.ndarray, original_size: tuple, *, sigmoid: bool) -> Image.Image:
+    """rembg's mask step: first channel, optional sigmoid, min-max to 0..1, L image."""
+    pred = np.asarray(pred, dtype=np.float32)[:, 0, :, :]
+    if sigmoid:
+        pred = 1.0 / (1.0 + np.exp(-pred))
+    lo, hi = float(pred.min()), float(pred.max())
+    pred = (pred - lo) / max(hi - lo, 1e-6)
+    pred = np.squeeze(pred)
+    mask = Image.fromarray((np.clip(pred, 0, 1) * 255).astype("uint8"), mode="L")
+    return mask.resize(original_size, Image.Resampling.LANCZOS)
+
+
+def predict_mask(img: Image.Image, model_id: Optional[str] = None) -> Image.Image:
+    mid = model_id or installed_model()
+    if not mid:
+        raise BackgroundRemovalNotInstalled(_missing_message())
+    spec = MODELS[mid]
+    sess = _session(mid)
+    tensor = preprocess(img, spec["size"])
+    outputs = sess.run(None, {sess.get_inputs()[0].name: tensor})
+    return postprocess(outputs[0], img.size, sigmoid=spec["sigmoid"])
+
+
+def remove_background(img: Image.Image, model_id: Optional[str] = None) -> Image.Image:
+    """The subject on a transparent background (RGBA)."""
+    mask = predict_mask(img, model_id)
+    out = img.convert("RGBA")
+    out.putalpha(mask)
+    return out
