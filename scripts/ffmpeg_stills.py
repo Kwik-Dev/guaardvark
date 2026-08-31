@@ -112,8 +112,11 @@ def main():
                 for img in images:
                     print(f"[dry-run] {pattern}: {Path(img).name}")
                 continue
+            # subfolder_name = a clean batch folder name under Videos. If --out is
+            # given use its basename (deterministic); else let the service mint a
+            # unique FFmpeg_<uuid> batch id. Output always lands in Videos/<id>.
             batch_label = f"all_{len(patterns)}_patterns" if args.all_patterns else patterns[0]
-            sub = args.out or str(ffmpeg_gen.FFMPEG_DIR / batch_label)
+            sub = os.path.basename(args.out) if args.out else f"FFmpeg_{batch_label}"
             results = ffmpeg_gen.generate_still_clip_batch(
                 image_paths=images,
                 pattern=pattern,
@@ -122,7 +125,7 @@ def main():
                 width=args.width,
                 height=args.height,
                 folder_name=args.folder_name,
-                subfolder_name=sub if args.out else None,
+                subfolder_name=sub,
                 focus_x=args.focus_x,
                 focus_y=args.focus_y,
                 pan_direction=args.pan_direction,
