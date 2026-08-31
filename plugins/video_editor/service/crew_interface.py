@@ -80,6 +80,15 @@ class ArrangedClip:
     source_out: float
     filter_preset: str = "none"
     transition_to_next: str = "hard-cut"
+    caption: Optional[str] = None   # on-screen caption text for this clip (timed)
+    # Per-clip caption style (None = use the renderer's defaults).
+    caption_x: Optional[float] = None
+    caption_y: Optional[float] = None
+    caption_size: Optional[int] = None
+    caption_color: Optional[str] = None
+    caption_bgcolor: Optional[str] = None
+    caption_halign: Optional[str] = None
+    caption_valign: Optional[str] = None
 
 
 @dataclass
@@ -103,6 +112,14 @@ class Arrangement:
                     "source_out": c.source_out,
                     "filter_preset": c.filter_preset,
                     "transition_to_next": c.transition_to_next,
+                    "caption": c.caption,
+                    "caption_x": c.caption_x,
+                    "caption_y": c.caption_y,
+                    "caption_size": c.caption_size,
+                    "caption_color": c.caption_color,
+                    "caption_bgcolor": c.caption_bgcolor,
+                    "caption_halign": c.caption_halign,
+                    "caption_valign": c.caption_valign,
                 }
                 for c in self.clips
             ],
@@ -202,6 +219,9 @@ class LocalArtDirector:
         kept_ranges_by_clip: dict[str, list[tuple[float, float]]],
         recipe: Optional[dict[str, Any]] = None,
         seed: int = 0,
+        respect_bin_order: bool = False,
+        customer_context: Optional[dict[str, Any]] = None,
+        caption_defaults: Optional[dict[str, Any]] = None,
     ) -> Arrangement:
         from mlt.arranger import arrange_from_analysis
 
@@ -211,6 +231,9 @@ class LocalArtDirector:
             kept_ranges_by_clip=kept_ranges_by_clip,
             recipe=recipe,
             seed=seed,
+            respect_bin_order=respect_bin_order,
+            customer_context=customer_context,
+            caption_defaults=caption_defaults,
         )
 
 

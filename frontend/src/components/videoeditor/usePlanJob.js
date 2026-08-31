@@ -146,6 +146,45 @@ export function usePlanJob() {
     });
   }, []);
 
+  // Apply a patch to every arranged clip (e.g. global caption defaults after a
+  // fresh Plan completes, so per-caption settings reflect the defaults).
+  const updateAllArrangementClips = useCallback((patch) => {
+    setState((prev) => {
+      const clips = prev.result?.arrangement?.clips;
+      if (!Array.isArray(clips) || clips.length === 0) return prev;
+      const nextClips = clips.map((c) => ({ ...c, ...patch }));
+      return {
+        ...prev,
+        result: {
+          ...prev.result,
+          arrangement: {
+            ...prev.result.arrangement,
+            clips: nextClips,
+          },
+        },
+      };
+    });
+  }, []);
+
+  // Update one arranged clip's fields (e.g. per-clip caption position/style).
+  const updateArrangementClip = useCallback((index, patch) => {
+    setState((prev) => {
+      const clips = prev.result?.arrangement?.clips;
+      if (!Array.isArray(clips) || index < 0 || index >= clips.length) return prev;
+      const nextClips = clips.map((c, i) => (i === index ? { ...c, ...patch } : c));
+      return {
+        ...prev,
+        result: {
+          ...prev.result,
+          arrangement: {
+            ...prev.result.arrangement,
+            clips: nextClips,
+          },
+        },
+      };
+    });
+  }, []);
+
   // Poll while job is in flight.
   useEffect(() => {
     const jobId = state.job?.id;
@@ -177,6 +216,8 @@ export function usePlanJob() {
     clearResult,
     hydrate,
     updateClipAnalysis,
+    updateArrangementClip,
+    updateAllArrangementClips,
     planning,
     status: state.status,
     stageLabel: state.stageLabel,

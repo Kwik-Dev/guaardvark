@@ -18,6 +18,9 @@ export const buildPlanRequest = ({
   scanMode,
   styleRecipeName,
   clipOverrides,
+  respectBinOrder = false,
+  customerContext = null,
+  captionDefaults = null,
   seed = Math.floor(Math.random() * 1_000_000),
 }) => ({
   bin_clips: (timeline?.bin || [])
@@ -28,6 +31,9 @@ export const buildPlanRequest = ({
   style_recipe_name: styleRecipeName,
   seed,
   clip_overrides: clipOverrides,
+  respect_bin_order: respectBinOrder,
+  customer_context: customerContext,
+  caption_defaults: captionDefaults,
 });
 
 export const getKeptRangeDecorations = (result) => {

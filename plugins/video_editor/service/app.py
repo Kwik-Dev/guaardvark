@@ -31,9 +31,14 @@ from mlt.beat_detector import BeatFilterParams, detect_beats
 from mlt.frame_math import FrameRate
 from mlt.mlt_parser import MediaAsset, ProjectProfile
 from mlt.mlt_writer import plan_cuts_from_beats, write_project
-from mlt.render import MeltNotFound, render_mlt
+from mlt.render import MeltNotFound, RenderResult, render_mlt
 from mlt.song_structure import analyze_song
-from mlt.timeline_compose import compose_arrangement, compose_timeline, timeline_from_payload
+from mlt.timeline_compose import (
+    compose_arrangement,
+    compose_single_clip_caption,
+    compose_timeline,
+    timeline_from_payload,
+)
 from mlt.filters import PRESET_CATEGORIES as FILTER_CATEGORIES
 from mlt.transitions import PRESETS as TRANSITION_PRESETS
 
@@ -123,6 +128,13 @@ class PlanBody(BaseModel):
     # Director's Notes overrides keyed by clip_id; merged into the vision
     # output before arranging. Empty dict = pure AI output, no edits.
     clip_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Order clips by bin order instead of the Art Director's section-scoring.
+    respect_bin_order: bool = False
+    # Customer context {name, intro, brand, products, usps} → per-clip captions.
+    customer_context: Optional[dict[str, Any]] = None
+    # Global caption defaults {text, color, size, bgcolor, halign, valign} applied
+    # to every clip after caption generation.
+    caption_defaults: Optional[dict[str, Any]] = None
 
 
 class RescanClipBody(BaseModel):
@@ -491,6 +503,7 @@ def list_style_recipes() -> dict[str, Any]:
 def submit_plan(body: PlanBody) -> dict[str, Any]:
     """Submit a Plan job: bin + song + scan_mode → arrangement.json (async)."""
     _require_paths(body.song_path, *[c.source_path for c in body.bin_clips])
+    logger.info("[plan] caption_defaults received: %s", body.caption_defaults)
 
     recipe = load_recipe(body.style_recipe_name)
     recipe_dict = recipe.to_dict() if recipe else None
@@ -506,6 +519,9 @@ def submit_plan(body: PlanBody) -> dict[str, Any]:
         style_recipe=recipe_dict,
         seed=body.seed,
         clip_overrides=body.clip_overrides or {},
+        respect_bin_order=body.respect_bin_order,
+        customer_context=body.customer_context,
+        caption_defaults=body.caption_defaults,
     )
 
     analyze_dir = Path(_paths["mlt_projects"]).parent / "auto-editor-scans"
@@ -681,15 +697,86 @@ def shotcut_compose_arrangement(body: ComposeArrangementBody) -> dict[str, Any]:
         melt_path = _runtime.get("melt", {}).get("resolved_path", "") or "melt"
         renders_dir = Path(_paths["renders"])
         renders_dir.mkdir(parents=True, exist_ok=True)
-        mp4_path = renders_dir / (mlt_path.stem + ".mp4")
-        try:
-            render = render_mlt(
-                mlt_path, mp4_path, melt_path=melt_path,
-                vcodec=_runtime.get("melt", {}).get("default_vcodec", "libx264"),
-                acodec=_runtime.get("melt", {}).get("default_acodec", "aac"),
+        vcodec = _runtime.get("melt", {}).get("default_vcodec", "libx264")
+        acodec = _runtime.get("melt", {}).get("default_acodec", "aac")
+
+        captioned = [c for c in clips if c.get("caption")]
+
+        if captioned:
+            # MLT's composite transition silently drops a text track over a
+            # MULTI-clip video track (it works for a single clip). So when any
+            # clip carries a caption, render each clip separately with its caption
+            # (single-clip composite is reliable) and concatenate the segments.
+            import subprocess
+            import tempfile
+
+            seg_paths: list[Path] = []
+            with tempfile.TemporaryDirectory(prefix="ve_caps_") as td:
+                td = Path(td)
+                for i, c in enumerate(clips):
+                    seg_mlt = td / f"seg_{i}.mlt"
+                    seg_mp4 = td / f"seg_{i}.mp4"
+                    caption = None
+                    if c.get("caption"):
+                        caption = {
+                            "text": c.get("caption"),
+                            "start": 0.0,
+                            "end": max(0.0, float(c["timeline_end"]) - float(c["timeline_start"])),
+                            "x": c.get("caption_x"),
+                            "y": c.get("caption_y"),
+                            "size": c.get("caption_size"),
+                            "color": c.get("caption_color"),
+                            "bgcolor": c.get("caption_bgcolor"),
+                            "halign": c.get("caption_halign"),
+                            "valign": c.get("caption_valign"),
+                        }
+                    compose_single_clip_caption(
+                        source_path=c["source_path"],
+                        source_in=float(c.get("source_in", 0.0)),
+                        source_out=float(c.get("source_out", 0.0)),
+                        duration_s=max(0.0, float(c["timeline_end"]) - float(c["timeline_start"])),
+                        caption=caption,
+                        output_path=seg_mlt,
+                        profile=profile,
+                    )
+                    render_mlt(seg_mlt, seg_mp4, melt_path=melt_path, vcodec=vcodec, acodec=acodec)
+                    seg_paths.append(seg_mp4)
+
+                concat_list = td / "concat.txt"
+                concat_list.write_text("".join(f"file '{p}'\n" for p in seg_paths))
+                final_path = renders_dir / (mlt_path.stem + ".mp4")
+                subprocess.run(
+                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final_path)],
+                    check=True, capture_output=True, timeout=600,
+                )
+                if body.audio_path:
+                    audio_final = renders_dir / (mlt_path.stem + "_audio.mp4")
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", str(final_path), "-i", body.audio_path,
+                         "-c:v", "copy", "-c:a", "aac", "-shortest", str(audio_final)],
+                        check=True, capture_output=True, timeout=600,
+                    )
+                    final_path = audio_final
+
+            duration_s = sum(
+                max(0.0, float(c["timeline_end"]) - float(c["timeline_start"])) for c in clips
             )
-        except MeltNotFound as e:
-            raise HTTPException(status_code=500, detail=f"melt unavailable: {e}") from e
+            render = RenderResult(
+                output_path=final_path,
+                duration_seconds=duration_s,
+                returncode=0,
+                stderr_tail="",
+            )
+        else:
+            mp4_path = renders_dir / (mlt_path.stem + ".mp4")
+            try:
+                render = render_mlt(
+                    mlt_path, mp4_path, melt_path=melt_path,
+                    vcodec=vcodec, acodec=acodec,
+                )
+            except MeltNotFound as e:
+                raise HTTPException(status_code=500, detail=f"melt unavailable: {e}") from e
+
         response["rendered_mp4"] = str(render.output_path)
         if body.register_result:
             doc = register_output(

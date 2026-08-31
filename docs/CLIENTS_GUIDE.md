@@ -381,6 +381,13 @@ images → pick a pattern (A/B/C), duration (2–10s), FPS (24/25/30), resolutio
 (480p/720p/1080p) → **Generate FFmpeg Clips**. Results return instantly; each clip is
 saved to the **Media Library** (Videos) with a Download link.
 
+**Output framing (no distortion, no upscaling):** every clip is produced at the
+chosen resolution with the image **fitted inside the frame** — small images keep
+their native size (they are **never** upscaled), and images larger than the frame are
+scaled down, always **preserving proportions**, centered on a **black** background.
+**Transparent PNGs are flattened onto black**, so fully-transparent regions come out
+black (not white) — handy for logos and cut-out artwork without ugly white edges.
+
 **CLI:**
 ```bash
 python scripts/ffmpeg_stills.py images/*.png --pattern ken_burns_zoom --duration 5 \
@@ -396,6 +403,55 @@ mode hides all AI model settings (no model is needed).
 
 **Full reference:** see `docs/FFMPEG_STILL_VIDEO.md`. Generated clips are `video` clips,
 so they work directly in the Video Editor's **Plan** pipeline.
+
+---
+
+# Captions — manage, export/import, and edit
+
+The Video Editor's **Plan** pipeline generates an AI caption for every arranged clip.
+Captions are managed in a few places and can be exported to a human-editable **.srt**
+subtitle file and edited in the **Code Editor** (or any text editor).
+
+## Where captions live
+
+- **Arrangement Preview** (Video Editor) — each clip that has a caption shows a
+  **“Caption: ‘…’”** toggle. Expand it to edit per-clip caption **text**, **position**
+  (9 presets: top/bottom/left/right/center), **size** (px), **text color**, and
+  **background color**.
+- **Caption defaults** (**OptionsPanel**, right side) — set a single **Default text**
+  (overrides the AI auto-captions), **Text color**, **Background**, and **Size** that are
+  applied to **every** clip when you hit **Plan**. This is the fast way to give the whole
+  video one consistent caption style (brand color, transparent background, etc.).
+
+## Export captions → .srt
+
+1. Run **Plan** so the arrangement has captions.
+2. Use the **Caption filename** field (next to the captions buttons) — it auto-fills to
+   **`<projectName>_captions`**, so naming your project `Kwiksher` exports
+   `Kwiksher_captions.srt`. You can type a custom name instead.
+3. Click **Export captions**. The file is saved to **Files → Captions** as an SRT
+   Document (`.srt` appended automatically).
+
+## Import captions
+
+Click **Import captions** and enter a caption **file path** (or document id) of an existing **SRT** file. Its captions are applied to the arrangement clips, matched by
+timecode overlap. Useful after you've hand-edited captions and re-imported them.
+
+## Editing captions in the Code Editor
+
+The exported `.srt` is a normal text file, so you can edit it in the **Code Editor**
+(page `/code-editor`):
+
+- **Easy way** — right after **Export captions**, click the green **“Edit captions”**
+  button; it opens the exported `.srt` directly in the Code Editor.
+- **From Files** (`/documents`, Files → Captions) — **double-click** the `….srt` to open
+  the built-in editor, then use its **“Open in Code Editor”** button; or **right-click**
+  the file → **“Open in Code Editor”**.
+
+> Captions are stored in **SRT** format (numbered blocks with `HH:MM:SS,mmm -->`
+> timecodes). A `.srt` is deliberately plain text so you can edit timecodes and wording
+> in any editor and re-import the result. `.srt` files open with plain-text highlighting
+> in the Code Editor.
 
 ---
 

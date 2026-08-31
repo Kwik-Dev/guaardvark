@@ -1794,17 +1794,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     </Box>
                   )}
 
-                  {/* Generate + errors + results */}
-                  <Button
-                    variant="contained"
-                    size="large"
-                    startIcon={ffGenerating ? <CircularProgress size={18} color="inherit" /> : <MovieIcon />}
-                    onClick={handleFfmpegGenerate}
-                    disabled={ffGenerating || selectedImages.length === 0}
-                    sx={{ py: 1.5 }}
-                  >
-                    {ffGenerating ? "Generating clips..." : "Generate FFmpeg Clips"}
-                  </Button>
+                  {/* Generate + errors + results. The single Generate button is at the
+                      bottom of the page (shared across text/image/ffmpeg modes). */}
                   {ffError && <Alert severity="error" variant="outlined">{ffError}</Alert>}
                   {ffResults && (
                     <Box>

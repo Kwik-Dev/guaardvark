@@ -144,6 +144,34 @@ def ensure_subfolder(parent_folder_name: str, subfolder_name: str) -> Folder:
     return new_folder
 
 
+def ensure_folder(folder_name: str) -> Optional[Folder]:
+    """
+    Ensure a top-level folder exists (both physical dir and DB record).
+    Returns the Folder object, or None on failure.
+    """
+    if not folder_name:
+        return None
+    # Ensure physical dir
+    physical = Path(UPLOAD_DIR) / folder_name
+    physical.mkdir(parents=True, exist_ok=True)
+
+    existing = Folder.query.filter_by(path=folder_name).first()
+    if existing:
+        return existing
+
+    new_folder = Folder(name=folder_name, path=folder_name, parent_id=None)
+    db.session.add(new_folder)
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        logger.warning(f"Could not create folder record for {folder_name}: {e}")
+        return Folder.query.filter_by(path=folder_name).first()
+
+    logger.info(f"Created folder: {folder_name}")
+    return new_folder
+
+
 def register_file(
     physical_path: str,
     folder_name: str,
@@ -194,8 +222,8 @@ def register_file(
         folder = ensure_subfolder(folder_name, subfolder_name)
         folder_id = folder.id if folder else None
     else:
-        parent = Folder.query.filter_by(path=folder_name).first()
-        folder_id = parent.id if parent else None
+        folder = ensure_folder(folder_name)
+        folder_id = folder.id if folder else None
 
     # Check for duplicate path (same physical file already registered).
     existing = DBDocument.query.filter_by(path=db_path).first()
