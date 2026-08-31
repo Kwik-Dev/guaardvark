@@ -16,6 +16,9 @@ Examples:
   python3 scripts/ffmpeg_stills.py data/clients/followup/kwiksher/video/images/*.png \
       --pattern ken_burns_zoom --duration 5 --width 1280 --height 720
 
+  # Zoom focused on the center-right of each image (focus is 0..1 fraction)
+  python3 scripts/ffmpeg_stills.py logo.png --pattern ken_burns_zoom --focus-x 0.7 --focus-y 0.5
+
   # Generate all three patterns for one image
   python3 scripts/ffmpeg_stills.py logo.png --all-patterns
 
@@ -70,6 +73,10 @@ def main():
     ap.add_argument("--fps", type=int, default=25, help="Frames per second")
     ap.add_argument("--width", type=int, default=1280, help="Output width")
     ap.add_argument("--height", type=int, default=720, help="Output height")
+    ap.add_argument("--focus-x", type=float, default=0.5,
+                    help="Zoom focus point X, 0..1 fraction (default 0.5 = center)")
+    ap.add_argument("--focus-y", type=float, default=0.5,
+                    help="Zoom focus point Y, 0..1 fraction (default 0.5 = center)")
     ap.add_argument("--out", default=None, help="Output directory (default: uploads/Videos/FFmpeg/<batch>)")
     ap.add_argument("--folder-name", default="Videos", help="Destination folder in the Media Library")
     ap.add_argument("--dry-run", action="store_true", help="Print what would happen, don't render")
@@ -109,6 +116,8 @@ def main():
                 height=args.height,
                 folder_name=args.folder_name,
                 subfolder_name=sub if args.out else None,
+                focus_x=args.focus_x,
+                focus_y=args.focus_y,
             )
             for r in results:
                 if r["success"]:

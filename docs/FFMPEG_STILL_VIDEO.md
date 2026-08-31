@@ -17,6 +17,13 @@ pixel-perfect — where Image-to-Video (I2V) would re-imagine the image.
 All three use ffmpeg's `scale`/`crop`/`zoompan` filters, which crop-and-scale the source
 rather than regenerating it.
 
+## Focus point
+
+For **Zoom** (and the vertical axis of **Pan**), you can pick the **focus point** the
+camera stays centered on while zooming — a `0.0–1.0` fraction of the image. Default is
+`0.5, 0.5` (**center**). e.g. `focus-x 0.7, focus-y 0.3` keeps the zoom centered on the
+upper-right of the frame.
+
 ## Where to use it
 
 ### Web UI (`/video`)
@@ -40,7 +47,8 @@ curl -X POST http://localhost:5055/api/batch-video/ffmpeg/stills \
   -d '{
     "image_paths": ["data/uploads/Images/img_0.png"],
     "pattern": "ken_burns_zoom",
-    "duration_s": 5, "fps": 25, "width": 1280, "height": 720
+    "duration_s": 5, "fps": 25, "width": 1280, "height": 720,
+    "focus_x": 0.5, "focus_y": 0.5
   }'
 ```
 

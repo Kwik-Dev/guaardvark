@@ -66,8 +66,16 @@ def _resolve_input(path: str) -> Optional[Path]:
     return cwd if cwd.exists() else None
 
 
-def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps: int) -> str:
-    """Return the ffmpeg -vf filter graph for the given motion pattern."""
+def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps: int,
+                  focus_x: float = 0.5, focus_y: float = 0.5) -> str:
+    """Return the ffmpeg -vf filter graph for the given motion pattern.
+
+    focus_x / focus_y (0.0–1.0) pick the point the camera keeps centered while
+    zooming (default 0.5/0.5 = center). Applies to ken_burns_zoom (and the pan
+    vertical axis).
+    """
+    fx = max(0.0, min(1.0, focus_x))
+    fy = max(0.0, min(1.0, focus_y))
     frames = max(1, int(round(duration_s * fps)))
 
     if pattern == "static":
@@ -77,19 +85,23 @@ def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps:
                 f"crop={width}:{height},fps={fps}")
 
     if pattern == "ken_burns_zoom":
-        # Slow steady zoom from 1.0 to _KB_ZOOM_MAX over the clip.
+        # Slow steady zoom from 1.0 to _KB_ZOOM_MAX while keeping the focus point
+        # centered in the crop. x/y are the crop top-left in the (scaled-up)
+        # input; locking the crop center on (fx*iw, fy*ih) keeps the focus steady.
         max_zoom = 1.35
         step = (max_zoom - 1.0) / frames
         z = f"min({step:.6f}+zoom,{max_zoom:.4f})"
+        x = f"{fx:.4f}*iw-iw/(2*zoom)"
+        y = f"{fy:.4f}*ih-ih/(2*zoom)"
         return (f"scale=8000:-1,"
-                f"zoompan=z='{z}':d={frames}:s={width}x{height}:fps={fps}")
+                f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={width}x{height}:fps={fps}")
     if pattern == "ken_burns_pan":
-        # Left-to-right pan at a fixed modest zoom.
+        # Left-to-right pan at a fixed modest zoom, vertically centered on fy.
         zoom = 1.20
         px = 3.0  # pixels/frame — tune for speed
         return (f"scale=8000:-1,"
                 f"zoompan=z='{zoom}':x='min({px}*on,iw-iw/zoom)':"
-                f"y='ih/2-(ih/zoom/2)':d={frames}:s={width}x{height}:fps={fps}")
+                f"y='{fy:.4f}*ih-ih/(2*zoom)':d={frames}:s={width}x{height}:fps={fps}")
     raise ValueError(f"Unknown ffmpeg pattern: {pattern}")
 
 
@@ -102,8 +114,13 @@ def generate_still_clip(
     fps: int = 25,
     width: int = 1280,
     height: int = 720,
+    focus_x: float = 0.5,
+    focus_y: float = 0.5,
 ) -> str:
     """Convert one still image to a video clip with the given camera pattern.
+
+    focus_x / focus_y (0.0–1.0) select the point the camera keeps centered while
+    zooming (default 0.5 = center).
 
     Returns the output path on success; raises RuntimeError on failure.
     """
@@ -116,7 +133,8 @@ def generate_still_clip(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    vf = _build_filter(pattern, width, height, duration_s, fps)
+    vf = _build_filter(pattern, width, height, duration_s, fps,
+                       focus_x=focus_x, focus_y=focus_y)
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", str(src),
@@ -143,6 +161,8 @@ def generate_still_clip_batch(
     fps: int = 25,
     width: int = 1280,
     height: int = 720,
+    focus_x: float = 0.5,
+    focus_y: float = 0.5,
     folder_name: str = "Videos",
     subfolder_name: Optional[str] = None,
 ) -> list[dict]:
@@ -176,6 +196,8 @@ def generate_still_clip_batch(
                 fps=fps,
                 width=width,
                 height=height,
+                focus_x=focus_x,
+                focus_y=focus_y,
             )
             doc = register_file(
                 physical_path=video_path,
@@ -187,6 +209,7 @@ def generate_still_clip_batch(
                     "source": str(src),
                     "pattern": pattern,
                     "duration_s": duration_s,
+                    "focus": {"x": focus_x, "y": focus_y},
                     "ffmpeg_clip": True,
                 },
             )

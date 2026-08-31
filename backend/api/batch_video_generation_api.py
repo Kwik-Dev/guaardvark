@@ -341,6 +341,13 @@ def generate_ffmpeg_still_videos():
         width = int(data.get("width", 1280))
         height = int(data.get("height", 720))
 
+        # Focus point (0.0–1.0 fractions of the image) the camera keeps centered
+        # while zooming. Default 0.5/0.5 = center.
+        focus_x = float(data.get("focus_x", 0.5))
+        focus_y = float(data.get("focus_y", 0.5))
+        focus_x = max(0.0, min(1.0, focus_x))
+        focus_y = max(0.0, min(1.0, focus_y))
+
         results = ffmpeg_gen.generate_still_clip_batch(
             image_paths=image_paths,
             pattern=pattern,
@@ -348,9 +355,12 @@ def generate_ffmpeg_still_videos():
             fps=fps,
             width=width,
             height=height,
+            focus_x=focus_x,
+            focus_y=focus_y,
         )
         return success_response({
             "pattern": pattern,
+            "focus": {"x": focus_x, "y": focus_y},
             "total": len(results),
             "created": sum(1 for r in results if r.get("success")),
             "failed": sum(1 for r in results if not r.get("success")),

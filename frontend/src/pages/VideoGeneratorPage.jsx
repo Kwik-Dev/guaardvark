@@ -137,6 +137,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     fps: 25,
     width: 1280,
     height: 720,
+    focus_x: 0.5,
+    focus_y: 0.5,
   });
   const [ffGenerating, setFfGenerating] = useState(false);
   const [ffResults, setFfResults] = useState(null); // { pattern, results: [] }
@@ -1085,6 +1087,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         fps: Number(ffConfig.fps),
         width: Number(ffConfig.width),
         height: Number(ffConfig.height),
+        focus_x: Number(ffConfig.focus_x),
+        focus_y: Number(ffConfig.focus_y),
       };
       const res = await fetch(`${API_BASE}/batch-video/ffmpeg/stills`, {
         method: "POST",
@@ -1719,6 +1723,45 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       <MenuItem value="1920x1080">1080p</MenuItem>
                     </TextField>
                   </Stack>
+
+                  {/* Focus point (used by Zoom / Pan) */}
+                  {ffConfig.pattern !== "static" && (
+                    <Box>
+                      <Stack direction="row" justifyContent="space-between" alignItems="center">
+                        <Typography variant="caption" fontWeight="bold" color="text.secondary">
+                          Focus point
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          X {Math.round(ffConfig.focus_x * 100)}% · Y {Math.round(ffConfig.focus_y * 100)}%
+                        </Typography>
+                      </Stack>
+                      <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 0.5 }}>
+                        <Typography variant="caption" color="text.secondary">X</Typography>
+                        <Slider
+                          value={ffConfig.focus_x}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          onChange={(e, v) => setFfConfig((c) => ({ ...c, focus_x: Number(v) }))}
+                          size="small"
+                        />
+                      </Stack>
+                      <Stack direction="row" alignItems="center" spacing={1}>
+                        <Typography variant="caption" color="text.secondary">Y</Typography>
+                        <Slider
+                          value={ffConfig.focus_y}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          onChange={(e, v) => setFfConfig((c) => ({ ...c, focus_y: Number(v) }))}
+                          size="small"
+                        />
+                      </Stack>
+                      <Typography variant="caption" color="text.secondary">
+                        The camera stays centered on this point while zooming (50% = center).
+                      </Typography>
+                    </Box>
+                  )}
 
                   {/* Generate + errors + results */}
                   <Button
