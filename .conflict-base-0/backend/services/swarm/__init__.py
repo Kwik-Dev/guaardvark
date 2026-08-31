@@ -1,1 +1,0 @@
-"""Film Crew — SEQUENTIAL production-pipeline agents (Screenwriter->Casting->Cinematographer->Storyboard->Editor). NOT the parallel Swarm Orchestrator plugin in /plugins/swarm. Here 'swarm' is a legacy dir name for film-crew."""

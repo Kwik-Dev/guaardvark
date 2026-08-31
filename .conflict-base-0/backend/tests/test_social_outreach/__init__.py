@@ -1,1 +1,0 @@
-"""Social outreach test suite."""
