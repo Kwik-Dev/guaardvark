@@ -1,8 +1,14 @@
 // One item in the project bin — a compact row: thumbnail/icon + name (+ kept-vs-
 // cut strip after Plan) + remove. Click to select; X to remove. Drag from
 // MediaLibrary or OS desktop adds; no drag-out (the bin owns its items).
+//
+// Drag-to-reorder: an existing clip can be dragged onto another tile to move it
+// into that slot. The drag SOURCE id is tracked in a ref (`draggingIdRef`)
+// rather than React state: calling setState on dragstart re-renders the tile and
+// cancels the HTML5 drag before the drop fires. Only the drop-target tile holds
+// local state for its hover highlight, so the source is never re-rendered.
 
-import React from "react";
+import React, { useState } from "react";
 import { Box, IconButton, Tooltip, Typography } from "@mui/material";
 import {
   Close as CloseIcon,
@@ -40,41 +46,47 @@ function KeptRangesStrip({ keptRanges, durationSeconds }) {
   );
 }
 
-const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, durationSeconds, onReorder, isDragOver, draggingId, onDragStartChange, onDragEndChange, onDragOverChange }) => {
+const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, durationSeconds, onReorder, draggingIdRef }) => {
+  // Local drag-over highlight for THIS tile only (target), so the drag source
+  // tile is never re-rendered (which would cancel the drag).
+  const [isTarget, setIsTarget] = useState(false);
+
   const handleDragStart = (e) => {
     e.stopPropagation();
     e.dataTransfer.setData("text/plain", clip.clipId);
     e.dataTransfer.effectAllowed = "move";
-    onDragStartChange?.(clip.clipId);  // track in state — getData() is empty during dragover
+    if (draggingIdRef) draggingIdRef.current = clip.clipId;
   };
   const handleDragOver = (e) => {
-    // Only allow the drop when we're dragging an existing clip onto another tile.
-    if (draggingId && draggingId !== clip.clipId) {
-      e.preventDefault();            // required so a drop can happen
+    const from = draggingIdRef?.current;
+    if (from && from !== clip.clipId) {
+      e.preventDefault();            // allow the drop
       e.dataTransfer.dropEffect = "move";
-      onDragOverChange?.(clip.clipId);
+      setIsTarget(true);
     }
   };
+  const handleDragLeave = () => setIsTarget(false);
   const handleDrop = (e) => {
-    // Internal reorder: drop on a different tile moves it into this slot.
-    if (draggingId && draggingId !== clip.clipId) {
+    setIsTarget(false);
+    const from = draggingIdRef?.current;
+    if (from && from !== clip.clipId) {
       e.preventDefault();
-      e.stopPropagation();          // don't let the bin's add-drop also fire
-      onDragEndChange?.();
-      onDragOverChange?.(null);
-      onReorder?.(draggingId, clip.clipId);
+      e.stopPropagation();           // don't let the panel's add-drop also fire
+      draggingIdRef.current = null;
+      onReorder?.(from, clip.clipId);
     }
-    // External library/file drops bubble to the panel's add handler.
   };
   const handleDragEnd = () => {
-    onDragEndChange?.();
-    onDragOverChange?.(null);
+    setIsTarget(false);
+    if (draggingIdRef) draggingIdRef.current = null;
   };
+
   return (
     <Box
       draggable
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onDragEnd={handleDragEnd}
       onClick={() => onSelect(clip.clipId)}
@@ -83,11 +95,11 @@ const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, 
         alignItems: "center",
         gap: 1,
         border: 2,
-        borderColor: isDragOver ? "primary.main" : (selected ? "primary.main" : "divider"),
+        borderColor: isTarget ? "primary.main" : (selected ? "primary.main" : "divider"),
         borderRadius: 1,
         p: 0.5,
         cursor: "grab",
-        backgroundColor: isDragOver ? "action.hover" : (selected ? "action.selected" : "background.paper"),
+        backgroundColor: isTarget ? "action.hover" : (selected ? "action.selected" : "background.paper"),
         "&:hover": { borderColor: "primary.light" },
         "&:active": { cursor: "grabbing" },
       }}
