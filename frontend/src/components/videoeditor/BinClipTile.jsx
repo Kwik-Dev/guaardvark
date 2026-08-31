@@ -40,21 +40,51 @@ function KeptRangesStrip({ keptRanges, durationSeconds }) {
   );
 }
 
-const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, durationSeconds }) => {
+const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, durationSeconds, onReorder, isDragOver, onDragOverChange }) => {
+  const handleDragStart = (e) => {
+    e.stopPropagation();
+    e.dataTransfer.setData("text/plain", clip.clipId);
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const handleDragOver = (e) => {
+    // Allow drop if we're dragging another clip over this one.
+    const dragging = e.dataTransfer.getData("text/plain");
+    if (dragging && dragging !== clip.clipId) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      onDragOverChange?.(clip.clipId);
+    }
+  };
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onDragOverChange?.(null);
+    const fromId = e.dataTransfer.getData("text/plain");
+    if (fromId && fromId !== clip.clipId && typeof onReorder === "function") {
+      onReorder(fromId, clip.clipId);
+    }
+  };
+  const handleDragEnd = () => onDragOverChange?.(null);
   return (
     <Box
+      draggable
+      onDragStart={handleDragStart}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      onDragEnd={handleDragEnd}
       onClick={() => onSelect(clip.clipId)}
       sx={{
         display: "flex",
         alignItems: "center",
         gap: 1,
         border: 2,
-        borderColor: selected ? "primary.main" : "divider",
+        borderColor: isDragOver ? "primary.main" : (selected ? "primary.main" : "divider"),
         borderRadius: 1,
         p: 0.5,
-        cursor: "pointer",
-        backgroundColor: selected ? "action.selected" : "background.paper",
+        cursor: "grab",
+        backgroundColor: isDragOver ? "action.hover" : (selected ? "action.selected" : "background.paper"),
         "&:hover": { borderColor: "primary.light" },
+        "&:active": { cursor: "grabbing" },
       }}
     >
       <MediaThumb documentId={clip.documentId} kind={clip.kind || "video"} size={44} />
