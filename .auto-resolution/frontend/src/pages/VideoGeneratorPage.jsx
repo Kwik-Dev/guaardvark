@@ -144,6 +144,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     height: 720,
     focus_x: 0.5,
     focus_y: 0.5,
+    pan_direction: "left-to-right",
   });
   const [ffGenerating, setFfGenerating] = useState(false);
   const [ffResults, setFfResults] = useState(null); // { pattern, results: [] }
@@ -1365,6 +1366,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         height: Number(ffConfig.height),
         focus_x: Number(ffConfig.focus_x),
         focus_y: Number(ffConfig.focus_y),
+        pan_direction: ffConfig.pan_direction,
       };
       const res = await fetch(`${API_BASE}/batch-video/ffmpeg/stills`, {
         method: "POST",

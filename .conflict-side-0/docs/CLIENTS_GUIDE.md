@@ -387,6 +387,10 @@ python scripts/ffmpeg_stills.py images/*.png --pattern ken_burns_zoom --duration
   --width 1280 --height 720
 ```
 
+**Focus point:** Zoom (and the pan vertical axis) accept a focus `--focus-x` / `--focus-y`
+(`0–1` fraction, default `0.5` = center) so the camera stays centered on a chosen part
+of the image (e.g. a character) while zooming.
+
 **Full reference:** see `docs/FFMPEG_STILL_VIDEO.md`. Generated clips are `video` clips,
 so they work directly in the Video Editor's **Plan** pipeline.
 
