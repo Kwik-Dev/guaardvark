@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import shutil
 import subprocess
 import uuid
@@ -40,9 +41,22 @@ PATTERNS = {
     },
     "ken_burns_pan": {
         "label": "Ken Burns pan",
-        "description": "Slow left-to-right camera pan. The artwork is untouched.",
+        "description": "Slow camera pan. The artwork is untouched.",
     },
 }
+
+# Direction of travel for the ken_burns_pan pattern.
+PAN_DIRECTIONS = {
+    "left-to-right": {"label": "Pan left \u2192 right", "description": "Camera dollies left to right."},
+    "right-to-left": {"label": "Pan right \u2192 left", "description": "Camera dollies right to left."},
+    "top-to-bottom": {"label": "Pan top \u2192 bottom", "description": "Camera tilts top to bottom."},
+    "bottom-to-top": {"label": "Pan bottom \u2192 top", "description": "Camera tilts bottom to top."},
+}
+
+# "random" is accepted by the drivers (API/CLI/UI) and resolved to a concrete
+# direction per image inside generate_still_clip_batch. It is NOT in
+# PAN_DIRECTIONS so the filter builder always gets a real travel direction.
+PAN_CHOICES = [*PAN_DIRECTIONS.keys(), "random"]
 
 # Output settings.
 FFMPEG_DIR = Path(UPLOAD_DIR) / "Videos" / "FFmpeg"
@@ -67,12 +81,13 @@ def _resolve_input(path: str) -> Optional[Path]:
 
 
 def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps: int,
-                  focus_x: float = 0.5, focus_y: float = 0.5) -> str:
+                  focus_x: float = 0.5, focus_y: float = 0.5,
+                  pan_direction: str = "left-to-right") -> str:
     """Return the ffmpeg -vf filter graph for the given motion pattern.
 
     focus_x / focus_y (0.0–1.0) pick the point the camera keeps centered while
-    zooming (default 0.5/0.5 = center). Applies to ken_burns_zoom (and the pan
-    vertical axis).
+    zooming, and the fixed (non-moving) axis for a pan (default 0.5 = center).
+    pan_direction selects the travel direction for the ken_burns_pan pattern.
     """
     fx = max(0.0, min(1.0, focus_x))
     fy = max(0.0, min(1.0, focus_y))
@@ -96,12 +111,26 @@ def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps:
         return (f"scale=8000:-1,"
                 f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={width}x{height}:fps={fps}")
     if pattern == "ken_burns_pan":
-        # Left-to-right pan at a fixed modest zoom, vertically centered on fy.
+        # Pan at a fixed modest zoom. The travel axis moves across the frame; the
+        # perpendicular axis stays fixed on the focus value.
         zoom = 1.20
-        px = 3.0  # pixels/frame — tune for speed
+        px = 3.0   # pixels/frame along x
+        py = 3.0   # pixels/frame along y
+        dirn = pan_direction if pan_direction in PAN_DIRECTIONS else "left-to-right"
+        if dirn == "left-to-right":
+            x = f"min({px}*on,iw-iw/zoom)"
+            y = f"{fy:.4f}*ih-ih/(2*zoom)"
+        elif dirn == "right-to-left":
+            x = f"max(iw-iw/zoom-{px}*on,0)"
+            y = f"{fy:.4f}*ih-ih/(2*zoom)"
+        elif dirn == "top-to-bottom":
+            x = f"{fx:.4f}*iw-iw/(2*zoom)"
+            y = f"min({py}*on,ih-ih/zoom)"
+        else:  # bottom-to-top
+            x = f"{fx:.4f}*iw-iw/(2*zoom)"
+            y = f"max(ih-ih/zoom-{py}*on,0)"
         return (f"scale=8000:-1,"
-                f"zoompan=z='{zoom}':x='min({px}*on,iw-iw/zoom)':"
-                f"y='{fy:.4f}*ih-ih/(2*zoom)':d={frames}:s={width}x{height}:fps={fps}")
+                f"zoompan=z='{zoom}':x='{x}':y='{y}':d={frames}:s={width}x{height}:fps={fps}")
     raise ValueError(f"Unknown ffmpeg pattern: {pattern}")
 
 
@@ -116,11 +145,13 @@ def generate_still_clip(
     height: int = 720,
     focus_x: float = 0.5,
     focus_y: float = 0.5,
+    pan_direction: str = "left-to-right",
 ) -> str:
     """Convert one still image to a video clip with the given camera pattern.
 
     focus_x / focus_y (0.0–1.0) select the point the camera keeps centered while
-    zooming (default 0.5 = center).
+    zooming, and the fixed axis for a pan (default 0.5 = center). pan_direction
+    selects the travel direction for the pan pattern.
 
     Returns the output path on success; raises RuntimeError on failure.
     """
@@ -134,7 +165,8 @@ def generate_still_clip(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     vf = _build_filter(pattern, width, height, duration_s, fps,
-                       focus_x=focus_x, focus_y=focus_y)
+                       focus_x=focus_x, focus_y=focus_y,
+                       pan_direction=pan_direction)
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", str(src),
@@ -163,6 +195,7 @@ def generate_still_clip_batch(
     height: int = 720,
     focus_x: float = 0.5,
     focus_y: float = 0.5,
+    pan_direction: str = "left-to-right",
     folder_name: str = "Videos",
     subfolder_name: Optional[str] = None,
 ) -> list[dict]:
@@ -186,7 +219,13 @@ def generate_still_clip_batch(
         src = _resolve_input(image_path)
         ext = ".mp4"
         stem = (src.stem if src else f"clip_{i}")
-        out_path = out_dir / f"{stem}_{pattern}{ext}"
+        # Resolve "random" to a concrete direction for THIS image so the batch
+        # gets variety instead of one pan direction for everything. The resolved
+        # value is recorded in the result + metadata below.
+        resolved_dir = pan_direction
+        if pan_direction == "random":
+            resolved_dir = random.choice(list(PAN_DIRECTIONS.keys()))
+        out_path = out_dir / f"{stem}_{pattern}_{resolved_dir}{ext}"
         try:
             video_path = generate_still_clip(
                 image_path=image_path,
@@ -198,6 +237,7 @@ def generate_still_clip_batch(
                 height=height,
                 focus_x=focus_x,
                 focus_y=focus_y,
+                pan_direction=resolved_dir,
             )
             doc = register_file(
                 physical_path=video_path,
@@ -208,6 +248,7 @@ def generate_still_clip_batch(
                 file_metadata={
                     "source": str(src),
                     "pattern": pattern,
+                    "pan_direction": resolved_dir,
                     "duration_s": duration_s,
                     "focus": {"x": focus_x, "y": focus_y},
                     "ffmpeg_clip": True,
@@ -222,6 +263,7 @@ def generate_still_clip_batch(
                     "success": True,
                     "error": None,
                     "pattern": pattern,
+                    "pan_direction": resolved_dir,
                 }
             )
         except Exception as e:  # noqa: BLE001
@@ -235,6 +277,7 @@ def generate_still_clip_batch(
                     "success": False,
                     "error": str(e),
                     "pattern": pattern,
+                    "pan_direction": resolved_dir,
                 }
             )
     return results
