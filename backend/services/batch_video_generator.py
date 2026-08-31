@@ -1432,9 +1432,19 @@ class BatchVideoGenerator:
                         video_file = batch_dir / res.video_path
                         if video_file.exists() and video_file.suffix.lower() in (".mp4", ".webm", ".avi", ".mov"):
                             thumb_filename = video_file.stem + "_thumb.jpg"
-                            # Place thumbnail in a thumbnails subdir next to the video
+                            # Normally thumbnails sit in a sibling "thumbnails" dir
+                            # under the batch. For flat batches (e.g. FFmpeg clips
+                            # directly in the batch dir) that naive parent.parent
+                            # lands OUTSIDE the batch dir, and relative_to() below
+                            # would raise — break the whole status read. Fall back
+                            # to a thumbnails/ subdir inside the batch dir instead.
                             thumbs_dir = video_file.parent.parent / "thumbnails"
                             thumb_path = thumbs_dir / thumb_filename
+                            try:
+                                thumb_path.relative_to(batch_dir)
+                            except ValueError:
+                                thumbs_dir = batch_dir / "thumbnails"
+                                thumb_path = thumbs_dir / thumb_filename
                             if self._extract_thumbnail(video_file, thumb_path):
                                 res.thumbnail_path = str(thumb_path.relative_to(batch_dir))
                                 metadata_changed = True

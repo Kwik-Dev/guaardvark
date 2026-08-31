@@ -287,11 +287,30 @@ def generate_still_clip_batch(
                 }
             )
 
-    # Write batch metadata so the Video Library shows real counts + a nice name.
+    # Write batch metadata so the Video Library shows real counts + a nice name,
+    # AND includes the per-clip results (so /status/<id> can play each clip).
+    # The `results` array matches BatchVideoResult fields; video_path is the
+    # filename relative to the batch dir, which /batch-video/video/<id>/<name>
+    # serves.
     ok = sum(1 for r in results if r.get("success"))
     fail = len(results) - ok
     display = (PAN_DIRECTIONS.get(pattern, {}).get("label") or pattern)
     try:
+        res_meta = []
+        for idx, r in enumerate(results):
+            res_meta.append({
+                "item_id": f"{idx}",
+                "success": bool(r.get("success")),
+                "video_path": (r.get("filename") if r.get("success") else None),
+                "frame_paths": [],
+                "thumbnail_path": None,
+                "error": r.get("error"),
+                "metadata": {
+                    "pattern": pattern,
+                    "pan_direction": r.get("pan_direction"),
+                    "source": r.get("source"),
+                },
+            })
         meta = {
             "batch_id": batch_id,
             "status": "completed",
@@ -301,6 +320,7 @@ def generate_still_clip_batch(
             "start_time": start_iso,
             "end_time": datetime.now().isoformat(),
             "metadata": {"display_name": f"FFmpeg {display}", "ffmpeg_clip": True},
+            "results": res_meta,
         }
         (out_dir / "batch_metadata.json").write_text(
             json.dumps(meta, indent=2), encoding="utf-8"
