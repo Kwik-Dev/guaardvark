@@ -22,6 +22,11 @@ import {
   Select,
   MenuItem,
   Alert,
+  Paper,
+  List,
+  ListItem,
+  ListItemText,
+  Slider,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -128,6 +133,19 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [dragActive, setDragActive] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef(null);
+
+  // FFmpeg still-clip mode (no GPU / no AI). Camera-motion patterns:
+  //   static / ken_burns_zoom / ken_burns_pan
+  const [ffConfig, setFfConfig] = useState({
+    pattern: "ken_burns_zoom",
+    duration_s: 5,
+    fps: 25,
+    width: 1280,
+    height: 720,
+  });
+  const [ffGenerating, setFfGenerating] = useState(false);
+  const [ffResults, setFfResults] = useState(null); // { pattern, results: [] }
+  const [ffError, setFfError] = useState("");
 
   // Gallery modal state
   const [galleryOpen, setGalleryOpen] = useState(false);
@@ -1185,6 +1203,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     setSuccess("");
     setBatchStatus(null);
 
+    if (inputMode === "ffmpeg") {
+      return handleFfmpegGenerate();
+    }
+
     if (inputMode === "text" && parsedPrompts.length === 0) {
       setError("Please enter at least one prompt.");
       return;
@@ -1317,6 +1339,49 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       setError(`Failed to queue batch: ${e.message}`);
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  // FFmpeg still-clip generation: converts stills to clips with camera-only
+  // motion (no GPU / no AI / no distortion). Results return synchronously.
+  const handleFfmpegGenerate = async () => {
+    setFfError("");
+    setFfResults(null);
+    const imagePaths = selectedImages.map((img) => img.path);
+    if (imagePaths.length === 0) {
+      setFfError("Please upload or select at least one image.");
+      return;
+    }
+    setFfGenerating(true);
+    try {
+      const body = {
+        image_paths: imagePaths,
+        pattern: ffConfig.pattern,
+        duration_s: Number(ffConfig.duration_s),
+        fps: Number(ffConfig.fps),
+        width: Number(ffConfig.width),
+        height: Number(ffConfig.height),
+      };
+      const res = await fetch(`${API_BASE}/batch-video/ffmpeg/stills`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const ed = await res.json().catch(() => ({}));
+        setFfError(formatUiError(ed.error || ed.message) || `HTTP ${res.status}`);
+        return;
+      }
+      const data = await res.json();
+      if (!data.success) {
+        setFfError(formatUiError(data.error || data.message) || "Generation failed");
+        return;
+      }
+      setFfResults(data.data);
+    } catch (e) {
+      setFfError(`Failed to generate clips: ${e.message}`);
+    } finally {
+      setFfGenerating(false);
     }
   };
 
@@ -1477,9 +1542,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return pool.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
   }, [batchStatus, getProcessesByType, activeProcesses]);
 
-  const controlsDisabled = isGenerating;
+  const controlsDisabled = isGenerating || ffGenerating;
   const canQueue =
-    !isGenerating && (inputMode === "text" ? parsedPrompts.length > 0 : selectedImages.length > 0);
+    !isGenerating && !ffGenerating && (inputMode === "text" ? parsedPrompts.length > 0 : selectedImages.length > 0);
   const { gpuBusy, blockReason } = useJobsGate({ submitMode: "queue" });
   const castIdentityLocked = selectedSubjectIds.length > 0;
   const keyframeModelOptions = useMemo(() => {
@@ -1575,10 +1640,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 <ActionButton
                   kind={canQueue ? "primary" : "neutral"}
                   onClick={handleGenerate}
-                  loading={isGenerating}
+                  loading={isGenerating || ffGenerating}
                   disabled={!canQueue || controlsDisabled}
                 >
-                  Add to queue
+                  {inputMode === "ffmpeg" ? "Generate FFmpeg clips" : "Add to queue"}
                 </ActionButton>
               }
             >
@@ -1618,6 +1683,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   options={[
                     { value: "text", label: "Text" },
                     { value: "image", label: "Image" },
+                    { value: "ffmpeg", label: "FFmpeg" },
                   ]}
                 />
               </Cluster>
@@ -1676,18 +1742,20 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 />
               ) : (
                 <Box>
-                  <TextField
-                    label="Describe the motion or action (optional)"
-                    multiline
-                    minRows={2}
-                    maxRows={4}
-                    value={promptsText}
-                    onChange={(e) => setPromptsText(e.target.value)}
-                    placeholder="Slow camera zoom in with a gentle head turn"
-                    fullWidth
-                    size="small"
-                    sx={{ mb: 1.5 }}
-                  />
+                  {inputMode !== "ffmpeg" && (
+                    <TextField
+                      label="Describe the motion or action (optional)"
+                      multiline
+                      minRows={2}
+                      maxRows={4}
+                      value={promptsText}
+                      onChange={(e) => setPromptsText(e.target.value)}
+                      placeholder="Slow camera zoom in with a gentle head turn"
+                      fullWidth
+                      size="small"
+                      sx={{ mb: 1.5 }}
+                    />
+                  )}
                   <Box
                     onDragOver={handleDragOver}
                     onDragLeave={handleDragLeave}
@@ -1742,6 +1810,130 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         </Box>
                       ))}
                     </Box>
+                  )}
+
+                  {inputMode === "ffmpeg" && (
+                    <Stack spacing={2} sx={{ mt: 2 }}>
+                      <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "action.hover" }}>
+                        <Typography variant="caption" color="text.secondary">
+                          FFmpeg converts each still to a clip with <b>camera-only</b> motion —
+                          the artwork is never re-rendered, so there is <b>zero distortion and zero
+                          color change</b>. No GPU needed.
+                        </Typography>
+                      </Paper>
+
+                      <Box>
+                        <Typography variant="caption" fontWeight="bold" color="text.secondary">
+                          Motion pattern
+                        </Typography>
+                        <Box sx={{ mt: 0.5 }}>
+                          <ChoiceChips
+                            ariaLabel="FFmpeg motion pattern"
+                            value={ffConfig.pattern}
+                            onChange={(v) => setFfConfig((c) => ({ ...c, pattern: v }))}
+                            options={[
+                              { value: "static", label: "A · Static" },
+                              { value: "ken_burns_zoom", label: "B · Zoom" },
+                              { value: "ken_burns_pan", label: "C · Pan" },
+                            ]}
+                          />
+                        </Box>
+                        <Typography variant="caption" color="text.secondary">
+                          {ffConfig.pattern === "static" && "Holds the image still — pixel-perfect, no movement."}
+                          {ffConfig.pattern === "ken_burns_zoom" && "Slow camera push-in (zoom)."}
+                          {ffConfig.pattern === "ken_burns_pan" && "Slow left-to-right camera pan."}
+                        </Typography>
+                      </Box>
+
+                      <Box>
+                        <Typography variant="caption" fontWeight="bold" color="text.secondary">
+                          Duration: {ffConfig.duration_s}s
+                        </Typography>
+                        <Slider
+                          value={ffConfig.duration_s}
+                          min={2}
+                          max={10}
+                          step={1}
+                          onChange={(e, v) => setFfConfig((c) => ({ ...c, duration_s: v }))}
+                          valueLabelDisplay="auto"
+                        />
+                      </Box>
+
+                      <Stack direction="row" spacing={2}>
+                        <TextField
+                          select
+                          size="small"
+                          label="FPS"
+                          value={ffConfig.fps}
+                          onChange={(e) => setFfConfig((c) => ({ ...c, fps: Number(e.target.value) }))}
+                          fullWidth
+                        >
+                          <MenuItem value={24}>24</MenuItem>
+                          <MenuItem value={25}>25</MenuItem>
+                          <MenuItem value={30}>30</MenuItem>
+                        </TextField>
+                        <TextField
+                          select
+                          size="small"
+                          label="Resolution"
+                          value={`${ffConfig.width}x${ffConfig.height}`}
+                          onChange={(e) => {
+                            const [w, h] = e.target.value.split("x").map(Number);
+                            setFfConfig((c) => ({ ...c, width: w, height: h }));
+                          }}
+                          fullWidth
+                        >
+                          <MenuItem value="854x480">480p</MenuItem>
+                          <MenuItem value="1280x720">720p</MenuItem>
+                          <MenuItem value="1920x1080">1080p</MenuItem>
+                        </TextField>
+                      </Stack>
+
+                      <ActionButton
+                        kind="primary"
+                        onClick={handleFfmpegGenerate}
+                        loading={ffGenerating}
+                        disabled={ffGenerating || selectedImages.length === 0}
+                      >
+                        Generate FFmpeg clips
+                      </ActionButton>
+                      {ffError && <Alert severity="error" variant="outlined">{ffError}</Alert>}
+                      {ffResults && (
+                        <Box>
+                          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+                            <Typography variant="subtitle2">
+                              Generated {ffResults.created} clip{ffResults.created === 1 ? "" : "s"}
+                              {ffResults.failed > 0 ? ` (${ffResults.failed} failed)` : ""}
+                            </Typography>
+                            <Button size="small" color="inherit" onClick={() => setFfResults(null)}>
+                              Clear
+                            </Button>
+                          </Stack>
+                          <List dense disablePadding>
+                            {ffResults.results.map((r, i) => (
+                              <ListItem key={i} divider sx={{ px: 0 }}>
+                                <ListItemText
+                                  primary={r.filename || r.source.split("/").pop()}
+                                  secondary={r.success ? "Ready — saved to Media Library" : r.error}
+                                />
+                                {r.success && r.document_id && (
+                                  <Button
+                                    size="small"
+                                    component="a"
+                                    href={`${API_BASE}/files/document/${r.document_id}/download`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    startIcon={<DownloadIcon />}
+                                  >
+                                    Download
+                                  </Button>
+                                )}
+                              </ListItem>
+                            ))}
+                          </List>
+                        </Box>
+                      )}
+                    </Stack>
                   )}
                 </Box>
               )}
@@ -2277,11 +2469,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               <ActionButton
                 kind={canQueue ? "primary" : "neutral"}
                 onClick={handleGenerate}
-                loading={isGenerating}
+                loading={isGenerating || ffGenerating}
                 disabled={!canQueue || controlsDisabled}
                 sx={{ height: 36, alignSelf: "flex-start" }}
               >
-                Add to queue
+                {inputMode === "ffmpeg" ? "Generate FFmpeg clips" : "Add to queue"}
               </ActionButton>
             </SettingsPanel>
           </Box>
