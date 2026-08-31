@@ -1957,14 +1957,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         </Box>
                       )}
 
-                      <ActionButton
-                        kind="primary"
-                        onClick={handleFfmpegGenerate}
-                        loading={ffGenerating}
-                        disabled={ffGenerating || selectedImages.length === 0}
-                      >
-                        Generate FFmpeg clips
-                      </ActionButton>
+                      {/* Generate + errors + results. The single Generate button is at the
+                          bottom of the page (shared across text/image/ffmpeg modes). */}
                       {ffError && <Alert severity="error" variant="outlined">{ffError}</Alert>}
                       {ffResults && (
                         <Box>

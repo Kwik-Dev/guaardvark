@@ -60,6 +60,13 @@ class PlanRequest:
     # Director's Notes overrides — applied AFTER vision analysis, BEFORE arranging.
     # Shape: {clip_id: {field: value, ...}}. Empty dict = no overrides.
     clip_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Order clips by bin order instead of the Art Director's section-scoring.
+    respect_bin_order: bool = False
+    # Customer context {name, intro, brand, products, usps} → per-clip captions.
+    customer_context: Optional[dict[str, Any]] = None
+    # Global caption defaults {text, color, size, bgcolor, halign, valign} applied
+    # to every clip after caption generation.
+    caption_defaults: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -135,6 +142,9 @@ def run_plan(
         kept_ranges_by_clip=kept_ranges_by_clip,
         recipe=req.style_recipe,
         seed=req.seed,
+        respect_bin_order=req.respect_bin_order,
+        customer_context=req.customer_context,
+        caption_defaults=req.caption_defaults,
     )
 
     if progress_cb:
