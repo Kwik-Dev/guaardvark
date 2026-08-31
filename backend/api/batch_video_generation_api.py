@@ -272,6 +272,95 @@ def generate_image_to_video_batch():
         return error_response(str(e), 500)
 
 
+@batch_video_bp.route("/ffmpeg/stills", methods=["POST"])
+def generate_ffmpeg_still_videos():
+    """Convert still images to movie clips using ffmpeg (no GPU / no AI model).
+
+    Three camera-motion patterns, all of which move the CAMERA only (the artwork
+    is never re-rendered) so there's zero distortion and zero color shift:
+      - static           : hold the frame (pixel-perfect)
+      - ken_burns_zoom   : slow push-in
+      - ken_burns_pan    : slow left-to-right pan
+
+    Body:
+      image_paths (list[str]) or image_ids (list[int] document ids)
+      pattern (str, default "ken_burns_zoom")
+      duration_s (float, default 5.0)
+      fps (int, default 25)
+      width / height (default 1280x720)
+
+    Returns per-image results, each output registered as a Document.
+    """
+    try:
+        from backend.services import ffmpeg_still_video_generator as ffmpeg_gen
+        from backend.models import Document as DBDocument, db
+        from backend.services.document_path_resolver import resolve_document_path
+
+        if not ffmpeg_gen.ffmpeg_available():
+            return error_response(
+                "ffmpeg not found on PATH. Install it with `brew install ffmpeg`.",
+                500, "FFMPEG_NOT_FOUND",
+            )
+
+        data = request.get_json(silent=True) or {}
+
+        image_paths = _parse_list(data.get("image_paths"))
+        image_ids = data.get("image_ids") or []
+        if not isinstance(image_ids, list):
+            return error_response("image_ids must be an array", 400)
+
+        # Resolve document ids -> on-disk paths.
+        doc_ids = [int(i) for i in image_ids if str(i).isdigit()]
+        if doc_ids:
+            rows = (
+                db.session.query(DBDocument)
+                .filter(DBDocument.id.in_(doc_ids))
+                .all()
+            )
+            for doc in rows:
+                p = resolve_document_path(doc)
+                if p:
+                    image_paths.append(str(p))
+
+        image_paths = [p for p in image_paths if p]
+        if not image_paths:
+            return error_response(
+                "No images provided: pass image_paths or image_ids", 400,
+                "MISSING_IMAGES",
+            )
+
+        pattern = data.get("pattern", "ken_burns_zoom")
+        if pattern not in ffmpeg_gen.PATTERNS:
+            return error_response(
+                f"pattern must be one of {sorted(ffmpeg_gen.PATTERNS)}",
+                400, "INVALID_PATTERN",
+            )
+
+        duration_s = float(data.get("duration_s", 5.0))
+        fps = int(data.get("fps", 25))
+        width = int(data.get("width", 1280))
+        height = int(data.get("height", 720))
+
+        results = ffmpeg_gen.generate_still_clip_batch(
+            image_paths=image_paths,
+            pattern=pattern,
+            duration_s=duration_s,
+            fps=fps,
+            width=width,
+            height=height,
+        )
+        return success_response({
+            "pattern": pattern,
+            "total": len(results),
+            "created": sum(1 for r in results if r.get("success")),
+            "failed": sum(1 for r in results if not r.get("success")),
+            "results": results,
+        })
+    except Exception as e:
+        logger.error(f"Failed to generate ffmpeg still clips: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
 @batch_video_bp.route("/enhance-preview", methods=["POST"])
 def enhance_prompt_preview():
     """
