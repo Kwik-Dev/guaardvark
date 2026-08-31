@@ -3,8 +3,13 @@
 // supported; the bin owns its clips. Remove via the X on each tile.
 
 import React, { useRef } from "react";
-import { Box, Stack, Typography, LinearProgress, Alert } from "@mui/material";
-import { VideoLibrary as VideoIcon, FolderOpen as OpenFolderIcon } from "@mui/icons-material";
+import { Box, Stack, Typography, LinearProgress, Alert, IconButton, Tooltip } from "@mui/material";
+import {
+  VideoLibrary as VideoIcon,
+  FolderOpen as OpenFolderIcon,
+  ArrowUpward as ArrowUpIcon,
+  ArrowDownward as ArrowDownIcon,
+} from "@mui/icons-material";
 import BinClipTile from "./BinClipTile";
 import { useExternalDrop } from "./useExternalDrop";
 
@@ -16,7 +21,7 @@ const BinPanel = ({
   onAddMany,    // (BinClip[]) => void — bulk add (from OS upload)
   onRemove,
   onReorder,    // (fromClipId, toClipId) => void — drag-to-reorder
-  onMove,       // (clipId, dir) => void — up/down arrow reorder
+  onMove,       // (clipId, dir) => void — up/down arrow reorder (header bar)
   warningsByClipId = {},  // {clipId: warning text}
   planDecorationsByClipId = {},
 }) => {
@@ -69,6 +74,28 @@ const BinPanel = ({
       <Stack direction="row" alignItems="center" spacing={1} sx={{ px: 1, py: 0.75, borderBottom: 1, borderColor: "divider" }}>
         <VideoIcon fontSize="small" />
         <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>Project Bin</Typography>
+        <Tooltip title="Move selected clip up">
+          <span>
+            <IconButton
+              size="small"
+              disabled={!selectedClipId || binClips.findIndex((c) => c.clipId === selectedClipId) <= 0}
+              onClick={() => onMove?.(selectedClipId, -1)}
+            >
+              <ArrowUpIcon fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
+        <Tooltip title="Move selected clip down">
+          <span>
+            <IconButton
+              size="small"
+              disabled={!selectedClipId || binClips.findIndex((c) => c.clipId === selectedClipId) >= binClips.length - 1}
+              onClick={() => onMove?.(selectedClipId, 1)}
+            >
+              <ArrowDownIcon fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
         <Typography variant="caption" color="text.secondary">{binClips.length} clip{binClips.length !== 1 ? "s" : ""}</Typography>
       </Stack>
 
@@ -100,17 +127,14 @@ const BinPanel = ({
           </Stack>
         ) : (
           <Stack spacing={1}>
-            {binClips.map((c, i) => (
+            {binClips.map((c) => (
               <BinClipTile
                 key={c.clipId}
                 clip={c}
-                index={i}
-                total={binClips.length}
                 selected={selectedClipId === c.clipId}
                 onSelect={onSelect}
                 onRemove={onRemove}
                 onReorder={onReorder}
-                onMove={onMove}
                 draggingIdRef={draggingIdRef}
                 warning={warningsByClipId[c.clipId]}
                 keptRanges={planDecorationsByClipId[c.clipId]?.keptRanges}

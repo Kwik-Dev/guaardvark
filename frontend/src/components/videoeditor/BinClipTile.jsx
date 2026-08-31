@@ -14,8 +14,6 @@ import {
   Close as CloseIcon,
   WarningAmber as WarningIcon,
   Star as StarIcon,
-  ArrowUpward as ArrowUpIcon,
-  ArrowDownward as ArrowDownIcon,
 } from "@mui/icons-material";
 import MediaThumb from "./MediaThumb";
 
@@ -48,10 +46,7 @@ function KeptRangesStrip({ keptRanges, durationSeconds }) {
   );
 }
 
-const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, durationSeconds, onReorder, onMove, index, total, draggingIdRef }) => {
-  const canUp = onMove && typeof index === "number" && index > 0;
-  const canDown = onMove && typeof index === "number" && index < total - 1;
-  const handleMove = (dir) => (e) => { e.stopPropagation(); onMove?.(clip.clipId, dir); };
+const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, durationSeconds, onReorder, draggingIdRef }) => {
   // Local drag-over highlight for THIS tile only (target), so the drag source
   // tile is never re-rendered (which would cancel the drag).
   const [isTarget, setIsTarget] = useState(false);
@@ -135,33 +130,6 @@ const BinClipTile = ({ clip, selected, onSelect, onRemove, warning, keptRanges, 
           keptRanges={keptRanges ?? clip.keptRanges}
           durationSeconds={durationSeconds ?? clip.durationSeconds}
         />
-      </Box>
-
-      <Box sx={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 0.25, flexShrink: 0 }}>
-        <Tooltip title={canUp ? "Move up" : "Already first"}>
-          <span>
-            <IconButton
-              size="small"
-              disabled={!canUp}
-              onClick={handleMove(-1)}
-              sx={{ width: 22, height: 22 }}
-            >
-              <ArrowUpIcon sx={{ fontSize: 14 }} />
-            </IconButton>
-          </span>
-        </Tooltip>
-        <Tooltip title={canDown ? "Move down" : "Already last"}>
-          <span>
-            <IconButton
-              size="small"
-              disabled={!canDown}
-              onClick={handleMove(1)}
-              sx={{ width: 22, height: 22 }}
-            >
-              <ArrowDownIcon sx={{ fontSize: 14 }} />
-            </IconButton>
-          </span>
-        </Tooltip>
       </Box>
 
       <Tooltip title="Remove from bin">
