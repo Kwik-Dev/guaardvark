@@ -15,12 +15,14 @@ registered as Documents so they appear in the Media Library / Files page.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
 import shutil
 import subprocess
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -59,7 +61,7 @@ PAN_DIRECTIONS = {
 PAN_CHOICES = [*PAN_DIRECTIONS.keys(), "random"]
 
 # Output settings.
-FFMPEG_DIR = Path(UPLOAD_DIR) / "Videos" / "FFmpeg"
+FFMPEG_DIR = Path(UPLOAD_DIR) / "Videos" / "FFmpeg"  # legacy/CLI default root
 
 
 def ffmpeg_available() -> bool:
@@ -210,9 +212,13 @@ def generate_still_clip_batch(
             "ffmpeg not found on PATH. Install ffmpeg (brew install ffmpeg)."
         )
 
+    # Batches live one level under Videos/<batch_id> so the video library's
+    # list_batches() (which scans Videos one level deep) can discover them, and
+    # we write a batch_metadata.json so it reports the correct video counts.
     batch_id = subfolder_name or f"FFmpeg_{uuid.uuid4().hex[:8]}"
-    out_dir = FFMPEG_DIR / batch_id
+    out_dir = Path(UPLOAD_DIR) / "Videos" / batch_id
     out_dir.mkdir(parents=True, exist_ok=True)
+    start_iso = datetime.now().isoformat()
 
     results = []
     for i, image_path in enumerate(image_paths):
@@ -280,4 +286,26 @@ def generate_still_clip_batch(
                     "pan_direction": resolved_dir,
                 }
             )
+
+    # Write batch metadata so the Video Library shows real counts + a nice name.
+    ok = sum(1 for r in results if r.get("success"))
+    fail = len(results) - ok
+    display = (PAN_DIRECTIONS.get(pattern, {}).get("label") or pattern)
+    try:
+        meta = {
+            "batch_id": batch_id,
+            "status": "completed",
+            "total_videos": len(results),
+            "completed_videos": ok,
+            "failed_videos": fail,
+            "start_time": start_iso,
+            "end_time": datetime.now().isoformat(),
+            "metadata": {"display_name": f"FFmpeg {display}", "ffmpeg_clip": True},
+        }
+        (out_dir / "batch_metadata.json").write_text(
+            json.dumps(meta, indent=2), encoding="utf-8"
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not write FFmpeg batch metadata: %s", e)
+
     return results
