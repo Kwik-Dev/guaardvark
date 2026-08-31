@@ -25,6 +25,43 @@ from .frame_math import FrameRate, frames_to_smpte, seconds_to_absolute_frame
 from .mlt_parser import ProjectProfile
 
 
+def _probe_media_duration(path: str | Path) -> Optional[float]:
+    """Return a media file's duration in seconds via ffprobe, or None on failure."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        val = out.stdout.strip()
+        return float(val) if val else None
+    except Exception:
+        return None
+
+
+def _loop_audio(path: str | Path, target_dur: float, out_dir: str | Path) -> str:
+    """Loop a short audio file with ffmpeg to cover `target_dur` seconds.
+
+    Returns the path to the looped file (created in `out_dir`). The MLT `repeat`
+    filter and the avformat `loop` property don't loop audio reliably in this
+    melt build, so we pre-loop with ffmpeg instead.
+    """
+    import subprocess
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{Path(path).stem}_loop_{int(round(target_dur))}s.wav"
+    if not out.exists():
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-stream_loop", "-1", "-i", str(path),
+             "-t", f"{target_dur:.3f}", "-c:a", "pcm_s16le", str(out)],
+            check=True, capture_output=True, timeout=120,
+        )
+    return str(out)
+
+
 @dataclass
 class TextElement:
     """One text overlay on the video — UI coordinates are pixel-space."""
@@ -495,8 +532,19 @@ def compose_arrangement(
     audio_chain_id: Optional[str] = None
     if audio_path:
         audio_chain_id = "chain_audio"
+        # Loop the soundtrack if it's shorter than the arrangement (e.g. when
+        # Respect-bin-order uses every clip and the total exceeds the song).
+        src_dur = _probe_media_duration(audio_path)
+        target_dur = (
+            song_duration_seconds
+            if song_duration_seconds is not None
+            else timeline_end_frames / fps.fps
+        )
+        audio_resource = audio_path
+        if src_dur is not None and target_dur is not None and src_dur < target_dur - 0.05:
+            audio_resource = _loop_audio(audio_path, target_dur, out_path.parent)
         _append_chain(
-            mlt, audio_chain_id, audio_path,
+            mlt, audio_chain_id, audio_resource,
             length_frames=audio_end_frames,
             fps=fps, audio=True, volume=audio_volume,
         )
@@ -513,6 +561,30 @@ def compose_arrangement(
     if audio_chain_id:
         _append_audio_only_playlist(mlt, audio_pl_id, audio_chain_id, audio_end_frames, fps)
 
+    # Caption track: one timed `dynamictext` producer per clip that carries a
+    # caption. Composited over the video via a `composite` transition in the
+    # tractor (a plain multitrack does NOT composite a text track over an
+    # avformat video; the composite transition does).
+    caption_pl_id: Optional[str] = None
+    captions = [
+        {
+            "text": c.get("caption"),
+            "start": float(c["timeline_start"]),
+            "end": float(c["timeline_end"]),
+            "x": c.get("caption_x"),
+            "y": c.get("caption_y"),
+            "size": c.get("caption_size"),
+            "color": c.get("caption_color"),
+            "bgcolor": c.get("caption_bgcolor"),
+            "halign": c.get("caption_halign"),
+            "valign": c.get("caption_valign"),
+        }
+        for c in arrangement_clips if c.get("caption")
+    ]
+    if captions:
+        caption_pl_id = "playlist_captions"
+        _append_caption_track(mlt, caption_pl_id, captions, profile, fps, timeline_end_frames)
+
     # Tractor: track order is critical for transitions. multitrack indices map:
     #   0 = playlist0 (V1)
     #   1 = playlist1_v2 (V2) if present
@@ -523,6 +595,7 @@ def compose_arrangement(
         fps,
         has_v2=needs_v2,
         audio_pl_id=audio_pl_id if audio_chain_id else None,
+        caption_pl_id=caption_pl_id,
         placed=placed,
     )
 
@@ -535,6 +608,140 @@ def compose_arrangement(
         standalone=False,
     )
     return out_path
+
+
+def compose_single_clip_caption(
+    source_path: str,
+    source_in: float,
+    source_out: float,
+    duration_s: float,
+    caption: Optional[dict[str, Any]],
+    output_path: str | Path,
+    profile: ProjectProfile,
+) -> Path:
+    """Emit a single-clip .mlt with one timed caption burned via a `text` filter.
+
+    MLT's `composite` transition silently drops a text track over an avformat
+    video (it only composites over a color producer), and the `dynamictext`
+    filter renders a timecode instead of its text. The `text` filter renders
+    its `argument` property reliably over video, so we attach it directly to the
+    video chain — no separate track or composite needed.
+
+    `caption` is a dict: {text, start, end, x, y, size, color, halign, valign}.
+    `start`/`end` are relative to this clip (0..duration_s).
+    """
+    from lxml import etree
+
+    fps = profile.frame_rate
+    out_path = Path(output_path).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    duration_frames = seconds_to_absolute_frame(max(duration_s, 0.0), fps)
+    source_in_frames = seconds_to_absolute_frame(max(source_in, 0.0), fps)
+    source_out_frames = seconds_to_absolute_frame(max(source_out, source_in), fps)
+
+    mlt = etree.Element(
+        "mlt",
+        attrib={
+            "LC_NUMERIC": "C",
+            "version": "7.24.0",
+            "title": "Shotcut version 24.04",
+            "producer": "main_bin",
+            "root": str(out_path.parent),
+        },
+    )
+    _append_profile(mlt, profile)
+    _append_main_bin(mlt)
+
+    chain_id = "chain_0"
+    _append_chain(
+        mlt, chain_id, source_path,
+        length_frames=source_out_frames, fps=fps, audio=False,
+    )
+
+    # Attach the caption as a `text` filter on the video chain (reliable over
+    # video, unlike the composite transition).
+    if caption and str(caption.get("text") or "").strip():
+        _append_caption_filter(
+            mlt, chain_id, caption, profile, fps, duration_frames,
+        )
+
+    _append_video_playlist(mlt, chain_id, source_in_frames, source_out_frames, fps)
+
+    _append_arrangement_tractor(
+        mlt,
+        duration_frames,
+        fps,
+        has_v2=False,
+        audio_pl_id=None,
+        caption_pl_id=None,
+        placed=[],
+    )
+
+    tree = etree.ElementTree(mlt)
+    tree.write(
+        str(out_path),
+        pretty_print=True,
+        xml_declaration=True,
+        encoding="UTF-8",
+        standalone=False,
+    )
+    return out_path
+
+
+def _append_caption_filter(
+    mlt,
+    chain_id: str,
+    caption: dict[str, Any],
+    profile: ProjectProfile,
+    fps: FrameRate,
+    duration_frames: int,
+) -> None:
+    """Attach a `text` filter (renders its `argument`) to a video chain.
+
+    The `text` filter reliably renders text over an avformat video, unlike the
+    `dynamictext` filter (which renders a timecode) or the `composite`
+    transition (which drops the text track over video).
+    """
+    from lxml import etree
+
+    chain = next((c for c in mlt.iter("chain") if c.get("id") == chain_id), None)
+    if chain is None:
+        return
+
+    text = str(caption.get("text") or "").strip()
+    if not text:
+        return
+
+    start_f = seconds_to_absolute_frame(max(0.0, float(caption.get("start") or 0.0)), fps)
+    end_f = seconds_to_absolute_frame(max(start_f, float(caption.get("end") or duration_frames)), fps)
+    end_f = min(end_f, max(duration_frames, 1))
+
+    filt = etree.SubElement(
+        chain,
+        "filter",
+        attrib={
+            "id": f"{chain_id}_caption",
+            "in": frames_to_smpte(start_f, fps),
+            "out": frames_to_smpte(max(end_f - 1, start_f), fps),
+        },
+    )
+    _prop(filt, "mlt_service", "text")
+    _prop(filt, "argument", text)
+    _prop(filt, "family", "Sans")
+    _prop(filt, "size", str(caption.get("size") or 48))
+    _prop(filt, "fgcolour", caption.get("color") or "#ffffff")
+    # Background colour behind the text (default transparent).
+    _prop(filt, "bgcolour", caption.get("bgcolor") or "#00000000")
+    # Dark outline keeps white text readable on any (light) background.
+    _prop(filt, "outline", "2")
+    _prop(filt, "outline_colour", "#000000")
+    _prop(filt, "halign", caption.get("halign") or "center")
+    _prop(filt, "valign", caption.get("valign") or "bottom")
+    _prop(filt, "geometry", f"0,0,{profile.width},{profile.height}")
+    if caption.get("x") is not None or caption.get("y") is not None:
+        _prop(filt, "x", str(caption.get("x") or 0.5))
+        _prop(filt, "y", str(caption.get("y") or 0.5))
 
 
 def _assign_tracks_and_timing(
@@ -639,6 +846,69 @@ def _append_audio_only_playlist(
     )
 
 
+def _append_caption_track(
+    mlt,
+    playlist_id: str,
+    captions: list[dict[str, Any]],
+    profile: ProjectProfile,
+    fps: FrameRate,
+    total_frames: int,
+) -> None:
+    """Add a text track with one timed `dynamictext` producer per caption.
+
+    Each caption dict: {text, start, end, x, y, size, color, halign, valign}.
+    Position/style default to bottom-center / size 48 / white when unset.
+    Blank entries fill the gaps so each caption sits at its absolute window.
+    Composited over the video by a `composite` transition in the tractor.
+
+    The producer's `out` is set to the FULL video duration (total_frames-1):
+    the MLT composite transition only composites a text track when its producer
+    spans the same length as the video track.
+    """
+    from lxml import etree
+
+    # IMPORTANT: emit the caption PRODUCERS first, then the playlist that
+    # references them. MLT's composite transition silently fails to composite
+    # a text track over the video when the playlist element is declared before
+    # its producers in the XML (the producers must already exist when the
+    # playlist entries are resolved).
+    slots: list[tuple[str, int, int]] = []  # (producer_id, start_f, dur)
+    for i, cap in enumerate(captions):
+        text = cap.get("text")
+        if not text or not str(text).strip():
+            continue
+        start_f = seconds_to_absolute_frame(cap["start"], fps)
+        end_f = seconds_to_absolute_frame(cap["end"], fps)
+        dur = max(1, end_f - start_f)
+        pid = f"caption_{i}"
+        prod = etree.SubElement(mlt, "producer", attrib={"id": pid, "in": "0", "out": str(max(0, total_frames - 1))})
+        _prop(prod, "mlt_service", "dynamictext")
+        _prop(prod, "text", str(text))
+        _prop(prod, "family", "Sans")
+        _prop(prod, "size", str(cap.get("size") or 48))
+        _prop(prod, "fgcolour", cap.get("color") or "#ffffff")
+        _prop(prod, "bgcolour", cap.get("bgcolor") or "#00000000")
+        # Dark outline keeps white text readable on any (light) background.
+        _prop(prod, "outline", "2")
+        _prop(prod, "outline_colour", "#000000")
+        _prop(prod, "halign", cap.get("halign") or "center")
+        _prop(prod, "valign", cap.get("valign") or "bottom")
+        _prop(prod, "geometry", f"0,0,{profile.width},{profile.height}")
+        if cap.get("x") is not None or cap.get("y") is not None:
+            _prop(prod, "x", str(cap.get("x") or 0.5))
+            _prop(prod, "y", str(cap.get("y") or 0.5))
+        slots.append((pid, start_f, dur))
+
+    pl = etree.SubElement(mlt, "playlist", attrib={"id": playlist_id})
+    _prop(pl, "shotcut:name", "Captions")
+    cursor = 0
+    for pid, start_f, dur in slots:
+        if start_f > cursor:
+            etree.SubElement(pl, "blank", attrib={"length": str(start_f - cursor)})
+        etree.SubElement(pl, "entry", attrib={"producer": pid, "in": "0", "out": str(dur - 1)})
+        cursor = start_f + dur
+
+
 def _append_arrangement_tractor(
     mlt,
     duration_frames: int,
@@ -646,6 +916,7 @@ def _append_arrangement_tractor(
     *,
     has_v2: bool,
     audio_pl_id: Optional[str],
+    caption_pl_id: Optional[str],
     placed: list[_PlacedClip],
 ) -> None:
     from lxml import etree
@@ -671,8 +942,26 @@ def _append_arrangement_tractor(
     etree.SubElement(multi, "track", attrib={"producer": "playlist0"})  # V1 = track 0
     if has_v2:
         etree.SubElement(multi, "track", attrib={"producer": "playlist1_v2"})  # V2 = track 1
+    caption_track_idx: Optional[int] = None
+    if caption_pl_id:
+        caption_track_idx = 2 if has_v2 else 1
+        etree.SubElement(multi, "track", attrib={"producer": caption_pl_id})
     if audio_pl_id:
         etree.SubElement(multi, "track", attrib={"producer": audio_pl_id, "hide": "video"})
+
+    # Composite the caption track over the video (a plain multitrack does NOT
+    # composite a text track over an avformat video; the composite transition does).
+    if caption_track_idx is not None:
+        etree.SubElement(
+            tractor, "transition",
+            attrib={"id": "caption_composite", "in": "0", "out": str(max(0, duration_frames - 1))},
+        )
+        _prop(tractor[-1], "mlt_service", "composite")
+        _prop(tractor[-1], "a_track", "0")
+        _prop(tractor[-1], "b_track", str(caption_track_idx))
+        _prop(tractor[-1], "geometry", "0,0,100%,100%")
+        _prop(tractor[-1], "fill", "1")
+
 
     # Emit a transition for every non-hard-cut between adjacent clips on
     # different tracks.

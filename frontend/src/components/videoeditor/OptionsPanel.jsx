@@ -11,7 +11,8 @@
 import React from "react";
 import {
   Box, Stack, Typography, Chip, Slider, TextField, Button,
-  FormControlLabel, Switch, Divider, Alert,
+  Checkbox, FormControlLabel, FormControl, InputLabel, Select, MenuItem,
+  Divider, Switch, Alert,
 } from "@mui/material";
 import { Delete as DeleteIcon, Star as StarIcon } from "@mui/icons-material";
 import ScanModeSelector from "./ScanModeSelector";
@@ -30,6 +31,11 @@ const OptionsPanel = ({
   onSetMasterSong, onSetVolume,
   // text overlay
   onUpdateText, onDeleteText,
+  // plan options: bin order + customer captions
+  respectBinOrder, setRespectBinOrder,
+  customers, customer, setCustomer,
+  // global caption defaults
+  captionDefaults, setCaptionDefaults,
   // errors
   error, planError,
 }) => {
@@ -149,6 +155,77 @@ const OptionsPanel = ({
     <Stack spacing={1.5} sx={{ p: 1, height: "100%", overflow: "auto" }} className="non-draggable">
       <Typography variant="subtitle2" fontWeight="bold">Plan settings</Typography>
       <ScanModeSelector value={scanMode} onChange={setScanMode} disabled={planning} />
+
+      <FormControlLabel
+        control={
+          <Checkbox
+            checked={!!respectBinOrder}
+            onChange={(e) => setRespectBinOrder?.(e.target.checked)}
+            size="small"
+          />
+        }
+        label={
+          <Typography variant="body2">Respect bin order (clips play in bin sequence)</Typography>
+        }
+      />
+
+      <FormControl fullWidth size="small">
+        <InputLabel>Customer captions</InputLabel>
+        <Select
+          value={customer?.id ?? ""}
+          onChange={(e) => {
+            const id = e.target.value;
+            const sel = id ? (customers.find((c) => c.id === id) || null) : null;
+            console.log("[VE] Customer selected:", sel ? { id: sel.id, name: sel.name, notes: !!sel.notes, keywords: sel.keywords?.length, usps: sel.unique_selling_points?.length } : null);
+            setCustomer?.(sel);
+          }}
+          label="Customer captions"
+          disabled={planning}
+        >
+          <MenuItem value=""><em>None</em></MenuItem>
+          {customers.map((c) => (
+            <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
+          ))}
+        </Select>
+        <Typography variant="caption" color="text.secondary">
+          {customer
+            ? "Plan will overlay captions from this customer's intro / brand / products on each clip."
+            : "Pick a customer to auto-add timed captions from their info."}
+        </Typography>
+      </FormControl>
+
+      <Box>
+        <Typography variant="subtitle2" fontWeight="bold">Caption defaults</Typography>
+        <Typography variant="caption" color="text.secondary">
+          Applied to every clip when you Plan — no need to edit each caption.
+        </Typography>
+        <Stack spacing={1} sx={{ mt: 0.5 }}>
+          <TextField
+            size="small" fullWidth label="Default text (overrides auto captions)"
+            value={captionDefaults?.text ?? ""}
+            onChange={(e) => setCaptionDefaults?.((d) => ({ ...d, text: e.target.value }))}
+            disabled={planning}
+          />
+          <Stack direction="row" spacing={1}>
+            <TextField
+              size="small" label="Text color" value={captionDefaults?.color ?? "#ffffff"}
+              onChange={(e) => setCaptionDefaults?.((d) => ({ ...d, color: e.target.value }))}
+              disabled={planning}
+            />
+            <TextField
+              size="small" label="Background" value={captionDefaults?.bgcolor ?? "#00000000"}
+              onChange={(e) => setCaptionDefaults?.((d) => ({ ...d, bgcolor: e.target.value }))}
+              disabled={planning}
+            />
+            <TextField
+              size="small" label="Size" type="number" value={captionDefaults?.size ?? 48}
+              onChange={(e) => setCaptionDefaults?.((d) => ({ ...d, size: Number(e.target.value) || 48 }))}
+              disabled={planning}
+            />
+          </Stack>
+        </Stack>
+      </Box>
+
       <Box>
         <Typography variant="caption" color="text.secondary">Style recipe</Typography>
         <Stack direction="row" spacing={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
