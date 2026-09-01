@@ -23,7 +23,6 @@ import {
   InputLabel,
   Select,
   MenuItem,
-  Alert,
   Paper,
   List,
   ListItem,
@@ -39,6 +38,7 @@ import {
   Collapse,
 } from "@mui/material";
 import PageLayout from "../components/layout/PageLayout";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import GpuGateBanner from "../components/common/GpuGateBanner";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import useJobsGate from "../hooks/useJobsGate";
@@ -137,6 +137,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     fps: 25,
     width: 1280,
     height: 720,
+    framing: "fit",
+    min_size: "",
     focus_x: 0.5,
     focus_y: 0.5,
     pan_direction: "left-to-right",
@@ -1088,6 +1090,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         fps: Number(ffConfig.fps),
         width: Number(ffConfig.width),
         height: Number(ffConfig.height),
+        framing: ffConfig.framing,
+        min_size: ffConfig.min_size || null,
         focus_x: Number(ffConfig.focus_x),
         focus_y: Number(ffConfig.focus_y),
         pan_direction: ffConfig.pan_direction,
@@ -1282,22 +1286,22 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
       {/* Error/Success Messages */}
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
+        <CollapsibleAlert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
           {formatUiError(error)}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {success && (
-        <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
+        <CollapsibleAlert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
           {formatUiError(success) || String(success)}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Selected model not installed — block generation rather than silently
           downgrade to a worse model. The action button reopens the install
           modal and pulses the exact model to download. */}
       {modelNotReady && (
-        <Alert
+        <CollapsibleAlert
           severity="warning"
           sx={{ mb: 3 }}
           onClose={() => setModelNotReady(null)}
@@ -1317,7 +1321,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           {modelNotReady.missing?.length
             ? ` (${modelNotReady.missing.length} file${modelNotReady.missing.length > 1 ? "s" : ""} missing)`
             : ""}, then generate again.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       <Grid container spacing={3}>
@@ -1406,9 +1410,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   sx={{ mt: 1.5 }}
                 />
                 {highConsistencyMode && (
-                  <Alert severity="info" sx={{ mt: 1 }}>
+                  <CollapsibleAlert severity="info" sx={{ mt: 1 }}>
                     High consistency prioritizes quality — Low VRAM is off so resolution and steps stay at cinema settings.
-                  </Alert>
+                  </CollapsibleAlert>
                 )}
               </Box>
 
@@ -1709,6 +1713,51 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     </Box>
                   )}
 
+                  {/* Framing — how the image is placed on the output frame */}
+                  <Box>
+                    <Typography variant="caption" fontWeight="bold" color="text.secondary">
+                      Framing
+                    </Typography>
+                    <ToggleButtonGroup
+                      value={ffConfig.framing}
+                      exclusive
+                      size="small"
+                      onChange={(e, v) => v && setFfConfig((c) => ({ ...c, framing: v }))}
+                      fullWidth
+                      sx={{ mt: 0.5 }}
+                    >
+                      <ToggleButton value="fit" sx={{ textTransform: 'none' }}>
+                        <Typography variant="caption">Letterbox</Typography>
+                      </ToggleButton>
+                      <ToggleButton value="cover" sx={{ textTransform: 'none' }}>
+                        <Typography variant="caption">Zoom to fill</Typography>
+                      </ToggleButton>
+                      <ToggleButton value="native" sx={{ textTransform: 'none' }}>
+                        <Typography variant="caption">Match image</Typography>
+                      </ToggleButton>
+                    </ToggleButtonGroup>
+                    <Typography variant="caption" color="text.secondary">
+                      {ffConfig.framing === "fit" && "Keep the image size (never upscaled), centered on black — letterbox."}
+                      {ffConfig.framing === "cover" && "Zoom the image to fill the whole frame, cropping the overflow."}
+                      {ffConfig.framing === "native" && "Output video size = the image's own size, clamped to a min/max."}
+                    </Typography>
+                    {ffConfig.framing === "native" && (
+                      <Stack direction="row" spacing={1} sx={{ mt: 0.5 }} alignItems="center">
+                        <TextField
+                          size="small"
+                          label="Min size (WxH)"
+                          placeholder="e.g. 480x270 or 480"
+                          value={ffConfig.min_size}
+                          onChange={(e) => setFfConfig((c) => ({ ...c, min_size: e.target.value }))}
+                          sx={{ width: 180 }}
+                        />
+                        <Typography variant="caption" color="text.secondary">
+                          Max = the Resolution above (e.g. 1280x720).
+                        </Typography>
+                      </Stack>
+                    )}
+                  </Box>
+
                   {/* Duration */}
                   <Box>
                     <Typography variant="caption" fontWeight="bold" color="text.secondary">
@@ -1796,7 +1845,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
                   {/* Generate + errors + results. The single Generate button is at the
                       bottom of the page (shared across text/image/ffmpeg modes). */}
-                  {ffError && <Alert severity="error" variant="outlined">{ffError}</Alert>}
+                  {ffError && <CollapsibleAlert severity="error" variant="outlined">{ffError}</CollapsibleAlert>}
                   {ffResults && (
                     <Box>
                       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
@@ -1986,11 +2035,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               )}
               <Collapse in={cinematicKeyframe || selectedSubjectIds.length > 0}>
                 {castIdentityLocked ? (
-                  <Alert severity="info" sx={{ mt: 1.5 }}>
+                  <CollapsibleAlert severity="info" sx={{ mt: 1.5 }}>
                     Keyframe still model is automatic from this character&apos;s training base
                     (Z-Image / SDXL / FLUX). A new still is generated from your prompt + LoRA,
                     then animated — training images are never used as start frames.
-                  </Alert>
+                  </CollapsibleAlert>
                 ) : (
                   <TextField
                     select
@@ -2042,9 +2091,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 ))}
               </TextField>
               {inputMode === "text" && (cinematicKeyframe || selectedSubjectIds.length > 0) && (
-                <Alert severity="info" sx={{ mt: 1.5 }}>
+                <CollapsibleAlert severity="info" sx={{ mt: 1.5 }}>
                   Keyframe mode renders a still first, then animates via image-to-video on the backend — much sharper than pure text-to-video.
-                </Alert>
+                </CollapsibleAlert>
               )}
             </Box>
 
@@ -2213,9 +2262,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               </Grid>
             </Grid>
             {isCogVideoXModel(model) && qualityPreset !== "maximum" && (
-              <Alert severity="info" sx={{ mb: 2 }}>
+              <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
                 CogVideoX needs at least 50 inference steps for clean output — lower presets are raised automatically.
-              </Alert>
+              </CollapsibleAlert>
             )}
 
             {/* Video Dimensions Row */}
@@ -2522,7 +2571,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
             </Box>
             {/* Low VRAM Mode Active Warning */}
             {lowVramMode && (isCogVideoXModel(model) || isWanModel(model)) && (
-              <Alert
+              <CollapsibleAlert
                 severity="info"
                 sx={{
                   mt: 1.5,
@@ -2536,7 +2585,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   ? `Low VRAM mode is active: Max ${computedParams.duration_frames} frames, max ${computedParams.num_inference_steps} steps, and reduced resolution (model preserved for I2V).`
                   : `Low VRAM mode is active: Max ${computedParams.duration_frames} frames, max ${computedParams.num_inference_steps} steps, and reduced resolution to minimize memory usage.`
                 }
-              </Alert>
+              </CollapsibleAlert>
             )}
           </Box>
           )}

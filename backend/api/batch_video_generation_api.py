@@ -341,6 +341,16 @@ def generate_ffmpeg_still_videos():
         width = int(data.get("width", 1280))
         height = int(data.get("height", 720))
 
+        # How the image is framed onto the output video.
+        framing = data.get("framing", "fit")
+        if framing not in ffmpeg_gen.FRAMING_MODES:
+            return error_response(
+                f"framing must be one of {sorted(ffmpeg_gen.FRAMING_MODES)}",
+                400, "INVALID_FRAMING",
+            )
+        # Lower size bound for the "native" framing ("WxH" or int).
+        min_size = data.get("min_size") or None
+
         # Focus point (0.0–1.0 fractions of the image) the camera keeps centered
         # while zooming. Default 0.5/0.5 = center.
         focus_x = float(data.get("focus_x", 0.5))
@@ -364,12 +374,15 @@ def generate_ffmpeg_still_videos():
             fps=fps,
             width=width,
             height=height,
+            framing=framing,
+            min_size=min_size,
             focus_x=focus_x,
             focus_y=focus_y,
             pan_direction=pan_direction,
         )
         return success_response({
             "pattern": pattern,
+            "framing": framing,
             "pan_direction": pan_direction,
             "focus": {"x": focus_x, "y": focus_y},
             "total": len(results),
