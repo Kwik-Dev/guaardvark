@@ -26,6 +26,7 @@ import {
   DialogActions,
   Tooltip,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   Science as ScienceIcon,
   Refresh as RefreshIcon,
@@ -626,7 +627,7 @@ const AutoresearchPage = () => {
         </DialogActions>
       </Dialog>
 
-      <AlertSnackbar
+      <CollapsibleAlertSnackbar
         open={snackbar.open}
         message={snackbar.message}
         severity={snackbar.severity}

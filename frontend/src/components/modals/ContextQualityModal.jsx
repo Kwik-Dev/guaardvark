@@ -16,7 +16,6 @@ import {
   Paper,
   Chip,
   CircularProgress,
-  Alert,
   Grid,
   Card,
   CardContent,
@@ -28,6 +27,7 @@ import {
   ListItemText,
   Divider,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Icons
 import CloseIcon from "@mui/icons-material/Close";
@@ -190,9 +190,9 @@ const ContextQualityModal = ({ open, onClose }) => {
         </Box>
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {results && (
@@ -388,9 +388,9 @@ const ContextQualityModal = ({ open, onClose }) => {
             )}
 
             {results.recommendations && results.recommendations.length === 0 && (
-              <Alert severity="success" icon={<CheckCircleIcon />}>
+              <CollapsibleAlert severity="success" icon={<CheckCircleIcon />}>
                 Great! No issues found with this context. The quality is good across all metrics.
-              </Alert>
+              </CollapsibleAlert>
             )}
           </Box>
         )}

@@ -4,7 +4,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   CircularProgress,
-  Alert,
   Box,
   Chip,
   Typography,
@@ -20,6 +19,7 @@ import {
   Snackbar, // Added for feedback
   Alert as MuiAlert, // Alias Alert to avoid conflict if needed inside Snackbar
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import { Link } from "@mui/material";
 import { Link as RouterLink, useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
@@ -218,9 +218,9 @@ const TaskManagerCard = React.forwardRef(
               <CircularProgress size={24} />
             </Box>
           ) : error ? (
-            <Alert severity="error" sx={{ mb: 2 }}>
+            <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
               {error}
-            </Alert>
+            </CollapsibleAlert>
           ) : (
             <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
               {/* Add Task Button */}

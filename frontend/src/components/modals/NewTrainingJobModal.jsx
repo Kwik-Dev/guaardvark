@@ -7,7 +7,6 @@ import {
   Button,
   TextField,
   Grid,
-  Alert,
   FormControl,
   InputLabel,
   Select,
@@ -19,6 +18,7 @@ import {
   RadioGroup,
   Radio,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   getTrainingDatasets,
   getDeviceProfiles,
@@ -209,24 +209,24 @@ const NewTrainingJobModal = ({
       <DialogTitle>Create New Training Job</DialogTitle>
       <DialogContent dividers>
         {hardwareCaps && (
-          <Alert severity="success" icon={<ComputerIcon />} sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="success" icon={<ComputerIcon />} sx={{ mb: 2 }}>
             <Typography variant="subtitle2">
               Detected Hardware: {hardwareCaps.gpu_name || "CPU Only"} ({hardwareCaps.vram_total_mb ? `${(hardwareCaps.vram_total_mb / 1024).toFixed(1)}GB VRAM` : "No GPU"})
             </Typography>
             <Typography variant="caption">
               Intelligent defaults applied based on your {(hardwareCaps.vram_total_mb / 1024).toFixed(0)}GB {hardwareCaps.gpu_name}.
             </Typography>
-          </Alert>
+          </CollapsibleAlert>
         )}
         {formError && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}
-          </Alert>
+          </CollapsibleAlert>
         )}
         {loading && (
-          <Alert severity="info" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
             Loading options...
-          </Alert>
+          </CollapsibleAlert>
         )}
         <Grid container spacing={2} sx={{ mt: 0 }}>
           <Grid item xs={12}>

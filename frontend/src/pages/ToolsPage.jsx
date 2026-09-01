@@ -17,7 +17,6 @@ import {
   IconButton,
   Tooltip,
   Chip,
-  Alert,
   TextField,
   Dialog,
   DialogTitle,
@@ -38,6 +37,7 @@ import {
   TableRow,
   TableSortLabel,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   Refresh,
   PlayArrow,
@@ -570,9 +570,9 @@ const ToolsPage = () => {
 
       {/* Error Display */}
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Tab Content */}
@@ -766,7 +766,7 @@ const ToolsPage = () => {
                   <Typography variant="subtitle2" sx={{ mb: 1 }}>
                     Result
                   </Typography>
-                  <Alert
+                  <CollapsibleAlert
                     severity={testResult.result?.success ? "success" : "error"}
                     icon={
                       testResult.result?.success ? (
@@ -780,7 +780,7 @@ const ToolsPage = () => {
                     {testResult.result?.success
                       ? "Tool executed successfully"
                       : testResult.result?.error || "Execution failed"}
-                  </Alert>
+                  </CollapsibleAlert>
                   <Paper
                     sx={{
                       p: 2,
@@ -813,7 +813,7 @@ const ToolsPage = () => {
       </Dialog>
 
       {/* Snackbar */}
-      <AlertSnackbar
+      <CollapsibleAlertSnackbar
         open={snackbar.open}
         message={snackbar.message}
         severity={snackbar.severity}

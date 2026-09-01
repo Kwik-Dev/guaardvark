@@ -5,9 +5,9 @@ import {
   Typography, 
   Button, 
   Stack, 
-  Alert,
   Divider 
 } from "@mui/material";
+import CollapsibleAlert from "./CollapsibleAlert";
 import { RefreshOutlined } from "@mui/icons-material";
 import { BrandLogo } from "../branding";
 
@@ -101,7 +101,7 @@ class ErrorBoundary extends React.Component {
             {process.env.NODE_ENV === "development" && this.state.error && (
               <>
                 <Divider sx={{ my: 2 }} />
-                <Alert severity="error" sx={{ textAlign: "left" }}>
+                <CollapsibleAlert severity="error" sx={{ textAlign: "left" }}>
                   <Typography variant="subtitle2" gutterBottom>
                     Error Details (Development Mode Only):
                   </Typography>
@@ -113,7 +113,7 @@ class ErrorBoundary extends React.Component {
                     {this.state.error.toString()}
                     {this.state.errorInfo.componentStack}
                   </Typography>
-                </Alert>
+                </CollapsibleAlert>
               </>
             )}
           </Paper>

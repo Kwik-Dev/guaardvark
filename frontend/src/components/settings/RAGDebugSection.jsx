@@ -10,11 +10,11 @@ import {
   Grid,
   Chip,
   CircularProgress,
-  Alert,
   LinearProgress,
   Tooltip,
   Stack,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Icons
 import SpeedIcon from "@mui/icons-material/Speed";
@@ -112,9 +112,9 @@ const RAGDebugSection = ({ ragDebugEnabled }) => {
       </Box>
 
       {error && (
-        <Alert severity="info" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
           No RAG data available. Index some documents to see performance stats.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {loading && !systemHealth && (
@@ -150,11 +150,11 @@ const RAGDebugSection = ({ ragDebugEnabled }) => {
               </Typography>
 
               {systemHealth.health_issues?.length > 0 && (
-                <Alert severity="warning" size="small">
+                <CollapsibleAlert severity="warning" size="small">
                   <Typography variant="caption">
                     Issues: {systemHealth.health_issues.join(", ")}
                   </Typography>
-                </Alert>
+                </CollapsibleAlert>
               )}
             </Paper>
           </Grid>

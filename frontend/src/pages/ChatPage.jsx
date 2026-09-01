@@ -1,5 +1,6 @@
 
 import { Alert, Box, Chip, Paper, Typography, Tooltip, IconButton } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import AddIcon from "@mui/icons-material/Add";
 import HistoryIcon from "@mui/icons-material/History";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
@@ -2207,13 +2208,13 @@ const ChatPage = () => {
       </Box>
 
       {!llmReady && (
-        <Alert severity="info" sx={{ mx: 2, mb: 1 }}>
+        <CollapsibleAlert severity="info" sx={{ mx: 2, mb: 1 }}>
           Model is loading into GPU memory... Chat will be ready in a moment.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Agent screen floating panel renders via portal from the chip in the header */}
-      {error && <Alert severity="error" sx={{ mx: 2, mb: 1 }}>{error}</Alert>}
+      {error && <CollapsibleAlert severity="error" sx={{ mx: 2, mb: 1 }}>{error}</CollapsibleAlert>}
 
       {}
 

@@ -5,7 +5,6 @@ import CloseIcon from "@mui/icons-material/Close";
 import SendIcon from "@mui/icons-material/Send";
 import StopIcon from "@mui/icons-material/Stop";
 import {
-  Alert,
   Box,
   Card,
   CardMedia,
@@ -15,6 +14,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import React, {
   forwardRef,
   useCallback,
@@ -1271,18 +1271,18 @@ Total URLs: ${analysis.totalUrls}`;
       >
         {/* Voice chat error alert */}
         {voiceError && (
-          <Alert
+          <CollapsibleAlert
             severity="error"
             sx={{ mb: 1 }}
             onClose={() => setVoiceError(null)}
           >
             {voiceError}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* File upload error */}
         {fileUploadState.error && (
-          <Alert
+          <CollapsibleAlert
             severity="error"
             sx={{ mb: 1 }}
             onClose={() =>
@@ -1290,7 +1290,7 @@ Total URLs: ${analysis.totalUrls}`;
             }
           >
             Upload failed: {fileUploadState.error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Image preview thumbnails */}
@@ -1371,13 +1371,13 @@ Total URLs: ${analysis.totalUrls}`;
 
         {/* Image error */}
         {imageState.error && (
-          <Alert
+          <CollapsibleAlert
             severity="error"
             sx={{ mb: 1 }}
             onClose={() => setImageState((prev) => ({ ...prev, error: null }))}
           >
             {imageState.error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         <Box sx={{ display: "flex", gap: 1, alignItems: "flex-end" }}>

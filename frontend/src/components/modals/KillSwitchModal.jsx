@@ -7,7 +7,6 @@ import {
   Button,
   Typography,
   Box,
-  Alert,
   CircularProgress,
   List,
   ListItem,
@@ -25,6 +24,7 @@ import {
   Speed as SpeedIcon
 } from '@mui/icons-material';
 import voiceService from '../../api/voiceService';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const KillSwitchModal = ({ open, onClose }) => {
   const [isLoading, setIsLoading] = useState(false);
@@ -113,12 +113,12 @@ const KillSwitchModal = ({ open, onClose }) => {
       </DialogTitle>
       
       <DialogContent>
-        <Alert severity="warning" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
           <Typography variant="body2">
             <strong>WARNING:</strong> This will forcefully terminate all active LLM processes. 
             Use only when the system is unresponsive or consuming excessive resources.
           </Typography>
-        </Alert>
+        </CollapsibleAlert>
 
         {/* System Status Section */}
         <Box sx={{ mb: 3 }}>
@@ -174,9 +174,9 @@ const KillSwitchModal = ({ open, onClose }) => {
               </List>
               
               {systemStatus.system_overloaded && (
-                <Alert severity="error" sx={{ mt: 1 }}>
+                <CollapsibleAlert severity="error" sx={{ mt: 1 }}>
                   System is currently overloaded. Consider using the kill switch.
-                </Alert>
+                </CollapsibleAlert>
               )}
             </Box>
           ) : (
@@ -194,10 +194,10 @@ const KillSwitchModal = ({ open, onClose }) => {
               Kill Results
             </Typography>
             
-            <Alert severity="success" sx={{ mb: 2 }}>
+            <CollapsibleAlert severity="success" sx={{ mb: 2 }}>
               Successfully killed {killResult.total_killed} processes
               {killResult.total_failed > 0 && `, ${killResult.total_failed} failed`}
-            </Alert>
+            </CollapsibleAlert>
             
             {killResult.killed_processes.length > 0 && (
               <List dense>
@@ -240,9 +240,9 @@ const KillSwitchModal = ({ open, onClose }) => {
 
         {/* Error Display */}
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
       </DialogContent>
       

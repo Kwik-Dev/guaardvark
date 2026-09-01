@@ -8,11 +8,11 @@ import {
   Select,
   MenuItem,
   FormControl,
-  Alert,
   CircularProgress,
   Stack,
   Tooltip,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Psychology as PsychologyIcon,
   Shield as ShieldIcon,
@@ -165,13 +165,13 @@ export default function UncleClaudeSection({ compact = false }) {
         </SettingsRow>
 
         {testResult && (
-          <Alert
+          <CollapsibleAlert
             severity={testResult.success ? "success" : "error"}
             sx={{ my: 1 }}
             onClose={() => setTestResult(null)}
           >
             {testResult.message}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Token Budget */}
@@ -282,9 +282,9 @@ export default function UncleClaudeSection({ compact = false }) {
       </Wrapper>
 
       {siStatus?.codebase_locked && (
-        <Alert severity="warning" variant="outlined" sx={{ mt: 2 }}>
+        <CollapsibleAlert severity="warning" variant="outlined" sx={{ mt: 2 }}>
           Codebase is locked. Autonomous edits are blocked.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       <ScanProgressModal

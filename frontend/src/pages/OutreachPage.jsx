@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { Link as RouterLink } from "react-router-dom";
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -28,6 +27,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SendIcon from "@mui/icons-material/Send";
@@ -629,10 +629,10 @@ const OutreachPage = () => {
       </Paper>
 
       {error && (
-        <Alert severity="error" onClose={() => setError(null)} sx={{ mb: 2 }}>{error}</Alert>
+        <CollapsibleAlert severity="error" onClose={() => setError(null)} sx={{ mb: 2 }}>{error}</CollapsibleAlert>
       )}
       {info && (
-        <Alert severity="info" onClose={() => setInfo(null)} sx={{ mb: 2 }}>{info}</Alert>
+        <CollapsibleAlert severity="info" onClose={() => setInfo(null)} sx={{ mb: 2 }}>{info}</CollapsibleAlert>
       )}
 
       {busy && <LinearProgress sx={{ mb: 1 }} />}
@@ -827,7 +827,7 @@ const OutreachPage = () => {
                   <Typography variant="caption" color="text.secondary">thread id: {selected.target_thread_id}</Typography>
                 )}
                 {selected.abort_reason && (
-                  <Alert severity="warning" sx={{ py: 0.5 }}>{selected.abort_reason}</Alert>
+                  <CollapsibleAlert severity="warning" sx={{ py: 0.5 }}>{selected.abort_reason}</CollapsibleAlert>
                 )}
               </Stack>
             ) : (
@@ -1174,9 +1174,9 @@ const OutreachPage = () => {
         </DialogTitle>
         <DialogContent dividers>
           {modalError && (
-            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setModalError(null)}>
+            <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setModalError(null)}>
               {modalError}
-            </Alert>
+            </CollapsibleAlert>
           )}
           <Box sx={{
             display: "grid",
@@ -1241,9 +1241,9 @@ const OutreachPage = () => {
                 fullWidth
               />
               {!PLATFORM_OPTIONS.find(p => p.value === ndPlatform)?.auto && (
-                <Alert severity="info" sx={{ py: 0.5, fontSize: "0.7rem" }}>
+                <CollapsibleAlert severity="info" sx={{ py: 0.5, fontSize: "0.7rem" }}>
                   No auto-post backend for {ndPlatform} yet — approving will queue the row but not ship it.
-                </Alert>
+                </CollapsibleAlert>
               )}
               <Divider sx={{ my: 0.5 }} />
               <Typography variant="caption" color="text.secondary">

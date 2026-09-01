@@ -20,10 +20,10 @@ import {
   CircularProgress,
   Box,
   Typography,
-  Alert,
   TextField,
   InputAdornment,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import SearchIcon from "@mui/icons-material/Search";
 
 const LinkingModal = ({
@@ -234,9 +234,9 @@ const LinkingModal = ({
       <Dialog open={open} onClose={() => onClose(false)}>
         <DialogTitle>Error</DialogTitle>
         <DialogContent>
-          <Alert severity="error">
+          <CollapsibleAlert severity="error">
             Primary entity data is missing. Cannot open linking modal.
-          </Alert>
+          </CollapsibleAlert>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => onClose(false)}>Close</Button>
@@ -265,10 +265,10 @@ const LinkingModal = ({
         sx={{ minHeight: "400px", display: "flex", flexDirection: "column" }}
       >
         {!hasLinkableTypes ? (
-          <Alert severity="warning" sx={{ mt: 2 }}>
+          <CollapsibleAlert severity="warning" sx={{ mt: 2 }}>
             No linkable item types have been configured for this{" "}
             {primaryEntityType}.
-          </Alert>
+          </CollapsibleAlert>
         ) : (
           <>
             <Tabs
@@ -313,13 +313,13 @@ const LinkingModal = ({
             />
 
             {error && (
-              <Alert
+              <CollapsibleAlert
                 severity="error"
                 sx={{ mb: 2, flexShrink: 0 }}
                 onClose={() => setError(null)}
               >
                 {error}
-              </Alert>
+              </CollapsibleAlert>
             )}
 
             <Box sx={{ flexGrow: 1, overflowY: "auto" }}>

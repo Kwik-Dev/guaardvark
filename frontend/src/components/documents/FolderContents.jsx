@@ -5,7 +5,6 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   Box,
   CircularProgress,
-  Alert,
   Typography,
   Card,
   CardActionArea,
@@ -27,6 +26,7 @@ import { API_BASE, getFileIcon, getFileIconSmall, FolderIndexIndicator, formatBy
 import MediaView from './MediaView';
 import CodeRepoDashboard from './CodeRepoDashboard';
 import { folderHasVisualMedia } from './folderViewPolicy';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Stable grid components (must be defined outside render to avoid Virtuoso remounts)
 const GridItemWrapper = React.forwardRef(({ children, ...props }, ref) => (
@@ -548,7 +548,7 @@ const FolderContents = ({
   if (error) {
     return (
       <Box sx={{ p: 2 }}>
-        <Alert severity="error">{error}</Alert>
+        <CollapsibleAlert severity="error">{error}</CollapsibleAlert>
       </Box>
     );
   }

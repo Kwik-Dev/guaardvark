@@ -27,8 +27,8 @@ import {
   Tooltip,
   CircularProgress,
   Stack,
-  Alert,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   MovieFilter as PosterPlaceholderIcon,
   Search as SearchIcon,
@@ -145,9 +145,9 @@ const OpenProjectDialog = ({ open, onClose, onOpenProject, currentId }) => {
         />
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {loading ? (

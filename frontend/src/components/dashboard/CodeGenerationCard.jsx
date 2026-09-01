@@ -4,7 +4,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   CircularProgress,
-  Alert,
   Box,
   Typography,
   List,
@@ -15,6 +14,7 @@ import {
   IconButton,
   Tooltip,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Add,
   PlayArrow,
@@ -131,9 +131,9 @@ const CodeGenerationCard = React.forwardRef(
           />
         )}
         {error && (
-          <Alert severity="error" sx={{ my: 1 }}>
+          <CollapsibleAlert severity="error" sx={{ my: 1 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Quick Actions */}

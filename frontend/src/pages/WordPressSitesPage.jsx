@@ -26,6 +26,7 @@ import {
   Chip,
   Stack,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import AddIcon from "@mui/icons-material/Add";
 import EditIcon from "@mui/icons-material/Edit";
 import DeleteIcon from "@mui/icons-material/Delete";
@@ -289,7 +290,7 @@ function WordPressSitesPage() {
       activeModel={activeModel}
     >
       {error && (
-        <AlertSnackbar severity="error" sx={{ mb: 2 }}>
+        <CollapsibleAlertSnackbar severity="error" sx={{ mb: 2 }}>
           {error}
         </AlertSnackbar>
       )}
@@ -495,7 +496,7 @@ function WordPressSitesPage() {
           autoHideDuration={isTesting ? null : 3000}
           anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
         >
-          <AlertSnackbar severity={isTesting ? "info" : "success"}>
+          <CollapsibleAlertSnackbar severity={isTesting ? "info" : "success"}>
             {isTesting ? "Testing connection..." : "Connection test completed"}
           </AlertSnackbar>
         </Snackbar>
@@ -508,7 +509,7 @@ function WordPressSitesPage() {
         onClose={() => setFeedback({ ...feedback, open: false })}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <AlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
+        <CollapsibleAlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
       </Snackbar>
     </PageLayout>
   );

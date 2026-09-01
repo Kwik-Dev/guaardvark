@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  Alert,
   AlertTitle,
   Box,
   Button,
@@ -23,6 +22,7 @@ import {
   BugReport as BugReportIcon
 } from '@mui/icons-material';
 import { useState } from 'react';
+import CollapsibleAlert from "./CollapsibleAlert";
 
 /**
  * Comprehensive error display component
@@ -112,7 +112,7 @@ export const ErrorDisplay = ({
   const hasDetails = errorInfo.details || errorInfo.code || errorInfo.timestamp;
 
   return (
-    <Alert
+    <CollapsibleAlert
       severity={severity}
       variant={variant}
       icon={showIcon ? getIcon() : false}
@@ -168,7 +168,7 @@ export const ErrorDisplay = ({
         </Stack>
       }
     >
-      <AlertTitle sx={{ mb: 1 }}>
+      <CollapsibleAlertTitle sx={{ mb: 1 }}>
         {severity === 'error' ? 'Error' : 
          severity === 'warning' ? 'Warning' : 
          'Information'}
@@ -220,7 +220,7 @@ export const ErrorDisplay = ({
           </Box>
         </Collapse>
       )}
-    </Alert>
+    </CollapsibleAlert>
   );
 };
 
@@ -302,14 +302,14 @@ export const ErrorToast = ({
       onClose={onClose}
       anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
     >
-      <Alert 
+      <CollapsibleAlert 
         onClose={onClose} 
         severity={severity}
         variant="filled"
         sx={{ width: '100%' }}
       >
         {typeof error === 'string' ? error : error.message || 'An error occurred'}
-      </Alert>
+      </CollapsibleAlert>
     </Snackbar>
   );
 };

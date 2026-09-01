@@ -16,9 +16,9 @@ import {
   MenuItem,
   Box,
   Typography,
-  Alert,
   Stack,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
 import IconButton from "@mui/material/IconButton";
 
@@ -129,10 +129,10 @@ function WordPressSiteModal({ open, onClose, site, clients, projects, onSave }) 
       </DialogTitle>
       <DialogContent>
         <Stack spacing={3} sx={{ mt: 1 }}>
-          <Alert severity="info">
+          <CollapsibleAlert severity="info">
             Use WordPress Application Passwords for secure API access. Go to Users → Your Profile
             → Application Passwords in WordPress admin to create one.
-          </Alert>
+          </CollapsibleAlert>
 
           <TextField
             fullWidth

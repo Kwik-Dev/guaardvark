@@ -12,7 +12,6 @@ import {
   DialogContent,
   DialogActions,
   CircularProgress,
-  Alert,
   Table,
   TableBody,
   TableCell,
@@ -21,6 +20,7 @@ import {
   TableRow,
   Tooltip,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
 import AddIcon from "@mui/icons-material/Add";
 import SearchIcon from "@mui/icons-material/Search";
@@ -366,7 +366,7 @@ const MemoryManagementSection = () => {
       </Box>
 
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>{error}</CollapsibleAlert>
       )}
 
       <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 480 }}>

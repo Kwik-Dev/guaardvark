@@ -25,7 +25,6 @@ import {
   Menu,
   MenuItem,
   CircularProgress,
-  Alert,
   Button,
   Dialog,
   DialogTitle,
@@ -76,6 +75,7 @@ import { useSnackbar } from '../common/SnackbarProvider';
 import { useLayout } from '../../contexts/LayoutContext';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const FolderGridLayout = WidthProvider(ReactGridLayoutLib);
 const FOLDER_LAYOUT_COLS = 48; // More columns for smoother positioning
@@ -2231,9 +2231,9 @@ const FileManager = () => {
         )}
 
         {error && (
-          <Alert severity="error" sx={{ m: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ m: 2 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {!loading && !error && (

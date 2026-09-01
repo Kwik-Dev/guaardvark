@@ -15,7 +15,6 @@ import {
   Divider,
   IconButton,
   CircularProgress,
-  Alert,
   Accordion,
   AccordionSummary,
   AccordionDetails,
@@ -33,6 +32,7 @@ import {
   FormControlLabel,
   FormLabel,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Close as CloseIcon,
   Download as DownloadIcon,
@@ -294,9 +294,9 @@ const OutputModal = ({
             <CircularProgress />
           </Box>
         ) : error ? (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         ) : (
           <>
             {/* Summary Statistics */}

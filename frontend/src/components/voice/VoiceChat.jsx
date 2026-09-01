@@ -7,7 +7,6 @@ import {
   Button,
   IconButton,
   Chip,
-  Alert,
   CircularProgress,
   Divider
 } from '@mui/material';
@@ -25,6 +24,7 @@ import { useUnifiedProgress } from '../../contexts/UnifiedProgressContext';
 import AudioVisualizer from './AudioVisualizer';
 import VolumeMeter from './VolumeMeter';
 import VoiceSettingsModal from './VoiceSettingsModal';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -607,20 +607,20 @@ const VoiceChat = ({
 
       {}
       {recordingError && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
           <Typography variant="body2">
             <strong>Recording Error:</strong> {recordingError}
           </Typography>
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {}
       {isRecording && (
-        <Alert severity="info" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
           <Typography variant="body2">
                          Debug: Volume={(recordingVolume || 0).toFixed(3)}, AudioLevels={audioLevels?.length || 0}, IsRecording={String(isRecording)}
           </Typography>
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {}

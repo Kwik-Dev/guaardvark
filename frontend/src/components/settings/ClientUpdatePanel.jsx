@@ -11,7 +11,6 @@ import {
   Chip,
   CircularProgress,
   LinearProgress,
-  Alert,
   Collapse,
   Table,
   TableBody,
@@ -23,6 +22,7 @@ import {
   Tooltip,
   Divider,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   CheckCircle as CheckIcon,
   Download as DownloadIcon,
@@ -297,9 +297,9 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
 
       {/* Error State */}
       {updateStatus.error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
           {updateStatus.error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Checking State */}
@@ -520,7 +520,7 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
         <Box mt={2}>
           <Divider sx={{ mb: 2 }} />
           {lastUpdateResult.success ? (
-            <Alert severity="success">
+            <CollapsibleAlert severity="success">
               <Typography variant="body2" fontWeight="bold">
                 Update completed successfully
               </Typography>
@@ -533,11 +533,11 @@ const ClientUpdatePanel = ({ masterUrl, _masterApiKey, isEnabled }) => {
                   Backups saved to: {lastUpdateResult.backupPath}
                 </Typography>
               )}
-            </Alert>
+            </CollapsibleAlert>
           ) : (
-            <Alert severity="error">
+            <CollapsibleAlert severity="error">
               Update failed: {lastUpdateResult.error}
-            </Alert>
+            </CollapsibleAlert>
           )}
         </Box>
       )}

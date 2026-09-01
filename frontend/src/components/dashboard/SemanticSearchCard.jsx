@@ -8,8 +8,8 @@ import {
   TextField,
   IconButton,
   CircularProgress,
-  Alert,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import SendIcon from "@mui/icons-material/Send";
 import StopIcon from "@mui/icons-material/Stop";
 import ChatIcon from "@mui/icons-material/Chat";
@@ -367,9 +367,9 @@ const SemanticSearchCard = React.forwardRef(
         {...props}
       >
             {error && (
-              <Alert severity="error" sx={{ mb: 1 }}>
+              <CollapsibleAlert severity="error" sx={{ mb: 1 }}>
                 {error}
-              </Alert>
+              </CollapsibleAlert>
             )}
 
             {}

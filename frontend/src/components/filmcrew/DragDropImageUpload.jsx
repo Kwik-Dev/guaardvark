@@ -4,6 +4,7 @@ import {
   Box, Typography, Chip, IconButton, CircularProgress, Alert,
   Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import ImageIcon from "@mui/icons-material/Image";
 import CloseIcon from "@mui/icons-material/Close";
@@ -279,15 +280,15 @@ const DragDropImageUpload = React.forwardRef(function DragDropImageUpload(
       </Box>
 
       {error && (
-        <Alert severity="error" sx={{ mt: 1 }} onClose={() => setError(null)}>
+        <CollapsibleAlert severity="error" sx={{ mt: 1 }} onClose={() => setError(null)}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {skipped.length > 0 && (
-        <Alert severity="warning" sx={{ mt: 1 }} onClose={() => setSkipped([])}>
+        <CollapsibleAlert severity="warning" sx={{ mt: 1 }} onClose={() => setSkipped([])}>
           Skipped: {skipped.map((s) => `${s.name} (${s.reason})`).join("; ")}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {staged.length > 0 && (

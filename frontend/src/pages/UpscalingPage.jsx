@@ -18,7 +18,6 @@ import {
   InputLabel,
   Select,
   MenuItem,
-  Alert,
   CircularProgress,
   ToggleButton,
   ToggleButtonGroup,
@@ -26,6 +25,7 @@ import {
   FormControlLabel,
   Slider,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import PageLayout from "../components/layout/PageLayout";
 import {
   Upload as UploadIcon,
@@ -429,21 +429,21 @@ const UpscalingPage = ({ embedded = false }) => {
     <Wrapper {...wrapperProps}>
       {/* Service Status */}
       {serviceAvailable === false && (
-        <Alert severity="warning" sx={{ mb: 3 }}>
+        <CollapsibleAlert severity="warning" sx={{ mb: 3 }}>
           Upscaling service is not running. Start it from the Plugins page.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError("")}>
+        <CollapsibleAlert severity="error" sx={{ mb: 3 }} onClose={() => setError("")}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {success && (
-        <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess("")}>
+        <CollapsibleAlert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess("")}>
           {success}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       <Grid container spacing={3}>

@@ -4,7 +4,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { BASE_URL } from "../api/apiClient";
 import {
-  Alert,
   AlertTitle,
   Autocomplete,
   Box,
@@ -28,6 +27,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import { useNavigate } from "react-router-dom";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
@@ -238,9 +238,9 @@ const BulkImportDocumentsPage = () => {
   const renderStatus = () => {
     if (!jobId) {
       return (
-        <Alert severity="info" icon={<InfoOutlinedIcon />}>
+        <CollapsibleAlert severity="info" icon={<InfoOutlinedIcon />}>
           No import job running. Configure and start an import to see status here.
-        </Alert>
+        </CollapsibleAlert>
       );
     }
 
@@ -251,8 +251,8 @@ const BulkImportDocumentsPage = () => {
       : "info";
 
     return (
-      <Alert severity={severity}>
-        <AlertTitle>Job Status</AlertTitle>
+      <CollapsibleAlert severity={severity}>
+        <CollapsibleAlertTitle>Job Status</AlertTitle>
         <Typography variant="body2" component="div" sx={{ mt: 1 }}>
           <strong>Job ID:</strong> {jobId}
         </Typography>
@@ -280,7 +280,7 @@ const BulkImportDocumentsPage = () => {
             </Box>
           </Typography>
         )}
-      </Alert>
+      </CollapsibleAlert>
     );
   };
 
@@ -500,9 +500,9 @@ const BulkImportDocumentsPage = () => {
                 </Typography>
               </Box>
             ) : directories.length === 0 ? (
-              <Alert severity="info">
+              <CollapsibleAlert severity="info">
                 No subdirectories found. You can select this directory.
-              </Alert>
+              </CollapsibleAlert>
             ) : (
               <List sx={{ maxHeight: 300, overflow: "auto" }}>
                 {directories.map((dir) => (

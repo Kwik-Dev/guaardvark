@@ -22,6 +22,7 @@ import {
 } from '../api/productionService';
 import { SubjectThumb } from '../components/filmcrew/CastLibraryView';
 import DragDropImageUpload from '../components/filmcrew/DragDropImageUpload';
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 const POLL_MS = 5000;
 const POLL_CAP = 180; // 15 min safety cap on a generate/train poll loop
@@ -552,7 +553,7 @@ const CastMemberPage = () => {
     return (
       <Box sx={{ p: 3 }}>
         <Button startIcon={<ArrowBackIcon />} onClick={() => navigate('/cast')}>Back to studio</Button>
-        <Alert severity="error" sx={{ mt: 2 }}>{error || 'Subject not found.'}</Alert>
+        <CollapsibleAlert severity="error" sx={{ mt: 2 }}>{error || 'Subject not found.'}</CollapsibleAlert>
       </Box>
     );
   }
@@ -635,7 +636,7 @@ const CastMemberPage = () => {
         {polling && <CircularProgress size={18} sx={{ ml: 1 }} />}
       </Box>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
+      {error && <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</CollapsibleAlert>}
 
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}>
         <Tab label="Overview" />
@@ -679,11 +680,11 @@ const CastMemberPage = () => {
                 generate uses trigger + short marks only. Train does not rewrite this.
               </Typography>
               {(subject.ref_image_paths || []).length > 0 && !subject.bible_vision_grounded && (
-                <Alert severity="warning" sx={{ mb: 1 }}>
+                <CollapsibleAlert severity="warning" sx={{ mb: 1 }}>
                   {subject.bible_manual_override
                     ? <>Manual edit — use <strong>Sync identity from photos</strong> to re-ground from refs.</>
                     : <>Bible may not match your photos — use <strong>Sync identity from photos</strong> so Generate / captions stop inventing a different look.</>}
-                </Alert>
+                </CollapsibleAlert>
               )}
               <TextField
                 label="Identity bible"
@@ -888,7 +889,7 @@ const CastMemberPage = () => {
               Matches user's "no simulations" requirement and the exact failure mode
               seen when the venv-torch cannot see CUDA despite a working GPU. */}
           {subject.training_status === 'failed' && subject.training_error && (
-            <Alert severity="error" sx={{ mt: 1.5 }}>
+            <CollapsibleAlert severity="error" sx={{ mt: 1.5 }}>
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
                 Training failed
               </Typography>
@@ -908,7 +909,7 @@ const CastMemberPage = () => {
               <Typography variant="caption">
                 Fix the problem, then click “Train LoRA” again. New training data (additional outfits etc.) will be incorporated on the next run (amend).
               </Typography>
-            </Alert>
+            </CollapsibleAlert>
           )}
         </Box>
       )}
@@ -959,22 +960,22 @@ const CastMemberPage = () => {
             )}
           </Typography>
           {(subject.ref_image_paths || []).length > 0 && !subject.bible_vision_grounded && (
-            <Alert severity="warning" sx={{ mb: 2 }}>
+            <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
               {subject.bible_manual_override
                 ? <>Manual bible edit — go to Overview and <strong>Sync identity from photos</strong> before training or generating.</>
                 : <>Bible may not match your photos — go to Overview and click{' '}
                   <strong>Sync identity from photos</strong> before training or generating.</>}
-            </Alert>
+            </CollapsibleAlert>
           )}
           {subject.smoke_identity?.ok && (
-            <Alert severity={Number(subject.smoke_identity.score) >= 0.75 ? 'success' : 'warning'} sx={{ mb: 2 }}>
+            <CollapsibleAlert severity={Number(subject.smoke_identity.score) >= 0.75 ? 'success' : 'warning'} sx={{ mb: 2 }}>
               Post-train smoke identity score:{' '}
               {subject.smoke_identity.score != null
                 ? Number(subject.smoke_identity.score).toFixed(2)
                 : 'n/a'}{' '}
               ({subject.smoke_identity.method || 'hist'}
               {subject.smoke_identity.family ? ` · ${subject.smoke_identity.family}` : ''})
-            </Alert>
+            </CollapsibleAlert>
           )}
 
           {/* Progress + honest status — so a planned-but-not-generated sheet doesn't

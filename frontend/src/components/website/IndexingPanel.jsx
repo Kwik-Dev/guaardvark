@@ -5,7 +5,6 @@
 // change required.
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -28,6 +27,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import {
@@ -161,7 +161,7 @@ const IndexingPanel = ({ website, onFeedback }) => {
   }
 
   if (error) {
-    return <Alert severity="error">{error}</Alert>;
+    return <CollapsibleAlert severity="error">{error}</CollapsibleAlert>;
   }
 
   if (!status) {
@@ -171,10 +171,10 @@ const IndexingPanel = ({ website, onFeedback }) => {
   return (
     <Stack spacing={2}>
       {!status.credentials_ok && (
-        <Alert severity="warning">
+        <CollapsibleAlert severity="warning">
           Service-account credentials not found on the server. Submissions will fail until
           the Google Indexing key is configured.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Quota + queue + controls */}

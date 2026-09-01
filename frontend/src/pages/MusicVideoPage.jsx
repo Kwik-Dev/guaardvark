@@ -8,7 +8,6 @@ import {
   Stack,
   LinearProgress,
   Chip,
-  Alert,
   Divider,
   CircularProgress,
   Collapse,
@@ -17,6 +16,7 @@ import {
   IconButton,
   Tooltip,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import MusicVideoIcon from "@mui/icons-material/MusicVideo";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import CloseIcon from "@mui/icons-material/Close";
@@ -252,11 +252,11 @@ function PlanViewer({ detail, busy, models = [], onSavePlan, onRegeneratePlan, o
         })()}
       </Stack>
       {detail.director_diagnostics && isEditable && (
-        <Alert severity="info" sx={{ mb: 1, py: 0.25, '& .MuiAlert-message': { fontSize: '0.75rem' } }}>
+        <CollapsibleAlert severity="info" sx={{ mb: 1, py: 0.25, '& .MuiAlert-message': { fontSize: '0.75rem' } }}>
           Director LLM did not produce distinct per-cut visual prompts (hover the chip for the raw model output head + reason, e.g. ``` or echoed style).
           Automatic energy cue variations were injected instead of pure repeats. Edit the boxes above or use the <b>Regenerate</b> form below with more specific guidance.
           For very long songs (75+ cuts) the small local model often struggles — shorter guidance or a stronger pulled gemma helps.
-        </Alert>
+        </CollapsibleAlert>
       )}
       {hasLocalEdits && (
         <Typography variant="caption" color="info.main" sx={{ display: 'block', mb: 1 }}>
@@ -1173,10 +1173,10 @@ const MusicVideoPage = () => {
                   </TextField>
 
                   {useLoraConsistency || keyframeModelOptions.length <= 1 ? (
-                    <Alert severity="info" sx={{ mt: 1 }}>
+                    <CollapsibleAlert severity="info" sx={{ mt: 1 }}>
                       Keyframe still model is automatic from the cast character&apos;s training base
                       (Z-Image / SDXL / FLUX). Storyboard frames are generated on demand from each cut prompt + LoRA.
-                    </Alert>
+                    </CollapsibleAlert>
                   ) : (
                     <TextField
                       select
@@ -1196,7 +1196,7 @@ const MusicVideoPage = () => {
                 </Stack>
               </Collapse>
 
-              {error && <Alert severity="error" onClose={() => setError(null)}>{formatUiError(error)}</Alert>}
+              {error && <CollapsibleAlert severity="error" onClose={() => setError(null)}>{formatUiError(error)}</CollapsibleAlert>}
               <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
               <Button variant="contained" onClick={handleCreate} disabled={busy || gpuSubmitBlocked}>
                 {busy ? <CircularProgress size={20} /> : (hasActiveGeneration ? "Add another to queue" : "Create & Analyze")}
@@ -1323,7 +1323,7 @@ const MusicVideoPage = () => {
 
               {needsAnalysis(detail) && !isAnalysisRunning(detail) && (
                 <Stack spacing={1.5} sx={{ mb: 2 }}>
-                  <Alert severity={(detail.status || "").startsWith("failed") ? "error" : "info"}>
+                  <CollapsibleAlert severity={(detail.status || "").startsWith("failed") ? "error" : "info"}>
                     {(detail.status || "").startsWith("failed") ? (
                       <>
                         Analysis failed
@@ -1337,7 +1337,7 @@ const MusicVideoPage = () => {
                         {" "}Click <b>Continue &amp; Analyze</b> to build the beat map and Director plan — no need to re-upload.
                       </>
                     )}
-                  </Alert>
+                  </CollapsibleAlert>
                   <Box>
                     <Button variant="contained" onClick={handleContinueAnalyze} disabled={busy}>
                       {busy ? <CircularProgress size={20} /> : "Continue & Analyze"}
@@ -1455,12 +1455,12 @@ const MusicVideoPage = () => {
 
               {detail.current_stage === "awaiting_approval" && hasCutPlan(detail) && detail.estimate && (
                 <Stack spacing={1.5}>
-                  <Alert severity="warning">
+                  <CollapsibleAlert severity="warning">
                     Plan ready for review. { (detail.clips || []).some(c => c.storyboard_path) 
                       ? "Storyboards generated — review/regen individuals below, then Approve & Generate the full video (i2v)." 
                       : "Use the 'Generate Storyboards' button in the plan below to create thumbnails first for review." }
                     <br />Estimated full video time after storyboards: <b>{detail.estimate.estimated_human}</b>.
-                  </Alert>
+                  </CollapsibleAlert>
                   <Box>
                     <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
                     <Stack direction="row" spacing={1} alignItems="center">
@@ -1542,10 +1542,10 @@ const MusicVideoPage = () => {
               )}
 
               {(detail.status || "").startsWith("failed") && (
-                <Alert severity="error">
+                <CollapsibleAlert severity="error">
                   Failed at stage <b>{detail.error_blob?.stage || detail.status}</b>:{" "}
                   {String(detail.error_blob?.error || "unknown error")}
-                </Alert>
+                </CollapsibleAlert>
               )}
 
               <Divider sx={{ my: 2 }} />

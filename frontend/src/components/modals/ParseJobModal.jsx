@@ -7,12 +7,12 @@ import {
   Button,
   TextField,
   Grid,
-  Alert,
   FormControlLabel,
   Checkbox,
   InputAdornment,
   IconButton,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import DirectoryPicker from "../common/DirectoryPicker";
 import { startParseJob } from "../../api";
@@ -78,9 +78,9 @@ const ParseJobModal = ({ open, onClose, onSuccess, isSaving: externalSaving }) =
         <DialogTitle>Parse Transcripts</DialogTitle>
         <DialogContent dividers>
           {formError && (
-            <Alert severity="error" sx={{ mb: 2 }}>
+            <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
               {formError}
-            </Alert>
+            </CollapsibleAlert>
           )}
           <Grid container spacing={2} sx={{ mt: 0 }}>
             <Grid item xs={12}>

@@ -9,7 +9,6 @@ import {
   Typography,
   IconButton,
   Tooltip,
-  Alert,
   Menu,
   MenuItem,
   ListItemIcon,
@@ -22,6 +21,7 @@ import {
   TextField,
   useTheme,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Close as CloseIcon,
   Save as SaveIcon,
@@ -896,9 +896,9 @@ ${currentTab.content}
           <Box sx={{ flex: 1, position: 'relative' }}>
             {editorError ? (
               <Box sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                <Alert severity="error" sx={{ mb: 2 }}>
+                <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
                   Editor failed to load: {editorError.message}
-                </Alert>
+                </CollapsibleAlert>
                 <IconButton onClick={() => setEditorError(null)} color="primary">
                   <RefreshIcon />
                 </IconButton>

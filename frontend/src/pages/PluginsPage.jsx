@@ -25,7 +25,6 @@ import {
   DialogActions,
   TextField,
   CircularProgress,
-  Alert,
   Divider,
   Stack,
   Collapse,
@@ -68,6 +67,7 @@ import {
   getVisionCameraStatus,
 } from '../api/pluginsService';
 import { getGpuStatus } from '../api/gpuService';
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 // ── Constants ──────────────────────────────────────────────────────────
 const TOTAL_VRAM_MB = 16384; // 16GB
@@ -201,9 +201,9 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
       </Stack>
 
       {usedPct > 90 && (
-        <Alert severity="warning" sx={{ mt: 1 }} variant="outlined">
+        <CollapsibleAlert severity="warning" sx={{ mt: 1 }} variant="outlined">
           VRAM usage is near capacity. Stop unused services from this page to free memory.
-        </Alert>
+        </CollapsibleAlert>
       )}
     </Paper>
   );
@@ -923,7 +923,7 @@ const PluginsPage = () => {
       </Typography>
 
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }}>{error}</Alert>
+        <CollapsibleAlert severity="error" sx={{ mb: 3 }}>{error}</CollapsibleAlert>
       )}
 
       {/* VRAM Budget Bar */}

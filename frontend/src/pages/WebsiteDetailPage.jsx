@@ -18,6 +18,7 @@ import {
   Tabs,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import SettingsIcon from "@mui/icons-material/Settings";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import TravelExploreIcon from "@mui/icons-material/TravelExplore";
@@ -228,7 +229,7 @@ const WebsiteDetailPage = () => {
         onClose={handleCloseFeedback}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <AlertSnackbar
+        <CollapsibleAlertSnackbar
           onClose={handleCloseFeedback}
           severity={feedback.severity || "info"}
           sx={{ width: "100%" }}

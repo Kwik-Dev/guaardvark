@@ -16,7 +16,6 @@ import {
   Card,
   CardContent,
   Chip,
-  Alert,
   FormControl,
   InputLabel,
   Select,
@@ -25,6 +24,7 @@ import {
   Switch,
   FormControlLabel,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   RecordVoiceOver as VoiceIcon,
   MusicNote as MusicIcon,
@@ -775,9 +775,9 @@ const AudioFoundryPage = () => {
                             </Button>
                           </Box>
                           {musicPreview.fallback && musicPreview.reason && (
-                            <Alert severity="warning" variant="outlined" sx={{ py: 0 }}>
+                            <CollapsibleAlert severity="warning" variant="outlined" sx={{ py: 0 }}>
                               {musicPreview.reason}
-                            </Alert>
+                            </CollapsibleAlert>
                           )}
                           <Box>
                             <Typography variant="caption" color="text.secondary">Style</Typography>
@@ -831,9 +831,9 @@ const AudioFoundryPage = () => {
                   <Stack spacing={3}>
                     <Typography variant="h6" fontWeight="bold">FX & Foley Generator</Typography>
                     {fxUnavailableReason && (
-                      <Alert severity="info" sx={{ borderRadius: 2 }}>
+                      <CollapsibleAlert severity="info" sx={{ borderRadius: 2 }}>
                         {fxUnavailableReason}
-                      </Alert>
+                      </CollapsibleAlert>
                     )}
                     <TextField
                       fullWidth
@@ -866,7 +866,7 @@ const AudioFoundryPage = () => {
                   </Stack>
                 )}
 
-                {error && <Alert severity="error" sx={{ mt: 2, borderRadius: 2 }}>{error}</Alert>}
+                {error && <CollapsibleAlert severity="error" sx={{ mt: 2, borderRadius: 2 }}>{error}</CollapsibleAlert>}
               </Box>
             </Paper>
           </Grid>
@@ -952,9 +952,9 @@ const AudioFoundryPage = () => {
                     </CardContent>
                   </Card>
 
-                  <Alert severity="success" icon={<SaveIcon />} sx={{ borderRadius: 2 }}>
+                  <CollapsibleAlert severity="success" icon={<SaveIcon />} sx={{ borderRadius: 2 }}>
                     Asset successfully registered in your <b>Audio</b> library.
-                  </Alert>
+                  </CollapsibleAlert>
                 </Stack>
               )}
             </Paper>

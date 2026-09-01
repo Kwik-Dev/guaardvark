@@ -14,7 +14,6 @@ import {
   TextField,
   Button,
   MenuItem,
-  Alert,
   CircularProgress,
   Stack,
   ToggleButtonGroup,
@@ -25,6 +24,7 @@ import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import DownloadIcon from '@mui/icons-material/Download';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import {
+import CollapsibleAlert from "../common/CollapsibleAlert";
   generateInfographic,
   getInfographicStatus,
   INFOGRAPHIC_STYLES,
@@ -110,11 +110,11 @@ const InfographicGenerator = () => {
     if (status.ready) return null;
     if (!status.comfyui_reachable) {
       return (
-        <Alert severity="warning" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
           ComfyUI isn't running. Enable the <strong>comfyui</strong> plugin
           on /plugins (or start it manually) and refresh.
           <Button size="small" onClick={refreshStatus} sx={{ ml: 1 }}>Refresh</Button>
-        </Alert>
+        </CollapsibleAlert>
       );
     }
     const missing = status.assets
@@ -122,9 +122,9 @@ const InfographicGenerator = () => {
       : [];
     if (missing.length) {
       return (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
           Missing Flux model assets: {missing.join(', ')}.
-        </Alert>
+        </CollapsibleAlert>
       );
     }
     return null;
@@ -270,7 +270,7 @@ const InfographicGenerator = () => {
               </Button>
             )}
             {error && (
-              <Alert severity="error" sx={{ flex: 1, py: 0 }}>{error}</Alert>
+              <CollapsibleAlert severity="error" sx={{ flex: 1, py: 0 }}>{error}</CollapsibleAlert>
             )}
           </Box>
         </Paper>

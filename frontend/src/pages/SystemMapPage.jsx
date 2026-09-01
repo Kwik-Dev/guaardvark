@@ -22,12 +22,12 @@ import {
   IconButton,
   TextField,
   CircularProgress,
-  Alert,
   Tooltip,
   Stack,
   InputAdornment,
   Divider,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SearchIcon from "@mui/icons-material/Search";
 import CloseIcon from "@mui/icons-material/Close";
@@ -712,7 +712,7 @@ export default function SystemMapPage() {
         </Box>
 
         {error && (
-          <Alert
+          <CollapsibleAlert
             severity="error"
             sx={{
               position: "absolute",
@@ -726,7 +726,7 @@ export default function SystemMapPage() {
             }}
           >
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Canvas */}
@@ -942,7 +942,7 @@ export default function SystemMapPage() {
 
         {/* Transient toast for dispatch results */}
         {toast && (
-          <Alert
+          <CollapsibleAlert
             severity="info"
             onClose={() => setToast(null)}
             sx={{
@@ -957,7 +957,7 @@ export default function SystemMapPage() {
             }}
           >
             {toast}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Loading overlay (initial only) */}

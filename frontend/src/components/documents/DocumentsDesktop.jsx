@@ -7,6 +7,7 @@ import axios from 'axios';
 import { useSnackbar } from '../common/SnackbarProvider';
 import DesktopItemsGrid from './DesktopItemsGrid';
 import { API_BASE, getItemKey } from './fileUtils.jsx';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const DocumentsDesktop = ({
   onFolderOpen,
@@ -202,7 +203,7 @@ const DocumentsDesktop = ({
   if (error) {
     return (
       <Box sx={{ p: 2 }}>
-        <Alert severity="error">{error}</Alert>
+        <CollapsibleAlert severity="error">{error}</CollapsibleAlert>
       </Box>
     );
   }

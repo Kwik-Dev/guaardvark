@@ -14,7 +14,6 @@ import {
   CardActions,
   Button,
   Chip,
-  Alert,
   CircularProgress,
   Divider,
   IconButton,
@@ -28,6 +27,7 @@ import {
   FormControlLabel,
   Paper,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   Refresh,
   Edit,
@@ -277,9 +277,9 @@ const AgentsPage = () => {
     >
 
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {loading ? (
@@ -366,7 +366,7 @@ const AgentsPage = () => {
 
           {testResult && (
             <Box sx={{ mt: 2 }}>
-              <Alert
+              <CollapsibleAlert
                 severity={testResult?.success && testResult?.result?.success ? "success" : "error"}
                 icon={testResult?.success && testResult?.result?.success ? <CheckCircle /> : <ErrorIcon />}
                 sx={{ mb: 2 }}
@@ -374,7 +374,7 @@ const AgentsPage = () => {
                 {testResult?.success && testResult?.result?.success
                   ? `Execution complete (${testResult?.result?.iterations || 0} iterations)`
                   : testResult?.error || testResult?.result?.error || "Execution failed"}
-              </Alert>
+              </CollapsibleAlert>
               <Paper
                 sx={{
                   p: 2,
@@ -404,7 +404,7 @@ const AgentsPage = () => {
         </DialogActions>
       </Dialog>
 
-      <AlertSnackbar
+      <CollapsibleAlertSnackbar
         open={snackbar.open}
         message={snackbar.message}
         severity={snackbar.severity}

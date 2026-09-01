@@ -1,13 +1,13 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
 import {
   Snackbar,
-  Alert,
   Dialog,
   DialogTitle,
   DialogContent,
   DialogActions,
   Button,
 } from "@mui/material";
+import CollapsibleAlert from "./CollapsibleAlert";
 
 const ErrorContext = createContext(null);
 
@@ -42,7 +42,7 @@ export const ErrorProvider = ({ children }) => {
         onClose={handleClose}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <Alert
+        <CollapsibleAlert
           onClose={handleClose}
           severity="error"
           variant="outlined"
@@ -65,7 +65,7 @@ export const ErrorProvider = ({ children }) => {
           onClick={openDetails}
         >
           {error.message}
-        </Alert>
+        </CollapsibleAlert>
       </Snackbar>
       <Dialog open={dialogOpen} onClose={closeDialog} fullWidth maxWidth="sm">
         <DialogTitle>Error Details</DialogTitle>

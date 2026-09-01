@@ -7,7 +7,6 @@
 import CloseIcon from "@mui/icons-material/Close";
 import LinkIcon from "@mui/icons-material/Link";
 import {
-  Alert,
   Autocomplete,
   Box,
   Button,
@@ -24,6 +23,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import React, { useCallback, useEffect, useState } from "react";
 import { useTheme } from "@mui/material/styles";
 
@@ -244,9 +244,9 @@ const RuleActionModal = ({
       </DialogTitle>
       <DialogContent dividers>
         {modelFetchError && (
-          <Alert severity="warning" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
             {modelFetchError}
-          </Alert>
+          </CollapsibleAlert>
         )}
         <Grid container spacing={3}>
           {/* Basic Information */}

@@ -13,7 +13,6 @@ import {
   IconButton,
   Tooltip,
   Chip,
-  Alert,
   Accordion,
   AccordionSummary,
   AccordionDetails,
@@ -27,6 +26,7 @@ import {
   Stack,
   LinearProgress,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import { 
   Refresh, 
   Warning, 
@@ -584,13 +584,13 @@ const DevToolsPage = () => {
                   )}
                 </>
               ) : healthError ? (
-                <Alert severity="error" action={
+                <CollapsibleAlert severity="error" action={
                   <Button color="inherit" size="small" onClick={handleRetry}>
                     Retry
                   </Button>
                 }>
                   {healthError}
-                </Alert>
+                </CollapsibleAlert>
               ) : (
                 <Box display="flex" alignItems="center">
                   <CircularProgress size={20} sx={{ mr: 1 }} />
@@ -625,19 +625,19 @@ const DevToolsPage = () => {
                     Heads: {dbHealth.heads && dbHealth.heads.join(", ")}
                   </Typography>
                   {dbHealth.multiple_heads && (
-                    <Alert severity="error" sx={{ mt: 1 }}>
+                    <CollapsibleAlert severity="error" sx={{ mt: 1 }}>
                       Multiple heads detected
-                    </Alert>
+                    </CollapsibleAlert>
                   )}
                 </>
               ) : dbError ? (
-                <Alert severity="error" action={
+                <CollapsibleAlert severity="error" action={
                   <Button color="inherit" size="small" onClick={handleRetry}>
                     Retry
                   </Button>
                 }>
                   {dbError}
-                </Alert>
+                </CollapsibleAlert>
               ) : (
                 <Box display="flex" alignItems="center">
                   <CircularProgress size={20} sx={{ mr: 1 }} />
@@ -679,13 +679,13 @@ const DevToolsPage = () => {
                   )}
                 </>
               ) : celeryError ? (
-                <Alert severity="error" action={
+                <CollapsibleAlert severity="error" action={
                   <Button color="inherit" size="small" onClick={handleRetry}>
                     Retry
                   </Button>
                 }>
                   {celeryError}
-                </Alert>
+                </CollapsibleAlert>
               ) : (
                 <Box display="flex" alignItems="center">
                   <CircularProgress size={20} sx={{ mr: 1 }} />
@@ -712,13 +712,13 @@ const DevToolsPage = () => {
                   </Typography>
                 </>
               ) : redisError ? (
-                <Alert severity="error" action={
+                <CollapsibleAlert severity="error" action={
                   <Button color="inherit" size="small" onClick={handleRetry}>
                     Retry
                   </Button>
                 }>
                   {redisError}
-                </Alert>
+                </CollapsibleAlert>
               ) : (
                 <Box display="flex" alignItems="center">
                   <CircularProgress size={20} sx={{ mr: 1 }} />
@@ -854,14 +854,14 @@ const DevToolsPage = () => {
               </Box>
 
               {stuckJobsCount > 0 && (
-                <Alert severity="warning" sx={{ mb: 2 }}>
+                <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
                   {stuckJobsCount} jobs appear to be stuck (no active Celery tasks or stale timestamps). Consider running cleanup.
-                </Alert>
+                </CollapsibleAlert>
               )}
               {!progressSystemHealthy && (
-                <Alert severity="error" sx={{ mb: 2 }}>
+                <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
                   Progress system detected issues. Some jobs may not be functioning properly.
-                </Alert>
+                </CollapsibleAlert>
               )}
 
               <Accordion>
@@ -1048,7 +1048,7 @@ const DevToolsPage = () => {
                                   <TableCell colSpan={6} sx={{ bgcolor: "action.hover" }}>
                                     <Box sx={{ p: 1 }}>
                                       {run.error_message && (
-                                        <Alert severity="error" sx={{ mb: 1 }}>{run.error_message}</Alert>
+                                        <CollapsibleAlert severity="error" sx={{ mb: 1 }}>{run.error_message}</CollapsibleAlert>
                                       )}
                                       {run.uncle_feedback && (
                                         <Box sx={{ mb: 1 }}>
@@ -1192,7 +1192,7 @@ const DevToolsPage = () => {
                 </Button>
               </Box>
               {logsError ? (
-                <Alert severity="error">Failed to load logs: {logsError}</Alert>
+                <CollapsibleAlert severity="error">Failed to load logs: {logsError}</CollapsibleAlert>
               ) : (
                 <Box
                   sx={{
@@ -1269,7 +1269,7 @@ const DevToolsPage = () => {
           </Card>
         </Grid>
       </Grid>
-      <AlertSnackbar
+      <CollapsibleAlertSnackbar
         open={snackbar.open}
         onClose={handleCloseSnackbar}
         severity={snackbar.severity}

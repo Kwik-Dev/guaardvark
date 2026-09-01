@@ -12,12 +12,12 @@ import {
   Grid,
   CircularProgress,
   Box,
-  Alert,
   Autocomplete,
   Typography,
   IconButton,
   Tooltip,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
 import SyncIcon from "@mui/icons-material/Sync";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -332,9 +332,9 @@ const DocumentActionModal = ({
       </DialogTitle>
       <DialogContent dividers>
         {formError && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}
-          </Alert>
+          </CollapsibleAlert>
         )}
         <Box component="form" noValidate autoComplete="off" sx={{ mt: 1 }}>
           <Grid container spacing={2}>

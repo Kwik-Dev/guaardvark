@@ -8,7 +8,6 @@ import {
   CircularProgress,
   Typography,
   Box,
-  Alert,
   Tabs,
   Tab,
   List,
@@ -17,6 +16,7 @@ import {
   ListItemButton,
   Chip,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import StorageIcon from "@mui/icons-material/Storage";
 
@@ -178,11 +178,11 @@ const RestoreBackupModal = ({ open, onClose, onRestore, isProcessing, backups = 
 
           {/* Warning */}
           {hasSelection && (
-            <Alert severity="warning" sx={{ mt: 2 }}>
+            <CollapsibleAlert severity="warning" sx={{ mt: 2 }}>
               <Typography variant="body2">
                 Restoring will overwrite existing data. Make sure you have a current backup first.
               </Typography>
-            </Alert>
+            </CollapsibleAlert>
           )}
         </Box>
       </DialogContent>

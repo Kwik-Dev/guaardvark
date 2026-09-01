@@ -4,6 +4,7 @@
 
 import React, { useRef, useCallback, useEffect, useState } from "react";
 import { Box, Paper, Typography, IconButton, Tooltip, Alert } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Save as SaveIcon,
   PlayArrow as RunIcon,
@@ -339,9 +340,9 @@ const CodeEditor = ({
 
       {/* Error Alert */}
       {error && (
-        <Alert severity="error" onClose={() => setError(null)} sx={{ m: 1 }}>
+        <CollapsibleAlert severity="error" onClose={() => setError(null)} sx={{ m: 1 }}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Monaco Editor */}
