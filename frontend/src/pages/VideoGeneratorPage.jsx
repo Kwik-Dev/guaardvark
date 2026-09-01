@@ -21,7 +21,6 @@ import {
   InputLabel,
   Select,
   MenuItem,
-  Alert,
   Paper,
   List,
   ListItem,
@@ -35,6 +34,7 @@ import {
   Collapse,
 } from "@mui/material";
 import PageLayout from "../components/layout/PageLayout";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import GpuGateBanner from "../components/common/GpuGateBanner";
 import {
   SettingChip,
@@ -142,6 +142,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     fps: 25,
     width: 1280,
     height: 720,
+    framing: "fit",
+    min_size: "",
     focus_x: 0.5,
     focus_y: 0.5,
     pan_direction: "left-to-right",
@@ -1364,6 +1366,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         fps: Number(ffConfig.fps),
         width: Number(ffConfig.width),
         height: Number(ffConfig.height),
+        framing: ffConfig.framing,
+        min_size: ffConfig.min_size || null,
         focus_x: Number(ffConfig.focus_x),
         focus_y: Number(ffConfig.focus_y),
         pan_direction: ffConfig.pan_direction,
@@ -1566,22 +1570,22 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
       {/* Error/Success Messages */}
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
+        <CollapsibleAlert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
           {formatUiError(error)}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {success && (
-        <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
+        <CollapsibleAlert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
           {formatUiError(success) || String(success)}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Selected model not installed — block generation rather than silently
           downgrade to a worse model. The action button reopens the install
           modal and pulses the exact model to download. */}
       {modelNotReady && (
-        <Alert
+        <CollapsibleAlert
           severity="warning"
           sx={{ mb: 3 }}
           onClose={() => setModelNotReady(null)}
@@ -1601,7 +1605,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           {modelNotReady.missing?.length
             ? ` (${modelNotReady.missing.length} file${modelNotReady.missing.length > 1 ? "s" : ""} missing)`
             : ""}, then generate again.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       <DashboardStrip>
@@ -1874,6 +1878,45 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         </Box>
                       )}
 
+                      {/* Framing — how the image is placed on the output frame */}
+                      <Box>
+                        <Typography variant="caption" fontWeight="bold" color="text.secondary">
+                          Framing
+                        </Typography>
+                        <Box sx={{ mt: 0.5 }}>
+                          <ChoiceChips
+                            ariaLabel="FFmpeg framing"
+                            value={ffConfig.framing}
+                            onChange={(v) => setFfConfig((c) => ({ ...c, framing: v }))}
+                            options={[
+                              { value: "fit", label: "Letterbox" },
+                              { value: "cover", label: "Zoom to fill" },
+                              { value: "native", label: "Match image" },
+                            ]}
+                          />
+                        </Box>
+                        <Typography variant="caption" color="text.secondary">
+                          {ffConfig.framing === "fit" && "Keep the image size (never upscaled), centered on black — letterbox."}
+                          {ffConfig.framing === "cover" && "Zoom the image to fill the whole frame, cropping the overflow."}
+                          {ffConfig.framing === "native" && "Output video size = the image's own size, clamped to a min/max."}
+                        </Typography>
+                        {ffConfig.framing === "native" && (
+                          <Stack direction="row" spacing={1} sx={{ mt: 0.5 }} alignItems="center">
+                            <TextField
+                              size="small"
+                              label="Min size (WxH)"
+                              placeholder="e.g. 480x270 or 480"
+                              value={ffConfig.min_size}
+                              onChange={(e) => setFfConfig((c) => ({ ...c, min_size: e.target.value }))}
+                              sx={{ width: 180 }}
+                            />
+                            <Typography variant="caption" color="text.secondary">
+                              Max = the Resolution above (e.g. 1280x720).
+                            </Typography>
+                          </Stack>
+                        )}
+                      </Box>
+
                       <Box>
                         <Typography variant="caption" fontWeight="bold" color="text.secondary">
                           Duration: {ffConfig.duration_s}s
@@ -1959,7 +2002,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
                       {/* Generate + errors + results. The single Generate button is at the
                           bottom of the page (shared across text/image/ffmpeg modes). */}
-                      {ffError && <Alert severity="error" variant="outlined">{ffError}</Alert>}
+                      {ffError && <CollapsibleAlert severity="error" variant="outlined">{ffError}</CollapsibleAlert>}
                       {ffResults && (
                         <Box>
                           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
