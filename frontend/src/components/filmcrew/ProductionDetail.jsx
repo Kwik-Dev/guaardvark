@@ -5,7 +5,6 @@ import {
   Paper,
   Divider,
   CircularProgress,
-  Alert,
   Button,
   Stack,
 } from '@mui/material';
@@ -14,6 +13,7 @@ import CastingPanel from './CastingPanel';
 import StoryboardGrid from './StoryboardGrid';
 import StoryboardProgress from './StoryboardProgress';
 import RenderProgress from './RenderProgress';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const ProductionDetail = ({
   production,
@@ -39,7 +39,7 @@ const ProductionDetail = ({
   if (error && !production) {
     return (
       <Box sx={{ p: 3 }}>
-        <Alert severity="error">{error}</Alert>
+        <CollapsibleAlert severity="error">{error}</CollapsibleAlert>
       </Box>
     );
   }
@@ -63,7 +63,7 @@ const ProductionDetail = ({
 
   return (
     <Box sx={{ p: 3, height: '100%', overflowY: 'auto' }}>
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && <CollapsibleAlert severity="error" sx={{ mb: 2 }}>{error}</CollapsibleAlert>}
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
         <Box>
           <Typography variant="h4" gutterBottom>{production.name}</Typography>
@@ -86,7 +86,7 @@ const ProductionDetail = ({
       </Box>
 
       {isFailed && (
-        <Alert
+        <CollapsibleAlert
           severity="error"
           sx={{ mb: 2 }}
           action={
@@ -99,11 +99,11 @@ const ProductionDetail = ({
           <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
             {errText}
           </Typography>
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {!isFailed && production.current_stage === 'screenwriting' && production.status === 'screenwriting' && (
-        <Alert
+        <CollapsibleAlert
           severity="info"
           sx={{ mb: 2 }}
           action={
@@ -113,7 +113,7 @@ const ProductionDetail = ({
           }
         >
           Screenwriting in progress (or stuck). Use Re-dispatch if nothing happens after a few minutes.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       <Paper sx={{ p: 2, mb: 3 }}>
