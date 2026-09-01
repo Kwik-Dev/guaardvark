@@ -6,10 +6,10 @@ import {
   MenuItem,
   FormControl,
   InputLabel,
-  Alert,
   CircularProgress,
 } from "@mui/material";
 import { PlayArrow as PlayIcon } from "@mui/icons-material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import FixesModal from "./FixesModal";
 import ScanProgressModal from "./ScanProgressModal";
 import { UNCLE_GOLD } from "../../utils/familyColors";
@@ -148,9 +148,9 @@ export default function UncleClaudeSection() {
           </FormControl>
         </Line>
         {testResult && (
-          <Alert severity={testResult.success ? "success" : "error"} sx={{ py: 0.25 }} onClose={() => setTestResult(null)}>
+          <CollapsibleAlert severity={testResult.success ? "success" : "error"} sx={{ py: 0.25 }} onClose={() => setTestResult(null)}>
             {testResult.message}
-          </Alert>
+          </CollapsibleAlert>
         )}
         <Line>
           <Hint>

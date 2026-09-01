@@ -13,7 +13,6 @@ import {
   Grid,
   Chip,
   LinearProgress,
-  Alert,
   Accordion,
   AccordionSummary,
   AccordionDetails,
@@ -77,6 +76,7 @@ import {
 } from '../utils/batchImageSettings';
 
 const ImageModelsModal = React.lazy(() => import('../components/modals/ImageModelsModal'));
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -1260,15 +1260,15 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
       {/* Error/Success Messages */}
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
+        <CollapsibleAlert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {success && (
-        <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
+        <CollapsibleAlert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
           {success}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       <Grid container spacing={3}>
@@ -1608,9 +1608,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   </Button>
 
                   {csvFile && (
-                    <Alert severity="info" sx={{ mb: 2, borderRadius: 1 }}>
+                    <CollapsibleAlert severity="info" sx={{ mb: 2, borderRadius: 1 }}>
                       File selected: {csvFile.name}
-                    </Alert>
+                    </CollapsibleAlert>
                   )}
 
                   <Button
@@ -1661,9 +1661,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   </Button>
 
                   {blueprintFile && (
-                    <Alert severity="info" sx={{ mb: 2, borderRadius: 1 }}>
+                    <CollapsibleAlert severity="info" sx={{ mb: 2, borderRadius: 1 }}>
                       File selected: {blueprintFile.name}
-                    </Alert>
+                    </CollapsibleAlert>
                   )}
 
                   <Typography variant="caption" color="text.secondary">

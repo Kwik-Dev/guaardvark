@@ -11,7 +11,6 @@ import {
   ListItemIcon,
   ListItemText,
   Box,
-  Alert,
   CircularProgress,
   IconButton,
   Breadcrumbs,
@@ -26,6 +25,7 @@ import {
   Switch,
   Collapse,
 } from "@mui/material";
+import CollapsibleAlert from "./CollapsibleAlert";
 import {
   Folder as FolderIcon,
   ArrowBack as ArrowBackIcon,
@@ -391,13 +391,13 @@ const DirectoryPicker = ({
               </Typography>
             </Box>
           ) : error ? (
-            <Alert severity="error">{error}</Alert>
+            <CollapsibleAlert severity="error">{error}</CollapsibleAlert>
           ) : filteredDirectories.length === 0 && filteredFiles.length === 0 ? (
-            <Alert severity="info">
+            <CollapsibleAlert severity="info">
               {searchQuery
                 ? "No matching items found."
                 : "No subdirectories found. You can select this directory."}
-            </Alert>
+            </CollapsibleAlert>
           ) : (
             <List
               sx={{

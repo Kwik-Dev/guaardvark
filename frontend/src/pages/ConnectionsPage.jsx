@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert,
   Box,
   Button,
   Card,
@@ -21,6 +20,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import AddIcon from "@mui/icons-material/Add";
 import LockIcon from "@mui/icons-material/Lock";
 import LockOpenIcon from "@mui/icons-material/LockOpen";
@@ -155,9 +155,9 @@ const ConnectionsPage = () => {
       </Tabs>
 
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {family === "social" && settings && (
@@ -260,9 +260,9 @@ const ConnectionsPage = () => {
                       </Typography>
                     </Stack>
                     {conn.error_message && (
-                      <Alert severity="error" sx={{ mt: 1 }}>
+                      <CollapsibleAlert severity="error" sx={{ mt: 1 }}>
                         {conn.error_message}
-                      </Alert>
+                      </CollapsibleAlert>
                     )}
                   </CardContent>
                   <CardActions>
@@ -291,9 +291,9 @@ const ConnectionsPage = () => {
           })}
           {!connections.length && (
             <Grid item xs={12}>
-              <Alert severity="info">
+              <CollapsibleAlert severity="info">
                 No connections in this category yet.
-              </Alert>
+              </CollapsibleAlert>
             </Grid>
           )}
         </Grid>
@@ -343,12 +343,12 @@ const ConnectionsPage = () => {
         autoHideDuration={5000}
         onClose={() => setFeedback((f) => ({ ...f, open: false }))}
       >
-        <Alert
+        <CollapsibleAlert
           severity={feedback.severity}
           onClose={() => setFeedback((f) => ({ ...f, open: false }))}
         >
           {feedback.message}
-        </Alert>
+        </CollapsibleAlert>
       </Snackbar>
     </Container>
   );

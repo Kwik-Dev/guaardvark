@@ -11,7 +11,6 @@ import {
   TextField,
   Button,
   CircularProgress,
-  Alert,
   Paper,
   Grid,
   TextareaAutosize,
@@ -30,6 +29,7 @@ import {
   FormLabel,
   Switch,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import { useTheme } from "@mui/material/styles";
 
 import * as apiService from "../api"; // For fetching Rules & Projects
@@ -586,13 +586,13 @@ const FileGenerationPage = () => {
             onClose={handleCloseFeedback("single")}
             anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
           >
-            <Alert
+            <CollapsibleAlert
               onClose={handleCloseFeedback("single")}
               severity={singleFileFeedback.severity}
               sx={{ width: "100%" }}
             >
               {singleFileFeedback.message}
-            </Alert>
+            </CollapsibleAlert>
           </Snackbar>
         )}
         {batchFeedback.open && (
@@ -602,13 +602,13 @@ const FileGenerationPage = () => {
             onClose={handleCloseFeedback("batch")}
             anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
           >
-            <Alert
+            <CollapsibleAlert
               onClose={handleCloseFeedback("batch")}
               severity={batchFeedback.severity}
               sx={{ width: "100%" }}
             >
               {batchFeedback.message}
-            </Alert>
+            </CollapsibleAlert>
           </Snackbar>
         )}
 

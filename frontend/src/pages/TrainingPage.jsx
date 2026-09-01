@@ -15,7 +15,6 @@ import {
   Tooltip,
   CircularProgress,
   Snackbar,
-  Alert,
   Alert as MuiAlert,
   Tabs,
   Tab,
@@ -24,6 +23,7 @@ import {
   Card,
   CardContent,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import AddIcon from "@mui/icons-material/Add";
 import EditIcon from "@mui/icons-material/Edit";
 import CloseIcon from "@mui/icons-material/Close";
@@ -564,14 +564,14 @@ const TrainingPage = () => {
       modelStatus
       activeModel={isLoadingModel ? "Loading..." : modelError ? "Error" : activeModel || "Default"}
     >
-      <Alert severity="info" sx={{ mb: 2 }}>
+      <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
         This page fine-tunes <strong>LLM chat models</strong> (Ollama/GGUF export).
         To train a <strong>character LoRA</strong> for video and images, use{" "}
         <Button component={RouterLink} to="/cast" size="small" variant="outlined" sx={{ ml: 0.5, verticalAlign: "baseline" }}>
           Cast Studio
         </Button>
         {" "}— upload reference shots, approve samples, then Train LoRA on the Training Data tab.
-      </Alert>
+      </CollapsibleAlert>
       <Paper elevation={2}>
         <Box sx={{ borderBottom: 1, borderColor: "divider" }}>
           <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)}>
@@ -1035,7 +1035,7 @@ const TrainingPage = () => {
         autoHideDuration={4000}
         onClose={handleCloseSnackbar}
       >
-        <AlertSnackbar
+        <CollapsibleAlertSnackbar
           onClose={handleCloseSnackbar}
           severity={feedback.severity}
           sx={{ width: "100%" }}

@@ -7,7 +7,6 @@ import {
   Warning as WarningIcon,
 } from "@mui/icons-material";
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -15,6 +14,7 @@ import {
   Paper,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -411,14 +411,14 @@ const EnhancedChatInterface = ({
 
         {/* Error Display */}
         {error && (
-          <Alert
+          <CollapsibleAlert
             severity="warning"
             sx={{ mt: 1 }}
             onClose={() => setError(null)}
             icon={<WarningIcon />}
           >
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Enhanced Memory Controls */}

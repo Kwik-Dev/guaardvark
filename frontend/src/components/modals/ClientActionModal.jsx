@@ -17,7 +17,6 @@ import {
   Box,
   // IconButton, // No longer needed for delete
   Tooltip,
-  Alert,
   Accordion,
   AccordionSummary,
   AccordionDetails,
@@ -27,6 +26,7 @@ import {
   IconButton,
   Autocomplete,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 // import CancelIcon from '@mui/icons-material/Cancel'; // Replaced by Button text
 import LinkIcon from "@mui/icons-material/Link";
 import _DeleteOutlineIcon from "@mui/icons-material/DeleteOutline"; // For the delete button icon
@@ -340,9 +340,9 @@ const ClientActionModal = ({
       <DialogTitle id="client-action-modal-title">{getTitle()}</DialogTitle>
       <DialogContent dividers>
         {formError && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}
-          </Alert>
+          </CollapsibleAlert>
         )}
         <Box
           component="form"

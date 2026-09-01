@@ -11,10 +11,10 @@ import {
   Typography,
   CircularProgress,
   LinearProgress,
-  Alert,
   IconButton,
   Divider,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Close as CloseIcon,
   Autorenew as AutorenewIcon,
@@ -288,7 +288,7 @@ export default function ScanProgressModal({ open, onClose, onComplete }) {
         )}
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>{error}</CollapsibleAlert>
         )}
 
         {/* Live detail line — the event's current status message */}
@@ -443,17 +443,17 @@ export default function ScanProgressModal({ open, onClose, onComplete }) {
 
         {/* Error from the run */}
         {run?.error_message && (
-          <Alert severity="error" variant="outlined" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" variant="outlined" sx={{ mb: 2 }}>
             {run.error_message}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Uncle feedback */}
         {run?.uncle_feedback && (
-          <Alert severity="info" variant="outlined" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="info" variant="outlined" sx={{ mb: 2 }}>
             <Typography variant="caption" color="text.secondary">Uncle Claude</Typography>
             <Typography variant="body2">{run.uncle_feedback}</Typography>
-          </Alert>
+          </CollapsibleAlert>
         )}
       </DialogContent>
 
