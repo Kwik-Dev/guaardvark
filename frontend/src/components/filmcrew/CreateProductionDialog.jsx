@@ -8,13 +8,13 @@ import {
   TextField,
   Autocomplete,
   Box,
-  Alert,
   Typography,
   Stack
 } from '@mui/material';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import { getProjects } from '../../api/projectService';
 import { listScriptTemplates, loadScriptTemplate } from '../../api/productionService';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const CreateProductionDialog = ({ open, onClose, onCreated }) => {
   const [name, setName] = useState('');
@@ -143,7 +143,7 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
       <DialogTitle>New Production</DialogTitle>
       <DialogContent>
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 1 }}>
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && <CollapsibleAlert severity="error">{error}</CollapsibleAlert>}
           <TextField
             label="Production Name"
             fullWidth
