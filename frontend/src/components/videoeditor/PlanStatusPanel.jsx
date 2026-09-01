@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Alert, Box, Chip, LinearProgress, Stack, Typography } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const ACTIVE_STATUSES = new Set(["submitting", "queued", "running"]);
 
@@ -94,14 +95,14 @@ const PlanStatusPanel = ({
         </Box>
       )}
 
-      {readiness && <Alert severity="info" sx={{ py: 0 }}>{readiness}</Alert>}
-      {planJob.error && <Alert severity="error" sx={{ py: 0 }}>{planJob.error}</Alert>}
+      {readiness && <CollapsibleAlert severity="info" sx={{ py: 0 }}>{readiness}</CollapsibleAlert>}
+      {planJob.error && <CollapsibleAlert severity="error" sx={{ py: 0 }}>{planJob.error}</CollapsibleAlert>}
       {warnings.length > 0 && (
-        <Alert severity="warning" sx={{ py: 0 }}>
+        <CollapsibleAlert severity="warning" sx={{ py: 0 }}>
           {warnings.slice(0, 3).map((warning, index) => (
             <div key={index}>{warning}</div>
           ))}
-        </Alert>
+        </CollapsibleAlert>
       )}
     </Stack>
   );

@@ -6,7 +6,6 @@ import {
   Typography,
   Paper,
   CircularProgress,
-  Alert,
   List,
   ListItem,
   ListItemIcon,
@@ -14,6 +13,7 @@ import {
   // Progress moved to ProgressFooterBar
   Chip,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DescriptionIcon from "@mui/icons-material/Description";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
@@ -253,32 +253,32 @@ const UploadPage = () => {
 
         {/* Status Messages */}
         {uploadStatus === "success" && successMessage && (
-          <Alert
+          <CollapsibleAlert
             severity="success"
             sx={{ mt: 2 }}
             icon={<CheckCircleIcon fontSize="inherit" />}
           >
             {successMessage}
-          </Alert>
+          </CollapsibleAlert>
         )}
         {uploadStatus === "indexing" &&
           successMessage && ( // Show intermediate message during indexing trigger
-            <Alert
+            <CollapsibleAlert
               severity="info"
               sx={{ mt: 2 }}
               icon={<HourglassTopIcon fontSize="inherit" />}
             >
               {successMessage}
-            </Alert>
+            </CollapsibleAlert>
           )}
         {uploadStatus === "error" && errorMessage && (
-          <Alert
+          <CollapsibleAlert
             severity="error"
             sx={{ mt: 2 }}
             icon={<ErrorIcon fontSize="inherit" />}
           >
             {errorMessage}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         <Typography variant="h6" sx={{ mt: 4 }}>

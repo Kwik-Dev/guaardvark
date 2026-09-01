@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  Alert,
   Box,
   Button,
   Dialog,
@@ -13,6 +12,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 import {
   completeOAuth,
@@ -144,21 +144,21 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
           )}
 
           {spec.review_required && (
-            <Alert severity="warning">
+            <CollapsibleAlert severity="warning">
               This platform requires app review before its API can post on your
               behalf.
-            </Alert>
+            </CollapsibleAlert>
           )}
 
           {isEnvManaged && (
-            <Alert severity="info">
+            <CollapsibleAlert severity="info">
               This credential comes from the environment variable{" "}
               <code>{connection.credential_env_key}</code> and is managed outside
               the app.
-            </Alert>
+            </CollapsibleAlert>
           )}
 
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && <CollapsibleAlert severity="error">{error}</CollapsibleAlert>}
 
           <TextField
             label="Account name"

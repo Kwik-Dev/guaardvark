@@ -20,6 +20,7 @@ import {
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Inline SVG so an empty shot never fetches from a third-party CDN.
 const NO_STORYBOARD_PLACEHOLDER =
@@ -144,9 +145,9 @@ const StoryboardGrid = ({ currentStage, shots, onRegenerate, onApproveAll, isApp
             Optionally override the prompt for this shot. If left blank, the original description will be used.
           </Typography>
           {regenError && (
-            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setRegenError(null)}>
+            <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setRegenError(null)}>
               {regenError}
-            </Alert>
+            </CollapsibleAlert>
           )}
           <TextField
             fullWidth

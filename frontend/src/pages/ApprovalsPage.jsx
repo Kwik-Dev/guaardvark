@@ -5,7 +5,6 @@
 // supervised mode is on.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -25,6 +24,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   Cancel as CancelIcon,
   CheckCircle as CheckCircleIcon,
@@ -196,11 +196,11 @@ const ApprovalsPage = () => {
     }
     if (!rows.length) {
       return (
-        <Alert severity="info" sx={{ m: 2 }}>
+        <CollapsibleAlert severity="info" sx={{ m: 2 }}>
           {tab === "pending"
             ? "Nothing is waiting for approval."
             : "No publishes have been decided yet."}
-        </Alert>
+        </CollapsibleAlert>
       );
     }
     return (
@@ -302,20 +302,20 @@ const ApprovalsPage = () => {
         </Stack>
 
         {selected.error_message && (
-          <Alert
+          <CollapsibleAlert
             severity={selected.status === "rejected" ? "info" : "error"}
             sx={{ mb: 2 }}
           >
             {selected.status === "rejected" ? "Reason: " : ""}
             {selected.error_message}
-          </Alert>
+          </CollapsibleAlert>
         )}
         {selected.remote_url && (
-          <Alert severity="success" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="success" sx={{ mb: 2 }}>
             <Link href={selected.remote_url} target="_blank" rel="noopener noreferrer">
               View the published post
             </Link>
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {isPending && (
@@ -386,9 +386,9 @@ const ApprovalsPage = () => {
       }
     >
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {!!queued.length && (

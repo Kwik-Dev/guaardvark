@@ -23,6 +23,7 @@ import AddIcon from '@mui/icons-material/Add';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import { listCastLibrary, createCastSubject, deleteCastSubject } from '../../api/productionService';
 import DragDropImageUpload from './DragDropImageUpload';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -121,7 +122,7 @@ const CastLibraryView = ({ onOpenSubject } = {}) => {
         </Button>
       </Box>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
+      {error && <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</CollapsibleAlert>}
 
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}>

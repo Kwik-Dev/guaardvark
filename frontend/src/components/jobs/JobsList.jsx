@@ -24,12 +24,12 @@ import {
   LinearProgress,
   Drawer,
   IconButton,
-  Alert,
   TextField,
   InputAdornment,
   Menu,
   MenuItem,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Close as CloseIcon,
   Refresh as RefreshIcon,
@@ -333,7 +333,7 @@ const JobsList = ({ title: _title, subtitle: _subtitle, kinds }) => {
             )}
           </Stack>
 
-          {error && <Alert severity="error" sx={{ m: 2 }}>{error}</Alert>}
+          {error && <CollapsibleAlert severity="error" sx={{ m: 2 }}>{error}</CollapsibleAlert>}
           {loading && <LinearProgress />}
 
           <Table size="small">

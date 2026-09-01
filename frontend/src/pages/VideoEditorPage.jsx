@@ -14,7 +14,6 @@ import {
   Chip,
   CircularProgress,
   Tooltip,
-  Alert,
   TextField,
 } from "@mui/material";
 import {
@@ -35,6 +34,7 @@ import MediaLibraryPanel from "../components/videoeditor/MediaLibraryPanel";
 import OverlayLayer from "../components/videoeditor/OverlayLayer";
 import BinPanel from "../components/videoeditor/BinPanel";
 import ArrangementPreview from "../components/videoeditor/ArrangementPreview";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import OptionsPanel from "../components/videoeditor/OptionsPanel";
 import PlanStatusPanel from "../components/videoeditor/PlanStatusPanel";
 import { usePlanJob } from "../components/videoeditor/usePlanJob";
@@ -1155,7 +1155,7 @@ const VideoEditorPage = () => {
                   </Button>
                 )}
               </Stack>
-              {success && <Alert severity="success" sx={{ mb: 1, py: 0 }}>{success}</Alert>}
+              {success && <CollapsibleAlert severity="success" sx={{ mb: 1, py: 0 }}>{success}</CollapsibleAlert>}
               <ArrangementPreview
                 arrangement={planJob.result?.arrangement}
                 onUpdateCaption={planJob.updateArrangementClip}

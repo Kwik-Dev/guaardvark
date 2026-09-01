@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { Button, CircularProgress, Typography, Box, Grid } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import AlertSnackbar from "../common/AlertSnackbar";
 import DashboardCardWrapper from "./DashboardCardWrapper";
 
@@ -123,7 +124,7 @@ const SystemStatusCard = React.forwardRef(
 
         {actionResponse && (
           <Box sx={{ mt: 2 }}>
-            <AlertSnackbar
+            <CollapsibleAlertSnackbar
               open={!!actionResponse}
               onClose={() => setActionResponse(null)}
               severity={actionResponse.error ? "error" : "success"}
@@ -133,7 +134,7 @@ const SystemStatusCard = React.forwardRef(
           </Box>
         )}
 
-        <AlertSnackbar
+        <CollapsibleAlertSnackbar
           open={snackbar.open}
           onClose={handleCloseSnackbar}
           severity={snackbar.severity}

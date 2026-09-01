@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -16,6 +15,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 
 import {
@@ -210,12 +210,12 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
           </Box>
         ) : (
           <Stack spacing={2} sx={{ mt: 1 }}>
-            {error && <Alert severity="error">{error}</Alert>}
+            {error && <CollapsibleAlert severity="error">{error}</CollapsibleAlert>}
 
             {!connections.length && (
-              <Alert severity="info">
+              <CollapsibleAlert severity="info">
                 No social connections yet. Add one on the Connections page first.
-              </Alert>
+              </CollapsibleAlert>
             )}
 
             <Box>
@@ -318,7 +318,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
             )}
 
             {allViolations.length > 0 && (
-              <Alert severity="warning">
+              <CollapsibleAlert severity="warning">
                 <Stack spacing={0.5}>
                   {allViolations.map((v) => (
                     <Typography key={v} variant="body2">
@@ -326,7 +326,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
                     </Typography>
                   ))}
                 </Stack>
-              </Alert>
+              </CollapsibleAlert>
             )}
           </Stack>
         )}
