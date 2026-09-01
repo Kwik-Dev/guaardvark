@@ -5,6 +5,34 @@ symptom, root cause, and any partial fix already applied.
 
 ---
 
+## [FUTURE] Agent-driven client registration from a website (fetch → extract → create → logo)
+
+- **Status:** Future request — not implemented. No code changes applied.
+- **Area:** `backend/tools/` (tool registry `tool_registry_init.py`), `backend/api/clients_api.py`, `backend/models.py` (`Client`).
+
+### Request
+Enable agents / Agent Tools to register a client by fetching the client's website and
+auto-populating the client record (info + pictures), instead of manual form entry or a
+bulk CSV/MD import script.
+
+### Current state (what exists today)
+- **Web fetch works:** `analyze_website`, `fetch_url`, `web_search` (`backend/tools/web_tools.py`) and the browser tools can pull a site's title, meta description, content preview, SEO metrics, URL structure, and content-type hints — enough to infer `industry`, `keywords`, `content_goals`, `brand_voice_examples`, `location`, `notes`.
+- **No `create_client` tool exists** in the registry, so an agent cannot write a client record through the tool system.
+- **No image scraping:** `analyze_website` extracts text/SEO only. There is no tool that downloads a site's logo or images. The image tools (`generate_image`, `edit_image`) generate/edit images; they do not fetch from a URL.
+- **`system_command` is whitelisted** to read-only filesystem commands (`ls`, `grep`, `cat`, `find`…) — no `curl`, so an agent cannot POST to the API as a workaround.
+- **FileGen (`generate_file`)** creates brand-new output files under `data/outputs/files`; it does not touch the DB and cannot register clients.
+
+### Proposed work / steps
+1. Add a **`create_client` tool** that wraps the existing `POST /api/clients/` logic (reuse `backend/api/clients_api.py` / `Client` model + `serialize_client`). Category e.g. `data`/`crm`, `is_dangerous=False`, `requires_approval=True` (writes to DB). Accept the same fields as the form (name required; email/phone/location/notes + RAG arrays: industry, target_audience, unique_selling_points, competitor_urls, keywords, content_goals, geographic_coverage; strings: brand_voice_examples, regulatory_constraints).
+2. Add a **`fetch_website_images` tool** (or extend `analyze_website`) to pull `og:image`, favicon/logo, and `<img>` srcs from a page, download the logo, and set `logo_path` via the existing logo-upload endpoint (`POST /api/clients/<id>/logo`).
+3. Register both tools in `backend/tools/tool_registry_init.py` so AgentBrain/agents can call them.
+4. Verify an end-to-end agent prompt: *"Register Acme Corp — fetch acme.com, extract industry/keywords/voice, download their logo, and create the client."*
+
+### Related
+- Bulk (non-agent) registration already exists via `scripts/import_clients.py` (CSV/MD → `POST /api/clients/`).
+
+---
+
 ## [OPEN] Upgrade bundled ComfyUI (v0.32.0 → latest v0.34.x)
 
 - **Status:** Open — no fix applied. Deferred; will handle later (ComfyUI version bump).
