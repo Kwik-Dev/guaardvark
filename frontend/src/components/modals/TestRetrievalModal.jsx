@@ -16,7 +16,6 @@ import {
   Paper,
   Chip,
   CircularProgress,
-  Alert,
   Divider,
   Grid,
   Accordion,
@@ -24,6 +23,7 @@ import {
   AccordionDetails,
   Stack,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Icons
 import CloseIcon from "@mui/icons-material/Close";
@@ -162,9 +162,9 @@ const TestRetrievalModal = ({ open, onClose }) => {
         </Box>
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {results && (
@@ -266,17 +266,17 @@ const TestRetrievalModal = ({ open, onClose }) => {
                 ))}
               </Box>
             ) : (
-              <Alert severity="info">
+              <CollapsibleAlert severity="info">
                 No results found for this query. Try a different search term or check if documents are properly indexed.
-              </Alert>
+              </CollapsibleAlert>
             )}
 
             {/* Error Handling */}
             {results.error && (
-              <Alert severity="error" sx={{ mt: 2 }}>
+              <CollapsibleAlert severity="error" sx={{ mt: 2 }}>
                 <Typography variant="subtitle2">Retrieval Error</Typography>
                 {results.error}
-              </Alert>
+              </CollapsibleAlert>
             )}
           </Box>
         )}

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
 import { Snackbar, Alert } from "@mui/material";
+import CollapsibleAlert from "./CollapsibleAlert";
 import { BrandLogo } from "../branding";
 
 const SnackbarContext = createContext(null);
@@ -31,7 +32,7 @@ export const SnackbarProvider = ({ children }) => {
         onClose={handleClose}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <Alert
+        <CollapsibleAlert
           onClose={handleClose}
           severity={snackbar.severity || "info"}
           variant="outlined"
@@ -53,7 +54,7 @@ export const SnackbarProvider = ({ children }) => {
           }}
         >
           {snackbar.message}
-        </Alert>
+        </CollapsibleAlert>
       </Snackbar>
     </SnackbarContext.Provider>
   );

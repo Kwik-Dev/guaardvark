@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Box, Typography, useTheme } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import { useSnackbar } from "../common/SnackbarProvider";
 import * as apiService from "../../api";
 import AlertSnackbar from "../common/AlertSnackbar";
@@ -239,7 +240,7 @@ const SystemMetricsBar = () => {
         </Typography>
       )}
 
-      <AlertSnackbar
+      <CollapsibleAlertSnackbar
         open={snackbar.open}
         onClose={handleCloseSnackbar}
         severity={snackbar.severity}

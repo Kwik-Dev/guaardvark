@@ -16,7 +16,6 @@ import {
   Typography,
   IconButton,
   Tooltip,
-  Alert,
   CircularProgress,
   Dialog,
   DialogTitle,
@@ -33,6 +32,7 @@ import {
 } from '@mui/icons-material';
 import axios from 'axios';
 import { BASE_URL } from '../../api/apiClient';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const CSVSpreadsheetViewer = ({ fileData, onClose, onSave }) => {
   const [csvData, setCsvData] = useState([]);
@@ -232,9 +232,9 @@ const CSVSpreadsheetViewer = ({ fileData, onClose, onSave }) => {
 
   if (error) {
     return (
-      <Alert severity="error" sx={{ m: 2 }}>
+      <CollapsibleAlert severity="error" sx={{ m: 2 }}>
         {error}
-      </Alert>
+      </CollapsibleAlert>
     );
   }
 

@@ -16,9 +16,9 @@ import {
   DialogContent,
   DialogActions,
   Button,
-  Alert,
   Collapse,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   FolderOpen as FolderOpenIcon,
   Folder as FolderIcon,
@@ -451,9 +451,9 @@ const FileTreeNavigator = ({
 
       {/* Error Display */}
       {error && (
-        <Alert severity="error" onClose={() => setError(null)} sx={{ m: 1 }}>
+        <CollapsibleAlert severity="error" onClose={() => setError(null)} sx={{ m: 1 }}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* File Tree */}

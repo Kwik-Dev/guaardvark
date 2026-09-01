@@ -4,6 +4,7 @@
 
 import React, { useRef } from "react";
 import { Box, Stack, Typography, LinearProgress, Alert, IconButton, Tooltip } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   VideoLibrary as VideoIcon,
   FolderOpen as OpenFolderIcon,
@@ -119,7 +120,7 @@ const BinPanel = ({
             <LinearProgress variant="determinate" value={progress} />
           </Box>
         )}
-        {error && <Alert severity="error" sx={{ mb: 1 }}>{error}</Alert>}
+        {error && <CollapsibleAlert severity="error" sx={{ mb: 1 }}>{error}</CollapsibleAlert>}
         {binClips.length === 0 ? (
           <Stack alignItems="center" justifyContent="center" sx={{ height: "100%", color: "text.secondary" }}>
             <OpenFolderIcon sx={{ fontSize: 40, opacity: 0.4 }} />
