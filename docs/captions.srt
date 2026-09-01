@@ -1,0 +1,66 @@
+1
+00:00:00,000 --> 00:00:05,000
+Introducing Kwiksher
+
+2
+00:00:05,000 --> 00:00:10,000
+Kwiksher LLC, maker of Kwik — a Photoshop plugin for creating retina-quality
+interactive books, magazines and apps for iOS/Android without code — and Kutt,
+a UI-export plugin. Founded May 2011 by Alex Souza in Florida; under new
+management since September 2014. Official Corona Labs partner.
+
+3
+00:00:10,000 --> 00:00:15,000
+"You are an artist not a code jockey. Kwik unleashes your creativity letting
+
+4
+00:00:15,000 --> 00:00:20,000
+Photoshop plugin
+
+5
+00:00:20,000 --> 00:00:25,000
+interactive books
+
+6
+00:00:25,000 --> 00:00:30,000
+storybook apps
+
+7
+00:00:30,000 --> 00:00:35,000
+iOS
+
+8
+00:00:35,000 --> 00:00:40,000
+Android
+
+9
+00:00:40,000 --> 00:00:45,000
+no-code
+
+10
+00:00:45,000 --> 00:00:50,000
+digital publishing
+
+11
+00:00:50,000 --> 00:00:55,000
+Kwik
+
+12
+00:00:55,000 --> 00:01:00,000
+Kutt
+
+13
+00:01:00,000 --> 00:01:05,000
+No-code app creation directly from Photoshop
+
+14
+00:01:05,000 --> 00:01:10,000
+Retina-quality interactive books/magazines/apps
+
+15
+00:01:10,000 --> 00:01:15,000
+Official Corona Labs partner
+
+16
+00:01:15,000 --> 00:01:20,000
+Introducing Kwiksher
