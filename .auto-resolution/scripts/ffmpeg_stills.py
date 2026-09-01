@@ -76,6 +76,12 @@ def main():
     ap.add_argument("--fps", type=int, default=25, help="Frames per second")
     ap.add_argument("--width", type=int, default=1280, help="Output width")
     ap.add_argument("--height", type=int, default=720, help="Output height")
+    ap.add_argument("--framing", default="fit", choices=list(ffmpeg_gen.FRAMING_MODES),
+                    help="How the image is framed: fit (letterbox), cover (zoom to fill), "
+                         "native (match image size) (default: fit)")
+    ap.add_argument("--min-size", default=None,
+                    help="Lower size bound for --framing native, e.g. '480x270' or '480' "
+                         "(default: none)")
     ap.add_argument("--focus-x", type=float, default=0.5,
                     help="Zoom focus point X, 0..1 fraction (default 0.5 = center)")
     ap.add_argument("--focus-y", type=float, default=0.5,
@@ -124,6 +130,8 @@ def main():
                 fps=args.fps,
                 width=args.width,
                 height=args.height,
+                framing=args.framing,
+                min_size=args.min_size,
                 folder_name=args.folder_name,
                 subfolder_name=sub,
                 focus_x=args.focus_x,

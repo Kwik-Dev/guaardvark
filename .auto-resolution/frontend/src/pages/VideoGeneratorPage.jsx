@@ -21,7 +21,6 @@ import {
   InputLabel,
   Select,
   MenuItem,
-  Alert,
   Paper,
   List,
   ListItem,
@@ -35,6 +34,7 @@ import {
   Collapse,
 } from "@mui/material";
 import PageLayout from "../components/layout/PageLayout";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import GpuGateBanner from "../components/common/GpuGateBanner";
 import {
   SettingChip,
@@ -142,6 +142,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     fps: 25,
     width: 1280,
     height: 720,
+    framing: "fit",
+    min_size: "",
     focus_x: 0.5,
     focus_y: 0.5,
     pan_direction: "left-to-right",
@@ -1364,6 +1366,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         fps: Number(ffConfig.fps),
         width: Number(ffConfig.width),
         height: Number(ffConfig.height),
+        framing: ffConfig.framing,
+        min_size: ffConfig.min_size || null,
         focus_x: Number(ffConfig.focus_x),
         focus_y: Number(ffConfig.focus_y),
         pan_direction: ffConfig.pan_direction,
@@ -1566,22 +1570,22 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
       {/* Error/Success Messages */}
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
+        <CollapsibleAlert severity="error" sx={{ mb: 3 }} onClose={() => setError('')}>
           {formatUiError(error)}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {success && (
-        <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
+        <CollapsibleAlert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess('')}>
           {formatUiError(success) || String(success)}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Selected model not installed — block generation rather than silently
           downgrade to a worse model. The action button reopens the install
           modal and pulses the exact model to download. */}
       {modelNotReady && (
-        <Alert
+        <CollapsibleAlert
           severity="warning"
           sx={{ mb: 3 }}
           onClose={() => setModelNotReady(null)}
@@ -1601,7 +1605,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           {modelNotReady.missing?.length
             ? ` (${modelNotReady.missing.length} file${modelNotReady.missing.length > 1 ? "s" : ""} missing)`
             : ""}, then generate again.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       <DashboardStrip>

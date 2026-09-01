@@ -82,10 +82,22 @@ def _resolve_input(path: str) -> Optional[Path]:
     return cwd if cwd.exists() else None
 
 
-def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps: int,
+def _build_filter(pattern: str, frame_w: int, frame_h: int, content_w: int,
+                  content_h: int, duration_s: float, fps: int,
                   focus_x: float = 0.5, focus_y: float = 0.5,
                   pan_direction: str = "left-to-right") -> str:
-    """Return the ffmpeg -vf filter graph for the given motion pattern.
+    """Return the ffmpeg filtergraph for the given motion pattern.
+
+    The output video frame is always `frame_w x frame_h` (the target size). The
+    image content is rendered at `content_w x content_h` (its native size when
+    smaller than the frame, or downscaled to fit when larger) and centered onto
+    the frame with black padding — so small images are never upscaled/stretched
+    and the proportions are never distorted.
+
+    Transparency is flattened onto black first: a PNG's fully-transparent pixels
+    keep their stored RGB (often white) and would otherwise show up as ugly white
+    edges once the alpha channel is dropped at encode time. Compositing the
+    scaled image over a black canvas turns those regions black, matching the pad.
 
     focus_x / focus_y (0.0–1.0) pick the point the camera keeps centered while
     zooming, and the fixed (non-moving) axis for a pan (default 0.5 = center).
@@ -95,11 +107,19 @@ def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps:
     fy = max(0.0, min(1.0, focus_y))
     frames = max(1, int(round(duration_s * fps)))
 
+    # Flatten source transparency onto black at content size, producing an
+    # opaque `flat` canvas. Works for both opaque and transparent inputs.
+    prologue = (
+        f"color=c=black:s={content_w}x{content_h}[bg0];"
+        f"[0:v]scale={content_w}:{content_h},setsar=1,format=rgba[img0];"
+        f"[bg0][img0]overlay=0:0:format=auto[flat]"
+    )
+
     if pattern == "static":
-        # Scale to cover, center-crop, hold. `loop 1` input feeds one image in;
-        # the -t handles the duration.
-        return (f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height},fps={fps}")
+        # Hold the frame pixel-perfect: center the opaque content on a black
+        # target-size canvas. No upscale, no stretch.
+        body = f"[flat]pad={frame_w}:{frame_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={fps}"
+        return f"{prologue};{body}"
 
     if pattern == "ken_burns_zoom":
         # Slow steady zoom from 1.0 to _KB_ZOOM_MAX while keeping the focus point
@@ -110,8 +130,11 @@ def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps:
         z = f"min({step:.6f}+zoom,{max_zoom:.4f})"
         x = f"{fx:.4f}*iw-iw/(2*zoom)"
         y = f"{fy:.4f}*ih-ih/(2*zoom)"
-        return (f"scale=8000:-1,"
-                f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={width}x{height}:fps={fps}")
+        work_w = max(2, round(content_w * max_zoom))
+        body = (f"[flat]scale={work_w}:-1,"
+                f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={content_w}x{content_h}:fps={fps},"
+                f"setsar=1,pad={frame_w}:{frame_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
+        return f"{prologue};{body}"
     if pattern == "ken_burns_pan":
         # Pan at a fixed modest zoom. The travel axis moves across the frame; the
         # perpendicular axis stays fixed on the focus value.
@@ -131,9 +154,40 @@ def _build_filter(pattern: str, width: int, height: int, duration_s: float, fps:
         else:  # bottom-to-top
             x = f"{fx:.4f}*iw-iw/(2*zoom)"
             y = f"max(ih-ih/zoom-{py}*on,0)"
-        return (f"scale=8000:-1,"
-                f"zoompan=z='{zoom}':x='{x}':y='{y}':d={frames}:s={width}x{height}:fps={fps}")
+        work_w = max(2, round(content_w * zoom))
+        body = (f"[flat]scale={work_w}:-1,"
+                f"zoompan=z='{zoom}':x='{x}':y='{y}':d={frames}:s={content_w}x{content_h}:fps={fps},"
+                f"setsar=1,pad={frame_w}:{frame_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
+        return f"{prologue};{body}"
     raise ValueError(f"Unknown ffmpeg pattern: {pattern}")
+
+
+def _probe_dimensions(path: str) -> Optional[tuple[int, int]]:
+    """Return (width, height) of an image/video via ffprobe, or None on failure."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return None
+        line = (proc.stdout.strip().splitlines() or [""])[0]
+        parts = line.split("x")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return int(parts[0]), int(parts[1])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _clamped_size(sw: int, sh: int, target_w: int, target_h: int) -> tuple[int, int]:
+    """Scale an image size so it fits inside the target frame proportionally,
+    but NEVER upscales: small images keep their native size, and images larger
+    than the target are scaled down to fit. The content is later padded onto the
+    (even-sized) target frame, so the returned size itself need not be even."""
+    ratio = min(1.0, target_w / sw, target_h / sh)
+    return max(1, round(sw * ratio)), max(1, round(sh * ratio))
 
 
 def generate_still_clip(
@@ -163,16 +217,28 @@ def generate_still_clip(
     if src is None:
         raise FileNotFoundError(f"Image not found: {image_path}")
 
+    # Fit the image into the target frame WITHOUT ever upscaling: keep small
+    # images at native resolution, and only downscale images larger than the
+    # target (proportionally). This avoids blurry/clipped output from upscaling.
+    dims = _probe_dimensions(str(src))
+    # Content keeps the image's native size when small and only downscales when
+    # larger than the target frame; the target frame size stays as requested.
+    content_w, content_h = width, height
+    if dims:
+        content_w, content_h = _clamped_size(dims[0], dims[1], width, height)
+
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    vf = _build_filter(pattern, width, height, duration_s, fps,
+    vf = _build_filter(pattern, width, height, content_w, content_h, duration_s, fps,
                        focus_x=focus_x, focus_y=focus_y,
                        pan_direction=pan_direction)
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", str(src),
-        "-vf", vf,
+        # -filter_complex (not -vf) so the graph can branch into the black
+        # background + overlay used to flatten source transparency onto black.
+        "-filter_complex", vf,
         "-t", str(duration_s),
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-r", str(fps),
