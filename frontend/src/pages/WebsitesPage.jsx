@@ -29,6 +29,7 @@ import {
   TableSortLabel,
   Chip,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import AddIcon from "@mui/icons-material/Add";
 import { useTheme } from "@mui/material/styles";
 import { useSearchParams } from "react-router-dom"; // For modal linking
@@ -387,7 +388,7 @@ const WebsitesPage = () => {
           onClose={handleCloseFeedback}
           anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
         >
-          <AlertSnackbar
+          <CollapsibleAlertSnackbar
             onClose={handleCloseFeedback}
             severity={feedback.severity || "info"}
             sx={{ width: "100%" }}

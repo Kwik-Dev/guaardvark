@@ -20,7 +20,6 @@ import {
   DialogActions,
   TextField,
   CircularProgress,
-  Alert,
   Stack,
   Collapse,
   LinearProgress,
@@ -34,6 +33,7 @@ import {
   Tabs,
   Tab,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   PlayArrow as LaunchIcon,
   Stop as CancelIcon,
@@ -490,9 +490,9 @@ const SwarmPage = () => {
       }
     >
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Active Swarms */}
@@ -728,10 +728,10 @@ const SwarmPage = () => {
             </Stack>
 
             {flightMode && (
-              <Alert severity="info" variant="outlined">
+              <CollapsibleAlert severity="info" variant="outlined">
                 Flight Mode: offline backends only (Ollama). Conflicts will be
                 auto-serialized.
-              </Alert>
+              </CollapsibleAlert>
             )}
           </Stack>
         </DialogContent>
@@ -1020,9 +1020,9 @@ const SwarmCard = ({
 
           {/* Error message for failed swarms */}
           {swarm.error && (
-            <Alert severity="error" variant="outlined" sx={{ mt: 1, py: 0 }}>
+            <CollapsibleAlert severity="error" variant="outlined" sx={{ mt: 1, py: 0 }}>
               <Typography variant="caption">{swarm.error}</Typography>
-            </Alert>
+            </CollapsibleAlert>
           )}
 
           {/* Progress bar */}
@@ -1179,9 +1179,9 @@ const TaskCard = ({ task, swarmId, onViewTask, _theme }) => {
         )}
 
         {task.error && (
-          <Alert severity="error" variant="outlined" sx={{ mt: 1, py: 0 }}>
+          <CollapsibleAlert severity="error" variant="outlined" sx={{ mt: 1, py: 0 }}>
             <Typography variant="caption">{task.error}</Typography>
-          </Alert>
+          </CollapsibleAlert>
         )}
       </CardContent>
       <CardActions sx={{ pt: 0 }}>

@@ -7,7 +7,6 @@ import {
   CircularProgress,
   Tooltip,
   Typography,
-  Alert,
   Paper
 } from '@mui/material';
 import {
@@ -19,6 +18,7 @@ import { keyframes } from '@mui/material/styles';
 import voiceService from '../../api/voiceService';
 import { checkForWakeWord } from '../../utils/wakeWordMatcher';
 import CanvasWaveform from './CanvasWaveform';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -1381,9 +1381,9 @@ const ContinuousVoiceChat = React.forwardRef(({
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       {/* Error */}
       {error && (
-        <Alert severity="error" onClose={() => setError(null)}>
+        <CollapsibleAlert severity="error" onClose={() => setError(null)}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Controls Row */}

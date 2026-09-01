@@ -19,7 +19,6 @@ import {
   Chip,
   CircularProgress,
   Divider,
-  Alert,
   Table,
   TableBody,
   TableCell,
@@ -32,6 +31,7 @@ import {
   CardContent,
   LinearProgress,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   CloudSync as SyncIcon,
   CloudOff as DisconnectIcon,
@@ -1236,9 +1236,9 @@ const InterconnectorSettings = () => {
                         }
                       />
                       {!config.require_api_key && (
-                        <Alert severity="warning" sx={{ mt: 1 }}>
+                        <CollapsibleAlert severity="warning" sx={{ mt: 1 }}>
                           API key authentication is disabled. Only use this on trusted local networks.
-                        </Alert>
+                        </CollapsibleAlert>
                       )}
                     </Box>
                   </Grid>
@@ -1250,11 +1250,11 @@ const InterconnectorSettings = () => {
                       </Typography>
                       {config.api_key_hash ? (
                         <Box>
-                          <Alert severity="success" sx={{ mb: 2 }}>
+                          <CollapsibleAlert severity="success" sx={{ mb: 2 }}>
                             API Key is configured (hash: {config.api_key_hash.substring(0, 16)}...)
-                          </Alert>
+                          </CollapsibleAlert>
                           {generatedApiKey && showApiKey && (
-                            <Alert severity="warning" sx={{ mb: 2 }}>
+                            <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
                               <Typography variant="body2" fontWeight="bold">
                                 Save this API key now - it won't be shown again:
                               </Typography>
@@ -1270,13 +1270,13 @@ const InterconnectorSettings = () => {
                               >
                                 {generatedApiKey}
                               </Typography>
-                            </Alert>
+                            </CollapsibleAlert>
                           )}
                         </Box>
                       ) : (
-                        <Alert severity="info" sx={{ mb: 2 }}>
+                        <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
                           No API key configured. Generate one to allow clients to connect.
-                        </Alert>
+                        </CollapsibleAlert>
                       )}
                       <Box display="flex" gap={2} alignItems="center" flexWrap="wrap" sx={{ mb: 2 }}>
                         <Button
@@ -1307,7 +1307,7 @@ const InterconnectorSettings = () => {
                       </Box>
                       {fileScanTestResult && fileScanTestResult.success && fileScanTestResult.details && (
                         <Box sx={{ mt: 2 }}>
-                          <Alert severity="success">
+                          <CollapsibleAlert severity="success">
                             <Typography variant="body2" fontWeight="bold">
                               File Scan Results:
                             </Typography>
@@ -1368,7 +1368,7 @@ const InterconnectorSettings = () => {
                                 )}
                               </>
                             )}
-                          </Alert>
+                          </CollapsibleAlert>
                         </Box>
                       )}
                     </Box>
@@ -1690,9 +1690,9 @@ const InterconnectorSettings = () => {
                     {dataSyncResults && !isSyncingData && (
                       <Box mt={2}>
                         {dataSyncResults.error ? (
-                          <Alert severity="error">{dataSyncResults.error}</Alert>
+                          <CollapsibleAlert severity="error">{dataSyncResults.error}</CollapsibleAlert>
                         ) : (
-                          <Alert severity="success">
+                          <CollapsibleAlert severity="success">
                             <Typography variant="body2">
                               Data sync completed
                             </Typography>
@@ -1705,7 +1705,7 @@ const InterconnectorSettings = () => {
                                   ` | Conflicts: ${dataSyncResults.summary.total_conflicts}`}
                               </Typography>
                             )}
-                          </Alert>
+                          </CollapsibleAlert>
                         )}
                       </Box>
                     )}
@@ -1734,9 +1734,9 @@ const InterconnectorSettings = () => {
                     {outputsIndex && (
                       <Box sx={{ mt: 2 }}>
                         {outputsIndex.error ? (
-                          <Alert severity="error">{outputsIndex.error}</Alert>
+                          <CollapsibleAlert severity="error">{outputsIndex.error}</CollapsibleAlert>
                         ) : (
-                          <Alert severity="info">
+                          <CollapsibleAlert severity="info">
                             <Typography variant="caption">
                               {`Found ${outputsIndex.count || (outputsIndex.files ? outputsIndex.files.length : 0)} file(s)`}
                             </Typography>
@@ -1754,7 +1754,7 @@ const InterconnectorSettings = () => {
                                 )}
                               </Box>
                             )}
-                          </Alert>
+                          </CollapsibleAlert>
                         )}
                       </Box>
                     )}
@@ -1793,9 +1793,9 @@ const InterconnectorSettings = () => {
                     {codeSyncResults && !isSyncingCode && (
                       <Box mt={2}>
                         {codeSyncResults.error ? (
-                          <Alert severity="error">{codeSyncResults.error}</Alert>
+                          <CollapsibleAlert severity="error">{codeSyncResults.error}</CollapsibleAlert>
                         ) : (
-                          <Alert severity="success">
+                          <CollapsibleAlert severity="success">
                             <Typography variant="body2">
                               Code sync completed
                             </Typography>
@@ -1808,7 +1808,7 @@ const InterconnectorSettings = () => {
                                   ` | ${codeSyncResults.files.summary.total_backed_up} backed up`}
                               </Typography>
                             )}
-                          </Alert>
+                          </CollapsibleAlert>
                         )}
                       </Box>
                     )}
@@ -1827,7 +1827,7 @@ const InterconnectorSettings = () => {
                     {isLoadingApprovals ? (
                       <LinearProgress />
                     ) : pendingApprovals.length === 0 ? (
-                      <Alert severity="info">No pending approvals</Alert>
+                      <CollapsibleAlert severity="info">No pending approvals</CollapsibleAlert>
                     ) : (
                       <TableContainer>
                         <Table size="small">
@@ -1897,7 +1897,7 @@ const InterconnectorSettings = () => {
               </Box>
 
               {nodes.length === 0 ? (
-                <Alert severity="info">No client nodes connected yet</Alert>
+                <CollapsibleAlert severity="info">No client nodes connected yet</CollapsibleAlert>
               ) : (
                 <TableContainer>
                   <Table size="small">
@@ -1978,9 +1978,9 @@ const InterconnectorSettings = () => {
                 </TableContainer>
               )}
               {broadcastResult && (
-                <Alert severity="info" sx={{ mt: 2 }}>
+                <CollapsibleAlert severity="info" sx={{ mt: 2 }}>
                   Broadcast started: {broadcastResult.broadcast_id || broadcastResult.data?.broadcast_id || "pending"}
-                </Alert>
+                </CollapsibleAlert>
               )}
             </Paper>
           )}

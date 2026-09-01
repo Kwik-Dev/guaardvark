@@ -9,7 +9,6 @@ import {
   Paper,
   IconButton,
   Chip,
-  Alert,
   Alert as MuiAlert,
   Snackbar,
   Tooltip,
@@ -28,6 +27,7 @@ import { getOutputs, retryFailedRows, deleteOutput } from '../api/outputService'
 import OutputCard from '../components/cards/OutputCard';
 import OutputModal from '../components/modals/OutputModal';
 import { ContextualLoader } from '../components/common/LoadingStates';
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 const _API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -269,7 +269,7 @@ const ContentLibraryPage = () => {
           onClose={handleCloseFeedback}
           anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
         >
-          <AlertSnackbar
+          <CollapsibleAlertSnackbar
             onClose={handleCloseFeedback}
             severity={feedback.severity || "info"}
             sx={{ width: "100%" }}
@@ -280,9 +280,9 @@ const ContentLibraryPage = () => {
         </Snackbar>
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Output Modal */}

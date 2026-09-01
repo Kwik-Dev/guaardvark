@@ -7,7 +7,6 @@
 
 import { formatUiError } from "../utils/uiError";
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -32,6 +31,7 @@ import {
   TableRow,
   Typography,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -665,9 +665,9 @@ const TaskPage = () => {
         </Snackbar>
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Enhanced Task Action Modal */}
@@ -700,7 +700,7 @@ const TaskPage = () => {
           </Stack>
 
           {videoGenError && (
-            <Alert severity="error" sx={{ mb: 1.5 }}>{videoGenError}</Alert>
+            <CollapsibleAlert severity="error" sx={{ mb: 1.5 }}>{videoGenError}</CollapsibleAlert>
           )}
           {videoGenLoading && <LinearProgress sx={{ mb: 1 }} />}
 

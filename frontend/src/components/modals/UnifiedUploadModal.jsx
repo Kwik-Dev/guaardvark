@@ -12,12 +12,12 @@ import {
   Grid,
   CircularProgress,
   Box,
-  Alert,
   Autocomplete,
   Typography,
   IconButton,
   LinearProgress,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Close as CloseIcon,
   UploadFile as UploadFileIcon,
@@ -305,9 +305,9 @@ const UnifiedUploadModal = ({
 
       <DialogContent dividers>
         {formError && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         <Grid container spacing={2}>

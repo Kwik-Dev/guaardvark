@@ -10,7 +10,6 @@ import {
   ButtonGroup,
   Tabs,
   Tab,
-  Alert,
   Chip,
   Stack,
   useTheme,
@@ -23,6 +22,7 @@ import {
   SwapHoriz as DiffIcon,
 } from '@mui/icons-material';
 import Editor from '@monaco-editor/react';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const CodeDiffViewer = ({
   originalCode = '',
@@ -206,18 +206,18 @@ const CodeDiffViewer = ({
         </Box>
 
         {description && (
-          <Alert severity="info" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
             <Typography variant="body2">{displayDescription}</Typography>
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Multi-file summary */}
         {isMultiFile && multiFileStats && (
-          <Alert severity="info" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
             <Typography variant="body2">
               {multiFileStats.totalFiles} file(s) with changes • {multiFileStats.totalChanges} total line changes
             </Typography>
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Diff Statistics */}

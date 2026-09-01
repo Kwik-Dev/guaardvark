@@ -17,12 +17,12 @@ import {
   TextField,
   Button,
   Chip,
-  Alert,
   LinearProgress,
 } from '@mui/material';
 import { listCastLibrary, listProductionSubjects, castSubject, confirmCasting } from '../../api/productionService';
 import { useUnifiedProgress } from '../../contexts/UnifiedProgressContext';
 import DragDropImageUpload from './DragDropImageUpload';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const CastingPanel = ({ productionId, onCastingConfirmed }) => {
   const [castingData, setCastingData] = useState({});
@@ -192,20 +192,20 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
   return (
     <Box sx={{ mt: 3 }}>
       <Typography variant="h6" gutterBottom>Pick a face for your character</Typography>
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && <CollapsibleAlert severity="error" sx={{ mb: 2 }}>{error}</CollapsibleAlert>}
       {!loading && subjectsToCast.length > 0 && notReadySubjects().length > 0 && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
           Pick a cast action for: {notReadySubjects().map((s) => s.name).join(', ')}.
           {notReadySubjects().some((s) => s.training_status === 'failed') &&
             ' A subject whose LoRA training failed must be re-cast before you can continue.'}
-        </Alert>
+        </CollapsibleAlert>
       )}
       {!loading && subjectsToCast.length === 0 && (
-        <Alert severity="info" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
           No subjects yet — the Screenwriter agent will populate these from the script.
           If you're seeing this after the script ran, the screenwriter run may have failed
           (check the failed-stage indicator above).
-        </Alert>
+        </CollapsibleAlert>
       )}
       <TableContainer component={Paper}>
         <Table>

@@ -10,11 +10,11 @@ import {
   Grid,
   Chip,
   CircularProgress,
-  Alert,
   LinearProgress,
   Tooltip,
   Stack,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Icons
 import SpeedIcon from "@mui/icons-material/Speed";
@@ -102,9 +102,9 @@ const RAGDebugSection = () => {
       </Box>
 
       {error && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
           Could not load retrieval health: {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {loading && !systemHealth && (
@@ -140,11 +140,11 @@ const RAGDebugSection = () => {
               </Typography>
 
               {systemHealth.health_issues?.length > 0 && (
-                <Alert severity="warning">
+                <CollapsibleAlert severity="warning" size="small">
                   <Typography variant="caption">
                     Issues: {systemHealth.health_issues.join(", ")}
                   </Typography>
-                </Alert>
+                </CollapsibleAlert>
               )}
             </Paper>
           </Grid>
