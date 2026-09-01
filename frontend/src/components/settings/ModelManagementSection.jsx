@@ -24,6 +24,7 @@ import {
 import { useSnackbar } from '../common/SnackbarProvider';
 import * as apiService from '../../api';
 import {
+import CollapsibleAlert from "../common/CollapsibleAlert";
   getLlmProvider,
   setCloudModelsEnabled,
   setLlmProvider,
@@ -317,10 +318,10 @@ const ModelManagementSection = ({
 
       {/* --- Cloud-active warning banner (persistent while cloud chat is live) --- */}
       {cloudActive && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="warning" sx={{ mb: 2 }}>
           ⚠ Cloud model active — chat is sent to{' '}
           <strong>{activeProvider}</strong>. Embeddings &amp; RAG stay local.
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* --- Cloud Models master toggle --- */}
@@ -453,12 +454,12 @@ const ModelManagementSection = ({
                 </Grid>
               </Grid>
               {testResult && (
-                <Alert
+                <CollapsibleAlert
                   severity={testResult.ok ? 'success' : 'error'}
                   sx={{ mt: 2 }}
                 >
                   {testResult.message}
-                </Alert>
+                </CollapsibleAlert>
               )}
             </Box>
           )}
@@ -498,12 +499,12 @@ const ModelManagementSection = ({
                 </Grid>
               </Grid>
               {testResult && (
-                <Alert
+                <CollapsibleAlert
                   severity={testResult.ok ? 'success' : 'error'}
                   sx={{ mt: 2 }}
                 >
                   {testResult.message}
-                </Alert>
+                </CollapsibleAlert>
               )}
             </Box>
           )}
