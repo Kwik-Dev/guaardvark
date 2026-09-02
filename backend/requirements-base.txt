@@ -91,3 +91,7 @@ watchdog>=3.0.0        # File system monitoring
 pyperclip>=1.8.2       # Cross-platform clipboard
 plyer>=2.1.0           # Native notifications
 pathspec>=0.12.0       # gitignore_filter / upload_api — required for upload blueprint
+
+# RunPod remote LoRA training (runpod_lora_trainer plugin)
+runpod>=1.7.6          # RunPod SDK — dispatch/poll serverless training jobs
+boto3>=1.34            # S3-compatible artifact staging/download (R2/S3 gateway)
