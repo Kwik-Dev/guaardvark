@@ -1,290 +1,280 @@
-# Remote LoRA Training on RunPod — Design & Research
+# Remote LoRA Training on RunPod — Setup & Reference
 
-Status: **Design / research only — not yet implemented.**
-Date: 2026-08-26
+Status: **Implemented** (was "design only" — see history note below).
+Date: 2026-08-26 (doc created) · updated to reflect shipped code.
 
-This document captures a design conversation about using a remote GPU training
-service (RunPod) from Guaardvark for LoRA training, plus research on the RunPod
-Python SDK. It is a planning artifact, not a spec of shipped code.
-
----
-
-## 1. Is RunPod currently supported? — No
-
-There is **zero remote-GPU / SSH / cloud code** in the codebase. The only RunPod
-reference is a research link in `docs/LoRA_memo.md`. LoRA training runs **only
-on the local machine**:
-
-- **Executor**: Celery task `lora_trainer.train_lora` → `_train_impl()` in
-  `backend/tasks/lora_trainer_tasks.py:24`
-- **Driver**: `RealLoraTrainer` (`plugins/lora_trainer/real_trainer.py`) spawns a
-  local subprocess daemon (`run_trainer.py` / `run_zimage_trainer.py`) over
-  stdin/stdout JSON
-- **Selection**: `GUAARDVARK_LORA_BACKEND` env (`mock|real|auto`) at
-  `lora_trainer_tasks.py:122`
-- **GPU gating**: local-only `gpu_session()` in
-  `backend/services/gpu_resource_policy.py:344` (in-process gate + nvidia-smi probe)
-- **Artifacts**: written locally to `data/training/loras/` via `_output_dir()`
-  (`lora_trainer_tasks.py:19`)
-
-The design is **cleanly extensible**: `train_subject_lora()` (real_trainer.py:273)
-is a stable public API that already matches the mock, so a remote trainer is a
-drop-in swap.
+> **History note:** this file began as a design/research artifact. The RunPod
+> trainer has since been **implemented** in `plugins/runpod_lora_trainer/`
+> (commit `1548b64 feat(lora): add RunPod remote LoRA trainer as an alternative
+> plugin`). The design sections below are retained for context but the **Setup**
+> section reflects the actual shipped code.
 
 ---
 
-## 2. Design: `RemoteLoraTrainer` (RunPod) as a new backend
+## 1. What it is
 
-The abstraction boundary is the `train_subject_lora()` contract. Add a third
-backend value and a new driver implementing the same method.
+An **alternative to the local `lora_trainer` plugin** that trains
+character/environment/prop LoRAs on a **remote RunPod serverless GPU endpoint**
+instead of the local machine. Enabling it **disables the local trainer** via the
+manifest `excludes: ["lora_trainer"]`. It holds **no local GPU** (no VRAM claim,
+no local daemon, nothing to evict).
 
-### 2.1 Plugin separation & mutual exclusion (REQUIREMENT)
-
-The remote trainer is a **separate plugin**, not a fork of `lora_trainer`.
-When the RunPod plugin is enabled/used, the local `lora_trainer` plugin is
-turned **off**.
-
-- **New plugin dir**: `plugins/runpod_lora_trainer/` with its own `plugin.json`
-  (`id: "runpod_lora_trainer"`, `type: "tool"`, `category: "training"`,
-  `port: null`). Contains `remote_trainer.py` + `pod/` image. Its `config` holds
-  `default_backend: "runpod"`, `output_dir`, `poll_interval_seconds`.
-- **Mutual-exclusion is a NEW plugin-system concept** — today there is *no*
-  "one plugin disables a sibling" mechanism. The only existing exclusivity is
-  `GPU_EXCLUSIVE_PLUGIN_IDS = {'ollama','comfyui'}` (`plugin_manager.py:49`),
-  which serializes start/stop operations; it does **not** disable one when the
-  other is enabled. So this requirement needs a small, focused addition.
-
-**Design — manifest `excludes` field:**
-
-- Add an optional `excludes: [plugin_id, ...]` array to `PluginMetadata`
-  (`plugin_base.py`) and to the JSON manifest. Semantics: this plugin is an
-  **alternative** to the listed plugins — enabling it disables them.
-- `runpod_lora_trainer/plugin.json`:
-  `"excludes": ["lora_trainer"]`
-- In `PluginManager.enable_plugin()` (`plugin_manager.py:877`), after persisting
-  the enable, resolve the mutual-exclusion set (both the new plugin's own
-  `excludes` AND any plugin that lists this id in its `excludes`) and
-  `disable_plugin()` each sibling (which stops it first if running). Log a clear
-  "disabled X because Y is now the active trainer" message.
-- Backend selection is then driven by **plugin state**, not just env: in
-  `_train_impl` (`lora_trainer_tasks.py:122`), `auto` → use the remote trainer
-  if `runpod_lora_trainer` is effectively enabled and configured, else fall back
-  to `RealLoraTrainer.is_available()`. Enabling the RunPod plugin therefore both
-  disables the local one and routes training to RunPod.
-
-This keeps the two plugins independently toggleable in the Plugins UI, with the
-mutual exclusion enforcing that only one trainer is active at a time.
-
-### 2.2 New driver — `plugins/runpod_lora_trainer/remote_trainer.py`
-
-A class exposing the **same signature** as `RealLoraTrainer.train_subject_lora()`
-(subject_id, name, ref_image_paths, output_dir, trigger_word, resolution,
-image_prompts, rank, alpha, learning_rate, steps, base_model_id) and returning the
-same result dict shape (`{"status": "ok", "lora_path": ..., "lora_version": ...}`)
-so `_train_impl`'s caller persists it unchanged.
-
-**Key difference from the local daemon:** this is a full push/poll/ingest job,
-not a piped subprocess. The local driver blocks on a long-lived subprocess; a
-remote job must be dispatched and its artifact **pulled back**.
-
-Proposed flow:
-
-1. **`is_available()`** — True if a RunPod target is configured (endpoint/API key
-   present). No local GPU probe.
-2. **`train_subject_lora(...)`**:
-   - **Stage inputs**: upload the subject's reference images + `.txt` captions
-     (already built upstream) to RunPod storage (S3 bucket or network volume).
-     Returns a dataset manifest URL.
-   - **Dispatch**: `endpoint.run({...})` with a job payload
-     `{images_uri, captions_uri, resolution, rank, alpha, lr, steps, base_model,
-     trigger_word, webhook_url, output_bucket}`. Returns a `job_id`.
-   - **Poll**: poll `job.status()` on an interval (configurable
-     `GUAARDVARK_RUNPOD_POLL_INTERVAL`), mapping remote states → the
-     unified-progress percentages the local path uses.
-   - **Ingest**: when status is `done`, **download** the `.safetensors` + sidecar
-     from the returned presigned URL into `output_dir` (local
-     `data/training/loras/`), then write the local schema-v2 sidecar via
-     `media_model_registry.write_lora_sidecar` so downstream render/inference
-     works identically.
-3. **`_gpu_env()` / `shutdown()`** — no-ops (no local GPU held). **Bypass
-   `gpu_session()`** so no local VRAM is claimed — add a flag in `_train_impl` to
-   skip the `gpu_session(JobKind.LORA_TRAIN...)` block for the remote path.
-
-### 2.3 Configuration — `backend/config.py`
-
-Reuse the existing pattern (env overrides like `GUAARDVARK_COMFYUI_URL` at
-config.py:72). Add a `GUAARDVARK_REMOTE_TRAINER` config block:
+## 2. Architecture
 
 ```
-RUNPOD_API_KEY / GUAARDVARK_RUNPOD_API_KEY   (never logged — secrets rule)
-RUNPOD_TARGET_URL                            (HTTP endpoint or pod IP:port)
-RUNPOD_STORAGE_BUCKET / OUTPUT_BUCKET        (upload/download of inputs & LoRA artifact)
-GUAARDVARK_LORA_BACKEND=runpod                (opt-in)
-GUAARDVARK_RUNPOD_POLL_INTERVAL
+Guaardvark (client)                          RunPod (serverless pod)
+remote_trainer.py  ── endpoint.run(payload) ─▶  pod/handler.py
+   │  dispatch                                  │  run_training()  ← runner.py
+   │  poll job.status()                         │  (same code as local trainer)
+   └─ download .safetensors ◀── lora_url ───────┘  upload to S3 bucket
 ```
 
-Keys from repo-root `.env` (matching how the rest of secrets are handled). Do
-**not** hardcode a pod identity.
+Flow is a **push/poll/ingest job** (not a piped daemon like the local trainer):
 
-### 2.4 Artifact contract — `run_zimage_trainer.py` / `run_trainer.py`
+1. **stage** — upload ref images + `.txt` captions into a manifest
+2. **dispatch** — `endpoint.run({...})` with dataset + hyperparams
+3. **poll** — `job.status()` until `COMPLETED`/`FAILED`, mapped to unified progress
+4. **ingest** — download the trained `.safetensors` from the returned URL into
+   `output_dir`, write the local schema-v2 sidecar
 
-The remote pod runs an **uploaded copy of the same runner scripts** (they already
-produce `.safetensors` + sidecar and print a JSON result). To support RunPod
-without forking the training logic:
+`RemoteLoraTrainer.train_subject_lora(...)` has the **same public API and result
+shape** as `RealLoraTrainer.train_subject_lora`, so the Celery wiring
+(`lora_trainer_tasks`) swaps backends without touching the caller.
 
-- The runner scripts get a thin `--remote` mode: read inputs from the manifest
-  URI, write results to `output_dir` then **push** the `.safetensors` + sidecar
-  to `output_bucket`.
-- Ship a `pod_scripts/runpod_entry.sh` + `Dockerfile` under
-  `plugins/lora_trainer/` so a user can build/upload the pod image once. This is
-  where the real iteration goes; the backend integration only needs the HTTP +
-  object-store contract.
+## 2.1 How LoRA training is processed (flowchart)
 
-### 2.5 Frontend
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Guaardvark (local)                                                         │
+│                                                                             │
+│  POST /api/cast/subjects/<id>/train                                         │
+│    └─ cast_library_api.train_subject()                                      │
+│         ├─ ensure_vision_identity()          (Ollama vision grounding)      │
+│         ├─ ensure_subject_image_captions()   (VLM .txt sidecars)            │
+│         ├─ training_status = "training"                                     │
+│         └─ dispatch_lora_train(subject_id)                                  │
+│              └─ celery.send_task("lora_trainer.train_lora")                 │
+│                   └─ lora_trainer_tasks.train_lora_task()                   │
+│                        └─ _train_impl(subject_id)                          │
+│                             ├─ build train_images (refs ∪ approved)         │
+│                             ├─ validate_cast_training()  (pretrain gate)    │
+│                             ├─ settings_for_subject()   (rank/alpha/lr/…)   │
+│                             └─ backend selection                            │
+│                                  └─ runpod_lora_trainer enabled? ──yes──┐   │
+│                                                                         │   │
+│  RemoteLoraTrainer.train_subject_lora()  ◀──────────────────────────────┘   │
+│    ├─ 1. stage:  build dataset manifest (images + captions)                 │
+│    ├─ 2. dispatch: endpoint.run({input: {...}})  ──────────────┐            │
+│    ├─ 3. poll: job.status() until COMPLETED/FAILED             │            │
+│    └─ 4. ingest: download .safetensors → output_dir            │            │
+│         └─ write_lora_sidecar() (schema-v2, mock=False)        │            │
+│              └─ training_status = "trained"; ensure_lora_in_comfyui()       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                                                              │
+                                                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  RunPod (cloud GPU server)                                                  │
+│                                                                             │
+│  Serverless endpoint (your pod image)                                       │
+│    └─ pod/handler.py  handler(job)                                          │
+│         ├─ _resolve_manifest()  → local image paths on the pod             │
+│         ├─ run_training(...)    (runner.py → local trainer scripts)        │
+│         │    ├─ _do_load()   load ZImagePipeline / SDXLPipeline            │
+│         │    └─ _do_train()  PEFT LoRA on the GPU (diffusers/peft)         │
+│         │         └─ writes .safetensors to temp dir                       │
+│         └─ upload_file_to_bucket() → presigned URL (or file://)            │
+│              └─ returns {status, lora_url, remote_job_id} ────────────────┐ │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                                                              │
+                                                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Guaardvark (local) — ingest                                                │
+│                                                                             │
+│  _download_artifact(lora_url, output_path)                                  │
+│    ├─ s3://   → boto3 against RunPod S3 gateway                            │
+│    ├─ http(s) → presigned URL streaming download                           │
+│    └─ file:// → test convenience                                           │
+│  → LoRA saved to data/training/loras/<name>_v<N>.safetensors               │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-No required changes — the UI already reads `Subject.training_status` + unified
-progress, which the remote path emits the same way. Optional later: a backend
-indicator on the training row.
+**Is RunPod a service that runs a training pod container on their GPU server?**
+Yes. RunPod is a cloud GPU provider. You build a **container** (the pod image)
+from the Dockerfile and deploy it as a **Serverless endpoint**; RunPod runs that
+container on **their GPU servers**. Guaardvark never touches a local GPU for this
+path — it dispatches a job to the endpoint, RunPod executes the training inside
+the container on its GPU, and Guaardvark downloads the resulting `.safetensors`.
 
-**Mutual-exclusion UI (included in scope):** the two trainer plugins appear
-side-by-side in the Plugins page (`frontend/src/pages/PluginsPage.jsx`). The
-existing plugin system has no "this replaces that" UI — only the VRAM-heavy
-conflict warning (`findGpuConflict`, `PluginsPage.jsx:756`). Add an `excludes`
-aware behavior:
+## 3. Prerequisites
 
-1. **Backend surfaces `excludes`**: `PluginManager.list_plugins()` /
-   `plugin_registry.list_plugins()` include each plugin's `excludes` array (so
-   the frontend knows the relationship without hardcoding ids).
-2. **Render**: when a plugin lists another as `excludes`, and that sibling is
-   currently enabled, render the sibling's toggle as **disabled** with a tooltip
-   "Disabled because <active trainer> is the active LoRA trainer" and its card
-   dimmed/annotated. Enabling the RunPod trainer therefore visibly turns off the
-   local `lora_trainer` switch in the same view.
-3. **Conflict message**: reuse the `showMessage` pattern (as `findGpuConflict`
-   does at `PluginsPage.jsx:774-781`) to tell the operator which trainer was
-   swapped out when they flip either toggle.
-4. This is generic (driven by the manifest `excludes` field), so it also covers
-   any future alternative-plugin pairs, not just the LoRA trainers.
+- **RunPod account** — sign up at runpod.io (free).
+- **RunPod credits** — pay-per-second, usage-based. A positive balance is
+  required to actually run a job (new accounts get ~$1 promo credit; no real
+  free GPU tier).
+- **RunPod API key** — Console → **Settings → API Keys → Create API Key**.
+  Use a **Restricted** key scoped to your training endpoint. This is the
+  `rpa_...` key used by Guaardvark's SDK (`GUAARDVARK_RUNPOD_API_KEY`).
+- **Docker** — to build the pod image locally before pushing to a registry.
+- **A container registry** — Docker Hub (`docker.io`), GHCR, or any registry
+  you can push to. Needed to host the pod image so RunPod can pull it.
+- **Cloudflare R2** (optional but recommended) — an S3-compatible bucket for
+  staging training inputs and retrieving the trained LoRA artifact.
 
-### 2.6 Files touched
+## 4. Setup
 
-| File | Change |
-|---|---|
-| `backend/tasks/lora_trainer_tasks.py` | select `runpod` backend via plugin state; skip local `gpu_session` for remote |
-| `plugins/runpod_lora_trainer/plugin.json` | **new** manifest, `id: runpod_lora_trainer`, `excludes: ["lora_trainer"]` |
-| `plugins/runpod_lora_trainer/remote_trainer.py` | **new** driver (upload → dispatch → poll → ingest) |
-| `plugins/runpod_lora_trainer/pod/` (Dockerfile, entry.sh, requirements) | runnable RunPod pod image |
-| `backend/plugins/plugin_base.py` | add `excludes: List[str]` to `PluginMetadata` + manifest parsing |
-| `backend/plugins/plugin_manager.py` | `enable_plugin()` resolves `excludes` and disables sibling(s) |
-| `backend/config.py` | `GUAARDVARK_RUNPOD_*` + `RUNPOD_TARGET_URL` resolution |
-| `plugins/lora_trainer/scripts/run_trainer.py`, `run_zimage_trainer.py` | optional `--remote` mode + push-artifact |
-| `docs/GUAARDVARK_GUIDE.md`, `AGENTS.md` | document the plugin + env |
+### 4.1 Docker — build & push the pod image
 
-### 2.7 Suggested implementation order (each independently mergeable)
+The pod image is built from `plugins/runpod_lora_trainer/pod/Dockerfile` and
+deployed as a **Serverless endpoint** on RunPod. The image bundles:
+- `handler.py` — the RunPod worker entrypoint
+- `runner.py` — a `run_training()` wrapper that reuses the **local trainer
+  scripts** (`plugins/lora_trainer/scripts/run_trainer.py` /
+  `run_zimage_trainer.py`), so the pod runs the exact same training code as a
+  local run
 
-1. Add `excludes` field to `PluginMetadata` + `PluginManager.enable_plugin()`
-   mutual-exclusion (generic, testable independently).
-2. New `runpod_lora_trainer` plugin: manifest (`excludes: ["lora_trainer"]`),
-   `remote_trainer.py` skeleton with a **dry-run/mock-remote** (fake poll
-   returning `done` + a local copy of a pre-made safetensor) — proves the
-   dispatch→ingest→persist wiring, plugin-state-driven backend selection, and
-   that enabling it disables `lora_trainer`, all under pytest.
-3. Config block + `RemoteLoraTrainer` real RunPod SDK integration
-   (upload/poll/ingest).
-4. Runner scripts `--remote` mode + pod image.
-5. Docs (`GUAARDVARK_GUIDE.md`, `AGENTS.md`).
+**Base image:** `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` (CUDA 12 —
+supports Ada/Ampere GPUs and the Z-Image/diffusers stack).
 
----
+**1. Log in to your registry** (Docker Hub example):
+```bash
+docker login
+```
 
-## 3. RunPod Python SDK — research notes
+**2. Build** from the `plugins/` directory (so both the pod files and the local
+scripts are in the Docker build context):
+```bash
+cd plugins
+docker build -f runpod_lora_trainer/pod/Dockerfile \
+    -t docker.io/<username>/guaardvark-lora-trainer:latest .
+```
 
-The `runpod` Python package (PyPI, Python 3.10+) is **two libraries in one**:
+**3. Push:**
+```bash
+docker push docker.io/<username>/guaardvark-lora-trainer:latest
+```
 
-1. **API/GraphQL client** — manage pods, submit jobs to serverless endpoints,
-   from your own code.
-2. **Serverless worker SDK** — the code that *runs on* RunPod (a `handler(job)`
-   function registered via `runpod.serverless.start(...)`).
+**Private image note:** if the repo is **private**, the RunPod endpoint needs
+credentials to pull it — see §4.3 (container-registry auth). Use a Docker Hub
+**Personal Access Token** (Account Settings → Personal Access Tokens) as the
+registry password, not your account password.
 
-### 3.1 Features relevant to Guaardvark LoRA training
+### 4.2 Cloudflare R2 — artifact staging (optional but recommended)
 
-| Feature | What it does | Use for us |
+R2 is S3-compatible, so it works as the bucket for staging training inputs and
+retrieving the trained `.safetensors`. Create a bucket in the Cloudflare
+dashboard, then generate an **R2 API token** (R2 → Manage R2 API Tokens) with
+**Object Read & Write** permission on that bucket.
+
+You'll need four values:
+- **Endpoint URL** — `https://<accountid>.r2.cloudflarestorage.com`
+- **Access Key ID** — the R2 token's access key
+- **Secret Access Key** — the R2 token's secret
+- **Bucket name** — e.g. `guaardvark-loras`
+
+These map to the `GUAARDVARK_RUNPOD_S3_*` env vars in §4.4.
+
+### 4.3 RunPod — API key, registry auth, endpoint
+
+**1. API key** (for Guaardvark's SDK):
+Console → **Settings → API Keys → Create API Key** → **Restricted**, scoped to
+your training endpoint. This is the `rpa_...` key for `GUAARDVARK_RUNPOD_API_KEY`.
+
+**2. Container-registry auth** (only if the pod image is **private**):
+Register the registry credentials in RunPod so the endpoint can pull the image.
+Via the RunPod MCP tool `runpod_create-container-registry-auth`:
+- **Registry**: `docker.io` (or `index.docker.io/v1/`)
+- **Username**: your Docker Hub username
+- **Password**: your Docker Hub **Personal Access Token**
+
+**3. Create the Serverless endpoint** (via `runpod_create-endpoint`):
+- **imageName**: `docker.io/<username>/guaardvark-lora-trainer:latest`
+- **gpuPoolIds**: e.g. `["ADA_24"]` (RTX 4090, 24GB) or `["AMPERE_24"]`
+  (RTX 3090, 24GB, cheaper)
+- **containerRegistryAuthId**: the auth id from step 2 (if private)
+- **workersMin/workersMax**: e.g. `0` / `1` (scale to zero when idle)
+- **executionTimeoutMs**: ≥ `GUAARDVARK_RUNPOD_MAX_JOB_SECONDS` (default 10800s)
+
+Copy the returned **endpoint ID** for `GUAARDVARK_RUNPOD_ENDPOINT_ID`.
+
+### 4.4 Configure `.env`
+
+Add to the repo-root `.env`:
+
+```bash
+# Route training to RunPod (auto = plugin-state decides; runpod = force)
+GUAARDVARK_LORA_BACKEND=auto
+
+# RunPod endpoint + API key (required)
+GUAARDVARK_RUNPOD_ENDPOINT_ID=<endpoint id from §4.3>
+GUAARDVARK_RUNPOD_API_KEY=rpa_...
+
+# Cloudflare R2 / S3-compatible bucket for artifact staging (optional)
+GUAARDVARK_RUNPOD_S3_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
+GUAARDVARK_RUNPOD_S3_ACCESS_KEY=<r2 access key>
+GUAARDVARK_RUNPOD_S3_SECRET_KEY=<r2 secret key>
+GUAARDVARK_RUNPOD_OUTPUT_BUCKET=guaardvark-loras
+
+# Optional tuning (defaults shown)
+GUAARDVARK_RUNPOD_POLL_INTERVAL=15
+GUAARDVARK_RUNPOD_MAX_JOB_SECONDS=10800
+```
+
+### 4.5 Enable the plugin
+
+In the **Plugins UI**, enable **RunPod LoRA Trainer**. This:
+- **disables the local `lora_trainer`** (via the manifest `excludes`),
+- routes training to RunPod (plugin state drives backend selection in
+  `_train_impl`).
+
+## 5. Config reference (`backend/config.py`)
+
+| Env var | Default | Purpose |
 |---|---|---|
-| `runpod.Endpoint("ID")` | Submit jobs to a deployed serverless GPU endpoint | **Recommended** — dispatch training, poll status |
-| `endpoint.run({...})` → `Job` | Async job; `job.status()`, `job.output()` | Long-running training (async is the right mode) |
-| `endpoint.run_sync(...)` | Blocks ~90s | Too short for training; skip |
-| `runpod.create_pod/get_pods/stop_pod` | Spin up/manage interactive GPU pods | Alternative one-off path |
-| `runpod.serverless.start({"handler": fn})` | The worker entrypoint that runs *on* the pod | Our pod image's `CMD` |
-| `upload_file_to_bucket(...)` | Push a file to any S3-compatible bucket, returns presigned URL | **Upload trained `.safetensors` back to us** |
-| Network-volume S3 API (boto3) | Read/write a volume without a GPU | Stage base model + dataset; avoid re-downloading |
+| `GUAARDVARK_RUNPOD_ENDPOINT_ID` | — | RunPod serverless endpoint ID |
+| `GUAARDVARK_RUNPOD_API_KEY` | — | RunPod API key (`rpa_...`) |
+| `GUAARDVARK_RUNPOD_S3_ENDPOINT_URL` / `_ACCESS_KEY` / `_SECRET_KEY` | — | S3-compatible bucket (e.g. Cloudflare R2) for artifact staging |
+| `GUAARDVARK_RUNPOD_OUTPUT_BUCKET` | `guaardvark-loras` | Bucket name for the trained LoRA artifact |
+| `GUAARDVARK_RUNPOD_POLL_INTERVAL` | 15s | Poll cadence |
+| `GUAARDVARK_RUNPOD_MAX_JOB_SECONDS` | 10800 (3h) | Hard job ceiling |
+| `GUAARDVARK_LORA_BACKEND` | `auto` | `mock`/`real`/`auto`/`runpod` |
+| `GUAARDVARK_DOCKERHUB_USERNAME` / `_TOKEN` | — | Docker Hub registry auth for a private pod image (read by setup tooling) |
 
-### 3.2 Authentication — what you need
+## 6. Backend selection
 
-**Two separate credentials:**
+In `_train_impl` (`backend/tasks/lora_trainer_tasks.py`):
+- `GUAARDVARK_LORA_BACKEND=runpod` → remote
+- `auto` → remote if `plugin_manager.is_effectively_enabled("runpod_lora_trainer")`
+  (plugin state is the source of truth)
 
-1. **RunPod API key** — for the SDK (endpoint jobs, pod management). Get it:
-   Console → **Settings → API Keys → Create API Key**. Since Nov 2024 keys have
-   scopes (`All` / `Restricted` / `Read Only`); use **Restricted** scoped to just
-   your training endpoint. Load via env:
-   `runpod.api_key = os.getenv("RUNPOD_API_KEY")`.
-2. **S3 API key** (separate) — for the S3-compatible gateway to network volumes.
-   Console → **Settings → S3 API Keys**. Gives an access key (`user_...`) +
-   secret (`rps_...`), shown once. Used with boto3 + a datacenter endpoint like
-   `https://s3api-us-ks-2.runpod.io/`.
+## 7. Testing (dry-run, no RunPod cost)
 
-### 3.3 Do you need to sign up / pay?
+`GUAARDVARK_RUNPOD_DRY_RUN=1` under pytest simulates the full
+dispatch→poll→ingest wiring with a local stub artifact — so the Celery flow and
+sidecar promotion are testable without a paid RunPod job. Refused outside pytest.
 
-- **Sign up: yes** — free, and you can create an API key immediately.
-- **Pay: yes, effectively** — RunPod is **pay-per-second, usage-based** (no
-  monthly subscription). New accounts get a small promo credit (~$1), but
-  **running your own pod/endpoint requires a positive credit balance** (RunPod
-  stops pods when balance can't cover ~10 min of runtime). There's no real free
-  GPU tier.
+## 8. Known gaps / limitations
 
-So: **sign up, create a Restricted API key, and add a small credit balance** to
-actually run training. The SDK install/config works on a free account, but
-dispatching a real job needs credits.
+- **Pod dependency versions may need pinning** — the pod `requirements.txt`
+  pulls unpinned `diffusers`/`peft`/`transformers`/`accelerate` on top of
+  `pytorch:2.5.1-cuda12.4`. If the image build hits a `pip` resolution conflict,
+  pin versions to match the local `backend/venv` stack (torch 2.13, diffusers
+  0.39, peft 0.20) or a known-good combo.
+- **FLUX not implemented** — `_resolve_backend` maps `flux`, but
+  `train_subject_lora` returns a "not implemented" failure. Only `zimage-turbo`
+  and `sdxl-legacy` work.
+- **Manifest staging is network-volume only** — `_resolve_manifest` in
+  `pod/handler.py` deliberately does not download arbitrary URLs; the
+  volume-shared path is the supported path.
+- **Lazy SDK imports** — `runpod` and `boto3` are imported only when a real
+  remote job is requested, so the plugin works without them installed until
+  needed.
 
-### 3.4 Recommended architecture for Guaardvark
+## 9. Sources
 
-Given the SDK, the cleanest design is a **serverless endpoint** (not a pod):
-
-- **Pod image** (`plugins/lora_trainer/pod/`): a Dockerfile with
-  `pytorch/pytorch:2.0.1-cuda11.7` + `runpod`, `diffusers`, `peft`, `accelerate`,
-  and a `handler.py` that runs our existing `run_zimage_trainer.py` /
-  `run_trainer.py` logic, then `upload_file_to_bucket()` the `.safetensors` back.
-- **Client side** (`RemoteLoraTrainer`): `endpoint.run({...})` with the dataset
-  manifest + hyperparams, poll `job.status()`, then **download** the artifact from
-  the returned presigned URL into `data/training/loras/`.
-- **Network volume** for the base model so cold starts don't re-download multi-GB
-  checkpoints.
-
-This maps cleanly onto the design above: the SDK replaces the "raw HTTP"
-transport option, and `upload_file_to_bucket` / presigned-URL download replaces
-the object-store plumbing.
-
----
-
-## 4. Open decisions (not yet resolved)
-
-1. **Transport**: RunPod **graphQL / `runpod` python SDK** (`runpod.api`) vs raw
-   **HTTP endpoints** + an **S3-compatible bucket** for artifacts. SDK is faster
-   to stand up; raw HTTP avoids a new dependency and works with self-hosted
-   bucket. (Research leans SDK.)
-2. **Security posture**: an API key in `.env` is the baseline; consider a
-   **cap/budget** (max $ per job) and an **approval gate** (outreach-style
-   supervised dispatch) before any paid pod is launched. Given the existing MCP
-   default-deny and supervised-outreach ethos, an approval gate is recommended.
-
----
-
-## 5. Sources
-
-- https://github.com/runpod/runpod-python (README — installation, Endpoint, Pods,
-  serverless worker, upload utils)
-- https://docs.runpod.io/serverless/sdks (install, config, API key env)
-- https://docs.runpod.io/get-started/api-keys (API key creation/scopes)
-- https://docs.runpod.io/serverless/workers/overview (workers, worker states)
-- https://docs.runpod.io/serverless/workers/create-dockerfile (Dockerfile)
-- https://docs.runpod.io/storage/s3-api (S3-compatible API, boto3 example)
-- https://docs.runpod.io/pods/pricing (credits, storage pricing, account limits)
-- https://github.com/runpod/runpod-python/blob/main/docs/serverless/utils/rp_upload.md
+- https://github.com/runpod/runpod-python
+- https://docs.runpod.io/serverless/sdks
+- https://docs.runpod.io/get-started/api-keys
+- https://docs.runpod.io/serverless/workers/overview
+- https://docs.runpod.io/serverless/workers/create-dockerfile
+- https://docs.runpod.io/storage/s3-api
+- https://docs.runpod.io/pods/pricing
