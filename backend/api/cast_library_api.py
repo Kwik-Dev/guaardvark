@@ -663,14 +663,19 @@ def dispatch_generate_samples(subject_id: int):
     # APPEND by default: a new batch stacks onto the user's curated (approved)
     # samples instead of wiping them. Pass append=false to start a clean slate.
     append = bool(body.get("append", True))
+    # Number of reference shots to plan + generate. The Cast UI offers 16 or 32
+    # (16 is the minimum where every angle, incl. profile right, appears).
+    n = int(body.get("n", 32) or 32)
+    if n not in (16, 32):
+        return jsonify({"error": "n must be 16 or 32"}), 400
 
     progress = get_unified_progress()
     job_id = progress.create_process(
         ProcessType.IMAGE_GENERATION,
         f"Character reference sheet generation for subject {subject_id}",
-        additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen", "use_trained_lora": use_lora, "append": append},
+        additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen", "use_trained_lora": use_lora, "append": append, "n": n},
     )
-    task = celery.send_task("character.generate_samples", args=[subject_id, job_id, use_lora, append])
+    task = celery.send_task("character.generate_samples", args=[subject_id, job_id, use_lora, append, n])
     # Persist celery id so /generate/cancel can revoke the worker without inspect.
     try:
         progress.update_process(
@@ -679,7 +684,7 @@ def dispatch_generate_samples(subject_id: int):
         )
     except Exception:
         pass
-    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id, "use_trained_lora": use_lora, "append": append}), 202
+    return jsonify({"task_id": task.id, "job_id": job_id, "subject_id": subject_id, "use_trained_lora": use_lora, "append": append, "n": n}), 202
 
 
 @bp.post("/subjects/<int:subject_id>/generate/cancel")
