@@ -1,3 +1,11 @@
+  - https://z-image-turbo.com/lora-training
+- https://medium.com/diffusion-doodles/how-to-train-a-lora-ostris-ai-toolkit-44216331056e
+- https://dev.to/gary_yan_86eb77d35e0070f5/best-practices-for-training-lora-models-with-z-image-complete-2026-guide-4p7h
+- https://occulticsiesta.hateblo.jp/entry/2026/03/17/204218
+- https://www.reddit.com/r/StableDiffusion/comments/1q8nknf/ltx2_lora_training_docker_imagerunpod/
+
+- https://onlinegamernikki.com/runpod-lora-learning-howto
+
 # Remote LoRA Training on RunPod — Setup & Reference
 
 Status: **Implemented** (was "design only" — see history note below).
@@ -212,7 +220,10 @@ GUAARDVARK_RUNPOD_API_KEY=rpa_...
 GUAARDVARK_RUNPOD_S3_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
 GUAARDVARK_RUNPOD_S3_ACCESS_KEY=<r2 access key>
 GUAARDVARK_RUNPOD_S3_SECRET_KEY=<r2 secret key>
-GUAARDVARK_RUNPOD_OUTPUT_BUCKET=guaardvark-loras
+GUAARDVARK_RUNPOD_OUTPUT_BUCKET=runpod-storage
+# Optional parent folder (prefix) in the bucket for a project/customer, e.g.
+# "kwiksher" → inputs under kwiksher/lora-inputs/…, outputs under kwiksher/…
+GUAARDVARK_RUNPOD_S3_PREFIX=kwiksher
 
 # Optional tuning (defaults shown)
 GUAARDVARK_RUNPOD_POLL_INTERVAL=15
@@ -226,6 +237,57 @@ In the **Plugins UI**, enable **RunPod LoRA Trainer**. This:
 - routes training to RunPod (plugin state drives backend selection in
   `_train_impl`).
 
+### 4.6 Specifying input data
+
+**Input data is NOT set in `.env`.** The training images come from the **cast
+Subject** in the Guaardvark UI:
+
+- **Reference images** — uploaded for the character (`Subject.ref_image_paths`)
+- **Approved samples** — generated Character-Generator samples marked approved
+
+These are collected automatically in `_train_impl` (refs ∪ approved samples) and
+passed to `RemoteLoraTrainer.train_subject_lora(...)`.
+
+What `.env` controls is **where the input images are staged** for the pod:
+
+| Env var | Controls |
+|---|---|
+| `GUAARDVARK_RUNPOD_S3_ENDPOINT_URL` / `_ACCESS_KEY` / `_SECRET_KEY` | If set, the client **uploads** each ref image to this S3/R2 bucket and the pod **downloads** it (`s3://` URLs) |
+| `GUAARDVARK_RUNPOD_OUTPUT_BUCKET` | The bucket name used for staging inputs + the trained LoRA |
+| *(none set)* | Fallback: client ships local paths; pod reads them from a shared **network volume** |
+
+So: upload the character's reference images in the cast UI, and set the S3/R2
+vars in `.env` to stage them to the pod. The pod endpoint must be created with
+the **same** `GUAARDVARK_RUNPOD_S3_*` (or `BUCKET_*`) env vars so it can download
+the staged inputs.
+
+### 4.7 Downloading the trained LoRA
+
+After the pod finishes training, the client downloads the `.safetensors`
+automatically. The pod returns a URL in its job output; the client fetches it
+into `data/training/loras/<name>_v<N>.safetensors` and writes a sidecar.
+
+```
+1. Client dispatches job:  endpoint.run(payload)
+2. Client polls:          job.status() until COMPLETED
+3. On COMPLETED:          artifact = job.output()  →  {"lora_url": "..."}
+4. Client extracts:       url = _extract_lora_url(artifact)
+5. Client downloads:      _download_artifact(url, output_path)
+```
+
+`_download_artifact` handles three URL schemes:
+
+| Pod returns | How the client downloads | When |
+|---|---|---|
+| `http(s)://` presigned URL | `urllib` streams the bytes | Pod has S3/R2 bucket creds → `upload_file_to_bucket` returns a presigned URL (**your normal path** with R2) |
+| `s3://bucket/key` | `boto3.download_file()` against the `RUNPOD_S3_*` gateway | Pod writes to a RunPod network-volume S3 gateway |
+| `file://<path>` | Reads the local file directly | Pod has **no** bucket creds AND the network volume is mounted at the same path on your machine (rare fallback) |
+
+**Note:** the pod runs on **RunPod's cloud GPU servers**, not your machine. The
+`file://` path is on a shared **network volume**, not your local disk — it only
+works if that volume is mounted locally. With R2 configured, you'll use the
+`http(s)` presigned-URL path, which needs no extra setup.
+
 ## 5. Config reference (`backend/config.py`)
 
 | Env var | Default | Purpose |
@@ -234,6 +296,7 @@ In the **Plugins UI**, enable **RunPod LoRA Trainer**. This:
 | `GUAARDVARK_RUNPOD_API_KEY` | — | RunPod API key (`rpa_...`) |
 | `GUAARDVARK_RUNPOD_S3_ENDPOINT_URL` / `_ACCESS_KEY` / `_SECRET_KEY` | — | S3-compatible bucket (e.g. Cloudflare R2) for artifact staging |
 | `GUAARDVARK_RUNPOD_OUTPUT_BUCKET` | `guaardvark-loras` | Bucket name for the trained LoRA artifact |
+| `GUAARDVARK_RUNPOD_S3_PREFIX` | — | Optional parent folder (prefix) in the bucket for a project/customer (e.g. `kwiksher`) |
 | `GUAARDVARK_RUNPOD_POLL_INTERVAL` | 15s | Poll cadence |
 | `GUAARDVARK_RUNPOD_MAX_JOB_SECONDS` | 10800 (3h) | Hard job ceiling |
 | `GUAARDVARK_LORA_BACKEND` | `auto` | `mock`/`real`/`auto`/`runpod` |
@@ -262,9 +325,6 @@ sidecar promotion are testable without a paid RunPod job. Refused outside pytest
 - **FLUX not implemented** — `_resolve_backend` maps `flux`, but
   `train_subject_lora` returns a "not implemented" failure. Only `zimage-turbo`
   and `sdxl-legacy` work.
-- **Manifest staging is network-volume only** — `_resolve_manifest` in
-  `pod/handler.py` deliberately does not download arbitrary URLs; the
-  volume-shared path is the supported path.
 - **Lazy SDK imports** — `runpod` and `boto3` are imported only when a real
   remote job is requested, so the plugin works without them installed until
   needed.
