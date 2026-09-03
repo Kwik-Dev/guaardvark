@@ -104,6 +104,11 @@ def create_celery_app():
             # to Celery's default 'celery' queue, which no worker consumes, and
             # the "Submit to Index" button silently produces a ghost task.
             'google_indexing.*': {'queue': 'default'},
+            # character.* (character.generate_samples / character.regen_sample) are
+            # custom-named like production.* — without an explicit route they fall
+            # to the unconsumed 'celery' queue, so "Generate character" in Cast
+            # leaves every sample stuck at status=pending with no images.
+            'character.*': {'queue': 'default'},
         },
 
         beat_schedule={

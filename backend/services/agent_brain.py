@@ -97,6 +97,18 @@ DELIBERATION_SIGNALS = [
     re.compile(r"(?:tell me|describe|what is|overview of|about).*?(?:codebase|your code|the code|your source|own source)", re.IGNORECASE),
 ]
 
+# Text-extraction / analysis over a pasted prompt. "extract the character description"
+# followed by an image prompt is a TEXT task — the model must answer in text and must
+# NOT call generate_image. Route to skip_tools so image tools are never offered.
+# (The direct image intercept already skips these, but the LLM can still call
+# generate_image on its own during the ReACT loop, so we take the tool away entirely.)
+TEXT_ANALYSIS_PATTERNS = re.compile(
+    r"\b(extract|describe|summarize|analyze|parse|break\s+down|pull\s+out)\b"
+    r"[^.!?\n]{0,120}?"
+    r"\b(character|description|prompt|scene|details?|attributes?|features?|style|lighting)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # Pure social / affirmation messages → Tier 2 LLM (skip_tools), never hardcoded pools
 SOCIAL_TIER2_PATTERNS = re.compile(
     r"^(hi|hello|hey|howdy|yo|sup|hiya|"
@@ -346,6 +358,20 @@ class AgentBrain:
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, is_voice_message=is_voice_message,
                     skip_tools=True, budget=budget, intent="social",
+                )
+
+            # -- Text extraction/analysis over a pasted prompt (Tier 2, skip_tools) --
+            # "extract the character description" + an image prompt is a TEXT task.
+            # Route to skip_tools so the model answers in text and generate_image is
+            # never offered — prevents the LLM from generating an image on its own.
+            if TEXT_ANALYSIS_PATTERNS.search(message):
+                tier_used = 2
+                route_intent = "text_analysis"
+                budget.charge(1, 2, "text-analysis skip_tools")
+                return self._instinct(
+                    session_id, message, options, emit_fn, app,
+                    project_id=project_id, is_voice_message=is_voice_message,
+                    skip_tools=True, budget=budget, intent="text_analysis",
                 )
 
             # -- Check if Tier 3 is needed --
