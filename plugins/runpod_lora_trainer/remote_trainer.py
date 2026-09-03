@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -293,20 +294,50 @@ class RemoteLoraTrainer:
 
     # The methods below are thin wrappers so the real SDK surface is contained
     # here and can be faked in tests without importing runpod.
+    def _s3_client(self):
+        """Build a boto3 S3 client from the configured R2/S3 creds."""
+        from backend import config
+        try:
+            import boto3
+        except ImportError as e:
+            raise RuntimeError("boto3 is required to stage inputs to S3/R2") from e
+        return boto3.client(
+            "s3",
+            aws_access_key_id=config.RUNPOD_S3_ACCESS_KEY or None,
+            aws_secret_access_key=config.RUNPOD_S3_SECRET_KEY or None,
+            endpoint_url=config.RUNPOD_S3_ENDPOINT_URL or None,
+        )
+
     def _stage_inputs(self, ref_image_paths: list[str], prompts: list[str]) -> dict:
-        """Upload images (+ captions) and return a manifest. Without S3 creds we
-        return the local paths — the pod image is expected to accept either a
-        manifest of URLs or (for a network volume) shared paths."""
+        """Upload images (+ captions) and return a manifest.
+
+        When S3/R2 creds are configured, upload each reference image to the
+        configured bucket and emit ``s3://bucket/key`` URLs in the manifest so
+        the pod can download them. Without S3 creds, fall back to local paths
+        (the pod reads them from a shared network volume).
+        """
         from backend import config
         manifest = []
-        for p in ref_image_paths:
-            entry = {"image_path": str(Path(p).resolve())}
-            manifest.append(entry)
         if config.RUNPOD_S3_ENDPOINT_URL and config.RUNPOD_S3_ACCESS_KEY:
-            # Real upload is implemented in the pod image via runpod's
-            # upload_file_to_bucket; on the client side we currently ship the
-            # manifest of local paths for the pod to pull over a network volume.
-            logger.info("runpod_lora_trainer: S3 staging configured (%s)", config.RUNPOD_S3_ENDPOINT_URL)
+            bucket = config.RUNPOD_OUTPUT_BUCKET or "guaardvark-loras"
+            prefix = config.RUNPOD_S3_PREFIX or ""
+            base = f"lora-inputs/{uuid.uuid4().hex[:8]}"
+            if prefix:
+                base = f"{prefix}/{base}"
+            client = self._s3_client()
+            for p in ref_image_paths:
+                src = Path(p).resolve()
+                key = f"{base}/{src.name}"
+                client.upload_file(str(src), bucket, key)
+                manifest.append({"image_path": f"s3://{bucket}/{key}"})
+            logger.info(
+                "runpod_lora_trainer: staged %d images to s3://%s/%s",
+                len(ref_image_paths), bucket, base,
+            )
+        else:
+            # Network-volume fallback: local paths the pod reads directly.
+            for p in ref_image_paths:
+                manifest.append({"image_path": str(Path(p).resolve())})
         return {"images": manifest, "captions": prompts}
 
     def _download_artifact(self, url: str, output_path: Path) -> None:
