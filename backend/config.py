@@ -90,6 +90,9 @@ RUNPOD_S3_ENDPOINT_URL = os.environ.get("GUAARDVARK_RUNPOD_S3_ENDPOINT_URL", "")
 RUNPOD_S3_ACCESS_KEY = os.environ.get("GUAARDVARK_RUNPOD_S3_ACCESS_KEY", "")
 RUNPOD_S3_SECRET_KEY = os.environ.get("GUAARDVARK_RUNPOD_S3_SECRET_KEY", "")
 RUNPOD_OUTPUT_BUCKET = os.environ.get("GUAARDVARK_RUNPOD_OUTPUT_BUCKET", "guaardvark-loras")
+# Optional parent folder (prefix) in the bucket for a project/customer, e.g.
+# "kwiksher" → inputs under kwiksher/lora-inputs/…, outputs under kwiksher/…
+RUNPOD_S3_PREFIX = os.environ.get("GUAARDVARK_RUNPOD_S3_PREFIX", "").strip().strip("/")
 RUNPOD_POLL_INTERVAL = int(os.environ.get("GUAARDVARK_RUNPOD_POLL_INTERVAL", "15"))
 # Hard ceiling for a single training job (seconds). Sized to cover a full
 # Z-Image schedule; the Celery task limits must be strictly larger than this.
