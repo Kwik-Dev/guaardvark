@@ -204,3 +204,28 @@ identity lock (trigger + class + short marks) is applied inside the render.
 - `backend/services/sample_promotion.py` — promotion to Training Data
 - `backend/services/comfyui_image_generator.py` — ComfyUI rendering + LoRA auto-link
 - `backend/utils/vision_analyzer.py` / `chat_utils.py` / `servo_knowledge_store.py` — vision model detection
+
+----
+
+
+ What you actually get per count
+
+ ┌─────────────────────────┬──────┬──────┬──────┐
+ │ Angle                   │ n=8  │ n=16 │ n=32 │
+ ├─────────────────────────┼──────┼──────┼──────┤
+ │ face-forward            │ 2    │ 5    │ 10   │
+ ├─────────────────────────┼──────┼──────┼──────┤
+ │ three-quarter left      │ 1    │ 2    │ 4    │
+ ├─────────────────────────┼──────┼──────┼──────┤
+ │ three-quarter right     │ 1    │ 2    │ 4    │
+ ├─────────────────────────┼──────┼──────┼──────┤
+ │ profile left            │ 1    │ 1    │ 2    │
+ ├─────────────────────────┼──────┼──────┼──────┤
+ │ profile right           │ 0 ❌ │ 1    │ 2    │
+ ├─────────────────────────┼──────┼──────┼──────┤
+ │ full-body front         │ 2    │ 3    │ 6    │
+ ├─────────────────────────┼──────┼──────┼──────┤
+ │ full-body three-quarter │ 1    │ 2    │ 4    │
+ ├─────────────────────────┼──────┼──────┼──────┤
+ │ Total                   │ 8    │ 16   │ 32   │
+ └─────────────────────────┴──────┴──────┴──────┘
