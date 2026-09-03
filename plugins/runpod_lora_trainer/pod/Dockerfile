@@ -28,9 +28,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY runpod_lora_trainer/pod/handler.py .
 COPY runpod_lora_trainer/pod/runner.py .
+COPY runpod_lora_trainer/pod/smoke_test.py .
 # Bundle the local trainer scripts so the pod runs the exact same training code
 # as a local run (runner.py imports run_zimage_trainer / run_trainer).
 COPY lora_trainer/scripts/ ./scripts/
+
+# Build-time smoke test: verifies handler/runner imports + wiring. Fails the
+# build if anything is wrong, so a pushed image is known-good.
+RUN python smoke_test.py
 
 # RunPod workers register a handler via runpod.serverless.start.
 CMD ["python", "-u", "/app/handler.py"]
