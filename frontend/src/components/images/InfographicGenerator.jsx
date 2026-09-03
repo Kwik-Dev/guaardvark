@@ -23,8 +23,8 @@ import {
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import DownloadIcon from '@mui/icons-material/Download';
 import RefreshIcon from '@mui/icons-material/Refresh';
-import {
 import CollapsibleAlert from "../common/CollapsibleAlert";
+import {
   generateInfographic,
   getInfographicStatus,
   INFOGRAPHIC_STYLES,
