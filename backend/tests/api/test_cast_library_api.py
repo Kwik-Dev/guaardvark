@@ -59,6 +59,17 @@ def test_create_subject_validates_kind(client):
     assert resp.status_code == 400
 
 
+def test_generate_rejects_invalid_shot_count(client):
+    """The generate dispatch only accepts n=16 or n=32 (the Cast UI's two options).
+    Validation runs before any Celery dispatch, so an invalid n returns 400."""
+    client.post("/api/cast-library/subjects", json={
+        "kind": "character", "name": "Alex", "description": "the protagonist",
+    })
+    resp = client.post("/api/cast-library/subjects/1/generate", json={"n": 24})
+    assert resp.status_code == 400
+    assert "n must be 16 or 32" in (resp.get_json() or {}).get("error", "")
+
+
 def test_list_after_create(client):
     client.post("/api/cast-library/subjects", json={
         "kind": "character", "name": "A", "description": "x",

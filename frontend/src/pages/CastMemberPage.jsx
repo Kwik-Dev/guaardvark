@@ -3,8 +3,8 @@ import { formatUiError } from "../utils/uiError";
 import { useParams, useNavigate } from 'react-router-dom';
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
 import {
-  Box, Tabs, Tab, Typography, Button, TextField, Card, CardMedia, CardContent,
-  CardActions, Chip, CircularProgress, Alert, Dialog, DialogTitle, DialogContent,
+  Box, Tabs, Tab, Typography, Button, TextField, MenuItem, Card, CardMedia, CardContent,
+  CardActions, Chip, CircularProgress, Dialog, DialogTitle, DialogContent,
   DialogActions, Grid, IconButton, Tooltip, Divider, Link, LinearProgress,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
@@ -116,6 +116,9 @@ const CastMemberPage = () => {
   // True from Generate dispatch until samples settle / cancel — so Cancel is
   // available even while the worker is still in the LLM planning phase.
   const [generateActive, setGenerateActive] = useState(false);
+  // Number of reference shots to generate. 16 is the minimum where every angle
+  // (incl. profile right) appears; 32 is the fuller default.
+  const [genCount, setGenCount] = useState(32);
   const pollCount = useRef(0);
   const [regenTarget, setRegenTarget] = useState(null); // sample being regenerated
   const [regenPrompt, setRegenPrompt] = useState('');
@@ -387,7 +390,7 @@ const CastMemberPage = () => {
       // Append a new batch onto the curated set (keeps approved keepers, stacks the
       // new shots above them). If we have a trained LoRA, use it so the new samples
       // stay consistent with the trained character (new costumes, angles, etc.).
-      const options = { append: true, ...(subject.lora_path ? { use_trained_lora: true } : {}) };
+      const options = { append: true, n: genCount, ...(subject.lora_path ? { use_trained_lora: true } : {}) };
       const res = await generateSamples(subjectId, options);
       setGenerateActive(true);
       await loadSamples();
@@ -920,6 +923,19 @@ const CastMemberPage = () => {
             <Button variant="outlined" startIcon={<AutoAwesomeIcon />} onClick={handlePlan} disabled={planning || busy}>
               {planning ? 'Planning…' : subject.bible ? 'Re-plan sheet' : 'Plan reference sheet'}
             </Button>
+            <TextField
+              select
+              label="Shots"
+              value={genCount}
+              onChange={(e) => setGenCount(Number(e.target.value))}
+              size="small"
+              sx={{ minWidth: 90 }}
+              disabled={busy || generateActive}
+              SelectProps={{ displayEmpty: true }}
+            >
+              <MenuItem value={16}>16</MenuItem>
+              <MenuItem value={32}>32</MenuItem>
+            </TextField>
             <Button variant="contained" startIcon={<AutoAwesomeIcon />} onClick={handleGenerate}
                     disabled={busy || planning || generateActive || sheetSamples.some(isPending)
                       || !(sheetSamples.length || subject.lora_path || subject.bible || samples.length)}>

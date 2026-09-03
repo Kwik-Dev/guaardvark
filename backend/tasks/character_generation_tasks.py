@@ -252,7 +252,7 @@ def _verify_angle_relabel_regen(
 # ── task implementations (plain functions for testability) ─────────────────────
 
 def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool = False,
-                     append: bool = True) -> dict:
+                     append: bool = True, n: int = 32) -> dict:
     """Plan + generate a batch of reference-sheet samples for a Subject.
 
     Flow:
@@ -271,6 +271,10 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
     job_id (optional): unified progress process id from dispatch. When present we
     drive updates so the job appears in unified queue / Activity / sockets for
     long batch runs of many cast items.
+
+    n: number of reference shots to plan + generate (default 32). The angle mix
+    is distributed proportionally by _angle_slots; n=16 is the minimum where
+    every angle (incl. profile right) appears.
     """
     from backend.models import db, Subject, SubjectSample
     from backend.services.character_generator_service import generate_character_sheet
@@ -332,6 +336,7 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
         name=subject.name,
         kind=subject.kind,
         description=subject.description or "",
+        n=n,
         trigger_word=subject.trigger_word or None,
         existing_bible=subject.bible or None,
         ref_image_paths=refs,
@@ -932,9 +937,9 @@ def create_character_generation_tasks(celery_app: Celery):
 
     @celery_app.task(name="character.generate_samples")
     def generate_samples_task(subject_id: int, job_id: str | None = None, use_lora: bool = False,
-                              append: bool = True):
+                              append: bool = True, n: int = 32):
         with current_app.app_context():
-            return generate_samples(subject_id, job_id=job_id, use_lora=use_lora, append=append)
+            return generate_samples(subject_id, job_id=job_id, use_lora=use_lora, append=append, n=n)
 
     @celery_app.task(name="character.regen_sample")
     def regen_sample_task(sample_id: int, prompt_override: str | None = None,
