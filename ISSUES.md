@@ -5,7 +5,86 @@ symptom, root cause, and any partial fix already applied.
 
 ---
 
-## [FUTURE] Agent-driven client registration from a website (fetch → extract → create → logo)
+## [FEATURE] Save a chat-generated image straight into the Cast Library
+
+- **Status:** Open (feature request) — not implemented. No code changes applied.
+- **Area:** `backend/tools/image_tools.py` (tool registry), `backend/api/cast_library_api.py`, chat image rendering in the frontend.
+
+### Request
+When the assistant generates an image in chat, the user should be able to save it into the
+Cast Library as a reference image for a character — without manually downloading the file and
+re-uploading it through the Cast Studio UI.
+
+### Current state (what exists today)
+- Chat-generated images are written to `data/outputs/generated_images/` and served at
+  `/api/outputs/generated_images/<file>.png`.
+- The Cast Library already has the write endpoints needed:
+  - `POST /api/cast-library/subjects` — create a subject; accepts `ref_image_paths` (on-disk paths).
+  - `POST /api/cast-library/subjects/<id>/upload-refs` — multipart upload; copies the file into
+    `data/cast_refs/<id>/`, appends to `ref_image_paths`, and auto-captions the new image.
+- **No chat tool or UI action wires these together.** `generate_image` only *uses* cast subjects
+  (`subject_ids`) to generate images *of* a character; it does not add images *into* the library.
+- The only current path is manual: download the image, open `/cast`, create/select a character,
+  drag-and-drop the file into the reference-images area.
+
+### Proposed work / steps
+1. **UI action on chat images** — add a "Save to Cast" button/action on generated images in the
+   chat view. On click, prompt for (or reuse) a Cast subject, then POST the image file to
+   `POST /api/cast-library/subjects/<id>/upload-refs` (reuse the existing `DragDropImageUpload`
+   flow / `productionService` helpers).
+2. **Or a `save_to_cast` tool** — add a `BaseTool` (category e.g. `data`, `is_dangerous=False`,
+   `requires_approval=True` since it writes to the DB) that takes an image path/URL + subject id
+   (or name) and calls the same upload logic, so the assistant can do it on request.
+3. Register the tool in `backend/tools/tool_registry_init.py` so AgentBrain/agents can call it.
+4. Verify an end-to-end prompt: *"Save this generated image to the Cast Library as Captain."*
+
+### Related
+- Cast Library CRUD + upload endpoints already exist in `backend/api/cast_library_api.py`.
+- See the companion feature request below for splitting a multi-view character sheet before saving.
+
+---
+
+## [FEATURE] Character sheet-splitting utility (multi-view sheet → individual view images)
+
+- **Status:** Open (feature request) — not implemented. No code changes applied.
+- **Area:** `backend/services/character_captioner.py`, `backend/services/character_generator_service.py`, Cast Library upload flow.
+
+### Request
+A multi-view **character sheet** (one image laid out with front / side / back panels) should be
+split into individual single-view images so each can be used as a clean Cast Library reference
+for LoRA training.
+
+### Why it's needed (root cause)
+The LoRA training pipeline is built around **individual, single-view images**:
+- `character_captioner.py` asks the VLM to lead with **exactly one** framing tag
+  (`close-up` / `head and shoulders` / `upper body` / `three-quarter view` / `full body` /
+  `wide shot`). A three-view sheet has no single framing, so the caption is wrong/misleading.
+- Training on a composite sheet teaches the model the **"three-panel sheet" layout** as part of
+  the character, so generations may come out as sheets instead of a single figure.
+- The pre-train gate measures pose/framing coverage per image (`detect_framing` /
+  `FULL_BODY_FRAMINGS`); a sheet counts as one framing and skews the coverage stats.
+
+The Casting Director's own sheet generation (`character_generator_service.generate_character_sheet`)
+already produces **individual stills** — one image per angle slot (`front`, `profile left`,
+`profile right`, `three-quarter`, `full body`, …) — which is the intended training shape. There is
+currently **no utility** to split an externally-provided composite sheet.
+
+### Proposed work / steps
+1. Add a sheet-splitting utility (e.g. `backend/services/character_sheet_splitter.py`) that takes
+   a multi-view character sheet image and crops it into individual view images (front / side /
+   back), using layout heuristics (panel grid detection) or a vision model to locate panels.
+2. Expose it as an endpoint (e.g. `POST /api/cast-library/split-sheet`) and/or a chat tool so a
+   sheet can be split and the resulting views uploaded to a Cast subject in one step.
+3. Wire the split views through the existing `upload-refs` flow so each gets a proper
+   single-framing caption.
+4. Verify: split a 3-panel sheet → 3 individual images, each captioned with a distinct framing,
+   and the pre-train gate sees full-body coverage.
+
+### Related
+- See the companion feature request above for saving a chat-generated image into the Cast Library.
+
+---
+
 
 - **Status:** Future request — not implemented. No code changes applied.
 - **Area:** `backend/tools/` (tool registry `tool_registry_init.py`), `backend/api/clients_api.py`, `backend/models.py` (`Client`).
