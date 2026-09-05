@@ -85,6 +85,58 @@ currently **no utility** to split an externally-provided composite sheet.
 
 ---
 
+## [FEATURE] RunPod LoRA trainer via Flash (code-first serverless) instead of a Docker image
+
+- **Status:** Open (feature request) — not implemented. No code changes applied.
+- **Area:** `plugins/runpod_lora_trainer/` (pod Dockerfile + handler + runner), `backend/tasks/lora_trainer_tasks.py`.
+
+### Request
+Offer a **Flash**-based path for the RunPod LoRA trainer — write the training as a Python
+`@Endpoint` function and deploy with `flash deploy`, instead of building/pushing a ~10GB
+Docker image and wiring a serverless endpoint to it.
+
+### Why it's lighter (current pain)
+The Docker-image path has been fragile in practice:
+- **Image build/maintenance** — a 10GB image (PyTorch + CUDA + trainer scripts) must be
+  rebuilt and re-pushed on every code change; the `latest` tag and multi-arch manifest
+  handling bit us (stale arm64 manifest, wrong-arch image pushed).
+- **GPU/CUDA mismatch** — the image's PyTorch 2.5.1/CUDA 12.4 only supports Ada/Ampere;
+  a Blackwell GPU worker failed with `no kernel image is available for execution on the
+  device`, requiring GPU-pool pinning.
+- **Disk sizing** — the ~20GB Z-Image model needs a 50GB container disk (was 10GB → OOM).
+- **Deploy loop** — every fix (path bug, model-ID mapping, disk, GPU) required a rebuild +
+  push + endpoint update + re-trigger.
+
+Flash removes the Dockerfile entirely: you write the training function locally, `flash dev`
+to iterate (hot-reload + live worker logs), then `flash deploy`. Flash provisions the
+endpoint and installs `dependencies=[]` at runtime.
+
+### Caveats / why it's not a drop-in
+- **Long-running job vs request/response** — Flash is designed for inference; LoRA training
+  is a 20–50 min batch job. It works via queue endpoints (`run` + `job.wait()`) but is
+  against Flash's grain.
+- **Heavy deps at runtime** — `torch`, `diffusers`, Z-Image still install on the worker
+  (cold start), so the first call is slow; warm workers help for repeated runs.
+- **10MB payload limit** — fine here because training data is staged to S3 (already done).
+- **Same GPU/CUDA constraints** — you still pick a GPU group; Blackwell still needs a
+  CUDA 12.8+ runtime.
+
+### Proposed work / steps
+1. Add a Flash `@Endpoint` function (e.g. `plugins/runpod_lora_trainer/flash_trainer.py`)
+   that wraps the existing `run_zimage_trainer` load→train protocol, taking the S3 dataset
+   manifest + hyperparams as input and returning the LoRA URL.
+2. Wire `RemoteLoraTrainer` (or a new `FlashLoraTrainer`) to call the Flash endpoint instead
+   of the Docker serverless endpoint, reusing the existing S3 staging + artifact download.
+3. Document the `flash dev` / `flash deploy` loop and the GPU-group choice (Ampere/Ada for
+   the current CUDA 12.4 stack).
+4. Keep the Docker path as a fallback; make the backend selectable (e.g. `runpod` vs `flash`).
+
+### Related
+- Existing Docker-based path: `plugins/runpod_lora_trainer/` (Dockerfile, handler.py, runner.py).
+- Flash docs: https://docs.runpod.io/flash/overview · https://github.com/runpod/flash
+
+---
+
 
 - **Status:** Future request — not implemented. No code changes applied.
 - **Area:** `backend/tools/` (tool registry `tool_registry_init.py`), `backend/api/clients_api.py`, `backend/models.py` (`Client`).
@@ -229,6 +281,37 @@ ffmpeg -i final.mp4 -i my_fx.wav \
 ffmpeg -i final.mp4 -i my_audio.wav \
   -map 0:v -map 1:a -c:v copy -c:a aac -shortest output.mp4
 ```
+
+## [OPEN] Post-train smoke identity score uses the file-size proxy, not a real visual measure
+
+- **Status:** Open — no fix applied. Documented; the `size` method is intentionally kept.
+- **Area:** `backend/services/video_consistency_metrics.py` (`score_smoke_vs_refs`), `backend/services/lora_posttrain_smoke.py`.
+
+### Symptom
+After a successful cast LoRA train, the Cast UI shows a "Post-train smoke identity score" alert. For the Starship Captain run it read `0.69 (size · zimage)`. The `size` method is a **file-size ratio**, not a real visual identity measure, so the number is not a meaningful "how similar is the generated character to the refs" score.
+
+### Root cause
+`score_smoke_vs_refs` hardcodes `method="size"`:
+```python
+ident = score_identity_preservation(ref_image_paths, smoke_path, method="size")
+```
+It never tries the RGB-histogram cosine similarity (`method="hist"`), which is the real (if weak) visual measure. The `size` method just compares the smoke image's file size to the average ref size, clamped to `[0.3, 0.95]`.
+
+### Why the histogram method is NOT used (and why `size` is kept)
+When the histogram method was tried on the actual smoke image vs the refs, it scored **~0.08** — far below the `size` score of 0.69. The histogram compares **color distributions**, which are dominated by **lighting and scene**, not identity:
+- The smoke image is a **neutral studio portrait** (`portrait, neutral studio lighting, sharp focus`).
+- The training refs are **varied scenes/lighting** (bridge, cargo bay, planet surface, red-alert, etc.).
+So the color histograms differ a lot even for the same character, making `hist` a poor identity measure for varied-scene refs. `size` is a rough but **stable** proxy that doesn't over-penalize lighting/scene differences.
+
+### Remaining work / options
+1. **Better identity measure** — a real face/identity embedding (e.g. a face-recognition model or CLIP image embedding) would score identity properly regardless of scene/lighting. This is the correct long-term fix but adds a model dependency.
+2. **Or** keep `size` but relabel the alert so users don't misread it as a visual similarity score (e.g. "smoke render OK" instead of a numeric identity score).
+3. **Or** make the smoke prompt match the refs' scene/lighting distribution so `hist` becomes meaningful.
+
+### Verification
+- `score_smoke_vs_refs(refs, smoke_12.png)` → `method: size` (current), `method: hist` would give ~0.08.
+
+---
 
 ## [FEATURE] Multilingual voice support — Japanese and 22+ other languages for Chatterbox TTS
 
