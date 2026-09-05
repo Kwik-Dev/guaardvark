@@ -7,14 +7,22 @@
 //   <CollapsibleAlert severity="warning" sx={{ mb: 1 }}>Some message</CollapsibleAlert>
 // Any existing `action` / `onClose` props are preserved alongside the toggle.
 
-import React, { useState } from "react";
+import React, { forwardRef, useState } from "react";
 import { Alert, IconButton, Collapse, Box } from "@mui/material";
 import { KeyboardArrowDown, KeyboardArrowUp } from "@mui/icons-material";
 
-const CollapsibleAlert = ({ children, action, onClose, ...alertProps }) => {
+// forwardRef is REQUIRED: this component is used as the child of MUI <Grow>
+// (e.g. the Snackbar's default transition). Grow reads the child's DOM node via
+// its ref (reflow = node => node.scrollTop); without forwarding the ref the node
+// is null and Grow throws "Cannot read properties of null (reading 'scrollTop')".
+const CollapsibleAlert = forwardRef(function CollapsibleAlert(
+  { children, action, onClose, ...alertProps },
+  ref
+) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <Alert
+      ref={ref}
       {...alertProps}
       onClose={onClose}
       action={
@@ -32,11 +40,15 @@ const CollapsibleAlert = ({ children, action, onClose, ...alertProps }) => {
         </Box>
       }
     >
-      <Collapse in={!collapsed} unmountOnExit>
+      {/* NOTE: no unmountOnExit — when this Collapse sits inside a MUI <Grow>
+          (e.g. the Snackbar), unmountOnExit makes the Collapse read scrollTop of
+          a null ref during the transition and throw. Keep the child mounted and
+          let the Collapse hide it. */}
+      <Collapse in={!collapsed}>
         <Box>{children}</Box>
       </Collapse>
     </Alert>
   );
-};
+});
 
 export default CollapsibleAlert;

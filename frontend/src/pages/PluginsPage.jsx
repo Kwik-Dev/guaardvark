@@ -243,8 +243,9 @@ const LogViewer = ({ pluginId, open }) => {
     }
   }, [logs]);
 
-  if (!open) return null;
-
+  // NOTE: do NOT return null here — this component is wrapped in a MUI <Collapse>,
+  // and a null child makes the Collapse transition read scrollTop of null and throw.
+  // The Collapse (in={open}) controls visibility; we always render the Box.
   return (
     <Box sx={{ mt: 1 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
