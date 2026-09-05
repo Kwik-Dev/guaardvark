@@ -138,10 +138,15 @@ def _resolve_model_path(model_id: str) -> str:
     mid = model_id or "Tongyi-MAI/Z-Image-Turbo"
     # Catalog layout: Tongyi-MAI--Z-Image-Turbo
     local_name = mid.replace("/", "--")
-    roots = [
-        Path(os.environ.get("GUAARDVARK_ROOT", ".")),
-        Path(__file__).resolve().parents[3],  # repo root from plugins/lora_trainer/scripts
-    ]
+    roots = [Path(os.environ.get("GUAARDVARK_ROOT", "."))]
+    # Repo root from plugins/lora_trainer/scripts. On the RunPod pod the scripts
+    # live at /app/scripts/, so parents[3] is out of range — guard it so the pod
+    # (which has no local snapshot and downloads from HF) doesn't crash with
+    # IndexError: 3.
+    try:
+        roots.append(Path(__file__).resolve().parents[3])
+    except IndexError:
+        pass
     for root in roots:
         cand = root / "data" / "models" / "stable_diffusion" / local_name
         if cand.is_dir() and (cand / "model_index.json").is_file():

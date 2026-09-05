@@ -196,6 +196,7 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
             learning_rate=train_settings["learning_rate"],
             steps=train_settings["steps"],
             base_model_id=train_profile.get("id"),
+            job_id=job_id,
         )
         if isinstance(remote_result, dict):
             remote_result.setdefault("used_images", train_images)
