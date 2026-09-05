@@ -93,6 +93,7 @@ class RemoteLoraTrainer:
         learning_rate: float = 1.0e-4,
         steps: int | None = None,
         base_model_id: str | None = None,
+        job_id: str | None = None,
         **_: Any,
     ) -> dict:
         if not ref_image_paths:
@@ -157,6 +158,7 @@ class RemoteLoraTrainer:
                     base_model_id=base_model_id,
                     max_seconds=config.RUNPOD_MAX_JOB_SECONDS,
                     poll_interval=config.RUNPOD_POLL_INTERVAL,
+                    job_id=job_id,
                 )
         except Exception as e:
             logger.exception("runpod_lora_trainer: dispatch failed for subject %s", subject_id)
@@ -232,6 +234,7 @@ class RemoteLoraTrainer:
         base_model_id: str | None,
         max_seconds: int,
         poll_interval: int,
+        job_id: str | None = None,
     ) -> dict:
         """Real RunPod SDK dispatch: stage → run → poll → download artifact."""
         from backend import config
@@ -273,8 +276,11 @@ class RemoteLoraTrainer:
         logger.info("runpod_lora_trainer: dispatched job %s for subject %s", job_id, subject_id)
 
         # 3) Poll with a hard ceiling. Map remote states to progress percentages
-        #    (the caller surfaces these via unified_progress).
+        #    (the caller surfaces these via unified_progress). The RunPod job is a
+        #    black box (no intermediate progress), so we estimate progress from
+        #    elapsed time vs the max_seconds ceiling and surface an ETA.
         deadline = time.time() + max_seconds
+        started = time.time()
         while time.time() < deadline:
             status = self._job_status(job)
             if status == "COMPLETED":
@@ -288,6 +294,21 @@ class RemoteLoraTrainer:
             if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
                 err = self._job_output(job) or {"error": "unknown"}
                 raise RuntimeError(f"RunPod job {job_id} {status}: {err}")
+            # Estimate progress from elapsed time. Reserve the last 10% for the
+            # artifact download; cap at 90% so the UI never shows "done" early.
+            elapsed = time.time() - started
+            frac = min(0.9, 0.25 + 0.65 * (elapsed / max_seconds))
+            pct = int(round(frac * 100))
+            remaining = max(0, int(deadline - time.time()))
+            if job_id:
+                try:
+                    from backend.utils.unified_progress_system import get_unified_progress
+                    get_unified_progress().update_process(
+                        job_id, pct,
+                        f"Training Z-Image Turbo LoRA on RunPod — ~{remaining // 60}m {remaining % 60}s left",
+                    )
+                except Exception:
+                    pass
             time.sleep(poll_interval)
 
         raise RuntimeError(f"RunPod job {job_id} exceeded {max_seconds}s ceiling")
