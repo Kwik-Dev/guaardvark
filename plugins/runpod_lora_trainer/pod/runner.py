@@ -52,7 +52,17 @@ def run_training(
     """
     if backend == "zimage":
         import run_zimage_trainer as trainer
-        model_id = base_model_id or "Tongyi-MAI/Z-Image-Turbo"
+        # The client sends the INTERNAL model id (e.g. "zimage-turbo"), not the
+        # HuggingFace repo path. Map it to the real repo id so the pod can
+        # download the weights; otherwise it tries to load "zimage-turbo" as a
+        # HF repo and fails with RepositoryNotFoundError.
+        _ZIMAGE_HF = {
+            "zimage-turbo": "Tongyi-MAI/Z-Image-Turbo",
+            "zimage": "Tongyi-MAI/Z-Image-Turbo",
+            "z-image-turbo": "Tongyi-MAI/Z-Image-Turbo",
+        }
+        model_id = _ZIMAGE_HF.get((base_model_id or "").strip().lower()) \
+            or base_model_id or "Tongyi-MAI/Z-Image-Turbo"
     elif backend == "sdxl":
         import run_trainer as trainer
         model_id = base_model_id or "stabilityai/stable-diffusion-xl-base-1.0"
