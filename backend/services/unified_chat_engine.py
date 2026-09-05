@@ -2882,9 +2882,31 @@ class UnifiedChatEngine:
         """
         if not message or not message.strip():
             return None
-        if not user_wants_image_generation(message):
-            return None
         if not self.registry.get_tool("generate_image"):
+            return None
+
+        # Cast LoRA request: the message names a trained cast subject (e.g. [starship_captain]
+        # or "Starship Captain ... trained LoRA"). Resolve subject_ids so the LoRA loads even
+        # when the LLM would otherwise refuse to call generate_image (it often hallucinates
+        # that no LoRA exists). Only treat it as an image request when the message also shows
+        # image/reference/LoRA intent, so "tell me about Starship Captain" is not hijacked.
+        cast_ids: list[int] = []
+        try:
+            from backend.tools.image_tools import _resolve_cast_from_prompt
+            cast_ids = _resolve_cast_from_prompt(message)
+        except Exception:
+            cast_ids = []
+
+        cast_image_intent = bool(cast_ids) and bool(
+            re.search(
+                r"\b(reference sheet|reference_sheet|character sheet|image|picture|photo|"
+                r"portrait|turnaround|concept art|generate|draw|create|render|make|lora|sheet)\b",
+                message,
+                re.IGNORECASE,
+            )
+        )
+
+        if not user_wants_image_generation(message) and not cast_image_intent:
             return None
 
         from backend.services.image_prompt_sanitize import sanitize_image_prompt
@@ -2893,11 +2915,18 @@ class UnifiedChatEngine:
         prompt = sanitize_image_prompt(message)
         if not prompt:
             return None
-        logger.info("Image-gen direct (natural lang): generate_image(prompt=%r)", prompt[:80])
+
+        params = {"prompt": prompt}
+        if cast_ids:
+            params["subject_ids"] = cast_ids
+        logger.info(
+            "Image-gen direct (natural lang): generate_image(prompt=%r subject_ids=%s)",
+            prompt[:80], cast_ids,
+        )
         # Delegate everything (user save, tool_call emit, model injection via /imagemodel,
         # gpu lease, execute, chat:image, complete, assistant save) to the shared runner.
         return self._run_direct_tool_execution(
-            "generate_image", {"prompt": prompt}, session_id, emit_fn, request_id, message, options
+            "generate_image", params, session_id, emit_fn, request_id, message, options
         )
 
     def _try_video_generate_direct(self, message: str, session_id: str,

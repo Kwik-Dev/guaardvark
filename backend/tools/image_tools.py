@@ -82,19 +82,28 @@ def _normalize_subject_ids(raw) -> list[int]:
     return out
 
 
-def _resolve_cast_from_prompt(prompt: str) -> list[int]:
-    """Match [trigger], trigger_word, or cast name tokens in the prompt to trained Subjects."""
-    text = prompt or ""
+def _resolve_cast_from_prompt(text: str) -> list[int]:
+    """Match [trigger], trigger_word, or cast-name phrases in ``text`` to trained Subjects.
+
+    ``text`` may be the image prompt or the original user message (which LLMs often strip
+    trigger tokens out of before calling ``generate_image``). Handles three forms of a
+    trained cast subject:
+
+      * bracket trigger  - [batman_2]
+      * underscore trigger - starship_captain
+      * plain name/trigger  - "Starship Captain"
+
+    Only trained subjects (``lora_path`` set) are considered, so common nouns don't match.
+    """
+    text = text or ""
     if not text.strip():
         return []
-    candidates: list[str] = []
+    text_l = text.lower()
+    text_und = " ".join(text_l.split()).replace(" ", "_")
     # Bracket form: [batman_2]
-    candidates.extend(re.findall(r"\[([^\]]+)\]", text))
-    # Bare tokens that look like triggers (word with underscore or known pattern)
-    for m in re.finditer(r"\b([a-zA-Z][a-zA-Z0-9]*(?:_[a-zA-Z0-9]+)+)\b", text):
-        candidates.append(m.group(1))
-    if not candidates:
-        return []
+    bracket_cands = re.findall(r"\[([^\]]+)\]", text)
+    # Bare underscore tokens that look like triggers
+    token_cands = re.findall(r"\b([a-zA-Z][a-zA-Z0-9]*(?:_[a-zA-Z0-9]+)+)\b", text)
 
     try:
         from flask import has_app_context
@@ -103,6 +112,12 @@ def _resolve_cast_from_prompt(prompt: str) -> list[int]:
         def _lookup() -> list[int]:
             found: list[int] = []
             seen: set[int] = set()
+
+            def _add(sid: int) -> None:
+                if sid not in seen:
+                    seen.add(sid)
+                    found.append(sid)
+
             rows = (
                 Subject.query.filter(
                     Subject.kind == "character",
@@ -110,23 +125,33 @@ def _resolve_cast_from_prompt(prompt: str) -> list[int]:
                     Subject.lora_path != "",
                 ).all()
             )
-            by_trigger = {}
-            by_name = {}
             for s in rows:
                 tw = (s.trigger_word or "").strip().lower()
                 nm = (s.name or "").strip().lower()
-                if tw:
-                    by_trigger[tw] = s.id
-                    by_trigger[tw.replace(" ", "_")] = s.id
-                if nm:
-                    by_name[nm] = s.id
-                    by_name[nm.replace(" ", "_")] = s.id
-            for c in candidates:
-                key = c.strip().lower()
-                sid = by_trigger.get(key) or by_name.get(key)
-                if sid and sid not in seen:
-                    seen.add(sid)
-                    found.append(sid)
+                tw_u = tw.replace(" ", "_").replace("-", "_")
+                nm_u = nm.replace(" ", "_").replace("-", "_")
+
+                # 1) Exact candidate match (bracket / underscore token)
+                for c in list(bracket_cands) + list(token_cands):
+                    ck = c.strip().lower().replace(" ", "_").replace("-", "_")
+                    if ck and ck in (tw_u, nm_u):
+                        _add(s.id)
+
+                # 2) Plain phrase match in the original text (spaces preserved)
+                if tw and re.search(rf"(?<![a-z0-9]){re.escape(tw)}(?![a-z0-9])", text_l):
+                    _add(s.id)
+                if tw_u and tw_u != tw and re.search(
+                    rf"(?<![a-z0-9_]){re.escape(tw_u)}(?![a-z0-9_])", text_und
+                ):
+                    _add(s.id)
+                if nm and nm != tw and re.search(
+                    rf"(?<![a-z0-9]){re.escape(nm)}(?![a-z0-9])", text_l
+                ):
+                    _add(s.id)
+                if nm_u and nm_u != nm and nm_u != tw_u and re.search(
+                    rf"(?<![a-z0-9_]){re.escape(nm_u)}(?![a-z0-9_])", text_und
+                ):
+                    _add(s.id)
             return found
 
         if has_app_context():
@@ -140,6 +165,61 @@ def _resolve_cast_from_prompt(prompt: str) -> list[int]:
                 db.session.remove()
     except Exception as e:
         logger.warning("cast resolve from prompt failed: %s", e)
+        return []
+
+
+def _resolve_cast_from_model(model: str) -> list[int]:
+    """Match a model name an LLM mistook for a cast LoRA to trained Subject ids.
+
+    Chat LLMs commonly strip the [trigger] token out of the prompt and pass it as the
+    ``model`` parameter instead of ``subject_ids`` (e.g. ``model=\"starship_captain_lora\"
+    or ``model=\"starship_captain\"``), which silently drops the LoRA and then fails on a
+    nonexistent model. Resolve those aliases here so the cast/LoRA path kicks in.
+
+    Handles trailing ``_lora`` / ``.safetensors`` suffixes and space/hyphen→underscore
+    normalization ("Starship Captain" → "starship_captain").
+    """
+    text = (model or "").strip().strip("[] ")
+    if not text:
+        return []
+    key = text.lower()
+    key = re.sub(r"(?:_lora|_lora\.safetensors|\.safetensors)\s*$", "", key).strip("[] ")
+    key = key.replace("-", "_").replace(" ", "_")
+    if not key:
+        return []
+
+    def _lookup() -> list[int]:
+        from flask import has_app_context
+        from backend.models import Subject, db
+        rows = Subject.query.filter(
+            Subject.kind == "character",
+            Subject.lora_path.isnot(None),
+            Subject.lora_path != "",
+        ).all()
+        out: list[int] = []
+        seen: set[int] = set()
+        for s in rows:
+            tw = (s.trigger_word or "").strip().lower().replace(" ", "_")
+            nm = (s.name or "").strip().lower().replace(" ", "_")
+            if key in (tw, nm) and s.id not in seen:
+                seen.add(s.id)
+                out.append(s.id)
+        return out
+
+    try:
+        from flask import has_app_context
+        from backend.models import db
+        if has_app_context():
+            return _lookup()
+        from backend.app import get_or_create_app
+        app = get_or_create_app()
+        with app.app_context():
+            try:
+                return _lookup()
+            finally:
+                db.session.remove()
+    except Exception as e:
+        logger.warning("cast resolve from model failed: %s", e)
         return []
 
 
@@ -223,7 +303,10 @@ class ImageGeneratorTool(BaseTool):
                 "downloaded model for the prompt (usually Z-Image-Turbo or SDXL). "
                 "With subject_ids, base is taken from the character's train family (Z-Image/SDXL/FLUX). "
                 "Only override when the user names a specific model: 'krea2-turbo', 'zimage-turbo', "
-                "'sd-xl', 'sdxl-turbo', 'realistic-vision', 'epic-realism'."
+                "'sd-xl', 'sdxl-turbo', 'realistic-vision', 'epic-realism'. "
+                "NEVER put a LoRA trigger or cast trigger word like 'starship_captain' or "
+                "'starship_captain_lora' here — that is not a model name. To render a trained "
+                "cast character, pass subject_ids (numeric Cast Library ID) and leave model='auto'."
             ),
             required=False,
             default="auto",
@@ -252,6 +335,24 @@ class ImageGeneratorTool(BaseTool):
         # Auto-resolve [batman_2] / trigger tokens if still empty
         if not sid_list:
             sid_list = _resolve_cast_from_prompt(prompt)
+
+        # LLMs often strip the [trigger] from the prompt and instead pass it as the
+        # model name (e.g. model="starship_captain_lora"). Resolve that alias so the
+        # LoRA still loads instead of failing on a nonexistent model.
+        if not sid_list and model:
+            sid_list = _resolve_cast_from_model(model)
+
+        # The original user message is the most reliable source of the trigger
+        # (the LLM may have stripped it from both the prompt and the model name).
+        if not sid_list:
+            ctx = kwargs.get("_agent_context") or {}
+            user_msg = (
+                ctx.get("user_message")
+                if isinstance(ctx, dict)
+                else getattr(ctx, "user_message", None)
+            )
+            if user_msg and str(user_msg).strip():
+                sid_list = _resolve_cast_from_prompt(str(user_msg))
 
         # Dimension hallucination guard (LLM may invent odd sizes)
         STANDARD_SIZES = {256, 384, 512, 640, 768, 896, 1024, 1280, 1536}

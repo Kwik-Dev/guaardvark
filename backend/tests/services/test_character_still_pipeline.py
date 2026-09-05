@@ -123,3 +123,113 @@ def test_cast_requested_but_empty_paths_fails_loudly():
     )
     assert still.success is False
     assert "no LoRA" in (still.error or "").lower() or "cast" in (still.error or "").lower()
+
+
+class TestResolveCastFromModel:
+    """LLMs often pass a cast trigger as the `model` name instead of subject_ids
+    (e.g. model=\"starship_captain_lora\"). _resolve_cast_from_model must map those
+    aliases back to trained Subject ids so the LoRA actually loads."""
+
+    @staticmethod
+    def _run(model, rows):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        from backend.tools import image_tools as it
+
+        fake_query = MagicMock()
+        fake_query.filter.return_value = fake_query
+        fake_query.all.return_value = rows
+
+        fake_subject = type(
+            "Subject",
+            (),
+            {
+                "query": fake_query,
+                "kind": "character",
+                "lora_path": MagicMock(),  # provides .isnot() and != for the filter chain
+            },
+        )()
+        fake_db = SimpleNamespace(session=SimpleNamespace(remove=lambda: None))
+        ctx = MagicMock()  # MagicMock is a context manager
+        fake_app = SimpleNamespace(app_context=lambda: ctx)
+        with (
+            patch("backend.app.get_or_create_app", return_value=fake_app),
+            patch("backend.models.Subject", fake_subject),
+            patch("backend.models.db", fake_db),
+        ):
+            return it._resolve_cast_from_model(model)
+
+    @staticmethod
+    def _subject(sid, trigger, name):
+        return type("S", (), {
+            "id": sid, "trigger_word": trigger, "name": name,
+            "lora_path": f"/fake/{trigger}_v1.safetensors",
+        })()
+
+    def test_lora_model_alias_resolves(self):
+        subj = self._subject(12, "starship_captain", "Starship Captain")
+        for model in (
+            "starship_captain_lora",
+            "starship_captain",
+            "[starship_captain]",
+            "Starship Captain",
+        ):
+            assert self._run(model, [subj]) == [12], model
+
+    def test_plain_base_models_do_not_resolve(self):
+        subj = self._subject(12, "starship_captain", "Starship Captain")
+        for model in ("flux-dev", "zimage-turbo", "auto", "krea2-turbo", ""):
+            assert self._run(model, [subj]) == [], model
+
+    def test_no_matching_subjects_returns_empty(self):
+        assert self._run("starship_captain_lora", []) == []
+
+
+class TestResolveCastFromPrompt:
+    """_resolve_cast_from_prompt must catch the trigger in the prompt OR the original
+    user message, in bracket / underscore / plain-name forms."""
+
+    @staticmethod
+    def _run(text, rows):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        from backend.tools import image_tools as it
+
+        fake_query = MagicMock()
+        fake_query.filter.return_value = fake_query
+        fake_query.all.return_value = rows
+        fake_subject = type(
+            "Subject", (), {"query": fake_query, "kind": "character", "lora_path": MagicMock()}
+        )()
+        fake_db = SimpleNamespace(session=SimpleNamespace(remove=lambda: None))
+        fake_app = SimpleNamespace(app_context=lambda: MagicMock())
+        with (
+            patch("backend.app.get_or_create_app", return_value=fake_app),
+            patch("backend.models.Subject", fake_subject),
+            patch("backend.models.db", fake_db),
+        ):
+            return it._resolve_cast_from_prompt(text)
+
+    @staticmethod
+    def _subject(sid, trigger, name):
+        return type("S", (), {
+            "id": sid, "trigger_word": trigger, "name": name, "lora_path": "/fake/lora.safetensors"
+        })()
+
+    def test_prompt_forms_resolve(self):
+        subj = self._subject(12, "starship_captain", "Starship Captain")
+        for text in (
+            "generate [starship_captain] on the bridge",
+            "generate starship_captain on the bridge",
+            "generate Starship Captain on the bridge",
+            "character reference sheet of [starship_captain] using his trained LoRA",
+            "character reference sheet of Starship Captain using his trained LoRA",
+        ):
+            assert self._run(text, [subj]) == [12], text
+
+    def test_unrelated_text_does_not_resolve(self):
+        subj = self._subject(12, "starship_captain", "Starship Captain")
+        for text in ("generate a spaceship bridge", "draw a captain hat"):
+            assert self._run(text, [subj]) == [], text
