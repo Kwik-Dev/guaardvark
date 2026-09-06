@@ -98,7 +98,7 @@ Video generation is kept lightweight with FFmpeg (no heavy video model in memory
 
 ## Branch management
 
-The 42 applied branches are organized into 8 merge batches + a docs-only group in `docs/git-workflow-actual_plan.md` (merge order, conflict hotspots, and per-batch smoke tests are documented there). All branches are based on `e1a6212`; `main`/`dev` are 369 commits behind `upstream/main`.
+The 42 applied branches are organized into two tracks — a **macOS track** (Apple Silicon support) and a **general track** (platform-agnostic improvements) — plus a docs-only group, documented in `docs/git-workflow-actual_plan.md` (merge order, conflict hotspots, and per-PR smoke tests are documented there). `main` is synced to `upstream/main` (`e4331689`); the `dev` integration branch is created from it and receives the track PRs.
 
 ---
 
