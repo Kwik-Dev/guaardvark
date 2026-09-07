@@ -1,0 +1,30 @@
+{
+  "id": "zvec_grep",
+  "name": "Code Search (zvec-grep)",
+  "version": "0.1.0",
+  "description": "Hybrid code search for the agents: one local index over a checkout, queried by meaning, by keyword, or by ripgrep, exposed as two MCP tools. Trial plugin; nothing leaves the machine.",
+  "author": "Guaardvark",
+  "type": "service",
+  "category": "code",
+  "port": 7999,
+  "vram_estimate_mb": 0,
+  "core": false,
+  "dependencies": [],
+  "config": {
+    "service_url": "http://127.0.0.1:7999",
+    "timeout": 30,
+    "fallback_enabled": true,
+    "embedding_model": "local/potion-code-16m-v2",
+    "default_enabled": false,
+    "default_auto_start": false
+  },
+  "requirements": {
+    "gpu": false,
+    "cuda": false,
+    "ollama": false,
+    "node": ">=22"
+  },
+  "endpoints": {
+    "mcp": "/mcp"
+  }
+}

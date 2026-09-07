@@ -304,3 +304,6 @@ data/demo_assets/*/README.md
 # by the release workflow; the root VERSION file stays the source of truth.
 cli/VERSION
 cli/README.md
+
+# zvec-grep workspace index (plugins/zvec_grep builds it per checkout)
+.zvec-grep/
