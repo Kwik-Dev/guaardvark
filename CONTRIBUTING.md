@@ -52,7 +52,9 @@ Open an issue using the **Feature Request** template. Describe the use case — 
 3. **Make your changes** (see Development Setup below)
 4. **Test** your changes: `python3 run_tests.py`
 5. **Commit** with a clear message following the project style (see below)
-6. **Push** and open a Pull Request against `main`
+6. **Push** and open a Pull Request against `main`. If your change is larger or
+   still settling, target the `dev` integration branch instead; CI and CodeQL run
+   on pull requests into either, and `dev` is merged forward into `main`.
 
 ### Improve Documentation
 
