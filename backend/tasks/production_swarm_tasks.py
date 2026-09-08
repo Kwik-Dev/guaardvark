@@ -455,6 +455,38 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
             return
 
         shots = ProductionShot.query.filter_by(production_id=prod_id).all()
+        total = len(shots)
+
+        # Create a unified progress job so the Film Crew UI can show per-shot
+        # storyboard generation progress. The job is keyed by production id so
+        # the frontend can correlate it easily.
+        progress_id = None
+        try:
+            from backend.utils.unified_progress_system import get_unified_progress, ProcessType
+            progress = get_unified_progress()
+            progress_id = progress.create_process(
+                ProcessType.IMAGE_GENERATION,
+                description=f"Storyboard for production {prod_id}",
+                process_id=f"filmcrew_storyboard_{prod_id}",
+                additional_data={"production_id": prod_id, "total_shots": total, "completed_shots": 0},
+            )
+        except Exception:
+            # Progress tracking is best-effort; never fail generation because of it.
+            pass
+
+        def _update_progress(completed: int, message: str):
+            if progress_id:
+                try:
+                    from backend.utils.unified_progress_system import get_unified_progress
+                    progress = get_unified_progress()
+                    progress.update_process(
+                        progress_id,
+                        int(completed / max(total, 1) * 100),
+                        message,
+                        additional_data={"production_id": prod_id, "total_shots": total, "completed_shots": completed},
+                    )
+                except Exception:
+                    pass
 
         # Claim the GPU exclusively around the still generate loop. Storyboard
         # gen rides VIDEO_RENDER; Z-Image cast LoRAs go offline via
@@ -471,6 +503,7 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
             require_fit=True,
             cross_process=True,
         ):
+            _update_progress(0, f"Starting storyboard generation for {total} shots")
             for i, shot in enumerate(shots):
                 lora_paths, prompt = _shot_loras_and_prompt(shot)
                 output_path = _storyboard_path(
@@ -479,6 +512,7 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
                     shot.shot_number or (i + 1),
                 )
                 subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+                _update_progress(i, f"Generating storyboard shot {i + 1}/{total}")
                 if lora_paths or image_generator is None:
                     still = render_character_still(
                         prompt,
@@ -498,6 +532,14 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
                     )
 
             db.session.commit()
+            _update_progress(total, f"Storyboard complete: {total} shots")
+            if progress_id:
+                try:
+                    from backend.utils.unified_progress_system import get_unified_progress
+                    get_unified_progress().complete_process(progress_id, f"Storyboard complete: {total} shots")
+                except Exception:
+                    pass
+
 
 def run_curator(prod_id: int) -> dict:
     """Layer 3 auto-curation: Gemma-4 vision judges each storyboard frame and sets
@@ -645,10 +687,14 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
 
         progress = get_unified_progress()
         render_id = f"prod_{prod_id}"
+        _total_shots = len(shot_inputs)
         job_id = progress.create_process(
             ProcessType.VIDEO_RENDER,
             f"Rendering production {prod_id}: {ctx.production.name}",
-            additional_data={"production_id": prod_id},
+            # Deterministic id so the Film Crew UI can look up live render
+            # progress (mirrors filmcrew_storyboard_<prod_id>).
+            process_id=f"filmcrew_render_{prod_id}",
+            additional_data={"production_id": prod_id, "total_shots": _total_shots, "completed_shots": 0},
         )
         # Claim the GPU exclusively for the render via the unified front door.
         # gpu_session delegates to the in-memory gate (same fail-fast GpuBusyError,
