@@ -1958,6 +1958,18 @@ if [ "$FAST_START" -ne 1 ]; then
 else
     vader_info "Fast start enabled - skipping frontend install/build."
 fi
+
+# macOS on an external/exFAT volume leaves "._name" AppleDouble sidecars next to
+# files after every pull, copy or pip install. A "._x.py" is a binary file that
+# ends in .py, so transformers' import scan and our blueprint discovery choke on
+# it (#41). Strip them before anything imports the backend. No-op on Linux.
+if is_macos && [ -f "$SCRIPT_DIR/scripts/platform/strip_appledouble.sh" ]; then
+    _sidecars=$(bash "$SCRIPT_DIR/scripts/platform/strip_appledouble.sh" "$SCRIPT_DIR" 2>/dev/null || echo 0)
+    if [ "${_sidecars:-0}" -gt 0 ]; then
+        vader_info "Removed $_sidecars AppleDouble '._*' sidecar file(s) from the checkout (they break Python import scans)."
+    fi
+    unset _sidecars
+fi
 vader_separator
 
 vader_step 6 "Ensuring Ollama service is running..."

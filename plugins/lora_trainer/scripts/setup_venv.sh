@@ -1,19 +1,38 @@
 #!/usr/bin/env bash
 # Bootstrap the isolated torch venv for the lora_trainer plugin.
 #
-# Run once on a host with a real NVIDIA GPU (a 12-16 GB consumer card is enough).
-# Auto-detects the driver's CUDA version and installs a matching torch wheel
-# so that torch.cuda.is_available() returns True inside the venv at runtime.
+# Linux: run once on a host with a real NVIDIA GPU (a 12-16 GB consumer card is
+# enough). Auto-detects the driver's CUDA version and installs a matching torch
+# wheel so that torch.cuda.is_available() returns True inside the venv at runtime.
+# macOS: installs the default PyPI wheel (Metal/MPS); there is no CUDA on a Mac.
 # Takes ~5-10 min. Can be re-run.
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="${PLUGIN_DIR}/venv-torch"
 REQS="${PLUGIN_DIR}/requirements-torch.txt"
+UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+# Pin the torch version that the live, known-good venv-torch actually runs. The old
+# 2.5.1 pin did NOT match disk (the working venv has 2.11.0+cu130), so re-running this
+# script would have downgraded torch and broken the real LoRA trainer. Verified via
+# `plugins/lora_trainer/venv-torch/bin/python -c "import torch; print(torch.__version__)"`.
+# PyPI has the same version as a macOS arm64 wheel.
+TORCH_VER="2.11.0"
 
 if [[ ! -f "${REQS}" ]]; then
     echo "ERROR: requirements-torch.txt missing at ${REQS}" >&2
     exit 1
+fi
+
+# Test for the interpreter, not the directory: the TMPDIR below lives inside the
+# venv dir, so an aborted or partial run leaves the directory present and empty,
+# and a directory test then skips creation forever (the #41 tester saw
+# "venv-torch/bin/pip: No such file or directory" on every re-run). Prefer 3.12,
+# the interpreter the pins in requirements-torch.txt are built for.
+if [[ ! -x "${VENV}/bin/python" ]]; then
+    PY="${PYTHON_CMD:-$(command -v python3.12 || command -v python3)}"
+    echo "Creating venv at ${VENV} with ${PY}…"
+    "${PY}" -m venv "${VENV}"
 fi
 
 # Pip wheels (CUDA bundles especially) total ~4 GB. /tmp is tmpfs on most
@@ -22,13 +41,30 @@ fi
 export TMPDIR="${VENV}/.tmp"
 mkdir -p "${TMPDIR}"
 
-if [[ ! -d "${VENV}" ]]; then
-    echo "Creating venv at ${VENV}…"
-    python3 -m venv "${VENV}"
-fi
-
 echo "Upgrading pip in venv-torch…"
 "${VENV}/bin/pip" install --upgrade pip wheel
+
+if [[ "${UNAME_S}" == "Darwin" ]]; then
+    # Default PyPI wheel is the MPS-capable build; the CUDA indexes below have no
+    # macOS wheels at all. Same rule as scripts/install_pytorch.sh.
+    echo "macOS detected: installing torch ${TORCH_VER} + torchvision from PyPI (Metal/MPS)…"
+    "${VENV}/bin/pip" install "torch==${TORCH_VER}" torchvision
+    echo "Installing remaining requirements…"
+    "${VENV}/bin/pip" install -r "${REQS}"
+    echo "Verifying MPS in venv-torch…"
+    "${VENV}/bin/python" -c '
+import torch, sys
+print("Python torch:", torch.__version__)
+mps = getattr(torch.backends, "mps", None)
+ok = bool(mps and mps.is_available())
+print("MPS available:", ok)
+if not ok:
+    print("ERROR: Metal (MPS) is not visible inside venv-torch; training would run on the CPU.")
+    sys.exit(1)
+'
+    echo "Done. The venv is complete; LoRA training on Apple Silicon is tracked in #43 (the trainer still selects CUDA today)."
+    exit 0
+fi
 
 echo "Detecting host CUDA version for correct torch wheel..."
 # Prefer the CUDA version reported by the installed NVIDIA driver.
@@ -40,11 +76,6 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 CU_INDEX="cu130"   # matches the working install on the development box (CUDA 13 driver)
-# Pin the torch version that the live, known-good venv-torch actually runs. The old
-# 2.5.1 pin did NOT match disk (the working venv has 2.11.0+cu130), so re-running this
-# script would have downgraded torch and broken the real LoRA trainer. Verified via
-# `plugins/lora_trainer/venv-torch/bin/python -c "import torch; print(torch.__version__)"`.
-TORCH_VER="2.11.0"
 
 if [[ -n "$HOST_CUDA" ]]; then
     # Turn 12.6 into cu126, 12.4 into cu124, 13.x into cu130 etc.

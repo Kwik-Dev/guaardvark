@@ -241,10 +241,35 @@ heal_cv_optional() {
 
 heal_comfyui_deps() {
     log "=== Step 5: ComfyUI + custom-node deps (backend venv) ==="
+    # ComfyUI is optional and may run outside the checkout (Comfy Desktop, a
+    # shared install). Without plugins/comfyui/ComfyUI there is nothing to heal;
+    # under `set -e` the installer's "not found" error used to end the whole
+    # heal here, before verification ran (#41).
+    if [ ! -f "$REPO_ROOT/plugins/comfyui/ComfyUI/main.py" ]; then
+        if [ "$COMFYUI_ONLY" -eq 1 ]; then
+            log "ERROR: ComfyUI is not installed under plugins/comfyui/ComfyUI; nothing to heal."
+            exit 1
+        fi
+        log "ComfyUI is not installed under plugins/comfyui (external ComfyUI, or not installed yet) — skipping."
+        return 0
+    fi
     export GUAARDVARK_HEAL_FORCE=1
     export VENV_PYTHON
     bash "$REPO_ROOT/plugins/comfyui/scripts/install_deps.sh"
     repin_numpy_setuptools
+}
+
+# macOS on an external/exFAT volume leaves "._name" AppleDouble sidecars next to
+# files; a "._x.py" breaks transformers' import scan and blueprint discovery.
+# See scripts/platform/strip_appledouble.sh. No-op on Linux.
+strip_appledouble_sidecars() {
+    local script="$REPO_ROOT/scripts/platform/strip_appledouble.sh"
+    [ -f "$script" ] || return 0
+    local n
+    n=$(bash "$script" "$REPO_ROOT" 2>/dev/null || echo 0)
+    if [ "${n:-0}" -gt 0 ]; then
+        log "Removed $n AppleDouble '._*' sidecar file(s) from the checkout (they break Python import scans)."
+    fi
 }
 
 verify_heal() {
@@ -344,6 +369,7 @@ main() {
     # Belt-and-braces: repin once more after the restart's install_deps re-run,
     # so verify below judges the venv state that will actually serve traffic.
     repin_numpy_setuptools
+    strip_appledouble_sidecars
     verify_heal || exit 1
 
     log "========== heal_backend_venv DONE =========="
