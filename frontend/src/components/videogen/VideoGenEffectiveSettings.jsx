@@ -1,14 +1,15 @@
 import React from "react";
 import { Box, Chip, Typography } from "@mui/material";
 import {
-  isLtxModel,
-  isMinimaxModel,
   isWanModel,
+  MODEL_OPTIONS,
+  modelChipLabel,
   PROMPT_STYLES,
 } from "../../constants/videoGeneratorPresets";
 
 /**
  * Compact "what will actually run" summary derived from computedParams.
+ * Family chip is MODEL_OPTIONS[computedParams.model].type — never a CogVideoX default.
  */
 export default function VideoGenEffectiveSettings({
   model,
@@ -22,6 +23,15 @@ export default function VideoGenEffectiveSettings({
   capabilities = null,
 }) {
   if (!computedParams) return null;
+  const runningId = computedParams.model || model;
+  const family = MODEL_OPTIONS[runningId]?.type;
+  const familyColor =
+    family === "ltx" ? "warning"
+    : family === "minimax" ? "success"
+    : family === "wan" ? "secondary"
+    : family === "hunyuan" ? "info"
+    : family === "cogvideox" ? "primary"
+    : "default";
   return (
     <Box sx={{ mb: 2 }}>
       <Typography
@@ -42,20 +52,15 @@ export default function VideoGenEffectiveSettings({
           bgcolor: "action.hover",
         }}
       >
-        {isLtxModel(model) ? (
-          <Chip
-            size="small"
-            color="warning"
-            label={String(model || "").startsWith("ltx25") ? "LTX-2.5" : "LTX-2.3"}
-            sx={{ fontWeight: 600 }}
-          />
-        ) : isMinimaxModel(model) ? (
-          <Chip size="small" color="success" label="MiniMax H3" sx={{ fontWeight: 600 }} />
-        ) : isWanModel(model) ? (
-          <Chip size="small" color="secondary" label="Wan 2.2" sx={{ fontWeight: 600 }} />
-        ) : (
-          <Chip size="small" color="primary" label="CogVideoX" sx={{ fontWeight: 600 }} />
-        )}
+        <Chip
+          size="small"
+          color={familyColor}
+          label={modelChipLabel(runningId)}
+          data-testid="effective-model"
+          data-model={runningId}
+          title={MODEL_OPTIONS[runningId]?.label || runningId}
+          sx={{ fontWeight: 600 }}
+        />
         <Chip size="small" variant="outlined" label={`${computedParams.num_inference_steps} steps`} />
         {computedParams.speed_profile && computedParams.speed_profile !== "standard" && (
           <Chip

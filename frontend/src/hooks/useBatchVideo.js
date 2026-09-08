@@ -184,12 +184,7 @@ export function useBatchVideo({ setError, setSuccess, computedParams } = {}) {
     }
   }, [activeBatchId, computedParams, fetchBatches, startPollingStatus]);
 
-  const handleDeleteBatch = useCallback(async (batchId, displayName) => {
-    if (!window.confirm(
-      `Delete "${displayName || batchId.slice(0, 8)}" and all of its videos? This can't be undone.`,
-    )) {
-      return;
-    }
+  const handleDeleteBatch = useCallback(async (batchId) => {
     try {
       const res = await fetch(`${API_BASE}/batch-video/delete/${batchId}`, { method: "DELETE" });
       if (res.ok) {
