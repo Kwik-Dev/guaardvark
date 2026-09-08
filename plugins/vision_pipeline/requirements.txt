@@ -6,8 +6,12 @@
 # on diffusers import (batch_image_generation_api etc), xformers build warnings, and
 # pynvml FutureWarnings. See plugins/comfyui/scripts/start.sh for the same problem from
 # custom nodes.
-fastapi==0.115.0
-uvicorn==0.30.0
+# Floors, not exact pins: every enabled plugin's requirements are installed into
+# the shared backend venv in one pip call, so an exact pin here conflicts with
+# the floors the other plugins declare (swarm asks for uvicorn>=0.32) and the
+# whole plugin bundle fails to reconcile.
+fastapi>=0.115.0
+uvicorn>=0.30.0
 Pillow>=10.0.0
 imagehash>=4.3.0
 pynvml>=11.5.0
