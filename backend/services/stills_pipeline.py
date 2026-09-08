@@ -129,12 +129,14 @@ def run_stills_pipeline(
         director=director,
         auto_enhance=auto_enhance,
         verbatim=verbatim,
+        model=model,
     )
 
     # Director rewrite (batch-level director already applied: pass enhance=none)
     if enhance_mode == "director":
         cleaned = apply_enhance_to_prompts(
             cleaned, enhance_mode="director", style=style, extra_guidance=extra_guidance,
+            model=model,
         )
         # After director, offline stuffing would double-rewrite — use none for auto_enhance
         req_auto_enhance = False

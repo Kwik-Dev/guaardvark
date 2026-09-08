@@ -925,6 +925,14 @@ def enhance_prompt():
                 )
             except Exception:
                 family = ""
+        if not family:
+            # "auto" resolves to the product default (Z-Image); the preview must
+            # show that family's prompt policy, not the tag-stuffed SD one.
+            try:
+                from backend.services.stills_defaults import model_family
+                family = model_family(model or "auto")
+            except Exception:
+                family = ""
 
         # Enhance the prompt
         enhanced_prompt, negative_prompt, detection = generator.image_generator.enhance_prompt_for_quality(

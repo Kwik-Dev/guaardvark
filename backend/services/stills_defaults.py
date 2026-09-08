@@ -16,14 +16,49 @@ from typing import Any
 # Family sampling + canvas (PoA image gen unification §4).
 # Z-Image Turbo: official HF recipe is num_inference_steps=9 (→ 8 DiT forwards),
 # guidance_scale=0.0 (CFG distilled out).
+#
+# prompt_style says what kind of text the family's encoder was trained on, and
+# therefore what the product may add to a person's prompt:
+#   "tags"    CLIP-era models (SD 1.5 / SDXL). Comma-separated quality and
+#             anatomy tags are how these were captioned, so appending them helps.
+#   "natural" LLM text encoders (Z-Image: Qwen3). Trained on prose captions; the
+#             model card asks for long natural-language descriptions and states
+#             that negative prompts have no effect (CFG-distilled). Tag suffixes
+#             are read as scene content: measured 2026-09-07 on this box, "full
+#             body shot, realistic stance, correct anatomy, ..." appended to
+#             "A man and woman watching a movie on a couch" produced posed,
+#             camera-facing figures with tangled legs on 4/4 seeds, while the
+#             same seeds with the bare sentence or a prose rewrite were clean.
+#             Natural families get an LLM rewrite (media_director) or nothing.
+# Krea 2 also uses an LLM encoder (Qwen3-VL per its model_index) but has not
+# been A/B'd here yet, so it keeps "tags" until it is.
 _FAMILY_DEFAULTS: dict[str, dict[str, Any]] = {
-    "zimage": {"width": 1024, "height": 1024, "steps": 9, "guidance": 0.0},
-    "krea2-turbo": {"width": 1024, "height": 1024, "steps": 8, "guidance": 0.0},
-    "krea2-raw": {"width": 1024, "height": 1024, "steps": 52, "guidance": 3.5},
-    "sdxl": {"width": 1024, "height": 1024, "steps": 25, "guidance": 7.0},
-    "sd": {"width": 512, "height": 512, "steps": 20, "guidance": 7.5},
-    "flux": {"width": 1024, "height": 1024, "steps": 28, "guidance": 3.5},
+    "zimage": {"width": 1024, "height": 1024, "steps": 9, "guidance": 0.0, "prompt_style": "natural"},
+    "krea2-turbo": {"width": 1024, "height": 1024, "steps": 8, "guidance": 0.0, "prompt_style": "tags"},
+    "krea2-raw": {"width": 1024, "height": 1024, "steps": 52, "guidance": 3.5, "prompt_style": "tags"},
+    "sdxl": {"width": 1024, "height": 1024, "steps": 25, "guidance": 7.0, "prompt_style": "tags"},
+    "sd": {"width": 512, "height": 512, "steps": 20, "guidance": 7.5, "prompt_style": "tags"},
+    "flux": {"width": 1024, "height": 1024, "steps": 28, "guidance": 3.5, "prompt_style": "tags"},
 }
+
+# Generator-side family names (OfflineImageGenerator._model_family) that do not
+# carry the turbo/raw split used above.
+_GENERATOR_FAMILY_ALIASES = {"krea2": "krea2-turbo"}
+
+
+def prompt_style_for_family(family: str | None) -> str:
+    """'natural' or 'tags' for a stills family name from either naming scheme."""
+    fam = (family or "").strip().lower()
+    fam = _GENERATOR_FAMILY_ALIASES.get(fam, fam)
+    entry = _FAMILY_DEFAULTS.get(fam)
+    if not entry:
+        return "tags"
+    return str(entry.get("prompt_style", "tags"))
+
+
+def prompt_style(model: str | None = "auto") -> str:
+    """'natural' or 'tags' for a catalog key / HF id / auto."""
+    return prompt_style_for_family(model_family(model))
 
 # When callers still ship classic SD-era "unset" markers, treat as None so
 # family defaults win for modern models.

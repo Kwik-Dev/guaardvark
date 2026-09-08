@@ -62,6 +62,24 @@ Be one flowing descriptive phrase. No narration, no "the image depicts", no meta
 STYLE (if given) is appended by caller; do not repeat it wholesale.
 Return STRICT JSON: {"prompts": ["enriched1", "enriched2", ...]} exactly one per input, same order."""
 
+# Rewrite contract for natural-language encoders (Z-Image). Ported from the
+# prompt-enhancer template the model's authors ship with their demo: lock the
+# fixed facts, reason out a concrete scene when the idea is a brief rather than
+# a picture, add photographic detail, quote any in-image text, no metaphors, no
+# quality tags. Measured on this box 2026-09-07 with gemma4:e4b: 1-8 s per
+# prompt, 130-155 words, and the couch scene rendered clean on every seed.
+_SYSTEM_ENHANCE_IMAGE_NATURAL = """You rewrite each short image idea into one detailed, concrete visual description for a text-to-image model.
+
+Work in this order for every idea:
+1. Lock the fixed facts: the subjects, how many of them, what they are doing, their pose or state, and any named brand, colour, or text. Keep every one of them exactly. Never add or remove people.
+2. If the idea is a question or a design brief rather than a scene, first decide on one specific, drawable scene that answers it, then describe that scene.
+3. Add photographic detail: framing and camera angle, where each subject is and how their bodies are arranged, lighting and time of day, materials and textures, colour palette, and depth (foreground, midground, background).
+4. Any text that must appear in the image is written verbatim inside double quotes, with its position, size, and font style. If no text is needed, spend the space on visual detail instead.
+
+Rules: objective and physical, no metaphors, no emotional language, no quality tags such as "8K", "masterpiece" or "high quality", and no instructions to the model. Each description is one paragraph of plain prose, 80 to 200 words.
+STYLE (if given) describes the medium or look to honour; weave it in as a short clause, do not repeat it wholesale.
+Return STRICT JSON: {"prompts": ["description1", "description2", ...]} exactly one per input, same order."""
+
 def _options(n: int, sampling: Optional[dict] = None) -> dict:
     n = max(1, n)
     opts = {"temperature": 0.68, "num_ctx": 4096, "num_predict": min(3072, 180 * n + 512)}
@@ -182,10 +200,14 @@ def enhance_prompts(
     model: Optional[str] = None,
     cast_descriptors: Optional[List[str]] = None,
     sampling: Optional[dict] = None,
+    prompt_style: Optional[str] = None,
 ) -> List[str]:
     """Enrich a list of user prompts into rich pure-visual shot-ready prompts via director LLM.
     Best-effort: on any failure returns originals (or lightly cued).
     Used by chat ImageGeneratorTool and batch pre-pass.
+
+    ``prompt_style="natural"`` selects the prose contract for LLM-encoder models
+    (Z-Image); anything else keeps the comma-phrase contract for CLIP-era models.
     """
     if not prompts:
         return []
@@ -214,11 +236,17 @@ def enhance_prompts(
         import ollama
         from backend.utils.ollama_resource_manager import think_payload
         opts = _options(n, sampling)
+        if (prompt_style or "").lower() == "natural":
+            system = _SYSTEM_ENHANCE_IMAGE_NATURAL
+            # Prose descriptions run ~150 words each; the phrase budget clips them.
+            opts["num_predict"] = max(int(opts.get("num_predict", 0)), min(4096, 320 * n + 256))
+        else:
+            system = _SYSTEM_ENHANCE_IMAGE
         resp = ollama.chat(
             model=resolved,
             format="json",
             messages=[
-                {"role": "system", "content": _SYSTEM_ENHANCE_IMAGE},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             options=opts,

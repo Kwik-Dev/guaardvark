@@ -4,6 +4,22 @@
 
 Everything the H3 release can do, wired through the product, on a branch until it merges.
 
+- **Z-Image gets prompts as prose, never as SD-era tags.** A plain sentence such as
+  "a man and woman watching a movie on a couch, her head on his shoulder" was leaving the
+  Images page with 22 phrases appended ("full body shot, realistic stance, correct anatomy,
+  anatomically correct, ..."), boilerplate written for CLIP-captioned SD 1.5. Z-Image's
+  encoder is an LLM and reads those as scene content: on this box the stuffed prompt gave
+  posed, camera-facing figures with tangled legs on four of four seeds, while the bare
+  sentence or a prose rewrite on the same seeds was clean. The 1,400-character anatomy
+  negative was never reaching the model at all (CFG-distilled, guidance 0). Each stills
+  family now declares a `prompt_style` in `backend/services/stills_defaults.py`; for
+  "natural" families the offline enhancer sends the sentence as written (plus one prose
+  clause for a non-photo style), and the default enhance rung becomes the media director's
+  new prose contract, a port of the prompt-enhancer template the model's authors ship with
+  their demo, which falls back to the exact sentence when no chat model answers. Chat and
+  batch share the change; the Images page's prompt preview now resolves "auto" to the
+  default model so it shows the policy that actually runs. Krea 2 keeps tags until it is
+  measured the same way.
 - **Thinking is off unless someone asks for it, everywhere the product talks to Ollama.**
   The Chat page's "Chat thinking" setting was documented as off by default while the stored
   value said on, so every reply on this box and on a client's box paid for gemma4's hidden reasoning:

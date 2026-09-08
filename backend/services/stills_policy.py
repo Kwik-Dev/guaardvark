@@ -5,10 +5,12 @@ Enhance ladder (single source of truth):
   * explicit enhance in {none, offline, director} → honor it
   * director_mode / enhance=director → ``director``
   * auto_enhance False → ``none``
-  * default (auto) → ``offline`` (generator style/anatomy stuffing)
+  * default (auto), tags family → ``offline`` (generator style/anatomy stuffing)
+  * default (auto), natural family (Z-Image) → ``director`` (LLM prose rewrite;
+    falls back to the exact prompt when no chat model answers — never stuffing)
 
-Director is **opt-in** (batch checkbox / enhance=\"director\"). Chat no longer
-always runs Media Director so chat and batch share the same default ladder.
+Which families are "natural" is declared in ``stills_defaults._FAMILY_DEFAULTS``.
+Chat and batch share this ladder.
 """
 from __future__ import annotations
 
@@ -31,8 +33,13 @@ def resolve_enhance_mode(
     director: bool = False,
     auto_enhance: bool | None = None,
     verbatim: bool | None = None,
+    model: str | None = None,
 ) -> EnhanceMode:
-    """Return the effective enhance mode for one stills request."""
+    """Return the effective enhance mode for one stills request.
+
+    ``model`` (catalog key / HF id / auto) picks the default rung: natural-language
+    families default to the director rewrite, tag families to offline stuffing.
+    """
     if verbatim is None:
         try:
             from backend.services.media_director import verbatim_prompts_enabled
@@ -54,8 +61,19 @@ def resolve_enhance_mode(
         return "director"
     if auto_enhance is False:
         return "none"
-    # Default product ladder: offline stuffing (not director) so chat == batch.
+    if model is not None and prompt_style_for_model(model) == "natural":
+        return "director"
+    # Default product ladder for tag families: offline stuffing so chat == batch.
     return "offline"
+
+
+def prompt_style_for_model(model: str | None) -> str:
+    """'natural' or 'tags' for a model ref; 'tags' when the lookup fails."""
+    try:
+        from backend.services.stills_defaults import prompt_style
+        return prompt_style(model)
+    except Exception:
+        return "tags"
 
 
 def resolve_stills_negative(
@@ -110,10 +128,12 @@ def apply_enhance_to_prompts(
     enhance_mode: EnhanceMode,
     style: str = "realistic",
     extra_guidance: str | None = None,
+    model: str | None = None,
 ) -> list[str]:
     """Apply director rewrite when mode is director; otherwise return prompts as-is.
 
     Offline stuffing happens inside OfflineImageGenerator when auto_enhance=True.
+    ``model`` selects the rewrite contract (prose for natural families).
     """
     if not prompts:
         return []
@@ -121,7 +141,10 @@ def apply_enhance_to_prompts(
         return list(prompts)
     try:
         from backend.services.media_director import enhance_prompts
-        refined = enhance_prompts(prompts, style=style, extra_guidance=extra_guidance)
+        refined = enhance_prompts(
+            prompts, style=style, extra_guidance=extra_guidance,
+            prompt_style=prompt_style_for_model(model) if model is not None else None,
+        )
         if refined and len(refined) == len(prompts):
             return [r.strip() if r else p for r, p in zip(refined, prompts)]
     except Exception as e:

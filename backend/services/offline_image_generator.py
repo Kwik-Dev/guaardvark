@@ -1705,6 +1705,26 @@ class OfflineImageGenerator:
         preset = self.content_presets.get(preset_name, self.content_presets["general"])
         style_config = self.style_configs.get(style, self.style_configs["realistic"])
 
+        if self._prompt_style(family) == "natural":
+            # LLM-encoder families read tag suffixes as scene content (see
+            # stills_defaults._FAMILY_DEFAULTS). The person's sentence goes
+            # through as written, plus one prose clause for a non-photo style.
+            # Negatives are still assembled for callers whose model uses CFG.
+            enhanced_prompt = self._natural_style_prompt(prompt, style)
+            negative_prompt = ", ".join(
+                p for p in (self.base_negative, style_config.get("negative_prompt", ""))
+                if p
+            )
+            detection["preset_used"] = preset_name
+            detection["style_used"] = style
+            detection["enhancements_applied"] = []
+            detection["prompt_style"] = "natural"
+            logger.debug(
+                "Image prompt enhancement skipped for %s (natural-language encoder); "
+                "prompt sent as written", family,
+            )
+            return enhanced_prompt, negative_prompt, detection
+
         # (priority, text) — priority decides what survives when a long-context
         # encoder budget forces a re-fit: 0 = subject/coherence guards,
         # 1 = anatomy/scene logic, 2 = preset, 3 = style boilerplate.
@@ -1804,6 +1824,35 @@ class OfflineImageGenerator:
         detection["enhancements_applied"] = unique_enhancements
 
         return enhanced_prompt, negative_prompt, detection
+
+    # One prose clause per style for natural-language encoders. "realistic" adds
+    # nothing: Z-Image renders a bare scene as a photograph already (2026-09-07
+    # A/B), and "photorealistic, professional photography" pushed it toward a
+    # posed catalogue look.
+    _NATURAL_STYLE_CLAUSES = {
+        "artistic": "painted as a piece of fine art",
+        "cartoon": "drawn as a colourful cartoon illustration with clean lines and flat cel shading",
+        "sketch": "drawn as a monochrome pencil sketch with visible hand-drawn linework",
+        "infographic": "designed as a flat vector infographic with simple geometric shapes and no people",
+        "technical": "drawn as a clean technical illustration with precise lines",
+    }
+
+    @staticmethod
+    def _prompt_style(family: str) -> str:
+        try:
+            from backend.services.stills_defaults import prompt_style_for_family
+            return prompt_style_for_family(family)
+        except Exception:
+            return "tags"
+
+    def _natural_style_prompt(self, prompt: str, style: str) -> str:
+        """User prompt plus at most one prose style clause (natural families)."""
+        text = (prompt or "").strip()
+        clause = self._NATURAL_STYLE_CLAUSES.get((style or "").lower())
+        if not clause or not text:
+            return text
+        sep = "" if text.endswith((".", "!", "?")) else "."
+        return f"{text}{sep} The image is {clause}."
 
     def _enhance_prompt(self, prompt: str, style: str) -> Tuple[str, str]:
         """Light style packaging only. Prefer generate_image's auto_enhance path for
@@ -2247,7 +2296,9 @@ Negative Prompt: {negative_prompt}""",
                     )
                     style_negative = style_config.get("negative_prompt", "") or ""
                     enhanced_prompt = request.prompt
-                    if request.style == "realistic":
+                    if self._prompt_style(family) == "natural":
+                        enhanced_prompt = self._natural_style_prompt(request.prompt, request.style)
+                    elif request.style == "realistic":
                         light_real = "photorealistic, professional photography, natural lighting, sharp focus"
                         if light_real.lower() not in enhanced_prompt.lower():
                             enhanced_prompt = f"{enhanced_prompt}, {light_real}"

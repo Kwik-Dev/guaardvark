@@ -867,7 +867,11 @@ class BatchImageGenerator:
         if not MEDIA_DIRECTOR_AVAILABLE:
             return
         try:
-            from backend.services.stills_policy import apply_enhance_to_prompts, resolve_enhance_mode
+            from backend.services.stills_policy import (
+                apply_enhance_to_prompts,
+                prompt_style_for_model,
+                resolve_enhance_mode,
+            )
 
             if getattr(request, "storyboard_concept", None):
                 concept = (request.storyboard_concept or "").strip()
@@ -891,9 +895,16 @@ class BatchImageGenerator:
                     )
                     return
 
+            # Model is chosen per prompt; the first explicit one stands for the
+            # batch (the page sets one model for all rows).
+            batch_model = next(
+                (bp.model for bp in request.prompts if (getattr(bp, "model", "") or "").strip()),
+                "auto",
+            )
             mode = resolve_enhance_mode(
                 director=bool(getattr(request, "director_mode", False)),
                 auto_enhance=getattr(request, "auto_enhance", True),
+                model=batch_model,
             )
             if mode != "director":
                 return
@@ -907,9 +918,12 @@ class BatchImageGenerator:
             guidance = getattr(request, "director_guidance", None)
             directed = apply_enhance_to_prompts(
                 raw, enhance_mode="director", style=style, extra_guidance=guidance,
+                model=batch_model,
             )
-            if not directed or directed == raw:
-                # Fallback to batch's media_direct_enhance if policy path no-op'd
+            if (not directed or directed == raw) and prompt_style_for_model(batch_model) != "natural":
+                # Fallback to batch's media_direct_enhance if policy path no-op'd.
+                # Natural families never take this rung: its phrase contract is the
+                # CLIP-era one, and an unchanged prompt is the intended fallback.
                 try:
                     directed = media_direct_enhance(raw, style=style, extra_guidance=guidance)
                 except Exception:
