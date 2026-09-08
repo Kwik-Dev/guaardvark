@@ -1,0 +1,10 @@
+{
+  "zvec_grep": {
+    "command": ["plugins/zvec_grep/node_modules/.bin/zg", "server", "--stdio", "--mcp-toolset", "agent"],
+    "env": {
+      "ZVEC_GREP_HOME": "plugins/zvec_grep/cache",
+      "ZVEC_GREP_MODEL_CACHE": "plugins/zvec_grep/cache/models",
+      "ZVEC_GREP_DEVICE": "cpu"
+    }
+  }
+}

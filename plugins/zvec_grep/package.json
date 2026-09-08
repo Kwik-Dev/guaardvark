@@ -1,0 +1,10 @@
+{
+  "name": "guaardvark-plugin-zvec-grep",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned zvec-grep install for the Guaardvark code-search plugin; scripts/setup.sh runs npm ci here.",
+  "license": "MIT",
+  "dependencies": {
+    "@zvec/zvec-grep": "0.2.2"
+  }
+}

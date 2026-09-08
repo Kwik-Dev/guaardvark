@@ -29,6 +29,22 @@ Everything the H3 release can do, wired through the product, on a branch until i
   never qualify. The stills rewrite tries up to three rungs, so a model that errors or hands
   back the wrong number of prompts is skipped rather than silently dropping to the raw
   sentence.
+- **The chat can search the code.** `search_codebase` is one tool name for "search this
+  project's source": by meaning or by symbol, returning files, line numbers and the code. With
+  the new zvec-grep plugin (`plugins/zvec_grep`, off by default, Node 22, CPU, everything on
+  the machine) it runs a local vector-plus-keyword index of the checkout; without it, the
+  repository's regex search. Questions about the source keep the tool in the prompt and get
+  one system line saying the code is already indexed. Measured 2026-09-08 on eight questions
+  about this repository with document retrieval off: baseline made no tool calls and
+  answered three with hedges; with the tool every question called it and seven came back
+  naming the right file and function. Four engine fixes came out of the trial and apply to
+  every tool: the result a tool hands back to the model is capped by a budget the tool
+  declares (`BaseTool.observation_chars`) instead of a flat 500 characters that left a search
+  with a header and no code; a tool call written in signature form
+  (`search_codebase(query:string='x')`) is normalised instead of failing as an unknown tool;
+  an MCP server's error result is a failure, not output; and the request's `project_root`
+  reaches tools that need it. Known: with document retrieval on, the model still prefers the
+  documents and rarely reaches for the tool.
 - **Thinking is off unless someone asks for it, everywhere the product talks to Ollama.**
   The Chat page's "Chat thinking" setting was documented as off by default while the stored
   value said on, so every reply on this box and on a client's box paid for gemma4's hidden reasoning:

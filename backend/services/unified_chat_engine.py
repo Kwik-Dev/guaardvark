@@ -84,6 +84,34 @@ def _split_pending_tool_marker(buf: str):
     return buf, ""
 
 
+# "name(param:type='value', ...)" written where a bare tool name belongs: the
+# model copied the TOOLS block's signature line into the call.
+_SIGNATURE_CALL_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*\((.*)\)\s*$", re.S)
+_SIGNATURE_ARG_RE = re.compile(
+    r"([A-Za-z_]\w*)(?:\s*:\s*[A-Za-z_]\w*\??)?\s*=\s*(?:'([^']*)'|\"([^\"]*)\"|([^,()]+))"
+)
+
+
+def _normalize_signature_tool_call(tc) -> None:
+    """Turn ``search_codebase(query:string='x')`` into tool ``search_codebase`` with ``query='x'``.
+
+    Seen in the 2026-09-08 trial: the parser passed the whole signature through
+    as the tool name, the registry had no such tool, and the model fell back to
+    a shell command. Arguments already present on the call win over the ones
+    parsed out of the signature.
+    """
+    name = getattr(tc, "tool_name", "") or ""
+    m = _SIGNATURE_CALL_RE.match(name)
+    if not m:
+        return
+    tc.tool_name = m.group(1)
+    params = dict(getattr(tc, "parameters", None) or {})
+    for key, single, double, bare in _SIGNATURE_ARG_RE.findall(m.group(2)):
+        if key not in params:
+            params[key] = (single or double or bare or "").strip()
+    tc.parameters = params
+
+
 def _looks_like_tool_list_echo(text: str, tool_names) -> bool:
     """Whether ``text`` is the prompt's tool list echoed back, not an answer.
 
@@ -318,6 +346,26 @@ MCP_NATIVE_TOOLS: List[str] = []
 # the Worker class" queries, so they also get a deterministic pin at the
 # selection chokepoint (see _pin_repo_intel_tools) keyed on REPO_INTEL_KEYWORDS.
 REPO_INTEL_TOOLS = ["get_repository_map", "get_dependency_graph", "read_ast_node"]
+# Questions about this codebase's own source: "where in the backend is X decided",
+# "which function does Y", "callers of Z". The semantic selector offered only
+# search_knowledge_base for six of eight such questions in the 2026-09-08 trial,
+# so the model answered from documents or said it was unsure. Pinned alongside
+# read_code so the model can open what the search found.
+CODE_SEARCH_TOOLS = ["search_codebase", "read_code"]
+CODE_SEARCH_KEYWORDS = [
+    "in the code", "in the codebase", "in the source", "source code", "the backend",
+    "the frontend", "which file", "which files", "which function", "which module",
+    "which class", "what function", "what module", "where in the", "where is the code",
+    "where does the code", "where is it decided", "where is this decided", "call site",
+    "call sites", "callers of", "who calls", "is defined", "is implemented",
+    "implemented in", "defined in", "how does the backend", "how does the frontend",
+    "how does the code", ".py", ".jsx", ".js ", ".ts ", "def ", "class ", "endpoint",
+    "route", "handler", "search the code", "search the codebase", "grep",
+    # Phrasings from the trial's misses: "which code classifies", "which worker
+    # consumes", "where are ... declared", "where is the ... decision made".
+    "which code", "which worker", "where are", "where is the", "declared",
+    "decision made", "the caller", "implementation", "the module",
+]
 # Knowledge-base navigation. search_knowledge_base is a CORE tool and always present,
 # which makes the selector treat "what documents do you have" as already served and
 # drop the tools that actually answer it. Same deterministic pin as the repo trio.
@@ -668,6 +716,35 @@ def _pin_repo_intel_tools(message: str, selected: List[str], all_tool_names: Lis
         return selected
     available = set(all_tool_names)
     pinned = [t for t in REPO_INTEL_TOOLS if t in available and t not in selected]
+    return pinned + list(selected) if pinned else selected
+
+
+# One system line for code questions. The persona's lessons tell the model to
+# ask for a folder path before indexing, and in the 2026-09-08 trial it obeyed
+# that for source questions too: search_codebase sat in the prompt for seven of
+# eight questions and it asked the user for a path instead of calling it.
+_CODE_SEARCH_NUDGE = (
+    "This project's source code is already indexed. For questions about the code, "
+    "call search_codebase first; never ask the user for a path, a file, or to load "
+    "the project, and never say the code is unavailable before searching it."
+)
+
+
+def _asks_about_code(message: str) -> bool:
+    msg = (message or "").lower()
+    return any(kw in msg for kw in CODE_SEARCH_KEYWORDS)
+
+
+def _pin_code_search_tools(message: str, selected: List[str], all_tool_names: List[str]) -> List[str]:
+    """Keep search_codebase (and read_code) in the prompt for questions about the code.
+
+    Same shape as _pin_repo_intel_tools: cheap, prepended so a downstream cap
+    never drops them, and only when the message plainly asks about source.
+    """
+    if not _asks_about_code(message):
+        return selected
+    available = set(all_tool_names)
+    pinned = [t for t in CODE_SEARCH_TOOLS if t in available and t not in selected]
     return pinned + list(selected) if pinned else selected
 
 
@@ -1705,6 +1782,7 @@ class UnifiedChatEngine:
                 selected_tools = merged
 
             selected_tools = _pin_repo_intel_tools(message, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_code_search_tools(message, selected_tools, self.registry.list_tools())
             selected_tools = _pin_knowledge_nav_tools(message, selected_tools, self.registry.list_tools())
             selected_tools = _pin_workstation_tools(message, selected_tools, self.registry.list_tools())
             selected_tools = _pin_image_edit_tools(bool(self._image_data), selected_tools, self.registry.list_tools())
@@ -1815,6 +1893,8 @@ class UnifiedChatEngine:
 
         # 5. Build Ollama messages array — static content first for prefix cache
         ollama_messages = [{"role": "system", "content": system_prompt}]
+        if "search_codebase" in (selected_tools or []) and _asks_about_code(message):
+            ollama_messages.append({"role": "system", "content": _CODE_SEARCH_NUDGE})
 
         # History messages
         for msg in history:
@@ -2041,6 +2121,8 @@ class UnifiedChatEngine:
                 parsed = parse_tool_calls_xml(parse_input)
 
             # 6d. No tool calls -> final answer
+            for _tc in parsed.tool_calls or []:
+                _normalize_signature_tool_call(_tc)
             if parsed.tool_calls:
                 tool_names = [tc.tool_name for tc in parsed.tool_calls]
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} TOOL_CALLS: {tool_names}")
@@ -2404,6 +2486,10 @@ class UnifiedChatEngine:
                         agent_context={
                             "user_message": message,
                             "message": message,
+                            "project_root": (
+                                (options.get("project_root") or options.get("projectRoot"))
+                                if isinstance(options, dict) else None
+                            ),
                             "pending_image_prompt": _SESSION_PENDING_IMAGE_PROMPT.get(session_id),
                             "direct_tool_params": (
                                 options.get("direct_tool_params")
@@ -2503,9 +2589,14 @@ class UnifiedChatEngine:
                         f"\n[TOOL ERROR: {tool_name} failed: {result.error}. "
                         f"Do NOT retry with the same parameters.{fallback_msg}]"
                     )
-                # Cap tool result text to reduce context bloat between iterations
-                if len(formatted) > 500:
-                    formatted = cut_on_whitespace(formatted, 500) + "... [truncated]"
+                # Cap tool result text to reduce context bloat between iterations.
+                # The budget is the tool's own (BaseTool.observation_chars): a
+                # search tool's result is the answer material, 500 chars of it
+                # left the model with a header and no code in the 2026-09-08 trial.
+                _tool_obj = self.registry.get_tool(tool_name)
+                _budget = int(getattr(_tool_obj, "observation_chars", 500) or 500)
+                if len(formatted) > _budget:
+                    formatted = cut_on_whitespace(formatted, _budget) + "... [truncated]"
                 observation_text += formatted + "\n"
 
             # Append any blocked-call observations
