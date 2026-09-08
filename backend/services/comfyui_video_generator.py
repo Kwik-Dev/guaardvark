@@ -133,6 +133,8 @@ class VideoGenerationRequest:
     face_restore: bool = False
     lora_name: Optional[str] = None
     lora_strength: float = 1.0
+    # User-catalog LoRAs: [{"id": "user-...", "strength": 0.7}]
+    adapters: List[Dict] = field(default_factory=list)
     # Capability-contract inputs (backend/services/video_model_registry.py).
     # A model that does not declare the capability rejects the field with a
     # plain message instead of ignoring it.
@@ -371,58 +373,54 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
 
     @classmethod
     def _ensure_wan_models(cls) -> dict:
-        """The Wan loader map is derived from the registry at IMPORT time (`WAN22_MODELS`
-        above); if that derivation froze to {} (a transient registry/circular-import hiccup
-        at module load) Wan generation would be silently dead for the whole process. Re-resolve
-        lazily here and cache the first non-empty result, so a one-time import-order problem
-        can't permanently break Wan video. No-op once the map is populated."""
-        if not cls.WAN22_MODELS:
-            try:
-                from backend.services.video_model_registry import wan_comfyui_map
-                fresh = wan_comfyui_map() or {}
-                if fresh:
-                    cls.WAN22_MODELS = fresh
-            except Exception:  # pragma: no cover - defensive
-                pass
+        """Re-derive the Wan loader map from the registry.
+
+        Import-time freeze used to stick at the first non-empty result, which
+        hid user-catalog models added later in the process. The map is small.
+        """
+        try:
+            from backend.services.video_model_registry import wan_comfyui_map
+            fresh = wan_comfyui_map() or {}
+            if fresh:
+                cls.WAN22_MODELS = fresh
+        except Exception:  # pragma: no cover - defensive
+            pass
         return cls.WAN22_MODELS
 
     @classmethod
     def _ensure_ltx_models(cls) -> dict:
-        """Same lazy re-resolve as `_ensure_wan_models` for the LTX-2.3 map."""
-        if not cls.LTX_MODELS:
-            try:
-                from backend.services.video_model_registry import ltx_comfyui_map
-                fresh = ltx_comfyui_map() or {}
-                if fresh:
-                    cls.LTX_MODELS = fresh
-            except Exception:  # pragma: no cover - defensive
-                pass
+        """Re-derive the LTX loader map from the registry (includes user catalog)."""
+        try:
+            from backend.services.video_model_registry import ltx_comfyui_map
+            fresh = ltx_comfyui_map() or {}
+            if fresh:
+                cls.LTX_MODELS = fresh
+        except Exception:  # pragma: no cover - defensive
+            pass
         return cls.LTX_MODELS
 
     @classmethod
     def _ensure_hunyuan_models(cls) -> dict:
-        """Same lazy re-resolve as `_ensure_wan_models` for the HunyuanVideo map."""
-        if not cls.HUNYUAN_MODELS:
-            try:
-                from backend.services.video_model_registry import hunyuan_comfyui_map
-                fresh = hunyuan_comfyui_map() or {}
-                if fresh:
-                    cls.HUNYUAN_MODELS = fresh
-            except Exception:  # pragma: no cover - defensive
-                pass
+        """Re-derive the HunyuanVideo loader map from the registry (includes user catalog)."""
+        try:
+            from backend.services.video_model_registry import hunyuan_comfyui_map
+            fresh = hunyuan_comfyui_map() or {}
+            if fresh:
+                cls.HUNYUAN_MODELS = fresh
+        except Exception:  # pragma: no cover - defensive
+            pass
         return cls.HUNYUAN_MODELS
 
     @classmethod
     def _ensure_minimax_models(cls) -> dict:
-        """Same lazy re-resolve as `_ensure_wan_models` for the MiniMax H3 map."""
-        if not cls.MINIMAX_MODELS:
-            try:
-                from backend.services.video_model_registry import minimax_comfyui_map
-                fresh = minimax_comfyui_map() or {}
-                if fresh:
-                    cls.MINIMAX_MODELS = fresh
-            except Exception:  # pragma: no cover - defensive
-                pass
+        """Re-derive the MiniMax H3 loader map from the registry (includes user catalog)."""
+        try:
+            from backend.services.video_model_registry import minimax_comfyui_map
+            fresh = minimax_comfyui_map() or {}
+            if fresh:
+                cls.MINIMAX_MODELS = fresh
+        except Exception:  # pragma: no cover - defensive
+            pass
         return cls.MINIMAX_MODELS
 
     @classmethod
@@ -693,6 +691,48 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             )
         return profile, None
 
+    def _resolve_adapters(self, request: VideoGenerationRequest, model_key: str) -> tuple:
+        """User-catalog LoRAs that apply to this generation model.
+
+        Returns (list of {filename, strength}, None) or (None, message).
+        """
+        from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, is_model_installed
+        from backend.services.user_video_models import DEFAULT_ADAPTER_STRENGTH
+
+        out = []
+        for raw in request.adapters or []:
+            if isinstance(raw, str):
+                aid, strength = raw, None
+            elif isinstance(raw, dict):
+                aid = (raw.get("id") or "").strip()
+                strength = raw.get("strength")
+            else:
+                continue
+            if not aid:
+                continue
+            entry = VIDEO_MODEL_REGISTRY.get(aid) or {}
+            if entry.get("type") != "lora":
+                return None, f"'{aid}' is not a LoRA"
+            applies = entry.get("applies_to") or []
+            if applies and model_key not in applies:
+                return None, f"{entry.get('name') or aid} does not apply to this model"
+            files = entry.get("files") or []
+            filename = files[0]["dst"] if files else None
+            if not filename:
+                return None, f"{entry.get('name') or aid} has no file"
+            if not is_model_installed(aid):
+                return None, (
+                    f"{entry.get('name') or aid} is not installed. "
+                    "Open Manage Video Models to download it."
+                )
+            out.append({
+                "filename": filename,
+                "strength": float(
+                    strength if strength is not None else entry.get("strength") or DEFAULT_ADAPTER_STRENGTH
+                ),
+            })
+        return out, None
+
     def _resolve_minimax_common(self, request: VideoGenerationRequest, model_key: str, caps: dict, entry_name: str) -> tuple:
         """Speed profile, LoRA, step count and prompt for either H3 build.
         Returns ((profile, lora_file, lora_strength, steps, prompt), None) or
@@ -800,6 +840,9 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         if err:
             return None, err
         profile, lora_file, lora_strength, steps, prompt = common
+        extra_loras, adapter_err = self._resolve_adapters(request, model_key)
+        if adapter_err:
+            return None, adapter_err
 
         def _upload(path, kind):
             if not path or not Path(path).exists():
@@ -851,6 +894,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 ref_image_size=str((request.metadata or {}).get("ref_image_size") or "match"),
                 lora_name=lora_file,
                 lora_strength=lora_strength,
+                extra_loras=extra_loras,
             )
         except ValueError as e:
             return None, str(e)
@@ -896,6 +940,9 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         if err:
             return None, err
         profile, lora_file, lora_strength, steps, prompt = common
+        extra_loras, adapter_err = self._resolve_adapters(request, model_key)
+        if adapter_err:
+            return None, adapter_err
         first_name = None
         first_path = request.first_frame_path or image_path
         if first_path:
@@ -956,6 +1003,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 last_frame_filename=last_name,
                 lora_name=lora_file,
                 lora_strength=lora_strength,
+                extra_loras=extra_loras,
                 guides=guide_specs,
             )
         except ValueError as e:
@@ -1735,6 +1783,11 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                     wan_lora_high, wan_lora_low = files.get("unet_high"), files.get("unet_low")
                     wan_lora_strength = float(wan_profile.get("strength") or 1.0)
 
+                extra_loras, adapter_err = self._resolve_adapters(request, model_key)
+                if adapter_err:
+                    result.error = adapter_err
+                    return result
+
                 if cfg.get("single"):
                     # Wan 2.2 TI2V-5B: ONE model does both — image-to-video if a start
                     # image is given, else text-to-video. Fits 16GB, no MoE two-pass.
@@ -1758,6 +1811,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         seed=seed,
                         fps=request.fps,
                         interpolation_multiplier=interpolation,
+                        extra_loras=extra_loras,
                     )
                     logger.info(f"Using Wan 2.2 TI2V-5B ({'i2v' if img_name else 't2v'}, {model_key}) via ComfyUI")
                 elif is_i2v:
@@ -1786,6 +1840,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         lora_low=wan_lora_low,
                         lora_strength=wan_lora_strength,
                         shift_override=wan_shift,
+                        extra_loras=extra_loras,
                     )
                     logger.info(f"Using Wan 2.2 image-to-video ({model_key}) via ComfyUI GGUF")
                 else:
@@ -1808,6 +1863,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         lora_low=wan_lora_low,
                         lora_strength=wan_lora_strength,
                         shift_override=wan_shift,
+                        extra_loras=extra_loras,
                     )
                     logger.info(f"Using Wan 2.2 text-to-video ({model_key}) via ComfyUI GGUF")
 

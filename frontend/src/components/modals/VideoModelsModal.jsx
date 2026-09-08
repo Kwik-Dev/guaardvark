@@ -23,6 +23,8 @@ import MemoryIcon from "@mui/icons-material/Memory";
 import axios from "axios";
 
 import { GENERATION_TYPES } from "../../constants/videoGeneratorPresets";
+import { ActionButton, ConfirmActionDialog } from "../settings/ui";
+import AddVideoModelDialog from "./AddVideoModelDialog";
 
 const TYPE_LABELS = {
   wan: "Video",
@@ -57,6 +59,9 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
     total_gb: 0,
   });
   const [error, setError] = useState(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
 
   // The parent passes a fresh `showMessage` closure on every render. Keep it in a
   // ref so our fetch callbacks (and the effects that depend on them) stay stable —
@@ -131,6 +136,27 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
       highlightRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [open, highlightModelId, loading, models]);
+
+  const handleRemove = async () => {
+    if (!removeTarget) return;
+    setRemoveBusy(true);
+    try {
+      const res = await axios.delete(`/api/batch-video/models/user/${encodeURIComponent(removeTarget.id)}`, {
+        params: { delete_files: true },
+      });
+      if (res.data.success) {
+        showMessageRef.current?.(`Removed ${removeTarget.name}`, "success");
+        setRemoveTarget(null);
+        fetchModels();
+      } else {
+        showMessageRef.current?.(res.data.error?.message || res.data.message || "Could not remove", "error");
+      }
+    } catch (err) {
+      showMessageRef.current?.(err.response?.data?.error?.message || err.message || "Could not remove", "error");
+    } finally {
+      setRemoveBusy(false);
+    }
+  };
 
   const handleDownload = async (modelId) => {
     try {
@@ -264,13 +290,20 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
               </Typography>
             </Box>
           ) : (model.is_ready ?? model.is_downloaded) ? (
-            <Chip
-              icon={<CheckCircleIcon />}
-              label="Installed"
-              color="success"
-              size="small"
-              variant="outlined"
-            />
+            <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
+              <Chip
+                icon={<CheckCircleIcon />}
+                label="Installed"
+                color="success"
+                size="small"
+                variant="outlined"
+              />
+              {model.user && (
+                <ActionButton kind="destructive" onClick={() => setRemoveTarget(model)} disabled={isDownloading}>
+                  Remove
+                </ActionButton>
+              )}
+            </Box>
           ) : (
             <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
               <Button
@@ -282,6 +315,11 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
               >
                 {model.install_size_gb ? `Install (${model.install_size_gb} GB)` : "Install"}
               </Button>
+              {model.user && (
+                <ActionButton kind="destructive" onClick={() => setRemoveTarget(model)} disabled={isDownloading}>
+                  Remove
+                </ActionButton>
+              )}
               {model.requires?.length > 0 && (
                 <Typography variant="caption" color="text.secondary" noWrap>
                   includes {model.requires.length} required file{model.requires.length > 1 ? "s" : ""}
@@ -362,10 +400,34 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
         )}
       </DialogContent>
       <DialogActions>
+        <ActionButton onClick={() => setAddOpen(true)} disabled={isDownloading}>
+          Add new model
+        </ActionButton>
         <Button onClick={onClose} disabled={isDownloading}>
           {isDownloading ? "Downloading..." : "Close"}
         </Button>
       </DialogActions>
+      <AddVideoModelDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        models={models}
+        showMessage={showMessageRef.current}
+        onAdded={() => {
+          fetchModels();
+          fetchDownloadStatus();
+        }}
+      />
+      <ConfirmActionDialog
+        open={Boolean(removeTarget)}
+        title={`Remove ${removeTarget?.name || "this model"}?`}
+        description="Drops it from your catalog and deletes the downloaded files under ComfyUI/models."
+        facts={removeTarget ? [{ label: "Files", value: (removeTarget.missing_files?.length >= 0 ? (removeTarget.name || removeTarget.id) : removeTarget.id) }] : []}
+        keeps="the shipped Video Models list"
+        confirmLabel="Remove"
+        busy={removeBusy}
+        onConfirm={handleRemove}
+        onClose={() => !removeBusy && setRemoveTarget(null)}
+      />
     </Dialog>
   );
 };

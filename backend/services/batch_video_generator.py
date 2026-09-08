@@ -170,6 +170,7 @@ class BatchVideoRequest:
     face_restore: bool = False
     lora_name: Optional[str] = None
     lora_strength: float = 1.0
+    adapters: List[Dict] = field(default_factory=list)
     # Capability-contract knobs (video_model_registry): a declared speed profile
     # (turbo LoRA + step count) and a declared style embedding id.
     speed_profile: Optional[str] = None
@@ -1116,6 +1117,7 @@ class BatchVideoGenerator:
                             face_restore=batch_request.face_restore,
                             lora_name=batch_request.lora_name,
                             lora_strength=batch_request.lora_strength,
+                            adapters=list(batch_request.adapters or []),
                             speed_profile=batch_request.speed_profile,
                             style_embedding=batch_request.style_embedding,
                             last_frame_path=item.last_frame_path,
@@ -1423,6 +1425,7 @@ class BatchVideoGenerator:
             face_restore=bool(params.get("face_restore", False)),
             lora_name=params.get("lora_name"),
             lora_strength=float(params.get("lora_strength", 1.0)),
+            adapters=list(params.get("adapters") or []) if isinstance(params.get("adapters"), list) else [],
             speed_profile=params.get("speed_profile") or None,
             style_embedding=params.get("style_embedding") or None,
             subject_ids=[int(s) for s in (params.get("subject_ids") or []) if str(s).strip()],
@@ -1472,6 +1475,7 @@ class BatchVideoGenerator:
                 "face_restore": batch_request.face_restore,
                 "lora_name": batch_request.lora_name,
                 "lora_strength": batch_request.lora_strength,
+                "adapters": list(batch_request.adapters or []),
                 "subject_ids": list(batch_request.subject_ids or []),
                 "cinematic_keyframe": bool(batch_request.cinematic_keyframe),
                 "director_mode": bool(batch_request.director_mode),

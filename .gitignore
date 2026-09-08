@@ -269,6 +269,8 @@ debug.log
 .cursor/
 # Per-machine runtime state written by the app
 data/video_model_download_status.json
+data/user_video_models.json
+data/user_video_models.json.tmp
 storage/
 
 # In-tree whisper.cpp checkout (own nested .git, 800MB+ build) — never track

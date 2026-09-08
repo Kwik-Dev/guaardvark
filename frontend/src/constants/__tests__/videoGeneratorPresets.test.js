@@ -8,6 +8,7 @@ import {
   GENERATION_TYPES,
   MINIMAX_DURATION_PRESETS,
   MODEL_OPTIONS,
+  modelChipLabel,
   MOTION_PRESETS,
   WAN_5B_DURATION_PRESETS,
   WAN_DURATION_PRESETS,
@@ -40,6 +41,22 @@ describe("durationPresetsFor", () => {
       expect((p.duration_frames - 1) % 8).toBe(0);
     }
     for (const p of Object.values(durationPresetsFor("cogvideox-5b"))) expect(p.fps).toBe(8);
+  });
+});
+
+describe("modelChipLabel", () => {
+  it("names each family from MODEL_OPTIONS.type, never defaulting to CogVideoX", () => {
+    expect(modelChipLabel("hunyuan-t2v")).toBe("HunyuanVideo");
+    expect(modelChipLabel("hunyuan-i2v")).toBe("HunyuanVideo");
+    expect(modelChipLabel("wan22-5b")).toBe("Wan 2.2");
+    expect(modelChipLabel("cogvideox-5b")).toBe("CogVideoX");
+    expect(modelChipLabel("minimax-h3-int8")).toBe("MiniMax H3");
+    for (const [id, opt] of Object.entries(MODEL_OPTIONS)) {
+      const label = modelChipLabel(id);
+      if (opt.type !== "cogvideox") {
+        expect(label).not.toBe("CogVideoX");
+      }
+    }
   });
 });
 

@@ -69,3 +69,65 @@ def test_loras_name_the_models_they_apply_to(client):
     assert lora["type"] == "lora"
     assert "minimax-h3-int8" in lora["applies_to"]
     assert rows["minimax-h3-int8"]["applies_to"] == []
+
+
+def test_from_hf_rejects_non_hf(client):
+    payload = client.post("/api/batch-video/models/from-hf", json={"url": "https://civitai.com/x"}).get_json()
+    assert payload["success"] is False
+    assert "Hugging Face" in ((payload.get("error") or {}).get("message") or "")
+
+
+def test_user_add_and_delete(client, tmp_path, monkeypatch):
+    from backend.services import user_video_models as uvm
+    monkeypatch.setattr(uvm, "_CATALOG_PATH_OVERRIDE", tmp_path / "user_video_models.json")
+    body = {
+        "role": "lora",
+        "like": "minimax-h3-int8",
+        "hf_repo": "Comfy-Org/MiniMax-H3",
+        "files": [{"src": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"}],
+        "name": "API turbo",
+        "install": False,
+    }
+    payload = client.post("/api/batch-video/models/user", json=body).get_json()
+    assert payload["success"], payload
+    mid = payload["data"]["id"]
+    try:
+        assert mid.startswith("user-")
+        rows = _rows(client)
+        assert rows[mid]["user"] is True
+        assert rows[mid]["type"] == "lora"
+        forbidden = client.delete("/api/batch-video/models/user/minimax-h3-int8").get_json()
+        assert forbidden["success"] is False
+        gone = client.delete(f"/api/batch-video/models/user/{mid}").get_json()
+        assert gone["success"] is True
+        assert mid not in _rows(client)
+    finally:
+        try:
+            uvm.remove_user_model(mid, delete_files=False)
+        except Exception:
+            pass
+
+
+def test_user_add_install_true_does_not_500(client, tmp_path, monkeypatch):
+    from backend.services import user_video_models as uvm
+    from backend.utils.response_utils import success_response
+    monkeypatch.setattr(uvm, "_CATALOG_PATH_OVERRIDE", tmp_path / "user_video_models.json")
+    monkeypatch.setattr(api, "start_video_model_download", lambda _mid: success_response({"message": "already installed"}))
+    body = {
+        "role": "lora",
+        "like": "minimax-h3-int8",
+        "hf_repo": "Comfy-Org/MiniMax-H3",
+        "files": [{"src": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"}],
+        "name": "Install path",
+        "install": True,
+    }
+    payload = client.post("/api/batch-video/models/user", json=body).get_json()
+    assert payload["success"], payload
+    mid = payload["data"]["id"]
+    try:
+        assert payload["data"]["download"]["message"] == "already installed"
+    finally:
+        try:
+            uvm.remove_user_model(mid, delete_files=False)
+        except Exception:
+            pass

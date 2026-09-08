@@ -5,8 +5,6 @@ import React, { useEffect, useMemo, useState, useRef, useCallback } from "react"
 import {
   Box,
   Typography,
-  ToggleButton,
-  ToggleButtonGroup,
   TextField,
   Button,
   Grid,
@@ -29,12 +27,22 @@ import {
   DialogContent,
   DialogActions,
   CircularProgress,
-  Switch,
-  FormControlLabel,
   Collapse,
 } from "@mui/material";
 import PageLayout from "../components/layout/PageLayout";
 import GpuGateBanner from "../components/common/GpuGateBanner";
+import {
+  SettingChip,
+  ChoiceChips,
+  ActionButton,
+  SettingsPanel,
+  Cluster,
+  Line,
+  Hint,
+  ConfirmActionDialog,
+  DashboardStrip,
+  DashboardTile,
+} from "../components/settings/ui";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import useJobsGate from "../hooks/useJobsGate";
 import useBatchVideo from "../hooks/useBatchVideo";
@@ -56,10 +64,10 @@ import {
   GENERATION_TYPES,
   DEFAULT_T2V_MODEL,
   DEFAULT_I2V_MODEL,
+  familyType,
   isCogVideoXModel,
   isWanModel,
   isLtxModel,
-  isHunyuanModel,
   isMinimaxModel,
   snapDimensions,
   fitAreaToRatio,
@@ -71,22 +79,13 @@ import {
   PlayArrow as PlayIcon,
   Refresh as RefreshIcon,
   Download as DownloadIcon,
-  CloudDownload as CloudDownloadIcon,
   VideoLibrary as VideoIcon,
-  Image as ImageIcon,
   DriveFileRenameOutline as RenameIcon,
   ExpandLess as ExpandLessIcon,
   Settings as SettingsIcon,
-  Speed as SpeedIcon,
-  Timer as TimerIcon,
-  Upload as UploadIcon,
-  Collections as GalleryIcon,
   Close as CloseIcon,
   CheckCircle as CheckCircleIcon,
-  Add as AddIcon,
   OpenInNew as OpenInNewIcon,
-  HighQuality as HighQualityIcon,
-  AutoFixHigh as EnhanceIcon,
   NavigateBefore as PrevIcon,
   NavigateNext as NextIcon,
   Fullscreen as FullscreenIcon,
@@ -96,6 +95,8 @@ import {
 import { formatUiError } from "../utils/uiError";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
+
+const stripGlyph = (label) => String(label || "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
 
 const formatVideoDate = (isoStr) => {
   if (!isoStr) return null;
@@ -191,6 +192,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // Capability-contract knobs; only sent when the model declares them.
     speed_profile: "standard",
     style_embedding: "",
+    adapters: [],
+    adapter_strength: 0.7,
   });
   // End frame for models that declare first+last-frame generation (image mode).
   const [endFrame, setEndFrame] = useState(null); // {path, name}
@@ -252,9 +255,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     setAdvancedParams((prev) => ({
       ...prev,
       face_restore: faceRestoreAvailable === true,
-      freeu: isWanModel(model),
+      freeu: isWanModel(model, modelMeta[model]),
     }));
-    if (isCogVideoXModel(model)) {
+    if (isCogVideoXModel(model, modelMeta[model])) {
       setFetaEnabled(true);
       setFetaWeight(1.0);
     }
@@ -296,7 +299,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
   // Sync guidance scale to model-family defaults when the model changes.
   useEffect(() => {
-    const family = MODEL_OPTIONS[model]?.type;
+    const family = familyType(model, modelMeta[model]);
     // Per-model wins: some models' backend workflows default differently from
     // their family, and the UI should send what the backend would have chosen.
     const defaultCfg = MODEL_OPTIONS[model]?.defaultGuidance ?? MODEL_DEFAULT_GUIDANCE[family];
@@ -378,11 +381,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // silent fall-back to a lesser model when the *selected* model isn't fully
   // installed (the "I clicked Wan 2.2 and got CogVideoX without being told" bug).
   const [modelMeta, setModelMeta] = useState({});
+  const [adapterModels, setAdapterModels] = useState([]);
   // When set, the selected model isn't installed — surface a blocking banner
   // ({ id, name, missing }) instead of generating with a fallback.
   const [modelNotReady, setModelNotReady] = useState(null);
   // Model id to scroll-to + pulse inside the Manage Video Models modal.
   const [highlightModelId, setHighlightModelId] = useState(null);
+  const [confirmAction, setConfirmAction] = useState(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   // Pull the authoritative model list + readiness. Extracted so we can re-run it
   // after the user closes the install modal (a freshly-installed model should
@@ -396,12 +402,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         const ids = new Set(vids.map(m => m.id));
         if (ids.size > 0) setApiModelIds(ids);
         setAnyModelReady(vids.some(m => m.is_ready));
+        setAdapterModels((data.data.models || []).filter((m) => m.type === "lora" && m.is_ready));
         const meta = {};
         vids.forEach(m => {
           meta[m.id] = {
             is_ready: m.is_ready,
             missing_files: m.missing_files || [],
             name: m.name,
+            type: m.type,
+            user: m.user,
             dimension_alignment: m.dimension_alignment,
             max_pixel_area: m.max_pixel_area,
             // Capability contract declared on the registry entry (modes, audio,
@@ -452,24 +461,48 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   }, []);
 
   // Filter models by current input mode AND the backend allowlist.
+  // Registry-only (user-added) ids are not in MODEL_OPTIONS; capabilities win.
   const availableModels = useMemo(() => {
-    return Object.entries(MODEL_OPTIONS).filter(([key, config]) => {
-      const modeOk = inputMode === "image" ? config.supportsI2V : config.supportsT2V;
-      const allowed = apiModelIds == null || apiModelIds.has(key);
-      return modeOk && allowed;
-    });
-  }, [inputMode, apiModelIds]);
-
-  // Auto-select best model when input mode changes
-  useEffect(() => {
-    const currentConfig = MODEL_OPTIONS[model];
-    const isCompatible = inputMode === "image"
-      ? currentConfig?.supportsI2V
-      : currentConfig?.supportsT2V;
-    if (!isCompatible) {
-      setModel(inputMode === "image" ? DEFAULT_I2V_MODEL : DEFAULT_T2V_MODEL);
+    const metaIds = Object.keys(modelMeta);
+    if (metaIds.length === 0) {
+      return Object.entries(MODEL_OPTIONS).filter(([key, config]) => {
+        const modeOk = inputMode === "image" ? config.supportsI2V : config.supportsT2V;
+        const allowed = apiModelIds == null || apiModelIds.has(key);
+        return modeOk && allowed;
+      });
     }
-  }, [inputMode]);
+    return metaIds
+      .filter((id) => {
+        const caps = modelMeta[id]?.capabilities || {};
+        const opt = MODEL_OPTIONS[id];
+        return inputMode === "image"
+          ? (caps.supports_i2v ?? opt?.supportsI2V)
+          : (caps.supports_t2v ?? opt?.supportsT2V);
+      })
+      .map((id) => [
+        id,
+        {
+          ...(MODEL_OPTIONS[id] || {}),
+          label: modelMeta[id]?.name || MODEL_OPTIONS[id]?.label || id,
+          type: modelMeta[id]?.type || MODEL_OPTIONS[id]?.type,
+        },
+      ]);
+  }, [inputMode, apiModelIds, modelMeta]);
+
+  // Auto-select a compatible model when input mode changes or the current id
+  // is a user model that does not support this mode.
+  useEffect(() => {
+    const meta = modelMeta[model];
+    const opt = MODEL_OPTIONS[model];
+    const isCompatible = inputMode === "image"
+      ? (meta?.capabilities?.supports_i2v ?? opt?.supportsI2V)
+      : (meta?.capabilities?.supports_t2v ?? opt?.supportsT2V);
+    if (!isCompatible) {
+      const fallback = availableModels[0]?.[0]
+        || (inputMode === "image" ? DEFAULT_I2V_MODEL : DEFAULT_T2V_MODEL);
+      if (fallback && fallback !== model) setModel(fallback);
+    }
+  }, [inputMode, model, modelMeta, availableModels]);
 
   // Duration presets follow the selected model's native fps.
   const durationPresets = useMemo(() => durationPresetsFor(model, modelMeta[model]), [model, modelMeta]);
@@ -477,10 +510,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // A model that declares aspectRatios offers only those. Switching to one that
   // cannot render the current selection snaps it rather than leaving a ratio on
   // screen that the model will warp — 1:1 on Wan 5B being the case that bit.
-  const allowedAspectRatios = useMemo(() => aspectRatiosFor(model), [model]);
+  const allowedAspectRatios = useMemo(() => aspectRatiosFor(model, modelMeta[model]), [model, modelMeta]);
   useEffect(() => {
-    setAspectRatio((current) => resolveAspectRatio(model, current));
-  }, [model]);
+    setAspectRatio((current) => resolveAspectRatio(model, current, modelMeta[model]));
+  }, [model, modelMeta]);
 
   // Calculate video dimensions from aspect ratio and size
   // The capability record the registry declares for the selected model
@@ -582,7 +615,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // on 720x405 → snaps to 720x400, which is off-spec and produces distorted
     // output every time. Pin to the model's native frame and let the user
     // letterbox / crop in post if they need a different aspect.
-    if (isCogVideoXModel(model)) {
+    if (isCogVideoXModel(model, modelMeta[model])) {
       const [nativeW, nativeH] = MODEL_OPTIONS[model].resolution;
       return { width: nativeW, height: nativeH };
     }
@@ -593,7 +626,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // stays pinned to the budget and its dropdown is disabled for LTX.
     // MiniMax H3 uses the same fixed-budget treatment: its pixel area is what
     // costs VRAM, and the aspect ratio reshapes the frame inside it.
-    if (isLtxModel(model) || isMinimaxModel(model)) {
+    if (isLtxModel(model, modelMeta[model]) || isMinimaxModel(model, modelMeta[model])) {
       const tier = modelMeta[model]?.tier_defaults;
       const [nativeW, nativeH] = tier?.width && tier?.height
         ? [tier.width, tier.height]
@@ -634,6 +667,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return { width, height };
   }, [aspectRatio, videoSize, model, modelMeta]);
 
+  const applicableAdapters = useMemo(
+    () => (adapterModels || []).filter((m) => {
+      const applies = m.applies_to || [];
+      return applies.length === 0 || applies.includes(model);
+    }),
+    [adapterModels, model],
+  );
+
   // Compute final params from presets
   const computedParams = useMemo(() => {
     const quality = QUALITY_PRESETS[qualityPreset] || QUALITY_PRESETS.standard;
@@ -672,7 +713,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // silently choosing a bad number, not to overrule someone who typed one.
     const profileSpec = activeSpeedProfile ? modelCaps?.speed_profiles?.[activeSpeedProfile] : null;
     const stepsTyped = !(advancedParams.num_inference_steps === null || advancedParams.num_inference_steps === undefined);
-    const declaredMin = profileSpec?.min_steps ?? modelConfig.minSteps ?? (isCogVideoXModel(model) ? 50 : null);
+    const declaredMin = profileSpec?.min_steps ?? modelConfig.minSteps ?? modelCaps?.min_steps ?? (isCogVideoXModel(model, modelMeta[model]) ? 50 : null);
     if (declaredMin && effectiveSteps < declaredMin && !stepsTyped) {
       effectiveSteps = declaredMin;
     }
@@ -684,7 +725,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
     // LTX distilled is trained for 8 steps @ CFG=1 — quality presets that
     // push 30–50 steps waste time and can degrade distilled output.
-    if (isLtxModel(model) &&
+    if (isLtxModel(model, modelMeta[model]) &&
         (advancedParams.num_inference_steps === null || advancedParams.num_inference_steps === undefined)) {
       effectiveSteps = modelConfig.defaultSteps || 8;
     }
@@ -692,7 +733,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // Low VRAM safe preset for CogVideoX on 16GB GPUs
     // Very aggressive settings based on successful test: 8 frames, 15 steps, 480x320.
     // (cogvideox-2b was retired; cogvideox-5b stays and is tamed via the clamps below.)
-    if (lowVramMode && isCogVideoXModel(model)) {
+    if (lowVramMode && isCogVideoXModel(model, modelMeta[model])) {
       // Aggressively clamp frames - tested working with 8 frames
       if (effectiveDurationFrames > 12) {
         effectiveDurationFrames = 12;
@@ -722,7 +763,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
     // Low VRAM safe preset for Wan 2.2 on 16GB GPUs
     // GGUF Q5 is already memory-efficient; moderate clamping
-    if (lowVramMode && isWanModel(model)) {
+    if (lowVramMode && isWanModel(model, modelMeta[model])) {
       // Clamp frames to short duration to reduce memory
       if (effectiveDurationFrames > 33) {
         effectiveDurationFrames = 33;
@@ -771,7 +812,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     const useKeyframePath = cinematicKeyframe || selectedSubjectIds.length > 0;
     // FETA improves temporal coherence on CogVideoX — auto-on for Cinema tier.
     const effectiveFeta =
-      isCogVideoXModel(effectiveModel) &&
+      isCogVideoXModel(effectiveModel, modelMeta[effectiveModel]) &&
       (fetaEnabled || qualityTier === "cinema" || highConsistencyMode);
 
     // Build final params - don't spread quality since it has legacy width/height
@@ -786,12 +827,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       num_inference_steps: effectiveSteps,
       guidance_scale: advancedParams.guidance_scale,
       generate_frames_only: advancedParams.generate_frames_only,
-      frames_per_batch: lowVramMode && (isCogVideoXModel(model) || isWanModel(model)) ? 1 : advancedParams.frames_per_batch,
+      frames_per_batch: lowVramMode && (isCogVideoXModel(model, modelMeta[model]) || isWanModel(model, modelMeta[model])) ? 1 : advancedParams.frames_per_batch,
       combine_frames: advancedParams.combine_frames,
       freeu: advancedParams.freeu,
       face_restore: advancedParams.face_restore,
       lora_name: advancedParams.lora_name,
       lora_strength: advancedParams.lora_strength,
+      adapters: (advancedParams.adapters || [])
+        .filter((id) => applicableAdapters.some((a) => a.id === id))
+        .map((id) => ({ id, strength: advancedParams.adapter_strength ?? 0.7 })),
       wan_sampler_profile: MODEL_OPTIONS[effectiveModel]?.samplerProfiles
         ? advancedParams.wan_sampler_profile
         : undefined,
@@ -820,7 +864,29 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           : {}),
       },
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile, applicableAdapters]);
+
+  const qualityChipOptions = useMemo(() => {
+    if (isLtxModel(model, modelMeta[model])) return [];
+    if (lowVramMode && (isWanModel(model, modelMeta[model]) || isCogVideoXModel(model, modelMeta[model]))) return [];
+    const min = MODEL_OPTIONS[model]?.minSteps ?? modelCaps?.min_steps ?? 0;
+    const seen = new Set();
+    const out = [];
+    Object.entries(QUALITY_PRESETS).forEach(([key, preset]) => {
+      const steps = Math.max(preset.num_inference_steps, min);
+      if (seen.has(steps)) return;
+      seen.add(steps);
+      out.push({ value: key, label: stripGlyph(preset.label), tooltip: `${steps} steps` });
+    });
+    return out;
+  }, [model, lowVramMode, modelMeta, modelCaps]);
+
+  useEffect(() => {
+    if (qualityChipOptions.length === 0) return;
+    if (!qualityChipOptions.some((o) => o.value === qualityPreset)) {
+      setQualityPreset(qualityChipOptions[0].value);
+    }
+  }, [qualityChipOptions, qualityPreset]);
 
   const {
     activeBatchId,
@@ -1389,6 +1455,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   }, [batchStatus, getProcessesByType, activeProcesses]);
 
   const controlsDisabled = isGenerating;
+  const canQueue =
+    !isGenerating && (inputMode === "text" ? parsedPrompts.length > 0 : selectedImages.length > 0);
   const { gpuBusy, blockReason } = useJobsGate({ submitMode: "queue" });
   const castIdentityLocked = selectedSubjectIds.length > 0;
   const keyframeModelOptions = useMemo(() => {
@@ -1442,472 +1510,313 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         </Alert>
       )}
 
-      <Grid container spacing={3}>
-        {/* Settings Section - Left Side */}
+      <DashboardStrip>
+        <DashboardTile
+          label="Model"
+          value={MODEL_OPTIONS[model]?.label || model}
+          sub={modelMeta[model]?.is_ready === false ? "not installed" : accelLabel || "readiness unknown"}
+          tone={modelMeta[model]?.is_ready === false ? "error" : modelMeta[model]?.is_ready ? "ok" : "off"}
+          onClick={() => setVideoModelsModalOpen(true)}
+        />
+        <DashboardTile
+          label="Frame"
+          value={`${computedParams.width}×${computedParams.height}`}
+          sub={`${computedParams.duration_frames} frames · ${computedParams.fps} fps`}
+        />
+        <DashboardTile
+          label="Steps"
+          value={String(computedParams.num_inference_steps)}
+          sub={lowVramMode ? "Low VRAM clamp" : qualityChipOptions.find((o) => o.value === qualityPreset)?.label || "preset"}
+        />
+        <DashboardTile
+          label="Queue"
+          value={
+            queue.filter((q) => ["queued", "running", "pending"].includes(q.status)).length
+              ? `${queue.filter((q) => ["queued", "running", "pending"].includes(q.status)).length} active`
+              : "Idle"
+          }
+          tone={gpuBusy ? "warn" : "ok"}
+          sub={gpuBusy ? blockReason || "GPU busy" : "ready to queue"}
+        />
+      </DashboardStrip>
+
+      <Grid container spacing={3} sx={{ mt: 0.5 }}>
+        {/* Compose */}
         <Grid item xs={12} lg={6}>
-          <Card sx={{ 
-            height: 'fit-content',
-            boxShadow: 2,
-            borderRadius: 2
-          }}>
-            <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
-              <Typography
-                variant="h6"
-                sx={{
-                  fontWeight: 600,
-                  mb: 3,
-                  color: 'text.primary'
-                }}
-              >
-                Generation Settings
-              </Typography>
-
-              {/* Low VRAM Mode */}
-              <Box sx={{
-                mb: 3,
-                p: 2,
-                bgcolor: 'info.50',
-                borderRadius: 2,
-                border: '1px solid',
-                borderColor: 'info.200'
-              }}>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={lowVramMode}
-                      onChange={(e) => {
-                        const newValue = e.target.checked;
-                        setLowVramMode(newValue);
-                        localStorage.setItem('lowVramMode', newValue.toString());
-                        if (newValue && highConsistencyMode) {
-                          setHighConsistencyMode(false);
-                        }
-                      }}
-                      color="primary"
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2">
-                        Low VRAM Safe Preset
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Recommended for 16GB GPUs: reduces frames, resolution, and steps to minimize memory usage.
-                      </Typography>
-                    </Box>
-                  }
-                  sx={{ mt: 1 }}
-                />
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={highConsistencyMode}
-                      onChange={(e) => {
-                        const on = e.target.checked;
-                        setHighConsistencyMode(on);
-                        if (on && lowVramMode) {
-                          setLowVramMode(false);
-                          localStorage.setItem('lowVramMode', 'false');
-                        }
-                      }}
-                      color="secondary"
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                        High consistency mode
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Enables Director, keyframe→I2V, face restore, Cinema post-processing, and temporal coherence (FETA on CogVideoX / FreeU on Wan). Turns off Low VRAM.
-                      </Typography>
-                    </Box>
-                  }
-                  sx={{ mt: 1.5 }}
-                />
-                {highConsistencyMode && (
-                  <Alert severity="info" sx={{ mt: 1 }}>
-                    High consistency prioritizes quality — Low VRAM is off so resolution and steps stay at cinema settings.
-                  </Alert>
-                )}
-              </Box>
-
-              {/* Main Generation Form */}
-              <Box sx={{ opacity: controlsDisabled ? 0.5 : 1, pointerEvents: controlsDisabled ? 'none' : 'auto' }}>
-        <Stack spacing={3}>
-          {/* Input Mode Toggle */}
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Typography variant="h6">Create Video</Typography>
-            <ToggleButtonGroup
-              value={inputMode}
-              exclusive
-              onChange={(e, v) => v && setInputMode(v)}
-              size="small"
-            >
-              <ToggleButton value="text">
-                <Tooltip title="Text-to-Video: Describe what you want">
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                    <VideoIcon fontSize="small" />
-                    <Typography variant="caption">Text</Typography>
-                  </Box>
-                </Tooltip>
-              </ToggleButton>
-              <ToggleButton value="image">
-                <Tooltip title="Image-to-Video: Animate an existing image">
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                    <ImageIcon fontSize="small" />
-                    <Typography variant="caption">Image</Typography>
-                  </Box>
-                </Tooltip>
-              </ToggleButton>
-            </ToggleButtonGroup>
-          </Stack>
-
-          {inputMode === "text" && promptPresets.length > 0 && (
-            <FormControl fullWidth size="small" sx={{ mb: 1 }}>
-              <InputLabel>Prompt preset</InputLabel>
-              <Select
-                value={selectedPromptPreset}
-                onChange={(e) => applyPromptPreset(e.target.value)}
-                label="Prompt preset"
-              >
-                <MenuItem value="">None</MenuItem>
-                {promptPresets.map((p) => (
-                  <MenuItem key={p.slug} value={p.slug}>
-                    <Box>
-                      <Typography variant="body2">{p.title}</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {p.category} · {p.duration_s} s · {p.ratio}
-                      </Typography>
-                    </Box>
-                  </MenuItem>
-                ))}
-              </Select>
-              {promptGallery?.source?.url && (
-                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-                  Written in the model&apos;s structured prompt format. More examples in the{" "}
-                  <a href={promptGallery.source.url} target="_blank" rel="noreferrer noopener">community gallery</a>
-                  {" "}({promptGallery.source.name}).
-                </Typography>
-              )}
-            </FormControl>
-          )}
-          {/* Prompt/Image Input */}
-          {inputMode === "text" ? (
-            <TextField
-              label={storyboardMode ? "Storyboard concept (one idea — the Director expands it)" : "What do you want to see? (one prompt per line)"}
-              multiline
-              minRows={storyboardMode ? 2 : 3}
-              maxRows={storyboardMode ? 4 : 6}
-              value={promptsText}
-              onChange={(e) => setPromptsText(e.target.value)}
-              placeholder={storyboardMode
-                ? "A lone astronaut discovers a bioluminescent forest on an alien moon"
-                : "A majestic eagle soaring over mountains at sunset&#10;A playful cat chasing butterflies in a garden"}
-              helperText={storyboardMode
-                ? `One concept only — becomes ${storyboardShots} connected shots. Extra lines are ignored.`
-                : parsedPrompts.length > 1
-                  ? `${parsedPrompts.length} clips in this batch — use Look & Feel for shared style.`
-                  : undefined}
-              fullWidth
-              variant="outlined"
-            />
-          ) : (
-            <Box>
-              {/* Motion/Action Direction for I2V */}
-              <TextField
-                label="Describe the motion or action (optional)"
-                multiline
-                minRows={2}
-                maxRows={4}
-                value={promptsText}
-                onChange={(e) => setPromptsText(e.target.value)}
-                placeholder="Make this character jump around happily, waving its arms&#10;Slow camera zoom in with gentle head turn and blinking"
-                fullWidth
-                variant="outlined"
-                sx={{ mb: 2 }}
-              />
-
-              {/* Image Upload Area */}
-              <Box
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                sx={{
-                  border: dragActive ? '2px dashed' : '2px dashed',
-                  borderColor: dragActive ? 'primary.main' : 'grey.300',
-                  borderRadius: 2,
-                  p: 3,
-                  textAlign: 'center',
-                  bgcolor: dragActive ? 'action.hover' : 'transparent',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                  '&:hover': {
-                    borderColor: 'primary.light',
-                    bgcolor: 'action.hover',
-                  },
-                }}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                {isUploading ? (
-                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                    <CircularProgress size={40} />
-                    <Typography variant="body2" color="text.secondary">
-                      Uploading...
-                    </Typography>
-                  </Box>
-                ) : (
-                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                    <UploadIcon sx={{ fontSize: 48, color: 'grey.400' }} />
-                    <Typography variant="body1" color="text.secondary">
-                      Drag & drop images here, or click to upload
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      Supports JPG, PNG, GIF, WebP
-                    </Typography>
-                  </Box>
-                )}
-              </Box>
-
-              {/* Hidden file input */}
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept="image/*"
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  if (e.target.files && e.target.files.length > 0) {
-                    handleFileUpload(Array.from(e.target.files));
-                    e.target.value = '';
-                  }
-                }}
-              />
-
-              {/* Gallery Selection Button */}
-              <Box sx={{ mt: 2, display: 'flex', justifyContent: 'center' }}>
-                <Button
-                  variant="outlined"
-                  startIcon={<GalleryIcon />}
-                  onClick={openGallery}
-                  sx={{ textTransform: 'none' }}
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, opacity: controlsDisabled ? 0.5 : 1, pointerEvents: controlsDisabled ? "none" : "auto" }}>
+            <SettingsPanel
+              id="videogen-mode"
+              title="Mode"
+              description="How this job spends the GPU."
+              actions={
+                <ActionButton
+                  kind={canQueue ? "primary" : "neutral"}
+                  onClick={handleGenerate}
+                  loading={isGenerating}
+                  disabled={!canQueue || controlsDisabled}
                 >
-                  Select from Image Gallery
-                </Button>
-              </Box>
+                  Add to queue
+                </ActionButton>
+              }
+            >
+              <Line>
+                <SettingChip
+                  label="Low VRAM"
+                  on={lowVramMode}
+                  note={lowVramMode ? "next job" : undefined}
+                  tooltip="Reduces frames, resolution, and steps on 16GB cards. Default on."
+                  onToggle={(next) => {
+                    setLowVramMode(next);
+                    localStorage.setItem("lowVramMode", next.toString());
+                    if (next && highConsistencyMode) setHighConsistencyMode(false);
+                  }}
+                />
+                <SettingChip
+                  label="High consistency"
+                  on={highConsistencyMode}
+                  tooltip="Director, keyframe→I2V, cinema post, face restore when available. Turns Low VRAM off."
+                  onToggle={(next) => {
+                    setHighConsistencyMode(next);
+                    if (next && lowVramMode) {
+                      setLowVramMode(false);
+                      localStorage.setItem("lowVramMode", "false");
+                    }
+                  }}
+                />
+              </Line>
+            </SettingsPanel>
 
-              {/* Selected Images Preview */}
-              {selectedImages.length > 0 && (
-                <Box sx={{ mt: 2 }}>
-                  <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                    Selected Images ({selectedImages.length})
-                  </Typography>
-                  <Grid container spacing={1}>
-                    {selectedImages.map((img) => (
-                      <Grid item key={img.id}>
-                        <Box
-                          sx={{
-                            position: 'relative',
-                            width: 80,
-                            height: 80,
-                            borderRadius: 1,
-                            overflow: 'hidden',
-                            border: '1px solid',
-                            borderColor: 'grey.300',
-                          }}
-                        >
-                          <Box
-                            component="img"
-                            src={img.thumbnailUrl}
-                            alt={img.name}
-                            sx={{
-                              width: '100%',
-                              height: '100%',
-                              objectFit: 'cover',
-                            }}
-                            onError={(e) => {
-                              e.target.onerror = null;
-                              e.target.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect fill="%23f0f0f0" width="80" height="80"/><text x="40" y="45" text-anchor="middle" fill="%23999" font-size="10">Error</text></svg>';
-                            }}
-                          />
+            <SettingsPanel id="videogen-prompt" title="Prompt">
+              <Cluster label="Input">
+                <ChoiceChips
+                  ariaLabel="Input mode"
+                  value={inputMode}
+                  onChange={setInputMode}
+                  options={[
+                    { value: "text", label: "Text" },
+                    { value: "image", label: "Image" },
+                  ]}
+                />
+              </Cluster>
+              {inputMode === "text" && promptPresets.length > 0 && (
+                <Cluster label="Preset">
+                  <Line nowrap>
+                    <FormControl size="small" className="grow">
+                      <InputLabel>Prompt preset</InputLabel>
+                      <Select
+                        value={selectedPromptPreset}
+                        onChange={(e) => applyPromptPreset(e.target.value)}
+                        label="Prompt preset"
+                      >
+                        <MenuItem value="">None</MenuItem>
+                        {promptPresets.map((p) => (
+                          <MenuItem key={p.slug} value={p.slug}>
+                            {p.title}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Line>
+                  {promptGallery?.source?.url && (
+                    <Hint>
+                      Written in the model&apos;s structured prompt format. More in the{" "}
+                      <a href={promptGallery.source.url} target="_blank" rel="noreferrer noopener">
+                        community gallery
+                      </a>
+                      .
+                    </Hint>
+                  )}
+                </Cluster>
+              )}
+              {inputMode === "text" ? (
+                <TextField
+                  label={storyboardMode ? "Storyboard concept" : "What do you want to see? (one prompt per line)"}
+                  multiline
+                  minRows={storyboardMode ? 2 : 3}
+                  maxRows={storyboardMode ? 4 : 6}
+                  value={promptsText}
+                  onChange={(e) => setPromptsText(e.target.value)}
+                  placeholder={
+                    storyboardMode
+                      ? "A lone astronaut discovers a bioluminescent forest on an alien moon"
+                      : "A majestic eagle soaring over mountains at sunset"
+                  }
+                  helperText={
+                    storyboardMode
+                      ? `One concept only — becomes ${storyboardShots} connected shots.`
+                      : parsedPrompts.length > 1
+                        ? `${parsedPrompts.length} clips — Look & Feel applies to all.`
+                        : undefined
+                  }
+                  fullWidth
+                  size="small"
+                />
+              ) : (
+                <Box>
+                  <TextField
+                    label="Describe the motion or action (optional)"
+                    multiline
+                    minRows={2}
+                    maxRows={4}
+                    value={promptsText}
+                    onChange={(e) => setPromptsText(e.target.value)}
+                    placeholder="Slow camera zoom in with a gentle head turn"
+                    fullWidth
+                    size="small"
+                    sx={{ mb: 1.5 }}
+                  />
+                  <Box
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    onClick={() => fileInputRef.current?.click()}
+                    sx={{
+                      border: "2px dashed",
+                      borderColor: dragActive ? "primary.main" : "divider",
+                      borderRadius: "8px",
+                      p: 2,
+                      textAlign: "center",
+                      bgcolor: dragActive ? "action.hover" : "transparent",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {isUploading ? (
+                      <CircularProgress size={28} />
+                    ) : (
+                      <Typography variant="body2" color="text.secondary">
+                        Drop images here, or click to upload
+                      </Typography>
+                    )}
+                  </Box>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/*"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files.length > 0) {
+                        handleFileUpload(Array.from(e.target.files));
+                        e.target.value = "";
+                      }
+                    }}
+                  />
+                  <Line sx={{ mt: 1 }}>
+                    <ActionButton onClick={openGallery}>Select from gallery</ActionButton>
+                  </Line>
+                  {selectedImages.length > 0 && (
+                    <Box sx={{ mt: 1, display: "flex", gap: 1, flexWrap: "wrap" }}>
+                      {selectedImages.map((img) => (
+                        <Box key={img.id} sx={{ position: "relative", width: 72, height: 72, borderRadius: "6px", overflow: "hidden" }}>
+                          <Box component="img" src={img.thumbnailUrl} alt={img.name} sx={{ width: "100%", height: "100%", objectFit: "cover" }} />
                           <IconButton
                             size="small"
                             onClick={() => removeSelectedImage(img.id)}
-                            sx={{
-                              position: 'absolute',
-                              top: 2,
-                              right: 2,
-                              bgcolor: 'rgba(0,0,0,0.6)',
-                              color: 'white',
-                              p: 0.25,
-                              '&:hover': {
-                                bgcolor: 'rgba(0,0,0,0.8)',
-                              },
-                            }}
+                            sx={{ position: "absolute", top: 2, right: 2, bgcolor: "rgba(0,0,0,0.6)", color: "white", p: 0.25 }}
                           >
                             <CloseIcon sx={{ fontSize: 14 }} />
                           </IconButton>
                         </Box>
-                      </Grid>
-                    ))}
-                    {/* Add more button */}
-                    <Grid item>
-                      <Box
-                        onClick={() => fileInputRef.current?.click()}
-                        sx={{
-                          width: 80,
-                          height: 80,
-                          borderRadius: 1,
-                          border: '2px dashed',
-                          borderColor: 'grey.300',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s ease',
-                          '&:hover': {
-                            borderColor: 'primary.main',
-                            bgcolor: 'action.hover',
-                          },
-                        }}
-                      >
-                        <AddIcon color="action" />
-                      </Box>
-                    </Grid>
-                  </Grid>
+                      ))}
+                    </Box>
+                  )}
                 </Box>
               )}
-            </Box>
-          )}
-
-          {/* Batch-wide prompt modifiers — apply to every prompt in the batch */}
-          <Stack spacing={2} sx={{ mt: 2 }}>
-            <TextField
-              label="Look & Feel (optional, applied to every prompt)"
-              multiline
-              minRows={2}
-              maxRows={4}
-              value={lookAndFeel}
-              onChange={(e) => setLookAndFeel(e.target.value)}
-              placeholder="moody cinematic, golden hour lighting, dramatic shadows, shallow depth of field"
-              helperText={
-                lookAndFeel.trim()
-                  ? `Will be appended to ${parsedPrompts.length || 0} prompt${parsedPrompts.length === 1 ? "" : "s"} in this batch.`
-                  : "Style modifier — same shape as BatchImageGen's Look & Feel field."
-              }
-              fullWidth
-              variant="outlined"
-              size="small"
-            />
-
-            <TextField
-              label="Negative Prompt (optional, applied to every prompt)"
-              multiline
-              minRows={2}
-              maxRows={4}
-              value={negativePrompt}
-              disabled={modelCaps?.cfg === false || isMinimaxModel(model)}
-              onChange={(e) => setNegativePrompt(e.target.value)}
-              placeholder="blurry, distorted hands, washed out colors, flickering, jittery motion"
-              helperText={
-                (modelCaps?.cfg === false || isMinimaxModel(model))
-                  ? "Not used by this model: it samples without classifier-free guidance."
-                  : enhancePrompt && !negativePrompt.trim()
-                  ? "Enhance Prompt is on — the backend also auto-adds quality-focused negatives (blur, artifacts, anatomy defects) when this field is empty."
-                  : "Target technical defects (blur, flicker, bad anatomy) for better consistency."
-              }
-              fullWidth
-              variant="outlined"
-              size="small"
-            />
-
-            {/* Fidelity / Exact text mode + live preview of enhancement */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={fidelityMode}
-                    onChange={(e) => {
-                      const v = e.target.checked;
-                      setFidelityMode(v);
-                      // Reset preview when toggling so user sees the difference
-                      setPreviewEnhanced("");
-                      setShowPreview(false);
-                    }}
-                    size="small"
-                  />
-                }
-                label={
-                  <Tooltip title="Exact text / preserve fidelity mode: uses light enhancement only (orientation + motion hints, no heavy style boilerplate). Prevents garbling of on-screen text/logos.">
-                    <Typography variant="body2">Exact text mode (light enhance)</Typography>
-                  </Tooltip>
-                }
-                sx={{ mr: 1 }}
-              />
-              <Button
+              <TextField
+                label="Look & Feel"
+                multiline
+                minRows={2}
+                maxRows={4}
+                value={lookAndFeel}
+                onChange={(e) => setLookAndFeel(e.target.value)}
+                placeholder="moody cinematic, golden hour, shallow depth of field"
+                helperText={lookAndFeel.trim() ? `Appended to ${parsedPrompts.length || 0} prompt(s).` : "Optional style applied to every prompt."}
+                fullWidth
                 size="small"
-                variant="outlined"
-                onClick={fetchPromptPreview}
-                disabled={previewLoading || !((inputMode === "text" ? parsedPrompts.length : promptsText.trim()) > 0)}
-                startIcon={previewLoading ? <CircularProgress size={14} /> : null}
-              >
-                {previewLoading ? "Previewing..." : "Preview enhanced prompt"}
-              </Button>
-            </Box>
+              />
+              <TextField
+                label="Negative prompt"
+                multiline
+                minRows={2}
+                maxRows={4}
+                value={negativePrompt}
+                disabled={modelCaps?.cfg === false || isMinimaxModel(model, modelMeta[model])}
+                onChange={(e) => setNegativePrompt(e.target.value)}
+                placeholder="blurry, distorted hands, flicker"
+                helperText={
+                  modelCaps?.cfg === false || isMinimaxModel(model, modelMeta[model])
+                    ? "This model samples without CFG — negative prompt is not used."
+                    : undefined
+                }
+                fullWidth
+                size="small"
+              />
+              <Line>
+                <SettingChip
+                  label="Exact text"
+                  on={fidelityMode}
+                  tooltip="Light enhancement only — keeps on-screen text and logos."
+                  onToggle={(next) => {
+                    setFidelityMode(next);
+                    setPreviewEnhanced("");
+                    setShowPreview(false);
+                  }}
+                />
+                <SettingChip
+                  label="Enhance prompt"
+                  on={enhancePrompt}
+                  tooltip="Adds quality and motion descriptors. Motion chips do nothing when this is off."
+                  onToggle={setEnhancePrompt}
+                />
+                <ActionButton
+                  onClick={fetchPromptPreview}
+                  loading={previewLoading}
+                  disabled={!((inputMode === "text" ? parsedPrompts.length : promptsText.trim()) > 0)}
+                >
+                  Preview enhanced
+                </ActionButton>
+              </Line>
+              {showPreview && previewEnhanced && (
+                <TextField
+                  label="Enhanced prompt (what will be sent)"
+                  value={previewEnhanced}
+                  multiline
+                  minRows={2}
+                  fullWidth
+                  size="small"
+                  InputProps={{ readOnly: true }}
+                />
+              )}
+            </SettingsPanel>
 
-            {/* Creative pipeline — biggest quality/consistency levers */}
-            <Box sx={{ mt: 2, p: 2, borderRadius: 2, border: 1, borderColor: 'divider', bgcolor: 'action.hover' }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1.5 }}>
-                Creative pipeline
-              </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
-                These options improve shot quality, character consistency, and connected sequences.
-              </Typography>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={directorMode}
-                      onChange={(e) => setDirectorMode(e.target.checked)}
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Tooltip title="Rewrites each prompt into a shot-ready cinematic description (camera, lens, lighting, motion) before generation.">
-                      <Typography variant="body2">Cinematic Director</Typography>
-                    </Tooltip>
-                  }
+            <SettingsPanel
+              id="videogen-pipeline"
+              title="Pipeline"
+              description="Shot writing and identity. High consistency turns these on."
+            >
+              <Line>
+                <SettingChip
+                  label="Director"
+                  on={directorMode}
+                  tooltip="Rewrites each prompt into a cinematic shot before generation."
+                  onToggle={setDirectorMode}
                 />
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={cinematicKeyframe || selectedSubjectIds.length > 0}
-                      onChange={(e) => setCinematicKeyframe(e.target.checked)}
-                      disabled={selectedSubjectIds.length > 0}
-                      size="small"
-                    />
+                <SettingChip
+                  label="Keyframe → I2V"
+                  on={cinematicKeyframe || selectedSubjectIds.length > 0}
+                  disabled={selectedSubjectIds.length > 0}
+                  tooltip={
+                    selectedSubjectIds.length > 0
+                      ? "On because a cast member is selected."
+                      : "Still first, then image-to-video. Sharper than pure text-to-video."
                   }
-                  label={
-                    <Tooltip title="Renders a high-quality still per clip, then animates it with image-to-video. Sharpest faces and detail — the main quality upgrade for text-to-video.">
-                      <Typography variant="body2">Keyframe → I2V</Typography>
-                    </Tooltip>
-                  }
+                  onToggle={setCinematicKeyframe}
                 />
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={storyboardMode}
-                      onChange={(e) => setStoryboardMode(e.target.checked)}
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Tooltip title="One concept becomes N connected shots written by the Director — a sequence, not duplicate seeds.">
-                      <Typography variant="body2">Storyboard sequence</Typography>
-                    </Tooltip>
-                  }
+                <SettingChip
+                  label="Storyboard"
+                  on={storyboardMode}
+                  tooltip="One concept becomes N connected shots."
+                  onToggle={setStoryboardMode}
                 />
                 {storyboardMode && (
                   <TextField
@@ -1916,593 +1825,342 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     value={storyboardShots}
                     onChange={(e) => setStoryboardShots(Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 1)))}
                     size="small"
-                    sx={{ width: 100 }}
+                    sx={{ width: 96 }}
                     inputProps={{ min: 1, max: 50 }}
                   />
                 )}
-              </Box>
+              </Line>
               {(directorMode || storyboardMode) && (
                 <TextField
                   value={directorGuidance}
                   onChange={(e) => setDirectorGuidance(e.target.value)}
-                  placeholder="Director guidance (e.g. handheld 35mm, moody teal grade, slow push-ins, consistent wardrobe)"
+                  placeholder="Director guidance (handheld 35mm, slow push-ins…)"
                   size="small"
                   fullWidth
-                  sx={{ mt: 1.5 }}
                 />
               )}
               <Collapse in={cinematicKeyframe || selectedSubjectIds.length > 0}>
                 {castIdentityLocked ? (
-                  <Alert severity="info" sx={{ mt: 1.5 }}>
-                    Keyframe still model is automatic from this character&apos;s training base
-                    (Z-Image / SDXL / FLUX). A new still is generated from your prompt + LoRA,
-                    then animated — training images are never used as start frames.
-                  </Alert>
+                  <Hint>Keyframe model is the character&apos;s training base. Training images are never start frames.</Hint>
                 ) : (
-                  <TextField
-                    select
-                    size="small"
-                    fullWidth
-                    label="Keyframe image model"
-                    value={keyframeModel === "from-lora" ? DEFAULT_KEYFRAME_MODEL : keyframeModel}
-                    onChange={(e) => setKeyframeModel(e.target.value)}
-                    helperText="The still that gets animated — identity and detail quality depend on this choice."
-                    sx={{ mt: 1.5 }}
-                  >
-                    {keyframeModelOptions.map(([key, cfg]) => (
-                      <MenuItem key={key} value={key}>
-                        {cfg.label} — {cfg.description}
-                      </MenuItem>
-                    ))}
-                  </TextField>
+                  <FormControl size="small" fullWidth sx={{ mt: 0.5 }}>
+                    <InputLabel>Keyframe image model</InputLabel>
+                    <Select
+                      value={keyframeModel === "from-lora" ? DEFAULT_KEYFRAME_MODEL : keyframeModel}
+                      onChange={(e) => setKeyframeModel(e.target.value)}
+                      label="Keyframe image model"
+                    >
+                      {keyframeModelOptions.map(([key, cfg]) => (
+                        <MenuItem key={key} value={key}>
+                          {cfg.label}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
                 )}
               </Collapse>
-              <TextField
-                select
-                size="small"
-                fullWidth
-                label="Cast (trained characters — locks identity across clips)"
-                value={selectedSubjectIds}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setSelectedSubjectIds(typeof v === "string" ? v.split(",").map(Number) : v);
-                }}
-                SelectProps={{
-                  multiple: true,
-                  renderValue: (sel) =>
-                    castSubjects
-                      .filter((s) => sel.includes(s.id))
-                      .map((s) => s.name)
-                      .join(", ") || "None selected",
-                }}
-                helperText={
-                  castSubjects.length === 0
-                    ? "Train a character in Cast Library to lock identity into every keyframe."
-                    : "LoRA + your prompt invent each keyframe still, then animate. Describe any scene or action."
-                }
-                sx={{ mt: 1.5 }}
-              >
-                {castSubjects.map((s) => (
-                  <MenuItem key={s.id} value={s.id}>
-                    {s.name}{s.trigger_word ? ` (${s.trigger_word})` : ""}
-                  </MenuItem>
-                ))}
-              </TextField>
-              {inputMode === "text" && (cinematicKeyframe || selectedSubjectIds.length > 0) && (
-                <Alert severity="info" sx={{ mt: 1.5 }}>
-                  Keyframe mode renders a still first, then animates via image-to-video on the backend — much sharper than pure text-to-video.
-                </Alert>
-              )}
-            </Box>
+              <FormControl size="small" fullWidth>
+                <InputLabel>Cast</InputLabel>
+                <Select
+                  multiple
+                  value={selectedSubjectIds}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSelectedSubjectIds(typeof v === "string" ? v.split(",").map(Number) : v);
+                  }}
+                  label="Cast"
+                  renderValue={(sel) =>
+                    castSubjects.filter((s) => sel.includes(s.id)).map((s) => s.name).join(", ") || "None"
+                  }
+                >
+                  {castSubjects.map((s) => (
+                    <MenuItem key={s.id} value={s.id}>
+                      {s.name}{s.trigger_word ? ` (${s.trigger_word})` : ""}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <Hint>
+                {castSubjects.length === 0
+                  ? "Train a character in Cast Library to lock identity into every keyframe."
+                  : "LoRA + prompt invent each keyframe still, then animate."}
+              </Hint>
+            </SettingsPanel>
 
-            {showPreview && previewEnhanced && (
-              <TextField
-                label="Enhanced prompt (what will be sent to the model)"
-                value={previewEnhanced}
-                multiline
-                minRows={2}
-                fullWidth
-                variant="filled"
-                size="small"
-                InputProps={{ readOnly: true }}
-                helperText="Result of backend prompt enhancer (style + motion hints + fidelity handling). Regenerate batch to apply changes."
-                sx={{ mt: 0.5 }}
-              />
-            )}
-
-            {/* frames_per_batch exposed (P0) — hidden behind lowVram force in computedParams */}
-            <TextField
-              label="Frames / batch (advanced)"
-              type="number"
-              size="small"
-              inputProps={{ min: 1, max: 8 }}
-              value={advancedParams.frames_per_batch}
-              onChange={(e) => {
-                const v = Math.max(1, parseInt(e.target.value || "1", 10));
-                setAdvancedParams((prev) => ({ ...prev, frames_per_batch: v }));
-              }}
-              helperText=">1 can speed up when VRAM allows (model dependent). Low VRAM mode forces 1."
-              sx={{ maxWidth: 180 }}
-            />
-          </Stack>
-
-          <Divider sx={{ my: 3 }} />
-
-          {/* Video Settings Section */}
-          <Box sx={{ mb: 3 }}>
-            <Typography 
-              variant="subtitle1" 
-              sx={{ 
-                display: "flex", 
-                alignItems: "center", 
-                gap: 1,
-                mb: 2.5,
-                fontWeight: 600
-              }}
-            >
-              <SettingsIcon fontSize="small" /> Video Settings
-            </Typography>
-
-            {/* Primary Settings Row */}
-            <Grid container spacing={2} sx={{ mb: 2 }}>
-              {/* Model Selection */}
-              <Grid item xs={12} sm={6} md={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>Model</InputLabel>
-                  <Select
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    label="Model"
-                  >
-                    {availableModels.map(([key, opt]) => (
-                      <MenuItem key={key} value={key}>
-                        <Box>
-                          <Typography variant="body2">{opt.label}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {opt.description}
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                {accelLabel && (
-                  <Box sx={{ mt: 1 }}>
-                    <Chip
-                      size="small"
-                      variant="outlined"
-                      label={`Runs on: ${accelLabel}`}
-                      title="The accelerator the backend detected for video generation"
-                    />
-                  </Box>
+            <SettingsPanel id="videogen-clip" title="Clip">
+              <Cluster label="Model">
+                <Line nowrap>
+                  <FormControl size="small" className="grow">
+                    <InputLabel>Model</InputLabel>
+                    <Select value={model} onChange={(e) => setModel(e.target.value)} label="Model">
+                      {availableModels.map(([key, opt]) => (
+                        <MenuItem key={key} value={key}>
+                          {opt.label}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <ActionButton onClick={() => setVideoModelsModalOpen(true)}>Manage models</ActionButton>
+                  <ActionButton kind="link" onClick={() => window.open("http://localhost:8188", "_blank")}>
+                    ComfyUI
+                  </ActionButton>
+                </Line>
+                {applicableAdapters.length > 0 && (
+                  <>
+                    <Line wrap>
+                      {applicableAdapters.map((a) => {
+                        const on = (advancedParams.adapters || []).includes(a.id);
+                        return (
+                          <SettingChip
+                            key={a.id}
+                            label={a.name}
+                            on={on}
+                            onToggle={() => {
+                              setAdvancedParams((prev) => {
+                                const cur = prev.adapters || [];
+                                return {
+                                  ...prev,
+                                  adapters: on ? cur.filter((id) => id !== a.id) : [...cur, a.id],
+                                };
+                              });
+                            }}
+                          />
+                        );
+                      })}
+                    </Line>
+                    <Hint>LoRAs you added in Manage models. Off until you turn one on. Strength 0.7.</Hint>
+                  </>
                 )}
                 {modelMeta[model]?.license?.name && (
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-                    {modelMeta[model].license.attribution} · {modelMeta[model].license.name}.{" "}
-                    {modelMeta[model].license.note}
-                    {modelMeta[model].license.form_url && (
-                      <>
-                        {" "}
-                        <a href={modelMeta[model].license.form_url} target="_blank" rel="noreferrer noopener">
-                          Application form
-                        </a>
-                      </>
-                    )}
-                  </Typography>
+                  <Hint>
+                    {modelMeta[model].license.attribution} · {modelMeta[model].license.name}. {modelMeta[model].license.note}
+                  </Hint>
                 )}
                 {anyModelReady === false && (
-                  <Box sx={{ mt: 1, p: 1, border: 1, borderColor: "warning.main", borderRadius: 1 }}>
-                    <Typography variant="caption" color="warning.main">
-                      ⚠ No video model is installed yet — open “Manage Video Models” to install one before generating.
-                    </Typography>
-                  </Box>
+                  <Hint>No video model is installed yet — open Manage models first.</Hint>
                 )}
-                <Button
-                  variant="outlined"
-                  size="small"
-                  startIcon={<SettingsIcon />}
-                  onClick={() => setVideoModelsModalOpen(true)}
-                  sx={{ mt: 1, textTransform: "none" }}
-                >
-                  Manage Video Models
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  startIcon={<OpenInNewIcon />}
-                  onClick={() => window.open('http://localhost:8188', '_blank')}
-                  sx={{ mt: 1, ml: 1, textTransform: "none" }}
-                >
-                  Advanced Editor
-                </Button>
-              </Grid>
-
-              {/* Quality Preset */}
-              <Grid item xs={12} sm={6} md={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                      <SpeedIcon fontSize="small" /> Quality
-                    </Box>
-                  </InputLabel>
-                  <Select
+              </Cluster>
+              {qualityChipOptions.length > 0 && (
+                <Cluster label="Steps" note="raised to the model floor">
+                  <ChoiceChips
+                    ariaLabel="Quality steps"
                     value={qualityPreset}
-                    onChange={(e) => setQualityPreset(e.target.value)}
-                    label="Quality"
-                  >
-                    {Object.entries(QUALITY_PRESETS).map(([key, preset]) => (
-                      <MenuItem key={key} value={key}>
-                        <Box>
-                          <Typography variant="body2">{preset.label}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {preset.description}
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-
-              {/* Duration Preset */}
-              <Grid item xs={12} sm={6} md={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                      <TimerIcon fontSize="small" /> Duration
-                    </Box>
-                  </InputLabel>
-                  <Select
-                    value={durationPreset}
-                    onChange={(e) => setDurationPreset(e.target.value)}
-                    label="Duration"
-                  >
-                    {Object.entries(durationPresets).map(([key, preset]) => (
-                      <MenuItem key={key} value={key}>
-                        <Box>
-                          <Typography variant="body2">{preset.label}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {preset.description}
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-
-              {/* Motion Preset — carried as motion_strength and expressed through prompt enhancement */}
-              <Grid item xs={12} sm={6} md={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                      <EnhanceIcon fontSize="small" /> Motion
-                    </Box>
-                  </InputLabel>
-                  <Select
-                    value={motionPreset}
-                    onChange={(e) => setMotionPreset(e.target.value)}
-                    label="Motion"
-                  >
-                    {Object.entries(MOTION_PRESETS).map(([key, preset]) => (
-                      <MenuItem key={key} value={key}>
-                        <Box>
-                          <Typography variant="body2">{preset.label}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {preset.description}
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                  <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
-                    Added to the prompt by the enhancer — no effect with Verbatim Prompts or enhancement off.
-                  </Typography>
-                </FormControl>
-              </Grid>
-            </Grid>
-            {isCogVideoXModel(model) && qualityPreset !== "maximum" && (
-              <Alert severity="info" sx={{ mb: 2 }}>
-                CogVideoX needs at least 50 inference steps for clean output — lower presets are raised automatically.
-              </Alert>
-            )}
-
-            {/* Video Dimensions Row */}
-            <Grid container spacing={2} sx={{ mb: 2 }}>
-              {isCogVideoXModel(model) ? (
-                <Grid item xs={12} sm={6} md={4}>
-                  <Chip
-                    label={`${computedParams.width}×${computedParams.height} native resolution`}
-                    variant="outlined"
-                    sx={{ height: 40, fontSize: '0.85rem' }}
+                    onChange={setQualityPreset}
+                    options={qualityChipOptions}
                   />
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                    CogVideoX is trained at 720×480 — other aspects distort output. Crop in post if needed.
-                  </Typography>
-                </Grid>
+                </Cluster>
+              )}
+              <Cluster label="Duration">
+                <ChoiceChips
+                  ariaLabel="Duration"
+                  value={durationPreset}
+                  onChange={setDurationPreset}
+                  options={Object.entries(durationPresets).map(([key, preset]) => ({
+                    value: key,
+                    label: stripGlyph(preset.label),
+                    tooltip: preset.description,
+                  }))}
+                />
+              </Cluster>
+              <Cluster label="Motion" note={enhancePrompt ? "via prompt enhancer" : "no effect while Enhance is off"}>
+                <ChoiceChips
+                  ariaLabel="Motion"
+                  value={motionPreset}
+                  onChange={setMotionPreset}
+                  disabled={!enhancePrompt}
+                  options={Object.entries(MOTION_PRESETS).map(([key, preset]) => ({
+                    value: key,
+                    label: stripGlyph(preset.label),
+                    tooltip: preset.description,
+                  }))}
+                />
+              </Cluster>
+              {isCogVideoXModel(model, modelMeta[model]) ? (
+                <Hint>CogVideoX is trained at {computedParams.width}×{computedParams.height}. Other aspects distort.</Hint>
               ) : (
                 <>
-                  <Grid item xs={12} sm={6} md={4}>
-                    <FormControl fullWidth size="small">
-                      <InputLabel>Aspect Ratio</InputLabel>
-                      <Select
-                        value={aspectRatio}
-                        onChange={(e) => setAspectRatio(e.target.value)}
-                        label="Aspect Ratio"
-                      >
-                        {Object.entries(allowedAspectRatios).map(([key, preset]) => (
-                          <MenuItem key={key} value={key}>
-                            <Box>
-                              <Typography variant="body2">{preset.label}</Typography>
-                              <Typography variant="caption" color="text.secondary">
-                                {preset.description}
-                              </Typography>
-                            </Box>
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={4}>
-                    <FormControl fullWidth size="small" disabled={isLtxModel(model) || isMinimaxModel(model)}>
-                      <InputLabel>Video Size</InputLabel>
-                      <Select
-                        value={videoSize}
-                        onChange={(e) => setVideoSize(e.target.value)}
-                        label="Video Size"
-                      >
-                        {Object.entries(VIDEO_SIZE_PRESETS).map(([key, preset]) => (
-                          <MenuItem key={key} value={key}>
-                            <Box>
-                              <Typography variant="body2">{preset.label}</Typography>
-                              <Typography variant="caption" color="text.secondary">
-                                {preset.description}
-                              </Typography>
-                            </Box>
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                      Renders at {computedParams.width}×{computedParams.height}
-                      {isLtxModel(model)
-                        ? " — LTX runs a fixed pixel budget; aspect ratio reshapes the frame"
-                        : isMinimaxModel(model)
-                          ? " — MiniMax H3 runs a fixed pixel budget; aspect ratio reshapes the frame"
-                          : ""}
-                    </Typography>
-                  </Grid>
+                  <Cluster label="Aspect">
+                    <ChoiceChips
+                      ariaLabel="Aspect ratio"
+                      value={aspectRatio}
+                      onChange={setAspectRatio}
+                      options={Object.entries(allowedAspectRatios).map(([key, preset]) => ({
+                        value: key,
+                        label: preset.label,
+                        tooltip: preset.description,
+                      }))}
+                    />
+                  </Cluster>
+                  <Cluster label="Size" note={`renders ${computedParams.width}×${computedParams.height}`}>
+                    <ChoiceChips
+                      ariaLabel="Video size"
+                      value={videoSize}
+                      onChange={setVideoSize}
+                      disabled={isLtxModel(model, modelMeta[model]) || isMinimaxModel(model, modelMeta[model])}
+                      options={Object.entries(VIDEO_SIZE_PRESETS).map(([key, preset]) => ({
+                        value: key,
+                        label: stripGlyph(preset.label),
+                        tooltip: preset.description,
+                      }))}
+                    />
+                  </Cluster>
                 </>
               )}
+              <Cluster label="Output">
+                <ChoiceChips
+                  ariaLabel="Output quality"
+                  value={qualityTier}
+                  onChange={setQualityTier}
+                  options={Object.entries(OUTPUT_QUALITY_TIERS).map(([key, tier]) => ({
+                    value: key,
+                    label: tier.label,
+                    tooltip: tier.description,
+                  }))}
+                />
+              </Cluster>
+            </SettingsPanel>
 
-              {/* Output Quality Tier (post-processing) */}
-              <Grid item xs={12} sm={6} md={4}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                      <HighQualityIcon fontSize="small" /> Output Quality
-                    </Box>
-                  </InputLabel>
+            <SettingsPanel id="videogen-finish" title="Finish">
+              <Line>
+                <SettingChip
+                  label="Fix anatomy"
+                  on={advancedParams.face_restore}
+                  disabled={!faceRestoreAvailable}
+                  tooltip={
+                    faceRestoreAvailable
+                      ? "CodeFormer face restore"
+                      : !faceRestoreNodeAvailable
+                        ? "ComfyUI node missing"
+                        : "CodeFormer weights not installed"
+                  }
+                  onToggle={(next) => setAdvancedParams({ ...advancedParams, face_restore: next })}
+                  onSettings={
+                    faceRestoreNodeAvailable && faceRestoreModelReady === false
+                      ? () => {
+                          setHighlightModelId("codeformer");
+                          setVideoModelsModalOpen(true);
+                        }
+                      : undefined
+                  }
+                />
+                <SettingChip
+                  label="2× upscale"
+                  on={postUpscale || qualityTier === "cinema"}
+                  disabled={qualityTier === "cinema"}
+                  tooltip={qualityTier === "cinema" ? "On because Output is Cinema." : "Real-ESRGAN after generation."}
+                  onToggle={setPostUpscale}
+                />
+                <SettingChip
+                  label="PNG frames"
+                  on={advancedParams.generate_frames_only}
+                  tooltip="Also save a lossless PNG sequence beside the MP4."
+                  onToggle={(next) => setAdvancedParams({ ...advancedParams, generate_frames_only: next })}
+                />
+                {isWanModel(model, modelMeta[model]) && (
+                  <SettingChip
+                    label="FreeU"
+                    on={advancedParams.freeu}
+                    tooltip="Fine-detail boost on Wan."
+                    onToggle={(next) => setAdvancedParams({ ...advancedParams, freeu: next })}
+                  />
+                )}
+                {isCogVideoXModel(model, modelMeta[model]) && (
+                  <SettingChip
+                    label="FETA"
+                    on={fetaEnabled || qualityTier === "cinema" || highConsistencyMode}
+                    disabled={qualityTier === "cinema" || highConsistencyMode}
+                    tooltip="Temporal coherence between frames."
+                    onToggle={setFetaEnabled}
+                  />
+                )}
+              </Line>
+              {isCogVideoXModel(model, modelMeta[model]) && (fetaEnabled || qualityTier === "cinema" || highConsistencyMode) && (
+                <TextField
+                  size="small"
+                  label="FETA weight"
+                  type="number"
+                  inputProps={{ step: 0.1, min: 0.1, max: 3.0 }}
+                  value={fetaWeight}
+                  onChange={(e) => setFetaWeight(Number(e.target.value))}
+                  sx={{ width: 140 }}
+                />
+              )}
+              {MODEL_OPTIONS[model]?.samplerProfiles && (
+                <FormControl size="small" fullWidth>
+                  <InputLabel>Sampler profile</InputLabel>
                   <Select
-                    value={qualityTier}
-                    onChange={(e) => setQualityTier(e.target.value)}
-                    label="Output Quality"
+                    value={advancedParams.wan_sampler_profile}
+                    onChange={(e) => setAdvancedParams({ ...advancedParams, wan_sampler_profile: e.target.value })}
+                    label="Sampler profile"
                   >
-                    {Object.entries(OUTPUT_QUALITY_TIERS).map(([key, tier]) => (
+                    {MODEL_OPTIONS[model].samplerProfiles.map((key) => (
                       <MenuItem key={key} value={key}>
-                        <Box>
-                          <Typography variant="body2">{tier.label}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {tier.description}
-                          </Typography>
-                        </Box>
+                        {WAN5B_SAMPLER_PROFILES[key]?.label || key}
                       </MenuItem>
                     ))}
                   </Select>
                 </FormControl>
-              </Grid>
-            </Grid>
-
-            {/* Post-processing — directly affects output polish and consistency */}
-            <Box sx={{ mt: 1, mb: 2, p: 2, borderRadius: 2, border: 1, borderColor: 'divider' }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
-                Post-processing
-              </Typography>
-              <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 2, flexWrap: 'wrap' }}>
-                <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
-                  <Tooltip
-                    title={
-                      faceRestoreAvailable
-                        ? "Restores faces and reduces anatomy defects via CodeFormer"
-                        : "Requires facerestore_cf ComfyUI node + CodeFormer weights (Manage Video Models)"
-                    }
+              )}
+              {modelCaps?.speed_profiles && (
+                <FormControl size="small" fullWidth>
+                  <InputLabel>Speed profile</InputLabel>
+                  <Select
+                    value={activeSpeedProfile || "standard"}
+                    onChange={(e) => setAdvancedParams({ ...advancedParams, speed_profile: e.target.value })}
+                    label="Speed profile"
                   >
-                    <span>
-                      <FormControlLabel
-                        control={
-                          <Switch
-                            checked={advancedParams.face_restore}
-                            onChange={(e) => setAdvancedParams({ ...advancedParams, face_restore: e.target.checked })}
-                            disabled={!faceRestoreAvailable}
-                            size="small"
-                          />
-                        }
-                        label={
-                          <Box>
-                            <Typography variant="body2">Fix anatomy (CodeFormer)</Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {faceRestoreAvailable
-                                ? "Restores faces and reduces anatomy defects"
-                                : faceRestoreNodeAvailable === null || faceRestoreModelReady === null
-                                  ? "Checking requirements…"
-                                  : !faceRestoreNodeAvailable
-                                    ? "ComfyUI node missing — restart ComfyUI from Plugins"
-                                    : "CodeFormer weights not installed"}
-                            </Typography>
-                          </Box>
-                        }
-                      />
-                    </span>
-                  </Tooltip>
-                  {faceRestoreNodeAvailable && faceRestoreModelReady === false && (
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<CloudDownloadIcon />}
-                      onClick={() => {
-                        setHighlightModelId("codeformer");
-                        setVideoModelsModalOpen(true);
+                    {Object.entries(modelCaps.speed_profiles).map(([key, spec]) => (
+                      <MenuItem key={key} value={key}>
+                        {spec.label || key}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              )}
+              {modelCaps?.style_embeddings?.length > 0 && (
+                <FormControl size="small" fullWidth>
+                  <InputLabel>Style embedding</InputLabel>
+                  <Select
+                    value={advancedParams.style_embedding || ""}
+                    onChange={(e) => setAdvancedParams({ ...advancedParams, style_embedding: e.target.value })}
+                    label="Style embedding"
+                  >
+                    <MenuItem value="">None</MenuItem>
+                    {modelCaps.style_embeddings.map((emb) => (
+                      <MenuItem key={emb.id} value={emb.id}>{emb.label}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              )}
+              {inputMode === "image" && modelCaps?.modes?.includes("flf2v") && (
+                <Line>
+                  <ActionButton component="label" loading={isUploadingEndFrame}>
+                    {endFrame ? `End frame: ${endFrame.name}` : "Add end frame"}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      hidden
+                      onChange={(e) => {
+                        handleEndFrameUpload(e.target.files?.[0]);
+                        e.target.value = "";
                       }}
-                      sx={{ alignSelf: "flex-start", ml: 4 }}
-                    >
-                      Install CodeFormer
-                    </Button>
-                  )}
-                </Box>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={postUpscale || qualityTier === 'cinema'}
-                      onChange={(e) => setPostUpscale(e.target.checked)}
-                      size="small"
                     />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2">2× upscale (Real-ESRGAN)</Typography>
-                      <Typography variant="caption" color="text.secondary">Sharper detail after generation</Typography>
-                    </Box>
-                  }
-                />
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={advancedParams.generate_frames_only}
-                      onChange={(e) => setAdvancedParams({ ...advancedParams, generate_frames_only: e.target.checked })}
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2">Export PNG frames</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Also save a lossless PNG sequence (alongside the MP4) to stitch in your own editor — motion is preserved, no compression loss
-                      </Typography>
-                    </Box>
-                  }
-                />
-                {isWanModel(model) && (
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={advancedParams.freeu}
-                        onChange={(e) => setAdvancedParams({ ...advancedParams, freeu: e.target.checked })}
-                        size="small"
-                      />
-                    }
-                    label={
-                      <Box>
-                        <Typography variant="body2">FreeU detail boost</Typography>
-                        <Typography variant="caption" color="text.secondary">Improves fine detail on Wan</Typography>
-                      </Box>
-                    }
-                  />
-                )}
-                {MODEL_OPTIONS[model]?.samplerProfiles && (
-                  <FormControl fullWidth size="small" sx={{ mt: 1.5 }}>
-                    <InputLabel>Sampler profile</InputLabel>
-                    <Select
-                      value={advancedParams.wan_sampler_profile}
-                      onChange={(e) => setAdvancedParams({ ...advancedParams, wan_sampler_profile: e.target.value })}
-                      label="Sampler profile"
-                    >
-                      {MODEL_OPTIONS[model].samplerProfiles.map((key) => (
-                        <MenuItem key={key} value={key}>
-                          <Box>
-                            <Typography variant="body2">{WAN5B_SAMPLER_PROFILES[key]?.label || key}</Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {WAN5B_SAMPLER_PROFILES[key]?.description}
-                            </Typography>
-                          </Box>
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                )}
-                {modelCaps?.speed_profiles && (
-                  <FormControl fullWidth size="small" sx={{ mt: 1.5 }}>
-                    <InputLabel>Speed profile</InputLabel>
-                    <Select
-                      value={activeSpeedProfile || "standard"}
-                      onChange={(e) => setAdvancedParams({ ...advancedParams, speed_profile: e.target.value })}
-                      label="Speed profile"
-                    >
-                      {Object.entries(modelCaps.speed_profiles).map(([key, spec]) => (
-                        <MenuItem key={key} value={key}>
-                          <Box>
-                            <Typography variant="body2">{spec.label || key}</Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {spec.steps} steps
-                              {spec.lora ? " · distilled LoRA (installed separately)" : ""}
-                              {spec.min_short_edge ? ` · needs a ${spec.min_short_edge}px short edge` : ""}
-                              {spec.experimental ? " · experimental" : ""}
-                            </Typography>
-                          </Box>
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                )}
-                {modelCaps?.style_embeddings?.length > 0 && (
-                  <FormControl fullWidth size="small" sx={{ mt: 1.5 }}>
-                    <InputLabel>Style embedding</InputLabel>
-                    <Select
-                      value={advancedParams.style_embedding || ""}
-                      onChange={(e) => setAdvancedParams({ ...advancedParams, style_embedding: e.target.value })}
-                      label="Style embedding"
-                    >
-                      <MenuItem value="">None</MenuItem>
-                      {modelCaps.style_embeddings.map((emb) => (
-                        <MenuItem key={emb.id} value={emb.id}>{emb.label}</MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                )}
-                {inputMode === "image" && modelCaps?.modes?.includes("flf2v") && (
-                  <Box sx={{ mt: 1.5 }}>
-                    <Button variant="outlined" size="small" component="label" disabled={isUploadingEndFrame}>
-                      {isUploadingEndFrame ? "Uploading end frame…" : endFrame ? `End frame: ${endFrame.name}` : "Add end frame (optional)"}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        hidden
-                        onChange={(e) => {
-                          handleEndFrameUpload(e.target.files?.[0]);
-                          e.target.value = "";
-                        }}
-                      />
-                    </Button>
-                    {endFrame && (
-                      <Button size="small" onClick={() => setEndFrame(null)} sx={{ ml: 1 }}>
-                        Remove
-                      </Button>
-                    )}
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-                      The clip will end on this image. If you added several start images, each of their clips ends on it.
-                    </Typography>
-                  </Box>
-                )}
-                {modelCaps?.audio_in && (
-                  <Box sx={{ mt: 1.5 }}>
-                    <FormControl fullWidth size="small">
-                      <InputLabel>Audio to perform (optional)</InputLabel>
+                  </ActionButton>
+                  {endFrame && <ActionButton onClick={() => setEndFrame(null)}>Remove</ActionButton>}
+                </Line>
+              )}
+              {modelCaps?.audio_in && (
+                <Cluster label="Audio guide">
+                  <Line nowrap>
+                    <FormControl size="small" className="grow">
+                      <InputLabel>Audio to perform</InputLabel>
                       <Select
                         value={audioGuide?.path || ""}
                         onChange={(e) => {
                           const clip = voiceClips.find((c) => c.path === e.target.value);
                           setAudioGuide(clip ? { path: clip.path, name: clip.filename } : null);
                         }}
-                        label="Audio to perform (optional)"
+                        label="Audio to perform"
                       >
                         <MenuItem value="">None</MenuItem>
                         {voiceClips.map((c) => (
@@ -2510,189 +2168,78 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         ))}
                       </Select>
                     </FormControl>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.5 }}>
-                      <Button variant="outlined" size="small" component="label" disabled={isUploadingAudioGuide}>
-                        {isUploadingAudioGuide ? "Uploading…" : "Upload audio"}
-                        <input
-                          type="file"
-                          accept="audio/*"
-                          hidden
-                          onChange={(e) => {
-                            handleAudioGuideUpload(e.target.files?.[0]);
-                            e.target.value = "";
-                          }}
-                        />
-                      </Button>
-                      <Typography variant="caption" color="text.secondary">
-                        A spoken line or a music cue anchored at the start of the clip: the model performs it
-                        (lip movement, timing) and samples the rest of the soundtrack around it. Cut to the clip length.
-                      </Typography>
-                    </Box>
-                  </Box>
-                )}
-                {isCogVideoXModel(model) && (
-                  <>
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={fetaEnabled || qualityTier === 'cinema' || highConsistencyMode}
-                          onChange={(e) => setFetaEnabled(e.target.checked)}
-                          size="small"
-                        />
-                      }
-                      label={
-                        <Box>
-                          <Typography variant="body2">Enhance-A-Video (FETA)</Typography>
-                          <Typography variant="caption" color="text.secondary">Improves temporal coherence between frames</Typography>
-                        </Box>
-                      }
-                    />
-                    {(fetaEnabled || qualityTier === 'cinema' || highConsistencyMode) && (
-                      <TextField
-                        size="small"
-                        label="FETA weight"
-                        type="number"
-                        inputProps={{ step: 0.1, min: 0.1, max: 3.0 }}
-                        value={fetaWeight}
-                        onChange={(e) => setFetaWeight(Number(e.target.value))}
-                        helperText="1.0 is a good default"
-                        sx={{ width: 140 }}
+                    <ActionButton component="label" loading={isUploadingAudioGuide}>
+                      Upload
+                      <input
+                        type="file"
+                        accept="audio/*"
+                        hidden
+                        onChange={(e) => {
+                          handleAudioGuideUpload(e.target.files?.[0]);
+                          e.target.value = "";
+                        }}
                       />
-                    )}
-                  </>
-                )}
-              </Box>
-            </Box>
-
-            <Box sx={{ mt: 2.5, mb: 2 }}>
-              <Typography variant="caption" color="text.secondary" sx={{ mb: 1.5, display: "block", fontWeight: 500 }}>
-                Prompt tuning
-              </Typography>
-              <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2, flexWrap: "wrap" }}>
-                <TextField
-                  size="small"
-                  label="Guidance Scale"
-                  type="number"
-                  inputProps={{ step: 0.5, min: 1, max: 20 }}
-                  value={advancedParams.guidance_scale}
-                  disabled={modelCaps?.cfg === false || isMinimaxModel(model)}
-                  onChange={(e) =>
-                    setAdvancedParams({
-                      ...advancedParams,
-                      guidance_scale: Number(e.target.value),
-                    })
-                  }
-                  helperText={(modelCaps?.cfg === false || isMinimaxModel(model))
-                    ? "This model samples without CFG — guidance and the negative prompt are not used."
-                    : `Default for ${isHunyuanModel(model) ? 'HunyuanVideo' : isLtxModel(model) ? 'LTX' : isWanModel(model) ? 'Wan' : 'CogVideoX'}: ${MODEL_DEFAULT_GUIDANCE[MODEL_OPTIONS[model]?.type] ?? 6}. Higher = stricter prompt adherence.`}
-                  sx={{
-                    width: { xs: '100%', sm: '280px' },
-                    '& .MuiFormHelperText-root': {
-                      mt: 0.5,
-                    },
-                  }}
-                />
-                <FormControl size="small" sx={{ width: { xs: '100%', sm: '280px' } }}>
-                  <InputLabel>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                      <EnhanceIcon fontSize="small" /> Prompt Style
-                    </Box>
-                  </InputLabel>
-                  <Select
-                    value={promptStyle}
-                    onChange={(e) => setPromptStyle(e.target.value)}
-                    label="Prompt Style"
-                  >
-                    {Object.entries(PROMPT_STYLES).map(([key, preset]) => (
-                      <MenuItem key={key} value={key}>
-                        <Box>
-                          <Typography variant="body2">{preset.label}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {preset.description}
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={enhancePrompt}
-                      onChange={(e) => setEnhancePrompt(e.target.checked)}
-                      color="primary"
-                      size="small"
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2">Enhance Prompt</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Adds quality + motion descriptors for consistency
-                      </Typography>
-                    </Box>
-                  }
-                  sx={{ ml: 0 }}
-                />
-              </Box>
-            </Box>
-            {/* Low VRAM Mode Active Warning */}
-            {lowVramMode && (isCogVideoXModel(model) || isWanModel(model)) && (
-              <Alert
-                severity="info"
-                sx={{
-                  mt: 1.5,
-                  mb: 2,
-                  '& .MuiAlert-message': {
-                    py: 0.5,
-                  },
-                }}
+                    </ActionButton>
+                  </Line>
+                </Cluster>
+              )}
+              <Cluster label="Prompt tuning">
+                <Line>
+                  <TextField
+                    size="small"
+                    label="Guidance"
+                    type="number"
+                    inputProps={{ step: 0.5, min: 1, max: 20 }}
+                    value={advancedParams.guidance_scale}
+                    disabled={modelCaps?.cfg === false || isMinimaxModel(model, modelMeta[model])}
+                    onChange={(e) => setAdvancedParams({ ...advancedParams, guidance_scale: Number(e.target.value) })}
+                    sx={{ width: 120 }}
+                  />
+                  <FormControl size="small" sx={{ minWidth: 180 }}>
+                    <InputLabel>Prompt style</InputLabel>
+                    <Select value={promptStyle} onChange={(e) => setPromptStyle(e.target.value)} label="Prompt style">
+                      {Object.entries(PROMPT_STYLES).map(([key, preset]) => (
+                        <MenuItem key={key} value={key}>{preset.label}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    label="Frames / batch"
+                    type="number"
+                    size="small"
+                    inputProps={{ min: 1, max: 8 }}
+                    value={advancedParams.frames_per_batch}
+                    onChange={(e) => {
+                      const v = Math.max(1, parseInt(e.target.value || "1", 10));
+                      setAdvancedParams((prev) => ({ ...prev, frames_per_batch: v }));
+                    }}
+                    sx={{ width: 140 }}
+                  />
+                </Line>
+              </Cluster>
+              <VideoGenEffectiveSettings
+                model={model}
+                computedParams={computedParams}
+                capabilities={modelCaps}
+                cinematicKeyframe={cinematicKeyframe}
+                selectedSubjectIds={selectedSubjectIds}
+                keyframeModel={keyframeModel}
+                directorMode={directorMode}
+                faceRestore={advancedParams.face_restore}
+                freeu={advancedParams.freeu}
+              />
+              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+              <ActionButton
+                kind={canQueue ? "primary" : "neutral"}
+                onClick={handleGenerate}
+                loading={isGenerating}
+                disabled={!canQueue || controlsDisabled}
+                sx={{ height: 36, alignSelf: "flex-start" }}
               >
-                {isCogVideoXModel(model) && model === "cogvideox-5b-i2v"
-                  ? `Low VRAM mode is active: Max ${computedParams.duration_frames} frames, max ${computedParams.num_inference_steps} steps, and reduced resolution (model preserved for I2V).`
-                  : `Low VRAM mode is active: Max ${computedParams.duration_frames} frames, max ${computedParams.num_inference_steps} steps, and reduced resolution to minimize memory usage.`
-                }
-              </Alert>
-            )}
+                Add to queue
+              </ActionButton>
+            </SettingsPanel>
           </Box>
-
-          {/* Preview of computed settings */}
-          <VideoGenEffectiveSettings
-            model={model}
-            computedParams={computedParams}
-            capabilities={modelCaps}
-            cinematicKeyframe={cinematicKeyframe}
-            selectedSubjectIds={selectedSubjectIds}
-            keyframeModel={keyframeModel}
-            directorMode={directorMode}
-            faceRestore={advancedParams.face_restore}
-            freeu={advancedParams.freeu}
-          />
-
-          {/* Model-mode mismatch is now prevented by filtering — no warning needed */}
-
-          <Divider />
-
-          <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
-
-          {/* Generate Button */}
-          <Button
-            variant="contained"
-            size="large"
-            startIcon={isGenerating ? null : <PlayIcon />}
-            onClick={handleGenerate}
-            disabled={controlsDisabled || isGenerating || (inputMode === "text" ? parsedPrompts.length === 0 : selectedImages.length === 0)}
-            sx={{ py: 1.5 }}
-            fullWidth
-          >
-            {isGenerating ? "Queueing..." : "Add to Queue"}
-          </Button>
-
-          {isGenerating && <LinearProgress />}
-            </Stack>
-          </Box>
-          </CardContent>
-        </Card>
         </Grid>
 
         {/* Status Section - Right Side */}
@@ -2777,7 +2324,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             >
                               <IconButton
                                 size="small"
-                                onClick={() => handleCancelBatch(q.batch_id)}
+                                onClick={() => setConfirmAction({
+                                  title: "Cancel this batch?",
+                                  description: "Stops the GPU job. Clips already written stay on disk.",
+                                  facts: [{ label: "Batch", value: q.display_name || q.batch_id.slice(0, 8) }],
+                                  keeps: "finished videos in this batch, the form, other batches",
+                                  confirmLabel: "Cancel batch",
+                                  run: () => handleCancelBatch(q.batch_id),
+                                })}
                                 aria-label="cancel batch"
                               >
                                 <CloseIcon fontSize="small" />
@@ -2850,7 +2404,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         size="small"
                         color="warning"
                         variant="outlined"
-                        onClick={() => handleCancelBatch(batchStatus.batch_id)}
+                        onClick={() => setConfirmAction({
+                          title: "Cancel this batch?",
+                          description: "Stops the GPU job. Clips already written stay on disk.",
+                          facts: [{ label: "Batch", value: batchStatus.display_name || batchStatus.batch_id.slice(0, 8) }],
+                          keeps: "finished videos in this batch, the form, other batches",
+                          confirmLabel: "Cancel batch",
+                          run: () => handleCancelBatch(batchStatus.batch_id),
+                        })}
                       >
                         Cancel
                       </Button>
@@ -2926,7 +2487,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       variant="outlined"
                       color="error"
                       sx={{ flex: 1, whiteSpace: 'nowrap' }}
-                      onClick={() => handleDeleteBatch(batchStatus.batch_id, batchStatus.display_name)}
+                      onClick={() => setConfirmAction({
+                        title: `Delete "${batchStatus.display_name || batchStatus.batch_id.slice(0, 8)}"?`,
+                        description: "Removes this batch and every video in it.",
+                        facts: [{ label: "Videos", value: String(batchStatus.completed_videos ?? batchStatus.total_videos ?? "all") }],
+                        keeps: "other batches, installed models, and the prompt in the form",
+                        confirmLabel: "Delete batch",
+                        run: () => handleDeleteBatch(batchStatus.batch_id),
+                      })}
                     >
                       Delete
                     </Button>
@@ -3075,7 +2643,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               </IconButton>
                               <IconButton
                                 size="small"
-                                onClick={() => handleDeleteVideo(batchStatus.batch_id, PathFromUrl(res.video_path))}
+                                onClick={() => setConfirmAction({
+                                  title: "Delete this video?",
+                                  description: "Removes the file. Other clips in the batch stay.",
+                                  facts: [{ label: "File", value: PathFromUrl(res.video_path) }],
+                                  keeps: "the rest of this batch, other batches, the form",
+                                  confirmLabel: "Delete video",
+                                  run: () => handleDeleteVideo(batchStatus.batch_id, PathFromUrl(res.video_path)),
+                                })}
                               >
                                 <CloseIcon fontSize="small" />
                               </IconButton>
@@ -3261,7 +2836,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                             <IconButton
                               size="small"
                               className="batch-delete"
-                              onClick={(e) => { e.stopPropagation(); handleDeleteBatch(b.batch_id, rawName); }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmAction({
+                                  title: `Delete "${rawName}"?`,
+                                  description: "Removes this batch and every video in it.",
+                                  facts: [{ label: "Videos", value: String(videoCount) }],
+                                  keeps: "other batches, installed models, and the prompt in the form",
+                                  confirmLabel: "Delete batch",
+                                  run: () => handleDeleteBatch(b.batch_id),
+                                });
+                              }}
                               sx={{
                                 position: 'absolute', top: 4, left: 4,
                                 width: 24, height: 24,
@@ -3304,7 +2889,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           {/* Legacy batch controls — keep for running/pending batches */}
           {batches.filter(b => b.status === "running" || b.status === "pending" || b.status === "processing").map((b) => (
             <Box key={`ctrl-${b.batch_id}`} sx={{ mt: 1 }}>
-              <Button size="small" color="warning" variant="outlined" onClick={() => handleCancelBatch(b.batch_id)}>
+              <Button size="small" color="warning" variant="outlined" onClick={() => setConfirmAction({
+                title: "Cancel this batch?",
+                description: "Stops the GPU job. Clips already written stay on disk.",
+                facts: [{ label: "Batch", value: b.display_name || b.batch_id.slice(0, 8) }],
+                keeps: "finished videos in this batch, the form, other batches",
+                confirmLabel: "Cancel batch",
+                run: () => handleCancelBatch(b.batch_id),
+              })}>
                 Cancel {b.display_name || b.batch_id.slice(0, 8)}
               </Button>
             </Box>
@@ -3608,6 +3200,26 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           );
         })()}
       </Dialog>
+      <ConfirmActionDialog
+        open={!!confirmAction}
+        title={confirmAction?.title || ""}
+        description={confirmAction?.description}
+        facts={confirmAction?.facts || []}
+        keeps={confirmAction?.keeps}
+        confirmLabel={confirmAction?.confirmLabel}
+        busy={confirmBusy}
+        onClose={() => !confirmBusy && setConfirmAction(null)}
+        onConfirm={async () => {
+          if (!confirmAction?.run) return;
+          setConfirmBusy(true);
+          try {
+            await confirmAction.run();
+            setConfirmAction(null);
+          } finally {
+            setConfirmBusy(false);
+          }
+        }}
+      />
     </PageLayout>
   );
 };

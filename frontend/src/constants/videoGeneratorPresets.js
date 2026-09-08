@@ -358,11 +358,34 @@ export const GENERATION_TYPES = new Set(Object.values(MODEL_OPTIONS).map((m) => 
 export const DEFAULT_T2V_MODEL = "wan22-5b";
 export const DEFAULT_I2V_MODEL = "wan22-5b";
 
-export const isCogVideoXModel = (model) => MODEL_OPTIONS[model]?.type === "cogvideox";
-export const isWanModel = (model) => MODEL_OPTIONS[model]?.type === "wan";
-export const isLtxModel = (model) => MODEL_OPTIONS[model]?.type === "ltx";
-export const isHunyuanModel = (model) => MODEL_OPTIONS[model]?.type === "hunyuan";
-export const isMinimaxModel = (model) => MODEL_OPTIONS[model]?.type === "minimax";
+/** Family of a model: shipped MODEL_OPTIONS first, then the registry row. */
+export const familyType = (model, registryMeta) =>
+  MODEL_OPTIONS[model]?.type || registryMeta?.type || null;
+
+export const isCogVideoXModel = (model, registryMeta) => familyType(model, registryMeta) === "cogvideox";
+export const isWanModel = (model, registryMeta) => familyType(model, registryMeta) === "wan";
+export const isLtxModel = (model, registryMeta) => familyType(model, registryMeta) === "ltx";
+export const isHunyuanModel = (model, registryMeta) => familyType(model, registryMeta) === "hunyuan";
+export const isMinimaxModel = (model, registryMeta) => familyType(model, registryMeta) === "minimax";
+
+/** Short name for the "what will run" chip. Keyed by MODEL_OPTIONS.type so a
+ *  new family cannot fall through to CogVideoX the way Hunyuan did. Unknown
+ *  types show the model's own label. */
+const FAMILY_CHIP_LABEL = {
+  ltx: (id) => (String(id).startsWith("ltx25") ? "LTX-2.5" : "LTX-2.3"),
+  minimax: () => "MiniMax H3",
+  wan: () => "Wan 2.2",
+  hunyuan: () => "HunyuanVideo",
+  cogvideox: () => "CogVideoX",
+};
+
+export function modelChipLabel(modelId, registryMeta) {
+  const opt = MODEL_OPTIONS[modelId];
+  const type = familyType(modelId, registryMeta);
+  const named = FAMILY_CHIP_LABEL[type];
+  if (named) return named(modelId);
+  return opt?.label || registryMeta?.name || modelId || "Unknown model";
+}
 
 /** Longer presets appear only when the registry declares a duration tier for
  *  them (a measured pixel-area cap at that length), so a 10 s or 15 s option
@@ -390,11 +413,12 @@ export const withDurationTiers = (presets, registryMeta) => {
 /** Duration presets for a model. The preset fps must match the model's native
  *  rate — muxing 24fps-native frames at 16fps plays every clip in slow motion. */
 export const durationPresetsFor = (model, registryMeta) => {
-  if (isMinimaxModel(model)) return withDurationTiers(MINIMAX_DURATION_PRESETS, registryMeta);
-  if (isHunyuanModel(model)) return HUNYUAN_DURATION_PRESETS;
-  if (isLtxModel(model)) return LTX_DURATION_PRESETS;
-  if (isWanModel(model)) {
-    return MODEL_OPTIONS[model]?.nativeFps === 24 ? WAN_5B_DURATION_PRESETS : WAN_DURATION_PRESETS;
+  if (isMinimaxModel(model, registryMeta)) return withDurationTiers(MINIMAX_DURATION_PRESETS, registryMeta);
+  if (isHunyuanModel(model, registryMeta)) return HUNYUAN_DURATION_PRESETS;
+  if (isLtxModel(model, registryMeta)) return LTX_DURATION_PRESETS;
+  if (isWanModel(model, registryMeta)) {
+    const fps = MODEL_OPTIONS[model]?.nativeFps ?? registryMeta?.capabilities?.native_fps;
+    return fps === 24 ? WAN_5B_DURATION_PRESETS : WAN_DURATION_PRESETS;
   }
   return COGVIDEOX_DURATION_PRESETS;
 };
@@ -404,8 +428,8 @@ export const durationPresetsFor = (model, registryMeta) => {
  *  A model declaring `aspectRatios` offers only those; anything else is off its
  *  training distribution and the frame comes back warped rather than merely
  *  cropped. Models without the key are unconstrained. */
-export const aspectRatiosFor = (model) => {
-  const allowed = MODEL_OPTIONS[model]?.aspectRatios;
+export const aspectRatiosFor = (model, registryMeta) => {
+  const allowed = MODEL_OPTIONS[model]?.aspectRatios || registryMeta?.capabilities?.aspect_ratios;
   if (!allowed?.length) return ASPECT_RATIO_PRESETS;
   return Object.fromEntries(
     allowed.filter((k) => ASPECT_RATIO_PRESETS[k]).map((k) => [k, ASPECT_RATIO_PRESETS[k]]),
@@ -413,8 +437,8 @@ export const aspectRatiosFor = (model) => {
 };
 
 /** The selected ratio if the model supports it, otherwise its first supported one. */
-export const resolveAspectRatio = (model, aspectRatio) => {
-  const allowed = aspectRatiosFor(model);
+export const resolveAspectRatio = (model, aspectRatio, registryMeta) => {
+  const allowed = aspectRatiosFor(model, registryMeta);
   return allowed[aspectRatio] ? aspectRatio : Object.keys(allowed)[0];
 };
 

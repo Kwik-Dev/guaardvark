@@ -39,7 +39,10 @@ def model_options():
 
 
 def _generation_ids():
-    return [mid for mid, e in vmr.VIDEO_MODEL_REGISTRY.items() if e.get("type") in vmr.GENERATION_TYPES]
+    return [
+        mid for mid, e in vmr.VIDEO_MODEL_REGISTRY.items()
+        if e.get("type") in vmr.GENERATION_TYPES and not mid.startswith("user-")
+    ]
 
 
 def test_every_frontend_model_exists_in_the_registry(model_options):

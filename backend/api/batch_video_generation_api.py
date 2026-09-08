@@ -35,6 +35,13 @@ from backend.services.video_model_registry import (
     resolve_active_video_model,
     clip_defaults_for,
 )
+from backend.services.user_video_models import (
+    preview_hf_url,
+    add_user_model,
+    remove_user_model,
+    is_user_model_id,
+    parse_hf_url,
+)
 
 # GPU Resource Coordinator for pre-flight availability check
 try:
@@ -204,6 +211,7 @@ def generate_text_to_video_batch():
             "face_restore": str(data.get("face_restore", "false")).lower() == "true",
             "lora_name": data.get("lora_name"),
             "lora_strength": float(data.get("lora_strength", 1.0)),
+            "adapters": data.get("adapters") if isinstance(data.get("adapters"), list) else [],
             # Capability-contract knobs; the generator validates them against
             # what the model declares.
             "speed_profile": data.get("speed_profile") or None,
@@ -297,6 +305,7 @@ def generate_image_to_video_batch():
             "face_restore": str(data.get("face_restore", "false")).lower() == "true",
             "lora_name": data.get("lora_name"),
             "lora_strength": float(data.get("lora_strength", 1.0)),
+            "adapters": data.get("adapters") if isinstance(data.get("adapters"), list) else [],
             # Capability-contract knobs; the generator validates them against
             # what the model declares.
             "speed_profile": data.get("speed_profile") or None,
@@ -366,15 +375,14 @@ def enhance_prompt_preview():
         # fidelity_mode: UI "Exact text mode" / preserve fidelity toggle
         fidelity = str(data.get("fidelity_mode", data.get("preserve_text_fidelity", "false"))).lower() == "true"
 
-        # model_family hint (frontend can send model or we infer)
+        # Family comes from the registry entry, not a substring. Hunyuan used
+        # to miss the "cog"/"wan"/"ltx" tests and get the generic path; a
+        # default of cogvideox would have been a silent mis-label.
         model = data.get("model", "")
         model_family = None
-        if "ltx" in (model or "").lower():
-            model_family = "ltx"
-        elif "wan" in (model or "").lower():
-            model_family = "wan"
-        elif "cog" in (model or "").lower():
-            model_family = "cogvideox"
+        if model:
+            from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
+            model_family = (VIDEO_MODEL_REGISTRY.get(model) or {}).get("type")
 
         from backend.utils.prompt_enhancer import (
             enhance_video_prompt,
@@ -965,6 +973,8 @@ def list_video_models():
                 # LoRA companions name the generation entries they apply to.
                 "applies_to": info.get("applies_to", []),
                 "active": model_id in {active_t2v, active_i2v} and bool(model_id),
+                "user": bool(info.get("user")) or is_user_model_id(model_id),
+                "like": info.get("like"),
             })
         return success_response({"models": models, "active_t2v": active_t2v, "active_i2v": active_i2v})
     except Exception as e:
@@ -1286,6 +1296,104 @@ def start_video_model_download(model_id):
     except Exception as e:
         logger.error(f"Error starting video model download: {e}")
         return error_response(str(e), 500)
+
+
+@batch_video_bp.route("/models/from-hf", methods=["POST"])
+def preview_hf_video_model():
+    """Parse a Hugging Face paste and list weight files. Does not download."""
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return error_response("Paste a Hugging Face URL or org/repo.", 400)
+    try:
+        parse_hf_url(url)
+        preview = preview_hf_url(url)
+        return success_response(preview)
+    except Exception as e:
+        logger.error("HF preview failed: %s", e)
+        return error_response(classify_hf_download_error(e, repo_id=None), 400)
+
+
+@batch_video_bp.route("/models/user", methods=["POST"])
+def add_user_video_model():
+    """Register a user model (same shape as the shipped catalog) and optionally Install."""
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    hf_repo = (data.get("hf_repo") or "").strip()
+    revision = (data.get("revision") or "main").strip() or "main"
+    files = data.get("files") if isinstance(data.get("files"), list) else []
+    if url and not hf_repo:
+        try:
+            parsed = parse_hf_url(url)
+        except ValueError as e:
+            return error_response(str(e), 400)
+        hf_repo = parsed["hf_repo"]
+        revision = parsed.get("revision") or revision
+        if parsed.get("src") and not files:
+            files = [{"src": parsed["src"]}]
+    if not files:
+        return error_response(
+            "Pick at least one weight file. Pasting a repo root does not snapshot the whole repo.",
+            400,
+        )
+    try:
+        mid, entry, problems = add_user_model(
+            role=(data.get("role") or "").strip(),
+            like_id=(data.get("like") or "").strip(),
+            hf_repo=hf_repo,
+            files=files,
+            name=(data.get("name") or "").strip() or None,
+            model_id=(data.get("id") or "").strip() or None,
+            description=(data.get("description") or "").strip() or None,
+            revision=revision,
+        )
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except Exception as e:
+        logger.error("add user video model failed: %s", e)
+        return error_response(str(e), 500)
+    install = str(data.get("install", "true")).lower() != "false"
+    download_payload = None
+    if install:
+        dl = start_video_model_download(mid)
+        resp_obj, status = dl if isinstance(dl, tuple) else (dl, getattr(dl, "status_code", 200))
+        body = resp_obj.get_json(silent=True) or {}
+        if status >= 400 or not body.get("success"):
+            return dl
+        download_payload = body.get("data")
+    return success_response({
+        "id": mid,
+        "entry": {
+            "id": mid,
+            "name": entry.get("name"),
+            "type": entry.get("type"),
+            "like": entry.get("like"),
+            "applies_to": entry.get("applies_to") or [],
+            "files": entry.get("files"),
+            "hf_repo": entry.get("hf_repo"),
+            "size_gb": entry.get("size_gb"),
+        },
+        "verify": problems,
+        "download": download_payload,
+    })
+
+
+@batch_video_bp.route("/models/user/<model_id>", methods=["DELETE"])
+def delete_user_video_model(model_id):
+    """Remove a user-added catalog entry. Shipped ids are refused."""
+    delete_files = str(request.args.get("delete_files") or (request.get_json(silent=True) or {}).get("delete_files") or "").lower() in (
+        "1", "true", "yes",
+    )
+    try:
+        result = remove_user_model(model_id, delete_files=delete_files)
+    except ValueError as e:
+        return error_response(str(e), 403)
+    except KeyError as e:
+        return error_response(str(e), 404)
+    except Exception as e:
+        logger.error("remove user video model failed: %s", e)
+        return error_response(str(e), 500)
+    return success_response(result)
 
 
 @batch_video_bp.route("/models/download-status", methods=["GET"])

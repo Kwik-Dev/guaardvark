@@ -2286,6 +2286,12 @@ def verify_registry() -> list:
 
 _normalize_registry()
 
+try:
+    from backend.services.user_video_models import load_user_catalog
+    load_user_catalog()
+except Exception as e:
+    logger.error("user video catalog failed to load: %s", e)
+
 # Loud-but-non-fatal startup check: drift/typos surface in logs instead of as a
 # mysterious blank render later.
 _problems = verify_registry()

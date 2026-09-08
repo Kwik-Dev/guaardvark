@@ -472,6 +472,7 @@ class ComfyUIVideoWorkflowMixin:
         lora_low: Optional[str] = None,
         lora_strength: float = 1.0,
         shift_override: Optional[float] = None,
+        extra_loras: Optional[list] = None,
     ) -> dict:
         """Build a ComfyUI API-format workflow for Wan 2.2 MoE text-to-video.
 
@@ -675,6 +676,13 @@ class ComfyUIVideoWorkflowMixin:
                 }
                 workflow["9"]["inputs"]["model"] = ["18", 0]
 
+        high_ref = ["17", 0] if lora_high else ["1", 0]
+        low_ref = ["18", 0] if lora_low else ["2", 0]
+        high_ref, next_id = self._chain_model_only_loras(workflow, high_ref, extra_loras, 40)
+        low_ref, _ = self._chain_model_only_loras(workflow, low_ref, extra_loras, next_id)
+        workflow["8"]["inputs"]["model"] = high_ref
+        workflow["9"]["inputs"]["model"] = low_ref
+
         if interpolation_multiplier > 1:
             self._add_rife_interpolation(
                 workflow,
@@ -706,6 +714,7 @@ class ComfyUIVideoWorkflowMixin:
         lora_low: Optional[str] = None,
         lora_strength: float = 1.0,
         shift_override: Optional[float] = None,
+        extra_loras: Optional[list] = None,
     ) -> dict:
         # Same MoE two-pass dance as Wan T2V, but the empty latent gets swapped
         # for WanImageToVideo — that node bakes the start frame into the
@@ -848,6 +857,13 @@ class ComfyUIVideoWorkflowMixin:
                 }
                 workflow["9"]["inputs"]["model"] = ["18", 0]
 
+        high_ref = ["17", 0] if lora_high else ["1", 0]
+        low_ref = ["18", 0] if lora_low else ["2", 0]
+        high_ref, next_id = self._chain_model_only_loras(workflow, high_ref, extra_loras, 40)
+        low_ref, _ = self._chain_model_only_loras(workflow, low_ref, extra_loras, next_id)
+        workflow["8"]["inputs"]["model"] = high_ref
+        workflow["9"]["inputs"]["model"] = low_ref
+
         if interpolation_multiplier > 1:
             self._add_rife_interpolation(
                 workflow,
@@ -875,6 +891,7 @@ class ComfyUIVideoWorkflowMixin:
         fps: int = 24,
         interpolation_multiplier: int = 1,
         sampler_profile: Optional[str] = None,
+        extra_loras: Optional[list] = None,
     ) -> dict:
         """Wan 2.2 TI2V-5B — single-model text+image-to-video that FITS 16GB (no MoE
         two-pass, no CPU offload → none of the 38-min-per-clip A14B pain). Graph mirrors
@@ -960,6 +977,9 @@ class ComfyUIVideoWorkflowMixin:
                 },
             },
         }
+
+        model_ref, _ = self._chain_model_only_loras(workflow, ["1", 0], extra_loras, 20)
+        workflow["8"]["inputs"]["model"] = model_ref
 
         # Image-to-video: bake the start frame into the latent node.
         if image_filename:
@@ -1959,6 +1979,7 @@ class ComfyUIVideoWorkflowMixin:
         ref_image_size: str = "match",
         lora_name: Optional[str] = None,
         lora_strength: float = 1.0,
+        extra_loras: Optional[list] = None,
     ) -> dict:
         """MiniMax H3 ref2va graph — the official video_minimax_h3_r2v template.
 
@@ -2092,6 +2113,10 @@ class ComfyUIVideoWorkflowMixin:
             }
             workflow["7"]["inputs"]["model"] = ["15", 0]
             workflow["9"]["inputs"]["model"] = ["15", 0]
+        model_ref = ["15", 0] if lora_name else ["1", 0]
+        model_ref, _ = self._chain_model_only_loras(workflow, model_ref, extra_loras, 40)
+        workflow["7"]["inputs"]["model"] = model_ref
+        workflow["9"]["inputs"]["model"] = model_ref
         if interpolation_multiplier > 1:
             self._add_rife_interpolation(
                 workflow, source_node_id="12", video_combine_node_id="14",
@@ -2114,6 +2139,7 @@ class ComfyUIVideoWorkflowMixin:
         last_frame_filename: Optional[str] = None,
         lora_name: Optional[str] = None,
         lora_strength: float = 1.0,
+        extra_loras: Optional[list] = None,
         guides: Optional[list] = None,
     ) -> dict:
         """MiniMax H3 fl2va graph — the official ComfyUI template plus its optional inputs.
@@ -2251,6 +2277,11 @@ class ComfyUIVideoWorkflowMixin:
             }
             workflow["7"]["inputs"]["model"] = ["15", 0]
             workflow["9"]["inputs"]["model"] = ["15", 0]
+
+        model_ref = ["15", 0] if lora_name else ["1", 0]
+        model_ref, _ = self._chain_model_only_loras(workflow, model_ref, extra_loras, 40)
+        workflow["7"]["inputs"]["model"] = model_ref
+        workflow["9"]["inputs"]["model"] = model_ref
 
         conditioning = ["6", 0]
         next_id = 17
@@ -2473,6 +2504,27 @@ class ComfyUIVideoWorkflowMixin:
         logger.info(f"Added FreeU_V2 node ({freeu_id}) after model node {model_node_id}")
         return freeu_id
 
+
+    def _chain_model_only_loras(self, workflow: dict, model_ref: list, loras: Optional[list], start_id: int) -> tuple:
+        """Stack LoraLoaderModelOnly nodes after model_ref. Returns (new_ref, next_id)."""
+        current = model_ref
+        nid = int(start_id)
+        for spec in loras or []:
+            name = (spec or {}).get("filename") or (spec or {}).get("lora_name")
+            if not name:
+                continue
+            sid = str(nid)
+            nid += 1
+            workflow[sid] = {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "model": current,
+                    "lora_name": name,
+                    "strength_model": float((spec or {}).get("strength") or 0.7),
+                },
+            }
+            current = [sid, 0]
+        return current, nid
 
     def _add_lora_loader(self, workflow: dict, model_node_id: str, clip_node_id: str, lora_name: str, strength: float = 1.0) -> tuple[str, str]:
         """Insert a LoraLoader node.
