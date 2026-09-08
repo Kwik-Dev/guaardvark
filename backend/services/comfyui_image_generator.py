@@ -47,6 +47,17 @@ FLUX_T5 = os.environ.get("GUAARDVARK_FLUX_T5", "t5/t5xxl_fp8_e4m3fn.safetensors"
 FLUX_CLIP = os.environ.get("GUAARDVARK_FLUX_CLIP", "clip_l.safetensors")
 FLUX_VAE = os.environ.get("GUAARDVARK_FLUX_VAE", "ae.safetensors")
 
+# ── Z-Image Turbo via ComfyUI ────────────────────────────────────────────────
+# Gated by GUAARDVARK_ZIMAGE_USE_COMFYUI=1 in batch_image_generator. These names
+# must exist inside the reachable ComfyUI (they are checked by the running server's
+# object_info). Overridable so a different Z-Image build / Qwen CLIP / VAE works.
+ZIMAGE_UNET = os.environ.get("GUAARDVARK_ZIMAGE_UNET", "z_image_turbo_bf16.safetensors")
+ZIMAGE_CLIP = os.environ.get("GUAARDVARK_ZIMAGE_CLIP", "qwen_3_4b.safetensors")
+ZIMAGE_CLIP_TYPE = os.environ.get("GUAARDVARK_ZIMAGE_CLIP_TYPE", "qwen_image")
+ZIMAGE_VAE = os.environ.get("GUAARDVARK_ZIMAGE_VAE", "ae.safetensors")
+ZIMAGE_SAMPLER = os.environ.get("GUAARDVARK_ZIMAGE_SAMPLER", "euler")
+ZIMAGE_SCHEDULER = os.environ.get("GUAARDVARK_ZIMAGE_SCHEDULER", "simple")
+
 # FLUX-dev (full transformer) keyframe path — the identity-lock route for trained
 # character LoRAs. Unlike the schnell GGUF branch, this one ACTUALLY chains LoRAs
 # (LoraLoaderModelOnly), uses FluxGuidance, and renders at dev step counts. An fp8
@@ -237,6 +248,59 @@ class ComfyUIImageGenerator:
             }
             wf["vae"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]}}
             wf["save"] = {"class_type": "SaveImage", "inputs": {"filename_prefix": "storyboard-flux-dev", "images": ["vae", 0]}}
+            return wf
+
+        if "zimage" in ml or "z-image" in ml:
+            # Z-Image Turbo via ComfyUI — UNETLoader + Qwen CLIP (qwen_image) + ae VAE.
+            wf = {
+                "unet": {
+                    "class_type": "UNETLoader",
+                    "inputs": {"unet_name": ZIMAGE_UNET, "weight_dtype": "default"},
+                },
+                "clip": {
+                    "class_type": "CLIPLoader",
+                    "inputs": {"clip_name": ZIMAGE_CLIP, "type": ZIMAGE_CLIP_TYPE},
+                },
+                "vae_loader": {
+                    "class_type": "VAELoader",
+                    "inputs": {"vae_name": ZIMAGE_VAE},
+                },
+                "pos": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": prompt, "clip": ["clip", 0]},
+                },
+                "neg": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": negative, "clip": ["clip", 0]},
+                },
+                "latent": {
+                    "class_type": "EmptyLatentImage",
+                    "inputs": {"width": width, "height": height, "batch_size": 1},
+                },
+                "sampler": {
+                    "class_type": "KSampler",
+                    "inputs": {
+                        "model": ["unet", 0],
+                        "seed": seed,
+                        "steps": steps,
+                        "cfg": cfg,
+                        "sampler_name": ZIMAGE_SAMPLER,
+                        "scheduler": ZIMAGE_SCHEDULER,
+                        "positive": ["pos", 0],
+                        "negative": ["neg", 0],
+                        "latent_image": ["latent", 0],
+                        "denoise": 1.0,
+                    },
+                },
+                "vae": {
+                    "class_type": "VAEDecode",
+                    "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]},
+                },
+                "save": {
+                    "class_type": "SaveImage",
+                    "inputs": {"filename_prefix": "guaardvark-zimage", "images": ["vae", 0]},
+                },
+            }
             return wf
 
         if effective_model and "flux" in effective_model.lower():
