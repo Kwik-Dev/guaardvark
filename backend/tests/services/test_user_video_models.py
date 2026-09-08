@@ -149,3 +149,89 @@ def test_chain_model_only_loras():
     assert wf["41"]["inputs"]["model"] == ["40", 0]
     assert ref == ["41", 0]
     assert nid == 42
+
+
+def test_suggest_role_encoder():
+    role, like = uvm.suggest_role_and_like(
+        [], src="qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors"
+    )
+    assert role == "encoder" and like == "minimax-h3-int8"
+    role, like = uvm.suggest_role_and_like([{"src": "umt5_xxl_fp16.safetensors"}])
+    assert role == "encoder" and like == "wan22-5b"
+
+
+def test_add_encoder_replaces_shipped_companion(catalog_dir):
+    mid, entry, _ = uvm.add_user_model(
+        role="encoder",
+        like_id="minimax-h3-int8",
+        hf_repo="sakamakismile/Qwen3-VL-32B-Heretic-MiniMax-H3-NVFP4",
+        files=[{"src": "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors", "size": 15687142551}],
+        name="Heretic NVFP4",
+    )
+    try:
+        assert entry["type"] == "encoder"
+        assert entry["replaces"] == "minimax-h3-qwen3vl-nvfp4"
+        # Lands beside the shipped companion so the CLIPLoader finds it.
+        assert entry["local_subdir"] == vmr.VIDEO_MODEL_REGISTRY["minimax-h3-qwen3vl-nvfp4"]["local_subdir"]
+        # Every H3 build that loads the same shipped encoder can use it.
+        assert "minimax-h3-int8" in entry["applies_to"]
+        assert "minimax-h3-ref2va-int8" in entry["applies_to"]
+        assert "minimax-h3-bf16" not in entry["applies_to"]
+        assert vmr.VIDEO_MODEL_REGISTRY[mid]["check_files"] == ["qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors"]
+        # Not a generation model: the loader map must not pick it up as a UNET.
+        assert mid not in vmr.minimax_comfyui_map()
+    finally:
+        uvm.remove_user_model(mid, delete_files=False)
+
+
+def test_add_encoder_needs_one_file_and_a_wired_family(catalog_dir):
+    with pytest.raises(ValueError, match="one file"):
+        uvm.add_user_model(
+            role="encoder", like_id="wan22-5b", hf_repo="x/y",
+            files=[{"src": "a.safetensors"}, {"src": "b.safetensors"}],
+        )
+    with pytest.raises(ValueError, match="does not take a replacement text encoder"):
+        uvm.add_user_model(
+            role="encoder", like_id="ltx23-distilled-fp8", hf_repo="x/y",
+            files=[{"src": "gemma.safetensors"}],
+        )
+
+
+def test_resolve_text_encoder(catalog_dir, tmp_path, monkeypatch):
+    models_dir = tmp_path / "comfy" / "models"
+    monkeypatch.setattr(vmr, "comfyui_models_dir", lambda: models_dir)
+    assert uvm.resolve_text_encoder("minimax-h3-int8", None) == (None, None)
+    assert uvm.resolve_text_encoder("minimax-h3-int8", "minimax-h3-qwen3vl-nvfp4")[1]
+    mid, entry, _ = uvm.add_user_model(
+        role="encoder", like_id="minimax-h3-int8",
+        hf_repo="sakamakismile/Qwen3-VL-32B-Heretic-MiniMax-H3-NVFP4",
+        files=[{"src": "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors"}],
+    )
+    try:
+        filename, err = uvm.resolve_text_encoder("minimax-h3-int8", mid)
+        assert filename is None and "not installed" in err
+        target = models_dir / entry["local_subdir"] / "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"x")
+        assert uvm.resolve_text_encoder("minimax-h3-int8", mid) == (
+            "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors", None,
+        )
+        filename, err = uvm.resolve_text_encoder("wan22-5b", mid)
+        assert filename is None and "does not replace" in err
+    finally:
+        uvm.remove_user_model(mid, delete_files=False)
+
+
+def test_graphs_load_the_chosen_encoder():
+    from backend.services.comfyui_video_generator import ComfyUIVideoGenerator
+    # Skip __init__ (it probes a live ComfyUI); graph builders only need the class-level maps.
+    gen = ComfyUIVideoGenerator.__new__(ComfyUIVideoGenerator)
+    wf = gen._create_minimax_workflow(prompt="a test", model_key="minimax-h3-int8", seed=1)
+    assert wf["2"]["inputs"]["clip_name"] == "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+    wf = gen._create_wan22_5b_workflow(prompt="a test", model_key="wan22-5b", seed=1, text_encoder="umt5_user.safetensors")
+    assert wf["3"]["inputs"]["clip_name"] == "umt5_user.safetensors"
+    wf = gen._create_minimax_workflow(
+        prompt="a test", model_key="minimax-h3-int8", seed=1,
+        text_encoder="qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors",
+    )
+    assert wf["2"]["inputs"]["clip_name"] == "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors"

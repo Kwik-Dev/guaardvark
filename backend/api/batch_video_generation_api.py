@@ -34,6 +34,7 @@ from backend.services.video_model_registry import (
     tier_defaults_for,
     resolve_active_video_model,
     clip_defaults_for,
+    TEXT_ENCODER_SWAP_TYPES,
 )
 from backend.services.user_video_models import (
     preview_hf_url,
@@ -212,6 +213,7 @@ def generate_text_to_video_batch():
             "lora_name": data.get("lora_name"),
             "lora_strength": float(data.get("lora_strength", 1.0)),
             "adapters": data.get("adapters") if isinstance(data.get("adapters"), list) else [],
+            "text_encoder": (data.get("text_encoder") or "").strip() or None,
             # Capability-contract knobs; the generator validates them against
             # what the model declares.
             "speed_profile": data.get("speed_profile") or None,
@@ -306,6 +308,7 @@ def generate_image_to_video_batch():
             "lora_name": data.get("lora_name"),
             "lora_strength": float(data.get("lora_strength", 1.0)),
             "adapters": data.get("adapters") if isinstance(data.get("adapters"), list) else [],
+            "text_encoder": (data.get("text_encoder") or "").strip() or None,
             # Capability-contract knobs; the generator validates them against
             # what the model declares.
             "speed_profile": data.get("speed_profile") or None,
@@ -975,6 +978,10 @@ def list_video_models():
                 "active": model_id in {active_t2v, active_i2v} and bool(model_id),
                 "user": bool(info.get("user")) or is_user_model_id(model_id),
                 "like": info.get("like"),
+                # User text encoders name the shipped companion they stand in for;
+                # generation rows say whether their graph accepts one.
+                "replaces": info.get("replaces"),
+                "encoder_swap": info.get("type") in TEXT_ENCODER_SWAP_TYPES,
             })
         return success_response({"models": models, "active_t2v": active_t2v, "active_i2v": active_i2v})
     except Exception as e:

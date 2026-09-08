@@ -194,7 +194,7 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
   const renderModelRow = (model) => {
     const isThis = isDownloading && currentModel === model.id;
     const isHighlight = !!highlightModelId && model.id === highlightModelId;
-    const typeLabel = TYPE_LABELS[model.type] || model.type;
+    const typeLabel = model.user && model.type === "encoder" ? "Text encoder" : TYPE_LABELS[model.type] || model.type;
     return (
       <ListItem
         key={model.id}

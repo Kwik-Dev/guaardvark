@@ -1,5 +1,6 @@
 // Add a Hugging Face weight to the user video catalog, then Install.
-// Role is required: a LoRA on a shipped model, or another UNET like one.
+// Role is required: a LoRA on a shipped model, another UNET like one, or a
+// text encoder that replaces the one a model ships with.
 
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -24,7 +25,10 @@ import { ActionButton, ChoiceChips, Hint } from "../settings/ui";
 const ROLE_OPTIONS = [
   { value: "lora", label: "LoRA on a model" },
   { value: "generation", label: "New generation model" },
+  { value: "encoder", label: "Text encoder" },
 ];
+
+const LIKE_LABEL = { lora: "Applies to", generation: "Like", encoder: "Replaces the encoder of" };
 
 const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) => {
   const [url, setUrl] = useState("");
@@ -41,6 +45,11 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
   const generationModels = useMemo(
     () => (models || []).filter((m) => !m.user && ["wan", "minimax", "ltx", "hunyuan", "cogvideox"].includes(m.type)),
     [models],
+  );
+  // Only families whose graph takes a replacement encoder are offered for that role.
+  const likeChoices = useMemo(
+    () => (role === "encoder" ? generationModels.filter((m) => m.encoder_swap) : generationModels),
+    [generationModels, role],
   );
   // Two-expert Wan 14B templates need a High and a Low file.
   const needsMoE = Boolean(like && /14b/.test(like) && role === "generation");
@@ -93,7 +102,9 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
     setSelected((prev) => (prev.includes(src) ? prev.filter((s) => s !== src) : [...prev, src]));
   };
 
-  const pending = Boolean(preview && like && selected.length > 0 && !saving);
+  const pending = Boolean(
+    preview && like && selected.length > 0 && !saving && (role !== "encoder" || selected.length === 1),
+  );
 
   const handleAdd = async () => {
     if (!pending) return;
@@ -138,7 +149,8 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
       <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 1.5, pt: 1 }}>
         <Hint>
           Paste a Hugging Face URL or org/repo. The file lands in ComfyUI the same way Install already works.
-          Pick whether it is a LoRA on a model you have, or another UNET like one.
+          Pick whether it is a LoRA on a model you have, another UNET like one, or a text encoder that
+          stands in for the one a model ships with.
         </Hint>
         <Box sx={{ display: "flex", gap: 1, alignItems: "flex-start" }}>
           <TextField
@@ -175,13 +187,13 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
               options={ROLE_OPTIONS}
             />
             <FormControl size="small" fullWidth>
-              <InputLabel>{role === "lora" ? "Applies to" : "Like"}</InputLabel>
+              <InputLabel>{LIKE_LABEL[role]}</InputLabel>
               <Select
-                value={like}
-                label={role === "lora" ? "Applies to" : "Like"}
+                value={likeChoices.some((m) => m.id === like) ? like : ""}
+                label={LIKE_LABEL[role]}
                 onChange={(e) => setLike(e.target.value)}
               >
-                {generationModels.map((m) => (
+                {likeChoices.map((m) => (
                   <MenuItem key={m.id} value={m.id}>
                     {m.name}
                   </MenuItem>
@@ -239,6 +251,12 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
             </Box>
             {needsMoE && (
               <Hint>This family is two experts. Pick one HighNoise file and one LowNoise file.</Hint>
+            )}
+            {role === "encoder" && (
+              <Hint>
+                One file. It replaces the shipped text encoder for every model in that family; pick it on the
+                Video Gen page under Text encoder. The shipped one stays installed.
+              </Hint>
             )}
           </>
         )}

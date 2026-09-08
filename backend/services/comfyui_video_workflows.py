@@ -473,6 +473,7 @@ class ComfyUIVideoWorkflowMixin:
         lora_strength: float = 1.0,
         shift_override: Optional[float] = None,
         extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """Build a ComfyUI API-format workflow for Wan 2.2 MoE text-to-video.
 
@@ -483,7 +484,9 @@ class ComfyUIVideoWorkflowMixin:
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
 
-        model_files = self.WAN22_MODELS.get(model_key, self.WAN22_MODELS["wan22-14b"])
+        model_files = dict(self.WAN22_MODELS.get(model_key, self.WAN22_MODELS["wan22-14b"]))
+        if text_encoder:
+            model_files["clip"] = text_encoder
         clip_device = self._wan_clip_device()
 
         # Default negative prompt for anatomy quality
@@ -715,6 +718,7 @@ class ComfyUIVideoWorkflowMixin:
         lora_strength: float = 1.0,
         shift_override: Optional[float] = None,
         extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         # Same MoE two-pass dance as Wan T2V, but the empty latent gets swapped
         # for WanImageToVideo — that node bakes the start frame into the
@@ -722,7 +726,9 @@ class ComfyUIVideoWorkflowMixin:
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
 
-        model_files = self.WAN22_MODELS.get(model_key, self.WAN22_MODELS["wan22-14b-i2v"])
+        model_files = dict(self.WAN22_MODELS.get(model_key, self.WAN22_MODELS["wan22-14b-i2v"]))
+        if text_encoder:
+            model_files["clip"] = text_encoder
         clip_device = self._wan_clip_device()
 
         if not negative_prompt:
@@ -892,6 +898,7 @@ class ComfyUIVideoWorkflowMixin:
         interpolation_multiplier: int = 1,
         sampler_profile: Optional[str] = None,
         extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """Wan 2.2 TI2V-5B — single-model text+image-to-video that FITS 16GB (no MoE
         two-pass, no CPU offload → none of the 38-min-per-clip A14B pain). Graph mirrors
@@ -905,7 +912,7 @@ class ComfyUIVideoWorkflowMixin:
 
         cfg = self.WAN22_MODELS.get(model_key, {})
         unet = cfg.get("unet") or "wan2.2_ti2v_5B_fp16.safetensors"
-        clip = cfg.get("clip") or "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+        clip = text_encoder or cfg.get("clip") or "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
         vae = cfg.get("vae") or "wan2.2_vae.safetensors"
         clip_device = self._wan_clip_device()
 
@@ -1980,6 +1987,7 @@ class ComfyUIVideoWorkflowMixin:
         lora_name: Optional[str] = None,
         lora_strength: float = 1.0,
         extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """MiniMax H3 ref2va graph — the official video_minimax_h3_r2v template.
 
@@ -2002,6 +2010,8 @@ class ComfyUIVideoWorkflowMixin:
             seed = int(time.time() * 1000) % (2**31)
 
         files = self._minimax_loader_cfg(model_key)
+        if text_encoder:
+            files["clip"] = text_encoder
         length = self._minimax_frame_count(num_frames)
         steps = int(num_inference_steps or 20)
         max_ref_frames = 362  # 15 s at 24 fps on the 17k+5 grid
@@ -2140,6 +2150,7 @@ class ComfyUIVideoWorkflowMixin:
         lora_name: Optional[str] = None,
         lora_strength: float = 1.0,
         extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
         guides: Optional[list] = None,
     ) -> dict:
         """MiniMax H3 fl2va graph — the official ComfyUI template plus its optional inputs.
@@ -2173,6 +2184,8 @@ class ComfyUIVideoWorkflowMixin:
             seed = int(time.time() * 1000) % (2**31)
 
         files = self._minimax_loader_cfg(model_key)
+        if text_encoder:
+            files["clip"] = text_encoder
         length = self._minimax_frame_count(num_frames)
         steps = int(num_inference_steps or 20)
 

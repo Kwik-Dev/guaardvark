@@ -194,6 +194,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     style_embedding: "",
     adapters: [],
     adapter_strength: 0.7,
+    // User text encoder id ("" = the one the model ships with).
+    text_encoder: "",
   });
   // End frame for models that declare first+last-frame generation (image mode).
   const [endFrame, setEndFrame] = useState(null); // {path, name}
@@ -382,6 +384,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // installed (the "I clicked Wan 2.2 and got CogVideoX without being told" bug).
   const [modelMeta, setModelMeta] = useState({});
   const [adapterModels, setAdapterModels] = useState([]);
+  const [encoderModels, setEncoderModels] = useState([]);
   // When set, the selected model isn't installed — surface a blocking banner
   // ({ id, name, missing }) instead of generating with a fallback.
   const [modelNotReady, setModelNotReady] = useState(null);
@@ -403,6 +406,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         if (ids.size > 0) setApiModelIds(ids);
         setAnyModelReady(vids.some(m => m.is_ready));
         setAdapterModels((data.data.models || []).filter((m) => m.type === "lora" && m.is_ready));
+        setEncoderModels((data.data.models || []).filter((m) => m.type === "encoder" && m.user && m.is_ready));
         const meta = {};
         vids.forEach(m => {
           meta[m.id] = {
@@ -674,6 +678,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     }),
     [adapterModels, model],
   );
+  const applicableEncoders = useMemo(
+    () => (encoderModels || []).filter((m) => (m.applies_to || []).includes(model)),
+    [encoderModels, model],
+  );
 
   // Compute final params from presets
   const computedParams = useMemo(() => {
@@ -836,6 +844,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       adapters: (advancedParams.adapters || [])
         .filter((id) => applicableAdapters.some((a) => a.id === id))
         .map((id) => ({ id, strength: advancedParams.adapter_strength ?? 0.7 })),
+      text_encoder: applicableEncoders.some((e) => e.id === advancedParams.text_encoder)
+        ? advancedParams.text_encoder
+        : undefined,
       wan_sampler_profile: MODEL_OPTIONS[effectiveModel]?.samplerProfiles
         ? advancedParams.wan_sampler_profile
         : undefined,
@@ -864,7 +875,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           : {}),
       },
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile, applicableAdapters]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile, applicableAdapters, applicableEncoders]);
 
   const qualityChipOptions = useMemo(() => {
     if (isLtxModel(model, modelMeta[model])) return [];
@@ -1929,6 +1940,28 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       })}
                     </Line>
                     <Hint>LoRAs you added in Manage models. Off until you turn one on. Strength 0.7.</Hint>
+                  </>
+                )}
+                {applicableEncoders.length > 0 && (
+                  <>
+                    <Line>
+                      <FormControl size="small" sx={{ minWidth: 260 }}>
+                        <InputLabel>Text encoder</InputLabel>
+                        <Select
+                          value={applicableEncoders.some((e) => e.id === advancedParams.text_encoder) ? advancedParams.text_encoder : ""}
+                          label="Text encoder"
+                          onChange={(e) => setAdvancedParams((prev) => ({ ...prev, text_encoder: e.target.value }))}
+                        >
+                          <MenuItem value="">Shipped with the model</MenuItem>
+                          {applicableEncoders.map((e) => (
+                            <MenuItem key={e.id} value={e.id}>
+                              {e.name}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Line>
+                    <Hint>Text encoders you added in Manage models. The shipped one runs unless you pick another.</Hint>
                   </>
                 )}
                 {modelMeta[model]?.license?.name && (

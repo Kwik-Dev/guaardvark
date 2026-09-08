@@ -1610,6 +1610,21 @@ def register_video_model(model_id: str, entry: dict, *, replace: bool = False) -
 # defaults from model_capabilities(); nothing here is a second registry.
 CAPABILITY_MODES = ("t2v", "i2v", "l2v", "flf2v", "ref2v")
 GENERATION_TYPES = ("wan", "cogvideox", "ltx", "hunyuan", "minimax")
+# Families whose ComfyUI graph takes a user-chosen text encoder in place of the
+# shipped companion (the CLIPLoader filename is a builder argument). A family
+# not listed here refuses the "encoder" role at add time rather than accepting a
+# file the graph would never load. LTX and Hunyuan use two-part encoders and
+# are not wired yet.
+TEXT_ENCODER_SWAP_TYPES = ("minimax", "wan")
+
+
+def shipped_encoder_for(model_id: str) -> str | None:
+    """Id of the text-encoder companion a generation model requires, or None."""
+    entry = VIDEO_MODEL_REGISTRY.get(model_id) or {}
+    for dep in entry.get("requires") or []:
+        if (VIDEO_MODEL_REGISTRY.get(dep) or {}).get("type") == "encoder":
+            return dep
+    return None
 
 
 def _derived_modes(model_id: str, entry: dict) -> list:

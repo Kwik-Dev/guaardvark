@@ -25,6 +25,9 @@ _CATALOG_LOCK = threading.Lock()
 # Tests point this at a temp file. None → data/user_video_models.json.
 _CATALOG_PATH_OVERRIDE = None
 _HF_LIST_CAP = 200
+# Filename fragments that mark a text encoder rather than a UNET or a LoRA.
+_ENCODER_HINTS = ("text_encoder", "text-encoder", "qwen3vl", "qwen3-vl", "umt5", "t5xxl", "_t5_", "gemma", "llava", "clip_l", "/clip/")
+ROLES = ("lora", "generation", "encoder")
 
 # Capability keys copied when the add is "a generation model like X".
 _LIKE_GENERATION_KEYS = (
@@ -105,7 +108,7 @@ def unique_user_id(stem: str, taken: set | None = None) -> str:
 
 
 def suggest_role_and_like(files: list, src: str | None = None) -> tuple[str | None, str | None]:
-    """Guess LoRA vs generation and a shipped family template from filenames."""
+    """Guess LoRA vs encoder vs generation and a shipped family template from filenames."""
     names = [src] if src else [f.get("src") or "" for f in files]
     blob = " ".join(names).lower()
     if any(k in blob for k in ("/loras/", "lora", "lycoris")):
@@ -116,6 +119,12 @@ def suggest_role_and_like(files: list, src: str | None = None) -> tuple[str | No
         if "wan" in blob or "t2v" in blob:
             return "lora", "wan22-14b"
         return "lora", None
+    if any(k in blob for k in _ENCODER_HINTS):
+        if "minimax" in blob or "qwen3vl" in blob or "qwen3-vl" in blob or "_h3_" in blob or "h3-" in blob:
+            return "encoder", "minimax-h3-int8"
+        if "umt5" in blob or "wan" in blob:
+            return "encoder", "wan22-5b"
+        return "encoder", None
     has_high = any(
         any(tok in n.lower() for tok in ("highnoise", "high_noise", "high_lighting", "_high_"))
         for n in names
@@ -227,14 +236,29 @@ def build_user_entry(
     description: str | None = None,
     revision: str = "main",
 ) -> tuple[str, dict]:
-    """Build a registry entry cloned from a shipped template. Does not register."""
-    from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, GENERATION_TYPES
+    """Build a registry entry cloned from a shipped template. Does not register.
+
+    Roles: ``lora`` stacks on a generation model, ``generation`` is another UNET
+    cloned from a shipped family, ``encoder`` swaps in for the text encoder a
+    generation model ships with (its CLIPLoader file). An encoder entry keeps the
+    companion's ``type: encoder`` and ``local_subdir`` so Install writes it next
+    to the shipped one, and names what it stands in for in ``replaces``.
+    """
+    from backend.services.video_model_registry import (
+        VIDEO_MODEL_REGISTRY,
+        GENERATION_TYPES,
+        TEXT_ENCODER_SWAP_TYPES,
+        shipped_encoder_for,
+    )
 
     like = VIDEO_MODEL_REGISTRY.get(like_id)
     if not like:
         raise ValueError(f"Unknown template '{like_id}'. Pick a shipped model this file is like.")
-    if role not in ("lora", "generation"):
-        raise ValueError("Role must be 'lora' (adapter on a model) or 'generation' (another UNET like a shipped one).")
+    if role not in ROLES:
+        raise ValueError(
+            "Role must be 'lora' (adapter on a model), 'generation' (another UNET like a shipped one) "
+            "or 'encoder' (a text encoder that replaces the one a model ships with)."
+        )
     if not hf_repo or "/" not in hf_repo:
         raise ValueError("hf_repo must be org/repo.")
     if not files:
@@ -249,7 +273,7 @@ def build_user_entry(
         expert = (item.get("expert") if isinstance(item, dict) else None) or None
         size = int((item.get("size") if isinstance(item, dict) else 0) or 0)
         total += size
-        if role == "lora":
+        if role in ("lora", "encoder"):
             dst = Path(src).name
         else:
             dst = _dst_for_generation_file(src, expert, like)
@@ -282,6 +306,40 @@ def build_user_entry(
         }
         return mid, entry
 
+    if role == "encoder":
+        if like.get("type") not in TEXT_ENCODER_SWAP_TYPES:
+            raise ValueError(
+                f"{like.get('name') or like_id} does not take a replacement text encoder yet; "
+                f"that works for {', '.join(TEXT_ENCODER_SWAP_TYPES)} models."
+            )
+        shipped = shipped_encoder_for(like_id)
+        shipped_entry = VIDEO_MODEL_REGISTRY.get(shipped) or {}
+        if not shipped or not shipped_entry:
+            raise ValueError(f"{like.get('name') or like_id} has no text-encoder companion to replace.")
+        if len(specs) != 1:
+            raise ValueError("A text encoder is one file. Pick the single .safetensors the CLIPLoader should read.")
+        # Every generation model in the family that loads the same shipped encoder
+        # can use the replacement, not only the one picked as the template.
+        applies = sorted(
+            mid_ for mid_, e in VIDEO_MODEL_REGISTRY.items()
+            if e.get("type") == like.get("type") and shipped_encoder_for(mid_) == shipped
+        ) or [like_id]
+        entry = {
+            "name": name or stem,
+            "description": description or f"User text encoder for {like.get('name') or like_id}; replaces {shipped_entry.get('name') or shipped}.",
+            "hf_repo": hf_repo,
+            "revision": revision or "main",
+            "local_subdir": shipped_entry.get("local_subdir") or "text_encoders",
+            "files": specs,
+            "size_gb": size_gb,
+            "vram_mb": 0,
+            "type": "encoder",
+            "applies_to": applies,
+            "replaces": shipped,
+            "user": True,
+        }
+        return mid, entry
+
     if like.get("type") not in GENERATION_TYPES:
         raise ValueError(f"'{like_id}' is not a generation family a new UNET can clone.")
     moe_like = any("HighNoise" in (f.get("dst") or "") for f in like.get("files") or [])
@@ -306,6 +364,33 @@ def build_user_entry(
         "like": like_id,
     })
     return mid, entry
+
+
+def resolve_text_encoder(model_key: str, encoder_id: str | None) -> tuple[str | None, str | None]:
+    """Filename the graph's CLIPLoader should read for a user-chosen encoder.
+
+    Returns (None, None) when no swap was asked for, (filename, None) when the
+    entry applies to this model and is installed, else (None, message).
+    """
+    from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, is_model_installed
+
+    eid = (encoder_id or "").strip()
+    if not eid:
+        return None, None
+    entry = VIDEO_MODEL_REGISTRY.get(eid) or {}
+    label = entry.get("name") or eid
+    if entry.get("type") != "encoder" or not entry.get("user"):
+        return None, f"'{eid}' is not a text encoder you added."
+    applies = entry.get("applies_to") or []
+    if applies and model_key not in applies:
+        return None, f"{label} does not replace the text encoder of this model."
+    files = entry.get("files") or []
+    filename = files[0].get("dst") if files else None
+    if not filename:
+        return None, f"{label} has no file."
+    if not is_model_installed(eid):
+        return None, f"{label} is not installed. Open Manage Video Models to download it."
+    return filename, None
 
 
 def add_user_model(**kwargs) -> tuple[str, dict, list]:

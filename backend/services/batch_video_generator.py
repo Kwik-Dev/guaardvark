@@ -171,6 +171,7 @@ class BatchVideoRequest:
     lora_name: Optional[str] = None
     lora_strength: float = 1.0
     adapters: List[Dict] = field(default_factory=list)
+    text_encoder: Optional[str] = None
     # Capability-contract knobs (video_model_registry): a declared speed profile
     # (turbo LoRA + step count) and a declared style embedding id.
     speed_profile: Optional[str] = None
@@ -1118,6 +1119,7 @@ class BatchVideoGenerator:
                             lora_name=batch_request.lora_name,
                             lora_strength=batch_request.lora_strength,
                             adapters=list(batch_request.adapters or []),
+                            text_encoder=batch_request.text_encoder,
                             speed_profile=batch_request.speed_profile,
                             style_embedding=batch_request.style_embedding,
                             last_frame_path=item.last_frame_path,
@@ -1426,6 +1428,7 @@ class BatchVideoGenerator:
             lora_name=params.get("lora_name"),
             lora_strength=float(params.get("lora_strength", 1.0)),
             adapters=list(params.get("adapters") or []) if isinstance(params.get("adapters"), list) else [],
+            text_encoder=params.get("text_encoder") or None,
             speed_profile=params.get("speed_profile") or None,
             style_embedding=params.get("style_embedding") or None,
             subject_ids=[int(s) for s in (params.get("subject_ids") or []) if str(s).strip()],
@@ -1476,6 +1479,7 @@ class BatchVideoGenerator:
                 "lora_name": batch_request.lora_name,
                 "lora_strength": batch_request.lora_strength,
                 "adapters": list(batch_request.adapters or []),
+                "text_encoder": batch_request.text_encoder,
                 "subject_ids": list(batch_request.subject_ids or []),
                 "cinematic_keyframe": bool(batch_request.cinematic_keyframe),
                 "director_mode": bool(batch_request.director_mode),

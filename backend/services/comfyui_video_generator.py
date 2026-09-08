@@ -19,6 +19,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+from backend.services.user_video_models import resolve_text_encoder
+
 try:
     from backend.config import CACHE_DIR, COMFYUI_URL, COMFYUI_OUTPUT_DIR, COMFYUI_DIR
     config_available = True
@@ -135,6 +137,8 @@ class VideoGenerationRequest:
     lora_strength: float = 1.0
     # User-catalog LoRAs: [{"id": "user-...", "strength": 0.7}]
     adapters: List[Dict] = field(default_factory=list)
+    # User-catalog text encoder id that replaces the model's shipped CLIPLoader file.
+    text_encoder: Optional[str] = None
     # Capability-contract inputs (backend/services/video_model_registry.py).
     # A model that does not declare the capability rejects the field with a
     # plain message instead of ignoring it.
@@ -843,6 +847,9 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         extra_loras, adapter_err = self._resolve_adapters(request, model_key)
         if adapter_err:
             return None, adapter_err
+        te_file, te_err = resolve_text_encoder(model_key, request.text_encoder)
+        if te_err:
+            return None, te_err
 
         def _upload(path, kind):
             if not path or not Path(path).exists():
@@ -895,6 +902,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 lora_name=lora_file,
                 lora_strength=lora_strength,
                 extra_loras=extra_loras,
+                text_encoder=te_file,
             )
         except ValueError as e:
             return None, str(e)
@@ -943,6 +951,9 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         extra_loras, adapter_err = self._resolve_adapters(request, model_key)
         if adapter_err:
             return None, adapter_err
+        te_file, te_err = resolve_text_encoder(model_key, request.text_encoder)
+        if te_err:
+            return None, te_err
         first_name = None
         first_path = request.first_frame_path or image_path
         if first_path:
@@ -1005,6 +1016,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 lora_strength=lora_strength,
                 extra_loras=extra_loras,
                 guides=guide_specs,
+                text_encoder=te_file,
             )
         except ValueError as e:
             return None, str(e)
@@ -1787,6 +1799,10 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 if adapter_err:
                     result.error = adapter_err
                     return result
+                te_file, te_err = resolve_text_encoder(model_key, request.text_encoder)
+                if te_err:
+                    result.error = te_err
+                    return result
 
                 if cfg.get("single"):
                     # Wan 2.2 TI2V-5B: ONE model does both — image-to-video if a start
@@ -1812,6 +1828,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         fps=request.fps,
                         interpolation_multiplier=interpolation,
                         extra_loras=extra_loras,
+                        text_encoder=te_file,
                     )
                     logger.info(f"Using Wan 2.2 TI2V-5B ({'i2v' if img_name else 't2v'}, {model_key}) via ComfyUI")
                 elif is_i2v:
@@ -1841,6 +1858,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         lora_strength=wan_lora_strength,
                         shift_override=wan_shift,
                         extra_loras=extra_loras,
+                        text_encoder=te_file,
                     )
                     logger.info(f"Using Wan 2.2 image-to-video ({model_key}) via ComfyUI GGUF")
                 else:
@@ -1864,6 +1882,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         lora_strength=wan_lora_strength,
                         shift_override=wan_shift,
                         extra_loras=extra_loras,
+                        text_encoder=te_file,
                     )
                     logger.info(f"Using Wan 2.2 text-to-video ({model_key}) via ComfyUI GGUF")
 
