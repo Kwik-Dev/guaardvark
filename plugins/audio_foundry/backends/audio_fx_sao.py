@@ -24,6 +24,28 @@ from backends.base import AudioBackend, GenerationResult
 logger = logging.getLogger(__name__)
 
 
+def _make_generator(seed: int | None, device: str, torch_module: Any | None = None):
+    """Build a seeded generator when the backend can safely use one.
+
+    Stable Audio's MPS path has a torch/numpy recursion bug when an explicit
+    MPS generator is threaded through the pipeline. On MPS, seed the global RNG
+    instead and let diffusers draw from that state.
+    """
+    if seed is None:
+        return None
+
+    torch = torch_module
+    if torch is None:
+        import torch as torch  # type: ignore[no-redef]
+
+    seed_int = int(seed)
+    if device == "mps":
+        torch.manual_seed(seed_int)
+        return None
+
+    return torch.Generator(device).manual_seed(seed_int)
+
+
 class StableAudioOpenBackend(AudioBackend):
     """Stability AI's SAO v1.0 via diffusers.StableAudioPipeline."""
 
@@ -44,7 +66,7 @@ class StableAudioOpenBackend(AudioBackend):
         self._sample_rate = int(sample_rate)
         self._max_duration_s = float(max_duration_s)
         self._pipeline: Any = None
-        self._device: str | None = None
+        self._device: str = "cpu"
         self._availability: tuple[bool, str | None] | None = None
 
     @property
@@ -122,6 +144,17 @@ class StableAudioOpenBackend(AudioBackend):
                 ) from e
             raise
 
+        # The model's default scheduler (CosineDPMSolverMultistep) drives an SDE
+        # solver via `torchsde`, whose Brownian-motion path recurses infinitely on
+        # Apple MPS (numpy seterr/geterr). Swap to a non-SDE multistep scheduler so
+        # FX generation works on MPS (and is unchanged on CUDA).
+        try:
+            from diffusers import EDMDPMSolverMultistepScheduler
+            pipe.scheduler = EDMDPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+            logger.info("%s scheduler -> EDMDPMSolverMultistep (avoids torchsde on MPS)", self.MODEL_ID)
+        except Exception as e:
+            logger.warning("Could not swap SAO scheduler (%s); keeping default", e)
+
         pipe.to(device)
         self._pipeline = pipe
         self._device = device
@@ -134,9 +167,9 @@ class StableAudioOpenBackend(AudioBackend):
 
         del self._pipeline
         self._pipeline = None
-        if torch.cuda.is_available():
+        if self._device == "cuda":
             torch.cuda.empty_cache()
-        elif getattr(self, "_device", None) == "mps" and hasattr(torch, "mps"):
+        elif self._device == "mps":
             torch.mps.empty_cache()
         logger.info("%s unloaded", self.MODEL_ID)
 
@@ -154,9 +187,7 @@ class StableAudioOpenBackend(AudioBackend):
         import torch
         import soundfile as sf
 
-        generator = None
-        if seed is not None:
-            generator = torch.Generator(getattr(self, "_device", "cuda")).manual_seed(int(seed))
+        generator = _make_generator(seed, self._device, torch)
 
         logger.info(
             "SAO generate: prompt=%r duration=%.1fs steps=%d seed=%s",

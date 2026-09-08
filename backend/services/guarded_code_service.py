@@ -450,7 +450,9 @@ def browse_repo_path(path: str = "", repo_root: str | Path | None = None) -> dic
         try:
             stat = child.stat()
         except OSError:
-            # Broken symlinks and vanished entries must not fail the listing.
+            # Broken symlink / unreadable entry (e.g. the repo-root `manager`
+            # symlink) — skip it rather than fail the whole folder listing.
+
             continue
         item_id = f"repo:{child_rel}"
         if child.is_dir():
