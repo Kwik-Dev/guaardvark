@@ -146,7 +146,7 @@ plyer>=2.1.0           # Native notifications
 # isort==6.0.1
 # mypy==1.16.1
 # ruff==0.11.13
-faster-whisper>=1.0.0
+faster-whisper>=1.2.1
 
 # Code Intelligence Dependencies
 tree-sitter>=0.22.0
