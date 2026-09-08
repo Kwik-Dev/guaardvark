@@ -13,7 +13,9 @@ def test_comfyui_url_explicit_env_wins(monkeypatch):
     from backend.utils import comfyui_url
 
     monkeypatch.setenv("GUAARDVARK_COMFYUI_URL", "http://127.0.0.1:8000/")
-    assert comfyui_url.get_comfyui_url() == "http://localhost:8000"
+    # An explicit override is honoured as typed (only the trailing slash goes);
+    # the localhost default applies when nothing is set.
+    assert comfyui_url.get_comfyui_url() == "http://127.0.0.1:8000"
 
 
 def test_comfyui_url_follows_the_plugin_port(monkeypatch):
