@@ -1,0 +1,31 @@
+# RunPod LoRA trainer — smoke test
+#
+# Submits a smoke job ({"smoke": true}) to the serverless endpoint and polls
+# its status. The smoke job verifies the image wiring + S3 read/write without
+# training. Requires GUAARDVARK_RUNPOD_API_KEY (from repo-root .env).
+#
+# Run:  httpyac send plugins/runpod_lora_trainer/smoke_test.http -a --output body
+#       (from the repo root so httpyac loads .env)
+
+@host = https://api.runpod.ai/v2/re65fdfztcmcxi
+@apiKey = {{GUAARDVARK_RUNPOD_API_KEY}}
+
+# 1. Submit the smoke job
+# @name submit
+POST {{host}}/run
+Authorization: Bearer {{apiKey}}
+Content-Type: application/json
+
+{
+  "input": {
+    "smoke": true
+  }
+}
+
+###
+
+# 2. Poll the job status (uses the job id from the submit response)
+# @ref submit
+# @name status
+GET {{host}}/status/{{submit.id}}
+Authorization: Bearer {{apiKey}}
