@@ -132,39 +132,82 @@ def _installed_model_tags() -> set[str]:
     return tags
 
 
-def _resolve_model(preferred: str) -> str:
-    """Pick a model that's actually pulled. Prefer ``preferred``; else any gemma (the
-    project's brain/vision family); else the first installed model; else ``preferred``
-    unchanged (the chat call then fails → graceful fallback).
+def _saved_active_model() -> str:
+    """The chat model made active on the Settings page ("" when none is saved)."""
+    try:
+        from backend.utils.llm_service import get_saved_active_model_name
+        try:
+            from flask import has_app_context
+            in_ctx = has_app_context()
+        except Exception:  # noqa: BLE001
+            in_ctx = True
+        if in_ctx:
+            return (get_saved_active_model_name() or "").strip()
+        # Batch and chat-tool threads run without a request context; the DB read
+        # would warn and fall through to the JSON file every call. Push the app
+        # context the way verbatim_prompts_enabled does.
+        try:
+            from backend.app import app as _flask_app
+        except Exception:  # noqa: BLE001
+            _flask_app = None
+        if _flask_app is None:
+            return (get_saved_active_model_name() or "").strip()
+        with _flask_app.app_context():
+            return (get_saved_active_model_name() or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
-    For the Director we default to a small dedicated model (DIRECTOR_MODEL) optimized
-    for fast, reliable structured JSON + strict visual-prompt-only output. This is
-    intentionally separate from whatever large model is loaded for general chat/brain.
 
-    Critically: never return an embedding model (they don't support /api/chat or
-    the JSON format mode the Director needs). If the requested/preferred model is an
-    embedding model, we force the safe DIRECTOR_MODEL.
+def _director_candidates(preferred: str | None = None) -> list[str]:
+    """Chat models to try for a Director call, best first.
+
+    Order:
+      1. an explicit per-job model (``preferred`` other than the built-in default),
+      2. the model made active on the Settings page,
+      3. any installed gemma, then any installed qwen (matched anywhere in the tag,
+         so a custom build such as ``someone/Gemma-4-custom`` counts),
+      4. every other installed chat model.
+    Embedding models never qualify (no /api/chat, no JSON mode). When Ollama lists
+    nothing the built-in default is returned so the chat call fails loudly.
     """
     try:
         raw_tags = _installed_model_tags() or set()
-        # Aggressively exclude embedding models — they are pulled for RAG but will 400
-        # on ollama.chat with format=json.
-        tags = {t for t in raw_tags if not _is_embedding_model(t)}
-
-        if not tags:
-            return DIRECTOR_MODEL
-
-        if preferred and not _is_embedding_model(preferred) and preferred in tags:
-            return preferred
-
-        # Prefer any gemma (they tend to be reliable for the strict prompt contract).
-        for t in sorted(tags):
-            if "gemma" in t:
-                return t
-
-        return next(iter(sorted(tags)), DIRECTOR_MODEL)
     except Exception:  # noqa: BLE001
-        return DIRECTOR_MODEL if _is_embedding_model(preferred) else (preferred or DIRECTOR_MODEL)
+        raw_tags = set()
+    tags = sorted(t for t in raw_tags if not _is_embedding_model(t))
+    if not tags:
+        fallback = (preferred or DIRECTOR_MODEL)
+        return [DIRECTOR_MODEL if _is_embedding_model(fallback) else fallback]
+
+    by_lower = {t.lower(): t for t in tags}
+
+    def _installed(name: str | None) -> str | None:
+        n = (name or "").strip()
+        if not n or _is_embedding_model(n):
+            return None
+        return by_lower.get(n.lower())
+
+    ordered: list[str] = []
+
+    def _add(tag: str | None) -> None:
+        if tag and tag not in ordered:
+            ordered.append(tag)
+
+    if preferred and preferred != DIRECTOR_MODEL:
+        _add(_installed(preferred))
+    _add(_installed(_saved_active_model()))
+    for family in ("gemma", "qwen"):
+        for t in tags:
+            if family in t.lower():
+                _add(t)
+    for t in tags:
+        _add(t)
+    return ordered
+
+
+def _resolve_model(preferred: str) -> str:
+    """First entry of :func:`_director_candidates` (see there for the order)."""
+    return _director_candidates(preferred)[0]
 
 
 def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = None, fill_method: str | None = None) -> list[dict[str, Any]]:

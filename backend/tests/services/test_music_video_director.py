@@ -113,6 +113,7 @@ def test_parse_accepts_bare_list():
 
 def test_resolve_model_prefers_available_gemma(monkeypatch):
     import ollama
+    monkeypatch.setattr(director, "_saved_active_model", lambda: "")
     # Real ollama shape (.model objects): preferred tag isn't pulled (only
     # gemma4:latest is) → resolve to the pulled gemma. This is the bug that made the
     # default model silently fall back to no-storyboard.
@@ -125,3 +126,45 @@ def test_resolve_model_prefers_available_gemma(monkeypatch):
     # Legacy dict shape ({"name": ...}) still handled.
     monkeypatch.setattr(ollama, "list", lambda: {"models": [{"name": "gemma4:legacy"}]})
     assert director._resolve_model("gemma4:e4b") == "gemma4:legacy"
+
+
+def _tags(*names):
+    return {"models": [_OllamaModelObj(n) for n in names]}
+
+
+def test_director_ladder_starts_with_the_active_model(monkeypatch):
+    import ollama
+    monkeypatch.setattr(ollama, "list", lambda: _tags(
+        "gemma4:e4b", "someone/Gemma-4-custom:latest", "qwen3.5:9b", "llama3:latest",
+        "nomic-embed-text:latest",
+    ))
+    monkeypatch.setattr(director, "_saved_active_model", lambda: "qwen3.5:9b")
+    # Default preferred (the built-in) yields to the Settings-page model.
+    assert director._director_candidates(director.DIRECTOR_MODEL) == [
+        "qwen3.5:9b", "gemma4:e4b", "someone/Gemma-4-custom:latest", "llama3:latest",
+    ]
+    assert director._resolve_model(director.DIRECTOR_MODEL) == "qwen3.5:9b"
+    # An explicit per-job model still wins over the active one.
+    assert director._resolve_model("llama3:latest") == "llama3:latest"
+
+
+def test_director_ladder_active_model_matched_case_insensitively(monkeypatch):
+    import ollama
+    monkeypatch.setattr(ollama, "list", lambda: _tags("someone/Gemma-4-custom:latest", "qwen3.5:9b"))
+    monkeypatch.setattr(director, "_saved_active_model", lambda: "someone/gemma-4-custom:latest")
+    assert director._resolve_model(director.DIRECTOR_MODEL) == "someone/Gemma-4-custom:latest"
+
+
+def test_director_ladder_skips_active_model_that_is_not_installed(monkeypatch):
+    import ollama
+    monkeypatch.setattr(ollama, "list", lambda: _tags("llama3:latest", "qwen3.5:9b"))
+    monkeypatch.setattr(director, "_saved_active_model", lambda: "gemma4:12b")
+    # no gemma pulled → qwen family before anything else
+    assert director._director_candidates(director.DIRECTOR_MODEL) == ["qwen3.5:9b", "llama3:latest"]
+
+
+def test_director_ladder_never_picks_an_embedding_model(monkeypatch):
+    import ollama
+    monkeypatch.setattr(ollama, "list", lambda: _tags("nomic-embed-text:latest"))
+    monkeypatch.setattr(director, "_saved_active_model", lambda: "nomic-embed-text:latest")
+    assert director._director_candidates(director.DIRECTOR_MODEL) == [director.DIRECTOR_MODEL]

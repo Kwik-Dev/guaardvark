@@ -26,6 +26,7 @@ from typing import Any, List, Optional, Dict
 # Reuse ALL vetted primitives (model safety, parse, chat, guards) to avoid regressions.
 from backend.services.music_video_director import (
     DIRECTOR_MODEL,
+    _director_candidates,
     _resolve_model,
     _is_embedding_model,
     _parse_prompts as _base_parse_prompts,
@@ -215,7 +216,6 @@ def enhance_prompts(
         log.info("media_director: verbatim prompts ON — sending user prompts to the model as-is (no director rewrite)")
         return list(prompts)
     n = len(prompts)
-    resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)
     style_c = _style_clause(style)
     guidance = f"\nExtra direction: {extra_guidance.strip()}." if extra_guidance and extra_guidance.strip() else ""
     cast = ""
@@ -228,36 +228,43 @@ def enhance_prompts(
         f"{style_c}{guidance}{cast}\n\n"
         "TASK: Return ONLY JSON with 'prompts' array of exactly N enriched pure-visual prompts. Preserve order and core intent."
     )
-    try:
-        # NOTE: do NOT use the music-director's _director_chat here — its parser hunts for a
-        # "shots" array, but this enrich contract returns {"prompts": [...]}. Mismatched parsing
-        # silently returned [] → originals (the batch-director no-op bug, fixed 2026-06-23).
-        # Mirror storyboard_from_concept: own chat call + _parse_image_prompts (list-aware).
-        import ollama
-        from backend.utils.ollama_resource_manager import think_payload
-        opts = _options(n, sampling)
-        if (prompt_style or "").lower() == "natural":
-            system = _SYSTEM_ENHANCE_IMAGE_NATURAL
-            # Prose descriptions run ~150 words each; the phrase budget clips them.
-            opts["num_predict"] = max(int(opts.get("num_predict", 0)), min(4096, 320 * n + 256))
-        else:
-            system = _SYSTEM_ENHANCE_IMAGE
-        resp = ollama.chat(
-            model=resolved,
-            format="json",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            options=opts,
-            **think_payload(resolved),
-        )
-        out = _parse_image_prompts(resp["message"]["content"], n)
-        if len(out) == n:
-            return [p.strip() for p in out]
-        log.warning("media_director.enhance_prompts parsed %d/%d prompts; falling back", len(out), n)
-    except Exception as e:  # noqa: BLE001
-        log.warning("media_director.enhance_prompts failed (%s); falling back", e)
+    # NOTE: do NOT use the music-director's _director_chat here — its parser hunts for a
+    # "shots" array, but this enrich contract returns {"prompts": [...]}. Mismatched parsing
+    # silently returned [] → originals (the batch-director no-op bug, fixed 2026-06-23).
+    # Mirror storyboard_from_concept: own chat call + _parse_image_prompts (list-aware).
+    opts = _options(n, sampling)
+    if (prompt_style or "").lower() == "natural":
+        system = _SYSTEM_ENHANCE_IMAGE_NATURAL
+        # Prose descriptions run ~150 words each; the phrase budget clips them.
+        opts["num_predict"] = max(int(opts.get("num_predict", 0)), min(4096, 320 * n + 256))
+    else:
+        system = _SYSTEM_ENHANCE_IMAGE
+    # The active chat model goes first; a model that errors or hands back the wrong
+    # number of prompts is skipped for the next family on the ladder (gemma, qwen, ...).
+    for resolved in _director_candidates(model or DEFAULT_DIRECTOR_MODEL)[:3]:
+        try:
+            import ollama
+            from backend.utils.ollama_resource_manager import think_payload
+            resp = ollama.chat(
+                model=resolved,
+                format="json",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                options=opts,
+                **think_payload(resolved),
+            )
+            out = _parse_image_prompts(resp["message"]["content"], n)
+            if len(out) == n:
+                log.info("media_director.enhance_prompts: %d prompt(s) rewritten by %s", n, resolved)
+                return [p.strip() for p in out]
+            log.warning(
+                "media_director.enhance_prompts: %s parsed %d/%d prompts; trying the next model",
+                resolved, len(out), n,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("media_director.enhance_prompts: %s failed (%s); trying the next model", resolved, e)
     # Fallback: return originals (caller may still do keyword enhance)
     return list(prompts)
 

@@ -20,6 +20,15 @@ Everything the H3 release can do, wired through the product, on a branch until i
   batch share the change; the Images page's prompt preview now resolves "auto" to the
   default model so it shows the policy that actually runs. Krea 2 keeps tags until it is
   measured the same way.
+- **The Director asks the active chat model first.** Every Director call (stills rewrite,
+  storyboards, edit refinement, video and music video planning) was hard-wired to
+  `gemma4:e4b`, then any gemma, then whatever was installed, ignoring the model made active
+  on the Settings page. The ladder is now: an explicit per-job model, then the Settings-page
+  model, then any installed gemma, then any installed qwen, then the rest, matched anywhere
+  in the tag so a custom build such as `someone/Gemma-4-custom` counts. Embedding models
+  never qualify. The stills rewrite tries up to three rungs, so a model that errors or hands
+  back the wrong number of prompts is skipped rather than silently dropping to the raw
+  sentence.
 - **Thinking is off unless someone asks for it, everywhere the product talks to Ollama.**
   The Chat page's "Chat thinking" setting was documented as off by default while the stored
   value said on, so every reply on this box and on a client's box paid for gemma4's hidden reasoning:
