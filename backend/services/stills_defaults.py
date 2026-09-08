@@ -34,6 +34,7 @@ from typing import Any
 # been A/B'd here yet, so it keeps "tags" until it is.
 _FAMILY_DEFAULTS: dict[str, dict[str, Any]] = {
     "zimage": {"width": 1024, "height": 1024, "steps": 9, "guidance": 0.0, "prompt_style": "natural"},
+    "comfyui": {"width": 1024, "height": 1024, "steps": 9, "guidance": 0.0, "prompt_style": "natural"},
     "krea2-turbo": {"width": 1024, "height": 1024, "steps": 8, "guidance": 0.0, "prompt_style": "tags"},
     "krea2-raw": {"width": 1024, "height": 1024, "steps": 52, "guidance": 3.5, "prompt_style": "tags"},
     "sdxl": {"width": 1024, "height": 1024, "steps": 25, "guidance": 7.0, "prompt_style": "tags"},
@@ -70,6 +71,8 @@ _LEGACY_GUIDANCE = 7.5
 def model_family(model: str | None) -> str:
     """Map catalog key / HF id / auto to a sampling family key."""
     mid = (model or "").strip().lower()
+    if mid == "comfyui":
+        return "comfyui"
     if not mid or mid == "auto":
         # Product daily driver family for unresolved auto.
         try:
