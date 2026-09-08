@@ -1610,16 +1610,21 @@ def register_video_model(model_id: str, entry: dict, *, replace: bool = False) -
 # defaults from model_capabilities(); nothing here is a second registry.
 CAPABILITY_MODES = ("t2v", "i2v", "l2v", "flf2v", "ref2v")
 GENERATION_TYPES = ("wan", "cogvideox", "ltx", "hunyuan", "minimax")
-# Families whose ComfyUI graph takes a user-chosen text encoder in place of the
-# shipped companion (the CLIPLoader filename is a builder argument). A family
-# not listed here refuses the "encoder" role at add time rather than accepting a
-# file the graph would never load. LTX and Hunyuan use two-part encoders and
-# are not wired yet.
-TEXT_ENCODER_SWAP_TYPES = ("minimax", "wan")
+# Families whose ComfyUI graph stacks user LoRAs (LoraLoaderModelOnly after the
+# UNET) and takes a user-chosen text encoder in place of the shipped companion.
+# A family not listed refuses that role at add time rather than accepting a
+# file the graph would never load. CogVideoX runs through the wrapper nodes and
+# has neither hook.
+LORA_STACK_TYPES = ("wan", "minimax", "ltx", "hunyuan")
+TEXT_ENCODER_SWAP_TYPES = ("wan", "minimax", "ltx", "hunyuan")
 
 
 def shipped_encoder_for(model_id: str) -> str | None:
-    """Id of the text-encoder companion a generation model requires, or None."""
+    """Id of the text-encoder companion a generation model requires, or None.
+
+    The first encoder in ``requires`` is the one the graph's main text slot
+    loads and the one a user encoder replaces; secondary parts (LTX 2.3's text
+    projection, Hunyuan's clip_l) stay as shipped."""
     entry = VIDEO_MODEL_REGISTRY.get(model_id) or {}
     for dep in entry.get("requires") or []:
         if (VIDEO_MODEL_REGISTRY.get(dep) or {}).get("type") == "encoder":

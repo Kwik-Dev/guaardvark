@@ -1019,6 +1019,8 @@ class ComfyUIVideoWorkflowMixin:
         fps: float = 16.0,
         interpolation_multiplier: int = 1,
         audio_out: bool = False,
+        extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """LTX-2.3 distilled T2V — AV-aware core ComfyUI graph.
 
@@ -1037,7 +1039,7 @@ class ComfyUIVideoWorkflowMixin:
         self._ensure_ltx_models()
         cfg = self.LTX_MODELS.get(model_key, {})
         unet = cfg.get("unet") or "ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors"
-        clip = cfg.get("clip") or "gemma_3_12B_it_fp4_mixed.safetensors"
+        clip = text_encoder or cfg.get("clip") or "gemma_3_12B_it_fp4_mixed.safetensors"
         text_proj = cfg.get("text_projection") or "ltx-2.3_text_projection_bf16.safetensors"
         vae = cfg.get("vae") or "LTX23_video_vae_bf16.safetensors"
         audio_vae = cfg.get("audio_vae") or "LTX23_audio_vae_bf16.safetensors"
@@ -1157,6 +1159,7 @@ class ComfyUIVideoWorkflowMixin:
                 base_fps=fps,
                 multiplier=interpolation_multiplier,
             )
+        self._stack_user_loras(workflow, extra_loras)
         return workflow
 
 
@@ -1176,6 +1179,8 @@ class ComfyUIVideoWorkflowMixin:
         interpolation_multiplier: int = 1,
         strength: float = 1.0,
         audio_out: bool = False,
+        extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """LTX-2.3 distilled I2V — AV concat path with LTXVImgToVideo start frame."""
         if seed is None:
@@ -1184,7 +1189,7 @@ class ComfyUIVideoWorkflowMixin:
         self._ensure_ltx_models()
         cfg = self.LTX_MODELS.get(model_key, {})
         unet = cfg.get("unet") or "ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors"
-        clip = cfg.get("clip") or "gemma_3_12B_it_fp4_mixed.safetensors"
+        clip = text_encoder or cfg.get("clip") or "gemma_3_12B_it_fp4_mixed.safetensors"
         text_proj = cfg.get("text_projection") or "ltx-2.3_text_projection_bf16.safetensors"
         vae = cfg.get("vae") or "LTX23_video_vae_bf16.safetensors"
         audio_vae = cfg.get("audio_vae") or "LTX23_audio_vae_bf16.safetensors"
@@ -1313,6 +1318,7 @@ class ComfyUIVideoWorkflowMixin:
                 base_fps=fps,
                 multiplier=interpolation_multiplier,
             )
+        self._stack_user_loras(workflow, extra_loras)
         return workflow
 
 
@@ -1361,6 +1367,8 @@ class ComfyUIVideoWorkflowMixin:
         fps: float = 16.0,
         interpolation_multiplier: int = 1,
         audio_out: bool = False,
+        extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """LTX-2.5 distilled T2V — official two-stage ComfyUI graph, video-only decode.
 
@@ -1377,7 +1385,9 @@ class ComfyUIVideoWorkflowMixin:
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
 
-        files = self._ltx25_loader_cfg(model_key)
+        files = dict(self._ltx25_loader_cfg(model_key))
+        if text_encoder:
+            files["clip"] = text_encoder
         length = self._ltx_frame_count(num_frames)
         stage_w, stage_h = self._ltx25_stage1_size(width, height)
         clip_device = self._wan_clip_device()
@@ -1534,6 +1544,7 @@ class ComfyUIVideoWorkflowMixin:
                 base_fps=fps,
                 multiplier=interpolation_multiplier,
             )
+        self._stack_user_loras(workflow, extra_loras)
         return workflow
 
     def _create_ltx25_i2v_workflow(
@@ -1552,12 +1563,16 @@ class ComfyUIVideoWorkflowMixin:
         interpolation_multiplier: int = 1,
         strength: float = 1.0,
         audio_out: bool = False,
+        extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """LTX-2.5 distilled I2V — two-stage stack with LTXVImgToVideo start frame."""
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
 
-        files = self._ltx25_loader_cfg(model_key)
+        files = dict(self._ltx25_loader_cfg(model_key))
+        if text_encoder:
+            files["clip"] = text_encoder
         length = self._ltx_frame_count(num_frames)
         stage_w, stage_h = self._ltx25_stage1_size(width, height)
         clip_device = self._wan_clip_device()
@@ -1736,6 +1751,7 @@ class ComfyUIVideoWorkflowMixin:
                 base_fps=fps,
                 multiplier=interpolation_multiplier,
             )
+        self._stack_user_loras(workflow, extra_loras)
         return workflow
 
 
@@ -1839,6 +1855,8 @@ class ComfyUIVideoWorkflowMixin:
         seed: Optional[int] = None,
         fps: int = 24,
         interpolation_multiplier: int = 1,
+        extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """HunyuanVideo text-to-video on ComfyUI's native nodes with a GGUF UNet.
 
@@ -1849,6 +1867,8 @@ class ComfyUIVideoWorkflowMixin:
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
         cfg = self._hunyuan_cfg(model_key, "hunyuan-t2v")
+        if text_encoder:
+            cfg["clip_llava"] = text_encoder
         workflow = self._hunyuan_loader_nodes(cfg)
         workflow.update({
             "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
@@ -1874,6 +1894,7 @@ class ComfyUIVideoWorkflowMixin:
                 base_fps=fps,
                 multiplier=interpolation_multiplier,
             )
+        self._stack_user_loras(workflow, extra_loras)
         return workflow
 
     def _create_hunyuan_i2v_workflow(
@@ -1889,6 +1910,8 @@ class ComfyUIVideoWorkflowMixin:
         seed: Optional[int] = None,
         fps: int = 24,
         interpolation_multiplier: int = 1,
+        extra_loras: Optional[list] = None,
+        text_encoder: Optional[str] = None,
     ) -> dict:
         """HunyuanVideo image-to-video (v2 "replace" conditioning).
 
@@ -1899,6 +1922,8 @@ class ComfyUIVideoWorkflowMixin:
         if seed is None:
             seed = int(time.time() * 1000) % (2**31)
         cfg = self._hunyuan_cfg(model_key, "hunyuan-i2v")
+        if text_encoder:
+            cfg["clip_llava"] = text_encoder
         workflow = self._hunyuan_loader_nodes(cfg)
         workflow.update({
             "4": {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": cfg["clip_vision"]}},
@@ -1944,6 +1969,7 @@ class ComfyUIVideoWorkflowMixin:
                 base_fps=fps,
                 multiplier=interpolation_multiplier,
             )
+        self._stack_user_loras(workflow, extra_loras)
         return workflow
 
     # ── MiniMax H3 ────────────────────────────────────────────────────────────
@@ -2517,6 +2543,25 @@ class ComfyUIVideoWorkflowMixin:
         logger.info(f"Added FreeU_V2 node ({freeu_id}) after model node {model_node_id}")
         return freeu_id
 
+
+    def _stack_user_loras(self, workflow: dict, extra_loras: Optional[list], unet_node: str = "1") -> dict:
+        """Insert LoraLoaderModelOnly nodes between the UNET loader and every
+        node that reads it as ``model``. Ids continue after the graph's highest
+        numeric id, so any builder can call this after assembling its dict."""
+        if not extra_loras:
+            return workflow
+        # Consumers are collected before the chain is added: the first LoRA
+        # node reads the UNET directly and must keep doing so.
+        consumers = [
+            node["inputs"] for node in workflow.values()
+            if isinstance(node, dict) and isinstance(node.get("inputs"), dict)
+            and node["inputs"].get("model") == [unet_node, 0]
+        ]
+        ids = [int(k) for k in workflow if str(k).isdigit()]
+        model_ref, _ = self._chain_model_only_loras(workflow, [unet_node, 0], extra_loras, (max(ids) if ids else 0) + 1)
+        for inputs in consumers:
+            inputs["model"] = model_ref
+        return workflow
 
     def _chain_model_only_loras(self, workflow: dict, model_ref: list, loras: Optional[list], start_id: int) -> tuple:
         """Stack LoraLoaderModelOnly nodes after model_ref. Returns (new_ref, next_id)."""

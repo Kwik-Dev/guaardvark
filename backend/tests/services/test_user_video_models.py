@@ -192,8 +192,13 @@ def test_add_encoder_needs_one_file_and_a_wired_family(catalog_dir):
         )
     with pytest.raises(ValueError, match="does not take a replacement text encoder"):
         uvm.add_user_model(
-            role="encoder", like_id="ltx23-distilled-fp8", hf_repo="x/y",
-            files=[{"src": "gemma.safetensors"}],
+            role="encoder", like_id="cogvideox-5b-i2v", hf_repo="x/y",
+            files=[{"src": "t5.safetensors"}],
+        )
+    with pytest.raises(ValueError, match="does not stack LoRAs"):
+        uvm.add_user_model(
+            role="lora", like_id="cogvideox-5b", hf_repo="x/y",
+            files=[{"src": "a_lora.safetensors"}],
         )
 
 
@@ -235,3 +240,50 @@ def test_graphs_load_the_chosen_encoder():
         text_encoder="qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors",
     )
     assert wf["2"]["inputs"]["clip_name"] == "qwen3vl_32b_heretic_minimax_h3_nvfp4.safetensors"
+
+
+def test_ltx_and_hunyuan_graphs_take_loras_and_encoder():
+    from backend.services.comfyui_video_generator import ComfyUIVideoGenerator
+    gen = ComfyUIVideoGenerator.__new__(ComfyUIVideoGenerator)
+    loras = [{"filename": "a.safetensors", "strength": 0.7}]
+
+    wf = gen._create_ltx23_t2v_workflow(prompt="t", seed=1, extra_loras=loras, text_encoder="gemma_user.safetensors")
+    assert wf["2"]["inputs"]["clip_name1"] == "gemma_user.safetensors"
+    assert wf["2"]["inputs"]["clip_name2"] == "ltx-2.3_text_projection_bf16.safetensors"  # projection stays
+    lora_nodes = [k for k, n in wf.items() if n.get("class_type") == "LoraLoaderModelOnly"]
+    assert len(lora_nodes) == 1 and wf[lora_nodes[0]]["inputs"]["model"] == ["1", 0]
+    sampling = next(n for n in wf.values() if n.get("class_type") == "ModelSamplingLTXV")
+    assert sampling["inputs"]["model"] == [lora_nodes[0], 0]
+
+    wf = gen._create_ltx25_t2v_workflow(prompt="t", seed=1, extra_loras=loras, text_encoder="gemma4_user.safetensors")
+    assert wf["2"]["inputs"]["clip_name"] == "gemma4_user.safetensors"
+    guider = next(n for n in wf.values() if n.get("class_type") == "CFGGuider")
+    assert wf[guider["inputs"]["model"][0]]["class_type"] == "LoraLoaderModelOnly"
+
+    wf = gen._create_hunyuan_t2v_workflow(prompt="t", seed=1, extra_loras=loras, text_encoder="llava_user.safetensors")
+    assert wf["2"]["inputs"]["clip_name2"] == "llava_user.safetensors"
+    assert wf["2"]["inputs"]["clip_name1"] == "clip_l.safetensors"  # clip_l stays
+    assert wf[wf["20"]["inputs"]["model"][0]]["class_type"] == "LoraLoaderModelOnly"
+
+    # No LoRAs, no encoder: graphs are byte-for-byte what they were.
+    plain = gen._create_hunyuan_t2v_workflow(prompt="t", seed=1)
+    assert plain["20"]["inputs"]["model"] == ["1", 0]
+    assert not [n for n in plain.values() if n.get("class_type") == "LoraLoaderModelOnly"]
+
+
+def test_lora_role_applies_to_ltx_and_hunyuan(catalog_dir):
+    for like in ("ltx25-distilled-int8", "hunyuan-t2v", "wan22-5b"):
+        mid, entry, _ = uvm.add_user_model(role="lora", like_id=like, hf_repo="x/y", files=[{"src": "l.safetensors"}])
+        try:
+            assert entry["applies_to"] == [like]
+        finally:
+            uvm.remove_user_model(mid, delete_files=False)
+    mid, entry, _ = uvm.add_user_model(
+        role="encoder", like_id="hunyuan-t2v", hf_repo="x/y", files=[{"src": "llava_user.safetensors"}],
+    )
+    try:
+        assert entry["replaces"] == "hunyuan-llava-te"
+        assert set(entry["applies_to"]) == {"hunyuan-t2v", "hunyuan-i2v"}
+        assert entry["local_subdir"] == "text_encoders"
+    finally:
+        uvm.remove_user_model(mid, delete_files=False)

@@ -47,10 +47,11 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
     [models],
   );
   // Only families whose graph takes a replacement encoder are offered for that role.
-  const likeChoices = useMemo(
-    () => (role === "encoder" ? generationModels.filter((m) => m.encoder_swap) : generationModels),
-    [generationModels, role],
-  );
+  const likeChoices = useMemo(() => {
+    if (role === "encoder") return generationModels.filter((m) => m.encoder_swap);
+    if (role === "lora") return generationModels.filter((m) => m.lora_stack);
+    return generationModels;
+  }, [generationModels, role]);
   // Two-expert Wan 14B templates need a High and a Low file.
   const needsMoE = Boolean(like && /14b/.test(like) && role === "generation");
 

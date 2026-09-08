@@ -34,6 +34,7 @@ from backend.services.video_model_registry import (
     tier_defaults_for,
     resolve_active_video_model,
     clip_defaults_for,
+    LORA_STACK_TYPES,
     TEXT_ENCODER_SWAP_TYPES,
 )
 from backend.services.user_video_models import (
@@ -982,6 +983,7 @@ def list_video_models():
                 # generation rows say whether their graph accepts one.
                 "replaces": info.get("replaces"),
                 "encoder_swap": info.get("type") in TEXT_ENCODER_SWAP_TYPES,
+                "lora_stack": info.get("type") in LORA_STACK_TYPES,
             })
         return success_response({"models": models, "active_t2v": active_t2v, "active_i2v": active_i2v})
     except Exception as e:

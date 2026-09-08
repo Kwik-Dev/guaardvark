@@ -124,6 +124,12 @@ def suggest_role_and_like(files: list, src: str | None = None) -> tuple[str | No
             return "encoder", "minimax-h3-int8"
         if "umt5" in blob or "wan" in blob:
             return "encoder", "wan22-5b"
+        if "gemma4" in blob or "gemma-4" in blob or "ltx-2.5" in blob or "ltx25" in blob:
+            return "encoder", "ltx25-distilled-int8"
+        if "gemma" in blob or "ltx" in blob:
+            return "encoder", "ltx23-distilled-fp8"
+        if "llava" in blob or "hunyuan" in blob:
+            return "encoder", "hunyuan-t2v"
         return "encoder", None
     has_high = any(
         any(tok in n.lower() for tok in ("highnoise", "high_noise", "high_lighting", "_high_"))
@@ -247,6 +253,7 @@ def build_user_entry(
     from backend.services.video_model_registry import (
         VIDEO_MODEL_REGISTRY,
         GENERATION_TYPES,
+        LORA_STACK_TYPES,
         TEXT_ENCODER_SWAP_TYPES,
         shipped_encoder_for,
     )
@@ -288,8 +295,11 @@ def build_user_entry(
 
     size_gb = round(total / (1024 ** 3), 3) if total else 0.0
     if role == "lora":
-        if like.get("type") not in GENERATION_TYPES:
-            raise ValueError(f"'{like_id}' is not a generation model a LoRA can apply to.")
+        if like.get("type") not in LORA_STACK_TYPES:
+            raise ValueError(
+                f"{like.get('name') or like_id} does not stack LoRAs; "
+                f"that works for {', '.join(LORA_STACK_TYPES)} models."
+            )
         entry = {
             "name": name or stem,
             "description": description or f"User LoRA for {like.get('name') or like_id}.",

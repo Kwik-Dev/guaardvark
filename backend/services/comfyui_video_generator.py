@@ -1900,6 +1900,14 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         prompt_used=request.prompt,
                     )
                 frames = self._hunyuan_frame_count(request.duration_frames)
+                extra_loras, adapter_err = self._resolve_adapters(request, model_key)
+                if adapter_err:
+                    result.error = adapter_err
+                    return result
+                te_file, te_err = resolve_text_encoder(model_key, request.text_encoder)
+                if te_err:
+                    result.error = te_err
+                    return result
                 if (self.HUNYUAN_MODELS.get(model_key) or {}).get("type") == "i2v":
                     if not image_path or not Path(image_path).exists():
                         result.error = "HunyuanVideo I2V requires an input image."
@@ -1920,6 +1928,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         seed=seed,
                         fps=request.fps,
                         interpolation_multiplier=interpolation,
+                        extra_loras=extra_loras,
+                        text_encoder=te_file,
                     )
                     logger.info(f"Using HunyuanVideo image-to-video ({model_key}) via ComfyUI GGUF")
                 else:
@@ -1937,6 +1947,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         seed=seed,
                         fps=request.fps,
                         interpolation_multiplier=interpolation,
+                        extra_loras=extra_loras,
+                        text_encoder=te_file,
                     )
                     logger.info(f"Using HunyuanVideo text-to-video ({model_key}) via ComfyUI GGUF")
 
@@ -2044,6 +2056,14 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         "quality may degrade.",
                         ltx_cfg,
                     )
+                extra_loras, adapter_err = self._resolve_adapters(request, model_key)
+                if adapter_err:
+                    result.error = adapter_err
+                    return result
+                te_file, te_err = resolve_text_encoder(model_key, request.text_encoder)
+                if te_err:
+                    result.error = te_err
+                    return result
                 i2v = bool(image_path and Path(image_path).exists())
                 if i2v:
                     uploaded_image = self._upload_image_to_comfyui(image_path)
@@ -2065,6 +2085,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                             fps=request.fps or 16,
                             interpolation_multiplier=interpolation,
                             audio_out=ltx_audio,
+                            extra_loras=extra_loras,
+                            text_encoder=te_file,
                         )
                         logger.info("Using LTX-2.5 distilled I2V (%s) via ComfyUI", model_key)
                     else:
@@ -2082,6 +2104,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                             fps=request.fps or 16,
                             interpolation_multiplier=interpolation,
                             audio_out=ltx_audio,
+                            extra_loras=extra_loras,
+                            text_encoder=te_file,
                         )
                         logger.info("Using LTX-2.3 distilled I2V (%s) via ComfyUI", model_key)
                 elif use_ltx25:
@@ -2098,6 +2122,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         fps=request.fps or 16,
                         interpolation_multiplier=interpolation,
                             audio_out=ltx_audio,
+                            extra_loras=extra_loras,
+                            text_encoder=te_file,
                     )
                     logger.info("Using LTX-2.5 distilled T2V (%s) via ComfyUI", model_key)
                 else:
@@ -2114,6 +2140,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         fps=request.fps or 16,
                         interpolation_multiplier=interpolation,
                             audio_out=ltx_audio,
+                            extra_loras=extra_loras,
+                            text_encoder=te_file,
                     )
                     logger.info("Using LTX-2.3 distilled T2V (%s) via ComfyUI", model_key)
 
