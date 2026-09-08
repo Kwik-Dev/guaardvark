@@ -163,14 +163,73 @@ running_pg_major() {  # $1 = app password; empty when unreachable
     "SHOW server_version;" 2>/dev/null | sed -E 's/^([0-9]+).*/\1/'
 }
 
-install_pgvector_package() {
-  if [ "$(uname -s)" = "Darwin" ]; then
-    if command_exists brew && brew install pgvector >/dev/null 2>&1; then
-      vader_success "pgvector installed via Homebrew."
+# Homebrew's pgvector formula is built only for the postgresql majors it depends
+# on (17 and 18 at the time of writing), while this script installs postgresql@16
+# and adopts whatever formula is already present. On a box serving a major the
+# formula does not cover, `brew install pgvector` succeeds and CREATE EXTENSION
+# still fails with "could not open extension control file". So after the formula
+# the running server is checked for vector.control, and when it is missing the
+# extension is built from source against that server's pg_config. Homebrew's
+# prefix is user-owned, so the install needs no sudo. The version matches the
+# Homebrew formula so both paths land the same release.
+PGVECTOR_VERSION="v0.8.6"
+
+macos_pg_config() {  # $1 = running server major (may be empty); prints its pg_config
+  local major="$1" formula prefix
+  for formula in "${major:+postgresql@${major}}" "${PG_FORMULA:-}" postgresql; do
+    [ -n "$formula" ] || continue
+    prefix=$(brew --prefix "$formula" 2>/dev/null) || continue
+    if [ -x "$prefix/bin/pg_config" ]; then
+      echo "$prefix/bin/pg_config"
       return 0
     fi
-    vader_warn "Could not install pgvector via Homebrew — run: brew install pgvector"
+  done
+  command -v pg_config 2>/dev/null
+}
+
+pgvector_control_present() {  # $1 = pg_config
+  [ -n "$1" ] && [ -f "$("$1" --sharedir 2>/dev/null)/extension/vector.control" ]
+}
+
+install_pgvector_homebrew() {
+  local major pg_config src
+  major=$(running_pg_major "${APP_PASS:-}")
+  # The install user is the superuser over the local socket on Homebrew Postgres.
+  [ -n "$major" ] || major=$(psql -d "$PG_DB" -tAc "SHOW server_version;" 2>/dev/null | sed -E 's/^([0-9]+).*/\1/')
+  pg_config=$(macos_pg_config "$major")
+  if command_exists brew && brew install pgvector >/dev/null 2>&1 && pgvector_control_present "$pg_config"; then
+    vader_success "pgvector installed via Homebrew."
+    return 0
+  fi
+  if [ -z "$pg_config" ]; then
+    vader_warn "Could not find pg_config for the running PostgreSQL${major:+ $major}; run: brew install pgvector"
     return 1
+  fi
+  if ! command_exists git || ! command_exists make; then
+    vader_warn "Homebrew's pgvector does not cover PostgreSQL${major:+ $major}, and building it needs git and make: xcode-select --install, then re-run."
+    return 1
+  fi
+  vader_info "Homebrew's pgvector does not cover PostgreSQL${major:+ $major}; building ${PGVECTOR_VERSION} against ${pg_config}..."
+  src=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/pgvector-build.$$")
+  if git clone --quiet --depth 1 --branch "$PGVECTOR_VERSION" https://github.com/pgvector/pgvector.git "$src/pgvector" >/dev/null 2>&1 \
+     && make -C "$src/pgvector" PG_CONFIG="$pg_config" >/dev/null 2>&1 \
+     && make -C "$src/pgvector" install PG_CONFIG="$pg_config" >/dev/null 2>&1 \
+     && pgvector_control_present "$pg_config"; then
+    rm -rf "$src"
+    vader_success "pgvector ${PGVECTOR_VERSION} built for PostgreSQL${major:+ $major}."
+    return 0
+  fi
+  rm -rf "$src"
+  vader_warn "pgvector build failed. Build it by hand against the running server, then re-run:"
+  vader_info "  git clone --branch ${PGVECTOR_VERSION} https://github.com/pgvector/pgvector.git && cd pgvector"
+  vader_info "  make PG_CONFIG=${pg_config} && make install PG_CONFIG=${pg_config}"
+  return 1
+}
+
+install_pgvector_package() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    install_pgvector_homebrew
+    return $?
   fi
   # The running server's major, not the newest one installed on the box: a
   # host with 16 serving and 18 merely installed needs postgresql-16-pgvector.
