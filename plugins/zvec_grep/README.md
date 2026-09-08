@@ -21,6 +21,22 @@ tokens" can be measured before anything becomes a default.
 - The daemon listens on loopback only. Indexes live in `<root>/.zvec-grep`,
   ignored by git.
 
+## How the chat reaches it
+
+The model never sees zg's own tool. `search_codebase` (`backend/tools/code_search_tools.py`)
+is the one name for "search the code": it supplies the workspace root itself (the request's
+`project_root`, else the Guaardvark root), asks zg when the `zvec_grep` MCP server is
+connected, and falls back to the repository's regex search when it is not, so it never
+advertises more than the machine can do. Questions about the source keep it in the prompt
+(`_pin_code_search_tools` in the chat engine) with one system line saying the code is already
+indexed, because the persona's "ask for a folder path" lesson otherwise wins. Its result
+budget is declared on the tool (`observation_chars`); the engine's default of 500 characters
+is right for chatty tools and useless for a search.
+
+zg honours `.gitignore` but not `.git/info/exclude`; `scripts/index.sh` passes the exclude
+file and skips `data/`, `logs/`, `pids/` and the private workspace directory, so the index
+holds what the repository holds.
+
 ## Use
 
 ```bash

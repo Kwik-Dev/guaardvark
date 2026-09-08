@@ -76,6 +76,10 @@ class BaseTool:
     # Safety and Context flags
     is_dangerous: bool = False
     requires_approval: bool = False
+    # How much of this tool's result the chat model gets to read before the
+    # next turn. 500 keeps a chatty tool from crowding the context; a search
+    # tool whose whole point is the text it returns declares more.
+    observation_chars: int = 500
     requires_confirmation: bool = False
     required_context: List[str] = field(default_factory=list)  # e.g., ['project_id', 'user_id']
     

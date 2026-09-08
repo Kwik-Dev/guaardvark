@@ -111,6 +111,13 @@ def register_code_tools() -> List[str]:
         _tool_categories["analyze_code"] = category
         logger.debug("Registered: CodeAnalysisTool")
 
+        from backend.tools.code_search_tools import SearchCodebaseTool
+
+        register_tool(SearchCodebaseTool())
+        registered.append("search_codebase")
+        _tool_categories["search_codebase"] = category
+        logger.debug("Registered: SearchCodebaseTool")
+
         from backend.tools.agent_tools.code_manipulation_tools import CODE_MANIPULATION_TOOLS
 
         for tool in CODE_MANIPULATION_TOOLS:
