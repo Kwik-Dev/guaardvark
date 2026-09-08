@@ -62,7 +62,8 @@ def _comfyui_default_url() -> str:
 
     plugin.local.json (untracked per-install override) beats plugin.json,
     so a custom port — e.g. an external ComfyUI Desktop on 8000 — set once
-    survives updates and drives every backend consumer.
+    survives updates and drives every backend consumer. The host is localhost,
+    matching the plugin manager's Running probe (see backend/utils/comfyui_url.py).
     """
     import json as _json
     for name in ("plugin.local.json", "plugin.json"):
@@ -72,8 +73,8 @@ def _comfyui_default_url() -> str:
                 port = int(_json.load(f).get("port"))
         except (OSError, ValueError, TypeError):
             continue
-        return f"http://127.0.0.1:{port}"
-    return "http://127.0.0.1:8188"
+        return f"http://localhost:{port}"
+    return "http://localhost:8188"
 
 COMFYUI_URL = os.environ.get("GUAARDVARK_COMFYUI_URL") or _comfyui_default_url()
 COMFYUI_DIR = os.environ.get("GUAARDVARK_COMFYUI_DIR", os.path.join(GUAARDVARK_ROOT, "plugins", "comfyui", "ComfyUI"))

@@ -8,6 +8,11 @@ resolves through here instead.
 
 Resolution order: ``GUAARDVARK_COMFYUI_URL`` (an explicit choice always wins),
 the plugin's effective port, then the manifest default of 8188.
+
+The host is ``localhost``, the same address the plugin manager probes for the
+Running badge on the Plugins page. With two spellings of the loopback address
+a ComfyUI listening on only one of them (IPv6-only, say) showed as Running on
+one page and "isn't running" on the next.
 """
 
 from __future__ import annotations
@@ -37,4 +42,4 @@ def get_comfyui_url() -> str:
     explicit = (os.environ.get("GUAARDVARK_COMFYUI_URL") or "").strip()
     if explicit:
         return explicit.rstrip("/")
-    return f"http://127.0.0.1:{comfyui_port()}"
+    return f"http://localhost:{comfyui_port()}"

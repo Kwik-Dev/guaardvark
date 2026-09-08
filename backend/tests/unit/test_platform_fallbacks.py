@@ -13,7 +13,7 @@ def test_comfyui_url_explicit_env_wins(monkeypatch):
     from backend.utils import comfyui_url
 
     monkeypatch.setenv("GUAARDVARK_COMFYUI_URL", "http://127.0.0.1:8000/")
-    assert comfyui_url.get_comfyui_url() == "http://127.0.0.1:8000"
+    assert comfyui_url.get_comfyui_url() == "http://localhost:8000"
 
 
 def test_comfyui_url_follows_the_plugin_port(monkeypatch):
@@ -27,7 +27,7 @@ def test_comfyui_url_follows_the_plugin_port(monkeypatch):
             return {"port": 8000}
 
     monkeypatch.setattr("backend.plugins.plugin_manager.get_plugin_manager", lambda: FakeManager())
-    assert comfyui_url.get_comfyui_url() == "http://127.0.0.1:8000"
+    assert comfyui_url.get_comfyui_url() == "http://localhost:8000"
 
 
 def test_comfyui_url_falls_back_to_the_manifest_default(monkeypatch):
@@ -39,7 +39,7 @@ def test_comfyui_url_falls_back_to_the_manifest_default(monkeypatch):
         raise RuntimeError("no plugin manager here")
 
     monkeypatch.setattr("backend.plugins.plugin_manager.get_plugin_manager", boom)
-    assert comfyui_url.get_comfyui_url() == "http://127.0.0.1:8188"
+    assert comfyui_url.get_comfyui_url() == "http://localhost:8188"
 
 
 def test_infographic_generator_uses_the_effective_port(monkeypatch):
