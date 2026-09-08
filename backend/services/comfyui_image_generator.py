@@ -53,10 +53,14 @@ FLUX_VAE = os.environ.get("GUAARDVARK_FLUX_VAE", "ae.safetensors")
 # object_info). Overridable so a different Z-Image build / Qwen CLIP / VAE works.
 ZIMAGE_UNET = os.environ.get("GUAARDVARK_ZIMAGE_UNET", "z_image_turbo_bf16.safetensors")
 ZIMAGE_CLIP = os.environ.get("GUAARDVARK_ZIMAGE_CLIP", "qwen_3_4b.safetensors")
-ZIMAGE_CLIP_TYPE = os.environ.get("GUAARDVARK_ZIMAGE_CLIP_TYPE", "qwen_image")
+ZIMAGE_CLIP_TYPE = os.environ.get("GUAARDVARK_ZIMAGE_CLIP_TYPE", "lumina2")
 ZIMAGE_VAE = os.environ.get("GUAARDVARK_ZIMAGE_VAE", "ae.safetensors")
-ZIMAGE_SAMPLER = os.environ.get("GUAARDVARK_ZIMAGE_SAMPLER", "euler")
+ZIMAGE_SAMPLER = os.environ.get("GUAARDVARK_ZIMAGE_SAMPLER", "res_multistep")
 ZIMAGE_SCHEDULER = os.environ.get("GUAARDVARK_ZIMAGE_SCHEDULER", "simple")
+# Flow-matching shift for Z-Image Turbo (ModelSamplingAuraFlow). The distilled
+# model is CFG-free: positive conditioning drives the sampler, the negative is
+# zeroed via ConditioningZeroOut, and cfg stays 1.0.
+ZIMAGE_SHIFT = float(os.environ.get("GUAARDVARK_ZIMAGE_SHIFT", "3"))
 
 # FLUX-dev (full transformer) keyframe path — the identity-lock route for trained
 # character LoRAs. Unlike the schnell GGUF branch, this one ACTUALLY chains LoRAs
@@ -95,6 +99,59 @@ DEFAULT_NEGATIVE = (
     "animal head, horse head, animal ears, animal face, fur on face, snout, muzzle, "
     "human-animal hybrid, anthropomorphic, extra head, two heads, mutated anatomy"
 )
+
+
+def _comfyui_loras_dir() -> Optional[Path]:
+    """Locate the running ComfyUI's ``models/loras`` directory (best-effort).
+
+    The configured ``COMFYUI_DIR`` may point at a bundled/plugins copy that does
+    not exist, while the actually-running ComfyUI lives elsewhere (e.g.
+    ``~/ComfyUI-Installs/ComfyUI/ComfyUI``). Probe the configured path plus the
+    common install locations and return the first that exists.
+    """
+    candidates: list[Path] = []
+    try:
+        from backend.config import COMFYUI_DIR
+        candidates.append(Path(COMFYUI_DIR) / "models" / "loras")
+    except Exception:
+        pass
+    candidates.append(
+        Path(__file__).resolve().parents[3] / "plugins" / "comfyui" / "ComfyUI" / "models" / "loras"
+    )
+    candidates.append(Path.home() / "ComfyUI-Installs" / "ComfyUI" / "ComfyUI" / "models" / "loras")
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def ensure_lora_in_comfyui(lora_path: str) -> bool:
+    """Symlink a trained LoRA into ComfyUI's ``models/loras`` so a
+    ``LoraLoaderModelOnly`` node can resolve it by basename.
+
+    Only acts when Z-Image is routed through ComfyUI
+    (``GUAARDVARK_ZIMAGE_USE_COMFYUI=1``). Returns True if the LoRA is present in
+    ComfyUI's loras dir (linked now, or already there). Best-effort: never raises.
+    """
+    if os.environ.get("GUAARDVARK_ZIMAGE_USE_COMFYUI", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    p = Path(lora_path)
+    if not p.exists():
+        return False
+    loras_dir = _comfyui_loras_dir()
+    if loras_dir is None:
+        logger.warning("ensure_lora_in_comfyui: could not locate ComfyUI loras dir for %s", p.name)
+        return False
+    target = loras_dir / p.name
+    if target.exists():
+        return True
+    try:
+        target.symlink_to(p.resolve())
+        logger.info("Linked LoRA %s into ComfyUI loras dir %s", p.name, loras_dir)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not link LoRA %s into ComfyUI: %s", p.name, e)
+        return False
 
 
 class ComfyUIImageGenerator:
@@ -163,13 +220,13 @@ class ComfyUIImageGenerator:
                     )
                     effective_model = tag
                     ml = tag
-                elif info.get("family") == "zimage":
-                    # Z-Image LoRAs are not applied via this Comfy SDXL/FLUX graph yet.
+                elif info.get("family") == "zimage" and "zimage" not in ml and "z-image" not in ml:
                     logger.warning(
-                        "Z-Image LoRAs cannot use Comfy SDXL/FLUX graph (base=%s); "
-                        "caller should use offline Z-Image path.",
-                        info.get("base_model_id"),
+                        "LoRAs are Z-Image (base=%s) but model=%r — overriding to zimage so identity applies.",
+                        info.get("base_model_id"), effective_model,
                     )
+                    effective_model = "zimage"
+                    ml = "zimage"
             except Exception as e:
                 # Pre-registry LoRAs / basename-only: fall back to historic SDXL force
                 # when flux-schnell would drop LoRAs entirely.
@@ -251,7 +308,15 @@ class ComfyUIImageGenerator:
             return wf
 
         if "zimage" in ml or "z-image" in ml:
-            # Z-Image Turbo via ComfyUI — UNETLoader + Qwen CLIP (qwen_image) + ae VAE.
+            # Z-Image Turbo via ComfyUI — UNETLoader + Lumina2 CLIP + ae VAE.
+            # Flow-matching: ModelSamplingAuraFlow (shift) wraps the UNet, the
+            # distilled model is CFG-free (cfg=1.0) with the negative zeroed via
+            # ConditioningZeroOut, and latents use EmptySD3LatentImage.
+            # Z-Image character LoRAs train only the transformer (not the text
+            # encoder), so they are applied model-only via LoraLoaderModelOnly —
+            # the same node the FLUX-dev branch uses. The chain feeds the UNet
+            # into the AuraFlow sampler; the CLIP is untouched and the trigger
+            # word in the prompt does the identity work.
             wf = {
                 "unet": {
                     "class_type": "UNETLoader",
@@ -273,33 +338,51 @@ class ComfyUIImageGenerator:
                     "class_type": "CLIPTextEncode",
                     "inputs": {"text": negative, "clip": ["clip", 0]},
                 },
+                "neg_zero": {
+                    "class_type": "ConditioningZeroOut",
+                    "inputs": {"conditioning": ["neg", 0]},
+                },
                 "latent": {
-                    "class_type": "EmptyLatentImage",
+                    "class_type": "EmptySD3LatentImage",
                     "inputs": {"width": width, "height": height, "batch_size": 1},
                 },
-                "sampler": {
-                    "class_type": "KSampler",
-                    "inputs": {
-                        "model": ["unet", 0],
-                        "seed": seed,
-                        "steps": steps,
-                        "cfg": cfg,
-                        "sampler_name": ZIMAGE_SAMPLER,
-                        "scheduler": ZIMAGE_SCHEDULER,
-                        "positive": ["pos", 0],
-                        "negative": ["neg", 0],
-                        "latent_image": ["latent", 0],
-                        "denoise": 1.0,
-                    },
+            }
+            # Chain LoraLoaderModelOnly nodes (model-only): each wraps the previous
+            # node's MODEL so multiple LoRAs stack; the CLIP is not touched.
+            model_src = ["unet", 0]
+            for i, name in enumerate(lora_names):
+                nid = f"lora_{i}"
+                wf[nid] = {
+                    "class_type": "LoraLoaderModelOnly",
+                    "inputs": {"model": model_src, "lora_name": name, "strength_model": self.lora_strength},
+                }
+                model_src = [nid, 0]
+            wf["sampling"] = {
+                "class_type": "ModelSamplingAuraFlow",
+                "inputs": {"shift": ZIMAGE_SHIFT, "model": model_src},
+            }
+            wf["sampler"] = {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["sampling", 0],
+                    "seed": seed,
+                    "steps": steps,
+                    "cfg": 1.0,
+                    "sampler_name": ZIMAGE_SAMPLER,
+                    "scheduler": ZIMAGE_SCHEDULER,
+                    "positive": ["pos", 0],
+                    "negative": ["neg_zero", 0],
+                    "latent_image": ["latent", 0],
+                    "denoise": 1.0,
                 },
-                "vae": {
-                    "class_type": "VAEDecode",
-                    "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]},
-                },
-                "save": {
-                    "class_type": "SaveImage",
-                    "inputs": {"filename_prefix": "guaardvark-zimage", "images": ["vae", 0]},
-                },
+            }
+            wf["vae"] = {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]},
+            }
+            wf["save"] = {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": "guaardvark-zimage", "images": ["vae", 0]},
             }
             return wf
 
@@ -590,6 +673,12 @@ class ComfyUIImageGenerator:
         for p in lora_paths:
             if not p:
                 continue
+            # When Z-Image is routed through ComfyUI, make sure the trained LoRA is
+            # linked into ComfyUI's models/loras so LoraLoaderModelOnly can find it.
+            try:
+                ensure_lora_in_comfyui(p)
+            except Exception:
+                pass
             pth = Path(p)
             found = pth.exists()
             if not found:
@@ -630,11 +719,8 @@ class ComfyUIImageGenerator:
                 info = resolve_inference_for_loras(lora_paths)
                 if info.get("comfy_model_tag"):
                     effective_model = info["comfy_model_tag"]
-                if info.get("family") == "zimage":
-                    raise RuntimeError(
-                        "Z-Image character LoRAs must run on the offline Z-Image path, "
-                        "not ComfyUI SDXL/FLUX. (base_model_id=zimage-turbo)"
-                    )
+                # Z-Image family is applied via the model-only LoRA chain in the
+                # Z-Image workflow branch; no refusal needed.
             except RuntimeError:
                 raise
             except Exception:
