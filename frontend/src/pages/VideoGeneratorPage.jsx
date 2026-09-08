@@ -2488,7 +2488,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       </Button>
                     )}
                     <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-                      The clip ends on this frame; each start image gets the same end frame.
+                      The clip will end on this image. If you added several start images, each of their clips ends on it.
                     </Typography>
                   </Box>
                 )}
