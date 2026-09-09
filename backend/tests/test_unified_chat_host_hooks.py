@@ -4,7 +4,8 @@ A host (an embedded assistant with its own persona, tools and answer checks)
 runs the engine's tool loop with: ``tool_names`` (allow-list),
 ``system_prompt`` (persona override), ``finalize_fn`` (audit before the
 answer is emitted or saved), ``skip_direct_intercepts``, ``skip_nudges``,
-``skip_memory_capture``, ``skip_escalation`` and ``persist``.
+``skip_memory_capture``, ``skip_escalation``, ``persist`` and ``history``
+(the conversation, in place of the session's stored turns).
 """
 
 import pytest
@@ -279,3 +280,20 @@ class TestEscalation:
         monkeypatch.setattr(su, "get_setting", _always)
         _, events = _run(e, "what is the ridge cap count", {})
         assert _complete(events)["response"] == "From the advisor."
+
+
+class TestHistoryOption:
+    def test_supplied_history_replaces_the_stored_session(self, monkeypatch):
+        e = _engine(monkeypatch)
+        e._load_history = lambda session_id, limit=None: [{"role": "user", "content": "STORED TURN"}]
+        _run(e, "and the ridge cap", {"history": [{"role": "user", "content": "SUPPLIED TURN"},
+                                                   {"role": "assistant", "content": "SUPPLIED REPLY"}]})
+        contents = [m["content"] for m in e.calls["llm_messages"][0]]
+        assert "SUPPLIED TURN" in contents and "SUPPLIED REPLY" in contents
+        assert "STORED TURN" not in contents
+
+    def test_stored_session_used_by_default(self, monkeypatch):
+        e = _engine(monkeypatch)
+        e._load_history = lambda session_id, limit=None: [{"role": "user", "content": "STORED TURN"}]
+        _run(e, "and the ridge cap", {})
+        assert "STORED TURN" in [m["content"] for m in e.calls["llm_messages"][0]]

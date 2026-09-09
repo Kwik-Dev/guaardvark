@@ -1748,7 +1748,13 @@ class UnifiedChatEngine:
 
         # 1. Load conversation history
         from backend.config import AGENTIC_HISTORY_LIMIT
-        history = self._load_history(session_id, limit=AGENTIC_HISTORY_LIMIT)
+        if isinstance(options.get("history"), list):
+            history = [
+                {"role": m.get("role", "user"), "content": m.get("content", "")}
+                for m in options["history"] if isinstance(m, dict)
+            ]
+        else:
+            history = self._load_history(session_id, limit=AGENTIC_HISTORY_LIMIT)
 
         # 2. RAG context (optional, skipped for action-oriented, conversational, and image messages)
         self._local_facts_this_turn = False
