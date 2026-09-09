@@ -20,7 +20,10 @@ def test_minimax_is_the_local_h3_release_not_the_api():
 
 def test_minimax_requires_encoder_and_both_vaes():
     req = vmr.VIDEO_MODEL_REGISTRY[MODEL]["requires"]
-    assert req == ["minimax-h3-qwen3vl-nvfp4", "minimax-h3-vae", "minimax-h3-audio-vae"]
+    # Encoder, the two VAEs, and the style-embedding pack the presets reference.
+    assert req == [
+        "minimax-h3-qwen3vl-nvfp4", "minimax-h3-vae", "minimax-h3-audio-vae", "minimax-h3-style-embeddings",
+    ]
     for dep in req:
         assert vmr.VIDEO_MODEL_REGISTRY[dep]["hf_repo"] == "Comfy-Org/MiniMax-H3"
     # Every companion path matches the layout the official template loads from.
@@ -135,8 +138,10 @@ def test_style_embeddings_are_a_tiny_required_companion():
 
 
 def test_tier_defaults_follow_detected_vram():
+    # 16 GB starts on turbo-8: measured 2026-09-01 (186 s vs 390 s at 20 steps,
+    # subject and motion intact), recorded beside the entry.
     assert vmr.tier_defaults_for(MODEL, 16376) == {
-        "tier": "16", "width": 864, "height": 480, "speed_profile": "standard", "frames": 124,
+        "tier": "16", "width": 864, "height": 480, "speed_profile": "turbo-8", "frames": 124,
     }
     assert vmr.tier_defaults_for(MODEL, 24564)["tier"] == "24"
     assert vmr.tier_defaults_for(MODEL, 49140)["tier"] == "24"  # largest declared class
