@@ -42,7 +42,7 @@ def json_chat(
     brace-balanced span. Returns `on_error` (default {}) on any failure.
     """
     import ollama
-    from backend.utils.ollama_resource_manager import think_payload
+    from backend.utils.ollama_resource_manager import think_payload, request_options
 
     if model is None:
         from backend.config import get_default_llm
@@ -57,7 +57,7 @@ def json_chat(
                 {"role": "user", "content": user},
             ],
             format="json",
-            options={"temperature": temperature},
+            options=request_options(model, temperature=temperature),
             **think_payload(model),
         )
     except Exception as e:  # noqa: BLE001 — degrade, don't crash the caller

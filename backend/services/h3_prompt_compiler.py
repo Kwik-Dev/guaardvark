@@ -549,7 +549,7 @@ def polish_intent(intent: H3Intent, model: Optional[str] = None) -> H3Intent:
     structure and the dialogue text. Raises on any failure; compile() catches."""
     import ollama
     from backend.services.director_service import DIRECTOR_MODEL, _resolve_model
-    from backend.utils.ollama_resource_manager import think_payload
+    from backend.utils.ollama_resource_manager import think_payload, request_options
     payload = intent_to_dict(intent)
     resolved = _resolve_model(model or DIRECTOR_MODEL)
     resp = ollama.chat(
@@ -557,7 +557,7 @@ def polish_intent(intent: H3Intent, model: Optional[str] = None) -> H3Intent:
         messages=[{"role": "system", "content": _POLISH_SYSTEM},
                   {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
         format="json",
-        options={"temperature": 0.4},
+        options=request_options(resolved, temperature=0.4),
         **think_payload(resolved),
     )
     content = resp["message"]["content"] if isinstance(resp, dict) else resp.message.content

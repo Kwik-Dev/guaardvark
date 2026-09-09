@@ -406,6 +406,23 @@ def _fallback_num_ctx(model_name: str) -> int:
     return DEFAULT_TEXT_NUM_CTX if is_text_chat_model(model_name) else DEFAULT_VISION_NUM_CTX
 
 
+def request_options(model_name: str, **overrides) -> dict:
+    """``options`` for an Ollama request, with ``num_ctx`` always set.
+
+    A request that omits ``num_ctx`` runs at whatever the Modelfile baked:
+    Ollama's 4,096 default on library tags (long prompts are silently cut to
+    the last half of that), or a community tag's 262,144 (a 12B model then
+    offloads its KV cache to RAM). Either way the runner reloads when the next
+    request asks for a different size. Every caller that is not the chat
+    engine's sized path builds its options here so no request leaves unsized.
+    An explicit ``num_ctx`` in ``overrides`` wins.
+    """
+    opts = {k: v for k, v in overrides.items() if v is not None}
+    if not opts.get("num_ctx"):
+        opts["num_ctx"] = compute_optimal_num_ctx(model_name)
+    return opts
+
+
 def compute_optimal_num_ctx(model_name: str) -> int:
     """The num_ctx from :func:`decide_num_ctx`, for callers that only need the number."""
     return decide_num_ctx(model_name).num_ctx

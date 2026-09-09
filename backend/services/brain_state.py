@@ -660,6 +660,7 @@ class BrainState:
             try:
                 import requests
                 from backend.config import OLLAMA_BASE_URL
+                from backend.utils.ollama_resource_manager import request_options
                 # Use Ollama's canonical warmup primitive instead of llama_index
                 # chat(): the latter's httpx stack silently timed out on slow
                 # hardware even though Ollama itself was making progress. 15-min
@@ -670,7 +671,8 @@ class BrainState:
                         "model": self.active_model,
                         "prompt": "ok",
                         "stream": False,
-                        "options": {"num_predict": 1},
+                        # Sized like the chat that follows, so this load is the one that serves it.
+                        "options": request_options(self.active_model, num_predict=1),
                         "keep_alive": "30m",
                     },
                     timeout=(10.0, 900.0),

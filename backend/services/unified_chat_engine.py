@@ -4150,13 +4150,16 @@ class UnifiedChatEngine:
                     return
                 # Small delay to let the just-finished gpu_session fully release VRAM
                 time.sleep(1.5)
+                # Same window the chat will ask for, or the runner loads at the
+                # Modelfile's size here and reloads seconds later for the answer.
+                from backend.utils.ollama_resource_manager import refresh_context_window, request_options
                 requests.post(
                     f"{OLLAMA_BASE_URL}/api/generate",
                     json={
                         "model": model,
                         "prompt": " ",
                         "stream": False,
-                        "options": {"num_predict": 1},
+                        "options": request_options(model, num_predict=1, num_ctx=refresh_context_window(self.llm) or None),
                         "keep_alive": get_chat_keep_alive(),
                     },
                     timeout=(8.0, 90.0),
@@ -4191,13 +4194,17 @@ class UnifiedChatEngine:
 
         try:
             import ollama as ollama_client
+            from backend.utils.ollama_resource_manager import request_options
+            summary_model = getattr(self.llm, "model", "llama3.1:latest")
             summary_response = ollama_client.chat(
-                model=getattr(self.llm, "model", "llama3.1:latest"),
+                model=summary_model,
                 messages=[{
                     "role": "user",
                     "content": f"Summarize the key facts, decisions, and context from this conversation in 200 words:\n\n{old_text}"
                 }],
-                options={"num_predict": 512, "temperature": 0.3},
+                # The window this history is being compacted for; without it the
+                # summary itself ran at the Modelfile default and saw the tail only.
+                options=request_options(summary_model, num_predict=512, temperature=0.3, num_ctx=context_window),
             )
             summary = summary_response["message"]["content"]
             compacted = [{"role": "system", "content": f"Conversation summary: {summary}"}]

@@ -18,6 +18,7 @@ import requests
 from PIL import Image
 
 from backend.config import OLLAMA_BASE_URL
+from backend.utils.ollama_resource_manager import request_options
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,7 @@ class VisionAnalyzer:
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
+                "options": request_options(model),
             }
             if not think:
                 request_body["think"] = False
@@ -279,10 +281,7 @@ class VisionAnalyzer:
                 "model": model,
                 "messages": messages,
                 "stream": False,
-                "options": {
-                    "num_predict": num_predict,
-                    "temperature": temperature,
-                },
+                "options": request_options(model, num_predict=num_predict, temperature=temperature),
             }
             if not think:
                 request_body["think"] = False
@@ -393,10 +392,7 @@ class VisionAnalyzer:
                     "images": [image_b64],
                 }],
                 "stream": False,
-                "options": {
-                    "num_predict": num_predict,
-                    "temperature": temperature,
-                },
+                "options": request_options(model, num_predict=num_predict, temperature=temperature),
             }
             if not think:
                 request_body["think"] = False
@@ -480,10 +476,7 @@ class VisionAnalyzer:
                     "images": [image_b64],
                 }],
                 "stream": False,
-                "options": {
-                    "num_predict": num_predict,
-                    "temperature": temperature,
-                },
+                "options": request_options(model, num_predict=num_predict, temperature=temperature),
             }
             if not think:
                 request_body["think"] = False
