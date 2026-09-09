@@ -147,9 +147,12 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 ### Whisper / audio (STT + TTS)
 | Variable | Purpose |
 |----------|---------|
-| `WHISPER_SERVER` / `WHISPER_SERVER_BIN` | External `whisper.cpp` server binary (STT is offloaded here). |
-| `WHISPER_SERVER_MODEL` / `WHISPER_SERVER_PORT` | Whisper model and server port. |
-| `WHISPER_DIR` / `WHISPER_BUILD_DIR` / `WHISPER_CLI` | Whisper install/build paths and CLI. |
+| `GUAARDVARK_USE_WHISPER_SERVER` | Opt-in flag (`1`) to route STT through an external `whisper.cpp` server instead of the bundled build. |
+| `GUAARDVARK_WHISPER_SERVER_BIN` | Path to the `whisper-server` binary (defaults to `command -v whisper-server`). |
+| `GUAARDVARK_WHISPER_SERVER_MODEL` | Path to the whisper model (e.g. `ggml-base.bin`). |
+| `GUAARDVARK_WHISPER_SERVER_PORT` | Server port (default `5800`). |
+| `GUAARDVARK_WHISPER_SERVER_URL` | Server URL the backend posts to (default `http://127.0.0.1:5800`). |
+| `WHISPER_DIR` / `WHISPER_BUILD_DIR` / `WHISPER_CLI` | Whisper install/build paths and CLI (bundled build). |
 
 ### Video
 | Variable | Purpose |
