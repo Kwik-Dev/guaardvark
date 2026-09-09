@@ -10,6 +10,7 @@ Uses file-based locking with PID tracking for crash recovery.
 
 import logging
 import os
+import platform
 from contextlib import contextmanager
 import json
 import time
@@ -19,7 +20,7 @@ import requests
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -559,7 +560,7 @@ class GPUResourceCoordinator:
 
     def get_available_vram(self) -> Dict[str, Any]:
         """
-        Get available VRAM. Probes NVIDIA first, then Apple MPS unified memory.
+        Get available VRAM. Probes Apple MPS first on macOS, then NVIDIA.
 
         Returns dict with:
             - available_mb: Available VRAM in MB
@@ -568,6 +569,15 @@ class GPUResourceCoordinator:
             - gpu_name: GPU device name
             - success: Whether query succeeded
         """
+        # Apple Silicon: MPS is the only accelerator. Probe it first so the
+        # NVIDIA machinery (pynvml import + nvidia-smi exec) never runs on a
+        # Mac and the sticky `_no_gpu_detected` flag is never touched.
+        if platform.system() == "Darwin":
+            mps_result = self._get_vram_via_mps()
+            if mps_result:
+                return mps_result
+            # Intel Mac (no MPS) — fall through to the NVIDIA path below.
+
         # Fast path for CPU-only hosts — skip the probe entirely once we know.
         if GPUResourceCoordinator._no_gpu_detected:
             return {
