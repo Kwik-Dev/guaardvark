@@ -1668,64 +1668,67 @@ class UnifiedChatEngine:
         """Internal chat execution with app context assumed."""
         from backend.utils.agent_output_parser import parse_tool_calls_xml, format_tool_result_for_llm
 
-        # 0. Slash / explicit direct-tool intercept — bypass LLM (e.g. /imagine → generate_image)
-        if isinstance(options, dict) and not options.get("direct_tool"):
-            ws_hit = match_workstation_direct(message)
-            if ws_hit:
-                tool_name, params = ws_hit
-                options = {**options, "direct_tool": tool_name, "direct_tool_params": params}
-        direct_result = self._try_direct_tool(message, session_id, options, emit_fn, request_id)
-        if direct_result is not None:
-            return direct_result
+        # A host that supplies its own routing (options["skip_direct_intercepts"])
+        # bypasses the pattern-matched shortcuts and lets the model choose.
+        if not options.get("skip_direct_intercepts"):
+            # 0. Slash / explicit direct-tool intercept — bypass LLM (e.g. /imagine → generate_image)
+            if isinstance(options, dict) and not options.get("direct_tool"):
+                ws_hit = match_workstation_direct(message)
+                if ws_hit:
+                    tool_name, params = ws_hit
+                    options = {**options, "direct_tool": tool_name, "direct_tool_params": params}
+            direct_result = self._try_direct_tool(message, session_id, options, emit_fn, request_id)
+            if direct_result is not None:
+                return direct_result
 
-        # 0b. Retry after GPU-busy image gen — re-invoke generate_image with pending prompt
-        retry_result = self._try_image_generate_retry(message, session_id, options, emit_fn, request_id)
-        if retry_result is not None:
-            return retry_result
+            # 0b. Retry after GPU-busy image gen — re-invoke generate_image with pending prompt
+            retry_result = self._try_image_generate_retry(message, session_id, options, emit_fn, request_id)
+            if retry_result is not None:
+                return retry_result
 
-        # 0b2. Retry after GPU-busy image edit — re-invoke edit_image (skip LLM; model may be evicted)
-        edit_retry = self._try_image_edit_retry(message, session_id, options, emit_fn, request_id)
-        if edit_retry is not None:
-            return edit_retry
+            # 0b2. Retry after GPU-busy image edit — re-invoke edit_image (skip LLM; model may be evicted)
+            edit_retry = self._try_image_edit_retry(message, session_id, options, emit_fn, request_id)
+            if edit_retry is not None:
+                return edit_retry
 
-        # 0c. Direct media command intercept — bypass LLM for simple media actions
-        media_result = self._try_media_direct(message, session_id, emit_fn, request_id)
-        if media_result is not None:
-            return media_result
+            # 0c. Direct media command intercept — bypass LLM for simple media actions
+            media_result = self._try_media_direct(message, session_id, emit_fn, request_id)
+            if media_result is not None:
+                return media_result
 
-        # Image-edit intercept: an attached image + an edit instruction ("put a cowboy
-        # hat on this character") deterministically calls edit_image, bypassing the
-        # small local model's unreliable tool choice (gemma4 tends to DESCRIBE the
-        # image rather than call the tool). 'What is this?'-style messages have no edit
-        # verb and fall through to the normal vision/describe path.
-        edit_result = self._try_image_edit_direct(message, session_id, emit_fn, request_id, options)
-        if edit_result is not None:
-            return edit_result
+            # Image-edit intercept: an attached image + an edit instruction ("put a cowboy
+            # hat on this character") deterministically calls edit_image, bypassing the
+            # small local model's unreliable tool choice (gemma4 tends to DESCRIBE the
+            # image rather than call the tool). 'What is this?'-style messages have no edit
+            # verb and fall through to the normal vision/describe path.
+            edit_result = self._try_image_edit_direct(message, session_id, emit_fn, request_id, options)
+            if edit_result is not None:
+                return edit_result
 
-        # Music-video / Film Crew create-and-plan. Must run BEFORE generate_video:
-        # "make a music video" matches the generic video create-verb.
-        mv_result = self._try_music_video_direct(message, session_id, emit_fn, request_id, options)
-        if mv_result is not None:
-            return mv_result
-        fc_result = self._try_film_crew_direct(message, session_id, emit_fn, request_id, options)
-        if fc_result is not None:
-            return fc_result
+            # Music-video / Film Crew create-and-plan. Must run BEFORE generate_video:
+            # "make a music video" matches the generic video create-verb.
+            mv_result = self._try_music_video_direct(message, session_id, emit_fn, request_id, options)
+            if mv_result is not None:
+                return mv_result
+            fc_result = self._try_film_crew_direct(message, session_id, emit_fn, request_id, options)
+            if fc_result is not None:
+                return fc_result
 
-        # Natural language VIDEO generation ("generate a video of ...") → direct
-        # generate_video. Must run BEFORE the image intercept: "video of" is also in
-        # IMAGE_GEN_INTENT_KEYWORDS, so the image path would otherwise swallow it.
-        video_result = self._try_video_generate_direct(message, session_id, emit_fn, request_id, options)
-        if video_result is not None:
-            return video_result
+            # Natural language VIDEO generation ("generate a video of ...") → direct
+            # generate_video. Must run BEFORE the image intercept: "video of" is also in
+            # IMAGE_GEN_INTENT_KEYWORDS, so the image path would otherwise swallow it.
+            video_result = self._try_video_generate_direct(message, session_id, emit_fn, request_id, options)
+            if video_result is not None:
+                return video_result
 
-        # Natural language image generation (e.g. "generate an image of an ostrich",
-        # "draw a cat", "picture of a sunset") → direct generate_image. Mirrors the
-        # reliable _try_image_edit_direct path so small models never get a chance to
-        # describe instead of calling the tool, and the selected /imagemodel is forced
-        # via inject_chat_image_model inside the runner.
-        gen_result = self._try_image_generate_direct(message, session_id, emit_fn, request_id, options)
-        if gen_result is not None:
-            return gen_result
+            # Natural language image generation (e.g. "generate an image of an ostrich",
+            # "draw a cat", "picture of a sunset") → direct generate_image. Mirrors the
+            # reliable _try_image_edit_direct path so small models never get a chance to
+            # describe instead of calling the tool, and the selected /imagemodel is forced
+            # via inject_chat_image_model inside the runner.
+            gen_result = self._try_image_generate_direct(message, session_id, emit_fn, request_id, options)
+            if gen_result is not None:
+                return gen_result
 
         # Resolve the per-request "thinking" preference for thinking-capable models
         # (gemma4:12b, qwen3, deepseek-r1, ...). Precedence: explicit per-chat override
@@ -1811,13 +1814,22 @@ class UnifiedChatEngine:
                         f"{filtered_before - len(selected_tools)} screen-only tool(s)"
                     )
 
+            allowed_tools = options.get("tool_names")
+            if allowed_tools is not None:
+                known = set(self.registry.list_tools())
+                selected_tools = [t for t in allowed_tools if t in known]
+
             tool_list = build_concise_tool_list(self.registry, selected_tools)
             mcp_section = build_mcp_inventory_for_prompt(selected_tools)
             if mcp_section:
                 tool_list = tool_list + "\n" + mcp_section
 
         brain_state = getattr(self, "_brain_state", None)
-        if brain_state is not None and getattr(brain_state, "_initialized", False):
+        if (
+            brain_state is not None
+            and getattr(brain_state, "_initialized", False)
+            and not options.get("system_prompt")
+        ):
             cli_memory = (options or {}).get("cli_working_memory") if isinstance(options, dict) else None
             system_prompt = brain_state.get_system_prompt(
                 role=getattr(self, "_prompt_role", "chat"),
@@ -1975,16 +1987,19 @@ class UnifiedChatEngine:
                 "imageUrl": self._image_url,
                 "messageType": "image_upload",
             }
-        self._save_message(session_id, "user", message, extra_data=extra)
-        try:
-            from backend.services.memory_capture import capture_from_message
-            capture_from_message(
-                message,
-                session_id=session_id,
-                project_id=getattr(self, "_project_id", None),
-            )
-        except Exception:
-            logger.exception("Chat memory auto-capture failed")
+        persist = options.get("persist", True)
+        if persist:
+            self._save_message(session_id, "user", message, extra_data=extra)
+        if persist and not options.get("skip_memory_capture"):
+            try:
+                from backend.services.memory_capture import capture_from_message
+                capture_from_message(
+                    message,
+                    session_id=session_id,
+                    project_id=getattr(self, "_project_id", None),
+                )
+            except Exception:
+                logger.exception("Chat memory auto-capture failed")
 
         # 6. ReACT loop
         accumulated_response = ""
@@ -2029,7 +2044,10 @@ class UnifiedChatEngine:
             # successful result instead of writing the final answer once the
             # data is available. Pushed once at iteration 3 so the LLM still
             # has plenty of room (max=8) but a clear cue to stop spinning.
-            if iteration == 3 and tools_called and not wrap_up_nudge_pushed:
+            if (
+                iteration == 3 and tools_called and not wrap_up_nudge_pushed
+                and not options.get("skip_nudges")
+            ):
                 ollama_messages.append({
                     "role": "system",
                     "content": (
@@ -2158,7 +2176,8 @@ class UnifiedChatEngine:
                 # successfully called, prepend a disclaimer instead of letting the
                 # LLM answer from memory.
                 if (
-                    self._is_realtime_query(message)
+                    not options.get("skip_nudges")
+                    and self._is_realtime_query(message)
                     and not tools_called
                     and not getattr(self, "_local_facts_this_turn", False)
                 ):
@@ -2646,6 +2665,7 @@ class UnifiedChatEngine:
             realtime_nudge = ""
             if (
                 iteration == 1
+                and not options.get("skip_nudges")
                 and self._is_realtime_query(message)
                 and not getattr(self, "_local_facts_this_turn", False)
             ):
@@ -2717,6 +2737,8 @@ class UnifiedChatEngine:
         # NOTE: This modifies accumulated_response BEFORE chat:complete emits it.
         from backend.utils.settings_utils import get_setting
         escalation_mode = get_setting("claude_escalation_mode", default="manual")
+        if options.get("skip_escalation"):
+            escalation_mode = "manual"
         if escalation_mode == "always" and accumulated_response.strip():
             try:
                 from backend.services.claude_advisor_service import get_claude_advisor
@@ -2728,6 +2750,18 @@ class UnifiedChatEngine:
                         logger.info("[UNIFIED_ENGINE] Escalation mode=always, routed through Claude")
             except Exception as e:
                 logger.warning(f"[UNIFIED_ENGINE] Escalation always-mode failed, using local response: {e}")
+
+        # 6c. Host finalizer: options["finalize_fn"](response, steps) -> str.
+        # Runs before the response is emitted or saved, so a host can audit and
+        # revise the model's draft; an empty or failed result keeps the draft.
+        finalize_fn = options.get("finalize_fn")
+        if callable(finalize_fn):
+            try:
+                revised = finalize_fn(accumulated_response, steps)
+                if isinstance(revised, str) and revised.strip():
+                    accumulated_response = revised
+            except Exception:
+                logger.exception("[UNIFIED_ENGINE] finalize_fn failed; keeping the model's draft")
 
         # 7. Emit complete
         emit_fn("chat:complete", {
@@ -2745,7 +2779,7 @@ class UnifiedChatEngine:
         # 8. Save assistant message (only if we have actual content)
         #    Strip any residual XML tool-call artifacts so they don't pollute
         #    conversation history and confuse future LLM context windows.
-        if accumulated_response.strip():
+        if accumulated_response.strip() and persist:
             clean_response = re.sub(
                 r'</?(?:tool_call|tool|observation|result|reasoning|query|url|'
                 r'param_name|parameter|value|full_page|selector|format|max_results|'
@@ -4559,7 +4593,13 @@ class UnifiedChatEngine:
         session_id: str = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Build the system prompt with rules and tool definitions."""
+        """Build the system prompt with rules and tool definitions.
+
+        ``options["system_prompt"]`` replaces the rules/persona block so a host
+        can run its own persona through the engine's tool loop.
+        """
+        if options and options.get("system_prompt"):
+            rules_persona = str(options["system_prompt"])
         voice_suffix = self._VOICE_INSTRUCTION if getattr(self, '_is_voice_message', False) else ""
 
         # Load saved memories into context. Wrap defensively so the call
