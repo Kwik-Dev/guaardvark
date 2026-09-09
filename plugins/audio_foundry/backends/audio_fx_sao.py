@@ -147,13 +147,14 @@ class StableAudioOpenBackend(AudioBackend):
         # The model's default scheduler (CosineDPMSolverMultistep) drives an SDE
         # solver via `torchsde`, whose Brownian-motion path recurses infinitely on
         # Apple MPS (numpy seterr/geterr). Swap to a non-SDE multistep scheduler so
-        # FX generation works on MPS (and is unchanged on CUDA).
-        try:
-            from diffusers import EDMDPMSolverMultistepScheduler
-            pipe.scheduler = EDMDPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-            logger.info("%s scheduler -> EDMDPMSolverMultistep (avoids torchsde on MPS)", self.MODEL_ID)
-        except Exception as e:
-            logger.warning("Could not swap SAO scheduler (%s); keeping default", e)
+        # FX generation works on MPS; CUDA keeps the model's release scheduler.
+        if device == "mps":
+            try:
+                from diffusers import EDMDPMSolverMultistepScheduler
+                pipe.scheduler = EDMDPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+                logger.info("%s scheduler -> EDMDPMSolverMultistep (avoids torchsde on MPS)", self.MODEL_ID)
+            except Exception as e:
+                logger.warning("Could not swap SAO scheduler (%s); keeping default", e)
 
         pipe.to(device)
         self._pipeline = pipe
