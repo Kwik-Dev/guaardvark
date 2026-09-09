@@ -109,7 +109,7 @@ def test_speed_profiles_resolve_to_installed_lora_files(monkeypatch):
     assert turbo["lora_file"] == "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
     assert turbo["steps"] == 8 and turbo["min_steps"] == 8 and turbo["lora_installed"] is True
     fast = vmr.speed_profile_for(MODEL, "turbo-4-768p")
-    assert fast["min_short_edge"] == 768 and fast["lora_installed"] is False
+    assert fast.get("min_short_edge") is None and fast["steps"] == 4 and fast["lora_installed"] is False
     assert vmr.speed_profile_for(MODEL, "nope") is None
     assert vmr.speed_profile_for(REF, "turbo-4")["experimental"] is True
     # The ref2v LoRA is not offered on the fl2va build and vice versa.

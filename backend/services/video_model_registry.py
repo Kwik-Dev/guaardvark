@@ -102,8 +102,11 @@ H3_STYLE_EMBEDDINGS = [
 # docs.comfy.org ("slightly lower audio and motion quality"), not from a
 # measurement here. min_steps is the no-bad-knob floor a preset may not go
 # below; an explicit value a person typed still wins and is logged.
-# The 4-step fl2v LoRA is tuned for the 768 px canvas, so it is gated to a
-# 768 short edge until a run at 480p is compared.
+# The 4-step fl2v LoRA was published against the 768 px canvas and shipped here
+# behind a 768 short-edge gate. That gate had no measurement behind it and made
+# the profile fail at the model's 864x480 default and on every duration tier
+# past 7.3 s, so it is gone. Record the 864x480-vs-1344x768 comparison here
+# when it is run; a profile keeps ``min_short_edge`` only with a result beside it.
 H3_FL2VA_SPEED_PROFILES = {
     "standard": {"label": "Standard (20 steps)", "steps": 20, "min_steps": 20},
     "turbo-8": {
@@ -114,12 +117,11 @@ H3_FL2VA_SPEED_PROFILES = {
         "min_steps": 8,
     },
     "turbo-4-768p": {
-        "label": "Turbo 768p (4 steps)",
+        "label": "Turbo (4 steps)",
         "lora": "minimax-h3-fl2v-turbo-4step-768p",
         "strength": 1.0,
         "steps": 4,
         "min_steps": 4,
-        "min_short_edge": 768,
     },
 }
 H3_REF2VA_SPEED_PROFILES = {

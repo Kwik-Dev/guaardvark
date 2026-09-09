@@ -73,10 +73,11 @@ def test_missing_lora_and_unknown_profile_fail_plainly(gen, tmp_path, monkeypatc
     assert wf is None and "Unknown speed profile 'warp'" in err
 
 
-def test_768p_profile_refuses_a_small_canvas(gen, tmp_path, monkeypatch):
+def test_4step_profile_runs_at_the_default_canvas(gen, tmp_path, monkeypatch):
     monkeypatch.setattr(vmr, "is_model_installed", lambda m: True)
     wf, err = _build(gen, tmp_path, speed_profile="turbo-4-768p")
-    assert wf is None and "768px short edge" in err
+    assert err is None and wf["9"]["inputs"]["steps"] == 4
+    assert wf["15"]["inputs"]["lora_name"] == "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
     req = VideoGenerationRequest(model=MODEL, prompt="p", width=1344, height=768,
                                  duration_frames=124, speed_profile="turbo-4-768p")
     wf, err = gen._build_minimax_request(req, MODEL, None, 1, 1)
