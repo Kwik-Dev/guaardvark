@@ -540,8 +540,12 @@ def list_models():
                 "label": info.get("label", model_id),
                 "description": info.get("description", ""),
                 "recommended": info.get("recommended", False),
-                "size_gb": IMAGE_MODEL_SIZES.get(info["id"], 2.5),
+                "size_gb": info.get("size_gb") or IMAGE_MODEL_SIZES.get(info["id"], 2.5),
                 "availability": info.get("availability", "downloadable"),
+                # User catalog rows (Manage Image Models → Add new model).
+                "user": bool(info.get("user")),
+                "family": info.get("family"),
+                "kind": info.get("kind"),
             }
             # A model the user cannot actually run must not sit in the picker — that
             # is how a gated Krea 2 got selected and silently produced SD 1.5 output.
@@ -554,10 +558,15 @@ def list_models():
                 )
                 unavailable.append(row)
 
+        from backend.services.user_image_models import catalog_rows, family_choices
         return success_response({
             "models": models,
             "unavailable_models": unavailable,
             "default_model": "auto",
+            # User LoRAs never enter the picker; the page shows them as chips and
+            # the modal lists them with Install / Remove.
+            "adapters": catalog_rows(generator.image_generator),
+            "families": family_choices(),
         })
 
     except Exception as e:
@@ -568,17 +577,20 @@ def list_models():
 @batch_image_bp.route("/models/download", methods=["POST"])
 def download_model():
     """Start downloading a specific model with real-time file size progress monitoring."""
+    data = request.get_json()
+    if not data or 'model_path' not in data:
+        return error_response("No model_path provided", 400)
+    return _start_image_model_download(data['model_path'])
+
+
+def _start_image_model_download(model_path: str):
+    """Start the background download for a catalog key or HF id (the Install button)."""
     global model_download_status
 
     try:
         if not service_available:
             return error_response("Batch image generation service not available", 503)
 
-        data = request.get_json()
-        if not data or 'model_path' not in data:
-            return error_response("No model_path provided", 400)
-
-        model_path = data['model_path']
         generator = get_batch_image_generator()
 
         if not generator.image_generator:
@@ -799,6 +811,102 @@ def validate_settings():
     except Exception as e:
         logger.error(f"Error validating settings: {e}")
         return error_response(str(e), 500)
+
+@batch_image_bp.route("/models/from-hf", methods=["POST"])
+def preview_hf_image_model():
+    """Parse a Hugging Face paste and list its weight files. Does not download."""
+    from backend.services.user_image_models import preview_hf_url
+    from backend.services.video_model_registry import classify_hf_download_error
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return error_response("Paste a Hugging Face URL or org/repo.", 400)
+    try:
+        return success_response(preview_hf_url(url))
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except Exception as e:
+        logger.error("HF image preview failed: %s", e)
+        return error_response(classify_hf_download_error(e, repo_id=None), 400)
+
+
+@batch_image_bp.route("/models/user", methods=["POST"])
+def add_user_image_model():
+    """Register a user image model or LoRA, then Install it unless told not to."""
+    from backend.services.user_image_models import add_user_model
+    from backend.services.user_video_models import parse_hf_url
+    if not service_available:
+        return error_response("Batch image generation service not available", 503)
+    data = request.get_json(silent=True) or {}
+    hf_repo = (data.get("hf_repo") or "").strip()
+    revision = (data.get("revision") or "main").strip() or "main"
+    files = data.get("files") if isinstance(data.get("files"), list) else []
+    url = (data.get("url") or "").strip()
+    if url and not hf_repo:
+        try:
+            parsed = parse_hf_url(url)
+        except ValueError as e:
+            return error_response(str(e), 400)
+        hf_repo = parsed["hf_repo"]
+        revision = parsed.get("revision") or revision
+        if parsed.get("src") and not files:
+            files = [{"src": parsed["src"]}]
+    generator = get_batch_image_generator()
+    if not generator.image_generator:
+        return error_response("Image generator not initialized", 503)
+    try:
+        mid, entry = add_user_model(
+            generator.image_generator,
+            role=(data.get("role") or "").strip(),
+            family=(data.get("family") or "").strip(),
+            hf_repo=hf_repo,
+            files=files,
+            has_model_index=bool(data.get("has_model_index")),
+            name=(data.get("name") or "").strip() or None,
+            description=(data.get("description") or "").strip() or None,
+            revision=revision,
+        )
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except Exception as e:
+        logger.error("add user image model failed: %s", e)
+        return error_response(str(e), 500)
+    download_payload = None
+    if str(data.get("install", "true")).lower() != "false":
+        dl = _start_image_model_download(mid)
+        resp_obj, status = dl if isinstance(dl, tuple) else (dl, getattr(dl, "status_code", 200))
+        body = resp_obj.get_json(silent=True) or {}
+        if status >= 400 or not body.get("success"):
+            return dl
+        download_payload = body.get("data")
+    return success_response({
+        "id": mid,
+        "entry": {k: entry.get(k) for k in ("name", "role", "family", "kind", "hf_repo", "files", "size_gb", "applies_to")},
+        "download": download_payload,
+    })
+
+
+@batch_image_bp.route("/models/user/<model_id>", methods=["DELETE"])
+def delete_user_image_model(model_id):
+    """Remove a user-added image model or LoRA. Shipped keys are refused."""
+    from backend.services.user_image_models import remove_user_model
+    if not service_available:
+        return error_response("Batch image generation service not available", 503)
+    delete_files = str(
+        request.args.get("delete_files") or (request.get_json(silent=True) or {}).get("delete_files") or ""
+    ).lower() in ("1", "true", "yes")
+    generator = get_batch_image_generator()
+    try:
+        result = remove_user_model(generator.image_generator, model_id, delete_files=delete_files)
+    except ValueError as e:
+        return error_response(str(e), 403)
+    except KeyError as e:
+        return error_response(str(e), 404)
+    except Exception as e:
+        logger.error("remove user image model failed: %s", e)
+        return error_response(str(e), 500)
+    return success_response(result)
+
 
 @batch_image_bp.route("/model-info/<model>", methods=["GET"])
 def get_model_info(model: str):
@@ -1193,6 +1301,24 @@ def generate_from_prompts():
         cast_warnings = params.pop("_cast_warnings", None) or []
         if cast_warnings:
             validation_info.setdefault("warnings", []).extend(cast_warnings)
+
+        # User LoRAs (Manage Image Models): ids → files + strength. A cast render
+        # goes through the character pipeline, which owns its own adapters.
+        adapters = data.get("adapters") if isinstance(data.get("adapters"), list) else []
+        if adapters:
+            from backend.services.user_image_models import resolve_user_loras
+            paths, scale, lora_err = resolve_user_loras(
+                get_batch_image_generator().image_generator, params.get("model") or "auto", adapters
+            )
+            if lora_err:
+                return error_response(lora_err, 400)
+            if params.get("subject_ids"):
+                validation_info.setdefault("warnings", []).append(
+                    "A cast character is selected, so your LoRAs were not stacked on this render."
+                )
+            else:
+                params["adapter_loras"] = paths
+                params["adapter_scale"] = scale
 
         # Start batch generation
         batch_id = start_batch_from_prompts(validated_prompts, **params)

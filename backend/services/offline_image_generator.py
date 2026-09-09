@@ -236,6 +236,12 @@ class OfflineImageGenerator:
         self.hidden_models: set[str] = set()
         # Offline Diffusers cannot load these — batch/API must route to ComfyUI.
         self.comfy_only_models = {"flux-dev"}
+        # User-added entries (backend/services/user_image_models.py): family by id
+        # or repo, file-kind entries keyed by their "user:<id>" sentinel, and the
+        # catalog rows themselves. Filled by load_user_catalog() below.
+        self.family_overrides: Dict[str, str] = {}
+        self.user_files: Dict[str, Dict[str, Any]] = {}
+        self.user_entries: Dict[str, Dict[str, Any]] = {}
         # UI metadata for the visible models (label/description/recommended/order).
         # Drives the centralized dropdown via get_available_models().
         self.model_meta = {
@@ -366,13 +372,35 @@ class OfflineImageGenerator:
 
         self.service_available = diffusion_available
 
+        try:
+            from backend.services.user_image_models import load_user_catalog
+            n_user = load_user_catalog(self)
+            if n_user:
+                logger.info("Registered %d user image model(s) from the user catalog", n_user)
+        except Exception as e:  # noqa: BLE001 — a broken catalog must not stop image generation
+            logger.error("user image catalog failed to load: %s", e)
+
         logger.info(f"OfflineImageGenerator initialized - Device: {self._device}, Models dir: {self.models_dir}")
 
     def _get_model_path(self, model_id: str) -> Path:
+        uf = self.user_files.get(model_id)
+        if uf:
+            return self.models_dir / uf["dir"]
         model_name = model_id.replace("/", "--")
         return self.models_dir / model_name
 
+    def _user_file_entry(self, model_id: str) -> Optional[Dict[str, Any]]:
+        """The user file entry for a key or its sentinel, or None."""
+        uf = self.user_files.get(model_id)
+        if uf is None:
+            uf = self.user_files.get(self.available_models.get(model_id, ""))
+        return uf
+
     def _is_model_downloaded(self, model_id: str) -> bool:
+        if self._user_file_entry(model_id) is not None:
+            from backend.services.user_image_models import user_files_present, user_sentinel
+            sentinel = model_id if model_id in self.user_files else self.available_models.get(model_id, user_sentinel(model_id))
+            return user_files_present(self, sentinel)
         # Comfy-only models (FLUX.1-dev): check ComfyUI unet asset, not HF snapshot.
         mid = (model_id or "").lower()
         if mid.startswith("comfy:") or mid == "flux-dev" or "flux1-dev" in mid or mid.endswith("flux-dev"):
@@ -506,12 +534,21 @@ class OfflineImageGenerator:
             return hit[0]
 
         verdict = "unreachable"
+        # A user file entry has no model_index.json; probe the file it names.
+        uf = self.user_files.get(repo_id)
+        if uf and uf.get("files"):
+            probe_url = (
+                f"https://huggingface.co/{uf['hf_repo']}/resolve/{uf.get('revision') or 'main'}/"
+                f"{uf['files'][0]['src']}"
+            )
+        else:
+            probe_url = f"https://huggingface.co/{repo_id}/resolve/main/model_index.json"
         try:
             import requests
             token = self._hf_token()
             headers = {"Authorization": f"Bearer {token}"} if token else {}
             resp = requests.head(
-                f"https://huggingface.co/{repo_id}/resolve/main/model_index.json",
+                probe_url,
                 headers=headers, timeout=6, allow_redirects=True,
             )
             if resp.status_code == 200:
@@ -624,6 +661,11 @@ class OfflineImageGenerator:
 
         Drives pipeline class, scheduler, VRAM strategy, and generation params.
         """
+        override = self.family_overrides.get(model_id or "") or self.family_overrides.get(
+            self._resolve_model_ref(model_id or "")
+        )
+        if override:
+            return override
         key = (model_id or "").lower()
         mid = self._resolve_model_ref(model_id).lower()
         if key.startswith("krea2") or (
@@ -1166,6 +1208,11 @@ class OfflineImageGenerator:
             return False, msg
 
         try:
+            if self._user_file_entry(model_id) is not None:
+                from backend.services.user_image_models import download_user_files
+                sentinel = model_id if model_id in self.user_files else self.available_models.get(model_id)
+                return download_user_files(self, sentinel)
+
             model_path = self._get_model_path(model_id)
 
             # LOUD first-run banner: this download is multi-GB and used to be
@@ -1370,10 +1417,18 @@ class OfflineImageGenerator:
                 load_kwargs["safety_checker"] = None
                 load_kwargs["requires_safety_checker"] = False
 
-            self._pipeline = pipeline_class.from_pretrained(
-                model_path,
-                **load_kwargs
-            )
+            user_file = self._user_file_entry(model_id)
+            if user_file and user_file.get("kind") == "single_file":
+                # A merged checkpoint (SD / SDXL): diffusers rebuilds the pipeline
+                # from the one file instead of a component tree.
+                checkpoint = model_path / user_file["files"][0]["dst"]
+                logger.info(f"Loading single-file checkpoint {checkpoint.name} (family: {family})")
+                self._pipeline = pipeline_class.from_single_file(str(checkpoint), **load_kwargs)
+            else:
+                self._pipeline = pipeline_class.from_pretrained(
+                    model_path,
+                    **load_kwargs
+                )
 
             # Flow-matching DiTs ship their own scheduler — don't force DPM (SD/SDXL only).
             if family not in ('zimage', 'krea2'):
@@ -3358,6 +3413,11 @@ Negative Prompt: {negative_prompt}""",
                 "engine": meta.get("engine") or (
                     "comfy" if model_key in getattr(self, "comfy_only_models", set()) else "offline"
                 ),
+                # User catalog rows carry their own family, kind and size.
+                "user": bool(meta.get("user")),
+                "family": meta.get("family") or self._model_family(model_key),
+                "kind": meta.get("kind"),
+                "size_gb": meta.get("size_gb"),
             }
 
         return models

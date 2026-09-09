@@ -64,6 +64,10 @@ class BatchPrompt:
     loras: List[str] = field(default_factory=list)
     subject_ids: List[int] = field(default_factory=list)
     trigger_word: str = ""
+    # User-catalog LoRA files (Manage Image Models) stacked on the plain stills
+    # path; resolved to paths and one strength at API time.
+    adapter_loras: List[str] = field(default_factory=list)
+    adapter_scale: float = 0.8
     content_preset: Optional[str] = None
     auto_enhance: bool = True
     enhance_anatomy: bool = True
@@ -761,6 +765,8 @@ class BatchImageGenerator:
                     remove_background=remove_background,
                     hold_gpu=False,
                     replace_legacy_sd_markers=True,
+                    loras=list(getattr(prompt, "adapter_loras", None) or []) or None,
+                    lora_scale=float(getattr(prompt, "adapter_scale", 0.8) or 0.8),
                 )
                 still = stills[0] if stills else None
                 if still and still.success:
@@ -2138,7 +2144,7 @@ class BatchImageGenerator:
                         'negative_prompt',
                         'content_preset', 'auto_enhance', 'enhance_anatomy',
                         'enhance_faces', 'enhance_hands', 'loras', 'subject_ids',
-                        'trigger_word']
+                        'trigger_word', 'adapter_loras', 'adapter_scale']
 
         model = kwargs.get("model") or "auto"
         resolved = resolve_stills_defaults(

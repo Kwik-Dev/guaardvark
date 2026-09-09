@@ -21,12 +21,17 @@ import ImageIcon from "@mui/icons-material/Image";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import axios from "axios";
+import { ActionButton, ConfirmActionDialog } from "../settings/ui";
+import AddImageModelDialog from "./AddImageModelDialog";
 
 const modelMatchesDownload = (model, currentModel) =>
   !!currentModel && (currentModel === model.path || currentModel === model.id);
 
 const ImageModelsModal = ({ open, onClose, showMessage }) => {
   const [models, setModels] = useState([]);
+  const [adapters, setAdapters] = useState([]);
+  const [addOpen, setAddOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState(null);
   const [loading, setLoading] = useState(true);
   const [downloadStatus, setDownloadStatus] = useState({
     is_downloading: false,
@@ -45,6 +50,7 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
       const res = await axios.get("/api/batch-image/models");
       if (res.data.success) {
         setModels(res.data.data.models);
+        setAdapters(res.data.data.adapters || []);
       } else {
         setError("Failed to load models");
       }
@@ -121,8 +127,73 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
     }
   };
 
+  const handleRemove = async () => {
+    if (!removeTarget) return;
+    try {
+      const res = await axios.delete(`/api/batch-image/models/user/${encodeURIComponent(removeTarget.id)}`, {
+        params: { delete_files: removeTarget.deleteFiles ? "1" : "0" },
+      });
+      if (res.data.success) {
+        showMessage?.(`Removed ${removeTarget.name || removeTarget.id}.`, "info");
+        fetchModels();
+      } else {
+        showMessage?.(res.data.error?.message || "Could not remove", "error");
+      }
+    } catch (err) {
+      showMessage?.(formatUiError(err.response?.data?.error) || err.message || "Could not remove", "error");
+    } finally {
+      setRemoveTarget(null);
+    }
+  };
+
   const isDownloading = downloadStatus.is_downloading;
   const currentModel = downloadStatus.current_model;
+
+  // Install / Installed / progress cell, shared by model rows and LoRA rows.
+  const renderInstallCell = (model) => {
+    const isThis = isDownloading && modelMatchesDownload(model, currentModel);
+    if (isThis) {
+      return (
+        <Box sx={{ width: 130 }}>
+          <Typography variant="caption" noWrap>
+            {downloadStatus.status === "starting"
+              ? "Starting..."
+              : `${downloadStatus.progress}% \u2014 ${downloadStatus.speed_mbps} MB/s`}
+          </Typography>
+          <LinearProgress
+            variant={downloadStatus.progress > 0 ? "determinate" : "indeterminate"}
+            value={downloadStatus.progress}
+            sx={{ mt: 0.5 }}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {(downloadStatus.downloaded_gb || 0).toFixed(1)} / {(downloadStatus.total_gb || 0).toFixed(1)} GB
+          </Typography>
+        </Box>
+      );
+    }
+    return (
+      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
+        {model.is_downloaded ? (
+          <Chip icon={<CheckCircleIcon />} label="Installed" color="success" size="small" variant="outlined" />
+        ) : (
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<CloudDownloadIcon />}
+            onClick={() => handleDownload(model)}
+            disabled={isDownloading}
+          >
+            Install
+          </Button>
+        )}
+        {model.user && (
+          <ActionButton kind="destructive" onClick={() => setRemoveTarget(model)} disabled={isDownloading}>
+            Remove
+          </ActionButton>
+        )}
+      </Box>
+    );
+  };
 
   return (
     <Dialog open={open} onClose={() => !isDownloading && onClose()} maxWidth="sm" fullWidth>
@@ -141,7 +212,6 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
         ) : (
           <List disablePadding>
             {models.map((model) => {
-              const isThis = isDownloading && modelMatchesDownload(model, currentModel);
               return (
                 <ListItem key={model.id} divider sx={{ py: 1.5 }}>
                   <ListItemIcon>
@@ -156,6 +226,7 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
                         {model.recommended && (
                           <Chip label="Recommended" size="small" color="primary" variant="outlined" />
                         )}
+                        {model.user && <Chip label={`Yours · ${model.family || "model"}`} size="small" variant="outlined" />}
                         {model.size_gb > 0 && (
                           <Chip label={`${model.size_gb} GB`} size="small" variant="outlined" />
                         )}
@@ -175,46 +246,39 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
                     }
                   />
 
-                  <Box sx={{ ml: 2, minWidth: 120, textAlign: "right" }}>
-                    {isThis ? (
-                      <Box sx={{ width: 130 }}>
-                        <Typography variant="caption" noWrap>
-                          {downloadStatus.status === "starting"
-                            ? "Starting..."
-                            : `${downloadStatus.progress}% \u2014 ${downloadStatus.speed_mbps} MB/s`}
-                        </Typography>
-                        <LinearProgress
-                          variant={downloadStatus.progress > 0 ? "determinate" : "indeterminate"}
-                          value={downloadStatus.progress}
-                          sx={{ mt: 0.5 }}
-                        />
-                        <Typography variant="caption" color="text.secondary">
-                          {(downloadStatus.downloaded_gb || 0).toFixed(1)} / {(downloadStatus.total_gb || 0).toFixed(1)} GB
-                        </Typography>
-                      </Box>
-                    ) : model.is_downloaded ? (
-                      <Chip
-                        icon={<CheckCircleIcon />}
-                        label="Installed"
-                        color="success"
-                        size="small"
-                        variant="outlined"
-                      />
-                    ) : (
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        startIcon={<CloudDownloadIcon />}
-                        onClick={() => handleDownload(model)}
-                        disabled={isDownloading}
-                      >
-                        Install
-                      </Button>
-                    )}
-                  </Box>
+                  <Box sx={{ ml: 2, minWidth: 120, textAlign: "right" }}>{renderInstallCell(model)}</Box>
                 </ListItem>
               );
             })}
+            {adapters.length > 0 && (
+              <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 2 }}>
+                Your LoRAs
+              </Typography>
+            )}
+            {adapters.map((a) => (
+              <ListItem key={a.id} divider sx={{ py: 1.5 }}>
+                <ListItemIcon>
+                  <ImageIcon color={a.is_downloaded ? "primary" : "action"} />
+                </ListItemIcon>
+                <ListItemText
+                  primary={
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                      <Typography variant="body1" fontWeight={500}>
+                        {a.name}
+                      </Typography>
+                      <Chip label={`LoRA · ${a.family}`} size="small" variant="outlined" />
+                      {a.size_gb > 0 && <Chip label={`${a.size_gb} GB`} size="small" variant="outlined" />}
+                    </Box>
+                  }
+                  secondary={
+                    <Typography variant="caption" color="text.disabled" component="span" display="block">
+                      {a.hf_repo}
+                    </Typography>
+                  }
+                />
+                <Box sx={{ ml: 2, minWidth: 120, textAlign: "right" }}>{renderInstallCell(a)}</Box>
+              </ListItem>
+            ))}
             {models.length === 0 && !loading && (
               <Typography variant="body2" color="textSecondary" align="center" sx={{ py: 3 }}>
                 No models available in configuration.
@@ -237,10 +301,31 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
         </Box>
       </DialogContent>
       <DialogActions>
+        <ActionButton onClick={() => setAddOpen(true)} disabled={isDownloading}>
+          Add new model
+        </ActionButton>
+        <Box sx={{ flex: 1 }} />
         <Button onClick={onClose} disabled={isDownloading}>
           {isDownloading ? "Downloading..." : "Close"}
         </Button>
       </DialogActions>
+      <AddImageModelDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        showMessage={showMessage}
+        onAdded={() => {
+          fetchModels();
+          fetchDownloadStatus();
+        }}
+      />
+      <ConfirmActionDialog
+        open={Boolean(removeTarget)}
+        title={`Remove ${removeTarget?.name || ""}?`}
+        description="The catalog entry goes away. Its downloaded files stay on disk."
+        confirmLabel="Remove entry"
+        onClose={() => setRemoveTarget(null)}
+        onConfirm={handleRemove}
+      />
     </Dialog>
   );
 };

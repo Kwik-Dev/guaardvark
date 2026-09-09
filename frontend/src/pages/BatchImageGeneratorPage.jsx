@@ -217,6 +217,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     description: 'Router picks the best downloaded model for each prompt',
   };
   const [modelOptions, setModelOptions] = useState([AUTO_MODEL_OPTION]);
+  // User LoRAs from Manage Image Models: rows from the same models call, and the
+  // ids switched on for this run. Sent as adapters; the backend resolves files.
+  const [userAdapters, setUserAdapters] = useState([]);
+  const [selectedAdapters, setSelectedAdapters] = useState([]);
   // Models the backend filtered out (gated, unreachable). Listed read-only with the
   // reason — picking one used to mean a failed run or, worse, silent SD 1.5 output.
   const [unavailableModels, setUnavailableModels] = useState([]);
@@ -255,6 +259,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           }));
           setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
           setUnavailableModels(data.data.unavailable_models || []);
+          setUserAdapters((data.data.adapters || []).filter((a) => a.is_downloaded));
         }
       } catch (e) {
         debugLog('Failed to load image models', e);
@@ -262,8 +267,15 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     })();
   }, []);
 
-  // Quality presets — family-aware (see utils/batchImageSettings for the tables).
+  // LoRAs that stack on the selected model's family. "auto" resolves to the
+  // stills default on the backend, which is the Z-Image family.
   const family = modelFamily(params.model);
+  const applicableAdapters = useMemo(() => {
+    const fam = family === 'auto' ? 'zimage' : family.startsWith('krea') ? 'krea2' : family.replace('-turbo', '');
+    return userAdapters.filter((a) => (a.applies_to || []).includes(fam));
+  }, [userAdapters, family]);
+
+  // Quality presets — family-aware (see utils/batchImageSettings for the tables).
   const isFlux = family === 'flux';
   const isZimage = isZimageModel(params.model);
   const isModernDit = family === 'auto' || family === 'zimage' || family.startsWith('krea');
@@ -921,6 +933,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             ...params,
             // Cast characters: backend resolves these to LoRA paths + trigger.
             subject_ids: castSubjectIds,
+            // User LoRAs switched on below the model select.
+            adapters: selectedAdapters
+              .filter((id) => applicableAdapters.some((a) => a.id === id))
+              .map((id) => ({ id })),
             // Quality enhancement parameters
             content_preset: selectedPreset === 'auto' ? null : selectedPreset,
             auto_enhance: autoEnhance,
@@ -1723,6 +1739,32 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               ))}
                             </Select>
                           </FormControl>
+                          {applicableAdapters.length > 0 && (
+                            <Box sx={{ mt: 1 }}>
+                              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                                Your LoRAs (off until you turn one on):
+                              </Typography>
+                              <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
+                                {applicableAdapters.map((a) => {
+                                  const on = selectedAdapters.includes(a.id);
+                                  return (
+                                    <Chip
+                                      key={a.id}
+                                      label={a.name}
+                                      size="small"
+                                      color={on ? 'primary' : 'default'}
+                                      variant={on ? 'filled' : 'outlined'}
+                                      onClick={() =>
+                                        setSelectedAdapters((prev) =>
+                                          on ? prev.filter((id) => id !== a.id) : [...prev, a.id],
+                                        )
+                                      }
+                                    />
+                                  );
+                                })}
+                              </Stack>
+                            </Box>
+                          )}
                           {unavailableModels.length > 0 && (
                             <Box sx={{ mt: 1 }}>
                               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
