@@ -624,7 +624,7 @@ def get_default_embed_model():
     logger.info("Initializing embedding model")
 
     try:
-        from backend.config import get_active_embedding_model
+        from backend.config import get_active_embedding_model, get_embedding_keep_alive
         from llama_index.embeddings.ollama import OllamaEmbedding
 
         model_name = get_active_embedding_model()
@@ -634,7 +634,9 @@ def get_default_embed_model():
             model_name=model_name,
             base_url=OLLAMA_BASE_URL,
             ollama_additional_kwargs={"mirostat": 0},
-            keep_alive=0,  # Unload after use to free VRAM for chat
+            # A short idle TTL: consecutive queries reuse the loaded model instead of
+            # paying a cold load each, and VRAM still frees between sessions.
+            keep_alive=get_embedding_keep_alive(),
         )
         return embed_model
 
