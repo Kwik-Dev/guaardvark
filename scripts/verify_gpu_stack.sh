@@ -105,12 +105,13 @@ else:
     print(8188)
 PY
 )
-if curl -sf --max-time 3 "http://127.0.0.1:${COMFY_PORT}/" >/dev/null 2>&1; then
+if curl -sf --max-time 3 "http://localhost:${COMFY_PORT}/" >/dev/null 2>&1; then
     echo "  ✔ comfyui: reachable on port ${COMFY_PORT}"
 else
     echo "  ⚠ comfyui: not reachable on port ${COMFY_PORT} (start with: bash $REPO_ROOT/plugins/comfyui/scripts/start.sh)"
     DEGRADED+=("comfyui")
 fi
+# Ollama: is a model loaded fully on GPU? `ollama ps` prints a PROCESSOR column.
 if command -v ollama >/dev/null 2>&1 && ollama ps >/dev/null 2>&1; then
     # Match the PROCESSOR column ("NN% CPU"), not a model NAME that contains
     # "cpu" (e.g. a model called cpu-bench would otherwise false-positive).

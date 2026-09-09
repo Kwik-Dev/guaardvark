@@ -2388,7 +2388,7 @@ if [ "${GUAARDVARK_USE_WHISPER_SERVER:-0}" = "1" ]; then
     # Prefer a whisper-server on PATH; fall back to an explicit env var. Avoid
     # hardcoding a personal checkout layout.
     WHISPER_SERVER_BIN="${GUAARDVARK_WHISPER_SERVER_BIN:-$(command -v whisper-server 2>/dev/null || true)}"
-    WHISPER_SERVER_MODEL="${GUAARDVARK_WHISPER_SERVER_MODEL:-$HOME/GitHub/whisper.cpp/models/ggml-base.bin}"
+    WHISPER_SERVER_MODEL="${GUAARDVARK_WHISPER_SERVER_MODEL:-$BACKEND_DIR/tools/voice/whisper.cpp/models/ggml-base.bin}"
     WHISPER_SERVER_PORT="${GUAARDVARK_WHISPER_SERVER_PORT:-5800}"
     if [ -x "$WHISPER_SERVER_BIN" ] && [ -f "$WHISPER_SERVER_MODEL" ]; then
         if lsof -Pi :$WHISPER_SERVER_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then

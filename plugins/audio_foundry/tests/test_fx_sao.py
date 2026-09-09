@@ -19,13 +19,12 @@ import pytest
 
 SLOW = os.environ.get("AUDIO_FOUNDRY_RUN_SLOW_TESTS") == "1"
 
-pytestmark = pytest.mark.skipif(not SLOW, reason="Set AUDIO_FOUNDRY_RUN_SLOW_TESTS=1 to enable")
-
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 
+@pytest.mark.skipif(not SLOW, reason="Set AUDIO_FOUNDRY_RUN_SLOW_TESTS=1 to enable")
 def test_sao_generates_valid_wav(tmp_path):
     """Load SAO once, generate 3 seconds of audio, verify file is a valid WAV."""
     import soundfile as sf
