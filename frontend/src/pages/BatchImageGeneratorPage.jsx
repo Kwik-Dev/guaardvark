@@ -60,6 +60,20 @@ import ImageLightbox from '../components/images/ImageLightbox';
 import BatchHistoryCard from '../components/images/BatchHistoryCard';
 import GpuGateBanner from '../components/common/GpuGateBanner';
 import useJobsGate from '../hooks/useJobsGate';
+import { formatUiError } from '../utils/uiError';
+import {
+  ZIMAGE_GUIDANCE,
+  ZIMAGE_PRESET_STEPS,
+  ZIMAGE_STEPS,
+  MAX_QUANTITY,
+  buildFinalPrompts,
+  clampQuantity,
+  isZimageModel,
+  modelFamily,
+  qualityPresetsForModel,
+  resolveQualityPreset,
+  stripCopyCounter,
+} from '../utils/batchImageSettings';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -98,41 +112,8 @@ const debugLog = (...args) => {
   }
 };
 
-// Utility function to sanitize text for display
-const sanitizeText = (text) => {
-  if (!text) return '';
-  return text.replace(/[<>&"]/g, (match) => {
-    const escape = {
-      '<': '&lt;',
-      '>': '&gt;',
-      '&': '&amp;',
-      '"': '&quot;'
-    };
-    return escape[match];
-  });
-};
-
-// Z-Image family test, in ONE place. Z-Image is CFG-free: guidance MUST be 0 and the
-// official sampling recipe is 9 steps. Three call sites previously disagreed - the
-// quality-preset list used a fuzzy includes('zimage') while handleModelChange used an
-// exact === 'zimage-turbo' - so they could classify the same model differently and
-// leave another family's steps/guidance applied.
-const isZimageModel = (m) => {
-  const k = String(m || 'auto').toLowerCase();
-  return k.includes('zimage') || k.includes('z-image') || k === 'auto';
-};
-
-// Legacy batches stored prompts with the old " (i+1)" copy counter baked in.
-// Strip it when rehydrating so re-runs don't compound the marker, and so the
-// even-repeat collapse below can still recover the original quantity.
-// Mirrors _TRAILING_COUNTER in backend/services/image_prompt_sanitize.py.
-const stripCopyCounter = (p) => String(p ?? '').replace(/(?:\s*\(\d{1,3}\))+\s*$/, '').trim() || String(p ?? '');
-
-const ZIMAGE_STEPS = 9;
-const ZIMAGE_GUIDANCE = 0;
-// Steps each Z-Image preset legitimately uses, so the guard below corrects foreign
-// values without fighting the model's own Fast / Standard / High-2K presets.
-const ZIMAGE_PRESET_STEPS = { fast: 6, standard: 9, 'high-2k': 9 };
+// Pull a renderable message out of an API error envelope or a fetch failure.
+const errorMessageFrom = (payload, fallback) => formatUiError(payload) || fallback;
 
 const BatchImageGeneratorPage = ({ embedded = false }) => {
   const theme = useTheme();
@@ -175,15 +156,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [directorGuidance, setDirectorGuidance] = useState("");
   const [isExpanding, setIsExpanding] = useState(false);
 
-  // New: Content presets and quality enhancement state
-  const [contentPresets, setContentPresets] = useState({});
+  // Content type + quality enhancement state
   const [selectedPreset, setSelectedPreset] = useState('auto'); // 'auto' = auto-detect
   const [autoEnhance, setAutoEnhance] = useState(true);
   const [enhanceAnatomy, setEnhanceAnatomy] = useState(true);
   const [enhanceFaces, setEnhanceFaces] = useState(true);
   const [enhanceHands, setEnhanceHands] = useState(true);
-  const [_contentDetection, setContentDetection] = useState(null);
-  const [_analyzingPrompt, setAnalyzingPrompt] = useState(false);
   // Character casting: selected subject ids whose LoRA + trigger get applied.
   const [castSubjectIds, setCastSubjectIds] = useState([]);
 
@@ -284,51 +262,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     })();
   }, []);
 
-  // Quality presets — family-aware (zimage/krea turbo-safe + FLUX + SDXL + classic SD)
-  const modelKey = (params.model || 'auto').toLowerCase();
-  const isFlux = modelKey.includes('flux');
-  const isZimage = modelKey.includes('zimage') || modelKey.includes('z-image') || modelKey === 'auto';
-  const isKreaRaw = modelKey.includes('krea') && modelKey.includes('raw');
-  const isKreaTurbo = modelKey.includes('krea') && !isKreaRaw;
-  const isSdxl = modelKey.includes('xl') || modelKey.includes('sdxl');
-  const qualityPresets = isFlux
-    ? [
-        { value: 'flux-fast', label: 'FLUX Fast', steps: 16, guidance: 3.0, description: 'Faster FLUX.1-dev stills' },
-        { value: 'flux-quality', label: 'FLUX Max Quality', steps: 28, guidance: 3.5, description: 'Default max-quality FLUX.1-dev' },
-        { value: 'flux-ultra', label: 'FLUX Ultra', steps: 40, guidance: 4.0, description: 'Highest steps — slow, peak detail' },
-      ]
-    : isZimage
-      ? [
-          { value: 'fast', label: 'Fast', steps: 6, guidance: 0.0, description: 'Quick draft' },
-          { value: 'standard', label: 'Standard', steps: 9, guidance: 0.0, description: 'Official Turbo recipe (HF)' },
-          // 2026-08-04: 'high' used to SILENTLY rewrite the canvas to 2048×2048 —
-          // users hit 16GB memory crashes without ever choosing 2K. The 2K jump
-          // is now its own explicitly-labeled preset.
-          { value: 'high-2k', label: 'High 2K (2048²)', steps: 9, guidance: 0.0, description: 'Official recipe at 2K canvas — heavy; 16GB cards may refuse' },
-        ]
-      : isKreaTurbo
-        ? [
-            { value: 'fast', label: 'Fast', steps: 6, guidance: 0.0, description: 'Krea turbo CFG-free' },
-            { value: 'standard', label: 'Standard', steps: 8, guidance: 0.0, description: 'Balanced turbo' },
-            { value: 'high', label: 'High Quality', steps: 12, guidance: 0.0, description: 'More steps' },
-          ]
-        : isKreaRaw
-          ? [
-              { value: 'standard', label: 'Standard', steps: 40, guidance: 3.5, description: 'Krea raw quality' },
-              { value: 'high', label: 'High Quality', steps: 52, guidance: 3.5, description: 'Default raw' },
-              { value: 'ultra', label: 'Ultra', steps: 60, guidance: 3.5, description: 'Slow, peak detail' },
-            ]
-          : isSdxl
-            ? [
-                { value: 'fast', label: 'Fast', steps: 20, guidance: 6.0, description: 'Quick SDXL' },
-                { value: 'standard', label: 'Standard', steps: 25, guidance: 7.0, description: 'Balanced SDXL' },
-                { value: 'high', label: 'High Quality', steps: 35, guidance: 7.5, description: 'Final SDXL' },
-              ]
-            : [
-                { value: 'fast', label: 'Fast', steps: 15, guidance: 7.0, description: 'Quick generation, good for testing' },
-                { value: 'standard', label: 'Standard', steps: 20, guidance: 7.5, description: 'Balanced quality and speed' },
-                { value: 'high', label: 'High Quality', steps: 30, guidance: 8.0, description: 'High quality, slower generation' },
-              ];
+  // Quality presets — family-aware (see utils/batchImageSettings for the tables).
+  const family = modelFamily(params.model);
+  const isFlux = family === 'flux';
+  const isZimage = isZimageModel(params.model);
+  const isModernDit = family === 'auto' || family === 'zimage' || family.startsWith('krea');
+  const qualityPresets = qualityPresetsForModel(params.model);
 
   // Dimension presets — base + model-family 2K / Flux~2MP packs (filtered below)
   const dimensionPresetsBase = [
@@ -361,18 +300,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   ];
 
   const dimensionPresetsForModel = (modelValue) => {
-    const m = String(modelValue || 'auto');
-    const isFlux = m.startsWith('flux');
-    const isModernDit =
-      m === 'auto' || m === 'zimage-turbo' || m.startsWith('krea2') || m === 'zimage';
-    const isLegacySd =
-      m === 'realistic-vision' || m === 'epic-realism' || m === 'sd-1.5';
+    const fam = modelFamily(modelValue);
+    const flux = fam === 'flux';
+    const modernDit = fam === 'auto' || fam === 'zimage' || fam.startsWith('krea');
+    const legacySd = fam === 'sd';
     return dimensionPresetsBase.filter((p) => {
       // Draft 512/768 sizes available for Turbo/Krea as well as classic SD / auto
-      if (p.pack === 'legacy') return isLegacySd || m === 'auto' || isModernDit;
-      if (p.pack === '1k') return !isLegacySd || m === 'auto';
-      if (p.pack === '2k') return isModernDit && !isFlux;
-      if (p.pack === 'flux2mp') return isFlux;
+      if (p.pack === 'legacy') return legacySd || modernDit;
+      if (p.pack === '1k') return !legacySd;
+      if (p.pack === '2k') return modernDit && !flux;
+      if (p.pack === 'flux2mp') return flux;
       return true;
     });
   };
@@ -383,57 +320,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     [params.model],
   );
 
-  // Analyze current prompt for content detection
-  const analyzeCurrentPrompt = useCallback(async (prompt) => {
-    if (!prompt) return;
-
-    setAnalyzingPrompt(true);
-    try {
-      const response = await fetch(`${API_BASE}/batch-image/analyze-prompt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt })
-      });
-
-      if (!response.ok) return;
-
-      const data = await response.json();
-      if (data.success && data.data.detection) {
-        setContentDetection(data.data.detection);
-
-        // Detection now only reports what the prompt looks like; it no longer touches
-        // steps/guidance/size. Those came from SD 1.5-era content presets that knew
-        // nothing about the selected model — typing a full-body prompt pushed the UI to
-        // 35 steps / CFG 8.0 even for Krea 2 Turbo (8 steps, CFG-free). The backend
-        // clamped it back at render time, so the panel was showing numbers that never
-        // ran. Sampling belongs to the model's own recipe.
-      }
-    } catch (err) {
-      console.error('Failed to analyze prompt:', err);
-    } finally {
-      setAnalyzingPrompt(false);
-    }
-  }, [selectedPreset, contentPresets]);
-
-  // Analyze prompt when it changes (debounced)
-  useEffect(() => {
-    let promptForAnalysis = '';
-    if (inputMode === 'single') {
-      promptForAnalysis = (batchItems || '').trim();
-    } else {
-      promptForAnalysis = batchItems.split('\n').find(line => line.trim()) || '';
-    }
-    if (!promptForAnalysis || !autoEnhance) {
-      setContentDetection(null);
-      return;
-    }
-
-    const timeoutId = setTimeout(() => {
-      analyzeCurrentPrompt(promptForAnalysis.trim());
-    }, 500); // Debounce 500ms
-
-    return () => clearTimeout(timeoutId);
-  }, [batchItems, autoEnhance, analyzeCurrentPrompt, inputMode]);
+  // Content detection runs server-side at render time (auto_enhance /
+  // content_preset are sent with the batch). The page no longer calls
+  // /analyze-prompt on every keystroke: the result was never rendered.
 
   // NEW: Director expand (uses /batch-image/expand-concept; populates batchItems with plan shots for review/launch)
   const handleDirectorExpand = async () => {
@@ -503,21 +392,6 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       }
     } catch (err) {
       setError('Failed to check service status');
-    }
-  }, []);
-
-  // Load content presets from API
-  const loadContentPresets = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE}/batch-image/presets`);
-      if (!response.ok) return;
-
-      const data = await response.json();
-      if (data.success && data.data.presets) {
-        setContentPresets(data.data.presets);
-      }
-    } catch (err) {
-      console.error('Failed to load content presets:', err);
     }
   }, []);
 
@@ -641,11 +515,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     }
   }, []);
 
-  // Load service status and presets on mount
+  // Load service status, history and queue on mount
   useEffect(() => {
     checkServiceStatus();
     loadBatchHistory();
-    loadContentPresets();
     fetchQueue();
   }, [fetchQueue, loadBatchHistory]);
 
@@ -685,14 +558,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (data.success) {
         const batchStatus = data.data;
         setActiveBatch(batchStatus);
+        // Replace, don't merge: a batch with no successful images must not keep
+        // the previous batch's thumbnails on screen under its own header.
+        setGeneratedImages(mapBatchResultsToImages(batchStatus));
 
-        const images = mapBatchResultsToImages(batchStatus);
-        if (images.length > 0) {
-          setGeneratedImages(images);
-        }
-
-        // Start polling if batch is still running (will be handled by the activeBatch useEffect)
-        // No need to call startPolling here as the useEffect will handle it
+        // Polling for a still-running batch is started by the activeBatch effect.
       }
     } catch (err) {
       setError(`Failed to load batch: ${err.message}`);
@@ -735,16 +605,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           }
 
           setActiveBatch(batchStatus);
+          setGeneratedImages(mapBatchResultsToImages(batchStatus));
 
-          const images = mapBatchResultsToImages(batchStatus);
-          if (images.length > 0) {
-            setGeneratedImages(images);
-          }
-
-          fetchQueue();
-
-          // Stop polling if batch is complete
-          if (['completed', 'error', 'cancelled'].includes(batchStatus.status)) {
+          // The queue panel has its own interval (2.5s while anything runs);
+          // refresh it here only on the terminal transition so the two pollers
+          // don't double the request rate for the life of the batch.
+          if (TERMINAL_BATCH_STATUSES.has(batchStatus.status)) {
             stopPolling();
             setSuccess(`Batch generation ${batchStatus.status}`);
             loadBatchHistory();
@@ -833,20 +699,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     setBatchItems(event.target.value);
   };
 
-  const parseBatchItems = () => {
-    // Split by lines and filter out empty lines
-    const topics = batchItems
-      .split('\n')
-      .map(item => item.trim())
-      .filter(item => item.length > 0);
-
-    // If look & feel is provided, combine it with each topic
-    if (lookAndFeel.trim()) {
-      return topics.map(topic => `${topic}, ${lookAndFeel.trim()}`);
-    }
-
-    return topics;
-  };
+  // The exact prompt list that Start Generation submits (single or bulk mode).
+  const finalPrompts = useMemo(
+    () => buildFinalPrompts({ inputMode, batchItems, lookAndFeel, quantity }),
+    [inputMode, batchItems, lookAndFeel, quantity],
+  );
+  // Distinct prompts before the quantity multiplier — what the counters show.
+  const uniquePromptCount = useMemo(
+    () => buildFinalPrompts({ inputMode, batchItems, lookAndFeel: '', quantity: 1 }).length,
+    [inputMode, batchItems],
+  );
 
   // Handle quality preset changes
   const handleQualityPresetChange = (presetValue) => {
@@ -860,16 +722,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           guidance: preset.guidance,
         };
         // Z-Image High 2K = official sampling at 2K (the real quality lever for
-        // Turbo). Only the EXPLICIT 'high-2k' preset touches the canvas — the
-        // old 'high' preset silently escalated to 2048² (2026-08-04 crashes).
-        const modelKey = String(prev.model || 'auto').toLowerCase();
-        const zimageFamily =
-          modelKey.includes('zimage')
-          || modelKey.includes('z-image')
-          || modelKey === 'auto';
+        // Turbo). Only the EXPLICIT 'high-2k' preset touches the canvas, and
+        // leaving it restores 1K — otherwise a "Fast" draft kept running at 2048²,
+        // which is the 16GB OOM the preset was split out to avoid.
+        const zimageFamily = isZimageModel(prev.model) || modelFamily(prev.model) === 'auto';
         if (zimageFamily && presetValue === 'high-2k') {
           next.width = 2048;
           next.height = 2048;
+        } else if (prev.quality_preset === 'high-2k' && prev.width === 2048 && prev.height === 2048) {
+          next.width = 1024;
+          next.height = 1024;
         }
         return next;
       });
@@ -879,57 +741,58 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // Handle model changes
   const handleModelChange = (modelValue) => {
     setParams(prev => {
+      const fam = modelFamily(modelValue);
       let newParams = { ...prev, model: modelValue };
 
       // Adjust dimensions based on model capabilities.
       // Modern high-res models (SDXL, Z-Image, FLUX, Krea) and 'auto' → 1024.
       // SD1.5-class photoreal finetunes (realistic-vision, epic-realism) are 512-native.
-      if (
-        modelValue.includes('xl')
-        || modelValue.startsWith('krea2')
-        || isZimageModel(modelValue)
-        || modelValue.startsWith('flux')
-        || modelValue === 'auto'
-      ) {
-        newParams.width = 1024;
-        newParams.height = 1024;
-      } else {
+      if (fam === 'sd') {
         newParams.width = 512;
         newParams.height = 512;
+      } else {
+        newParams.width = 1024;
+        newParams.height = 1024;
       }
 
-      // Recommended defaults per model — quality sliders remain free to push higher.
-      if (modelValue === 'krea2-raw') {
-        newParams.steps = 52;
-        newParams.guidance = 3.5;
-      } else if (modelValue === 'krea2-turbo') {
-        newParams.steps = 8;
-        newParams.guidance = 0;
-      } else if (isZimageModel(modelValue)) {
-        // Z-Image is CFG-FREE: guidance MUST be 0, official recipe is 9 steps.
-        // Family test, not `=== 'zimage-turbo'`, so any future zimage-* id is covered
-        // and this agrees with the preset list's own fuzzy check.
-        newParams.steps = ZIMAGE_STEPS;
+      // Every family has its own preset list; a value carried over from another
+      // family (e.g. 'flux-quality' after leaving FLUX, or 'fast' arriving at
+      // Krea Raw) is not in the new list, so the Select showed nothing and the
+      // "Quality" chip described settings not in use. Apply the family default.
+      const presetValue = resolveQualityPreset(modelValue, prev.quality_preset);
+      const preset = qualityPresetsForModel(modelValue).find((p) => p.value === presetValue);
+      newParams.quality_preset = presetValue;
+      if (preset) {
+        newParams.steps = preset.steps;
+        newParams.guidance = preset.guidance;
+      }
+      if (fam === 'zimage') {
+        // Z-Image is CFG-free: guidance MUST be 0, official recipe is 9 steps.
+        newParams.steps = ZIMAGE_PRESET_STEPS[presetValue] ?? ZIMAGE_STEPS;
         newParams.guidance = ZIMAGE_GUIDANCE;
-        // Reset the preset as well. Without this, a preset carried over from another
-        // family (Realistic Vision "High" = 30 steps / guidance 8.0) stays selected;
-        // the Z-Image list has no 'high', so qualityPresets.find() returns undefined
-        // and re-applying it silently does nothing - leaving 30/8.0 in force.
-        newParams.quality_preset = 'standard';
-      } else if (modelValue === 'flux-dev' || modelValue.startsWith('flux')) {
-        // FLUX.1-dev max-quality defaults (FluxGuidance 3.5, 28 steps)
-        newParams.steps = 28;
-        newParams.guidance = 3.5;
+      }
+      if (fam === 'flux') {
         newParams.max_workers = 1; // VRAM safety — heavy Comfy graph
+      }
+      // The explicit High 2K preset is the only thing that puts the canvas at 2048².
+      if (presetValue === 'high-2k') {
+        newParams.width = 2048;
+        newParams.height = 2048;
       }
 
       return newParams;
     });
   };
 
+  // Browsers report CSVs as text/csv, application/vnd.ms-excel, or nothing at
+  // all depending on the OS's file associations, so the extension is the
+  // reliable signal (the backend re-validates by extension too).
+  const isCsvFile = (file) =>
+    !!file && (file.type === 'text/csv' || (file.name || '').toLowerCase().endsWith('.csv'));
+
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (file && file.type === 'text/csv') {
+    if (isCsvFile(file)) {
       setCsvFile(file);
       setError('');
     } else {
@@ -940,8 +803,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
   const handleBlueprintFileUpload = (event) => {
     const file = event.target.files[0];
-    const isCsv = file && (file.type === 'text/csv' || file.name.toLowerCase().endsWith('.csv'));
-    if (isCsv) {
+    if (isCsvFile(file)) {
       setBlueprintFile(file);
       setError('');
     } else {
@@ -1021,87 +883,19 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         setError('Please select a CSV file for upload');
         setLoading(false);
         return;
-      } else if (inputMode === 'single') {
-        // Single prompt: entire text (with newlines/paragraphs) as ONE prompt.
-        // Quantity duplicates the exact same prompt text.
-        const singlePrompt = (batchItems || '').trim();
-        if (!singlePrompt) {
-          setError('Please provide a prompt');
-          setLoading(false);
-          return;
-        }
-        let effectivePrompt = singlePrompt;
-        if (lookAndFeel && lookAndFeel.trim()) {
-          effectivePrompt = `${singlePrompt}, ${lookAndFeel.trim()}`;
-        }
-        let promptsToGenerate = [effectivePrompt];
-        if (quantity > 1) {
-          promptsToGenerate = Array(quantity).fill(effectivePrompt);
-        }
-        debugLog('Batch image single-prompt prepared', { promptCount: promptsToGenerate.length, quantity });
-
-        const uiConfig = {
-          inputMode,
-          batchItems,
-          lookAndFeel,
-          quantity,
-          params,
-          castSubjectIds,
-          selectedPreset,
-          autoEnhance,
-          enhanceAnatomy,
-          enhanceFaces,
-          enhanceHands,
-          directorEnabled,
-          directorGuidance,
-        };
-
-        response = await fetch(`${API_BASE}/batch-image/generate/prompts`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompts: promptsToGenerate,
-            ...params,
-            // Cast characters: backend resolves these to LoRA paths + trigger.
-            subject_ids: castSubjectIds,
-            // Quality enhancement parameters
-            content_preset: selectedPreset === 'auto' ? null : selectedPreset,
-            auto_enhance: autoEnhance,
-            enhance_anatomy: enhanceAnatomy,
-            enhance_faces: enhanceFaces,
-            enhance_hands: enhanceHands,
-            // Director (shared intelligent pipeline with MusicVideo / chat)
-            director_mode: !!directorEnabled,
-            director_guidance: directorGuidance || undefined,
-            ui_config: uiConfig,
-          })
-        });
       } else {
-        // Bulk input (one per line)
-        const validPrompts = parseBatchItems();
-        if (validPrompts.length === 0) {
-          setError('Please provide at least one prompt or topic');
+        // Single (whole text = one prompt) or bulk (one per line). The same
+        // builder feeds the Preview dialog, so what is shown is what is sent.
+        // No " (i+1)" numbering: the backend keys images by position
+        // (prompt_id=prompt_N) and the text encoder read the counter as content.
+        const promptsToGenerate = finalPrompts;
+        if (promptsToGenerate.length === 0) {
+          setError(inputMode === 'single' ? 'Please provide a prompt' : 'Please provide at least one prompt or topic');
           setLoading(false);
           return;
         }
 
-        // Duplicate prompts based on quantity. No " (i+1)" numbering: the backend
-        // keys images by position (prompt_id=prompt_N), never by prompt text, so
-        // the counter bought nothing and the text encoder tokenized it as content.
-        // Worse, it was stored in retry_data and re-appended on every re-run, so
-        // markers compounded ("… (2) (2)"). The single-prompt path above has always
-        // sent plain identical copies.
-        let promptsToGenerate = validPrompts;
-        if (quantity > 1) {
-          promptsToGenerate = [];
-          validPrompts.forEach(prompt => {
-            for (let i = 0; i < quantity; i++) {
-              promptsToGenerate.push(prompt);
-            }
-          });
-        }
-
-        debugLog('Batch image prompts prepared', { promptCount: promptsToGenerate.length });
+        debugLog('Batch image prompts prepared', { promptCount: promptsToGenerate.length, quantity });
 
         const uiConfig = {
           inputMode,
@@ -1143,22 +937,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
       // Check if response is ok before parsing JSON
       if (!response.ok) {
-        // Try to parse error response
-        let errorMessage = `Failed to start generation: HTTP ${response.status}`;
+        let errorMessage = `Failed to start generation: HTTP ${response.status} ${response.statusText}`;
         try {
-          const errorData = await response.json();
-          if (errorData.error) {
-            if (typeof errorData.error === 'object' && errorData.error.message) {
-              errorMessage = errorData.error.message;
-            } else if (typeof errorData.error === 'string') {
-              errorMessage = errorData.error;
-            }
-          } else if (errorData.message) {
-            errorMessage = errorData.message;
-          }
+          errorMessage = errorMessageFrom(await response.json(), errorMessage);
         } catch (e) {
-          // If JSON parsing fails, use status text
-          errorMessage = `Failed to start generation: HTTP ${response.status} ${response.statusText}`;
+          // Non-JSON body: keep the HTTP status text.
         }
         setError(errorMessage);
         setLoading(false);
@@ -1204,8 +987,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         fetchQueue();
         loadBatchHistory();
       } else {
-        const errorMsg = data.error?.message || data.error || data.message || 'Failed to start generation';
-        setError(errorMsg);
+        setError(errorMessageFrom(data, 'Failed to start generation'));
       }
     } catch (err) {
       console.error('Generation error:', err);
@@ -1215,37 +997,36 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     }
   };
 
-  const cancelGeneration = async () => {
-    if (!activeBatch) return;
-
+  // POST /cancel for one batch; returns true on success and surfaces the
+  // server's message otherwise. Shared by the Cancel button and the queue rows.
+  const requestCancel = useCallback(async (batchId) => {
     try {
-      const response = await fetch(`${API_BASE}/batch-image/cancel/${activeBatch.batch_id}`, {
-        method: 'POST'
-      });
-
-      if (!response.ok) {
-        setError(`Failed to cancel generation: HTTP ${response.status}`);
-        return;
+      const response = await fetch(`${API_BASE}/batch-image/cancel/${batchId}`, { method: 'POST' });
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (e) {
+        data = null;
       }
-
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        setError('Cancel response is not JSON');
-        return;
+      if (!response.ok || !data?.success) {
+        setError(errorMessageFrom(data, `Failed to cancel generation: HTTP ${response.status}`));
+        return false;
       }
-
-      const data = await response.json();
-      if (data.success) {
-        setSuccess('Batch generation cancelled');
-        stopPolling();
-        setActiveBatch(prev => prev ? { ...prev, status: 'cancelled' } : null);
-        fetchQueue();
-      } else {
-        setError(data.error || 'Failed to cancel generation');
-      }
+      return true;
     } catch (err) {
       setError('Failed to cancel generation: ' + err.message);
+      return false;
     }
+  }, []);
+
+  const cancelGeneration = async () => {
+    if (!activeBatch) return;
+    const ok = await requestCancel(activeBatch.batch_id);
+    if (!ok) return;
+    setSuccess('Batch generation cancelled');
+    stopPolling();
+    setActiveBatch(prev => prev ? { ...prev, status: 'cancelled' } : null);
+    fetchQueue();
   };
 
   // Stable identity: this is handed to every batch history card, which is memoised.
@@ -1699,7 +1480,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   />
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                     <Typography variant="caption" color="text.secondary">
-                      {parseBatchItems().length} prompts ready for generation (bulk mode)
+                      {uniquePromptCount} prompts ready for generation (bulk mode)
                     </Typography>
                     <Button
                       variant="text"
@@ -1754,7 +1535,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   />
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <Typography variant="caption" color="text.secondary">
-                      {inputMode === 'single' ? 'Style will be appended to your single prompt' : `This style will be applied to all ${parseBatchItems().length} prompts above`}
+                      {inputMode === 'single' ? 'Style will be appended to your single prompt' : `This style will be applied to all ${uniquePromptCount} prompts above`}
                     </Typography>
                     <Button
                       variant="outlined"
@@ -1969,13 +1750,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               value={params.quality_preset}
                               onChange={(e) => handleQualityPresetChange(e.target.value)}
                             >
-                              {qualityPresets
-                                .filter((option) => {
-                                  const isFlux = String(params.model || '').startsWith('flux');
-                                  const isFluxPreset = option.value.startsWith('flux');
-                                  return isFlux ? isFluxPreset || option.value === 'standard' : !isFluxPreset;
-                                })
-                                .map(option => (
+                              {qualityPresets.map(option => (
                                 <MenuItem key={option.value} value={option.value}>
                                   <Box>
                                     <Typography variant="body2">{option.label}</Typography>
@@ -1990,9 +1765,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                         </Grid>
 
                         <Grid item xs={12}>
-                          {/* Auto-detect analyses the prompt and applies a content preset's recommended
-                              settings. It runs invisibly on every prompt edit, so give the user a way to
-                              turn it off when they have deliberately chosen their own steps/guidance. */}
+                          {/* auto_enhance picks the prompt-enhancement rung at render time
+                              (stills_policy.resolve_enhance_mode). It never touches steps,
+                              guidance or size — those come from the model's recipe above. */}
                           <FormControlLabel
                             control={
                               <Switch
@@ -2003,11 +1778,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             }
                             label={
                               <Box>
-                                <Typography variant="body2">Auto-detect settings from prompt</Typography>
+                                <Typography variant="body2">Enhance prompts automatically</Typography>
                                 <Typography variant="caption" color="text.secondary">
                                   {autoEnhance
-                                    ? 'Adjusts steps and guidance based on the prompt. Off = your settings are kept exactly.'
-                                    : 'Off — your steps and guidance are left exactly as you set them.'}
+                                    ? 'Adds the content type\u2019s quality and anatomy phrasing (and negatives) to each prompt. Steps and guidance are not changed.'
+                                    : 'Off — prompts are sent as written.'}
                                 </Typography>
                               </Box>
                             }
@@ -2036,8 +1811,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             label="Number of Images per Prompt"
                             type="number"
                             value={quantity}
-                            onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value) || 1))}
-                            inputProps={{ min: 1, max: 100 }}
+                            onChange={(e) => setQuantity(clampQuantity(e.target.value))}
+                            inputProps={{ min: 1, max: MAX_QUANTITY }}
                           />
                           <Button
                             variant="outlined"
@@ -2083,9 +1858,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                                 </MenuItem>
                               ))}
                             </Select>
-                            {(String(params.model).startsWith('flux')
-                              || params.model === 'zimage-turbo'
-                              || String(params.model).startsWith('krea2'))
+                            {(isFlux || isModernDit)
                               && (params.width * params.height > 1024 * 1024) && (
                               <Typography variant="caption" color="warning.main" sx={{ mt: 0.5, display: 'block' }}>
                                 High-res (&gt;1MP): more VRAM; may OOM on 16GB cards.
@@ -2097,7 +1870,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                         <Grid item xs={12}>
                           <Typography gutterBottom>
                             Steps: {params.steps}
-                            {String(params.model).startsWith('flux') ? ' (FLUX quality ↑ with more steps)' : ''}
+                            {isFlux ? ' (FLUX quality ↑ with more steps)' : ''}
                           </Typography>
                           <Slider
                             value={params.steps}
@@ -2117,27 +1890,33 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
                         <Grid item xs={12}>
                           <Typography gutterBottom>
-                            {isZimageModel(params.model)
+                            {isZimage
                               ? 'Guidance Scale: 0 (CFG-free model)'
-                              : String(params.model).startsWith('flux')
+                              : isFlux
                                 ? `FluxGuidance: ${params.guidance}`
                                 : `Guidance Scale: ${params.guidance}`}
                           </Typography>
                           {/* Z-Image is CFG-free: there is NO valid non-zero guidance. Any other value
                               produces washed-out, over-cooked output, so the control is disabled rather
-                              than left free to drift off the only correct setting. */}
+                              than left free to drift off the only correct setting. `auto` is left
+                              editable: the router may pick SDXL, which does use CFG. */}
                           <Slider
-                            value={isZimageModel(params.model) ? ZIMAGE_GUIDANCE : params.guidance}
+                            value={isZimage ? ZIMAGE_GUIDANCE : params.guidance}
                             onChange={(e, value) => setParams({ ...params, guidance: value })}
                             min={0}
-                            max={String(params.model).startsWith('flux') ? 6 : 20}
+                            max={isFlux ? 6 : 20}
                             step={0.5}
                             marks
-                            disabled={isZimageModel(params.model)}
+                            disabled={isZimage}
                           />
-                          {isZimageModel(params.model) && (
+                          {isZimage && (
                             <Typography variant="caption" color="text.secondary">
                               Z-Image runs CFG-free — guidance is fixed at 0. Use Steps for quality.
+                            </Typography>
+                          )}
+                          {family === 'auto' && (
+                            <Typography variant="caption" color="text.secondary">
+                              Auto routes per prompt. The usual pick (Z-Image) is CFG-free — keep 0 unless you expect an SDXL route.
                             </Typography>
                           )}
                         </Grid>
@@ -2302,14 +2081,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               <IconButton
                                 size="small"
                                 onClick={async () => {
-                                  try {
-                                    await fetch(`${API_BASE}/batch-image/cancel/${q.batch_id}`, { method: 'POST' });
-                                    fetchQueue();
-                                    if (activeBatch?.batch_id === q.batch_id) {
-                                      setActiveBatch((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
-                                    }
-                                  } catch (e) {
-                                    setError(`Cancel failed: ${e.message}`);
+                                  const ok = await requestCancel(q.batch_id);
+                                  fetchQueue();
+                                  if (ok && activeBatch?.batch_id === q.batch_id) {
+                                    setActiveBatch((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
                                   }
                                 }}
                                 aria-label="cancel batch"
@@ -2447,10 +2222,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       // Otherwise use the main image name (serving logic will fallback if needed).
                       let thumbnailUrl = '';
                       if (batchIdForUrl) {
-                        if (image.thumbnailFilename) {
-                          thumbnailUrl = `${API_BASE}/batch-image/image/${batchIdForUrl}/${image.thumbnailFilename}?thumbnail=true`;
-                        } else if (image.imageFilename) {
-                          thumbnailUrl = `${API_BASE}/batch-image/image/${batchIdForUrl}/${image.imageFilename}?thumbnail=true`;
+                        const thumbName = image.thumbnailFilename || image.imageFilename;
+                        if (thumbName) {
+                          thumbnailUrl = `${API_BASE}/batch-image/image/${batchIdForUrl}/${encodeFilename(thumbName)}?thumbnail=true`;
                         }
                       }
 
@@ -2469,7 +2243,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               // Robust fallback: always try the full original image (no ?thumbnail) before hiding.
                               // This ensures we show *something* even if dedicated thumbnail is missing or 404s.
                               if (image.imageFilename && batchIdForUrl && !e.target.dataset.fallbackAttempted) {
-                                e.target.src = `${API_BASE}/batch-image/image/${batchIdForUrl}/${image.imageFilename}`;
+                                e.target.src = `${API_BASE}/batch-image/image/${batchIdForUrl}/${encodeFilename(image.imageFilename)}`;
                                 e.target.dataset.fallbackAttempted = 'true';
                               } else if (!e.target.dataset.hidden) {
                                 // Only hide as last resort
@@ -2487,12 +2261,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             }}
                           />
                           <ImageListItemBar
-                            title={image.prompt ? sanitizeText(image.prompt).substring(0, 30) + '...' : 'No prompt'}
+                            title={image.prompt ? image.prompt.substring(0, 30) + '...' : 'No prompt'}
                             actionIcon={
                               <IconButton
                                 sx={{ color: 'rgba(255, 255, 255, 0.54)' }}
                                 onClick={() => openImageViewer(image)}
-                                aria-label={`View full image: ${sanitizeText(image.prompt) || 'Generated image'}`}
+                                aria-label={`View full image: ${image.prompt || 'Generated image'}`}
                               >
                                 <Visibility />
                               </IconButton>
@@ -2588,54 +2362,31 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         fullWidth
       >
         <DialogTitle>
-          Preview Generated Prompts ({inputMode === 'single' ? 1 : parseBatchItems().length}{inputMode === 'single' && quantity > 1 ? ` × ${quantity}` : ''})
+          Preview Generated Prompts ({uniquePromptCount}{quantity > 1 ? ` × ${quantity}` : ''})
         </DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             These are the final prompts that will be sent to the image generator:
           </Typography>
           <Box sx={{ maxHeight: 400, overflow: 'auto' }}>
-            {inputMode === 'single' ? (
-              (() => {
-                const single = (batchItems || '').trim();
-                const items = quantity > 1 ? Array(quantity).fill(single) : [single];
-                return items.map((prompt, index) => (
-                  <Paper
-                    key={index}
-                    variant="outlined"
-                    sx={{
-                      p: 2,
-                      mb: 1,
-                      backgroundColor: 'background.default',
-                      border: '1px solid',
-                      borderColor: 'divider'
-                    }}
-                  >
-                    <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                      <strong>{index + 1}.</strong> {sanitizeText(prompt)}
-                    </Typography>
-                  </Paper>
-                ));
-              })()
-            ) : (
-              parseBatchItems().map((prompt, index) => (
-                <Paper
-                  key={index}
-                  variant="outlined"
-                  sx={{
-                    p: 2,
-                    mb: 1,
-                    backgroundColor: 'background.default',
-                    border: '1px solid',
-                    borderColor: 'divider'
-                  }}
-                >
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                    <strong>{index + 1}.</strong> {sanitizeText(prompt)}
-                  </Typography>
-                </Paper>
-              ))
-            )}
+            {/* Same list startGeneration submits (Look & Feel appended, quantity applied). */}
+            {finalPrompts.map((prompt, index) => (
+              <Paper
+                key={index}
+                variant="outlined"
+                sx={{
+                  p: 2,
+                  mb: 1,
+                  backgroundColor: 'background.default',
+                  border: '1px solid',
+                  borderColor: 'divider'
+                }}
+              >
+                <Typography variant="body2" sx={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+                  <strong>{index + 1}.</strong> {prompt}
+                </Typography>
+              </Paper>
+            ))}
           </Box>
         </DialogContent>
         <DialogActions>

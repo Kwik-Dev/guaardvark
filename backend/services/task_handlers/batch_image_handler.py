@@ -51,12 +51,14 @@ class BatchImageHandler(BaseTaskHandler):
                             "prompt": {"type": "string"},
                             "negative_prompt": {"type": "string", "default": ""},
                             "style": {"type": "string", "default": "realistic"},
-                            "width": {"type": "integer", "default": 512},
-                            "height": {"type": "integer", "default": 512},
-                            "steps": {"type": "integer", "default": 20},
-                            "guidance": {"type": "number", "default": 7.5},
+                            # Size/steps/guidance default per model family
+                            # (stills_defaults.resolve_stills_defaults) when omitted.
+                            "width": {"type": "integer"},
+                            "height": {"type": "integer"},
+                            "steps": {"type": "integer"},
+                            "guidance": {"type": "number"},
                             "seed": {"type": "integer"},
-                            "model": {"type": "string", "default": "sd-1.5"}
+                            "model": {"type": "string", "default": "auto"}
                         },
                         "required": ["prompt"]
                     },
@@ -64,18 +66,23 @@ class BatchImageHandler(BaseTaskHandler):
                 },
                 "batch_name": {
                     "type": "string",
-                    "description": "Name for the batch"
+                    "description": "Display name for the batch"
                 },
                 "model": {
                     "type": "string",
                     "default": "auto",
-                    "enum": ["auto", "krea2-turbo", "krea2-raw", "zimage-turbo", "sd-xl", "sdxl-turbo", "realistic-vision", "epic-realism"],
+                    "enum": ["auto", "zimage-turbo", "flux-dev", "krea2-turbo", "krea2-raw", "sd-xl", "sdxl-turbo", "realistic-vision", "epic-realism"],
                     "description": "Image model; 'auto' lets the router pick the best downloaded model"
                 },
                 "max_workers": {
                     "type": "integer",
                     "default": 2,
                     "description": "Number of concurrent workers (use 1 for GPU)"
+                },
+                "max_wait_seconds": {
+                    "type": "integer",
+                    "default": 3600,
+                    "description": "Cancel the batch and fail the task if it has not finished by then"
                 },
                 "generate_thumbnails": {
                     "type": "boolean",
@@ -84,8 +91,8 @@ class BatchImageHandler(BaseTaskHandler):
                 },
                 "content_preset": {
                     "type": "string",
-                    "enum": ["auto", "person_portrait", "person_full_body", "product_photo", "landscape", "abstract"],
-                    "description": "Content preset for quality enhancement"
+                    "enum": ["person_portrait", "person_full_body", "person_working", "product_photo", "landscape", "infographic_preset", "general"],
+                    "description": "Content preset for prompt shaping; omit to auto-detect"
                 },
                 "auto_enhance": {
                     "type": "boolean",
@@ -231,30 +238,38 @@ class BatchImageHandler(BaseTaskHandler):
             progress_callback(5, f"Starting generation of {len(batch_prompts)} images", None)
 
             # Create batch request
-            batch_name = config.get("batch_name", f"task_{task.id}")
+            batch_name = config.get("batch_name") or f"task_{task.id}"
             max_workers = config.get("max_workers", 2)
             generate_thumbnails = config.get("generate_thumbnails", True)
 
-            # Create output directory
-            output_dir = generator._create_output_directory(
-                generator._generate_batch_id() if not hasattr(task, 'job_id') else f"batch_{task.job_id}"
-            )
-
+            # start_batch_generation() owns the output directory: it creates
+            # <base>/<batch_id>/ and writes it back onto the request. Creating a
+            # second folder here under a different id left an empty orphan that
+            # output_data then pointed at.
+            job_id = getattr(task, "job_id", None)
             request = BatchImageRequest(
-                batch_id=f"task_{task.id}_{task.job_id or 'sync'}",
+                batch_id=f"task_{task.id}_{job_id or 'sync'}",
                 prompts=batch_prompts,
-                output_dir=str(output_dir),
+                output_dir="",
                 max_workers=max_workers,
                 generate_thumbnails=generate_thumbnails,
                 content_preset=content_preset,
                 auto_enhance=auto_enhance,
                 enhance_anatomy=enhance_anatomy,
                 enhance_faces=enhance_faces,
-                enhance_hands=enhance_hands
+                enhance_hands=enhance_hands,
+                ui_config={"batch_name": batch_name, "task_id": task.id},
             )
 
             # Start batch generation (this runs in a background thread)
             batch_id = generator.start_batch_generation(request)
+            output_dir = request.output_dir
+            try:
+                status = generator.get_batch_status(batch_id)
+                if status is not None:
+                    status.display_name = batch_name
+            except Exception:
+                pass
 
             progress_callback(10, f"Batch {batch_id} started", {
                 "batch_id": batch_id,
@@ -267,9 +282,10 @@ class BatchImageHandler(BaseTaskHandler):
             total_images = len(batch_prompts)
 
             import time
-            max_wait_seconds = 3600  # 1 hour max
+            max_wait_seconds = int(config.get("max_wait_seconds") or 3600)
             poll_interval = 2  # Check every 2 seconds
             waited = 0
+            timed_out = True
 
             while waited < max_wait_seconds:
                 status = generator.get_batch_status(batch_id)
@@ -300,6 +316,7 @@ class BatchImageHandler(BaseTaskHandler):
                 })
 
                 if status.status in ("completed", "error", "cancelled"):
+                    timed_out = False
                     break
 
                 time.sleep(poll_interval)
@@ -309,6 +326,24 @@ class BatchImageHandler(BaseTaskHandler):
             final_status = generator.get_batch_status(batch_id)
             completed_at = datetime.now()
             duration = (completed_at - started_at).total_seconds()
+
+            if timed_out:
+                # Stop the batch rather than leaving it running behind a task
+                # that has already reported a result.
+                try:
+                    generator.cancel_batch(batch_id)
+                except Exception as cancel_err:
+                    logger.warning(f"Could not cancel timed-out batch {batch_id}: {cancel_err}")
+                return TaskResult(
+                    status=TaskResultStatus.FAILED,
+                    message=f"Batch {batch_id} did not finish within {max_wait_seconds}s; cancelled",
+                    error_message="timeout",
+                    items_processed=completed_images,
+                    items_total=total_images,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    duration_seconds=duration
+                )
 
             if final_status is None:
                 return TaskResult(

@@ -48,9 +48,10 @@ const ImageBatchWindow = ({
     }
   }, [batch, onFeedback]);
 
+  // Backend terminal failure status is 'error' (BatchGenerationStatus.status).
   const statusColor = batch?.status === 'completed' ? 'success'
-    : batch?.status === 'running' ? 'warning'
-    : batch?.status === 'failed' ? 'error'
+    : batch?.status === 'running' || batch?.status === 'queued' ? 'warning'
+    : batch?.status === 'error' || batch?.status === 'failed' ? 'error'
     : 'default';
 
   const titleBarActions = (

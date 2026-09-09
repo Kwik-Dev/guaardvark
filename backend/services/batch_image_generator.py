@@ -99,6 +99,15 @@ class BatchImageRequest:
     ui_config: Optional[Dict[str, Any]] = None
     retry_data: Optional[Dict[str, Any]] = None
 
+
+# Batch-level kwargs the create_batch_from_* factories forward into
+# BatchImageRequest. Derived from the dataclass so a new field is carried
+# automatically; the API's per-prompt keys (model, width, ...) are excluded
+# because they are applied to each BatchPrompt instead.
+_BATCH_REQUEST_PARAMS = frozenset(
+    BatchImageRequest.__dataclass_fields__.keys()
+) - {"batch_id", "prompts", "output_dir"}
+
 @dataclass
 class BatchImageResult:
     prompt_id: str
@@ -524,6 +533,45 @@ class BatchImageGenerator:
             except Exception:
                 pass
 
+    def _finish_cancelled_before_start(
+        self,
+        batch_id: str,
+        batch_status: BatchGenerationStatus,
+        output_dir: Path,
+        request: BatchImageRequest,
+        reason: str,
+    ) -> None:
+        """Terminal bookkeeping for a batch cancelled before any image ran.
+
+        The progress process is created at the top of run_batch(), before the
+        VRAM wait, so a cancel there has to close it too or the socket side
+        never learns the batch ended.
+        """
+        batch_status.status = "cancelled"
+        if not batch_status.error:
+            batch_status.error = reason
+        batch_status.end_time = datetime.now()
+        batch_status.gpu_wait_reason = None
+        if request.save_metadata:
+            try:
+                self._save_batch_metadata(batch_status, output_dir)
+            except Exception:
+                pass
+        if self.progress_system:
+            try:
+                self.progress_system.cancel_process(
+                    process_id=batch_id,
+                    message=f"Batch generation cancelled: {reason}",
+                    additional_data={
+                        "batch_id": batch_id,
+                        "completed": batch_status.completed_images,
+                        "failed": batch_status.failed_images,
+                        "total": batch_status.total_images,
+                    },
+                )
+            except Exception:
+                pass
+
     @staticmethod
     def _is_comfy_flux_model(model_key: str | None) -> bool:
         k = (model_key or "").strip().lower()
@@ -804,11 +852,16 @@ class BatchImageGenerator:
                 error=str(e)
             )
         finally:
+            # An exception raised here would replace the function's return value
+            # with a traceback, so the CUDA cache flush is best-effort.
             import gc
-            import torch
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
         # Pipeline unload is deferred to batch completion (_cleanup_gpu_memory at
         # run_batch end). Per-image cleanup defeated keep_pipeline_loaded and caused
         # full Z-Image reload + RAM spike → OOM on multi-image batches.
@@ -873,6 +926,14 @@ class BatchImageGenerator:
                 resolve_enhance_mode,
             )
 
+            # BatchImageRequest has no style field of its own; the page applies
+            # one style to every row, so the first prompt's style stands for
+            # the batch. (Reading request.style here always yielded "".)
+            batch_style = next(
+                (bp.style for bp in request.prompts if (getattr(bp, "style", "") or "").strip()),
+                "",
+            )
+
             if getattr(request, "storyboard_concept", None):
                 concept = (request.storyboard_concept or "").strip()
                 n = len(request.prompts)
@@ -880,7 +941,7 @@ class BatchImageGenerator:
                     from backend.services.media_director import storyboard_from_concept
                     res = storyboard_from_concept(
                         concept, n,
-                        style=(getattr(request, "look_and_feel", None) or ""),
+                        style=batch_style,
                         extra_guidance=getattr(request, "director_guidance", None),
                     )
                     shots = res.get("prompts") or []
@@ -914,7 +975,7 @@ class BatchImageGenerator:
                 return
             # Prefer stills_policy director path (enhance_prompts); fall back to
             # media_direct_enhance alias if needed.
-            style = getattr(request, "style", "") or ""
+            style = batch_style
             guidance = getattr(request, "director_guidance", None)
             directed = apply_enhance_to_prompts(
                 raw, enhance_mode="director", style=style, extra_guidance=guidance,
@@ -1123,6 +1184,16 @@ class BatchImageGenerator:
                     max_workers = 1 if self._batch_uses_cuda_offline_gen() else request.max_workers
 
                     results = []
+                    # preserve_order: results are listed in prompt order rather than
+                    # completion order (they differ whenever max_workers > 1).
+                    prompt_order = {p.id: i for i, p in enumerate(request.prompts)}
+
+                    def _ordered_results() -> List[BatchImageResult]:
+                        # A new list, not an in-place sort: /status may be iterating
+                        # batch_status.results from another thread.
+                        if not request.preserve_order:
+                            return list(results)
+                        return sorted(results, key=lambda r: prompt_order.get(r.prompt_id, len(prompt_order)))
 
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         self.executors[batch_id] = executor
@@ -1180,7 +1251,7 @@ class BatchImageGenerator:
                                                 if not batch_status.error:
                                                     batch_status.error = result.error
 
-                                            batch_status.results = results
+                                            batch_status.results = _ordered_results()
 
                                         if request.save_metadata:
                                             try:
@@ -1345,10 +1416,10 @@ class BatchImageGenerator:
 
                 while True:
                     if cancel_event and cancel_event.is_set():
-                        batch_status.status = "cancelled"
-                        batch_status.error = "Cancelled while waiting for GPU/VRAM"
-                        batch_status.end_time = datetime.now()
-                        batch_status.gpu_wait_reason = None
+                        self._finish_cancelled_before_start(
+                            batch_id, batch_status, output_dir, request,
+                            "Cancelled while waiting for GPU/VRAM",
+                        )
                         return
 
                     try:
@@ -1469,6 +1540,14 @@ class BatchImageGenerator:
             logger.info(f"Cancelled batch generation {batch_id}")
             return True
 
+    def forget_batch(self, batch_id: str) -> None:
+        """Drop every in-memory trace of a batch (after its files are deleted)."""
+        with self.batch_lock:
+            self.active_batches.pop(batch_id, None)
+            self.cancel_events.pop(batch_id, None)
+            self.executors.pop(batch_id, None)
+            self.queue_order = [b for b in self.queue_order if b != batch_id]
+
     def list_queue(self) -> List[Dict[str, Any]]:
         """Snapshot of the in-process image batch queue for the UI panel."""
         snapshot = []
@@ -1549,6 +1628,7 @@ class BatchImageGenerator:
             logger.error(f"Blueprint dependencies missing: {e}")
             batch_status.status = "error"
             batch_status.error = str(e)
+            batch_status.end_time = datetime.now()
             return
 
         batch_status.status = "running"
@@ -1601,6 +1681,10 @@ class BatchImageGenerator:
         csv_input = csv.DictReader(stream)
 
         for row in csv_input:
+            if batch_status.status == "cancelled":
+                logger.info(f"Blueprint batch {batch_id} cancelled after {len(results)} rows")
+                break
+
             city = row.get('city') or row.get('City') or row.get('name')
             if not city:
                 continue
@@ -1643,7 +1727,9 @@ class BatchImageGenerator:
 
                 img = Image.new('RGB', (width, height), color=colors['bg'])
                 draw = ImageDraw.Draw(img)
-                random.seed(city)
+                # Per-row generator: the layout is reproducible per city without
+                # reseeding the process-wide RNG from a background thread.
+                rng = random.Random(city)
 
                 density = min(data_count, 1000)
                 nodes = []
@@ -1651,23 +1737,23 @@ class BatchImageGenerator:
                 if style == 'tech':
                     hero_color = colors['nodes'][sum(ord(c) for c in city) % len(colors['nodes'])]
                     for i in range(density):
-                        x = random.randint(50, width - 50)
-                        y = random.randint(50, height - 50)
+                        x = rng.randint(50, width - 50)
+                        y = rng.randint(50, height - 50)
                         nodes.append((x, y))
                         if i > 0 and i % 3 == 0:
-                            prev = nodes[random.randint(0, i - 1)]
+                            prev = nodes[rng.randint(0, i - 1)]
                             draw.line([x, y, prev[0], prev[1]], fill=colors['lines'], width=1)
                     for x, y in nodes:
                         draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill=hero_color)
 
                 elif style == 'constellation':
                     for _ in range(density):
-                        x = random.randint(50, width - 50)
-                        y = random.randint(50, height - 50)
+                        x = rng.randint(50, width - 50)
+                        y = rng.randint(50, height - 50)
                         nodes.append((x, y))
 
                     for i, (x1, y1) in enumerate(nodes):
-                        node_color = random.choice(colors['nodes'])
+                        node_color = rng.choice(colors['nodes'])
                         draw.ellipse([x1 - 2, y1 - 2, x1 + 2, y1 + 2], fill=node_color)
 
                         draw.ellipse([x1 - 4, y1 - 4, x1 + 4, y1 + 4], outline=node_color, width=0)
@@ -1675,7 +1761,7 @@ class BatchImageGenerator:
                         closest_dist = float('inf')
                         closest_idx = -1
 
-                        check_indices = random.sample(range(len(nodes)), min(20, len(nodes)))
+                        check_indices = rng.sample(range(len(nodes)), min(20, len(nodes)))
                         for j in check_indices:
                             if i == j: continue
                             x2, y2 = nodes[j]
@@ -1695,12 +1781,12 @@ class BatchImageGenerator:
                         draw.ellipse([cx-r, cy-r, cx+r, cy+r], outline=colors['lines'], width=1)
 
                     for i in range(density):
-                        angle = random.uniform(0, 2 * math.pi)
-                        dist = random.uniform(0, height // 2 - 20)
+                        angle = rng.uniform(0, 2 * math.pi)
+                        dist = rng.uniform(0, height // 2 - 20)
                         x = int(cx + dist * math.cos(angle) * (width/height))
                         y = int(cy + dist * math.sin(angle))
 
-                        is_crisis = random.random() < 0.2
+                        is_crisis = rng.random() < 0.2
                         node_color = colors['nodes'][1] if is_crisis else colors['nodes'][0]
 
                         size = 3
@@ -1709,12 +1795,12 @@ class BatchImageGenerator:
                 elif style == 'foundation':
                     grid_size = 40
                     for i in range(density):
-                        gx = random.randint(2, (width // grid_size) - 2) * grid_size
-                        gy = random.randint(2, (height // grid_size) - 2) * grid_size
+                        gx = rng.randint(2, (width // grid_size) - 2) * grid_size
+                        gy = rng.randint(2, (height // grid_size) - 2) * grid_size
                         nodes.append((gx, gy))
 
                         if i > 0 and i % 2 == 0:
-                            prev = nodes[random.randint(0, i-1)]
+                            prev = nodes[rng.randint(0, i-1)]
                             mid_x = prev[0]
                             mid_y = gy
                             draw.line([gx, gy, mid_x, mid_y], fill=colors['lines'], width=1)
@@ -1725,24 +1811,24 @@ class BatchImageGenerator:
                 elif style == 'circuit':
                     trace_y_lanes = list(range(60, height - 60, 35))
                     for ty in trace_y_lanes:
-                        jitter = random.randint(-2, 2)
+                        jitter = rng.randint(-2, 2)
                         draw.line([40, ty + jitter, width - 40, ty + jitter], fill=colors['lines'], width=1)
 
                     for i in range(density):
-                        lane = random.choice(trace_y_lanes)
-                        x = random.randint(60, width - 60)
-                        y = lane + random.randint(-4, 4)
+                        lane = rng.choice(trace_y_lanes)
+                        x = rng.randint(60, width - 60)
+                        y = lane + rng.randint(-4, 4)
                         nodes.append((x, y))
-                        node_color = random.choice(colors['nodes'])
+                        node_color = rng.choice(colors['nodes'])
 
-                        if random.random() < 0.3:
-                            pw, ph = random.choice([(6, 4), (8, 3), (4, 6)])
+                        if rng.random() < 0.3:
+                            pw, ph = rng.choice([(6, 4), (8, 3), (4, 6)])
                             draw.rectangle([x - pw, y - ph, x + pw, y + ph], fill=node_color, outline=colors['lines'])
                         else:
                             draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill=node_color)
 
                         if i > 0 and i % 4 == 0:
-                            target_lane = random.choice(trace_y_lanes)
+                            target_lane = rng.choice(trace_y_lanes)
                             draw.line([x, y, x, target_lane], fill=colors['lines'], width=1)
 
                 elif style == 'scales':
@@ -1751,31 +1837,31 @@ class BatchImageGenerator:
                     draw.line([cx, 30, cx, height - 30], fill=colors['lines'], width=1)
 
                     for by in range(80, height - 40, 70):
-                        beam_w = random.randint(200, width // 2 - 50)
+                        beam_w = rng.randint(200, width // 2 - 50)
                         draw.line([cx - beam_w, by, cx + beam_w, by], fill=colors['lines'], width=1)
 
                     half_density = density // 2
                     left_nodes = []
                     right_nodes = []
                     for i in range(half_density):
-                        x = random.randint(50, cx - 30)
-                        y = random.randint(50, height - 50)
+                        x = rng.randint(50, cx - 30)
+                        y = rng.randint(50, height - 50)
                         left_nodes.append((x, y))
                         mx = cx + (cx - x)
                         right_nodes.append((mx, y))
 
                     for i, (x, y) in enumerate(left_nodes):
-                        node_color = random.choice(colors['nodes'])
+                        node_color = rng.choice(colors['nodes'])
                         draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill=node_color)
                         if i > 0 and i % 3 == 0:
-                            prev = left_nodes[random.randint(0, i - 1)]
+                            prev = left_nodes[rng.randint(0, i - 1)]
                             draw.line([x, y, prev[0], prev[1]], fill=colors['lines'], width=1)
 
                     for i, (mx, y) in enumerate(right_nodes):
-                        node_color = random.choice(colors['nodes'])
+                        node_color = rng.choice(colors['nodes'])
                         draw.ellipse([mx - 2, y - 2, mx + 2, y + 2], fill=node_color)
                         if i > 0 and i % 3 == 0:
-                            prev = right_nodes[random.randint(0, i - 1)]
+                            prev = right_nodes[rng.randint(0, i - 1)]
                             draw.line([mx, y, prev[0], prev[1]], fill=colors['lines'], width=1)
 
                     nodes = left_nodes + right_nodes
@@ -1789,26 +1875,26 @@ class BatchImageGenerator:
                         points = []
                         x = 40
                         while x < width - 40:
-                            if random.random() < 0.08:
-                                spike_h = random.randint(30, lead_spacing // 2)
-                                direction = 1 if random.random() < 0.7 else -1
+                            if rng.random() < 0.08:
+                                spike_h = rng.randint(30, lead_spacing // 2)
+                                direction = 1 if rng.random() < 0.7 else -1
                                 points.extend([(x, base_y), (x + 4, base_y - spike_h * direction),
                                                (x + 8, base_y + spike_h * direction // 3), (x + 12, base_y)])
                                 x += 16
                             else:
-                                y = base_y + random.randint(-3, 3)
+                                y = base_y + rng.randint(-3, 3)
                                 points.append((x, y))
-                                x += random.randint(4, 8)
+                                x += rng.randint(4, 8)
 
                         if len(points) >= 2:
                             for j in range(len(points) - 1):
                                 draw.line([points[j], points[j + 1]], fill=colors['nodes'][0], width=1)
 
                     for i in range(density):
-                        x = random.randint(50, width - 50)
-                        y = random.randint(50, height - 50)
+                        x = rng.randint(50, width - 50)
+                        y = rng.randint(50, height - 50)
                         nodes.append((x, y))
-                        node_color = random.choice(colors['nodes'])
+                        node_color = rng.choice(colors['nodes'])
                         s = 2
                         draw.line([x - s, y, x + s, y], fill=node_color, width=1)
                         draw.line([x, y - s, x, y + s], fill=node_color, width=1)
@@ -1833,10 +1919,10 @@ class BatchImageGenerator:
                         draw.ellipse([px - 4, 36, px + 4, 44], fill=colors['nodes'][0])
 
                     for i in range(min(density, 300)):
-                        x = random.randint(2, width // mesh_size - 2) * mesh_size
-                        y = random.randint(2, height // mesh_size - 2) * mesh_size
+                        x = rng.randint(2, width // mesh_size - 2) * mesh_size
+                        y = rng.randint(2, height // mesh_size - 2) * mesh_size
                         nodes.append((x, y))
-                        node_color = random.choice(colors['nodes'][:2])
+                        node_color = rng.choice(colors['nodes'][:2])
                         draw.rectangle([x - 2, y - 2, x + 2, y + 2], fill=node_color)
 
                 full_path = images_dir / safe_name
@@ -1871,12 +1957,15 @@ class BatchImageGenerator:
                     batch_status.failed_images += 1
 
         batch_status.end_time = datetime.now()
-        batch_status.status = "completed"
+        if batch_status.status != "cancelled":
+            batch_status.status = "completed"
+        batch_status.display_name = f"Multi-Style Blueprints - {batch_status.completed_images} items"
 
         metadata = {
             "batch_id": batch_id,
-            "display_name": f"Multi-Style Blueprints - {batch_status.completed_images} items",
-            "status": "completed",
+            "display_name": batch_status.display_name,
+            "status": batch_status.status,
+            "error": batch_status.error,
             "total_images": batch_status.total_images,
             "completed_images": batch_status.completed_images,
             "failed_images": batch_status.failed_images,
@@ -1905,6 +1994,86 @@ class BatchImageGenerator:
         with self.batch_lock:
             return list(self.active_batches.values())
 
+    def _status_from_metadata(
+        self, batch_folder: Path, *, include_results: bool = False
+    ) -> Optional[BatchGenerationStatus]:
+        """Rebuild a BatchGenerationStatus from a batch folder's metadata file."""
+        metadata_file = batch_folder / "batch_metadata.json"
+        if not metadata_file.exists():
+            return None
+        try:
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+        except (json.JSONDecodeError, ValueError, OSError) as e:
+            logger.warning(f"Failed to load metadata for batch {batch_folder.name}: {e}")
+            return None
+
+        try:
+            status = BatchGenerationStatus(
+                batch_id=metadata.get("batch_id", batch_folder.name),
+                status=metadata.get("status", "unknown"),
+                total_images=metadata.get("total_images", 0),
+                completed_images=metadata.get("completed_images", 0),
+                failed_images=metadata.get("failed_images", 0),
+                start_time=datetime.fromisoformat(metadata["start_time"]) if metadata.get("start_time") else None,
+                end_time=datetime.fromisoformat(metadata["end_time"]) if metadata.get("end_time") else None,
+                output_dir=str(batch_folder),
+                display_name=metadata.get("display_name"),
+                retry_data=metadata.get("retry_data"),
+            )
+        except (ValueError, KeyError, TypeError) as e:
+            logger.warning(f"Failed to load metadata for batch {batch_folder.name}: {e}")
+            return None
+
+        if include_results:
+            status.results = [
+                BatchImageResult(
+                    prompt_id=r.get("prompt_id", ""),
+                    success=r.get("success", False),
+                    image_path=r.get("image_path"),
+                    thumbnail_path=r.get("thumbnail_path"),
+                    generation_time=r.get("generation_time", 0.0) or 0.0,
+                    error=r.get("error"),
+                    metadata=r.get("metadata") or {},
+                )
+                for r in metadata.get("results", []) or []
+                if isinstance(r, dict)
+            ]
+        return status
+
+    def find_batch_status(
+        self, batch_id: str, *, include_results: bool = False
+    ) -> Optional[BatchGenerationStatus]:
+        """In-memory status first, then the batch's own folder, then a full scan.
+
+        Batch folders are named after the batch id, so the direct path covers
+        every batch from a previous process without the O(batches) scan that
+        list_all_batches() performs; the scan stays as the fallback for folders
+        that were moved.
+        """
+        status = self.get_batch_status(batch_id)
+        if status:
+            return status
+
+        from werkzeug.utils import secure_filename
+        safe_id = secure_filename(batch_id or "")
+        if safe_id:
+            direct = self._status_from_metadata(
+                self.base_output_dir / safe_id, include_results=include_results
+            )
+            if direct:
+                return direct
+
+        for candidate in self.list_all_batches():
+            if candidate.batch_id == batch_id and candidate.output_dir:
+                if include_results and not candidate.results:
+                    reloaded = self._status_from_metadata(
+                        Path(candidate.output_dir), include_results=True
+                    )
+                    return reloaded or candidate
+                return candidate
+        return None
+
     def list_all_batches(self) -> List[BatchGenerationStatus]:
         active_batches = self.list_active_batches()
         active_batch_ids = {batch.batch_id for batch in active_batches}
@@ -1919,38 +2088,11 @@ class BatchImageGenerator:
             for batch_folder in self.base_output_dir.iterdir():
                 if not batch_folder.is_dir():
                     continue
-                
-                batch_id = batch_folder.name
-                
-                if batch_id in active_batch_ids:
+                if batch_folder.name in active_batch_ids:
                     continue
-                
-                metadata_file = batch_folder / "batch_metadata.json"
-                if not metadata_file.exists():
-                    continue
-                
-                try:
-                    with open(metadata_file, 'r') as f:
-                        metadata = json.load(f)
-                    
-                    batch_status = BatchGenerationStatus(
-                        batch_id=metadata.get("batch_id", batch_id),
-                        status=metadata.get("status", "unknown"),
-                        total_images=metadata.get("total_images", 0),
-                        completed_images=metadata.get("completed_images", 0),
-                        failed_images=metadata.get("failed_images", 0),
-                        start_time=datetime.fromisoformat(metadata["start_time"]) if metadata.get("start_time") else None,
-                        end_time=datetime.fromisoformat(metadata["end_time"]) if metadata.get("end_time") else None,
-                        output_dir=str(batch_folder),
-                        display_name=metadata.get("display_name"),
-                        retry_data=metadata.get("retry_data"),
-                    )
-                    
+                batch_status = self._status_from_metadata(batch_folder)
+                if batch_status:
                     completed_batches.append(batch_status)
-                    
-                except (json.JSONDecodeError, ValueError, KeyError) as e:
-                    logger.warning(f"Failed to load metadata for batch {batch_id}: {e}")
-                    continue
                     
         except Exception as e:
             logger.error(f"Error scanning batch directories: {e}")
@@ -1982,22 +2124,11 @@ class BatchImageGenerator:
         batch_id = self._generate_batch_id()
         output_dir = str(self._create_output_directory(batch_id))
 
-        # Include director knobs so UI director_mode actually reaches _apply_director
-        # (was silently dropped — dead plumbing bug).
-        batch_params = [
-            'max_workers', 'preserve_order', 'generate_thumbnails',
-            'save_metadata', 'user_id', 'project_id', 'content_preset',
-            'auto_enhance', 'enhance_anatomy', 'enhance_faces', 'enhance_hands',
-            'restore_faces', 'face_restoration_weight', 'remove_background',
-            'director_mode', 'director_guidance', 'storyboard_concept',
-            'planning_mode', 'director_model', 'user_treatment',
-        ]
-
         return BatchImageRequest(
             batch_id=batch_id,
             prompts=prompts,
             output_dir=output_dir,
-            **{k: v for k, v in kwargs.items() if k in batch_params}
+            **{k: v for k, v in kwargs.items() if k in _BATCH_REQUEST_PARAMS}
         )
 
     def create_batch_from_prompts(self, prompt_list: List[str], **kwargs) -> BatchImageRequest:
@@ -2008,15 +2139,6 @@ class BatchImageGenerator:
                         'content_preset', 'auto_enhance', 'enhance_anatomy',
                         'enhance_faces', 'enhance_hands', 'loras', 'subject_ids',
                         'trigger_word']
-        
-        batch_params = [
-            'max_workers', 'preserve_order', 'generate_thumbnails',
-            'save_metadata', 'user_id', 'project_id', 'content_preset',
-            'auto_enhance', 'enhance_anatomy', 'enhance_faces', 'enhance_hands',
-            'restore_faces', 'face_restoration_weight', 'remove_background',
-            'director_mode', 'director_guidance', 'storyboard_concept',
-            'planning_mode', 'director_model', 'user_treatment',
-        ]
 
         model = kwargs.get("model") or "auto"
         resolved = resolve_stills_defaults(
@@ -2062,7 +2184,7 @@ class BatchImageGenerator:
             batch_id=batch_id,
             prompts=prompts,
             output_dir=output_dir,
-            **{k: v for k, v in kwargs.items() if k in batch_params}
+            **{k: v for k, v in kwargs.items() if k in _BATCH_REQUEST_PARAMS}
         )
 
     def get_service_status(self) -> Dict[str, Any]:

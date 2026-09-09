@@ -66,6 +66,25 @@ def test_classic_sd_keeps_512():
     assert d["guidance"] == 7.5
 
 
+def test_lone_legacy_step_or_guidance_is_an_explicit_choice():
+    """Only the full 512/20/7.5 triple is an unset marker.
+
+    SDXL "Fast" is 20 steps and SDXL "High" is guidance 7.5; a lone match on
+    one of those used to be swapped for the family default, so the panel showed
+    numbers that never ran.
+    """
+    fast = resolve_stills_defaults("sd-xl", width=1024, height=1024, steps=20, guidance=6.0)
+    assert fast["steps"] == 20
+    assert fast["guidance"] == 6.0
+
+    high = resolve_stills_defaults("sd-xl", width=1024, height=1024, steps=35, guidance=7.5)
+    assert high["steps"] == 35
+    assert high["guidance"] == 7.5
+
+    typed = resolve_stills_defaults("krea2-raw", steps=20)
+    assert typed["steps"] == 20
+
+
 def test_krea_raw_vs_turbo():
     assert model_family("krea2-raw") == "krea2-raw"
     assert model_family("krea2-turbo") == "krea2-turbo"

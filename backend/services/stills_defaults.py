@@ -130,21 +130,20 @@ def resolve_stills_defaults(
             return int(base[key])
         return int(val)
 
+    # Steps and guidance follow the same rule as size: only the complete
+    # 512/20/7.5 triple is an "unset" marker. A lone 20 steps (SDXL Fast preset)
+    # or 7.5 guidance (SDXL High) is a value somebody chose and must survive.
     def _pick_steps(val: int | None) -> int:
         if val is None:
             return int(base["steps"])
-        if replace_legacy_sd_markers and int(val) == _LEGACY_STEPS and family != "sd":
+        if full_legacy_unset and int(val) == _LEGACY_STEPS:
             return int(base["steps"])
         return int(val)
 
     def _pick_guidance(val: float | None) -> float:
         if val is None:
             return float(base["guidance"])
-        if (
-            replace_legacy_sd_markers
-            and abs(float(val) - _LEGACY_GUIDANCE) < 1e-6
-            and family != "sd"
-        ):
+        if full_legacy_unset and abs(float(val) - _LEGACY_GUIDANCE) < 1e-6:
             return float(base["guidance"])
         return float(val)
 

@@ -57,7 +57,9 @@ def client(tmp_path, monkeypatch):
     status.output_dir = str(batch_dir)
     gen = MagicMock()
     gen.get_batch_status.return_value = status
+    gen.find_batch_status.return_value = status
     gen.list_all_batches.return_value = [status]
+    gen.active_batches = {}
     gen.base_output_dir = str(tmp_path)
 
     monkeypatch.setattr(m, "service_available", True, raising=False)
