@@ -262,3 +262,26 @@ def test_select_rebuilds_cache_on_embedding_dim_mismatch(monkeypatch):
     selected = sel.select("find docs", registry, max_tools=5)
     assert "web_search" in selected
     assert calls["n"] >= 1
+
+
+def test_query_time_embed_keeps_the_model_warm_for_the_configured_ttl(monkeypatch):
+    """A message embed uses the hardware-aware keep_alive; batch init passes None and gets Ollama's default."""
+    import sys
+    import types
+
+    from backend import config as _config
+
+    SemanticToolSelector = _import_selector()
+    seen = []
+    fake_ollama = types.SimpleNamespace(embeddings=lambda **kw: (seen.append(kw) or {"embedding": [1.0, 0.0]}))
+    monkeypatch.setitem(sys.modules, "ollama", fake_ollama)
+    monkeypatch.setattr(_config, "get_embedding_keep_alive", lambda: "5m")
+    selector = SemanticToolSelector.__new__(SemanticToolSelector)
+    selector._embedding_model = "embed-test"
+
+    selector._embed("what is the weather")
+    assert seen[-1]["keep_alive"] == "5m"
+    selector._embed("Tool: x", keep_alive=None)
+    assert "keep_alive" not in seen[-1]
+    selector._embed(".", keep_alive=0)
+    assert seen[-1]["keep_alive"] == 0

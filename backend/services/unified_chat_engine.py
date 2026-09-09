@@ -1303,11 +1303,20 @@ class SemanticToolSelector:
         desc = (tool.description or "")[:200]
         return f"Tool: {name}\nPurpose: {desc}\nParams: {params_str}"
 
-    def _embed(self, text: str, keep_alive=0) -> List[float]:
-        """Call ollama to embed text. keep_alive=0 unloads model after use."""
+    def _embed(self, text: str, keep_alive="default") -> List[float]:
+        """Embed ``text`` with Ollama.
+
+        A query-time call keeps the model warm for the hardware-aware TTL
+        (``get_embedding_keep_alive``), so consecutive messages do not each
+        pay a cold load; ``keep_alive=None`` leaves Ollama's own default in
+        place (batch initialisation, which unloads explicitly when done).
+        """
         import ollama
         kwargs = {"model": self._embedding_model, "prompt": text}
-        if keep_alive is not None:
+        if keep_alive == "default":
+            from backend.config import get_embedding_keep_alive
+            kwargs["keep_alive"] = get_embedding_keep_alive()
+        elif keep_alive is not None:
             kwargs["keep_alive"] = keep_alive
         response = ollama.embeddings(**kwargs)
         return response["embedding"]
