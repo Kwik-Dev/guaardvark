@@ -123,6 +123,13 @@ class InterconnectorFileSyncService:
             "plugins/",
             "frontend/vite.config.js",
             "frontend/index.html",
+            # Static assets the bundle build copies as-is (icons, the voice-input
+            # worklet); without them a client's rebuilt bundle serves stale or
+            # missing files.
+            "frontend/public/",
+            # app.py and /api/system/version read this; a client that never
+            # receives it reports the version it was first cloned at.
+            "VERSION",
         ]
         
         self.exclude_patterns = [
