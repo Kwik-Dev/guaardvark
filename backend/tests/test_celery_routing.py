@@ -34,6 +34,25 @@ def test_api_task_routes_to_default_queue():
         f"Task routed to {queue_name!r}, worker subscribes to 'default'"
 
 
+def test_character_generate_samples_routes_to_default_queue():
+    """character.generate_samples / character.regen_sample MUST land on 'default'.
+
+    These are custom-named tasks (not backend.tasks.*), so without an explicit
+    route they fall to Celery's default 'celery' queue, which no worker consumes.
+    The Cast "Generate character" button then leaves every sample stuck at
+    status=pending with no images (ghost task). The main worker subscribes to
+    'default', so the route must resolve there.
+    """
+    from backend.celery_app import celery
+    for task_name in ("character.generate_samples", "character.regen_sample"):
+        route = celery.amqp.router.route({}, task_name, args=[1], kwargs={})
+        queue = route.get("queue")
+        queue_name = queue.name if hasattr(queue, "name") else str(queue)
+        assert queue_name == "default", (
+            f"{task_name} routed to {queue_name!r}, worker subscribes to 'default'"
+        )
+
+
 def test_flask_and_worker_share_celery_instance():
     """Flask must NOT call make_celery() — split-brain bug.
     

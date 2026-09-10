@@ -244,3 +244,44 @@ class TestCommandOnlyMode:
         assert "generate_image" in GPU_HEAVY_TOOLS
         assert "generate_music_video" not in GPU_HEAVY_TOOLS
         assert "start_film_crew" not in GPU_HEAVY_TOOLS
+
+class TestCastLoraDirectIntercept:
+    """A cast-LoRA request (e.g. \"[starship_captain] ... trained LoRA\") must be routed
+    directly to generate_image with subject_ids, bypassing an LLM that refuses to call
+    the tool because it hallucinates that no LoRA exists."""
+
+    def _engine(self):
+        from backend.services.unified_chat_engine import UnifiedChatEngine
+
+        engine = UnifiedChatEngine.__new__(UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        return engine
+
+    def test_cast_lora_request_routes_directly_with_subject_ids(self):
+        from unittest.mock import patch
+
+        engine = self._engine()
+        captured = {}
+
+        def fake_run(tool, params, session_id, emit_fn, request_id, message, options):
+            captured["params"] = params
+            return {"done": True}
+
+        with patch.object(engine, "_run_direct_tool_execution", side_effect=fake_run), \
+             patch("backend.tools.image_tools._resolve_cast_from_prompt", return_value=[12]):
+            result = engine._try_image_generate_direct(
+                "character reference sheet of [starship_captain] using his trained LoRA",
+                "sess", lambda *a, **k: None, "req", {},
+            )
+        assert result == {"done": True}
+        assert captured["params"].get("subject_ids") == [12]
+
+    def test_plain_cast_mention_without_image_intent_is_not_hijacked(self):
+        from unittest.mock import patch
+
+        engine = self._engine()
+        with patch("backend.tools.image_tools._resolve_cast_from_prompt", return_value=[12]):
+            result = engine._try_image_generate_direct(
+                "tell me about Starship Captain", "sess", lambda *a, **k: None, "req", {},
+            )
+        assert result is None
