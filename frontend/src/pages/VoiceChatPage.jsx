@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Box, Paper, Typography, Button, Alert, IconButton, Chip, Divider,
+  Box, Paper, Typography, Button, IconButton, Chip, Divider,
   ToggleButtonGroup, ToggleButton
 } from '@mui/material';
 import {
@@ -14,6 +14,7 @@ import {
 import VoiceChat from '../components/voice/VoiceChat';
 import ContinuousVoiceChat from '../components/voice/ContinuousVoiceChat';
 import { useAppStore } from '../stores/useAppStore';
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 /**
  * VoiceChatPage Component
@@ -185,7 +186,7 @@ const VoiceChatPage = () => {
       {errors.length > 0 && (
         <Box sx={{ p: 2, backgroundColor: "error.dark", borderBottom: 1, borderColor: "divider" }}>
           {errors.map((error) => (
-            <Alert
+            <CollapsibleAlert
               key={error.id}
               severity="error"
               sx={{ mb: 1 }}
@@ -209,7 +210,7 @@ const VoiceChatPage = () => {
               <Typography variant="caption" color="text.secondary">
                 {new Date(error.timestamp).toLocaleString()}
               </Typography>
-            </Alert>
+            </CollapsibleAlert>
           ))}
 
           {errors.length > 1 && (

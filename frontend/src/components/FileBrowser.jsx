@@ -20,7 +20,6 @@ import {
   DialogActions,
   Button,
   TextField,
-  Alert,
   CircularProgress,
   Tooltip,
 } from '@mui/material';
@@ -33,6 +32,7 @@ import {
   Info as InfoIcon,
 } from '@mui/icons-material';
 import { BASE_URL, handleResponse } from '../api/apiClient';
+import CollapsibleAlert from "./common/CollapsibleAlert";
 
 const FileBrowser = ({ onFileSelect, _onClose }) => {
   const [currentPath, setCurrentPath] = useState('');
@@ -241,9 +241,9 @@ const FileBrowser = ({ onFileSelect, _onClose }) => {
 
       {/* Error Alert */}
       {error && (
-        <Alert severity="error" sx={{ m: 2 }}>
+        <CollapsibleAlert severity="error" sx={{ m: 2 }}>
           {error}
-        </Alert>
+        </CollapsibleAlert>
       )}
 
       {/* Content */}

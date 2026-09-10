@@ -19,6 +19,7 @@ import {
   IconButton,
   Tooltip,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Close as CloseIcon,
   CheckCircle as CheckCircleIcon,
@@ -245,7 +246,7 @@ export default function FixesModal({ open, onClose, showMessage }) {
             <CircularProgress size={32} />
           </Box>
         ) : error ? (
-          <Alert severity="error" sx={{ m: 2 }}>{error}</Alert>
+          <CollapsibleAlert severity="error" sx={{ m: 2 }}>{error}</CollapsibleAlert>
         ) : filtered.length === 0 ? (
           <Box sx={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", p: 3 }}>
             <Typography variant="body2" color="text.secondary">
@@ -371,9 +372,9 @@ export default function FixesModal({ open, onClose, showMessage }) {
                   )}
 
                   {selected.applied_at && (
-                    <Alert severity="success" variant="outlined">
+                    <CollapsibleAlert severity="success" variant="outlined">
                       Applied {formatRelative(selected.applied_at)}
-                    </Alert>
+                    </CollapsibleAlert>
                   )}
                 </Stack>
               )}
