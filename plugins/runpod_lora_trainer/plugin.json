@@ -1,0 +1,30 @@
+{
+  "id": "runpod_lora_trainer",
+  "name": "RunPod LoRA Trainer",
+  "version": "0.1.0",
+  "description": "Trains character/environment/prop LoRAs on a remote RunPod GPU endpoint instead of the local machine. An alternative to the local lora_trainer plugin — enabling this one disables lora_trainer. Requires a configured RunPod endpoint + API key (GUAARDVARK_RUNPOD_* env vars) and a deployed pod image from plugins/runpod_lora_trainer/pod/.",
+  "author": "Guaardvark",
+  "type": "tool",
+  "category": "training",
+  "port": null,
+  "vram_estimate_mb": 0,
+  "core": false,
+  "dependencies": [],
+  "excludes": ["lora_trainer"],
+  "config": {
+    "default_enabled": false,
+    "default_auto_start": false,
+    "service_url": null,
+    "timeout": 30,
+    "fallback_enabled": true,
+    "output_dir": "data/training/loras",
+    "max_ref_images": 30,
+    "default_backend": "runpod",
+    "poll_interval_seconds": 15,
+    "max_job_seconds": 10800
+  },
+  "requirements": {
+    "gpu": false
+  },
+  "endpoints": {}
+}
