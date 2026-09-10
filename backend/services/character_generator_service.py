@@ -97,7 +97,8 @@ _FACE_MICRO_RE = re.compile(
 _KEEP_RE = re.compile(
     r"\b(build|frame|tall|short|height|shoulders?|torso|physique|athletic|slender|stocky|"
     r"lean|muscular|hair|skin|complexion|wears?|wearing|jacket|shirt|trousers|pants|dress|"
-    r"coat|boots|shoes|outfit|wardrobe|aged?|years?)\b",
+    r"coat|boots|shoes|outfit|wardrobe|aged?|years?|"
+    r"stubble|beard|mustache|moustache|goatee|sideburns|facial\s+hair)\b",
     re.IGNORECASE,
 )
 
