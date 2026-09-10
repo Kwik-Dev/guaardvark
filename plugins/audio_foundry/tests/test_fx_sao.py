@@ -13,18 +13,18 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 SLOW = os.environ.get("AUDIO_FOUNDRY_RUN_SLOW_TESTS") == "1"
-
-pytestmark = pytest.mark.skipif(not SLOW, reason="Set AUDIO_FOUNDRY_RUN_SLOW_TESTS=1 to enable")
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 
+@pytest.mark.skipif(not SLOW, reason="Set AUDIO_FOUNDRY_RUN_SLOW_TESTS=1 to enable")
 def test_sao_generates_valid_wav(tmp_path):
     """Load SAO once, generate 3 seconds of audio, verify file is a valid WAV."""
     import soundfile as sf
@@ -52,3 +52,51 @@ def test_sao_generates_valid_wav(tmp_path):
         assert result.meta["seed"] == 42
     finally:
         backend.unload()
+
+
+def test_make_generator_uses_global_seed_on_mps():
+    from backends.audio_fx_sao import _make_generator
+
+    calls = []
+
+    class FakeGenerator:
+        def __init__(self, device):
+            calls.append(("generator", device))
+
+        def manual_seed(self, seed):
+            calls.append(("manual_seed", seed))
+            return "generator-result"
+
+    fake_torch = SimpleNamespace(
+        manual_seed=lambda seed: calls.append(("global_seed", seed)),
+        Generator=FakeGenerator,
+    )
+
+    result = _make_generator(123, "mps", fake_torch)
+
+    assert result is None
+    assert calls == [("global_seed", 123)]
+
+
+def test_make_generator_builds_device_generator_elsewhere():
+    from backends.audio_fx_sao import _make_generator
+
+    calls = []
+
+    class FakeGenerator:
+        def __init__(self, device):
+            calls.append(("generator", device))
+
+        def manual_seed(self, seed):
+            calls.append(("manual_seed", seed))
+            return "generator-result"
+
+    fake_torch = SimpleNamespace(
+        manual_seed=lambda seed: calls.append(("global_seed", seed)),
+        Generator=FakeGenerator,
+    )
+
+    result = _make_generator(123, "cuda", fake_torch)
+
+    assert result == "generator-result"
+    assert calls == [("generator", "cuda"), ("manual_seed", 123)]

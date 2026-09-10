@@ -10,6 +10,7 @@ Uses file-based locking with PID tracking for crash recovery.
 
 import logging
 import os
+import platform
 from contextlib import contextmanager
 import json
 import time
@@ -559,7 +560,7 @@ class GPUResourceCoordinator:
 
     def get_available_vram(self) -> Dict[str, Any]:
         """
-        Get available VRAM using pynvml (nvidia-ml-py3).
+        Get available VRAM. Probes Apple MPS first on macOS, then NVIDIA.
 
         Returns dict with:
             - available_mb: Available VRAM in MB
@@ -568,6 +569,15 @@ class GPUResourceCoordinator:
             - gpu_name: GPU device name
             - success: Whether query succeeded
         """
+        # Apple Silicon: MPS is the only accelerator. Probe it first so the
+        # NVIDIA machinery (pynvml import + nvidia-smi exec) never runs on a
+        # Mac and the sticky `_no_gpu_detected` flag is never touched.
+        if platform.system() == "Darwin":
+            mps_result = self._get_vram_via_mps()
+            if mps_result:
+                return mps_result
+            # Intel Mac (no MPS) — fall through to the NVIDIA path below.
+
         # Fast path for CPU-only hosts — skip the probe entirely once we know.
         if GPUResourceCoordinator._no_gpu_detected:
             return {
@@ -578,6 +588,7 @@ class GPUResourceCoordinator:
                 "reason": "no_gpu_hardware",
             }
 
+        # 1) NVIDIA probe (existing)
         try:
             import pynvml
             pynvml.nvmlInit()
@@ -606,14 +617,71 @@ class GPUResourceCoordinator:
             if not getattr(GPUResourceCoordinator, '_pynvml_warned', False):
                 logger.warning("pynvml not installed, falling back to nvidia-smi")
                 GPUResourceCoordinator._pynvml_warned = True
-            return self._get_vram_via_nvidia_smi()
+            nv_result = self._get_vram_via_nvidia_smi()
+            if nv_result.get("success"):
+                return nv_result
+            mps_result = self._get_vram_via_mps()
+            if mps_result:
+                # MPS is a real accelerator — clear the sticky no-GPU flag so
+                # later calls don't short-circuit before the MPS probe runs.
+                GPUResourceCoordinator._no_gpu_detected = False
+                return mps_result
+            return nv_result
         except Exception as e:
-            # Common on CPU-only hosts: "NVML Shared Library Not Found" — the
-            # machine genuinely has no NVIDIA driver. One warning, not every 30s.
             if not getattr(GPUResourceCoordinator, '_pynvml_error_logged', False):
                 logger.warning(f"pynvml probe failed ({e}), trying nvidia-smi fallback")
                 GPUResourceCoordinator._pynvml_error_logged = True
-            return self._get_vram_via_nvidia_smi()
+            nv_result = self._get_vram_via_nvidia_smi()
+            if nv_result.get("success"):
+                return nv_result
+            mps_result = self._get_vram_via_mps()
+            if mps_result:
+                GPUResourceCoordinator._no_gpu_detected = False
+                return mps_result
+            return nv_result
+
+    def _get_vram_via_mps(self) -> Optional[Dict[str, Any]]:
+        """Apple Silicon MPS fallback: report a share of unified memory as GPU budget.
+
+        MPS has no separate VRAM, so we report total system RAM and a heuristic
+        "available" budget. This lets the preflight gate pass on Apple Silicon
+        while still guarding against genuinely CPU-only hosts.
+        """
+        try:
+            import platform
+            if platform.system() != "Darwin" or platform.machine() != "arm64":
+                return None
+
+            import torch
+            if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+                return None
+
+            import subprocess
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            total_bytes = int(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip().isdigit() else 0
+            if total_bytes <= 0:
+                return None
+
+            total_mb = total_bytes // (1024 * 1024)
+            # Heuristic: leave 8 GB for the OS / other apps; rest is GPU-addressable.
+            reserved_mb = 8 * 1024
+            available_mb = max(1024, total_mb - reserved_mb)
+
+            return {
+                "success": True,
+                "available_mb": available_mb,
+                "total_mb": total_mb,
+                "used_mb": 0,
+                "gpu_name": "Apple Silicon MPS",
+                "utilization_percent": 0.0,
+                "accel": "mps",
+            }
+        except Exception as e:
+            logger.debug(f"MPS VRAM probe failed: {e}")
+            return None
 
     def _get_vram_via_nvidia_smi(self) -> Dict[str, Any]:
         """Fallback VRAM query using nvidia-smi command."""
