@@ -8,6 +8,7 @@ from backend.services.agent_brain import (
     SOCIAL_TIER2_PATTERNS,
     DELIBERATION_SIGNALS,
     VISION_PATTERNS,
+    TEXT_ANALYSIS_PATTERNS,
 )
 from backend.services.brain_state import BrainState, _build_default_reflexes
 
@@ -235,3 +236,72 @@ class TestTierRouting:
         )
         assert result.get("tier") == 2
         assert result.get("success") is False
+
+
+# ---------------------------------------------------------------------------
+# Text-extraction / analysis over a pasted prompt (must NOT trigger image gen)
+# ---------------------------------------------------------------------------
+
+class TestTextAnalysisRouting:
+    """'extract/describe/summarize/analyze a prompt' is a TEXT task — it must
+    route to Tier 2 skip_tools so generate_image is never offered, even when the
+    pasted text reads exactly like an image prompt."""
+
+    def test_extract_character_description_matches(self):
+        msg = (
+            "extract the character description\n\n"
+            "medium close-up of a weathered starship captain in a dark navy "
+            "uniform with gold trim, facing the viewport, face lit by cold blue "
+            "starfield glow and warm amber holographic readout reflecting off his "
+            "cheek, sweat beads on his brow, eyes fixed on a distant planet, "
+            "blurred bridge consoles with pulsing red alert lights, crew out of "
+            "focus, dramatic chiaroscuro lighting, cinematic depth of field, "
+            "photorealistic"
+        )
+        assert TEXT_ANALYSIS_PATTERNS.search(msg)
+
+    def test_describe_scene_matches(self):
+        assert TEXT_ANALYSIS_PATTERNS.search(
+            "describe the scene in this prompt: a woman on a motorcycle at night"
+        )
+
+    def test_summarize_prompt_matches(self):
+        assert TEXT_ANALYSIS_PATTERNS.search("summarize the prompt for me")
+
+    def test_analyze_lighting_matches(self):
+        assert TEXT_ANALYSIS_PATTERNS.search(
+            "analyze the lighting and style of this description"
+        )
+
+    def test_legit_image_generation_does_not_match(self):
+        for msg in (
+            "generate an image of a woman on a motorcycle",
+            "draw a cat",
+            "create a picture of a sunset",
+            "make an image of a starship captain",
+            "visualize a futuristic city",
+            "render a portrait of a king",
+        ):
+            assert not TEXT_ANALYSIS_PATTERNS.search(msg), msg
+
+    def test_plain_chat_does_not_match(self):
+        assert not TEXT_ANALYSIS_PATTERNS.search("hello there")
+
+    def test_extract_routes_to_tier2_skip_tools(self, brain):
+        """The reported bug: 'extract the character description' + image prompt
+        must route to Tier 2 (skip_tools), never to image generation."""
+        result = brain.process(
+            session_id="test",
+            message=(
+                "extract the character description\n\n"
+                "medium close-up of a weathered starship captain in a dark navy "
+                "uniform with gold trim, dramatic chiaroscuro lighting, cinematic "
+                "depth of field, photorealistic"
+            ),
+            options={},
+            emit_fn=lambda e, d: None,
+        )
+        # Tier 2 skip_tools path (fails only because no LLM in the test fixture)
+        assert result.get("tier") == 2
+        assert result.get("success") is False
+        assert "Model not loaded" in (result.get("error") or "")
