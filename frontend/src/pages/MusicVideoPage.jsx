@@ -728,7 +728,12 @@ const MusicVideoPage = () => {
   // When false, more options for beautiful output (better keyframe models + top-tier I2V like Wan2.2).
   const [useLoraConsistency, setUseLoraConsistency] = useState(false);
   const [keyframeModel, setKeyframeModel] = useState(DEFAULT_KEYFRAME_MODEL);
-  const [i2vModel, setI2vModel] = useState("wan22-5b");
+  const [i2vModel, setI2vModel] = useState("wan22-14b-i2v");
+  // Approval-panel I2V model override (persisted via updateMusicVideoPlan).
+  const [approvalI2vModel, setApprovalI2vModel] = useState("");
+  useEffect(() => {
+    if (detail?.i2v_model) setApprovalI2vModel(detail.i2v_model);
+  }, [detail?.i2v_model]);
 
   const keyframeModelOptions = useMemo(
     () =>
@@ -777,8 +782,8 @@ const MusicVideoPage = () => {
   // API answers or when it is down.
   const FALLBACK_I2V_MODEL_OPTIONS = {
     "wan22-5b": {
-      label: "Wan 2.2 5B TI2V — default",
-      description: "Text + image to video, ~5s, fits 16GB",
+      label: "Wan 2.2 5B TI2V (Recommended — MPS-friendly)",
+      description: "Fast 5s clips, fits 16GB / Apple Silicon — no offload. Text + image to video.",
     },
     "wan22-14b-i2v": {
       label: "Wan 2.2 14B I2V (GGUF Q5)",
@@ -957,6 +962,17 @@ const MusicVideoPage = () => {
       setError(formatUiError(e?.response?.data?.error) || e.message || "Approve failed.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleApprovalI2vChange = async (value) => {
+    if (!detail) return;
+    setApprovalI2vModel(value);
+    try {
+      const updated = await updateMusicVideoPlan(detail.id, { i2v_model: value });
+      setDetail(updated);
+    } catch (e) {
+      setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to update I2V model.");
     }
   };
 
@@ -1536,7 +1552,19 @@ const MusicVideoPage = () => {
                   </Alert>
                   <Box>
                     <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
-                    <Stack direction="row" spacing={1} alignItems="center">
+                    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                      <TextField
+                        select
+                        size="small"
+                        label="I2V / Animation Model"
+                        value={approvalI2vModel}
+                        onChange={(e) => handleApprovalI2vChange(e.target.value)}
+                        sx={{ minWidth: 260 }}
+                      >
+                        {Object.entries(i2vModelOptions).map(([key, cfg]) => (
+                          <MenuItem key={key} value={key}>{cfg.label}</MenuItem>
+                        ))}
+                      </TextField>
                       <Button variant="contained" color="warning" onClick={handleApprove} disabled={busy || gpuSubmitBlocked}>
                         {busy ? <CircularProgress size={20} /> : "Approve & Generate Video"}
                       </Button>

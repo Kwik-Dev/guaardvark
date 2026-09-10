@@ -156,6 +156,9 @@ class ACEStepBackend(AudioBackend):
         if not self.is_loaded:
             raise RuntimeError("ACE-Step not loaded; dispatcher should call load() first")
 
+        # Forwarded by the JobManager for async jobs; None on the inline path.
+        progress_cb = params.get("progress_cb")
+
         style_prompt: str = params["style_prompt"]
         negative_prompt: str | None = params.get("negative_prompt")
         lyrics: str | None = params.get("lyrics")
@@ -185,7 +188,11 @@ class ACEStepBackend(AudioBackend):
         }
 
         t0 = time.monotonic()
-        result = self._send(gen_payload, timeout_s=_GENERATE_TIMEOUT_S)
+        result = self._send(
+            gen_payload,
+            timeout_s=_GENERATE_TIMEOUT_S,
+            progress_cb=progress_cb,
+        )
         gen_seconds = time.monotonic() - t0
 
         if not result.get("ok"):
@@ -231,8 +238,16 @@ class ACEStepBackend(AudioBackend):
 
     # ----- subprocess plumbing -----
 
-    def _send(self, command: dict[str, Any], timeout_s: float = 30) -> dict[str, Any]:
-        """Send one JSON command, read one JSON response. Synchronous."""
+    def _send(self, command: dict[str, Any], timeout_s: float = 30,
+              progress_cb=None) -> dict[str, Any]:
+        """Send one JSON command; read interim progress events, then the final
+        JSON response. Synchronous.
+
+        The ACE-Step daemon emits `{"kind":"progress","progress":...,"stage":...}`
+        lines on stdout during generation; these are forwarded to ``progress_cb``
+        (current, total, stage) and skipped, and we keep reading until the final
+        `{"ok": ...}` response line.
+        """
         if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
             raise RuntimeError("ACE-Step daemon not running")
 
@@ -247,27 +262,48 @@ class ACEStepBackend(AudioBackend):
         # silently dies. readline() doesn't accept a timeout on its own, so
         # we use a watchdog thread that kills the process on overrun — the
         # readline then returns "" and we surface a clean error.
-        result_holder: dict[str, Any] = {}
+        # The watchdog counts LACK of any output (progress OR final) as a
+        # hang, so a long-but-progressing render isn't wrongly killed.
+        received_anything: list[bool] = [False]
 
         def _watchdog() -> None:
             time.sleep(timeout_s)
-            if not result_holder:
+            if not received_anything[0]:
                 logger.error("ACE-Step daemon timed out after %ss; killing", timeout_s)
                 self._kill_proc()
 
         wd = threading.Thread(target=_watchdog, daemon=True)
         wd.start()
 
-        response_line = self._proc.stdout.readline()
-        result_holder["done"] = True
+        while True:
+            response_line = self._proc.stdout.readline()
+            received_anything[0] = True  # got SOMETHING — the daemon is alive
+            if not response_line:
+                raise RuntimeError("ACE-Step daemon closed stdout (likely crashed or timed out)")
 
-        if not response_line:
-            raise RuntimeError("ACE-Step daemon closed stdout (likely crashed or timed out)")
+            try:
+                obj = json.loads(response_line)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(
+                    f"ACE-Step daemon returned non-JSON: {response_line!r} ({e})")
 
-        try:
-            return json.loads(response_line)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"ACE-Step daemon returned non-JSON: {response_line!r} ({e})") from e
+            # Interim progress event — forward to the job's progress callback
+            # and keep reading for the final result line.
+            if (
+                isinstance(obj, dict)
+                and obj.get("kind") == "progress"
+                and progress_cb is not None
+            ):
+                try:
+                    progress_cb(
+                        int(float(obj.get("progress", 0.0)) * 100),
+                        100,
+                        str(obj.get("stage", "generating")),
+                    )
+                except Exception:  # noqa: BLE001 — progress forwarding is best-effort
+                    pass
+                continue
+            return obj
 
     def _pump_stderr(self) -> None:
         """Drain the daemon's stderr to our logger on a background thread."""
