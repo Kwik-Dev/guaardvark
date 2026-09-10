@@ -13,7 +13,6 @@ import {
   Grid,
   CircularProgress,
   Box,
-  Alert,
   Autocomplete,
   Typography,
   IconButton,
@@ -30,6 +29,7 @@ import {
   RadioGroup,
   FormControlLabel,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import StopIcon from "@mui/icons-material/Stop";
@@ -827,9 +827,9 @@ const TaskActionModal = ({
 
       <DialogContent dividers>
         {formError && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Task Management Section - Only show for existing tasks */}

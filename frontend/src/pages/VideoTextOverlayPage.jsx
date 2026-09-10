@@ -23,9 +23,9 @@ import {
   MenuItem,
   FormControlLabel,
   Switch,
-  Alert,
   Grid,
 } from "@mui/material";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   TextFields as TextFieldsIcon,
   AutoFixHigh as RenderIcon,
@@ -249,7 +249,7 @@ const VideoTextOverlayPage = () => {
                   />
                 </Box>
 
-                {error && <Alert severity="error" onClose={() => setError(null)}>{formatUiError(error)}</Alert>}
+                {error && <CollapsibleAlert severity="error" onClose={() => setError(null)}>{formatUiError(error)}</CollapsibleAlert>}
 
                 <Button
                   variant="contained"

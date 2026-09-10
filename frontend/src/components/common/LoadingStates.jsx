@@ -8,7 +8,6 @@ import {
   CircularProgress,
   LinearProgress,
   Typography,
-  Alert,
   Chip,
   Skeleton,
   Fade,
@@ -25,6 +24,7 @@ import {
   Error as ErrorIcon,
 } from '@mui/icons-material';
 import { BrandLogo } from '../branding';
+import CollapsibleAlert from "./CollapsibleAlert";
 
 // Enhanced Loading Spinner with context
 export const ContextualLoader = ({
@@ -299,7 +299,7 @@ export const NetworkStatus = () => {
       {/* Offline Alert */}
       {showOfflineAlert && (
         <Slide direction="down" in={showOfflineAlert}>
-          <Alert
+          <CollapsibleAlert
             severity="warning"
             sx={{
               position: 'fixed',
@@ -326,7 +326,7 @@ export const NetworkStatus = () => {
                 Some features may not be available. Check your connection.
               </Typography>
             </Box>
-          </Alert>
+          </CollapsibleAlert>
         </Slide>
       )}
     </>

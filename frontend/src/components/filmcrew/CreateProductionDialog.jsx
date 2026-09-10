@@ -8,7 +8,6 @@ import {
   TextField,
   Autocomplete,
   Box,
-  Alert,
   FormControl,
   InputLabel,
   Select,
@@ -16,6 +15,7 @@ import {
   Typography
 } from '@mui/material';
 import { getProjects } from '../../api/projectService';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const API_BASE = '/api';
 
@@ -93,7 +93,7 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
       <DialogTitle>New Production</DialogTitle>
       <DialogContent>
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 1 }}>
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && <CollapsibleAlert severity="error">{error}</CollapsibleAlert>}
           <TextField
             label="Production Name"
             fullWidth

@@ -16,7 +16,6 @@ import {
   Autocomplete,
   IconButton,
   CircularProgress,
-  Alert,
   Switch,
   FormControlLabel,
   Chip,
@@ -28,6 +27,7 @@ import {
 } from '@mui/icons-material';
 import * as apiService from '../../api';
 import axios from 'axios';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const API_BASE = '/api/files';
 
@@ -291,7 +291,7 @@ const FolderPropertiesModal = ({
         <Divider sx={{ my: 2 }} />
 
         {/* Warning about cascading */}
-        <Alert
+        <CollapsibleAlert
           severity="info"
           icon={<WarningIcon />}
           sx={{ mb: 2 }}
@@ -299,14 +299,14 @@ const FolderPropertiesModal = ({
           <Typography variant="body2">
             <strong>Note:</strong> Properties set here will be applied to all files and subfolders within this folder, including nested subfolders.
           </Typography>
-        </Alert>
+        </CollapsibleAlert>
 
         {parentProps && (parentProps.client_id || parentProps.project_id || parentProps.website_id || parentProps.tags || parentProps.notes) && (
-          <Alert severity="info" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
             <Typography variant="body2">
               Some properties are inherited from the parent folder. Fields marked <Chip label="inherited" size="small" variant="outlined" color="info" sx={{ height: 18, fontSize: '0.65rem', mx: 0.5 }} /> were set by the parent.
             </Typography>
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Entity Links */}

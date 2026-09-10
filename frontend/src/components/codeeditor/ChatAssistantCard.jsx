@@ -12,7 +12,6 @@ import {
   Stack,
   Typography,
   Tooltip,
-  Alert,
   Paper,
   Button,
   Badge,
@@ -32,6 +31,7 @@ import {
   CardContent,
   CardActions,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Send,
   Edit as EditIcon,
@@ -1607,7 +1607,7 @@ Provide a helpful, specific response. Reference actual code when relevant. If mo
 
           {/* Enhanced Messages with Real-time Analysis */}
           {realTimeAnalysis.enabled && !contextExpanded && (realTimeAnalysis.errors.length > 0 || realTimeAnalysis.warnings.length > 0) && (
-            <Alert
+            <CollapsibleAlert
               severity={realTimeAnalysis.errors.length > 0 ? "error" : "warning"}
               action={
                 <Button size="small" onClick={() => handleSendMessage("/fix")}>
@@ -1620,7 +1620,7 @@ Provide a helpful, specific response. Reference actual code when relevant. If mo
                 ? `${realTimeAnalysis.errors.length} error${realTimeAnalysis.errors.length > 1 ? 's' : ''} detected`
                 : `${realTimeAnalysis.warnings.length} warning${realTimeAnalysis.warnings.length > 1 ? 's' : ''} detected`
               }
-            </Alert>
+            </CollapsibleAlert>
           )}
 
           {/* Messages */}

@@ -9,7 +9,6 @@ import {
   Card,
   CardContent,
   Grid,
-  Alert,
   CircularProgress,
   Chip,
   Paper,
@@ -26,6 +25,7 @@ import {
 } from '@mui/icons-material';
 
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -208,13 +208,13 @@ const ProgressTestPage = () => {
                 {results[test.id] && (
                   <Paper sx={{ p: 2, bgcolor: 'grey.50' }}>
                     {results[test.id].error ? (
-                      <Alert severity="error" sx={{ mb: 1 }}>
+                      <CollapsibleAlert severity="error" sx={{ mb: 1 }}>
                         {results[test.id].error}
-                      </Alert>
+                      </CollapsibleAlert>
                     ) : (
-                      <Alert severity="success" sx={{ mb: 1 }}>
+                      <CollapsibleAlert severity="success" sx={{ mb: 1 }}>
                         Test started successfully
-                      </Alert>
+                      </CollapsibleAlert>
                     )}
                     {results[test.id].process_id && (
                       <Typography variant="caption" color="text.secondary">

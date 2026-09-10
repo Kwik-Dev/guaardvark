@@ -11,8 +11,9 @@
 import React from "react";
 import {
   Box, Stack, Typography, Chip, Slider, TextField, Button,
-  FormControlLabel, Switch, Divider, Alert,
+  FormControlLabel, Switch, Divider,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import { Delete as DeleteIcon, Star as StarIcon } from "@mui/icons-material";
 import ScanModeSelector from "./ScanModeSelector";
 import DirectorsNotesPanel from "./DirectorsNotesPanel";
@@ -167,8 +168,8 @@ const OptionsPanel = ({
       <Typography variant="caption" color="text.secondary">
         Select a bin clip or text overlay to edit its options.
       </Typography>
-      {error && <Alert severity="error" sx={{ py: 0 }}>{error}</Alert>}
-      {planError && <Alert severity="error" sx={{ py: 0 }}>{planError}</Alert>}
+      {error && <CollapsibleAlert severity="error" sx={{ py: 0 }}>{error}</CollapsibleAlert>}
+      {planError && <CollapsibleAlert severity="error" sx={{ py: 0 }}>{planError}</CollapsibleAlert>}
     </Stack>
   );
 };

@@ -11,13 +11,13 @@ import {
   CircularProgress,
   Typography,
   Box,
-  Alert,
   TextField,
   Divider,
   Card,
   CardActionArea,
   CardContent,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import StorageIcon from "@mui/icons-material/Storage";
 import CloudDoneIcon from "@mui/icons-material/CloudDone";
 import CodeIcon from "@mui/icons-material/Code";
@@ -152,11 +152,11 @@ const CreateBackupModal = ({ open, onClose, onCreate, isProcessing }) => {
         </Box>
 
         {selectedType && (
-          <Alert severity="info" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
             <Typography variant="body2">
               {typeCards.find((c) => c.key === selectedType)?.description}
             </Typography>
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Component selection (only for data backups) */}

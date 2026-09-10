@@ -4,7 +4,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   CircularProgress,
-  Alert,
   List,
   ListItem,
   ListItemText,
@@ -13,6 +12,7 @@ import {
   Avatar,
   ListItemAvatar,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import { useNavigate } from "react-router-dom";
 import DashboardCardWrapper from "./DashboardCardWrapper";
 import WebsiteActionModal from "../modals/WebsiteActionModal";
@@ -129,9 +129,9 @@ const WebsiteDataCard = React.forwardRef(
             />
           )}
           {error && (
-            <Alert severity="error" sx={{ my: 1 }}>
+            <CollapsibleAlert severity="error" sx={{ my: 1 }}>
               {error}
-            </Alert>
+            </CollapsibleAlert>
           )}
           {!isLoading && !error && websites.length === 0 && (
             <Typography

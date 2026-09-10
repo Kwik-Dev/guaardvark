@@ -15,7 +15,6 @@ import {
   Grid,
   CircularProgress,
   Box,
-  Alert,
   Autocomplete,
   Tabs,
   Tab,
@@ -24,6 +23,7 @@ import {
   Select,
   MenuItem,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
 
 import * as apiService from "../../api";
@@ -678,9 +678,9 @@ const WebsiteActionModal = ({
         {activeTab === 0 && (
           <>
             {formError && (
-              <Alert severity="error" sx={{ mb: 2 }}>
+              <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
                 {formError}
-              </Alert>
+              </CollapsibleAlert>
             )}
             <Box component="form" noValidate autoComplete="off" sx={{ mt: 1 }}>
           <Grid container spacing={2}>
@@ -868,9 +868,9 @@ const WebsiteActionModal = ({
         {activeTab === 1 && isEditMode && (
           <Box sx={{ mt: 1 }}>
             {wpFormError && (
-              <Alert severity="error" sx={{ mb: 2 }}>
+              <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
                 {wpFormError}
-              </Alert>
+              </CollapsibleAlert>
             )}
             {isLoadingWpSite ? (
               <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
@@ -879,11 +879,11 @@ const WebsiteActionModal = ({
             ) : (
               <Grid container spacing={2}>
                 <Grid item xs={12}>
-                  <Alert severity="info">
+                  <CollapsibleAlert severity="info">
                     Connect this website to WordPress via LLAMANATOR2 plugin for secure content management, SEO optimization, and automated publishing.
                     <br />
                     <strong>Note:</strong> The LLAMANATOR2 plugin must be installed and activated on your WordPress site. Get the API key from the plugin settings page.
-                  </Alert>
+                  </CollapsibleAlert>
                 </Grid>
                 <Grid item xs={12}>
                   <TextField
@@ -939,9 +939,9 @@ const WebsiteActionModal = ({
                 </Grid>
                 {wpSite && (
                   <Grid item xs={12}>
-                    <Alert severity="success" icon={<CheckCircleIcon />}>
+                    <CollapsibleAlert severity="success" icon={<CheckCircleIcon />}>
                       WordPress site registered. Last tested: {wpSite.last_test_at ? new Date(wpSite.last_test_at).toLocaleString() : "Never"}
-                    </Alert>
+                    </CollapsibleAlert>
                   </Grid>
                 )}
                 <Grid item xs={12}>
