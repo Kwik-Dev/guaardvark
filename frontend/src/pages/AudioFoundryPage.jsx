@@ -552,9 +552,18 @@ const AudioFoundryPage = () => {
                           clickable
                           sx={{
                             fontWeight: "bold",
-                            backgroundColor: voiceBackend === b ? "#9c27b0" : "rgba(255,255,255,0.05)",
-                            color: "white",
-                            "&:hover": { backgroundColor: "#7b1fa2" }
+                            // Active = purple/white. Inactive uses theme tokens
+                            // (action.selected / action.hover / text.primary /
+                            // divider) so the chips stay **visible in BOTH light
+                            // and dark mode** — the old rgba(255,255,255,0.05) +
+                            // white-text combo was invisible on a light background.
+                            backgroundColor: voiceBackend === b ? "#9c27b0" : "action.selected",
+                            color: voiceBackend === b ? "white" : "text.primary",
+                            border: voiceBackend === b ? "none" : "1px solid",
+                            borderColor: voiceBackend === b ? "transparent" : "divider",
+                            "&:hover": {
+                              backgroundColor: voiceBackend === b ? "#7b1fa2" : "action.hover",
+                            },
                           }}
                           onClick={() => setVoiceBackend(b)}
                         />
@@ -950,7 +959,9 @@ const AudioFoundryPage = () => {
                   <Typography variant="h5" fontWeight="bold">Synthesizing Waves...</Typography>
                   <Typography color="text.secondary">
                     {progress && progress.total > 0
-                      ? `Chunk ${progress.current}/${progress.total} (~${Math.round((progress.current / progress.total) * 100)}%)`
+                      ? progress.stage && progress.stage !== "synthesizing"
+                        ? `${progress.stage.charAt(0).toUpperCase() + progress.stage.slice(1)}… ${Math.round((progress.current / progress.total) * 100)}%`
+                        : `Chunk ${progress.current}/${progress.total} (~${Math.round((progress.current / progress.total) * 100)}%)`
                       : progress && progress.status === "queued"
                         ? "Queued… waiting for the GPU."
                         : "Generating high-fidelity audio on local GPU."}
