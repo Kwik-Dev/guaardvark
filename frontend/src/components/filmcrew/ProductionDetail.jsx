@@ -123,6 +123,23 @@ const ProductionDetail = ({
         />
       </Paper>
 
+      {production.final_video && (
+        <Paper sx={{ p: 2, mb: 3 }}>
+          <Typography variant="h6" gutterBottom>Final Film</Typography>
+          <Divider sx={{ my: 1 }} />
+          <Box
+            component="video"
+            controls
+            preload="metadata"
+            src={production.final_video.url}
+            sx={{ width: '100%', maxHeight: 480, borderRadius: 1, bgcolor: '#000' }}
+          />
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+            {production.final_video.filename}
+          </Typography>
+        </Paper>
+      )}
+
       {production.current_stage === 'casting' && (
         <Paper sx={{ p: 2, mb: 3 }}>
           <CastingPanel
