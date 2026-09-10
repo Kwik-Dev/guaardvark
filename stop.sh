@@ -336,6 +336,35 @@ if [ -n "$celery_pids" ]; then
     fi
 fi
 
+# Clean up any Guaardvark MCP server (backend.mcp, stdio) spawned from this
+# checkout. Normally clients spawn their own instance, so this only matters if
+# one was started manually (e.g. for a smoke test) and left running.
+mcp_pids=$(pgrep -f "python.*backend[.]mcp" 2>/dev/null)
+if [ -n "$mcp_pids" ]; then
+    env_mcp_pids=()
+    for pid in $mcp_pids; do
+        proc_cwd=$(_proc_cwd "$pid")
+        if [ -n "$proc_cwd" ] && [[ "$proc_cwd" == "$SCRIPT_DIR"* ]]; then
+            env_mcp_pids+=("$pid")
+        fi
+    done
+    if [ ${#env_mcp_pids[@]} -gt 0 ]; then
+        vader_info "Stopping ${#env_mcp_pids[@]} MCP server process(es) from this environment..."
+        for pid in "${env_mcp_pids[@]}"; do
+            kill -TERM "$pid" 2>/dev/null
+        done
+        sleep 2
+        for pid in "${env_mcp_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                vader_warn "MCP process (PID: $pid) still running, using SIGKILL..."
+                kill -KILL "$pid" 2>/dev/null
+            fi
+        done
+        rm -f "$PIDS_DIR"/mcp.pid
+        vader_success "MCP server stopped."
+    fi
+fi
+
 VITE_PORT=5173
 if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a
@@ -419,6 +448,10 @@ for plugin_dir in "$SCRIPT_DIR"/plugins/*/; do
 done
 
 rm -f "$PIDS_DIR"/*.pid
+
+# macOS native startup uses Homebrew services for Redis/PostgreSQL; stop them so
+# Guaardvark does not leave background databases running after shutdown.
+stop_macos_managed_services
 
 # Remove runtime state file used by CLI auto-discovery
 RUNTIME_FILE="$HOME/.guaardvark/runtime.json"
