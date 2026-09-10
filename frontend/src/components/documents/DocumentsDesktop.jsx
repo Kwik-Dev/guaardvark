@@ -2,7 +2,7 @@
 // Shows folders/files as draggable icons on a desktop surface
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Box, CircularProgress, Alert } from '@mui/material';
+import { Box, CircularProgress } from '@mui/material';
 import axios from 'axios';
 import { useSnackbar } from '../common/SnackbarProvider';
 import DesktopItemsGrid from './DesktopItemsGrid';

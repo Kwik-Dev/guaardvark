@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Box, Chip, LinearProgress, Stack, Typography } from "@mui/material";
+import {  Box, Chip, LinearProgress, Stack, Typography } from "@mui/material";
 import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const ACTIVE_STATUSES = new Set(["submitting", "queued", "running"]);

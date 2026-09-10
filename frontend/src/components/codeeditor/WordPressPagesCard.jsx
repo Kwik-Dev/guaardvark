@@ -32,7 +32,6 @@ import {
   Tooltip,
   LinearProgress,
 } from "@mui/material";
-import CollapsibleAlert from "../common/CollapsibleAlert";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
@@ -961,7 +960,7 @@ const WordPressPagesCard = React.forwardRef(
             onClose={() => setFeedback({ ...feedback, open: false })}
             anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
           >
-            <CollapsibleAlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
+            <AlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
           </Snackbar>
         </Box>
       </DashboardCardWrapper>

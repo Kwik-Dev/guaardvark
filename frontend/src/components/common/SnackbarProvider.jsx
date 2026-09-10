@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
-import { Snackbar, Alert } from "@mui/material";
+import { Snackbar } from "@mui/material";
 import CollapsibleAlert from "./CollapsibleAlert";
 import { BrandLogo } from "../branding";
 

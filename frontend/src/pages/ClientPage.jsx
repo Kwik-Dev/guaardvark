@@ -27,7 +27,6 @@ import {
   TableRow,
   TableSortLabel,
 } from "@mui/material";
-import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import AddIcon from "@mui/icons-material/Add";
 import _EditIcon from "@mui/icons-material/Edit"; // For table actions
 import CloseIcon from "@mui/icons-material/Close"; // For table actions
@@ -426,7 +425,7 @@ const ClientPage = () => {
           onClose={handleCloseFeedback}
           anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
         >
-          <CollapsibleAlertSnackbar
+          <AlertSnackbar
             onClose={handleCloseFeedback}
             severity={feedback.severity || "info"}
             sx={{ width: "100%" }}

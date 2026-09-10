@@ -38,7 +38,6 @@ import {
   Autocomplete,
   Stack,
 } from "@mui/material";
-import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import AddIcon from "@mui/icons-material/Add";
 import EditIcon from "@mui/icons-material/Edit";
 import CloseIcon from "@mui/icons-material/Close";
@@ -394,7 +393,7 @@ function ProjectsPage() {
           autoHideDuration={6000}
           onClose={handleCloseFeedback}
         >
-          <CollapsibleAlertSnackbar
+          <AlertSnackbar
             onClose={handleCloseFeedback}
             severity={feedback.severity}
             variant="filled"

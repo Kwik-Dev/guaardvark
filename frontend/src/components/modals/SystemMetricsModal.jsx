@@ -6,7 +6,6 @@ import {
   Paper,
   Divider,
 } from "@mui/material";
-import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
 import { useSnackbar } from "../common/SnackbarProvider";
 import * as apiService from "../../api";
@@ -627,7 +626,7 @@ const SystemMetricsModal = ({ open, onClose }) => {
         )}
       </Paper>
 
-      <CollapsibleAlertSnackbar
+      <AlertSnackbar
         open={snackbar.open}
         onClose={handleCloseSnackbar}
         severity={snackbar.severity}

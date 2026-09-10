@@ -1035,7 +1035,7 @@ const TrainingPage = () => {
         autoHideDuration={4000}
         onClose={handleCloseSnackbar}
       >
-        <CollapsibleAlertSnackbar
+        <AlertSnackbar
           onClose={handleCloseSnackbar}
           severity={feedback.severity}
           sx={{ width: "100%" }}

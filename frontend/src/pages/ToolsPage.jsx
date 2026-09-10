@@ -813,7 +813,7 @@ const ToolsPage = () => {
       </Dialog>
 
       {/* Snackbar */}
-      <CollapsibleAlertSnackbar
+      <AlertSnackbar
         open={snackbar.open}
         message={snackbar.message}
         severity={snackbar.severity}

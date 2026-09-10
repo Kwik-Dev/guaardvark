@@ -3,7 +3,7 @@
 // Integrates with existing Guaardvark infrastructure
 
 import React, { useRef, useCallback, useEffect, useState } from "react";
-import { Box, Paper, Typography, IconButton, Tooltip, Alert } from "@mui/material";
+import { Box, Paper, Typography, IconButton, Tooltip } from "@mui/material";
 import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   Save as SaveIcon,

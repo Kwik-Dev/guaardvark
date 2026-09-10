@@ -2,7 +2,7 @@
 // Error boundary specifically for project state management issues
 
 import React from 'react';
-import { Alert, Box, Button, Typography } from '@mui/material';
+import {  Box, Button, Typography } from '@mui/material';
 import { Refresh as RefreshIcon } from '@mui/icons-material';
 import { useAppStore } from '../../stores/useAppStore';
 import CollapsibleAlert from "./CollapsibleAlert";

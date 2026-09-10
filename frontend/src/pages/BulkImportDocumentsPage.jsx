@@ -252,7 +252,7 @@ const BulkImportDocumentsPage = () => {
 
     return (
       <CollapsibleAlert severity={severity}>
-        <CollapsibleAlertTitle>Job Status</AlertTitle>
+        <AlertTitle>Job Status</AlertTitle>
         <Typography variant="body2" component="div" sx={{ mt: 1 }}>
           <strong>Job ID:</strong> {jobId}
         </Typography>

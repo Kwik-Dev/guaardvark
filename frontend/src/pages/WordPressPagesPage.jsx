@@ -34,7 +34,6 @@ import {
   Tooltip,
   LinearProgress,
 } from "@mui/material";
-import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import DownloadIcon from "@mui/icons-material/Download";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
@@ -916,7 +915,7 @@ function WordPressPagesPage() {
         onClose={() => setFeedback({ ...feedback, open: false })}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <CollapsibleAlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
+        <AlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
       </Snackbar>
     </PageLayout>
   );

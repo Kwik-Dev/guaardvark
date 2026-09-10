@@ -11,7 +11,7 @@
 import React from "react";
 import {
   Box, Stack, Typography, Chip, Slider, TextField, Button,
-  FormControlLabel, Switch, Divider, Alert,
+  FormControlLabel, Switch, Divider,
 } from "@mui/material";
 import CollapsibleAlert from "../common/CollapsibleAlert";
 import { Delete as DeleteIcon, Star as StarIcon } from "@mui/icons-material";

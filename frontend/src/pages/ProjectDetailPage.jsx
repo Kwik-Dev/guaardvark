@@ -33,7 +33,6 @@ import {
   TextField,
   Autocomplete,
 } from "@mui/material";
-import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   Add as AddIcon,
   Edit as EditIcon,
@@ -695,7 +694,7 @@ const ProjectDetailPage = () => {
         onClose={handleCloseFeedback}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <CollapsibleAlertSnackbar
+        <AlertSnackbar
           onClose={handleCloseFeedback}
           severity={feedback.severity || "info"}
           sx={{ width: "100%" }}

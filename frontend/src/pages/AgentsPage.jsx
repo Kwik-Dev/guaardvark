@@ -404,7 +404,7 @@ const AgentsPage = () => {
         </DialogActions>
       </Dialog>
 
-      <CollapsibleAlertSnackbar
+      <AlertSnackbar
         open={snackbar.open}
         message={snackbar.message}
         severity={snackbar.severity}
