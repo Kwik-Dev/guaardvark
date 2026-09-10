@@ -1,5 +1,6 @@
 import React from "react";
 import { Alert } from "@mui/material";
+import CollapsibleAlert from "./CollapsibleAlert";
 
 /**
  * @param {boolean} [gpuBusy] - GPU held or cooling down (preferred)
@@ -17,16 +18,16 @@ export default function GpuGateBanner({
 
   if (queueMode) {
     return (
-      <Alert severity="info" sx={{ mb: 1 }}>
+      <CollapsibleAlert severity="info" sx={{ mb: 1 }}>
         GPU in use — {blockReason}. New jobs stack in the queue and run automatically when
         the GPU is free.
-      </Alert>
+      </CollapsibleAlert>
     );
   }
 
   return (
-    <Alert severity="info" sx={{ mb: 1 }}>
+    <CollapsibleAlert severity="info" sx={{ mb: 1 }}>
       GPU temporarily unavailable — {blockReason}. Actions will unlock when the GPU is free.
-    </Alert>
+    </CollapsibleAlert>
   );
 }

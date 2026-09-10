@@ -28,6 +28,7 @@ import {
   Switch,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
   Science as ScienceIcon,
   Refresh as RefreshIcon,
@@ -1164,7 +1165,7 @@ const AutoresearchPage = () => {
         </DialogActions>
       </Dialog>
 
-      <AlertSnackbar
+      <CollapsibleAlertSnackbar
         open={snackbar.open}
         message={snackbar.message}
         severity={snackbar.severity}

@@ -25,7 +25,6 @@ import {
   DialogActions,
   TextField,
   CircularProgress,
-  Alert,
   Divider,
   Stack,
   Collapse,
@@ -69,6 +68,7 @@ import {
 } from '../api/pluginsService';
 import { getGpuStatus } from '../api/gpuService';
 import OllamaLifecycleSection from '../components/settings/OllamaLifecycleSection';
+import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 // ── Constants ──────────────────────────────────────────────────────────
 const TOTAL_VRAM_MB = 16384; // 16GB
@@ -202,9 +202,9 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
       </Stack>
 
       {usedPct > 90 && (
-        <Alert severity="warning" sx={{ mt: 1 }} variant="outlined">
+        <CollapsibleAlert severity="warning" sx={{ mt: 1 }} variant="outlined">
           VRAM usage is near capacity. Stop unused services from this page to free memory.
-        </Alert>
+        </CollapsibleAlert>
       )}
     </Paper>
   );
@@ -244,8 +244,9 @@ const LogViewer = ({ pluginId, open }) => {
     }
   }, [logs]);
 
-  if (!open) return null;
-
+  // NOTE: do NOT return null here — this component is wrapped in a MUI <Collapse>,
+  // and a null child makes the Collapse transition read scrollTop of null and throw.
+  // The Collapse (in={open}) controls visibility; we always render the Box.
   return (
     <Box sx={{ mt: 1 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
@@ -968,7 +969,7 @@ const PluginsPage = () => {
       </Typography>
 
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }}>{error}</Alert>
+        <CollapsibleAlert severity="error" sx={{ mb: 3 }}>{error}</CollapsibleAlert>
       )}
 
       {/* VRAM Budget Bar */}

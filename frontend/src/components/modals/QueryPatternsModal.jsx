@@ -15,7 +15,6 @@ import {
   Paper,
   Chip,
   CircularProgress,
-  Alert,
   Table,
   TableBody,
   TableCell,
@@ -27,6 +26,7 @@ import {
   CardContent,
   Stack,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Icons
 import CloseIcon from "@mui/icons-material/Close";
@@ -130,9 +130,9 @@ const QueryPatternsModal = ({ open, onClose }) => {
         )}
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {error}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {patterns && !loading && (
@@ -331,18 +331,18 @@ const QueryPatternsModal = ({ open, onClose }) => {
                   </Grid>
                 </Grid>
               ) : (
-                <Alert severity="info">
+                <CollapsibleAlert severity="info">
                   No query patterns available yet. Use the system to generate some queries first.
-                </Alert>
+                </CollapsibleAlert>
               )}
             </Paper>
           </Box>
         )}
 
         {patterns && patterns.total_patterns === 0 && !loading && (
-          <Alert severity="info">
+          <CollapsibleAlert severity="info">
             No query patterns found. Start using the RAG system to generate pattern data.
-          </Alert>
+          </CollapsibleAlert>
         )}
       </DialogContent>
 

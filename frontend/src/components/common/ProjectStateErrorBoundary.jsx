@@ -5,6 +5,7 @@ import React from 'react';
 import { Alert, Box, Button, Typography } from '@mui/material';
 import { Refresh as RefreshIcon } from '@mui/icons-material';
 import { useAppStore } from '../../stores/useAppStore';
+import CollapsibleAlert from "./CollapsibleAlert";
 
 class ProjectStateErrorBoundary extends React.Component {
   constructor(props) {
@@ -57,7 +58,7 @@ class ProjectStateErrorBoundary extends React.Component {
     if (this.state.hasError) {
       return (
         <Box sx={{ p: 3, textAlign: 'center' }}>
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             <Typography variant="h6" gutterBottom>
               Project State Error
             </Typography>
@@ -73,7 +74,7 @@ class ProjectStateErrorBoundary extends React.Component {
             <Typography variant="body2" color="text.secondary">
               Error: {this.state.error?.message || 'Unknown error'}
             </Typography>
-          </Alert>
+          </CollapsibleAlert>
           
           <Button
             variant="contained"

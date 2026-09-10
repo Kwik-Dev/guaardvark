@@ -7,7 +7,6 @@ import {
   Button,
   Typography,
   Box,
-  Alert,
   Paper,
   LinearProgress,
 } from '@mui/material';
@@ -20,6 +19,7 @@ import {
 } from '@mui/icons-material';
 import { BASE_URL } from '../../api/apiClient';
 import { getBackendHealth } from '../../api/devtoolsService';
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Strip ANSI escape codes from terminal output
 // eslint-disable-next-line no-control-regex -- intentional: ANSI escape sequences are control chars by definition
@@ -332,15 +332,15 @@ const RebootProgressModal = ({ open, onClose }) => {
         )}
 
         {status === 'complete' && (
-          <Alert severity="success" sx={{ mb: 1.5 }}>
+          <CollapsibleAlert severity="success" sx={{ mb: 1.5 }}>
             Reboot complete — reloading page...
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {status === 'error' && errorMessage && (
-          <Alert severity="error" sx={{ mb: 1.5 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 1.5 }}>
             {errorMessage}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {/* Terminal output */}

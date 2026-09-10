@@ -1,11 +1,11 @@
 import {
-  Alert,
   Box,
   IconButton,
   Tooltip,
   Typography,
   Zoom,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import { keyframes, styled } from "@mui/material/styles";
 import PropTypes from "prop-types";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -687,7 +687,7 @@ const VoiceChatButton = ({
       {}
       {recordingError && (
         <Zoom in={true}>
-          <Alert
+          <CollapsibleAlert
             severity="error"
             sx={{
               position: "absolute",
@@ -699,7 +699,7 @@ const VoiceChatButton = ({
             onClose={() => setRecordingError(null)}
           >
             {recordingError}
-          </Alert>
+          </CollapsibleAlert>
         </Zoom>
       )}
 

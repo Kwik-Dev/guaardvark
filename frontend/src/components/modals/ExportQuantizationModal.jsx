@@ -7,7 +7,6 @@ import {
   Button,
   TextField,
   Grid,
-  Alert,
   FormControl,
   InputLabel,
   Select,
@@ -17,6 +16,7 @@ import {
   Chip,
   CircularProgress,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 import MemoryIcon from "@mui/icons-material/Memory";
 import SpeedIcon from "@mui/icons-material/Speed";
 import StorageIcon from "@mui/icons-material/Storage";
@@ -139,18 +139,18 @@ const ExportQuantizationModal = ({
       </DialogTitle>
       <DialogContent dividers>
         {formError && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         {isReQuantize && currentQuantization && (
-          <Alert severity="info" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="info" sx={{ mb: 2 }}>
             Current quantization: <strong>{currentQuantization.toUpperCase()}</strong>
             {currentQuantization === "f16" && (
               <> - This is full precision. Quantizing to Q4_K_M will reduce size by ~75% and improve load times.</>
             )}
-          </Alert>
+          </CollapsibleAlert>
         )}
 
         <Grid container spacing={2} sx={{ mt: 0 }}>

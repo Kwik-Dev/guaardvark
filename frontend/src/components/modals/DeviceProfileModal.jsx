@@ -7,7 +7,6 @@ import {
   Button,
   TextField,
   Grid,
-  Alert,
   FormControl,
   InputLabel,
   Select,
@@ -15,6 +14,7 @@ import {
   FormControlLabel,
   Checkbox,
 } from "@mui/material";
+import CollapsibleAlert from "../common/CollapsibleAlert";
 
 const DeviceProfileModal = ({
   open,
@@ -122,9 +122,9 @@ const DeviceProfileModal = ({
       </DialogTitle>
       <DialogContent dividers>
         {formError && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}
-          </Alert>
+          </CollapsibleAlert>
         )}
         <Grid container spacing={2} sx={{ mt: 0 }}>
           <Grid item xs={12}>
