@@ -362,6 +362,19 @@ class OfflineImageGenerator:
                 self._device = "cuda"
             except Exception as e:
                 logger.warning(f"CUDA is available but not usable (e.g., PyTorch compatibility issue), falling back to CPU: {e}")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            # Apple Silicon: Metal shares system memory with the CPU, so there is no
+            # separate VRAM pool. Probe with a tiny op so a broken MPS build degrades
+            # to CPU rather than failing mid-generation. Z-Image/Krea 2 are DiTs whose
+            # weights (~20GB bf16) fit unified memory but NOT a CPU fp32 run — see the
+            # family guard in _generate().
+            try:
+                dummy = torch.zeros(1, device="mps")
+                _ = dummy + dummy
+                torch.mps.synchronize()
+                self._device = "mps"
+            except Exception as e:
+                logger.warning(f"MPS is available but not usable, falling back to CPU: {e}")
         
         self._generation_lock = threading.RLock()
         # One-shot / once-per-process: avoid WARNING spam when xformers is absent.
@@ -382,6 +395,14 @@ class OfflineImageGenerator:
             logger.error("user image catalog failed to load: %s", e)
 
         logger.info(f"OfflineImageGenerator initialized - Device: {self._device}, Models dir: {self.models_dir}")
+
+    def _generator_device(self) -> str:
+        """Device for ``torch.Generator``.
+
+        torch.Generator supports only CPU and CUDA, so Apple MPS seeds on CPU —
+        the seed still drives the MPS sampler deterministically.
+        """
+        return "cuda" if self._device == "cuda" else "cpu"
 
     def _get_model_path(self, model_id: str) -> Path:
         uf = self.user_files.get(model_id)
@@ -1300,6 +1321,8 @@ class OfflineImageGenerator:
             # Use bf16 on Ada Lovelace+, fp16 otherwise
             if self._device == "cuda":
                 gpu_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            elif self._device == "mps":
+                gpu_dtype = torch.bfloat16
             else:
                 gpu_dtype = torch.float32
 
@@ -1434,6 +1457,11 @@ class OfflineImageGenerator:
                 else:
                     gpu_dtype = torch.float16
                     logger.info("Using float16")
+            elif self._device == "mps":
+                # Metal supports bfloat16 on Apple Silicon; fp32 would double the
+                # unified-memory footprint of a ~20GB DiT.
+                gpu_dtype = torch.bfloat16
+                logger.info("Using bfloat16 (Apple MPS)")
             else:
                 gpu_dtype = torch.float32
 
@@ -2266,13 +2294,14 @@ Negative Prompt: {negative_prompt}""",
                 # an older build). fp32 CPU inference of a 6B DiT consumes tens of GB
                 # of RAM and locks the desktop — identical symptoms to the GPU crash,
                 # with only one WARNING line as evidence. Fail loud instead.
-                if family in ('zimage', 'krea2') and self._device != "cuda":
+                if family in ('zimage', 'krea2') and self._device not in ("cuda", "mps"):
                     result.error = (
-                        f"CUDA is unavailable/unusable on this box (device="
+                        f"No CUDA or Apple MPS accelerator available (device="
                         f"{self._device}) — refusing to run {family} on CPU (fp32 CPU "
-                        "inference = tens of GB of RAM + desktop lockup). Check that "
-                        "torch.cuda.get_arch_list() includes this GPU's architecture "
-                        "(e.g. sm_120 for RTX 5060 Ti) and install a matching torch."
+                        "inference = tens of GB of RAM + desktop lockup). On Apple "
+                        "Silicon this means torch.backends.mps.is_available() was "
+                        "False; otherwise check that torch.cuda.get_arch_list() "
+                        "includes this GPU's architecture (e.g. sm_120 for RTX 5060 Ti)."
                     )
                     result.generation_time = time.time() - start_time
                     return result
