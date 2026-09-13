@@ -111,13 +111,19 @@ def reset_ask(st: Stage):
     require(ok.get("status") == "ok", "backend not healthy")
     plugins = api_get("/api/plugins/status").get("status", {})
     require(plugins.get("comfyui") == "running", "ComfyUI plugin must be running")
+    # Song analysis (the Director) needs both; a stopped one fails the project
+    # and the agent starts debugging the checkout on camera.
+    for pid in ("video_editor", "ollama"):
+        require(plugins.get(pid) == "running", f"the {pid} plugin must be running for song analysis")
 
 
 def act_ask(st: Stage):
     # One interactive session, kept alive across the ask, gate and file beats,
     # so the skill loading, the streamed tool calls and the permission prompt
     # are all on camera. The agent must stop at the gate; it never approves.
-    stage_claude(PLUGIN_TOOLS, cwd=CLIENT_DIR, boot=8.0)
+    # manual: auto mode is Claude Code's default and would run shell commands
+    # unasked, so the gate's permission prompt would never appear on camera.
+    stage_claude(PLUGIN_TOOLS, cwd=CLIENT_DIR, extra="--permission-mode manual", boot=8.0)
     type_into_stage_terminal(
         f"Make a music video from song document {SONG_DOC_ID} in this style: {STYLE}. "
         "Follow the guaardvark skills. Stop at the approval gate and tell me the cost "
