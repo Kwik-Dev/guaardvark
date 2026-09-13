@@ -52,7 +52,19 @@ def _stdout_to_stderr():
         os.close(saved_stdout_fd)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _configure_logging(cmd: str | None, verbose: bool = False) -> None:
+    """Keep server diagnostics intact and one-shot commands quiet by default."""
+    if cmd in (None, "stdio", "http"):
+        _configure_stderr_logging(logging.DEBUG if verbose else logging.INFO)
+    else:
+        level = logging.INFO if verbose else logging.WARNING
+        _configure_stderr_logging(level)
+        # Filter records from dependencies that explicitly set their own level.
+        for handler in logging.getLogger().handlers:
+            handler.setLevel(level)
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m backend.mcp")
     sub = parser.add_subparsers(dest="cmd")
 
@@ -100,17 +112,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Also make real read-only tool calls, one per tool family",
     )
 
-    sub.add_parser(
+    list_tools_cmd = sub.add_parser(
         "list-tools",
         help="Print exposed tools and exit (no transport, useful for smoke tests)",
     )
 
     parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Debug-level logging to stderr",
+        "-v", "--verbose", action="store_true",
+        help="INFO logging for one-shot commands; DEBUG logging for servers (stderr)",
     )
+    for command in (config_cmd, install_cmd, doctor_cmd, list_tools_cmd):
+        command.add_argument(
+            "-v", "--verbose", action="store_true", default=argparse.SUPPRESS,
+            help="Show INFO-level logging to stderr",
+        )
+    return parser
 
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
-    _configure_stderr_logging(logging.DEBUG if args.verbose else logging.INFO)
+    _configure_logging(args.cmd, args.verbose)
 
     cmd = args.cmd or "stdio"
 
