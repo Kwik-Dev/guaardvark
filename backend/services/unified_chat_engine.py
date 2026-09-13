@@ -333,6 +333,9 @@ FILE_TOOLS = ["file_bulk_operation", "file_watch"]
 OUTREACH_TOOLS = ["outreach_status", "outreach_list_queue", "outreach_draft_post",
                   "outreach_approve_draft", "outreach_reject_draft", "outreach_run_pass",
                   "outreach_execute_intent"]
+# Publishing to the user's own connections. The tool only queues; the Approvals
+# page holds every chat request until a person approves it.
+PUBLISH_TOOLS = ["request_publish"]
 # Populated dynamically when an MCP server connects — see
 # backend.services.mcp_native_proxy. Holds names like 'filesystem_list_directory'
 # so the LLM can pick MCP tools by name without going through mcp_execute.
@@ -498,6 +501,9 @@ TOOL_CONTEXT_KEYWORDS = {
                   "promote", "advertise", "share the github",
                   "guaardvark on youtube", "guaardvark on reddit",
                   "post comments on youtube", "github on youtube"], OUTREACH_TOOLS),
+    "publish": (["publish", "post to discord", "post on discord", "post to bluesky",
+                 "post on bluesky", "post to mastodon", "post on mastodon",
+                 "post to telegram", "send to telegram", "announce"], PUBLISH_TOOLS),
     "file": (["bulk file", "rename files", "process all files", "watch file",
               "watch the file", "monitor file", "all files in", "every file in",
               "batch file"], FILE_TOOLS),
@@ -2518,6 +2524,7 @@ class UnifiedChatEngine:
                         t_name,
                         on_output=on_output,
                         agent_context={
+                            "transport": "chat",
                             "user_message": message,
                             "message": message,
                             "project_root": (

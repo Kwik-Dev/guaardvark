@@ -693,6 +693,28 @@ def register_outreach_tools() -> List[str]:
     return registered
 
 
+def register_connection_tools() -> List[str]:
+    """Register the agent handle on the Connections publish queue."""
+    global _tool_categories
+    registered = []
+    category = "connections"
+
+    try:
+        from backend.tools.connection_tools import RequestPublishTool
+
+        tool = RequestPublishTool()
+        register_tool(tool)
+        registered.append(tool.name)
+        _tool_categories[tool.name] = category
+        logger.debug("Registered: RequestPublishTool")
+    except ImportError as e:
+        logger.error(f"Failed to import connection tools: {e}")
+    except Exception as e:
+        logger.error(f"Failed to register connection tools: {e}")
+
+    return registered
+
+
 def register_workstation_tools() -> List[str]:
     """Register chat tools that wrap mapper / GPU / logs / swarm / self-improvement."""
     global _tool_categories
@@ -800,6 +822,7 @@ def initialize_all_tools() -> ToolRegistry:
     _registered_tools.extend(register_test_execution_tools())
     _registered_tools.extend(register_agent_control_tools())
     _registered_tools.extend(register_outreach_tools())
+    _registered_tools.extend(register_connection_tools())
     _registered_tools.extend(register_workstation_tools())
 
     # Get the registry for status reporting

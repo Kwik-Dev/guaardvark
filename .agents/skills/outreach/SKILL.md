@@ -17,6 +17,7 @@ Nothing here posts. Approval happens in the Studio's Outreach page, by design.
 | `outreach_list_queue` | drafts, default `status='drafted'` (pending review) |
 | `outreach_draft_post` | draft a comment or share post for a platform and thread URL; grounded in the user's indexed knowledge, graded, then queued |
 | `outreach_reject_draft` | mark a draft rejected so it will not post |
+| `request_publish` | ask to post the user's own announcement to one of their social connections; it waits on the Approvals page |
 
 ## Pattern
 
