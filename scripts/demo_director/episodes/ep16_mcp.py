@@ -1,4 +1,4 @@
-"""Episode 16 — Plug In Anything (≈4:30). DRAFT rewrite — dry-run before shooting.
+"""Episode 16 — Plug In Anything (≈4:00).
 
 MCP doctor, install --dry-run, the policy, the index profile for clients, a
 restricted Claude Code session calling a Guaardvark tool, approvals, and a
@@ -15,7 +15,6 @@ Requires: `python -m backend.mcp doctor` all PASS; the AcmeCorp corpus
 indexed; CLIENT_DIR holding an mcp.json that launches the guaardvark server;
 Claude Code logged in; backend restarted with private extensions parked.
 
-Meant to replace episodes/ep16_mcp.py.
 Run from scripts/demo_director/:  venv/bin/python episodes/ep16_mcp.py
 """
 
@@ -38,6 +37,8 @@ from helpers import (  # noqa: E402
 
 PY = "backend/venv/bin/python"
 QUIET = "2>/dev/null"          # the MCP CLI logs INFO lines to stderr
+# Terminal commands sleep longer than any beat's narration so the window stays
+# on screen to the end of the take; the next reset closes it.
 
 # Claude Code runs from a neutral folder holding only an mcp.json for the
 # guaardvark server, with --restricted so no instructions, memory or hooks
@@ -47,8 +48,9 @@ CLIENT_DIR = Path("/var/tmp/guaardvark-ep16")
 # The synthetic contract has a term, a scope and a renewal clause and no payment
 # terms; asking for what it holds keeps the answer about the passages found.
 SEARCH_QUERY = "AcmeCorp service agreement scope, term and renewal"
-# A generate_image call after a search in the same session has stalled; keep
-# the image off until that is understood. With it on, the prompt asks for
+# The client beat shows the search. An image after it no longer stalls (the
+# search's reranker loads in the backend, where GPU admission can unload it),
+# so the image step can be switched on; the prompt then asks for
 # wait_for_result=true because the MCP default queues and returns at once.
 CLIENT_WITH_IMAGE = False
 IMAGE_PROMPT = "a brass compass on a weathered sea chart, soft window light"
@@ -232,7 +234,7 @@ def reset_doctor(st: Stage):
 
 
 def act_doctor(st: Stage):
-    stage_terminal(f"{PY} -m backend.mcp doctor {QUIET}; sleep 40")
+    stage_terminal(f"{PY} -m backend.mcp doctor {QUIET}; sleep 120")
     wait_terminal(r"All checks passed", 90)
     time.sleep(4.0)
 
@@ -246,7 +248,7 @@ def v_doctor(st: Stage):
 # ---------------------------------------------------------- beat: install
 
 def act_install(st: Stage):
-    stage_terminal(f"{PY} -m backend.mcp install --dry-run {QUIET}; sleep 30")
+    stage_terminal(f"{PY} -m backend.mcp install --dry-run {QUIET}; sleep 120")
     wait_terminal(r"\[ dry\]", 60)
     time.sleep(4.0)
 
@@ -263,7 +265,7 @@ def v_install(st: Stage):
 POLICY_CMD = (
     f"{PY} -m backend.mcp list-tools {QUIET}"
     " | awk 'NR<=6 {print} END {print \"...\"; print NR \" tools exposed\"}'; echo; "
-    "sed -n '/^DEFAULT_DENY_CATEGORIES/,/^]/p' backend/mcp/config.py; sleep 40")
+    "sed -n '/^DEFAULT_DENY_CATEGORIES/,/^]/p' backend/mcp/config.py; sleep 120")
 
 
 def act_policy(st: Stage):
@@ -330,7 +332,7 @@ def client_command() -> str:
     # The prompt is shell-quoted with double quotes: keep it free of ", $ and `.
     assert not re.search(r'["$`]', ask), ask
     return (f'claude -p "{ask}" --restricted --strict-mcp-config --mcp-config mcp.json '
-            f'--allowedTools "{",".join(tools)}"; sleep 45')
+            f'--allowedTools "{",".join(tools)}"; sleep 120')
 
 
 def reset_client(st: Stage):
@@ -396,7 +398,7 @@ def v_approvals(st: Stage):
 CAVEAT_CMD = (
     f"git log -1 --format=%b {CAVEAT_COMMIT} | tr '\\n' ' ' "
     "| grep -o 'Note read_logs[^.]*\\.'; echo; "
-    f"git show --stat --format=%s {FIX_COMMIT} | head -8; sleep 30")
+    f"git show --stat --format=%s {FIX_COMMIT} | head -8; sleep 120")
 
 
 def act_fixed(st: Stage):
