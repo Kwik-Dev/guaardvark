@@ -176,7 +176,7 @@ _DOC_SORT_COLS = {
 LIVE_REPO_PREFIX = "/__repo__"
 
 # File-browser label for the live repo mount; follows the product name so
-# white-label distributions read naturally (e.g. "Roof Brain Code").
+# white-label distributions read naturally (e.g. "Acme Studio Code").
 _REPO_MOUNT_NAME = f"{GUAARDVARK_PROJECT_NAME} Code"
 
 

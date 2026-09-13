@@ -7,8 +7,8 @@ One call writes ``<OUTPUT_DIR>/chat-exports/chats-<timestamp>/`` containing:
   rolling summaries.
 * ``sessions/<session_id>.md`` — the same transcript as readable Markdown.
 
-Sessions come from ``llm_sessions``; Roofing Brain answers are not persisted
-there and are therefore not part of this export.
+Sessions come from ``llm_sessions``; an embedded assistant that stores its
+answers elsewhere is not part of this export.
 """
 
 from __future__ import annotations

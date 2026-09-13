@@ -317,7 +317,7 @@ def test_restore_refuses_a_dump_of_another_database(tmp_path, monkeypatch):
     machine) must never be restored here with --clean in front of it."""
     monkeypatch.setattr(backup_service, "_effective_db_url",
                         lambda: "postgresql://u:p@localhost:5432/guaardvark")
-    monkeypatch.setattr(backup_service, "_dump_dbname", lambda _p: "roofbrain")
+    monkeypatch.setattr(backup_service, "_dump_dbname", lambda _p: "otherproduct")
     dump = tmp_path / "foreign.pgdump"
     dump.write_bytes(b"PGDMP")
     assert backup_service._restore_pg_dump(dump) is False  # tripwire proves pg_restore never ran

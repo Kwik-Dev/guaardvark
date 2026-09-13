@@ -69,12 +69,12 @@ describe('FloatingChatProvider', () => {
   });
 
   it('hides on exact routes and on prefixes ending in *', () => {
-    const routes = ['/chat', '/roofing', '/roofing/brain*'];
+    const routes = ['/chat', '/studio', '/studio/assistant*'];
     expect(isFloatingChatHiddenRoute('/chat', routes)).toBe(true);
-    expect(isFloatingChatHiddenRoute('/roofing', routes)).toBe(true);
-    expect(isFloatingChatHiddenRoute('/roofing/brain', routes)).toBe(true);
-    expect(isFloatingChatHiddenRoute('/roofing/brain/training', routes)).toBe(true);
-    expect(isFloatingChatHiddenRoute('/roofing/jobs', routes)).toBe(false);
+    expect(isFloatingChatHiddenRoute('/studio', routes)).toBe(true);
+    expect(isFloatingChatHiddenRoute('/studio/assistant', routes)).toBe(true);
+    expect(isFloatingChatHiddenRoute('/studio/assistant/training', routes)).toBe(true);
+    expect(isFloatingChatHiddenRoute('/studio/jobs', routes)).toBe(false);
     expect(isFloatingChatHiddenRoute('/chat2', routes)).toBe(false);
   });
 });

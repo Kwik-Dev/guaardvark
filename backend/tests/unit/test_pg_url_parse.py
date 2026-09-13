@@ -17,7 +17,7 @@ def parse(url: str):
 
 
 @pytest.mark.parametrize("url,expected", [
-    ("postgresql://roofbrain:s3cret@localhost:5432/roofbrain", ("roofbrain", "s3cret", "localhost", "5432", "roofbrain")),
+    ("postgresql://vertical:s3cret@localhost:5432/verticaldb", ("vertical", "s3cret", "localhost", "5432", "verticaldb")),
     ("postgresql://guaardvark:pw@127.0.0.1:5433/guaardvark?sslmode=disable", ("guaardvark", "pw", "127.0.0.1", "5433", "guaardvark")),
     ("postgres://u:p@h/db", ("u", "p", "h", "", "db")),
     ("postgresql+psycopg2://u:p%40x@h:5432/db", ("u", "p%40x", "h", "5432", "db")),

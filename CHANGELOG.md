@@ -125,7 +125,7 @@ Interconnector clients: Update Now, restart, and rebuild the frontend bundle.
   pattern and then by Ollama's own capabilities list, so qwen3 is covered and a family the
   list has not met is still caught. `build_ollama` turns thinking off for those models unless
   the caller passes `thinking` itself; `get_llm_instance(model=...)` accepts `thinking`,
-  `request_timeout`, `json_mode`, `num_ctx` and `num_predict` like the RoofBrain build already
+  `request_timeout`, `json_mode`, `num_ctx` and `num_predict` like a white-label build already
   did; the model-switch and startup instances, the brain's capability probe, the diagnostics
   ping and the agent's narration fallback all go through the same helper. The Chat page's
   per-chat `/thinking on` still wins, and the retry after an Ollama serializer crash now keeps
