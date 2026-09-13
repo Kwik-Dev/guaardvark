@@ -49,7 +49,8 @@ EXPOSED, REGISTERED = (int(_m.group(1)), int(_m.group(2))) if _m else (0, 0)
 require(len(SKILLS) == 15, f"expected 15 skills, found {len(SKILLS)}: {SKILLS}")
 require(EXPOSED > 0, "list-tools did not report the exposed count")
 
-WORDS = {15: "fifteen", 46: "forty-six", 47: "forty-seven", 90: "ninety", 91: "ninety-one"}
+WORDS = {15: "fifteen", 46: "forty-six", 47: "forty-seven", 48: "forty-eight",
+         90: "ninety", 91: "ninety-one", 92: "ninety-two"}
 def say(n: int) -> str:
     return WORDS.get(n, str(n))
 

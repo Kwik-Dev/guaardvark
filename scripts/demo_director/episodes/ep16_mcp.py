@@ -321,10 +321,32 @@ def v_profiles(st: Stage):
 
 # ----------------------------------------------------------- beat: client
 
+# Asked for on camera and never sent: the take shows it waiting, then it is cancelled.
+POST_TEXT = ("Guaardvark 2.9.0 is out: agent skills and a Claude Code plugin, "
+             "running on your own machine.")
+POST_MARK = "Guaardvark 2.9.0 is out"
+
+
+def mcp_requests() -> list[dict]:
+    """This episode's publish requests still waiting for a person."""
+    rows = api_get("/api/connections/publishes", status="awaiting_approval",
+                   limit=50).get("publishes", [])
+    return [r for r in rows
+            if r.get("requested_by") == "mcp" and POST_MARK in (r.get("body") or "")]
+
+
+def cancel_mcp_requests():
+    for record in mcp_requests():
+        H.rq.post(f"{H.API}/api/connections/publishes/{record['id']}/cancel",
+                  timeout=20).raise_for_status()
+
+
 def client_command() -> str:
-    tools = ["mcp__guaardvark__search_knowledge_base"]
+    tools = ["mcp__guaardvark__search_knowledge_base", "mcp__guaardvark__request_publish"]
     ask = (f"Use the guaardvark tools only. Search the knowledge base for: {SEARCH_QUERY}. "
-           "Quote two short passages, each with the source file name it came from.")
+           "Quote two short passages, each with the source file name it came from. "
+           f"Then use request_publish to ask for this post: {POST_TEXT} "
+           "Report the status the request comes back with.")
     if CLIENT_WITH_IMAGE:
         tools.append("mcp__guaardvark__generate_image")
         ask += (" Then call generate_image with wait_for_result set to true and the "
@@ -343,12 +365,18 @@ def reset_client(st: Stage):
             "Ollama is not running: the knowledge search cannot embed the query")
     if CLIENT_WITH_IMAGE:
         require(plugin_running("comfyui"), "ComfyUI is not running")
+    social = [c for c in api_get("/api/connections", family="social").get("connections", [])
+              if c.get("enabled")]
+    require(len(social) == 1,
+            f"request_publish needs exactly one enabled social connection, found {len(social)}")
+    cancel_mcp_requests()   # a request left by an earlier take would crowd the list
 
 
 def act_client(st: Stage):
     stage_terminal(client_command(), cwd=CLIENT_DIR)
     # -p prints the whole answer when the session ends.
-    wait_terminal(r"(?i)service[-_ ]agreement", 420 if CLIENT_WITH_IMAGE else 180)
+    wait_terminal(r"(?i)awaiting[_ ]approval|pending approval",
+                  420 if CLIENT_WITH_IMAGE else 240)
     time.sleep(6.0)
 
 
@@ -360,14 +388,22 @@ def v_client(st: Stage):
             "retrieval reported degraded; the passages are not real")
     if CLIENT_WITH_IMAGE:
         require("/api/batch-image/image/" in body, "no image URL in the client answer")
+    require(re.search(r"(?i)awaiting[_ ]approval|pending approval", body),
+            "the client did not report its publish request waiting for approval")
+    require(len(mcp_requests()) == 1, "no single MCP publish request is waiting for approval")
     verify_no_private_names(st)
 
 
 # -------------------------------------------------------- beat: approvals
 
+def pending_request(st: Stage):
+    return st.page.get_by_role("button").filter(has_text=POST_MARK)
+
+
 def reset_approvals(st: Stage):
     close_dialogs(st)
     kill_stage_terminal()
+    require(len(mcp_requests()) == 1, "the client's publish request is not waiting")
     set_nav_chrome(st, "software", path="/connections")
     # Only the Social tab (the default) carries the publish switches, and only
     # once publish settings have loaded.
@@ -379,18 +415,24 @@ def reset_approvals(st: Stage):
 def act_approvals(st: Stage):
     st.hover_over(st.page.get_by_text("Require approval", exact=True), dur=0.9)
     time.sleep(4.0)     # tooltip: chat or MCP always require approval
-    st.glide_click(st.page.get_by_role("tab", name="MCP", exact=True), dur=0.8)
-    time.sleep(2.5)
     goto(st, "/approvals", settle=2.5)
-    pending = st.page.get_by_role("tab", name=re.compile(r"^Pending"))
-    st.hover_over(pending, dur=0.8)
+    item = pending_request(st).first
+    item.wait_for(state="visible", timeout=20_000)
+    st.glide_click(item, dur=0.9)
+    time.sleep(2.5)
+    for name in ("Approve", "Reject", "Cancel"):   # pointed at, never clicked
+        st.hover_over(st.page.get_by_role("button", name=name, exact=True), dur=0.6)
+        time.sleep(1.6)
     time.sleep(2.0)
 
 
 def v_approvals(st: Stage):
-    require(st.page.get_by_role("tab", name=re.compile(r"^Pending")).count(),
-            "the approvals page has no Pending tab")
+    require(st.page.get_by_text("Requested by mcp").count(),
+            "the review pane is not showing the MCP request")
+    require(st.page.get_by_role("button", name="Approve", exact=True).count(),
+            "the request has no Approve button")
     verify_path(st, "/approvals")
+    verify_no_private_names(st)
 
 
 # ------------------------------------------------------------ beat: fixed
@@ -399,6 +441,13 @@ CAVEAT_CMD = (
     f"git log -1 --format=%b {CAVEAT_COMMIT} | tr '\\n' ' ' "
     "| grep -o 'Note read_logs[^.]*\\.'; echo; "
     f"git show --stat --format=%s {FIX_COMMIT} | head -8; sleep 120")
+
+
+def reset_fixed(st: Stage):
+    # The approvals take verifies while recording, so its request is
+    # withdrawn here, before this beat's recorder starts.
+    cancel_mcp_requests()
+    reset_terminal(st)
 
 
 def act_fixed(st: Stage):
@@ -420,8 +469,8 @@ def _client_narration() -> list[str]:
     lines = [
         "A client on camera. This is Claude Code, started in an empty folder "
         "with the Guaardvark server and nothing else: no project, no memory, "
-        "no other servers. It may use exactly one Guaardvark tool, the "
-        "knowledge base search." if not CLIENT_WITH_IMAGE else
+        "no other servers. It may use exactly two Guaardvark tools: the "
+        "knowledge base search, and a request to publish." if not CLIENT_WITH_IMAGE else
         "A client on camera. This is Claude Code, started in an empty folder "
         "with the Guaardvark server and nothing else: no project, no memory, "
         "no other servers. It may use exactly two Guaardvark tools: the "
@@ -431,6 +480,9 @@ def _client_narration() -> list[str]:
         "exist. The search runs on this machine, and what comes back is "
         "passages with the file each one came from, not a summary. Claude "
         "sees the passages it asked for. The rest of the corpus stays here.",
+        "",
+        "Then it asks to post an announcement. That tool can only ask: the "
+        "request comes back awaiting approval, and nothing has been sent.",
     ]
     if CLIENT_WITH_IMAGE:
         lines += [
@@ -525,8 +577,10 @@ BEATS = [
              "M C P always require approval, whatever the switch says. The "
              "server enforces that, not just the tooltip.",
              "",
-             "Outside M C P servers get their own tab. And the approvals page "
-             "is where those requests wait.",
+             "Here is the request the client just made, marked M C P: the "
+             "connection, the text, and three buttons. Approve, reject, or "
+             "cancel. The server holds it until a person picks one. This one "
+             "never goes out.",
          ],
          action=act_approvals, verify=v_approvals, reset=reset_approvals),
     Beat(name="fixed",
@@ -546,7 +600,7 @@ BEATS = [
              "Next: five agents on one repository, every one of them in its "
              "own copy.",
          ],
-         action=act_fixed, verify=v_fixed, reset=reset_terminal),
+         action=act_fixed, verify=v_fixed, reset=reset_fixed),
 ]
 
 
@@ -560,6 +614,12 @@ def main():
         stage.cursor.click()
         print(f"\nEP16 COMPLETE: {ep.produce(stage)}")
     finally:
+        # A resumed run reuses the fixed beat without its reset, so withdraw
+        # the on-camera request here as well.
+        try:
+            cancel_mcp_requests()
+        except Exception as e:  # noqa: BLE001 - report, never mask the take's own error
+            print(f"  WARNING: could not cancel the on-camera publish request: {e}")
         kill_stage_terminal()
         stage.close()
 
