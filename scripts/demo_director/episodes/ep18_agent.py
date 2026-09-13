@@ -52,7 +52,8 @@ os.environ["GUAARDVARK_ROOT"] = str(REPO)
 # ---- numbers, read at load ---------------------------------------------------
 SKILLS = sorted(p.name for p in (REPO / ".agents" / "skills").iterdir()
                 if (p / "SKILL.md").is_file() and not p.name.startswith(("_", ".")))
-_lt = subprocess.run([PY, "-m", "backend.mcp", "list-tools"], cwd=REPO,
+# -v: one-shot CLI commands log warnings only, and the counts are an INFO line.
+_lt = subprocess.run([PY, "-m", "backend.mcp", "list-tools", "-v"], cwd=REPO,
                      capture_output=True, text=True, timeout=300)
 _m = re.search(r"exposing (\d+) of (\d+) registered", _lt.stderr + _lt.stdout)
 EXPOSED, REGISTERED = (int(_m.group(1)), int(_m.group(2))) if _m else (0, 0)
