@@ -39,6 +39,9 @@ class ModelType(Enum):
     RERANKER = "reranker"
     # A session booking, not a model the orchestrator can load or unload.
     IMAGE_BATCH = "image_batch"
+    # A model a sidecar plugin (audio_foundry) loads and unloads itself; the plugin
+    # reports load, release and evict, and the admission reclaim asks it to unload.
+    EXTERNAL_PLUGIN = "external_plugin"
 
 
 class SlotState(Enum):
@@ -1195,6 +1198,8 @@ class GPUMemoryOrchestrator:
             return ModelType.RERANKER
         elif lower.startswith("image_batch"):
             return ModelType.IMAGE_BATCH
+        elif lower.startswith("audio_foundry:"):
+            return ModelType.EXTERNAL_PLUGIN
         elif lower.startswith("ollama:"):
             name = slot_id.split(":", 1)[1] if ":" in slot_id else ""
             if any(kw in name.lower() for kw in ("embed", "retrieval", "minilm")):

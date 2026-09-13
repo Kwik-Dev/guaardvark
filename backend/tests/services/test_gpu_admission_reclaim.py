@@ -289,6 +289,25 @@ def test_image_batch_slot_is_not_mistyped_as_an_ollama_model():
     assert orch._infer_model_type("image_batch:ImageBatch_08-24-2026_1") == ModelType.IMAGE_BATCH
 
 
+def test_audio_foundry_slot_is_not_mistyped_as_an_ollama_model():
+    """As OLLAMA_LLM its unload asked Ollama to drop a model named "voice" and
+    failed, and the hardware sync purged the slot while the model stayed loaded."""
+    orch = _bare_orch()
+    assert orch._infer_model_type("audio_foundry:voice") == ModelType.EXTERNAL_PLUGIN
+
+
+def test_an_audio_foundry_slot_leaves_the_registry_when_the_plugin_evicts_it():
+    orch = _bare_orch()
+    slot = ModelSlot(
+        slot_id="audio_foundry:voice", model_type=ModelType.EXTERNAL_PLUGIN, vram_mb=3716,
+        loaded_at=0.0, last_used=0.0, priority=70, state=SlotState.LOADED,
+    )
+    orch._registry["audio_foundry:voice"] = slot
+
+    assert orch._unload_model(slot) is True
+    assert "audio_foundry:voice" not in orch._registry
+
+
 def test_a_booking_is_never_evicted_out_from_under_its_owner():
     """Registry-only 'unload' frees nothing but would credit the caller its whole
     estimate, admitting a second job against VRAM still in use."""
