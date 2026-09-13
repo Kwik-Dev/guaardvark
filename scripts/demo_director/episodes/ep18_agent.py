@@ -39,6 +39,16 @@ PY = "backend/venv/bin/python"
 SONG_DOC_ID = os.environ.get("EP18_SONG_DOC_ID", "")
 STYLE = "grainy 16 millimetre, neon rain on wet asphalt, slow dolly, 1984"
 
+# Claude Code on camera runs from a throwaway config that holds only a login, in
+# a neutral folder, so none of the operator's settings, memory, hooks, plugins or
+# MCP servers load and the plugin install never touches the real config. The
+# plugin's MCP launcher finds the checkout through GUAARDVARK_ROOT, so the path is
+# never typed on camera. Every claude call below inherits both.
+CLIENT_DIR = Path(os.environ.get("EP18_CLIENT_DIR", "/var/tmp/guaardvark-ep18"))
+CLAUDE_CONFIG = CLIENT_DIR / "claude-config"
+os.environ["CLAUDE_CONFIG_DIR"] = str(CLAUDE_CONFIG)
+os.environ["GUAARDVARK_ROOT"] = str(REPO)
+
 # ---- numbers, read at load ---------------------------------------------------
 SKILLS = sorted(p.name for p in (REPO / ".agents" / "skills").iterdir()
                 if (p / "SKILL.md").is_file() and not p.name.startswith(("_", ".")))
@@ -65,7 +75,10 @@ def reset_terminal(st: Stage):
 
 def reset_install(st: Stage):
     reset_terminal(st)
-    # A clean plugin state so the install is real on camera.
+    require((CLAUDE_CONFIG / ".credentials.json").is_file(),
+            f"no Claude Code login in the throwaway config {CLAUDE_CONFIG}")
+    # A clean plugin state so the install is real on camera; scoped to the
+    # throwaway config by CLAUDE_CONFIG_DIR.
     subprocess.run(["claude", "plugin", "uninstall", "guaardvark@guaardvark"],
                    capture_output=True, text=True)
     subprocess.run(["claude", "plugin", "marketplace", "remove", "guaardvark"],
@@ -75,7 +88,7 @@ def reset_install(st: Stage):
 def act_install(st: Stage):
     stage_terminal(
         "claude plugin marketplace add guaardvark/guaardvark && "
-        "claude plugin install guaardvark@guaardvark; sleep 30")
+        "claude plugin install guaardvark@guaardvark; sleep 30", cwd=CLIENT_DIR)
     time.sleep(16.0)
 
 
@@ -98,7 +111,7 @@ def act_ask(st: Stage):
     # One interactive session, kept alive across the ask, gate and file beats,
     # so the skill loading, the streamed tool calls and the permission prompt
     # are all on camera. The agent must stop at the gate; it never approves.
-    stage_claude(PLUGIN_TOOLS, boot=8.0)
+    stage_claude(PLUGIN_TOOLS, cwd=CLIENT_DIR, boot=8.0)
     type_into_stage_terminal(
         f"Make a music video from song document {SONG_DOC_ID} in this style: {STYLE}. "
         "Follow the guaardvark skills. Stop at the approval gate and tell me the cost "
@@ -166,7 +179,7 @@ BEATS = [
              "Two lines. No clone.",
              "",
              f"The marketplace is the repository itself. The install brings {say(len(SKILLS))} "
-             "skills and the M C P server, and asks where your checkout lives.",
+             "skills and the M C P server, which runs from your own checkout.",
          ],
          action=act_install, verify=v_installed, reset=reset_install),
     Beat(name="ask",
