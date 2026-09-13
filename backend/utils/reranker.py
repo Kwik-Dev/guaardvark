@@ -23,6 +23,8 @@ import os
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend.utils.backend_http import in_mcp_process
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "BAAI/bge-reranker-v2-m3"
@@ -56,6 +58,9 @@ def _pick_device() -> str:
     starts next. This choice is made per load, not once per process -- an unload
     releases it, and the next query re-decides against the card as it is then.
     """
+    # Memory held by the MCP process is invisible to the backend's GPU admission.
+    if in_mcp_process():
+        return "cpu"
     floor_mb = int(os.environ.get("GUAARDVARK_RERANK_MIN_VRAM_MB", "3000"))
     try:
         from backend.services.gpu_resource_coordinator import has_gpu, get_available_vram

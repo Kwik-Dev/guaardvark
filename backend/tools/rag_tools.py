@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.services.indexing_service import search_with_llamaindex
+from backend.utils.backend_http import is_mcp_transport, run_tool_in_backend
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,12 @@ class KnowledgeSearchTool(BaseTool):
 
     def execute(self, query: str, top_k: int = None, filter_type: str = None,
                 project_id: str = None) -> ToolResult:
+        if is_mcp_transport(self):
+            arguments = {"query": query, "top_k": top_k,
+                         "filter_type": filter_type, "project_id": project_id}
+            return run_tool_in_backend(
+                self.name, {key: value for key, value in arguments.items() if value is not None}
+            )
         logger.info(f"Executing KnowledgeSearchTool: {query}")
         try:
             # content_type is the type key actually stamped on every indexed node
