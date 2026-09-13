@@ -359,20 +359,24 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     _raw_w = data.get('width', None)
     _raw_h = data.get('height', None)
     _raw_steps = data.get('steps', None)
+    params['steps_explicit'] = _as_bool(data.get('steps_explicit'), False)
     _raw_g = data.get('guidance', None)
     _resolved = resolve_stills_defaults(
         params['model'],
         width=int(_raw_w) if _raw_w is not None else None,
         height=int(_raw_h) if _raw_h is not None else None,
         steps=int(_raw_steps) if _raw_steps is not None else None,
+        steps_explicit=params['steps_explicit'],
         guidance=float(_raw_g) if _raw_g is not None else None,
         replace_legacy_sd_markers=True,
     )
     params['width'] = int(_resolved['width'])
     params['height'] = int(_resolved['height'])
-    # Absolute step bounds 1–100 — model validator recommends ranges but does not
-    # throttle quality when hard_clamp=False (FLUX / Z-Image / Krea).
+    # Absolute bounds 1-100 hold for every value; the floor and the model clamps
+    # are what a typed value bypasses.
     params['steps'] = min(max(int(_resolved['steps']), 1), 100)
+    params['steps_requested'] = _resolved['steps_requested']
+    params['steps_notice'] = _resolved['steps_notice']
 
     # Guidance scale - will be validated by SettingsValidator
     guidance = float(_resolved['guidance'])
@@ -395,8 +399,11 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
             # Start from user guidance; corrected_values may override hard clamps only.
             params['guidance'] = guidance
             if validation_result.corrected_values:
-                params.update(validation_result.corrected_values)
-                validation_info["corrected_values"] = validation_result.corrected_values
+                corrections = dict(validation_result.corrected_values)
+                if params['steps_explicit']:
+                    corrections.pop("steps", None)
+                params.update(corrections)
+                validation_info["corrected_values"] = corrections
 
             # Collect warnings and recommendations
             validation_info["warnings"] = validation_result.warnings
@@ -776,6 +783,7 @@ def validate_settings():
             width=int(data['width']) if data.get('width') is not None else None,
             height=int(data['height']) if data.get('height') is not None else None,
             steps=int(data['steps']) if data.get('steps') is not None else None,
+            steps_explicit=_as_bool(data.get('steps_explicit'), False),
             guidance=float(data['guidance']) if data.get('guidance') is not None else None,
         )
         guidance = float(_r['guidance'])
@@ -1397,6 +1405,10 @@ def get_batch_generation_status(batch_id: str):
 
         # Include results if requested
         if include_results:
+            status_data['steps_notices'] = list(dict.fromkeys(
+                r.metadata['steps_notice'] for r in (status.results or [])
+                if (r.metadata or {}).get('steps_notice')
+            ))
             status_data['results'] = [
                 {
                     "prompt_id": r.prompt_id,

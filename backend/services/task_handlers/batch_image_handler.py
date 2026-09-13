@@ -56,6 +56,7 @@ class BatchImageHandler(BaseTaskHandler):
                             "width": {"type": "integer"},
                             "height": {"type": "integer"},
                             "steps": {"type": "integer"},
+                            "steps_explicit": {"type": "boolean", "default": False},
                             "guidance": {"type": "number"},
                             "seed": {"type": "integer"},
                             "model": {"type": "string", "default": "auto"}
@@ -176,6 +177,7 @@ class BatchImageHandler(BaseTaskHandler):
                 width=config.get("width"),
                 height=config.get("height"),
                 steps=config.get("steps"),
+                steps_explicit=config.get("steps_explicit", False) is True,
                 guidance=config.get("guidance"),
                 replace_legacy_sd_markers=True,
             )
@@ -190,6 +192,11 @@ class BatchImageHandler(BaseTaskHandler):
                         width=int(form_defaults["width"]),
                         height=int(form_defaults["height"]),
                         steps=int(form_defaults["steps"]),
+                        metadata={
+                            "steps_explicit": config.get("steps_explicit", False) is True,
+                            "steps_requested": config.get("steps_requested", form_defaults["steps_requested"]),
+                            "steps_notice": form_defaults["steps_notice"] or config.get("steps_notice"),
+                        },
                         guidance=float(form_defaults["guidance"]),
                         content_preset=content_preset,
                         auto_enhance=auto_enhance,
@@ -200,11 +207,18 @@ class BatchImageHandler(BaseTaskHandler):
                 elif isinstance(p, dict):
                     # Full prompt config — empty knobs inherit form + family defaults
                     row_model = p.get("model", default_model)
+                    row_meta = dict(p.get("metadata") or {})
+                    if "steps" not in p:
+                        for key in ("steps_requested", "steps_notice"):
+                            if key in config:
+                                row_meta.setdefault(key, config[key])
+                    row_explicit = p.get("steps_explicit", row_meta.get("steps_explicit", config.get("steps_explicit", False))) is True
                     row_res = resolve_stills_defaults(
                         row_model,
                         width=p.get("width", form_defaults["width"]),
                         height=p.get("height", form_defaults["height"]),
-                        steps=p.get("steps", form_defaults["steps"]),
+                        steps=p.get("steps", config.get("steps")),
+                        steps_explicit=row_explicit,
                         guidance=p.get("guidance", form_defaults["guidance"]),
                         replace_legacy_sd_markers=True,
                     )
@@ -216,6 +230,12 @@ class BatchImageHandler(BaseTaskHandler):
                         width=int(row_res["width"]),
                         height=int(row_res["height"]),
                         steps=int(row_res["steps"]),
+                        metadata={
+                            **(p.get("metadata") or {}),
+                            "steps_explicit": row_explicit,
+                            "steps_requested": row_meta.get("steps_requested", row_res["steps_requested"]),
+                            "steps_notice": row_res["steps_notice"] or row_meta.get("steps_notice"),
+                        },
                         guidance=float(row_res["guidance"]),
                         seed=p.get("seed"),
                         model=row_model,

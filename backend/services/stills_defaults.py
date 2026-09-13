@@ -33,7 +33,9 @@ from typing import Any
 # Krea 2 also uses an LLM encoder (Qwen3-VL per its model_index) but has not
 # been A/B'd here yet, so it keeps "tags" until it is.
 _FAMILY_DEFAULTS: dict[str, dict[str, Any]] = {
-    "zimage": {"width": 1024, "height": 1024, "steps": 9, "guidance": 0.0, "prompt_style": "natural"},
+    # min_steps: the no-bad-knob floor for steps a default or an agent chose. None
+    # until measured; record the comparison beside the number when it is set.
+    "zimage": {"min_steps": None, "width": 1024, "height": 1024, "steps": 9, "guidance": 0.0, "prompt_style": "natural"},
     "krea2-turbo": {"width": 1024, "height": 1024, "steps": 8, "guidance": 0.0, "prompt_style": "tags"},
     "krea2-raw": {"width": 1024, "height": 1024, "steps": 52, "guidance": 3.5, "prompt_style": "tags"},
     "sdxl": {"width": 1024, "height": 1024, "steps": 25, "guidance": 7.0, "prompt_style": "tags"},
@@ -96,14 +98,16 @@ def resolve_stills_defaults(
     width: int | None = None,
     height: int | None = None,
     steps: int | None = None,
+    steps_explicit: bool = False,
     guidance: float | None = None,
     replace_legacy_sd_markers: bool = True,
 ) -> dict[str, Any]:
-    """Return resolved {model, family, width, height, steps, guidance}.
+    """Return family defaults and sampling provenance, applying any measured floor.
 
     Explicit non-None values are kept unless ``replace_legacy_sd_markers`` is
     True and the value is the classic 512/20/7.5 placeholder (then family wins
-    for modern families).
+    for modern families). ``steps_explicit`` preserves typed steps, including
+    legacy markers, and bypasses the floor.
     """
     family = model_family(model)
     base = dict(_FAMILY_DEFAULTS.get(family) or _FAMILY_DEFAULTS["sd"])
@@ -134,9 +138,9 @@ def resolve_stills_defaults(
     # 512/20/7.5 triple is an "unset" marker. A lone 20 steps (SDXL Fast preset)
     # or 7.5 guidance (SDXL High) is a value somebody chose and must survive.
     def _pick_steps(val: int | None) -> int:
-        if val is None:
+        if val is None or int(val) <= 0:
             return int(base["steps"])
-        if full_legacy_unset and int(val) == _LEGACY_STEPS:
+        if full_legacy_unset and not steps_explicit and int(val) == _LEGACY_STEPS:
             return int(base["steps"])
         return int(val)
 
@@ -147,13 +151,29 @@ def resolve_stills_defaults(
             return float(base["guidance"])
         return float(val)
 
+    resolved_steps = _pick_steps(steps)
+    floor = base.get("min_steps")
+    floor = int(floor) if floor is not None else None
+    notice = None
+    if floor is not None and resolved_steps < floor and not steps_explicit:
+        label = {
+            "zimage": "Z-Image Turbo", "krea2-turbo": "Krea 2 Turbo",
+            "krea2-raw": "Krea 2 Raw", "sdxl": "SDXL",
+            "sd": "Stable Diffusion", "flux": "FLUX",
+        }[family]
+        notice = f"{label} needs at least {floor} steps; raised {resolved_steps} to {floor}."
+        resolved_steps = floor
+
     resolved_model = (model or "auto").strip() or "auto"
     return {
         "model": resolved_model,
         "family": family,
         "width": _pick_size(width, "width"),
         "height": _pick_size(height, "height"),
-        "steps": _pick_steps(steps),
+        "steps": resolved_steps,
+        "steps_requested": steps,
+        "steps_floor": floor,
+        "steps_notice": notice,
         "guidance": _pick_guidance(guidance),
     }
 

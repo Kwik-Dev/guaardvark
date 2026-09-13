@@ -235,6 +235,13 @@ class ImageGeneratorTool(BaseTool):
             required=False,
             default=1024,
         ),
+        "steps": ToolParameter(
+            name="steps",
+            type="int",
+            description="Optional sampling steps. The server may raise it to the model's minimum and will say so.",
+            required=False,
+            default=None,
+        ),
         "model": ToolParameter(
             name="model",
             type="string",
@@ -408,6 +415,7 @@ class ImageGeneratorTool(BaseTool):
                         "\nCast LoRA: OFF (no subject_ids — base model only; "
                         "pass subject_ids=[id] for trained cast characters)"
                     )
+                notice_line = f"{meta['steps_notice']}\n" if meta.get("steps_notice") else ""
                 return ToolResult(
                     success=True,
                     output=(
@@ -416,7 +424,9 @@ class ImageGeneratorTool(BaseTool):
                         f"Prompt used: {still.prompt_used}\n"
                         f"Style: {style}\n"
                         f"Size: {still.width}x{still.height}\n"
-                        f"Steps/CFG: {still.steps}/{still.guidance}\n"
+                        f"Steps: {still.steps}\n"
+                        f"{notice_line}"
+                        f"CFG: {still.guidance}\n"
                         f"Enhance: {still.enhance_mode}\n"
                         f"Model: {still.model_used or model}\n"
                         f"Seed: {still.seed_used}"
@@ -431,6 +441,8 @@ class ImageGeneratorTool(BaseTool):
                         "width": still.width,
                         "height": still.height,
                         "steps": still.steps,
+                        "steps_requested": meta.get("steps_requested"),
+                        "steps_notice": meta.get("steps_notice"),
                         "guidance": still.guidance,
                         "enhance_mode": still.enhance_mode,
                         "model": still.model_used or model,
@@ -472,8 +484,11 @@ class ImageGeneratorTool(BaseTool):
                via_http: bool = False, wait: bool = False) -> ToolResult:
         """Enqueue one prompt on the batch image generator: in-process inside the
         backend, over HTTP from anywhere else. Returns at once unless ``wait``."""
+        from backend.services.stills_defaults import resolve_stills_defaults
+        sampling = resolve_stills_defaults(model, width=width, height=height, steps=steps, guidance=guidance)
         params = {
             "model": model or "auto",
+            "steps_explicit": False,
             "style": style,
             "width": width,
             "height": height,
@@ -491,6 +506,8 @@ class ImageGeneratorTool(BaseTool):
                 data = _http_json("POST", "/api/batch-image/generate/prompts",
                                   {"prompts": [prompt], **params})
                 batch_id = data["batch_id"]
+                sampling.update({k: v for k, v in (data.get("parameters") or {}).items()
+                                 if k in ("steps", "steps_requested", "steps_notice")})
             else:
                 from backend.services.batch_image_generator import start_batch_from_prompts
                 batch_id = start_batch_from_prompts([prompt], **params)
@@ -500,7 +517,7 @@ class ImageGeneratorTool(BaseTool):
             logger.error("ImageGeneratorTool queue failed: %s", e, exc_info=True)
             return ToolResult(success=False, error=f"Could not queue the image: {e}")
         if wait:
-            return self._wait_http(batch_id, prompt)
+            return self._wait_http(batch_id, prompt, sampling)
         cast_line = (
             f"Cast LoRA: ON subject_ids={list(subject_ids)}" if subject_ids
             else "Cast LoRA: OFF (pass subject_ids=[id] for trained cast characters)"
@@ -511,6 +528,8 @@ class ImageGeneratorTool(BaseTool):
                 f"Image queued as batch {batch_id}.",
                 f"Prompt: {prompt}",
                 f"Size: {width}x{height} | Model: {model or 'auto'} | Style: {style}",
+                f"Steps: {sampling['steps']} (planned)",
+                *([sampling["steps_notice"]] if sampling.get("steps_notice") else []),
                 cast_line,
                 f"Poll: get_generation_status(batch_id=\"{batch_id}\")",
                 f"Open Images: {self.STUDIO_URL}",
@@ -519,6 +538,9 @@ class ImageGeneratorTool(BaseTool):
                 "prompt": prompt,
                 "batch_id": batch_id,
                 "queued": True,
+                "steps": sampling["steps"],
+                "steps_requested": sampling.get("steps_requested"),
+                "steps_notice": sampling.get("steps_notice"),
                 "studio_url": self.STUDIO_URL,
                 "status_tool": "get_generation_status",
                 "width": width,
@@ -529,7 +551,7 @@ class ImageGeneratorTool(BaseTool):
         )
 
 
-    def _wait_http(self, batch_id: str, prompt: str) -> ToolResult:
+    def _wait_http(self, batch_id: str, prompt: str, sampling: dict | None = None) -> ToolResult:
         """Poll the backend for a queued batch and return the finished file."""
         import time as _time
         deadline = _time.monotonic() + self.MAX_WAIT_S
@@ -551,10 +573,14 @@ class ImageGeneratorTool(BaseTool):
                         f"Image URL: {f['url']}",
                         f"Prompt used: {prompt}",
                         f"Model: {f.get('model') or 'auto'}",
+                        f"Steps: {f.get('steps') if f.get('steps') is not None else 'unknown'}",
+                        *([f["steps_notice"]] if f.get("steps_notice") else []),
                         f"Batch: {batch_id}",
                     ]),
                     metadata={"image_url": f["url"], "batch_id": batch_id, "prompt": prompt,
-                              "model": f.get("model"), "generation_time": f.get("generation_time")},
+                              "model": f.get("model"), "generation_time": f.get("generation_time"),
+                              "steps": f.get("steps"), "steps_requested": f.get("steps_requested"),
+                              "steps_notice": f.get("steps_notice")},
                 )
             if info.get("status") in ("error", "cancelled") or (
                 info.get("status") == "completed" and not info.get("files")
@@ -564,7 +590,9 @@ class ImageGeneratorTool(BaseTool):
         return ToolResult(
             success=True,
             output=f"Image still rendering after {self.MAX_WAIT_S // 60} minutes (batch {batch_id}). "
-                   f"Poll get_generation_status(batch_id=\"{batch_id}\"); it is not a failure.",
+                   f"Poll get_generation_status(batch_id=\"{batch_id}\"); it is not a failure.\n"
+                   f"Steps: {(sampling or {}).get('steps', 'unknown')} (planned)"
+                   + (f"\n{sampling['steps_notice']}" if (sampling or {}).get("steps_notice") else ""),
             metadata={"batch_id": batch_id, "queued": True, "still_running": True, "prompt": prompt},
         )
 
@@ -608,6 +636,7 @@ class GenerationStatusTool(BaseTool):
                     "url": f"/api/batch-image/image/{batch_id}/{name}",
                     "path": r.image_path,
                     "model": (r.metadata or {}).get("model_used"),
+                    **{k: (r.metadata or {}).get(k) for k in ("steps", "steps_requested", "steps_notice")},
                     "generation_time": r.generation_time,
                 })
         failed = [r.error for r in (status.results or []) if not r.success and r.error]
@@ -642,6 +671,7 @@ class GenerationStatusTool(BaseTool):
                     "url": f"/api/batch-image/image/{batch_id}/{name}",
                     "path": r["image_path"],
                     "model": (r.get("metadata") or {}).get("model_used"),
+                    **{k: (r.get("metadata") or {}).get(k) for k in ("steps", "steps_requested", "steps_notice")},
                     "generation_time": r.get("generation_time"),
                 })
         failed = [r.get("error") for r in (d.get("results") or []) if not r.get("success") and r.get("error")]
@@ -738,6 +768,10 @@ class GenerationStatusTool(BaseTool):
         lines = [head]
         for f in info["files"]:
             lines.append(f"File: {f['url']}")
+            if info["kind"] == "image":
+                lines.append(f"Steps: {f.get('steps') if f.get('steps') is not None else 'unknown'}")
+                if f.get("steps_notice"):
+                    lines.append(f["steps_notice"])
         if info.get("error"):
             lines.append(f"Error: {info['error']}")
         for err in info.get("errors") or []:

@@ -74,6 +74,7 @@ def run_stills_pipeline(
     width: int | None = None,
     height: int | None = None,
     steps: int | None = None,
+    steps_explicit: bool = False,
     guidance: float | None = None,
     style: str = "realistic",
     negative_prompt: str = "",
@@ -150,6 +151,7 @@ def run_stills_pipeline(
         width=width,
         height=height,
         steps=steps,
+        steps_explicit=steps_explicit,
         guidance=guidance,
         replace_legacy_sd_markers=replace_legacy_sd_markers,
     )
@@ -179,6 +181,7 @@ def run_stills_pipeline(
                 width=w,
                 height=h,
                 steps=st,
+                steps_explicit=steps_explicit,
                 guidance=g,
                 style=style,
                 seed=seed,
@@ -200,6 +203,12 @@ def run_stills_pipeline(
                 hold_gpu=hold_gpu,
             )
         )
+    for result in results:
+        result.metadata.update(
+            steps=result.steps,
+            steps_requested=defaults["steps_requested"],
+            steps_notice=defaults["steps_notice"],
+        )
     return results
 
 
@@ -211,6 +220,7 @@ def _generate_one(
     width: int,
     height: int,
     steps: int,
+    steps_explicit: bool,
     guidance: float,
     style: str,
     seed: int | None,
@@ -242,6 +252,7 @@ def _generate_one(
         return _generate_comfy_flux(
             prompt=prompt, negative=negative, model=model,
             width=width, height=height, steps=steps, guidance=guidance,
+            steps_explicit=steps_explicit,
             seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
         )
 
@@ -264,6 +275,7 @@ def _generate_one(
         width=width,
         height=height,
         num_inference_steps=steps,
+        steps_explicit=steps_explicit,
         guidance_scale=guidance,
         style=style,
         seed=seed,
@@ -350,6 +362,7 @@ def _generate_one(
 
     prompt_used = getattr(gen_result, "prompt_used", None) or prompt
     neg_used = getattr(gen_result, "negative_prompt_used", None) or negative
+    actual_steps = (getattr(gen_result, "metadata", None) or {}).get("steps", request.num_inference_steps)
     base = StillResult(
         success=bool(gen_result.success),
         image_path=gen_result.image_path,
@@ -359,7 +372,7 @@ def _generate_one(
         negative_used=neg_used,
         width=width,
         height=height,
-        steps=steps,
+        steps=actual_steps,
         guidance=guidance,
         enhance_mode=enhance_mode,
         generation_time=float(getattr(gen_result, "generation_time", 0) or 0),
@@ -404,6 +417,7 @@ def _generate_comfy_flux(
     width: int,
     height: int,
     steps: int,
+    steps_explicit: bool = False,
     guidance: float,
     seed: int | None,
     enhance_mode: str,
@@ -425,6 +439,7 @@ def _generate_comfy_flux(
             seed=seed if seed is not None else 42,
             model="flux",
             steps=steps,
+            steps_explicit=steps_explicit,
             cfg=guidance,
         )
         url = None
@@ -450,7 +465,7 @@ def _generate_comfy_flux(
             negative_used=negative,
             width=width,
             height=height,
-            steps=steps,
+            steps=getattr(gen, "last_steps", steps),
             guidance=guidance,
             enhance_mode=enhance_mode,
         )

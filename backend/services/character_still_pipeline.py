@@ -104,6 +104,7 @@ def render_character_still(
     width: int | None = None,
     height: int | None = None,
     steps: int | None = None,
+    steps_explicit: bool = False,
     guidance: float | None = None,
     seed: int | None = None,
     negative_prompt: str = "",
@@ -236,11 +237,12 @@ def render_character_still(
         width=width,
         height=height,
         steps=steps,
+        steps_explicit=steps_explicit,
         guidance=guidance,
     )
     w = int(width if width else defaults["width"])
     h = int(height if height else defaults["height"])
-    st = int(steps if steps is not None else defaults["steps"])
+    st = int(defaults["steps"])
     g = float(guidance if guidance is not None else defaults["guidance"])
 
     dest = Path(output_path) if output_path else Path(tempfile.gettempdir()) / (
@@ -251,6 +253,9 @@ def render_character_still(
 
     meta = {
         "source": source,
+        "steps": st,
+        "steps_requested": defaults["steps_requested"],
+        "steps_notice": defaults["steps_notice"],
         "family": family,
         "engine": engine,
         "base_model_id": route.get("base_model_id"),
@@ -272,7 +277,8 @@ def render_character_still(
                 negative_prompt=negative_prompt or "",
                 width=w,
                 height=h,
-                num_inference_steps=st if st > 0 else 8,
+                num_inference_steps=st,
+                steps_explicit=steps_explicit,
                 guidance_scale=g,
                 style=style,
                 seed=seed,
@@ -286,6 +292,8 @@ def render_character_still(
                 lora_scale=strength,
                 keep_pipeline_loaded=keep_pipeline,
             ))
+            st = (getattr(result, "metadata", None) or {}).get("steps", st)
+            meta["steps"] = st
             if not result.success or not result.image_path:
                 return StillResult(
                     success=False,
@@ -329,10 +337,13 @@ def render_character_still(
             width=w,
             height=h,
             seed=seed if seed is not None else 42,
-            steps=st if st > 0 else (20 if family == "flux" else 30),
+            steps=st,
+            steps_explicit=steps_explicit,
             model=model_tag,
             negative_prompt=negative_prompt or None,
         )
+        st = getattr(gen, "last_steps", st)
+        meta["steps"] = st
         if not path or not Path(path).is_file():
             return StillResult(
                 success=False,

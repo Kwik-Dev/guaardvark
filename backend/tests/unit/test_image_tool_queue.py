@@ -72,7 +72,8 @@ def test_status_tool_reads_an_image_batch(monkeypatch):
     class _R:
         def __init__(self, ok, path=None, err=None):
             self.success, self.image_path, self.error = ok, path, err
-            self.metadata = {"model_used": "Z-Image"}
+            self.metadata = {"model_used": "Z-Image", "steps": 8, "steps_requested": 4,
+                             "steps_notice": "Raised sampling to 8 steps."}
             self.generation_time = 20.6
 
     class _S:
@@ -88,6 +89,8 @@ def test_status_tool_reads_an_image_batch(monkeypatch):
     assert result.metadata["files"][0]["url"] == "/api/batch-image/image/ImageBatch_x/img_1.png"
     assert "1/2 finished, 1 failed" in result.output
     assert "Failed item: oom" in result.output
+    assert "Steps: 8" in result.output
+    assert "Raised sampling to 8 steps." in result.output
 
 
 def test_status_tool_falls_through_to_video(monkeypatch):
@@ -163,7 +166,7 @@ def _fake_requests(monkeypatch, routes):
 
     class _Req:
         @staticmethod
-        def request(method, url, json=None, timeout=None):
+        def request(method, url, json=None, timeout=None, **kwargs):
             path = url.split("127.0.0.1:5000", 1)[1] if "127.0.0.1:5000" in url else url
             calls.append((method, path, json))
             handler = routes[(method, path.split("?")[0])]
@@ -204,7 +207,8 @@ def test_mcp_transport_with_wait_polls_http_and_returns_the_file(monkeypatch):
         return 200, {"success": True, "data": {
             "status": "completed", "total_images": 1, "completed_images": 1, "failed_images": 0,
             "results": [{"success": True, "image_path": "/x/ImageBatch_http_2/images/img.png",
-                         "metadata": {"model_used": "Z-Image"}, "generation_time": 12.5}]}}
+                         "metadata": {"model_used": "Z-Image", "steps": 8, "steps_requested": 4,
+                                      "steps_notice": "Raised sampling to 8 steps."}, "generation_time": 12.5}]}}
 
     _fake_requests(monkeypatch, {
         ("POST", "/api/batch-image/generate/prompts"): (200, {"success": True, "data": {"batch_id": "ImageBatch_http_2"}}),
@@ -218,6 +222,9 @@ def test_mcp_transport_with_wait_polls_http_and_returns_the_file(monkeypatch):
     assert result.success
     assert result.metadata["image_url"] == "/api/batch-image/image/ImageBatch_http_2/img.png"
     assert "12.5s" in result.output and polls["n"] == 2
+    assert "Steps: 8" in result.output
+    assert "Raised sampling to 8 steps." in result.output
+    assert result.metadata["steps_requested"] == 4
 
 
 def test_mcp_transport_reports_plugin_offline(monkeypatch):
@@ -243,3 +250,68 @@ def test_status_tool_over_http_reads_image_then_video(monkeypatch):
     result = tool.execute(batch_id="vid_9")
     assert result.success and result.metadata["kind"] == "video"
     assert result.metadata["files"][0]["url"] == "/api/batch-video/video/vid_9/clip.mp4"
+
+
+def test_tool_declares_optional_steps():
+    param = ImageGeneratorTool.parameters["steps"]
+    assert param.type == "int"
+    assert not param.required
+    assert "minimum" in param.description
+
+
+def test_queued_steps_are_planned_and_never_explicit(monkeypatch):
+    from backend.services.stills_defaults import _FAMILY_DEFAULTS
+    monkeypatch.setitem(_FAMILY_DEFAULTS["zimage"], "min_steps", 8)
+    calls = _fake_batch_module(monkeypatch)
+    monkeypatch.setattr("backend.tools.image_tools._resolve_cast_from_prompt", lambda _: [])
+    result = ImageGeneratorTool().execute(
+        prompt="a key", model="zimage-turbo", steps=4, steps_explicit=True, wait_for_result=False,
+    )
+    assert result.success
+    assert "Steps: 8 (planned)" in result.output
+    assert "Z-Image Turbo needs at least 8 steps; raised 4 to 8." in result.output
+    assert calls["kwargs"]["steps"] == 4
+    assert calls["kwargs"]["steps_explicit"] is False
+
+
+def test_inline_success_reports_steps_and_notice(monkeypatch):
+    stills = types.ModuleType("backend.services.stills_pipeline")
+    notice = "Z-Image Turbo needs at least 8 steps; raised 4 to 8."
+    calls = []
+
+    def render(*args, **kwargs):
+        calls.append(kwargs)
+        return [types.SimpleNamespace(
+            success=True, image_path="key.png", image_url="/images/key.png",
+            metadata={"steps_requested": 4, "steps_notice": notice},
+            generation_time=1.0, prompt_used="a key", width=1024, height=1024,
+            steps=8, guidance=0.0, enhance_mode="none", model_used="zimage-turbo",
+            seed_used=1, negative_used="",
+        )]
+
+    stills.run_stills_pipeline = render
+    monkeypatch.setitem(sys.modules, "backend.services.stills_pipeline", stills)
+    monkeypatch.setattr("backend.tools.image_tools._resolve_cast_from_prompt", lambda _: [])
+    result = ImageGeneratorTool().execute(prompt="a key", steps=4, steps_explicit=True)
+    assert result.success
+    assert "Steps: 8" in result.output
+    assert notice in result.output
+    assert result.metadata["steps_requested"] == 4
+    assert not calls[0].get("steps_explicit", False)
+
+
+def test_http_queue_uses_server_sampling(monkeypatch):
+    _fake_requests(monkeypatch, {
+        ("POST", "/api/batch-image/generate/prompts"): (200, {"success": True, "data": {
+            "batch_id": "ImageBatch_http", "parameters": {
+                "steps": 10, "steps_requested": 4, "steps_notice": "Raised sampling to 10 steps.",
+            },
+        }}),
+    })
+    monkeypatch.setattr("backend.tools.image_tools._resolve_cast_from_prompt", lambda _: [])
+    tool = ImageGeneratorTool()
+    tool.set_context({"transport": "mcp"})
+    result = tool.execute(prompt="a key", steps=4, model="zimage-turbo", wait_for_result=False)
+    assert result.success
+    assert "Steps: 10 (planned)" in result.output
+    assert "Raised sampling to 10 steps." in result.output

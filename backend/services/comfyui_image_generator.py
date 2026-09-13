@@ -119,6 +119,7 @@ class ComfyUIImageGenerator:
         self, *, prompt: str, negative: str, lora_names: list[str],
         width: int, height: int, seed: int, steps: int, cfg: float,
         model: str | None = None,
+        steps_explicit: bool = False,
     ) -> dict:
         effective_model = model or self.model
         ml = (effective_model or "").lower()
@@ -212,8 +213,7 @@ class ComfyUIImageGenerator:
             # upper bound is operator-owned (quality slider / batch params).
             flux_guidance = float(cfg) if cfg is not None and float(cfg) > 0 else FLUX_DEV_GUIDANCE
             flux_guidance = max(1.0, min(flux_guidance, 10.0))
-            flux_steps = int(steps) if steps else 28
-            flux_steps = max(4, min(flux_steps, 100))
+            flux_steps = int(steps) if steps_explicit else max(4, min(int(steps) if steps else 28, 100))
             wf["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}}
             wf["guid"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["pos", 0], "guidance": flux_guidance}}
             # FLUX-dev is CFG-distilled (cfg=1.0) so the negative is inert; an empty
@@ -281,7 +281,7 @@ class ComfyUIImageGenerator:
                     "class_type": "KSampler",
                     "inputs": {
                         "seed": seed,
-                        "steps": min(steps, 8),  # flux-schnell typically low steps
+                        "steps": steps if steps_explicit else min(steps, 8),
                         "cfg": 1.0,
                         "sampler_name": "euler",
                         "scheduler": "simple",
@@ -541,6 +541,7 @@ class ComfyUIImageGenerator:
         output_path: str, width: int = 1024, height: int = 1024,
         negative_prompt: str | None = None, seed: int = 42,
         steps: int = 30, cfg: float = 7.0,
+        steps_explicit: bool = False,
         model: str | None = None,  # e.g. keyframe_model from MV settings ("flux-schnell", "sdxl"...)
     ) -> str:
         if not self._available():
@@ -582,6 +583,7 @@ class ComfyUIImageGenerator:
             lora_names=lora_names,
             width=width, height=height, seed=seed, steps=steps, cfg=cfg,
             model=effective_model,
+            steps_explicit=steps_explicit,
         )
 
         prompt_id = self._queue(workflow)
@@ -596,5 +598,9 @@ class ComfyUIImageGenerator:
         if result is None:
             raise RuntimeError(f"ComfyUI produced no image for prompt {prompt_id}")
 
+        self.last_steps = next(
+            node["inputs"]["steps"] for node in workflow.values()
+            if node.get("class_type") == "KSampler"
+        )
         logger.info("Storyboard image generated (%d LoRAs): %s", len(lora_names), result)
         return result

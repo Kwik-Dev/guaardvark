@@ -138,6 +138,7 @@ class ImageGenerationRequest:
     # omit knobs do not inherit SD-era 512/20/7.5.
     width: int = 1024
     height: int = 1024
+    steps_explicit: bool = False
     num_inference_steps: int = 9
     guidance_scale: float = 0.0
     style: str = "realistic"
@@ -1042,7 +1043,7 @@ class OfflineImageGenerator:
         if family == "zimage":
             # Official HF: 9 steps / guidance 0. Soft envelope matches settings_validator.
             steps = int(request.num_inference_steps or 0)
-            if steps < 4 or steps > 30:
+            if not request.steps_explicit and (steps < 4 or steps > 30):
                 request.num_inference_steps = 9
             else:
                 request.num_inference_steps = steps
@@ -1057,7 +1058,7 @@ class OfflineImageGenerator:
         elif family == "krea2":
             if self._krea2_variant(request.model or "") == "raw":
                 steps = int(request.num_inference_steps or 0)
-                if steps < 20 or steps > 80:
+                if not request.steps_explicit and (steps < 20 or steps > 80):
                     request.num_inference_steps = 52
                 else:
                     request.num_inference_steps = steps
@@ -1071,7 +1072,7 @@ class OfflineImageGenerator:
                     request.guidance_scale = g
             else:
                 steps = int(request.num_inference_steps or 0)
-                if steps < 4 or steps > 20:
+                if not request.steps_explicit and (steps < 4 or steps > 20):
                     request.num_inference_steps = 8
                 else:
                     request.num_inference_steps = steps

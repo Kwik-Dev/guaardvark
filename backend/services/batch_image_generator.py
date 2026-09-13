@@ -238,6 +238,8 @@ class BatchImageGenerator:
         form_width: int | None = None,
         form_height: int | None = None,
         form_steps: int | None = None,
+        form_steps_explicit: bool = False,
+        form_steps_metadata: Dict[str, Any] | None = None,
         form_guidance: float | None = None,
         form_style: str | None = None,
     ) -> List[BatchPrompt]:
@@ -291,6 +293,7 @@ class BatchImageGenerator:
                     w_in = _cell_int('width', form_width)
                     h_in = _cell_int('height', form_height)
                     s_in = _cell_int('steps', form_steps)
+                    steps_explicit = str(row.get('steps_explicit', form_steps_explicit)).strip().lower() in ('true', '1', 'yes')
                     g_in = _cell_float('guidance', form_guidance)
                     seed = int(row['seed']) if row.get('seed') and str(row.get('seed')).strip() else None
 
@@ -299,6 +302,7 @@ class BatchImageGenerator:
                         width=w_in,
                         height=h_in,
                         steps=s_in,
+                        steps_explicit=steps_explicit,
                         guidance=g_in,
                         replace_legacy_sd_markers=True,
                     )
@@ -314,6 +318,7 @@ class BatchImageGenerator:
                         
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Row {i+1} has invalid numeric values, using family defaults: {e}")
+                    steps_explicit = False
                     resolved = resolve_stills_defaults(row_model)
                     width = int(resolved["width"])
                     height = int(resolved["height"])
@@ -334,6 +339,13 @@ class BatchImageGenerator:
                     seed=seed,
                     model=row_model,
                     metadata={
+                        'steps_explicit': steps_explicit,
+                        'steps_requested': (form_steps_metadata or {}).get('steps_requested', resolved['steps_requested'])
+                        if not (row.get('steps') or '').strip() else resolved['steps_requested'],
+                        'steps_notice': resolved['steps_notice'] or (
+                            (form_steps_metadata or {}).get('steps_notice')
+                            if not (row.get('steps') or '').strip() else None
+                        ),
                         'row_number': i + 1,
                         'original_row': dict(row)
                     }
@@ -606,7 +618,7 @@ class BatchImageGenerator:
                 logger.info("FLUX batch resolution %sx%s → %sx%s", ow, oh, width, height)
         except Exception as e:
             logger.debug("FLUX dim clamp skipped: %s", e)
-        steps = int(prompt.steps or 28)
+        steps = int(prompt.steps if prompt.metadata.get("steps_explicit", False) else (prompt.steps or 28))
         # FluxGuidance value (user "guidance" slider); KSampler cfg stays 1.0 inside Comfy.
         guidance = float(prompt.guidance) if prompt.guidance is not None else 3.5
 
@@ -630,6 +642,7 @@ class BatchImageGenerator:
                 negative_prompt=prompt.negative_prompt or None,
                 seed=seed,
                 steps=steps,
+                steps_explicit=prompt.metadata.get("steps_explicit", False),
                 cfg=guidance,
                 model="flux-dev",
             )
@@ -642,6 +655,7 @@ class BatchImageGenerator:
                 # The seed actually rendered, not the (often None) requested one —
                 # otherwise the batch cannot report or reproduce its own output.
                 seed_used=seed,
+                metadata={"steps": getattr(gen, "last_steps", steps)},
             )
         except Exception as e:
             logger.error("FLUX.1-dev batch generation failed: %s", e)
@@ -684,6 +698,7 @@ class BatchImageGenerator:
                 width=width,
                 height=height,
                 steps=prompt.steps,
+                steps_explicit=prompt.metadata.get("steps_explicit", False),
                 guidance=prompt.guidance,
                 seed=prompt.seed,
                 negative_prompt=prompt.negative_prompt or "",
@@ -712,6 +727,7 @@ class BatchImageGenerator:
                 model_used=still.model_used or "character+lora",
                 image_size=(still.width or width, still.height or height),
                 seed_used=still.seed_used if still.seed_used is not None else prompt.seed,
+                metadata={**meta, "steps": still.steps},
             )
         except Exception as e:
             logger.error(f"Character LoRA generation failed: {e}")
@@ -746,6 +762,7 @@ class BatchImageGenerator:
                     width=prompt.width,
                     height=prompt.height,
                     steps=prompt.steps,
+                    steps_explicit=prompt.metadata.get("steps_explicit", False),
                     guidance=prompt.guidance,
                     style=prompt.style or "realistic",
                     negative_prompt=prompt.negative_prompt or "",
@@ -779,6 +796,7 @@ class BatchImageGenerator:
                         generation_time=still.generation_time,
                         image_size=(still.width, still.height),
                         seed_used=still.seed_used,
+                        metadata={**still.metadata, "steps": still.steps},
                     )
                 else:
                     result = ImageGenerationResult(
@@ -842,7 +860,10 @@ class BatchImageGenerator:
                     "original_prompt": prompt.prompt,
                     "style": prompt.style,
                     "dimensions": f"{prompt.width}x{prompt.height}",
-                    "steps": prompt.steps,
+                    "steps": (result.metadata or {}).get("steps", prompt.steps),
+                    "steps_requested": prompt.metadata.get(
+                        "steps_requested", (result.metadata or {}).get("steps_requested", prompt.steps)),
+                    "steps_notice": (result.metadata or {}).get("steps_notice") or prompt.metadata.get("steps_notice"),
                     "guidance": prompt.guidance,
                     "seed_used": result.seed_used,
                     "model_used": result.model_used
@@ -2120,6 +2141,8 @@ class BatchImageGenerator:
             form_width=kwargs.get("width"),
             form_height=kwargs.get("height"),
             form_steps=kwargs.get("steps"),
+            form_steps_explicit=kwargs.get("steps_explicit", False),
+            form_steps_metadata={k: kwargs[k] for k in ("steps_requested", "steps_notice") if k in kwargs},
             form_guidance=kwargs.get("guidance"),
             form_style=kwargs.get("style"),
         )
@@ -2152,6 +2175,7 @@ class BatchImageGenerator:
             width=kwargs.get("width"),
             height=kwargs.get("height"),
             steps=kwargs.get("steps"),
+            steps_explicit=kwargs.get("steps_explicit", False),
             guidance=kwargs.get("guidance"),
             replace_legacy_sd_markers=True,
         )
@@ -2177,6 +2201,11 @@ class BatchImageGenerator:
             prompts.append(BatchPrompt(
                 id=f"prompt_{i+1}",
                 prompt=cleaned,
+                metadata={
+                    "steps_explicit": kwargs.get("steps_explicit", False),
+                    "steps_requested": kwargs.get("steps_requested", resolved["steps_requested"]),
+                    "steps_notice": resolved["steps_notice"] or kwargs.get("steps_notice"),
+                },
                 **{k: v for k, v in filled.items() if k in prompt_params}
             ))
 

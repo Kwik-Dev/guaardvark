@@ -181,6 +181,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     width: 1024,
     height: 1024,
     steps: 9,
+    steps_explicit: false,
     guidance: 0.0,
     max_workers: 2,
     preserve_order: true,
@@ -237,7 +238,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (!isZimageModel(prev.model)) return prev;
       const wantedSteps = ZIMAGE_PRESET_STEPS[prev.quality_preset] ?? ZIMAGE_STEPS;
       if (prev.guidance === ZIMAGE_GUIDANCE && prev.steps === wantedSteps) return prev;
-      return { ...prev, guidance: ZIMAGE_GUIDANCE, steps: wantedSteps };
+      return { ...prev, guidance: ZIMAGE_GUIDANCE, steps: wantedSteps, steps_explicit: false };
     });
   }, [params.model, params.quality_preset]);
 
@@ -731,6 +732,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           ...prev,
           quality_preset: presetValue,
           steps: preset.steps,
+          steps_explicit: false,
           guidance: preset.guidance,
         };
         // Z-Image High 2K = official sampling at 2K (the real quality lever for
@@ -774,6 +776,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       const presetValue = resolveQualityPreset(modelValue, prev.quality_preset);
       const preset = qualityPresetsForModel(modelValue).find((p) => p.value === presetValue);
       newParams.quality_preset = presetValue;
+      newParams.steps_explicit = false;
       if (preset) {
         newParams.steps = preset.steps;
         newParams.guidance = preset.guidance;
@@ -1113,6 +1116,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             width: p.width || prev.width,
             height: p.height || prev.height,
             steps: p.steps || prev.steps,
+            steps_explicit: false,
             guidance: p.guidance !== undefined ? p.guidance : prev.guidance,
           }));
         }
@@ -1916,7 +1920,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                           </Typography>
                           <Slider
                             value={params.steps}
-                            onChange={(e, value) => setParams({ ...params, steps: value })}
+                            onChange={(e, value) => setParams({ ...params, steps: value, steps_explicit: true })}
                             min={1}
                             max={100}
                             step={1}
