@@ -175,6 +175,22 @@ def act_gate(st: Stage):
     time.sleep(8.0)
 
 
+def reset_file(st: Stage):
+    # Rendering takes minutes per clip; the take starts once the video is
+    # assembled, so the agent's poll returns the file instead of dead air.
+    close_dialogs(st)
+    project = newest_music_video()
+    deadline = time.monotonic() + max(900, int(project.get("cut_count") or 0) * 120)
+    while time.monotonic() < deadline:
+        project = newest_music_video()
+        if project.get("current_stage") == "complete":
+            return
+        require(not str(project.get("status") or "").startswith("failed"),
+                f"the music video failed at {project.get('current_stage')}: {project.get('status')}")
+        time.sleep(10.0)
+    raise RuntimeError("precondition failed: the music video did not finish rendering")
+
+
 def act_file(st: Stage):
     type_into_stage_terminal(
         "Poll until the music video is finished and give me the file.", delay_ms=40)
@@ -238,7 +254,7 @@ BEATS = [
              "back a file, not a promise.",
              "It is in the media library, on this disk.",
          ],
-         action=act_file, verify=lambda st: verify_path(st, "/media"), reset=reset_keep_session),
+         action=act_file, verify=lambda st: verify_path(st, "/media"), reset=reset_file),
     Beat(name="caveat",
          narration=[
              "One honest beat. One step is below what this model needs: measured on this "
