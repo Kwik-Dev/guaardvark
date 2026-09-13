@@ -202,6 +202,13 @@ def verify_no_private_names(st: Stage):
     into the stage terminal matches a per-clone private pattern."""
     pats = load_private_patterns()
     require(pats, f"no private patterns loaded from {PRIVATE_PATTERNS_FILE}")
+    # The home folder and login name are private on every clone, in any case,
+    # so they need no entry in the patterns file.
+    home = Path.home()
+    pats = pats + [
+        (re.compile(re.escape(str(home))), "absolute home folder path"),
+        (re.compile(rf"\b{re.escape(home.name)}\b", re.IGNORECASE), "login name"),
+    ]
     visible = st.page.evaluate(
         "() => (document.title || '') + '\\n' + (document.body ? document.body.innerText : '')")
     corpus = [("page", visible)] + [("terminal", c) for c in _TERMINAL_COMMANDS]
