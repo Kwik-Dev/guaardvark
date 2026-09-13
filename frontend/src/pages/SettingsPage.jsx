@@ -315,6 +315,14 @@ const SettingsPage = () => {
   const [videoModelsModalOpen, setVideoModelsModalOpen] = useState(false);
   const [voiceModelsModalOpen, setVoiceModelsModalOpen] = useState(false);
   const [imageGenStatus, setImageGenStatus] = useState(null);
+  // /api/batch-image/status reports service_available (the batch image service
+  // loaded) and image_generator_available (its image pipeline loaded); usable
+  // means both. Batch images run on the backend's own pipeline, not ComfyUI.
+  const imageGenAvailable = Boolean(
+    imageGenStatus?.service_available && imageGenStatus?.image_generator_available,
+  );
+  const imageGenUnavailableHint =
+    imageGenStatus?.error || "the image service did not load; see the backend log";
 
   // Resource monitor and embedding model state
   const [gpuResources, setGpuResources] = useState(null);
@@ -2306,7 +2314,7 @@ const SettingsPage = () => {
       <DashboardTile
         label="Image generation"
         tone={
-          imageGenStatus?.available
+          imageGenAvailable
             ? "ok"
             : imageGenStatus === null
               ? "warn"
@@ -2315,12 +2323,12 @@ const SettingsPage = () => {
         value={
           imageGenStatus === null
             ? "checking"
-            : imageGenStatus?.available
+            : imageGenAvailable
               ? "Available"
               : "Unavailable"
         }
         sub={
-          imageGenStatus?.available ? undefined : "start ComfyUI from Plugins"
+          imageGenAvailable ? undefined : imageGenUnavailableHint
         }
       />
       {interconnectorEnabled && (
@@ -2889,7 +2897,7 @@ const SettingsPage = () => {
         <Line>
           <StatusPill
             tone={
-              imageGenStatus?.available
+              imageGenAvailable
                 ? "ok"
                 : imageGenStatus === null
                   ? "warn"
@@ -2898,14 +2906,14 @@ const SettingsPage = () => {
             label={
               imageGenStatus === null
                 ? "Image generation: checking"
-                : imageGenStatus?.available
+                : imageGenAvailable
                   ? "Image generation available"
                   : "Image generation unavailable"
             }
             tooltip={
-              imageGenStatus?.available
+              imageGenAvailable
                 ? ""
-                : "Start ComfyUI from the Plugins page"
+                : imageGenUnavailableHint
             }
           />
           <ActionButton onClick={() => setImageModelsModalOpen(true)}>
