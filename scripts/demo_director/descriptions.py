@@ -33,7 +33,8 @@ WHAT_IS = (
     "Guaardvark is a self-hosted AI system that writes, voices, shoots, and "
     "edits video — chat, image gen, video gen, voice cloning, an autonomous "
     "screen agent, and a full AI film crew — running on a single desktop GPU, "
-    "no cloud API calls. This is one of 12 walkthrough episodes."
+    "no cloud API calls. This episode is part of the Guaardvark walkthrough "
+    "series."
 )
 
 TAGS_COMMON = ["Guaardvark", "local AI", "self-hosted AI", "open source AI",
@@ -554,25 +555,26 @@ EPISODES = {
         title="Plug In Anything — MCP, Episode 16",
         keyword="MCP server",
         hook=(
-            "Forty-three tools. Any client that speaks the protocol. And a "
-            "policy that says no by default."
+            "Any client that speaks the protocol. And a policy that says no "
+            "by default."
         ),
         body=(
             "The MCP server's doctor and install commands, the default-deny "
-            "policy read from its config, why 43 of 87 tools are exposed, an "
-            "index profile tuned for MCP clients, a Claude Code session "
-            "searching the knowledge base and generating an image through "
-            "Guaardvark, and the approvals page where anything that acts "
-            "waits for a person."
+            "policy and the approval rule that decide which registered tools "
+            "a client can see, an index profile tuned for MCP clients, Claude "
+            "Code searching a synthetic company's documents through Guaardvark "
+            "with nothing of the operator's own setup loaded, the approvals "
+            "page where anything that acts waits for a person, and a caveat "
+            "recorded in one commit and fixed in a later one."
         ),
         chapters=[
             "Doctor",
-            "Install — six clients",
+            "Install",
             "The policy",
             "An index profile for clients",
             "A client on camera",
             "Approvals",
-            "A recorded caveat",
+            "A caveat, recorded and fixed",
         ],
         links=[2, 3, 12, 13, 14],
         tags=["Model Context Protocol", "MCP", "local AI tools"],
