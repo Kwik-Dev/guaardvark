@@ -180,13 +180,16 @@ def _orchestrator_request(
 
 
 def _orchestrator_release(slot_id: str) -> None:
-    """Release the booking; video slots are dropped outright so tracked VRAM
-    falls at once (the weights behind them belong to the generator)."""
+    """Release the booking. Session slots (image batches, and any slot naming
+    video) are dropped outright: they account for VRAM the caller held, so once
+    its gpu_session exits the booking is stale and would otherwise sit in the
+    registry as tracked VRAM. Model slots such as sd:pipeline and ollama:* keep
+    the normal release, which only starts their eviction timer."""
     try:
         from backend.services.gpu_memory_orchestrator import get_orchestrator
         orch = get_orchestrator()
         orch.release_model(slot_id)
-        if "video" in slot_id.lower():
+        if slot_id.startswith("image_batch:") or "video" in slot_id.lower():
             orch.drop_booking(slot_id)
     except Exception as e:  # noqa: BLE001
         log.warning("orchestrator release_model(%s) failed (non-fatal): %s", slot_id, e)
