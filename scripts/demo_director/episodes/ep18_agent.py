@@ -99,9 +99,14 @@ def v_installed(st: Stage):
     verify_no_private_names(st)
 
 
+_BASELINE = {"music_video_id": 0}
+
+
 def reset_ask(st: Stage):
     reset_terminal(st)
     require(SONG_DOC_ID, "EP18_SONG_DOC_ID is not set (a 20–30 s song in the library)")
+    rows = api_get("/api/music-video").get("music_videos") or []
+    _BASELINE["music_video_id"] = max((int(r.get("id") or 0) for r in rows), default=0)
     ok = api_get("/api/health")
     require(ok.get("status") == "ok", "backend not healthy")
     plugins = api_get("/api/plugins/status").get("status", {})
@@ -118,6 +123,16 @@ def act_ask(st: Stage):
         "Follow the guaardvark skills. Stop at the approval gate and tell me the cost "
         "before you ask me to approve.", delay_ms=40)
     time.sleep(75.0)
+
+
+def v_ask(st: Stage):
+    # The sentence only counts if the agent actually started a project; a
+    # session stuck at a login or trust prompt would otherwise pass here and
+    # hang at the gate.
+    project = newest_music_video()
+    require(int(project.get("id") or 0) > _BASELINE["music_video_id"],
+            "the agent did not create a music video project")
+    verify_no_private_names(st)
 
 
 def reset_studio(st: Stage):
@@ -231,7 +246,7 @@ BEATS = [
              f"{say(EXPOSED)} tools are exposed of {say(REGISTERED)} registered. The rest stay "
              "behind a policy that says no by default.",
          ],
-         action=act_ask, verify=v_any, reset=reset_ask),
+         action=act_ask, verify=v_ask, reset=reset_ask),
     Beat(name="studio",
          narration=[
              "Queued is not done. The Director has analysed the song, cut it on the beat, and "
