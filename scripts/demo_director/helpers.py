@@ -103,7 +103,14 @@ def stage_terminal(cmd: str, cwd: Path | None = None):
     TERMINAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = TERMINAL_LOG_DIR / f"terminal_{int(time.time())}.typescript"
     _TERMINAL_LOGS.append(log)
-    env = {k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"}
+    # A director started from inside a Claude Code session inherits its session
+    # markers; a claude launched on the stage would read them, show a child-session
+    # warning on camera and reach the parent's messaging socket. CLAUDE_CONFIG_DIR
+    # is not a session marker and is kept.
+    env = {k: v for k, v in os.environ.items()
+           if k != "WAYLAND_DISPLAY"
+           and k not in ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT")
+           and not k.startswith("CLAUDE_CODE_")}
     env["DISPLAY"] = os.environ.get("DEMO_DISPLAY", ":98")
     env["GDK_BACKEND"] = "x11"
     # The product's own binaries on PATH, so a command never has to spell
@@ -135,8 +142,19 @@ def focus_window(name_pattern: str, timeout: float = 10.0) -> str:
     raise RuntimeError(f"no window matching {name_pattern!r} on the stage display")
 
 
-def focus_stage_terminal() -> str:
-    return focus_window("ptyxis|Ptyxis|script|claude")
+def focus_stage_terminal(timeout: float = 10.0) -> str:
+    """Raise the stage terminal by window class: programs inside it (Claude Code
+    names the window after the session topic) rename the title freely."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = _xdo("search", "--onlyvisible", "--class", "ptyxis")
+        wid = (r.stdout.split() or [""])[0]
+        if wid:
+            _xdo("windowactivate", "--sync", wid)
+            time.sleep(0.4)
+            return wid
+        time.sleep(0.5)
+    raise RuntimeError("no stage terminal (window class ptyxis) on the stage display")
 
 
 def type_into_stage_terminal(text: str, delay_ms: int = 45, enter: bool = True, settle: float = 1.0):
