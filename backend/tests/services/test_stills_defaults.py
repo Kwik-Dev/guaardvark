@@ -160,11 +160,21 @@ def test_typed_steps_survive_floor_and_legacy_markers(monkeypatch, steps):
 
 
 @pytest.mark.parametrize("model", ["zimage-turbo", "sd-xl"])
-def test_none_or_missing_floor_keeps_steps(model):
-    result = resolve_stills_defaults(model, steps=4)
-    assert result["steps"] == result["steps_requested"] == 4
+def test_none_or_missing_floor_keeps_steps(monkeypatch, model):
+    from backend.services.stills_defaults import _FAMILY_DEFAULTS
+    monkeypatch.setitem(_FAMILY_DEFAULTS["zimage"], "min_steps", None)
+    result = resolve_stills_defaults(model, steps=1)
+    assert result["steps"] == result["steps_requested"] == 1
     assert result["steps_floor"] is None
     assert result["steps_notice"] is None
+
+
+def test_zimage_declares_its_measured_floor():
+    raised = resolve_stills_defaults("zimage-turbo", steps=1)
+    kept = resolve_stills_defaults("zimage-turbo", steps=2)
+    assert raised["steps"] == 2 and raised["steps_floor"] == 2
+    assert raised["steps_notice"] == "Z-Image Turbo needs at least 2 steps; raised 1 to 2."
+    assert kept["steps"] == 2 and kept["steps_notice"] is None
 
 
 @pytest.mark.parametrize("explicit, expected", [(False, 8), (True, 4)])

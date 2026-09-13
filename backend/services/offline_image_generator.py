@@ -1041,12 +1041,18 @@ class OfflineImageGenerator:
         Hard defaults live in ``_apply_family_sampling`` (fallback / family switch only).
         """
         if family == "zimage":
-            # Official HF: 9 steps / guidance 0. Soft envelope matches settings_validator.
+            # Official HF: 9 steps / guidance 0. The low bound is the measured floor
+            # declared in stills_defaults, so a value the resolver raised is not
+            # changed again here; only an unset or runaway value falls back to 9.
+            from backend.services.stills_defaults import _FAMILY_DEFAULTS
+            floor = int(_FAMILY_DEFAULTS["zimage"].get("min_steps") or 4)
             steps = int(request.num_inference_steps or 0)
-            if not request.steps_explicit and (steps < 4 or steps > 30):
+            if request.steps_explicit:
+                request.num_inference_steps = steps
+            elif steps <= 0 or steps > 30:
                 request.num_inference_steps = 9
             else:
-                request.num_inference_steps = steps
+                request.num_inference_steps = max(steps, floor)
             try:
                 g = float(request.guidance_scale)
             except (TypeError, ValueError):

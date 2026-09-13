@@ -9,7 +9,9 @@ from backend.services.stills_defaults import _FAMILY_DEFAULTS
 
 
 @pytest.mark.parametrize("model, family, steps, default", [
-    ("zimage-turbo", "zimage", 2, 9),
+    ("zimage-turbo", "zimage", 0, 9),
+    ("zimage-turbo", "zimage", 1, 2),     # below the declared floor
+    ("zimage-turbo", "zimage", 2, 2),     # at the floor: no longer reset to 9
     ("zimage-turbo", "zimage", 40, 9),
     ("krea2-turbo", "krea2", 2, 8),
     ("krea2-turbo", "krea2", 40, 8),

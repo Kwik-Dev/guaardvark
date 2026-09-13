@@ -164,7 +164,7 @@ def act_file(st: Stage):
 def act_caveat(st: Stage):
     # The honesty beat, same session: a clamp or a refusal read back verbatim.
     type_into_stage_terminal(
-        "Generate a 512x512 image of a paper boat with generate_image at 4 steps, then "
+        "Generate a 1024x1024 image of a paper boat with generate_image at 1 step, then "
         "poll it and tell me verbatim what the server changed or refused.", delay_ms=40)
     time.sleep(50.0)
 
@@ -218,8 +218,9 @@ BEATS = [
          action=act_file, verify=lambda st: verify_path(st, "/media"), reset=reset_keep_session),
     Beat(name="caveat",
          narration=[
-             "One honest beat. Four steps is below what this model needs. The server raises "
-             "it, says so, and the agent reads that back to you word for word.",
+             "One honest beat. One step is below what this model needs: measured on this "
+             "machine, one step is noise and two is clean. The server raises it to two, "
+             "says so, and the agent reads that back to you word for word.",
              "",
              f"{say(len(SKILLS))} skills. Your G P U. Your agent.",
          ],

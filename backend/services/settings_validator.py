@@ -81,7 +81,8 @@ MODEL_SETTINGS = {
         "recommended_guidance": 0.0,
         "min_dimensions": (512, 512),
         "recommended_dimensions": (1024, 1024),
-        "steps_range": (4, 30),
+        # Low end is the measured floor (stills_defaults _FAMILY_DEFAULTS["zimage"]).
+        "steps_range": (2, 30),
         # Official HF: num_inference_steps=9 → 8 DiT forwards; guidance_scale=0.0
         "recommended_steps": 9,
         "best_for": ["versatile", "photorealism", "faces", "anatomy", "text", "high_res"],

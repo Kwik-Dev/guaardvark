@@ -35,7 +35,13 @@ from typing import Any
 _FAMILY_DEFAULTS: dict[str, dict[str, Any]] = {
     # min_steps: the no-bad-knob floor for steps a default or an agent chose. None
     # until measured; record the comparison beside the number when it is set.
-    "zimage": {"min_steps": None, "width": 1024, "height": 1024, "steps": 9, "guidance": 0.0, "prompt_style": "natural"},
+    # Z-Image Turbo 2: measured 2026-09-13 on this box at 1024x1024, seed 1984,
+    # verbatim prompts, three scenes (two people on a bench, a paper boat in neon
+    # rain, a bicycle under a street sign) at 1-9 steps. 1 step is visibly broken
+    # (grain over everything, blank faces, smeared newsprint, noisy wheels); 2 is
+    # clean and only slightly softer than 3-9; 9 adds fine texture and legible
+    # signage.
+    "zimage": {"min_steps": 2, "width": 1024, "height": 1024, "steps": 9, "guidance": 0.0, "prompt_style": "natural"},
     "krea2-turbo": {"width": 1024, "height": 1024, "steps": 8, "guidance": 0.0, "prompt_style": "tags"},
     "krea2-raw": {"width": 1024, "height": 1024, "steps": 52, "guidance": 3.5, "prompt_style": "tags"},
     "sdxl": {"width": 1024, "height": 1024, "steps": 25, "guidance": 7.0, "prompt_style": "tags"},
