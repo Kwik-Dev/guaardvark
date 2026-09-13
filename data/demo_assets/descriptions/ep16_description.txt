@@ -1,17 +1,17 @@
 Any client that speaks the protocol. And a policy that says no by default.
 
-The MCP server's doctor and install commands, the default-deny policy and the approval rule that decide which registered tools a client can see, an index profile tuned for MCP clients, Claude Code searching a synthetic company's documents through Guaardvark with nothing of the operator's own setup loaded, the approvals page where anything that acts waits for a person, and a caveat recorded in one commit and fixed in a later one.
+The MCP server's doctor and install commands, the default-deny policy and the approval rule that decide which registered tools a client can see, an index profile tuned for MCP clients, Claude Code searching a synthetic company's documents through Guaardvark with nothing of the operator's own setup loaded and then asking to publish a post, the approvals page where that request waits for a person, and a caveat recorded in one commit and fixed in a later one.
 
 One machine. No cloud. This is Episode 16.
 
-CHAPTERS (add exact timestamps after the final edit)
+CHAPTERS
 0:00 Doctor
-[__:__] Install
-[__:__] The policy
-[__:__] An index profile for clients
-[__:__] A client on camera
-[__:__] Approvals
-[__:__] A caveat, recorded and fixed
+0:24 Install
+0:51 The policy
+1:28 An index profile for clients
+2:06 A client on camera
+2:51 Approvals
+3:25 A caveat, recorded and fixed
 
 FEATURED IN THIS EPISODE
 ▸ Ep 2: A Brain With Three Speeds — Chat Brain — {EP02}

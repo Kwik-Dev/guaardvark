@@ -44,6 +44,17 @@ TAGS_COMMON = ["Guaardvark", "local AI", "self-hosted AI", "open source AI",
 # not the finer-grained SERIES.md beat plan, which the production consolidated
 # during editing. Overrides the placeholder chapters below for these episodes.
 REAL_CHAPTERS = {
+    # Beat lengths of ep16_mcp_20260913_021604 (doctor 24.0, install 27.0,
+    # policy 37.0, profiles 38.5, client 44.5, approvals 34.0, fixed 42.5).
+    16: [
+        (0, "Doctor"),
+        (24, "Install"),
+        (51, "The policy"),
+        (88, "An index profile for clients"),
+        (126, "A client on camera"),
+        (171, "Approvals"),
+        (205, "A caveat, recorded and fixed"),
+    ],
     5: [
         (0, "Hook — the Media Director"),
         (27, "The wall — browsing the pre-rendered batch"),
@@ -563,9 +574,10 @@ EPISODES = {
             "policy and the approval rule that decide which registered tools "
             "a client can see, an index profile tuned for MCP clients, Claude "
             "Code searching a synthetic company's documents through Guaardvark "
-            "with nothing of the operator's own setup loaded, the approvals "
-            "page where anything that acts waits for a person, and a caveat "
-            "recorded in one commit and fixed in a later one."
+            "with nothing of the operator's own setup loaded and then asking "
+            "to publish a post, the approvals page where that request waits "
+            "for a person, and a caveat recorded in one commit and fixed in a "
+            "later one."
         ),
         chapters=[
             "Doctor",
