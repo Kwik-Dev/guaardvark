@@ -33,6 +33,15 @@ from backend.services.job_operation_gate import (
 from backend.services.job_types import JobKind
 
 
+@pytest.fixture(autouse=True)
+def no_audio_foundry(monkeypatch):
+    """A real sidecar may be listening on this machine; never evict its models
+    from a test. Records the calls instead."""
+    calls = []
+    monkeypatch.setattr(grp, "evict_audio_foundry_backends", lambda: calls.append("audio") or [])
+    return calls
+
+
 @pytest.fixture
 def fresh_gate(monkeypatch):
     gate = JobOperationGate()
@@ -82,9 +91,15 @@ def test_reclaim_gpu_in_process_flag_routes_to_the_orchestrator():
     seen = []
     with patch.object(grp, "evict_ollama_models", lambda: seen.append("ollama")), \
          patch.object(grp, "free_comfyui_vram", lambda: seen.append("comfy")), \
+         patch.object(grp, "evict_audio_foundry_backends", lambda: seen.append("audio") or []), \
          patch.object(grp, "reclaim_in_process_vram", lambda n=0: seen.append(("in_process", n)) or 0):
         grp.reclaim_gpu(evict_ollama=True, free_comfyui=True, in_process=True, needed_mb=11000)
-    assert seen == ["ollama", "comfy", ("in_process", 11000)]
+    assert seen == ["ollama", "comfy", "audio", ("in_process", 11000)]
+
+
+def test_reclaim_gpu_defaults_leave_audio_foundry_alone(no_audio_foundry):
+    grp.reclaim_gpu(evict_ollama=True, free_comfyui=False)
+    assert no_audio_foundry == []
 
 
 def test_in_process_reclaim_never_constructs_an_orchestrator():

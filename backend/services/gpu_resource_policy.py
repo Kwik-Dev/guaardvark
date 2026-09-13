@@ -94,6 +94,49 @@ def evict_ollama_models() -> bool:
         return False
 
 
+_AUDIO_FOUNDRY_URL = "http://127.0.0.1:8206"
+
+
+def evict_audio_foundry_backends() -> list:
+    """Ask the Audio Foundry sidecar to unload every backend it holds. Never raises.
+
+    Its voice, effects and music models are never what a render is asking for,
+    and the sidecar owns their CUDA memory: the orchestrator only tracks its
+    slots, and a backend restart forgets even that while the model stays on the
+    card (an idle 3.9GB voice model once held an image batch at "need ~12024MB,
+    only 11960MB usable"). The sidecar's /evict refuses a backend that is
+    generating, so a live request is never cut off. Returns the intents it
+    reported unloaded.
+    """
+    try:
+        import requests
+
+        try:
+            from backend.api.audio_foundry_api import AUDIO_FOUNDRY_URL as base
+        except Exception:  # noqa: BLE001
+            base = _AUDIO_FOUNDRY_URL
+        try:
+            status = requests.get(f"{base}/status", timeout=(1.0, 5.0)).json()
+        except requests.RequestException:
+            return []  # sidecar not running
+        unloaded = []
+        for intent, info in (status.get("backends") or {}).items():
+            if not (info or {}).get("loaded"):
+                continue
+            try:
+                resp = requests.post(f"{base}/evict/{intent}", timeout=(1.0, 30.0))
+                if resp.ok and resp.json().get("unloaded"):
+                    unloaded.append(intent)
+            except (requests.RequestException, ValueError) as e:
+                log.warning("audio_foundry evict %s failed (non-fatal): %s", intent, e)
+        if unloaded:
+            log.info("Reclaim: audio_foundry unloaded %s", ", ".join(unloaded))
+        return unloaded
+    except Exception as e:  # noqa: BLE001
+        log.warning("audio_foundry eviction failed (non-fatal): %s", e)
+        return []
+
+
 def reclaim_in_process_vram(needed_mb: int = 0) -> int:
     """Release CUDA memory this process is holding. Returns MB freed. Never raises.
 
@@ -151,6 +194,7 @@ def reclaim_gpu(
     if free_comfyui:
         free_comfyui_vram()
     if in_process:
+        evict_audio_foundry_backends()
         reclaim_in_process_vram(needed_mb)
 
 
