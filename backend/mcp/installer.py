@@ -106,8 +106,10 @@ def _merge_json_config(
 
     mutate(data)
 
+    from backend.utils.display_paths import display_path
+
     if dry_run:
-        return f"would write {SERVER_NAME} entry to {path}"
+        return f"would write {SERVER_NAME} entry to {display_path(path)}"
 
     if path.is_file():
         backup = path.with_name(path.name + ".guaardvark-backup")
@@ -116,7 +118,7 @@ def _merge_json_config(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return f"wrote {SERVER_NAME} entry to {path}"
+    return f"wrote {SERVER_NAME} entry to {display_path(path)}"
 
 
 def _set_mcp_servers_entry(data: dict[str, Any]) -> None:
@@ -130,7 +132,9 @@ def _set_mcp_servers_entry(data: dict[str, Any]) -> None:
 
 
 def _run_cli(argv: list[str], dry_run: bool) -> str:
-    pretty = " ".join(shlex.quote(a) for a in argv)
+    from backend.utils.display_paths import display_text
+
+    pretty = display_text(" ".join(shlex.quote(a) for a in argv))
     if dry_run:
         return f"would run: {pretty}"
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)

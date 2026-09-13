@@ -46,10 +46,12 @@ def _report(status: str, name: str, detail: str = "") -> bool:
 
 
 def _check_python() -> bool:
+    from backend.utils.display_paths import display_path
+
     python = _python_executable()
     if not Path(python).is_file():
-        return _report(_FAIL, "python executable", f"{python} does not exist")
-    return _report(_PASS, "python executable", python)
+        return _report(_FAIL, "python executable", f"{display_path(python)} does not exist")
+    return _report(_PASS, "python executable", display_path(python))
 
 
 def _check_sdk() -> bool:
@@ -337,10 +339,13 @@ def _check_clients() -> bool:
     ok = True
     for label, command, args in found:
         problems = _entry_problems(command, args)
+        # Shown relative to the checkout and home: doctor output gets pasted into
+        # issues and shared on screen.
+        from backend.utils.display_paths import display_text
         if problems:
-            ok = _report(_FAIL, f"client: {label}", "; ".join(problems)) and ok
+            ok = _report(_FAIL, f"client: {label}", display_text("; ".join(problems))) and ok
         else:
-            preview = " ".join([command, *args])
+            preview = display_text(" ".join([command, *args]))
             _report(_PASS, f"client: {label}", preview[:100])
     return ok
 

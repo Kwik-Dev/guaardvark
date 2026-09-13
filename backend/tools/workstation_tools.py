@@ -303,9 +303,11 @@ class ReadLogsTool(BaseTool):
                 error=f"Unknown log '{raw_name}'. Allowed: {sorted(_LOG_ALLOWLIST)}",
             )
         try:
+            from backend.utils.display_paths import display_path
+
             path = _log_dir() / raw_name
             if not path.is_file():
-                return ToolResult(success=False, error=f"Log file not found: {path}")
+                return ToolResult(success=False, error=f"Log file not found: {display_path(path)}")
             n = max(10, min(int(kwargs.get("lines") or 80), 400))
             text = path.read_text(encoding="utf-8", errors="replace")
             rows = text.splitlines()
@@ -316,7 +318,8 @@ class ReadLogsTool(BaseTool):
             return ToolResult(
                 success=True,
                 output={
-                    "path": str(path),
+                    # Relative to the checkout: this result crosses the MCP boundary.
+                    "path": display_path(path),
                     "matched_lines": len(rows),
                     "returned_lines": len(tail),
                     "query": query or None,
