@@ -45,7 +45,9 @@ Creating a project without the MCP tool: `POST $B/api/music-video` with
 1. Start the project, show the cut list and the beat count.
 2. Offer storyboards before approval: they are cheap and catch a wrong style early.
 3. Ask for approval in plain words with the cost: number of cuts times the clip time for the
-   chosen model. Approve only after a clear yes.
+   chosen model. Approve only after a clear yes, and only once `GET $B/api/music-video/$ID`
+   shows `current_stage` `awaiting_approval` with cuts: before analysis finishes the approve
+   route answers 409.
 4. Character in the video: create a Cast subject and train a LoRA first (the cast skill) so the
    Director can lock identity across cuts.
 5. The finished cut is assembled to the detected beat grid. The Video Editor page can trim or

@@ -127,17 +127,40 @@ def reset_studio(st: Stage):
     time.sleep(1.5)
 
 
+def newest_music_video() -> dict:
+    """The project the agent created: the list route answers newest first."""
+    body = api_get("/api/music-video")
+    rows = body if isinstance(body, list) else (
+        body.get("music_videos") or body.get("videos") or body.get("items") or [])
+    require(rows, "no music video project exists yet")
+    return rows[0]
+
+
 def act_studio(st: Stage):
-    # The newest project's cut plan appears in the Studio; hover the first cuts.
-    row = st.page.get_by_text(re.compile("cut", re.I)).first
-    if row.count():
-        st.hover_over(row, dur=0.9)
+    # The page selects nothing on load; open the agent's project so its plan shows.
+    project = newest_music_video()
+    st.glide_click(st.page.get_by_text(project["name"], exact=True).first, dur=0.9)
+    st.page.get_by_role("heading", name=project["name"]).first.wait_for(
+        state="visible", timeout=15_000)
     time.sleep(6.0)
 
 
 def reset_keep_session(st: Stage):
     # The interactive session from the ask beat stays up.
     close_dialogs(st)
+
+
+def reset_gate(st: Stage):
+    # The approve route answers 409 until analysis has written the plan, so the
+    # take starts only once the project is at the gate with cuts.
+    close_dialogs(st)
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        project = newest_music_video()
+        if project.get("current_stage") == "awaiting_approval" and project.get("cut_count"):
+            return
+        time.sleep(3.0)
+    raise RuntimeError("precondition failed: the music video never reached the approval gate")
 
 
 def act_gate(st: Stage):
@@ -208,7 +231,7 @@ BEATS = [
              "model arrives. One heavy job at a time.",
              "One machine. No cloud.",
          ],
-         action=act_gate, verify=v_any, reset=reset_keep_session),
+         action=act_gate, verify=v_any, reset=reset_gate),
     Beat(name="file",
          narration=[
              "The agent polls by batch i d until the status route says completed, and hands "
