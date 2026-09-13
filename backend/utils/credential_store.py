@@ -389,6 +389,8 @@ def rotate_key() -> Dict[str, Any]:
 
 def health() -> Dict[str, Any]:
     """Store diagnostics for the Connections page."""
+    from backend.utils.display_paths import display_path
+
     path = credentials_path()
     mode = None
     if path.exists():
@@ -397,7 +399,7 @@ def health() -> Dict[str, Any]:
         except OSError:
             pass
     return {
-        "path": str(path),
+        "path": display_path(path),
         "exists": path.exists(),
         "mode": mode,
         "key_present": key_path().exists(),
