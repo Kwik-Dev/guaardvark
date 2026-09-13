@@ -121,14 +121,21 @@ def act_ask(st: Stage):
     # One interactive session, kept alive across the ask, gate and file beats,
     # so the skill loading, the streamed tool calls and the permission prompt
     # are all on camera. The agent must stop at the gate; it never approves.
-    # manual: auto mode is Claude Code's default and would run shell commands
-    # unasked, so the gate's permission prompt would never appear on camera.
-    stage_claude(PLUGIN_TOOLS, cwd=CLIENT_DIR, extra="--permission-mode manual", boot=8.0)
+    # auto: the setup skill loads its health and plugin checks through shell
+    # injections, which manual mode stops at a permission prompt.
+    stage_claude(PLUGIN_TOOLS, cwd=CLIENT_DIR, extra="--permission-mode auto", boot=8.0)
     type_into_stage_terminal(
         f"Make a music video from song document {SONG_DOC_ID} in this style: {STYLE}. "
         "Follow the guaardvark skills. Stop at the approval gate and tell me the cost "
         "before you ask me to approve.", delay_ms=40)
-    time.sleep(75.0)
+    # Hold until the agent has started the project, then let its report print.
+    deadline = time.monotonic() + 240
+    while time.monotonic() < deadline:
+        rows = api_get("/api/music-video").get("music_videos") or []
+        if any(int(r.get("id") or 0) > _BASELINE["music_video_id"] for r in rows):
+            break
+        time.sleep(3.0)
+    time.sleep(20.0)
 
 
 def v_ask(st: Stage):
@@ -172,6 +179,13 @@ def reset_keep_session(st: Stage):
     close_dialogs(st)
 
 
+def v_gate(st: Stage):
+    stage = newest_music_video().get("current_stage")
+    require(stage in ("generating", "assembling", "complete"),
+            f"the approval did not start generation (stage {stage})")
+    verify_no_private_names(st)
+
+
 def reset_gate(st: Stage):
     # The approve route answers 409 until analysis has written the plan, so the
     # take starts only once the project is at the gate with cuts.
@@ -186,12 +200,16 @@ def reset_gate(st: Stage):
 
 
 def act_gate(st: Stage):
-    # The user answers the agent in the same session: yes. The approve route is
-    # a curl the skill names, so Claude Code asks permission for it on camera;
-    # the "y" is typed live. Then the GPU HUD shows the swap.
+    # The user answers the agent in the same session: yes. The agent calls the
+    # approve route itself; the take holds until generation has actually begun,
+    # then the GPU HUD shows the swap.
     type_into_stage_terminal("Yes, approve it.", delay_ms=50)
-    time.sleep(12.0)
-    type_into_stage_terminal("y", delay_ms=120, settle=25.0)   # the permission prompt
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        if newest_music_video().get("current_stage") in ("generating", "assembling", "complete"):
+            break
+        time.sleep(3.0)
+    time.sleep(6.0)
     focus_window("Chromium|Guaardvark")
     goto(st, "/dashboard", settle=2.0)
     time.sleep(8.0)
@@ -269,7 +287,7 @@ BEATS = [
              "model arrives. One heavy job at a time.",
              "One machine. No cloud.",
          ],
-         action=act_gate, verify=v_any, reset=reset_gate),
+         action=act_gate, verify=v_gate, reset=reset_gate),
     Beat(name="file",
          narration=[
              "The agent polls by batch i d until the status route says completed, and hands "
