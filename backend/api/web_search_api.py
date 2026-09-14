@@ -12,11 +12,17 @@ from flask import Blueprint, current_app, jsonify, request
 from backend.utils.response_utils import success_response, error_response
 from backend.utils.settings_utils import get_web_access
 from backend.utils.safe_math import evaluate_arithmetic
+from backend.utils.text_focus import focus_window
 
 web_search_bp = Blueprint("web_search_api", __name__, url_prefix="/api/web-search")
 logger = logging.getLogger(__name__)
 
-def extract_website_content(url: str) -> Dict[str, Any]:
+def extract_website_content(url: str, query: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch a page and return its title, description and up to 2,000 characters of its text.
+
+    With ``query`` the text is the stretch of the page about the query
+    (:func:`backend.utils.text_focus.focus_window`); without it, the head of the page.
+    """
     try:
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
@@ -56,7 +62,7 @@ def extract_website_content(url: str) -> Dict[str, Any]:
             content_text = soup.get_text(separator=' ', strip=True)
         
         content_text = re.sub(r'\s+', ' ', content_text)
-        content_text = content_text[:2000]
+        content_text = focus_window(content_text, query, 2000) if query else content_text[:2000]
         
         return {
             "success": True,
