@@ -27,11 +27,13 @@ def focus_window(text: str, query: str, limit: int, anchors: Iterable[str] = ())
     """The ``limit``-character stretch of ``text`` that holds the most distinct query terms and anchors.
 
     A page often opens with navigation, so its head can leave out the passage
-    a question is about. The window starts a little before its first matching
-    term and ends on whitespace; a window that does not start at the top of
-    the text begins with "… ". Ties go to the earliest window. The head of
-    ``text`` (cut on whitespace) is returned when the text already fits, when
-    there is nothing to look for, or when no term occurs.
+    a question is about. Among windows with the same number of distinct terms,
+    the one whose matches sit closest together wins (a menu repeats words that
+    a passage uses once), then the earliest. The window starts a little before
+    its first matching term and ends on whitespace; a window that does not
+    start at the top of the text begins with "… ". The head of ``text`` (cut
+    on whitespace) is returned when the text already fits, when there is
+    nothing to look for, or when no term occurs.
     """
     if text is None:
         return ""
@@ -45,14 +47,15 @@ def focus_window(text: str, query: str, limit: int, anchors: Iterable[str] = ())
 
     positions = [position for position, _ in hits]
     lead = limit // 5
-    best_start, best_score = 0, 0
+    best_key, best_start = None, 0
     for position, _ in hits:
         start = max(0, position - lead)
         low = bisect.bisect_left(positions, start)
         high = bisect.bisect_left(positions, start + limit)
-        score = len({term for _, term in hits[low:high]})
-        if score > best_score:
-            best_start, best_score = start, score
+        inside = hits[low:high]
+        key = (len({term for _, term in inside}), -(inside[-1][0] - inside[0][0]), -start)
+        if best_key is None or key > best_key:
+            best_key, best_start = key, start
     if best_start == 0:
         return cut_on_whitespace(text, limit)
     space = text.find(" ", best_start, best_start + 40)

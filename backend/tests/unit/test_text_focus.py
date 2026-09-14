@@ -28,6 +28,15 @@ def test_the_window_with_the_most_distinct_terms_wins_and_ties_go_to_the_earlies
     assert focus_window(tied, "alpha", 50) == cut_on_whitespace(tied, 50)
 
 
+def test_a_passage_beats_a_menu_that_repeats_the_same_words():
+    menu = " ".join(f"Brackets Kits Frames Accessories {i}" for i in range(90))
+    spec = "Which kit: the K20 bracket kit fits frames up to 48 inches and needs four M6 bolts."
+    text = f"{menu} {spec} " + "Footer " * 40
+    window = focus_window(text, "Which bolts does the K20 bracket kit need for these frames?", 700)
+    assert spec in window
+    assert window.index(spec) < 400
+
+
 def test_anchors_count_like_query_terms():
     text = "x " * 500 + "part ELN-01 fits" + " y" * 500
     assert "ELN-01" in focus_window(text, "", 80, anchors=["ELN-01"])
