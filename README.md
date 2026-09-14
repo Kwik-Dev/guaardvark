@@ -665,16 +665,7 @@ Details: [INSTALL.md](INSTALL.md) · [agent mental model](docs/AGENT_MENTAL_MODE
 
 ### 3. Pick a good first issue
 
-Start here — each issue has acceptance criteria and a clear **out of scope** list:
-
-| Issue | What you do | Risk |
-|-------|-------------|------|
-| [#46](https://github.com/guaardvark/guaardvark/issues/46) | Add browser-basic **agent recipes** (JSON only) | Low |
-| [#47](https://github.com/guaardvark/guaardvark/issues/47) | Write `docs/AGENT_MENTAL_MODEL.md` | Low |
-| [#48](https://github.com/guaardvark/guaardvark/issues/48) | CLI: `guaardvark recipes list/show/validate` | Low |
-| [#49](https://github.com/guaardvark/guaardvark/issues/49) | Document **hardware / VRAM tiers** | Low |
-
-All open starters: [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+Starter issues carry the [`good first issue`](https://github.com/guaardvark/guaardvark/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) label, each with acceptance criteria and a clear **out of scope** list. When none are open, the safe zones below are the best place to start.
 
 We aim to review serious PRs within **24–48 hours**.
 

@@ -98,8 +98,6 @@ data/agent/chromium_profile/
 data/agent/xfce_config/
 
 # Stray local scratch files (do not commit)
-/1_logo.png
-/doc.txt
 /README.draft.md
 
 # Logs, backups, PIDs
