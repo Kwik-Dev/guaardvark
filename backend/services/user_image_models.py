@@ -29,25 +29,29 @@ import re
 import threading
 from pathlib import Path
 
+from backend.services.user_model_families import (
+    DuplicateUserModel,
+    family_choices as _table_family_choices,
+    find_duplicate,
+    image_generation_families,
+    image_lora_families,
+    inspect_hf_repo,
+    match_families,
+    sanitize_repo_src,
+)
+
 logger = logging.getLogger(__name__)
 
 USER_MODEL_PREFIX = "user-"
 DEFAULT_LORA_STRENGTH = 0.8
 _CATALOG_LOCK = threading.Lock()
 _CATALOG_PATH_OVERRIDE = None
-WEIGHT_SUFFIXES = (".safetensors", ".ckpt", ".pt", ".bin")
+WEIGHT_SUFFIXES = (".safetensors", ".ckpt", ".pt", ".bin", ".gguf")
 
-# Families a user model can join, the shipped key whose sampling policy it
-# borrows, and whether diffusers can load it from a single merged checkpoint.
-GENERATION_FAMILIES = {
-    "zimage": {"label": "Z-Image", "like": "zimage-turbo", "single_file": False},
-    "krea2": {"label": "Krea 2", "like": "krea2-turbo", "single_file": False},
-    "sdxl": {"label": "SDXL", "like": "sd-xl", "single_file": True},
-    "sd": {"label": "SD 1.5", "like": "realistic-vision", "single_file": True},
-}
-# OfflineImageGenerator._apply_loras implements Z-Image only; SDXL and FLUX
-# character LoRAs are routed to ComfyUI, which the offline catalog cannot drive.
-LORA_FAMILIES = ("zimage",)
+# Families a user model can join. Source of truth is user_model_families.
+GENERATION_FAMILIES = image_generation_families()
+# Z-Image stacks offline; SDXL and FLUX LoRAs land in ComfyUI/models/loras.
+LORA_FAMILIES = image_lora_families()
 # Markers each family's id detection keys on; scrubbed from a slug that belongs
 # to a different family.
 _FAMILY_MARKERS = {
@@ -95,63 +99,54 @@ def user_model_id(name: str, family: str, taken=None) -> str:
 
 def suggest_role_and_family(files: list, src: str | None, hf_repo: str, has_model_index: bool):
     """Guess LoRA vs generation and the family from names alone."""
-    names = [src] if src else [f.get("src") or "" for f in files]
-    blob = " ".join(names + [hf_repo or ""]).lower()
-    if any(k in blob for k in ("lora", "lycoris", "adapter")):
-        role = "lora"
-    else:
-        role = "generation"
-    if "z-image" in blob or "zimage" in blob:
-        family = "zimage"
-    elif "krea" in blob:
-        family = "krea2"
-    elif "flux" in blob:
-        family = "flux"
-    elif "xl" in blob:
-        family = "sdxl"
-    elif has_model_index or role == "generation":
-        family = "sd"
-    else:
-        family = "zimage"
-    return role, family
+    matches = match_families(
+        domain="image", files=files, src=src, hf_repo=hf_repo or "",
+        has_model_index=has_model_index,
+    )
+    top = next((m for m in matches if m.get("wired")), None)
+    if not top:
+        return "generation", "sd"
+    return top.get("role") or "generation", top.get("family") or "sd"
 
 
 def preview_hf_url(url: str) -> dict:
     """Parse a paste and list the repo's weight files; says whether it is a diffusers repo."""
-    from backend.services.user_video_models import parse_hf_url, list_hf_weight_files
-    from huggingface_hub import HfApi
-
-    parsed = parse_hf_url(url)
-    repo, revision = parsed["hf_repo"], parsed.get("revision") or "main"
-    files, gated = list_hf_weight_files(repo, revision)
-    try:
-        all_files = HfApi().list_repo_files(repo, revision=revision)
-    except Exception:  # noqa: BLE001 — the weight listing already succeeded
-        all_files = []
-    has_model_index = "model_index.json" in all_files
-    src = parsed.get("src")
-    if src and not any(f["src"] == src for f in files):
-        files.insert(0, {"src": src, "size": 0})
-    role, family = suggest_role_and_family(files, src, repo, has_model_index)
+    inspected = inspect_hf_repo(url)
+    matches = match_families(
+        domain="image",
+        files=inspected["files"],
+        src=inspected.get("src"),
+        hf_repo=inspected["hf_repo"],
+        has_model_index=inspected.get("has_model_index") or False,
+        pipeline_tag=inspected.get("pipeline_tag"),
+        index_class=inspected.get("index_class"),
+    )
+    wired = [m for m in matches if m.get("wired")]
+    unwired = [m for m in matches if not m.get("wired")]
+    top = (unwired or wired or [None])[0]
     return {
-        "hf_repo": repo,
-        "revision": revision,
-        "src": src,
-        "files": files,
-        "gated": gated,
-        "has_model_index": has_model_index,
-        "suggested_role": role,
-        "suggested_family": family,
+        "hf_repo": inspected["hf_repo"],
+        "revision": inspected.get("revision") or "main",
+        "src": inspected.get("src"),
+        "files": inspected["files"],
+        "gated": inspected.get("gated") or False,
+        "truncated": inspected.get("truncated") or False,
+        "has_model_index": inspected.get("has_model_index") or False,
+        "license": inspected.get("license"),
+        "token_present": inspected.get("token_present") or False,
+        "pipeline_tag": inspected.get("pipeline_tag"),
+        "index_class": inspected.get("index_class"),
+        "warnings": list(inspected.get("warnings") or []),
+        "matches": matches,
+        "suggested_role": (top or {}).get("role") if top and top.get("wired") else None,
+        "suggested_family": (top or {}).get("family") if top and top.get("wired") else None,
+        "unwired": unwired[0] if unwired else None,
         "families": family_choices(),
     }
 
 
 def family_choices() -> list:
-    return [
-        {"id": fam, "label": spec["label"], "like": spec["like"],
-         "single_file": spec["single_file"], "lora": fam in LORA_FAMILIES}
-        for fam, spec in GENERATION_FAMILIES.items()
-    ]
+    return _table_family_choices("image")
 
 
 def _read_catalog() -> dict:
@@ -186,38 +181,67 @@ def build_user_entry(
     description: str | None = None,
     revision: str = "main",
     taken=None,
+    known_files: list | None = None,
 ) -> tuple[str, dict]:
     """Validate the pieces and shape a catalog entry. Does not persist or register."""
     if role not in ROLES:
         raise ValueError("Role must be 'generation' (a model to pick) or 'lora' (an adapter on a model).")
     if family not in GENERATION_FAMILIES:
         raise ValueError(
-            f"Family must be one of {', '.join(GENERATION_FAMILIES)}. FLUX models install "
-            "from Manage Video Models, which owns the ComfyUI folders."
+            f"Family must be one of {', '.join(GENERATION_FAMILIES)}."
         )
     if not hf_repo or "/" not in hf_repo:
         raise ValueError("hf_repo must be org/repo.")
     specs = []
     total = 0
+    known = None
+    known_sizes = {}
+    if known_files is not None:
+        known = set()
+        for f in known_files:
+            if isinstance(f, dict):
+                s = f.get("src")
+                if s:
+                    known.add(s)
+                    known_sizes[s] = int(f.get("size") or 0)
+            elif f:
+                known.add(f)
     for item in files or []:
         src = (item.get("src") if isinstance(item, dict) else None) or ""
-        if src:
-            specs.append({"src": src, "dst": Path(src).name})
-            total += int((item.get("size") if isinstance(item, dict) else 0) or 0)
+        if not src:
+            continue
+        src = sanitize_repo_src(src)
+        if known is not None and src not in known:
+            raise ValueError(f"'{src}' is not a weight file in that repo.")
+        size = int((item.get("size") if isinstance(item, dict) else 0) or 0) or known_sizes.get(src, 0)
+        specs.append({"src": src, "dst": Path(src).name, "size": size})
+        total += size
     size_gb = round(total / (1024 ** 3), 3) if total else 0.0
     spec = GENERATION_FAMILIES[family]
+    engine = spec.get("engine") or "offline"
+    local_subdir = None
 
     if role == "lora":
         if family not in LORA_FAMILIES:
             raise ValueError(
-                f"{spec['label']} LoRAs are not stacked by the offline image engine yet; "
+                f"{spec['label']} LoRAs are not stacked; "
                 f"that works for {', '.join(GENERATION_FAMILIES[f]['label'] for f in LORA_FAMILIES)} today."
             )
         if len(specs) != 1:
             raise ValueError("A LoRA is one file. Pick the single .safetensors to stack.")
         kind = "lora"
+        if spec.get("lora_engine") == "comfy":
+            engine = "comfy"
+            local_subdir = "loras"
+    elif spec.get("engine") == "comfy":
+        if len(specs) != 1:
+            raise ValueError(
+                f"A {spec['label']} stills model is one UNET file (.safetensors or .gguf). Pick exactly one."
+            )
+        kind = "comfy_files"
+        local_subdir = spec.get("local_subdir") or "unet"
     elif has_model_index:
-        if specs and len(specs) > 0:
+        if specs:
             # A diffusers repo is fetched whole; a file list would only confuse the
             # snapshot downloader, which already skips redundant root checkpoints.
             specs = []
@@ -250,6 +274,8 @@ def build_user_entry(
         "applies_to": [family] if role == "lora" else [],
         "strength": DEFAULT_LORA_STRENGTH if role == "lora" else None,
         "user": True,
+        "engine": engine,
+        "local_subdir": local_subdir,
     }
     return mid, entry
 
@@ -284,6 +310,8 @@ def register_entry(generator, model_id: str, entry: dict) -> None:
             "files": list(entry.get("files") or []),
             "kind": entry.get("kind"),
             "family": family,
+            "engine": entry.get("engine") or "offline",
+            "local_subdir": entry.get("local_subdir"),
         }
     if entry.get("role") == "lora":
         generator.hidden_models.add(model_id)
@@ -292,7 +320,7 @@ def register_entry(generator, model_id: str, entry: dict) -> None:
         "description": entry.get("description") or "",
         "recommended": False,
         "order": 50 + len(generator.user_entries),
-        "engine": "offline",
+        "engine": entry.get("engine") or GENERATION_FAMILIES.get(family, {}).get("engine") or "offline",
         "user": True,
         "role": entry.get("role"),
         "family": family,
@@ -337,6 +365,15 @@ def add_user_model(generator, **kwargs) -> tuple[str, dict]:
     """Validate, persist and register. Returns (id, entry)."""
     with _CATALOG_LOCK:
         catalog = _read_catalog()
+        dup = find_duplicate(
+            catalog,
+            hf_repo=kwargs.get("hf_repo") or "",
+            revision=kwargs.get("revision") or "main",
+            files=kwargs.get("files") or [],
+            kind="snapshot" if kwargs.get("has_model_index") else None,
+        )
+        if dup:
+            raise DuplicateUserModel(dup)
         taken = set(catalog["models"]) | set(getattr(generator, "available_models", {}) or {})
         mid, entry = build_user_entry(taken=taken, **kwargs)
         register_entry(generator, mid, entry)
@@ -360,26 +397,56 @@ def remove_user_model(generator, model_id: str, *, delete_files: bool = False) -
         _write_catalog(catalog)
     removed = []
     if delete_files:
-        base = Path(generator.models_dir)
-        target = base / (entry["hf_repo"].replace("/", "--") if entry.get("kind") == "snapshot" else model_id)
-        # A snapshot directory can be shared with a shipped model of the same repo.
-        shared = entry.get("kind") == "snapshot" and any(
-            v == entry.get("hf_repo") for k, v in (generator.available_models or {}).items() if k != model_id
-        )
-        if target.is_dir() and not shared:
-            import shutil
-            shutil.rmtree(target, ignore_errors=True)
-            removed.append(str(target))
+        if (entry.get("engine") == "comfy" or entry.get("local_subdir")) and entry.get("files"):
+            from backend.services.video_model_registry import comfyui_models_dir
+            base = comfyui_models_dir() / (entry.get("local_subdir") or "unet")
+            for spec in entry.get("files") or []:
+                path = base / spec.get("dst")
+                if path.exists() and path.is_file():
+                    path.unlink()
+                    removed.append(str(path))
+        else:
+            base = Path(generator.models_dir)
+            target = base / (entry["hf_repo"].replace("/", "--") if entry.get("kind") == "snapshot" else model_id)
+            # A snapshot directory can be shared with a shipped model of the same repo.
+            shared = entry.get("kind") == "snapshot" and any(
+                v == entry.get("hf_repo") for k, v in (generator.available_models or {}).items() if k != model_id
+            )
+            if target.is_dir() and not shared:
+                import shutil
+                shutil.rmtree(target, ignore_errors=True)
+                removed.append(str(target))
     return {"id": model_id, "name": entry.get("name"), "deleted_paths": removed}
 
 
 # ── generation-time helpers ─────────────────────────────────────────────────
 
+def _user_dest_dir(generator, uf: dict) -> Path:
+    if (uf.get("engine") == "comfy" or uf.get("local_subdir")) and uf.get("kind") in ("lora", "comfy_files"):
+        from backend.services.video_model_registry import comfyui_models_dir
+        return comfyui_models_dir() / (uf.get("local_subdir") or "unet")
+    return Path(generator.models_dir) / uf["dir"]
+
+
+def user_download_dir(generator, model_id: str) -> Path | None:
+    """Dest directory for a user catalog key (Comfy unet/loras or models_dir/<id>)."""
+    files = getattr(generator, "user_files", None) or {}
+    uf = files.get(model_id)
+    if uf is None:
+        uf = files.get(user_sentinel(model_id))
+    if uf is None:
+        av = (getattr(generator, "available_models", None) or {}).get(model_id)
+        uf = files.get(av or "")
+    if not uf:
+        return None
+    return _user_dest_dir(generator, uf)
+
+
 def user_files_present(generator, sentinel: str) -> bool:
     uf = (getattr(generator, "user_files", {}) or {}).get(sentinel)
     if not uf:
         return False
-    base = Path(generator.models_dir) / uf["dir"]
+    base = _user_dest_dir(generator, uf)
     for spec in uf.get("files") or []:
         p = base / spec["dst"]
         if not p.is_file() or p.stat().st_size == 0:
@@ -387,17 +454,19 @@ def user_files_present(generator, sentinel: str) -> bool:
     return bool(uf.get("files"))
 
 
-def download_user_files(generator, sentinel: str) -> tuple[bool, str | None]:
-    """hf_hub_download each declared file into models_dir/<id>/, resuming partials."""
+def download_user_files(generator, sentinel: str, stop=None) -> tuple[bool, str | None]:
+    """hf_hub_download each declared file into the dest dir, resuming partials."""
     from huggingface_hub import hf_hub_download
 
     uf = (getattr(generator, "user_files", {}) or {}).get(sentinel)
     if not uf:
         return False, f"{sentinel} is not a user file entry"
-    base = Path(generator.models_dir) / uf["dir"]
+    base = _user_dest_dir(generator, uf)
     base.mkdir(parents=True, exist_ok=True)
     try:
         for spec in uf.get("files") or []:
+            if stop is not None and stop.is_set():
+                return False, "Download stalled"
             got = Path(hf_hub_download(
                 repo_id=uf["hf_repo"], filename=spec["src"], revision=uf.get("revision") or "main",
                 local_dir=str(base),
@@ -462,7 +531,7 @@ def resolve_user_loras(generator, model: str, adapters: list) -> tuple[list, flo
         if not user_files_present(generator, sentinel):
             return [], None, f"{label} is not installed. Open Manage Image Models to download it."
         uf = generator.user_files[sentinel]
-        paths.append(str(Path(generator.models_dir) / uf["dir"] / uf["files"][0]["dst"]))
+        paths.append(str(_user_dest_dir(generator, uf) / uf["files"][0]["dst"]))
         s = raw.get("strength") if isinstance(raw, dict) else None
         s = float(s if s is not None else entry.get("strength") or DEFAULT_LORA_STRENGTH)
         strength = s if strength is None else max(strength, s)
@@ -485,6 +554,7 @@ def catalog_rows(generator) -> list:
             "hf_repo": entry.get("hf_repo"),
             "size_gb": entry.get("size_gb") or 0.0,
             "strength": entry.get("strength") or DEFAULT_LORA_STRENGTH,
+            "engine": entry.get("engine") or "offline",
             "is_downloaded": user_files_present(generator, user_sentinel(mid)),
             "user": True,
         })

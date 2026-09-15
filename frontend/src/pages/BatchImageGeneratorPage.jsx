@@ -61,6 +61,7 @@ import BatchHistoryCard from '../components/images/BatchHistoryCard';
 import GpuGateBanner from '../components/common/GpuGateBanner';
 import useJobsGate from '../hooks/useJobsGate';
 import { formatUiError } from '../utils/uiError';
+import { ActionButton } from '../components/settings/ui';
 import {
   ZIMAGE_GUIDANCE,
   ZIMAGE_PRESET_STEPS,
@@ -74,6 +75,8 @@ import {
   resolveQualityPreset,
   stripCopyCounter,
 } from '../utils/batchImageSettings';
+
+const ImageModelsModal = React.lazy(() => import('../components/modals/ImageModelsModal'));
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -145,6 +148,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [imageModelsModalOpen, setImageModelsModalOpen] = useState(false);
   const [showPromptPreview, setShowPromptPreview] = useState(false);
   // Live queue panel (mirrors Video Gen) — stacked batches drain one-at-a-time
   const [queue, setQueue] = useState([]);
@@ -242,31 +246,30 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     });
   }, [params.model, params.quality_preset]);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const response = await fetch(`${API_BASE}/batch-image/models`);
-        const data = await response.json();
-        if (data.success && data.data?.models) {
-          // The backend only returns models that can actually run. A model needing a
-          // download is still offered (it fetches on first use); gated or unreachable
-          // ones arrive in unavailable_models instead, with a reason.
-          const fetched = data.data.models.map(m => ({
-            value: m.id,
-            label: m.recommended ? `${m.label} ⭐` : m.label,
-            description: m.availability === 'downloadable'
-              ? `${m.description || ''} (downloads ~${m.size_gb}GB on first use)`.trim()
-              : (m.description || ''),
-          }));
-          setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
-          setUnavailableModels(data.data.unavailable_models || []);
-          setUserAdapters((data.data.adapters || []).filter((a) => a.is_downloaded));
-        }
-      } catch (e) {
-        debugLog('Failed to load image models', e);
+  const loadImageModels = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/batch-image/models`);
+      const data = await response.json();
+      if (data.success && data.data?.models) {
+        const fetched = data.data.models.map(m => ({
+          value: m.id,
+          label: m.recommended ? `${m.label} ⭐` : m.label,
+          description: m.availability === 'downloadable'
+            ? `${m.description || ''} (downloads ~${m.size_gb}GB on first use)`.trim()
+            : (m.description || ''),
+        }));
+        setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
+        setUnavailableModels(data.data.unavailable_models || []);
+        setUserAdapters((data.data.adapters || []).filter((a) => a.is_downloaded));
       }
-    })();
+    } catch (e) {
+      debugLog('Failed to load image models', e);
+    }
   }, []);
+
+  useEffect(() => {
+    loadImageModels();
+  }, [loadImageModels]);
 
   // LoRAs that stack on the selected model's family. "auto" resolves to the
   // stills default on the backend, which is the Z-Image family.
@@ -1674,7 +1677,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
                   {/* Current Settings Display */}
                   <Box sx={{ mt: 3, p: 2, backgroundColor: 'background.paper', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
-                    <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 500 }}>Current Settings</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 1 }}>
+                      <Typography variant="subtitle2" sx={{ fontWeight: 500 }}>Current Settings</Typography>
+                      <ActionButton onClick={() => setImageModelsModalOpen(true)}>Manage models</ActionButton>
+                    </Box>
                     <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
                       <Chip
                         label={`Model: ${modelOptions.find(m => m.value === params.model)?.label || params.model}`}
@@ -2439,6 +2445,19 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           <Button onClick={() => setShowPromptPreview(false)}>Close</Button>
         </DialogActions>
       </Dialog>
+      <React.Suspense fallback={null}>
+        <ImageModelsModal
+          open={imageModelsModalOpen}
+          onClose={() => {
+            setImageModelsModalOpen(false);
+            loadImageModels();
+          }}
+          showMessage={(msg, severity) => {
+            if (severity === "error") setError(msg);
+            else setSuccess(msg);
+          }}
+        />
+      </React.Suspense>
     </PageLayout>
   );
 };

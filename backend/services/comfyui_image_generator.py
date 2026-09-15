@@ -97,7 +97,8 @@ class ComfyUIImageGenerator:
     # over-processed, and 0.6 "fries" the image into a blurry mush.
     def __init__(self, comfy_url: str | None = None, lora_strength: float = 0.25, model: str | None = None,
                  flux_unet: str | None = None, flux_t5: str | None = None,
-                 flux_clip: str | None = None, flux_vae: str | None = None):
+                 flux_clip: str | None = None, flux_vae: str | None = None,
+                 flux_dev_unet: str | None = None):
         self.comfy_url = (comfy_url or _COMFY_URL).rstrip("/")
         self.lora_strength = lora_strength
         self.model = model or "sdxl"  # "flux-schnell", "sdxl", "sdxl-lora" etc. (from MV keyframe_model)
@@ -106,6 +107,7 @@ class ComfyUIImageGenerator:
         self.flux_t5 = flux_t5 or FLUX_T5
         self.flux_clip = flux_clip or FLUX_CLIP
         self.flux_vae = flux_vae or FLUX_VAE
+        self.flux_dev_unet = flux_dev_unet or FLUX_DEV_UNET
 
     # ── connectivity ──────────────────────────────────────────────────
     def _available(self) -> bool:
@@ -190,7 +192,7 @@ class ComfyUIImageGenerator:
             wf: dict = {
                 "unet": {
                     "class_type": "UNETLoader",
-                    "inputs": {"unet_name": FLUX_DEV_UNET, "weight_dtype": FLUX_DEV_WEIGHT_DTYPE},
+                    "inputs": {"unet_name": self.flux_dev_unet, "weight_dtype": FLUX_DEV_WEIGHT_DTYPE},
                 },
                 "clip": {
                     "class_type": "DualCLIPLoader",

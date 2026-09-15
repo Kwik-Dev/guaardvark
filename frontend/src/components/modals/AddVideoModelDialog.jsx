@@ -14,6 +14,8 @@ import {
   Select,
   MenuItem,
   Checkbox,
+  Radio,
+  RadioGroup,
   FormControlLabel,
   Typography,
   Box,
@@ -21,6 +23,8 @@ import {
 } from "@mui/material";
 import axios from "axios";
 import { ActionButton, ChoiceChips, Hint } from "../settings/ui";
+import useHfModelLookup from "../../hooks/useHfModelLookup";
+import { formatWeightSize, selectedBytes } from "../../utils/hfUrl";
 
 const ROLE_OPTIONS = [
   { value: "lora", label: "LoRA on a model" },
@@ -31,41 +35,41 @@ const ROLE_OPTIONS = [
 const LIKE_LABEL = { lora: "Applies to", generation: "Like", encoder: "Replaces the encoder of" };
 
 const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) => {
-  const [url, setUrl] = useState("");
-  const [looking, setLooking] = useState(false);
-  const [preview, setPreview] = useState(null);
-  const [error, setError] = useState("");
+  const { url, onUrlChange, looking, preview, error, setError, handleLookup } = useHfModelLookup({
+    endpoint: "/api/batch-video/models/from-hf",
+    open,
+  });
   const [role, setRole] = useState("lora");
   const [like, setLike] = useState("");
   const [selected, setSelected] = useState([]);
   const [experts, setExperts] = useState({});
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [fileFilter, setFileFilter] = useState("");
 
   const generationModels = useMemo(
     () => (models || []).filter((m) => !m.user && ["wan", "minimax", "ltx", "hunyuan", "cogvideox"].includes(m.type)),
     [models],
   );
-  // Only families whose graph takes a replacement encoder are offered for that role.
   const likeChoices = useMemo(() => {
     if (role === "encoder") return generationModels.filter((m) => m.encoder_swap);
     if (role === "lora") return generationModels.filter((m) => m.lora_stack);
     return generationModels;
   }, [generationModels, role]);
-  // Two-expert Wan 14B templates need a High and a Low file.
   const needsMoE = Boolean(like && /14b/.test(like) && role === "generation");
+  // Radio for one file (LoRA, encoder, a single UNET). Checkboxes only for a MoE pair.
+  const singleFile = !needsMoE;
+  const unwired = preview?.unwired;
 
   useEffect(() => {
     if (!open) {
-      setUrl("");
-      setPreview(null);
-      setError("");
       setRole("lora");
       setLike("");
       setSelected([]);
       setExperts({});
       setName("");
       setSaving(false);
+      setFileFilter("");
     }
   }, [open]);
 
@@ -78,36 +82,42 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
     } else if (preview?.files?.length === 1) {
       setSelected([preview.files[0].src]);
       setName(preview.files[0].src.split("/").pop().replace(/\.[^.]+$/, ""));
+    } else if (preview?.hf_repo) {
+      setName(preview.hf_repo.split("/").pop());
     }
   }, [preview]);
 
-  const handleLookup = async () => {
-    setError("");
-    setLooking(true);
-    try {
-      const res = await axios.post("/api/batch-video/models/from-hf", { url });
-      if (res.data.success) {
-        setPreview(res.data.data);
-      } else {
-        setError(res.data.error?.message || res.data.message || "Lookup failed");
-      }
-    } catch (err) {
-      const msg = err.response?.data?.error?.message || err.message || "Lookup failed";
-      setError(msg);
-    } finally {
-      setLooking(false);
-    }
-  };
-
   const toggleFile = (src) => {
+    if (singleFile) {
+      setSelected([src]);
+      return;
+    }
     setSelected((prev) => (prev.includes(src) ? prev.filter((s) => s !== src) : [...prev, src]));
   };
 
+  const moeComplete = !needsMoE || (() => {
+    const tags = selected.map((src) => experts[src]).filter(Boolean);
+    const autoHigh = selected.filter((src) => /high/i.test(src) && !experts[src]);
+    const autoLow = selected.filter((src) => /low/i.test(src) && !experts[src]);
+    const highs = tags.filter((t) => t === "high").length + autoHigh.length;
+    const lows = tags.filter((t) => t === "low").length + autoLow.length;
+    return highs === 1 && lows === 1;
+  })();
+
   const pending = Boolean(
-    preview && like && selected.length > 0 && !saving && (role !== "encoder" || selected.length === 1),
+    preview &&
+      !unwired &&
+      like &&
+      likeChoices.some((m) => m.id === like) &&
+      selected.length > 0 &&
+      !saving &&
+      (role !== "encoder" || selected.length === 1) &&
+      (!singleFile || selected.length === 1) &&
+      moeComplete &&
+      (!needsMoE || selected.length === 2),
   );
 
-  const handleAdd = async () => {
+  const handleAdd = async (install) => {
     if (!pending) return;
     setSaving(true);
     setError("");
@@ -125,14 +135,25 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
         like,
         files,
         name: name.trim() || undefined,
-        install: true,
+        install,
       });
       if (!res.data.success) {
         setError(res.data.error?.message || res.data.message || "Could not add");
         setSaving(false);
         return;
       }
-      showMessage?.(`Added ${res.data.data?.entry?.name || name}. Installing…`, "info");
+      const problems = res.data.data?.verify || [];
+      const dl = res.data.data?.download;
+      const label = res.data.data?.entry?.name || name;
+      if (problems.length) {
+        showMessage?.(`Added ${label}, with registry notes: ${problems.join("; ")}`, "warning");
+      } else if (dl?.error) {
+        showMessage?.(`Added ${label}. Install did not start: ${dl.error}`, "warning");
+      } else if (install) {
+        showMessage?.(`Added ${label}. Installing…`, "info");
+      } else {
+        showMessage?.(`Added ${label}. Install when you are ready.`, "info");
+      }
       onAdded?.(res.data.data?.id);
       onClose();
     } catch (err) {
@@ -143,6 +164,44 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
   };
 
   const files = preview?.files || [];
+  const visibleFiles = fileFilter.trim()
+    ? files.filter((f) => f.src.toLowerCase().includes(fileFilter.trim().toLowerCase()))
+    : files;
+  const bytes = selectedBytes(files, selected);
+  const repoUrl = preview?.hf_repo ? `https://huggingface.co/${preview.hf_repo}` : "";
+  const likeName = likeChoices.find((m) => m.id === like)?.name || like;
+
+  const fileRow = (f) => (
+    <Box key={f.src} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+      {singleFile ? null : (
+        <FormControlLabel
+          sx={{ flex: 1, mr: 0 }}
+          control={
+            <Checkbox size="small" checked={selected.includes(f.src)} onChange={() => toggleFile(f.src)} />
+          }
+          label={
+            <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
+              {f.src}
+              {formatWeightSize(f.size)}
+            </Typography>
+          }
+        />
+      )}
+      {needsMoE && selected.includes(f.src) && (
+        <Select
+          size="small"
+          value={experts[f.src] || ""}
+          onChange={(e) => setExperts((prev) => ({ ...prev, [f.src]: e.target.value }))}
+          displayEmpty
+          sx={{ minWidth: 88 }}
+        >
+          <MenuItem value="">auto</MenuItem>
+          <MenuItem value="high">High</MenuItem>
+          <MenuItem value="low">Low</MenuItem>
+        </Select>
+      )}
+    </Box>
+  );
 
   return (
     <Dialog open={open} onClose={saving ? undefined : onClose} maxWidth="sm" fullWidth>
@@ -160,7 +219,7 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
             label="Hugging Face URL"
             placeholder="https://huggingface.co/org/repo/blob/main/file.safetensors"
             value={url}
-            onChange={(e) => setUrl(e.target.value)}
+            onChange={(e) => onUrlChange(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleLookup()}
             disabled={looking || saving}
           />
@@ -174,19 +233,29 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
             {error}
           </Typography>
         )}
-        {preview && (
+        {preview && unwired && (
+          <Typography variant="body2" color="error">
+            {unwired.reason}
+          </Typography>
+        )}
+        {preview && !unwired && (
           <>
             <Typography variant="caption" color="text.secondary">
               {preview.hf_repo}
-              {preview.gated ? " · gated (needs HF_TOKEN)" : ""}
+              {preview.license ? ` · ${preview.license}` : ""}
+              {preview.gated
+                ? preview.token_present
+                  ? " · gated (agree on the model page with your HF_TOKEN account)"
+                  : " · gated (set HF_TOKEN in .env and restart)"
+                : ""}
               {preview.truncated ? " · file list truncated" : ""}
             </Typography>
-            <ChoiceChips
-              ariaLabel="Role"
-              value={role}
-              onChange={setRole}
-              options={ROLE_OPTIONS}
-            />
+            {(preview.warnings || []).map((w) => (
+              <Typography key={w} variant="caption" color="warning.main">
+                {w}
+              </Typography>
+            ))}
+            <ChoiceChips ariaLabel="Role" value={role} onChange={setRole} options={ROLE_OPTIONS} />
             <FormControl size="small" fullWidth>
               <InputLabel>{LIKE_LABEL[role]}</InputLabel>
               <Select
@@ -201,54 +270,49 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
                 ))}
               </Select>
             </FormControl>
-            <TextField
-              size="small"
-              label="Name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
+            {likeChoices.length === 0 && (
+              <Typography variant="body2" color="error">
+                No shipped model in this list takes that role.
+              </Typography>
+            )}
+            <TextField size="small" label="Name" value={name} onChange={(e) => setName(e.target.value)} />
             <Typography variant="overline" color="text.secondary">
-              Files
+              {singleFile ? "Files (pick one)" : "Files"}
             </Typography>
+            {files.length > 8 && (
+              <TextField
+                size="small"
+                label="Filter files"
+                value={fileFilter}
+                onChange={(e) => setFileFilter(e.target.value)}
+              />
+            )}
             <Box sx={{ maxHeight: 240, overflow: "auto", border: 1, borderColor: "divider", borderRadius: 1, px: 1 }}>
               {files.length === 0 && (
                 <Typography variant="body2" color="text.secondary" sx={{ py: 1 }}>
                   No weight files listed. Paste a URL that includes the filename.
                 </Typography>
               )}
-              {files.map((f) => (
-                <Box key={f.src} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                  <FormControlLabel
-                    sx={{ flex: 1, mr: 0 }}
-                    control={
-                      <Checkbox
-                        size="small"
-                        checked={selected.includes(f.src)}
-                        onChange={() => toggleFile(f.src)}
-                      />
-                    }
-                    label={
-                      <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
-                        {f.src}
-                        {f.size ? ` (${(f.size / 1024 ** 3).toFixed(2)} GB)` : ""}
-                      </Typography>
-                    }
-                  />
-                  {needsMoE && selected.includes(f.src) && (
-                    <Select
-                      size="small"
-                      value={experts[f.src] || ""}
-                      onChange={(e) => setExperts((prev) => ({ ...prev, [f.src]: e.target.value }))}
-                      displayEmpty
-                      sx={{ minWidth: 88 }}
-                    >
-                      <MenuItem value="">auto</MenuItem>
-                      <MenuItem value="high">High</MenuItem>
-                      <MenuItem value="low">Low</MenuItem>
-                    </Select>
-                  )}
-                </Box>
-              ))}
+              {singleFile ? (
+                <RadioGroup value={selected[0] || ""} onChange={(e) => toggleFile(e.target.value)}>
+                  {visibleFiles.map((f) => (
+                    <FormControlLabel
+                      key={f.src}
+                      value={f.src}
+                      sx={{ display: "flex", mr: 0 }}
+                      control={<Radio size="small" />}
+                      label={
+                        <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
+                          {f.src}
+                          {formatWeightSize(f.size)}
+                        </Typography>
+                      }
+                    />
+                  ))}
+                </RadioGroup>
+              ) : (
+                visibleFiles.map((f) => fileRow(f))
+              )}
             </Box>
             {needsMoE && (
               <Hint>This family is two experts. Pick one HighNoise file and one LowNoise file.</Hint>
@@ -259,6 +323,19 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
                 Video Gen page under Text encoder. The shipped one stays installed.
               </Hint>
             )}
+            <Hint>
+              {name.trim() || "Unnamed"} · {likeName || "template"} · {role}
+              {bytes > 0 ? ` · ${(bytes / 1024 ** 3).toFixed(2)} GB` : ""}
+              {preview.license ? ` · licence ${preview.license}` : ""}
+              {preview.gated && repoUrl && (
+                <>
+                  {" · "}
+                  <a href={repoUrl} target="_blank" rel="noreferrer noopener">
+                    Agree and access
+                  </a>
+                </>
+              )}
+            </Hint>
           </>
         )}
       </DialogContent>
@@ -266,7 +343,10 @@ const AddVideoModelDialog = ({ open, onClose, models, showMessage, onAdded }) =>
         <ActionButton onClick={onClose} disabled={saving}>
           Cancel
         </ActionButton>
-        <ActionButton kind="primary" onClick={handleAdd} loading={saving} disabled={!pending}>
+        <ActionButton onClick={() => handleAdd(false)} disabled={!pending}>
+          Add only
+        </ActionButton>
+        <ActionButton kind="primary" onClick={() => handleAdd(true)} loading={saving} disabled={!pending}>
           Add and install
         </ActionButton>
       </DialogActions>

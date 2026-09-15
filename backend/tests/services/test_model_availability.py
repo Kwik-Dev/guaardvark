@@ -407,6 +407,24 @@ class TestMenuFiltering(unittest.TestCase):
             g.get_available_models()
         probe.assert_not_called()
 
+    def test_undownloaded_user_flux_is_downloadable_not_unreachable(self):
+        """User Comfy stills (FLUX) must stay in Manage Image Models for Install."""
+        g = _gen()
+        mid = "user-flux-fp8"
+        g.available_models[mid] = "user:user-flux-fp8"
+        g.user_entries[mid] = {"engine": "comfy", "role": "generation", "family": "flux"}
+        g.model_meta[mid] = {
+            "label": "Flux FP8", "user": True, "engine": "comfy",
+            "family": "flux", "kind": "comfy_files", "order": 50,
+        }
+        with patch.object(g, "_is_model_downloaded", return_value=False), \
+             patch.object(g, "_probe_repo_access", return_value="ok"):
+            models = g.get_available_models()
+        self.assertEqual(models[mid]["availability"], "downloadable")
+        self.assertTrue(models[mid]["selectable"])
+        self.assertEqual(models["flux-dev"]["availability"], "downloadable")
+        self.assertTrue(models["flux-dev"]["selectable"])
+
 
 class TestLoadFailureMessages(unittest.TestCase):
 

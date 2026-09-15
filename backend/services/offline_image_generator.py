@@ -402,10 +402,24 @@ class OfflineImageGenerator:
             from backend.services.user_image_models import user_files_present, user_sentinel
             sentinel = model_id if model_id in self.user_files else self.available_models.get(model_id, user_sentinel(model_id))
             return user_files_present(self, sentinel)
-        # Comfy-only models (FLUX.1-dev): check ComfyUI unet asset, not HF snapshot.
+        # Comfy-only catalog keys: the video-registry install plan is the source of
+        # truth (flux-dev, qwen-image-edit, …), not a diffusers snapshot.
         mid = (model_id or "").lower()
-        if mid.startswith("comfy:") or mid == "flux-dev" or "flux1-dev" in mid or mid.endswith("flux-dev"):
-            return self._flux_dev_assets_present()
+        catalog_key = mid.split(":", 1)[1] if mid.startswith("comfy:") else None
+        if catalog_key or mid in getattr(self, "comfy_only_models", set()) or mid == "flux-dev" or mid.endswith("flux-dev") or "flux1-dev" in mid:
+            try:
+                from backend.services.video_model_registry import is_model_installed
+                key = catalog_key or (
+                    "flux-dev" if (mid == "flux-dev" or mid.endswith("flux-dev") or "flux1-dev" in mid)
+                    else (model_id if model_id in getattr(self, "comfy_only_models", set()) else None)
+                )
+                if key:
+                    return bool(is_model_installed(key))
+            except Exception:
+                pass
+            if mid == "flux-dev" or "flux1-dev" in mid or (catalog_key == "flux-dev"):
+                return self._flux_dev_assets_present()
+            return False
         model_path = self._get_model_path(model_id)
         # A non-empty directory is NOT enough. An aborted gated download leaves a
         # README and an empty images/ folder behind — observed with Krea 2 (1 MB of
@@ -503,7 +517,12 @@ class OfflineImageGenerator:
 
     def is_comfy_only_model(self, model_key: str) -> bool:
         key = (model_key or "").strip().lower()
-        return key in getattr(self, "comfy_only_models", set()) or key.startswith("flux")
+        if key in getattr(self, "comfy_only_models", set()) or key.startswith("flux"):
+            return True
+        entry = (getattr(self, "user_entries", None) or {}).get(model_key) or {}
+        if (entry.get("engine") == "comfy" and entry.get("role") == "generation"):
+            return True
+        return key.startswith("user-flux")
 
     # How long a repo-access verdict stays good. The menu asks per model, so without
     # a cache every dropdown open would fan out HTTP requests.
@@ -1208,17 +1227,19 @@ class OfflineImageGenerator:
         logger.error(msg)
         return False, msg
 
-    def _download_model(self, model_id: str) -> tuple[bool, str | None]:
+    def _download_model(self, model_id: str, stop=None) -> tuple[bool, str | None]:
         if not self.service_available:
             msg = "Diffusion service not available for model download"
             logger.error(msg)
             return False, msg
 
         try:
+            if stop is not None and stop.is_set():
+                return False, "Download stalled"
             if self._user_file_entry(model_id) is not None:
                 from backend.services.user_image_models import download_user_files
                 sentinel = model_id if model_id in self.user_files else self.available_models.get(model_id)
-                return download_user_files(self, sentinel)
+                return download_user_files(self, sentinel, stop=stop)
 
             model_path = self._get_model_path(model_id)
 
@@ -3392,8 +3413,17 @@ Negative Prompt: {negative_prompt}""",
             if downloaded:
                 availability = "ready"
             elif self.is_comfy_only_model(model_key):
-                # Sentinel id — nothing to fetch from HF; assets are installed for Comfy.
-                availability = "unreachable"
+                user_entry = (getattr(self, "user_entries", None) or {}).get(model_key) or {}
+                if user_entry.get("engine") == "comfy" and user_entry.get("role") == "generation":
+                    availability = "downloadable"
+                else:
+                    try:
+                        from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
+                        availability = (
+                            "downloadable" if model_key in VIDEO_MODEL_REGISTRY else "unreachable"
+                        )
+                    except Exception:
+                        availability = "unreachable"
             elif not probe_remote:
                 availability = "downloadable"
             else:

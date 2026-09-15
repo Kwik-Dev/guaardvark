@@ -1,5 +1,5 @@
 // frontend/src/components/modals/ImageModelsModal.jsx
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { formatUiError } from "../../utils/uiError";
 import {
   Dialog,
@@ -21,7 +21,7 @@ import ImageIcon from "@mui/icons-material/Image";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import axios from "axios";
-import { ActionButton, ConfirmActionDialog } from "../settings/ui";
+import { ActionButton, ConfirmActionDialog, SettingChip } from "../settings/ui";
 import AddImageModelDialog from "./AddImageModelDialog";
 
 const modelMatchesDownload = (model, currentModel) =>
@@ -43,6 +43,11 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
     total_gb: 0,
   });
   const [error, setError] = useState(null);
+
+  const showMessageRef = useRef(showMessage);
+  useEffect(() => {
+    showMessageRef.current = showMessage;
+  }, [showMessage]);
 
   const fetchModels = useCallback(async () => {
     try {
@@ -68,18 +73,19 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
         const status = res.data.data;
         setDownloadStatus(status);
         if (!status.is_downloading && status.status === "completed") {
-          showMessage?.("Model download completed!", "success");
+          showMessageRef.current?.("Model download completed!", "success");
           fetchModels();
           setDownloadStatus((prev) => ({ ...prev, status: "idle", current_model: null }));
         } else if (!status.is_downloading && status.status === "failed") {
-          showMessage?.(`Download failed: ${status.error}`, "error");
+          showMessageRef.current?.(`Download failed: ${status.error}`, "error");
+          fetchModels();
           setDownloadStatus((prev) => ({ ...prev, status: "idle", current_model: null }));
         }
       }
     } catch (err) {
       console.error("Failed to fetch download status", err);
     }
-  }, [fetchModels, showMessage]);
+  }, [fetchModels]);
 
   useEffect(() => {
     if (open) {
@@ -287,16 +293,14 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
           </List>
         )}
 
-        {/* FLUX keyframe/storyboard models are ComfyUI GGUF models (they live in
-            ComfyUI/models/, not the diffusers models dir these rows manage), so they
-            are downloaded from the Video / ComfyUI Models manager. Point users there
-            instead of silently omitting them. */}
+        {/* FLUX.1-dev stills install from this list (ComfyUI UNET). Community
+            FLUX UNETs and LoRAs add via Add new model. Schnell keyframe GGUF
+            companions still live under Video Models. */}
         <Box sx={{ mt: 2, p: 1.5, borderRadius: 1, bgcolor: "action.hover" }}>
           <Typography variant="caption" color="text.secondary">
-            Looking for <strong>FLUX.1-schnell / FLUX.1-dev</strong> (cinematic keyframe &amp;
-            storyboard models)? Those are ComfyUI models — install them from the{" "}
-            <strong>Video Models</strong> manager, which downloads into ComfyUI&apos;s
-            unet/clip/vae folders.
+            <strong>FLUX.1-dev</strong> stills install here. Add another FLUX UNET or LoRA with
+            Add new model. Keyframe GGUF packs (schnell) still live under{" "}
+            <strong>Video Models</strong>.
           </Typography>
         </Box>
       </DialogContent>
@@ -321,8 +325,16 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
       <ConfirmActionDialog
         open={Boolean(removeTarget)}
         title={`Remove ${removeTarget?.name || ""}?`}
-        description="The catalog entry goes away. Its downloaded files stay on disk."
-        confirmLabel="Remove entry"
+        description="Drops it from your catalog. Downloaded files stay unless you turn on Delete downloaded files."
+        extra={
+          <SettingChip
+            label="Delete downloaded files"
+            on={Boolean(removeTarget?.deleteFiles)}
+            onToggle={(next) => setRemoveTarget((t) => (t ? { ...t, deleteFiles: next } : t))}
+          />
+        }
+        keeps="the shipped Image Models list"
+        confirmLabel="Remove"
         onClose={() => setRemoveTarget(null)}
         onConfirm={handleRemove}
       />

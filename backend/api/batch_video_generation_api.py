@@ -44,6 +44,7 @@ from backend.services.user_video_models import (
     is_user_model_id,
     parse_hf_url,
 )
+from backend.services.user_model_families import DuplicateUserModel, hf_inspect_url
 
 # GPU Resource Coordinator for pre-flight availability check
 try:
@@ -1314,13 +1315,16 @@ def preview_hf_video_model():
     url = (data.get("url") or "").strip()
     if not url:
         return error_response("Paste a Hugging Face URL or org/repo.", 400)
+    repo_id = None
     try:
-        parse_hf_url(url)
+        repo_id = parse_hf_url(url)["hf_repo"]
         preview = preview_hf_url(url)
         return success_response(preview)
+    except ValueError as e:
+        return error_response(str(e), 400)
     except Exception as e:
         logger.error("HF preview failed: %s", e)
-        return error_response(classify_hf_download_error(e, repo_id=None), 400)
+        return error_response(classify_hf_download_error(e, repo_id=repo_id), 400)
 
 
 @batch_video_bp.route("/models/user", methods=["POST"])
@@ -1331,15 +1335,28 @@ def add_user_video_model():
     hf_repo = (data.get("hf_repo") or "").strip()
     revision = (data.get("revision") or "main").strip() or "main"
     files = data.get("files") if isinstance(data.get("files"), list) else []
-    if url and not hf_repo:
+    inspected = None
+    if not url and hf_repo:
+        src = None
+        if len(files) == 1 and isinstance(files[0], dict):
+            src = files[0].get("src")
+        url = hf_inspect_url(hf_repo, revision, src)
+    if url:
         try:
-            parsed = parse_hf_url(url)
+            inspected = preview_hf_url(url)
         except ValueError as e:
             return error_response(str(e), 400)
-        hf_repo = parsed["hf_repo"]
-        revision = parsed.get("revision") or revision
-        if parsed.get("src") and not files:
-            files = [{"src": parsed["src"]}]
+        except Exception as e:
+            logger.error("HF re-inspect failed: %s", e)
+            return error_response(classify_hf_download_error(e, repo_id=hf_repo or None), 400)
+        hf_repo = inspected["hf_repo"]
+        revision = inspected.get("revision") or revision
+        if inspected.get("unwired"):
+            return error_response(inspected["unwired"].get("reason") or "That architecture is not wired yet.", 400)
+        if inspected.get("src") and not files:
+            files = [{"src": inspected["src"]}]
+    else:
+        return error_response("Paste a Hugging Face URL or org/repo.", 400)
     if not files:
         return error_response(
             "Pick at least one weight file. Pasting a repo root does not snapshot the whole repo.",
@@ -1355,7 +1372,10 @@ def add_user_video_model():
             model_id=(data.get("id") or "").strip() or None,
             description=(data.get("description") or "").strip() or None,
             revision=revision,
+            known_files=inspected["files"] if inspected else None,
         )
+    except DuplicateUserModel as e:
+        return error_response(str(e), 409, data={"id": e.model_id})
     except ValueError as e:
         return error_response(str(e), 400)
     except Exception as e:
@@ -1368,8 +1388,13 @@ def add_user_video_model():
         resp_obj, status = dl if isinstance(dl, tuple) else (dl, getattr(dl, "status_code", 200))
         body = resp_obj.get_json(silent=True) or {}
         if status >= 400 or not body.get("success"):
-            return dl
-        download_payload = body.get("data")
+            err = (body.get("error") or {})
+            download_payload = {
+                "error": err.get("message") if isinstance(err, dict) else (err or body.get("message")),
+                "status": status,
+            }
+        else:
+            download_payload = body.get("data")
     return success_response({
         "id": mid,
         "entry": {

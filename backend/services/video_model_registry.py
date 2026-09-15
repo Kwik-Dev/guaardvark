@@ -2035,6 +2035,13 @@ def classify_hf_download_error(exc: BaseException, *, repo_id: str | None = None
     Non-gated failures are returned as ``str(exc)`` unchanged.
     """
     msg = str(exc).lower()
+    if "429" in msg or "rate limit" in msg or "too many requests" in msg:
+        return (
+            "Hugging Face rate-limited this lookup. Wait a moment, or set HF_TOKEN in .env."
+        )
+    if "404" in msg or "entrynotfound" in msg or "repository not found" in msg:
+        where = f" '{repo_id}'" if repo_id else ""
+        return f"No Hugging Face repo{where} was found."
     gated = any(
         token in msg
         for token in (

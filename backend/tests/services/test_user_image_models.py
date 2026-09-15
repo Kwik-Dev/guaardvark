@@ -73,7 +73,9 @@ def test_single_file_only_for_sd_families(catalog_dir, tmp_path):
     assert entry["kind"] == "single_file"
     sentinel = uim.user_sentinel(mid)
     assert gen.available_models[mid] == sentinel
-    assert gen.user_files[sentinel]["files"] == [{"src": "merged.safetensors", "dst": "merged.safetensors"}]
+    assert gen.user_files[sentinel]["files"] == [
+        {"src": "merged.safetensors", "dst": "merged.safetensors", "size": 2_000_000_000},
+    ]
     assert uim.user_files_present(gen, sentinel) is False
     target = gen.models_dir / mid / "merged.safetensors"
     target.parent.mkdir(parents=True)
@@ -83,8 +85,12 @@ def test_single_file_only_for_sd_families(catalog_dir, tmp_path):
 
 def test_lora_entry_is_hidden_from_the_picker_and_resolves_to_a_path(catalog_dir, tmp_path):
     gen = _generator(tmp_path)
-    with pytest.raises(ValueError, match="not stacked"):
-        uim.add_user_model(gen, role="lora", family="sdxl", hf_repo="x/y", files=[{"src": "l.safetensors"}])
+    sdxl_mid, sdxl_entry = uim.add_user_model(
+        gen, role="lora", family="sdxl", hf_repo="x/y", files=[{"src": "sdxl_l.safetensors"}], name="XL LoRA",
+    )
+    assert sdxl_entry["engine"] == "comfy" and sdxl_entry["local_subdir"] == "loras"
+    uim.remove_user_model(gen, sdxl_mid)
+
     mid, entry = uim.add_user_model(gen, role="lora", family="zimage", hf_repo="x/y", files=[{"src": "l.safetensors"}], name="Realism")
     assert entry["applies_to"] == ["zimage"] and mid in gen.hidden_models
     rows = uim.catalog_rows(gen)
@@ -102,6 +108,7 @@ def test_lora_entry_is_hidden_from_the_picker_and_resolves_to_a_path(catalog_dir
     paths, scale, err = uim.resolve_user_loras(gen, "zimage-turbo", [{"id": "zimage-turbo"}])
     assert "not a LoRA" in err
     assert uim.resolve_user_loras(gen, "auto", []) == ([], None, None)
+    assert uim.user_download_dir(gen, mid) == gen.models_dir / mid
 
 
 def test_load_user_catalog_skips_bad_rows(catalog_dir, tmp_path):
@@ -116,6 +123,63 @@ def test_load_user_catalog_skips_bad_rows(catalog_dir, tmp_path):
     assert gen.available_models["sd-xl"] == "stabilityai/stable-diffusion-xl-base-1.0"
 
 
+def test_flux_generation_is_one_comfy_unet(catalog_dir, tmp_path):
+    gen = _generator(tmp_path)
+    mid, entry = uim.add_user_model(
+        gen, role="generation", family="flux", hf_repo="someone/flux-finetune",
+        files=[{"src": "flux1-dev-fp8.safetensors", "size": 12_000_000_000}],
+        has_model_index=False, name="Flux FP8",
+    )
+    assert entry["kind"] == "comfy_files" and entry["engine"] == "comfy"
+    assert entry["local_subdir"] == "unet"
+    assert entry["size_gb"] == round(12_000_000_000 / (1024 ** 3), 3)
+    assert gen.model_meta[mid]["engine"] == "comfy"
+    dest = uim.user_download_dir(gen, mid)
+    from backend.services.video_model_registry import comfyui_models_dir
+    assert dest == comfyui_models_dir() / "unet"
+    uim.remove_user_model(gen, mid)
+
+
+def test_path_traversal_src_rejected(catalog_dir, tmp_path):
+    gen = _generator(tmp_path)
+    with pytest.raises(ValueError, match="inside the repo"):
+        uim.add_user_model(
+            gen, role="lora", family="zimage", hf_repo="x/y",
+            files=[{"src": "../evil.safetensors"}],
+        )
+
+
+def test_duplicate_same_files_raises(catalog_dir, tmp_path):
+    gen = _generator(tmp_path)
+    uim.add_user_model(
+        gen, role="lora", family="zimage", hf_repo="x/y", files=[{"src": "l.safetensors"}], name="A",
+    )
+    with pytest.raises(uim.DuplicateUserModel):
+        uim.add_user_model(
+            gen, role="lora", family="zimage", hf_repo="x/y", files=[{"src": "l.safetensors"}], name="B",
+        )
+
+
 def test_cannot_remove_shipped_key(catalog_dir, tmp_path):
     with pytest.raises(ValueError, match="shipped"):
         uim.remove_user_model(_generator(tmp_path), "sd-xl")
+
+
+def test_download_user_files_stops_before_hf(catalog_dir, tmp_path, monkeypatch):
+    import threading
+    gen = _generator(tmp_path)
+    mid, _ = uim.add_user_model(
+        gen, role="lora", family="zimage", hf_repo="x/y",
+        files=[{"src": "l.safetensors"}], name="Stop me",
+    )
+    sentinel = uim.user_sentinel(mid)
+    stop = threading.Event()
+    stop.set()
+    called = []
+    monkeypatch.setattr(
+        "huggingface_hub.hf_hub_download",
+        lambda **kw: called.append(kw) or str(tmp_path / "nope"),
+    )
+    ok, err = uim.download_user_files(gen, sentinel, stop=stop)
+    assert ok is False and "stalled" in (err or "").lower()
+    assert called == []

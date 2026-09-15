@@ -28,14 +28,9 @@ the product never phones home on its own. Always confirm the size and the licenc
    `model_index` exists, and a proposed catalog entry.
 2. Show that to the user: which file(s), role, family, size, licence.
 3. Register (and optionally install) with `POST $B/api/batch-video/models/user` (or `batch-image`)
-   sending the entry back, e.g.
-   ```json
-   {"url": "...", "hf_repo": "org/repo", "revision": "main", "files": ["model.safetensors"],
-    "role": "lora", "family": "wan22", "name": "My LoRA", "description": "...", "install": true}
-   ```
-   `role` and `family` decide where the Studio offers it (a Wan LoRA appears under Wan models;
-   an SDXL checkpoint under image models). Video entries also take `like: "<registry id>"` to
-   inherit that model's capabilities.
+   sending the entry back. `role` and `family` (image) or `like` (video) decide where the Studio
+   offers it. The server re-inspects the repo; do not send `has_model_index` from the client.
+   Gated repos need `HF_TOKEN`; confirm size and licence from the Look-up response first.
 4. Remove: `DELETE .../models/user/<model_id>` with `{"delete_files": true|false}`.
 
 ## Using a user LoRA

@@ -32,10 +32,13 @@ def test_parse_hf_url_variants():
     )
     assert resolve["src"] == "loras/x.safetensors"
     assert uvm.parse_hf_url("Comfy-Org/MiniMax-H3")["hf_repo"] == "Comfy-Org/MiniMax-H3"
+    assert uvm.parse_hf_url("https://hf.co/Comfy-Org/MiniMax-H3")["hf_repo"] == "Comfy-Org/MiniMax-H3"
     with pytest.raises(ValueError, match="Hugging Face"):
         uvm.parse_hf_url("https://civitai.com/models/1")
     with pytest.raises(ValueError, match="org/repo"):
         uvm.parse_hf_url("only-one-token")
+    with pytest.raises(ValueError, match="dataset"):
+        uvm.parse_hf_url("https://huggingface.co/datasets/someone/data")
 
 
 def test_suggest_role_lora_and_moe():

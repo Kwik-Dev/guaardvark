@@ -66,18 +66,92 @@ except ImportError as e:
 
 batch_image_bp = Blueprint("batch_image", __name__, url_prefix="/api/batch-image")
 
-# Global variables for tracking model download status
-model_download_status = {
-    "is_downloading": False,
-    "current_model": None,
-    "progress": 0,
-    "status": "idle",
-    "error": None,
-    "speed_mbps": 0,
-    "downloaded_gb": 0,
-    "total_gb": 0,
-}
+# Global variables for tracking model download status (parity with video, issue #36).
+_DOWNLOAD_STALL_SECONDS = 180
+_IMAGE_DOWNLOAD_EPOCH = 0
 model_download_lock = threading.Lock()
+
+
+def _image_download_status_path() -> Path:
+    return Path(os.environ.get("GUAARDVARK_ROOT", ".")) / "data" / "image_model_download_status.json"
+
+
+def _idle_image_download_status() -> dict:
+    return {
+        "is_downloading": False,
+        "current_model": None,
+        "progress": 0,
+        "status": "idle",
+        "error": None,
+        "speed_mbps": 0,
+        "downloaded_gb": 0,
+        "total_gb": 0,
+        "updated_at": time.time(),
+        "epoch": _IMAGE_DOWNLOAD_EPOCH,
+    }
+
+
+def _persist_image_download_status() -> None:
+    try:
+        p = _image_download_status_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(model_download_status), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _dir_bytes(d: Path) -> int:
+    """Bytes currently under dest, including hf_hub_download .incomplete staging."""
+    total = 0
+    if d.exists():
+        for f in d.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _image_download_dest(img, catalog_key: str, hf_model_id: str) -> Path:
+    """Directory whose growth is the download — Comfy unet/loras, or the snapshot path."""
+    from backend.services.user_image_models import user_download_dir
+
+    dest = user_download_dir(img, catalog_key)
+    if dest is not None:
+        return dest
+    return img._get_model_path(hf_model_id)
+
+
+def _reconcile_image_download_status_on_load() -> None:
+    global model_download_status, _IMAGE_DOWNLOAD_EPOCH
+    try:
+        p = _image_download_status_path()
+        persisted = json.loads(p.read_text()) if p.exists() else None
+    except Exception:
+        persisted = None
+    if not persisted:
+        model_download_status = _idle_image_download_status()
+        return
+    _IMAGE_DOWNLOAD_EPOCH = int(persisted.get("epoch", 0))
+    if persisted.get("is_downloading") or persisted.get("status") in ("starting", "downloading"):
+        persisted.update({
+            "is_downloading": False,
+            "status": "failed",
+            "error": "Download was interrupted by a backend restart. Click Install to retry.",
+            "progress": 0,
+            "updated_at": time.time(),
+        })
+        model_download_status = persisted
+        _persist_image_download_status()
+    else:
+        model_download_status = persisted
+
+
+model_download_status = _idle_image_download_status()
+_reconcile_image_download_status_on_load()
 
 # Approximate model sizes in GB (HuggingFace repo total). Curated set only —
 # matches offline_image_generator.available_models after the 2026-05-29 cull.
@@ -592,7 +666,7 @@ def download_model():
 
 def _start_image_model_download(model_path: str):
     """Start the background download for a catalog key or HF id (the Install button)."""
-    global model_download_status
+    global model_download_status, _IMAGE_DOWNLOAD_EPOCH
 
     try:
         if not service_available:
@@ -609,6 +683,15 @@ def _start_image_model_download(model_path: str):
                 f"Unknown model '{model_path}' — not in the allowed model set", 400
             )
 
+        img = generator.image_generator
+        if img._is_model_downloaded(catalog_key) or img._is_model_downloaded(hf_model_id):
+            return success_response({
+                "message": f"{catalog_key} is already installed",
+                "already_installed": True,
+                "catalog_key": catalog_key,
+                "model_path": hf_model_id,
+            })
+
         # Comfy-only catalog entries carry a "comfy:" sentinel, not an HF repo id —
         # feeding it to the diffusers path fails HF validation ('comfy:flux-dev').
         # Their assets (unet + encoders + VAE) install into ComfyUI/models/ via the
@@ -624,12 +707,27 @@ def _start_image_model_download(model_path: str):
                 )
             return _video_api.start_video_model_download(catalog_key)
 
-        estimated_size_gb = IMAGE_MODEL_SIZES.get(catalog_key, IMAGE_MODEL_SIZES.get(hf_model_id, 2.5))
+        user_entry = (getattr(img, "user_entries", None) or {}).get(catalog_key) or {}
+        file_bytes = sum(int(f.get("size") or 0) for f in (user_entry.get("files") or []))
+        size_gb = user_entry.get("size_gb")
+        if size_gb:
+            estimated_size_gb = float(size_gb)
+        elif file_bytes:
+            estimated_size_gb = round(file_bytes / (1024 ** 3), 3)
+        else:
+            estimated_size_gb = IMAGE_MODEL_SIZES.get(catalog_key, IMAGE_MODEL_SIZES.get(hf_model_id, 2.5))
 
         with model_download_lock:
-            if model_download_status["is_downloading"]:
-                return error_response(f"Already downloading model: {model_download_status['current_model']}", 409)
+            now = time.time()
+            st = model_download_status
+            # Keep 409 while the worker thread is alive. Stall marks status failed
+            # but does not clear this flag until download_task's finally — a retry
+            # must not start a second hf_hub_download into the same dest.
+            if st.get("is_downloading"):
+                return error_response(f"Already downloading model: {st.get('current_model')}", 409)
 
+            _IMAGE_DOWNLOAD_EPOCH += 1
+            epoch = _IMAGE_DOWNLOAD_EPOCH
             model_download_status = {
                 "is_downloading": True,
                 "current_model": hf_model_id,
@@ -639,51 +737,64 @@ def _start_image_model_download(model_path: str):
                 "speed_mbps": 0,
                 "downloaded_gb": 0,
                 "total_gb": estimated_size_gb,
+                "updated_at": now,
+                "epoch": epoch,
             }
+            _persist_image_download_status()
 
-        def download_task(hf_model_id, total_gb):
+        def download_task(hf_model_id, total_gb, epoch):
             _start_time = time.time()
-            total_bytes = int(total_gb * 1024**3)
+            total_bytes = int(total_gb * 1024**3) if total_gb else 1
+            dest = _image_download_dest(generator.image_generator, catalog_key, hf_model_id)
+            baseline = _dir_bytes(dest)
+            stalled = threading.Event()
 
             try:
                 with model_download_lock:
-                    model_download_status["status"] = "downloading"
+                    if model_download_status.get("epoch") == epoch:
+                        model_download_status["status"] = "downloading"
+                        model_download_status["updated_at"] = time.time()
+                        _persist_image_download_status()
 
-                # Monitor download progress by watching file sizes on disk
                 stop_monitor = threading.Event()
 
                 def _monitor_progress():
+                    last_bytes = -1
+                    last_change = time.time()
                     while not stop_monitor.is_set():
                         try:
-                            downloaded = 0
-                            # Check HF cache for .incomplete files (active downloads)
-                            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
-                            if cache_dir.exists():
-                                for f in cache_dir.rglob("*.incomplete"):
-                                    try:
-                                        downloaded += f.stat().st_size
-                                    except OSError:
-                                        pass
-                            # Check target model directory for completed files
-                            target_dir = generator.image_generator._get_model_path(hf_model_id)
-                            if target_dir.exists():
-                                for f in target_dir.rglob("*"):
-                                    if f.is_file():
-                                        try:
-                                            downloaded += f.stat().st_size
-                                        except OSError:
-                                            pass
-
-                            elapsed = time.time() - _start_time
+                            downloaded = max(0, _dir_bytes(dest) - baseline)
+                            now_m = time.time()
+                            if downloaded != last_bytes:
+                                last_bytes = downloaded
+                                last_change = now_m
+                            elif (now_m - last_change) > _DOWNLOAD_STALL_SECONDS:
+                                stalled.set()
+                                with model_download_lock:
+                                    if model_download_status.get("epoch") != epoch:
+                                        return
+                                    model_download_status.update({
+                                        "status": "failed",
+                                        "error": "Download stalled (no new bytes for 3 minutes). Click Install to retry.",
+                                        "progress": 0,
+                                        "updated_at": now_m,
+                                    })
+                                    _persist_image_download_status()
+                                stop_monitor.set()
+                                return
+                            elapsed = now_m - _start_time
                             speed = (downloaded / (1024 * 1024)) / max(elapsed, 0.1)
                             pct = min(int((downloaded / max(total_bytes, 1)) * 100), 99)
-
                             with model_download_lock:
+                                if model_download_status.get("epoch") != epoch:
+                                    return
                                 model_download_status.update({
                                     "progress": pct,
                                     "speed_mbps": round(speed, 1),
                                     "downloaded_gb": round(downloaded / 1024**3, 2),
+                                    "updated_at": now_m,
                                 })
+                                _persist_image_download_status()
                         except Exception:
                             pass
                         stop_monitor.wait(1.0)
@@ -692,39 +803,53 @@ def _start_image_model_download(model_path: str):
                 monitor_thread.start()
 
                 try:
-                    success, dl_error = generator.image_generator._download_model(hf_model_id)
+                    success, dl_error = generator.image_generator._download_model(
+                        hf_model_id, stop=stalled
+                    )
                 finally:
                     stop_monitor.set()
                     monitor_thread.join(timeout=2)
 
                 with model_download_lock:
+                    if model_download_status.get("epoch") != epoch:
+                        return
+                    if stalled.is_set():
+                        return
                     if success:
                         model_download_status.update({
                             "status": "completed",
                             "progress": 100,
                             "downloaded_gb": total_gb,
                             "total_gb": total_gb,
+                            "updated_at": time.time(),
                         })
                     else:
                         model_download_status.update({
                             "status": "failed",
                             "error": dl_error or "Failed to download model",
                             "progress": 0,
+                            "updated_at": time.time(),
                         })
+                    _persist_image_download_status()
             except Exception as e:
                 logger.error(f"Error in model download thread: {e}")
                 with model_download_lock:
-                    model_download_status.update({
-                        "status": "failed",
-                        "error": str(e),
-                        "progress": 0,
-                    })
+                    if model_download_status.get("epoch") == epoch and not stalled.is_set():
+                        model_download_status.update({
+                            "status": "failed",
+                            "error": str(e),
+                            "progress": 0,
+                            "updated_at": time.time(),
+                        })
+                        _persist_image_download_status()
             finally:
                 with model_download_lock:
-                    model_download_status["is_downloading"] = False
+                    if model_download_status.get("epoch") == epoch:
+                        model_download_status["is_downloading"] = False
+                        model_download_status["updated_at"] = time.time()
+                        _persist_image_download_status()
 
-        # Start download in background
-        thread = threading.Thread(target=download_task, args=(hf_model_id, estimated_size_gb))
+        thread = threading.Thread(target=download_task, args=(hf_model_id, estimated_size_gb, epoch))
         thread.daemon = True
         thread.start()
 
@@ -825,24 +950,28 @@ def preview_hf_image_model():
     """Parse a Hugging Face paste and list its weight files. Does not download."""
     from backend.services.user_image_models import preview_hf_url
     from backend.services.video_model_registry import classify_hf_download_error
+    from backend.services.user_video_models import parse_hf_url
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
     if not url:
         return error_response("Paste a Hugging Face URL or org/repo.", 400)
+    repo_id = None
     try:
+        repo_id = parse_hf_url(url)["hf_repo"]
         return success_response(preview_hf_url(url))
     except ValueError as e:
         return error_response(str(e), 400)
     except Exception as e:
         logger.error("HF image preview failed: %s", e)
-        return error_response(classify_hf_download_error(e, repo_id=None), 400)
+        return error_response(classify_hf_download_error(e, repo_id=repo_id), 400)
 
 
 @batch_image_bp.route("/models/user", methods=["POST"])
 def add_user_image_model():
     """Register a user image model or LoRA, then Install it unless told not to."""
-    from backend.services.user_image_models import add_user_model
-    from backend.services.user_video_models import parse_hf_url
+    from backend.services.user_image_models import add_user_model, preview_hf_url
+    from backend.services.user_model_families import DuplicateUserModel, hf_inspect_url
+    from backend.services.video_model_registry import classify_hf_download_error
     if not service_available:
         return error_response("Batch image generation service not available", 503)
     data = request.get_json(silent=True) or {}
@@ -850,15 +979,29 @@ def add_user_image_model():
     revision = (data.get("revision") or "main").strip() or "main"
     files = data.get("files") if isinstance(data.get("files"), list) else []
     url = (data.get("url") or "").strip()
-    if url and not hf_repo:
+    inspected = None
+    if not url and hf_repo:
+        src = None
+        if len(files) == 1 and isinstance(files[0], dict):
+            src = files[0].get("src")
+        url = hf_inspect_url(hf_repo, revision, src)
+    if url:
         try:
-            parsed = parse_hf_url(url)
+            inspected = preview_hf_url(url)
         except ValueError as e:
             return error_response(str(e), 400)
-        hf_repo = parsed["hf_repo"]
-        revision = parsed.get("revision") or revision
-        if parsed.get("src") and not files:
-            files = [{"src": parsed["src"]}]
+        except Exception as e:
+            logger.error("HF image re-inspect failed: %s", e)
+            return error_response(classify_hf_download_error(e, repo_id=hf_repo or None), 400)
+        hf_repo = inspected["hf_repo"]
+        revision = inspected.get("revision") or revision
+        if inspected.get("unwired"):
+            return error_response(inspected["unwired"].get("reason") or "That architecture is not wired yet.", 400)
+        if inspected.get("src") and not files:
+            files = [{"src": inspected["src"]}]
+        has_model_index = bool(inspected.get("has_model_index"))
+    else:
+        return error_response("Paste a Hugging Face URL or org/repo.", 400)
     generator = get_batch_image_generator()
     if not generator.image_generator:
         return error_response("Image generator not initialized", 503)
@@ -869,11 +1012,14 @@ def add_user_image_model():
             family=(data.get("family") or "").strip(),
             hf_repo=hf_repo,
             files=files,
-            has_model_index=bool(data.get("has_model_index")),
+            has_model_index=has_model_index,
             name=(data.get("name") or "").strip() or None,
             description=(data.get("description") or "").strip() or None,
             revision=revision,
+            known_files=inspected["files"] if inspected else None,
         )
+    except DuplicateUserModel as e:
+        return error_response(str(e), 409, data={"id": e.model_id})
     except ValueError as e:
         return error_response(str(e), 400)
     except Exception as e:
@@ -885,11 +1031,16 @@ def add_user_image_model():
         resp_obj, status = dl if isinstance(dl, tuple) else (dl, getattr(dl, "status_code", 200))
         body = resp_obj.get_json(silent=True) or {}
         if status >= 400 or not body.get("success"):
-            return dl
-        download_payload = body.get("data")
+            err = (body.get("error") or {})
+            download_payload = {
+                "error": err.get("message") if isinstance(err, dict) else (err or body.get("message")),
+                "status": status,
+            }
+        else:
+            download_payload = body.get("data")
     return success_response({
         "id": mid,
-        "entry": {k: entry.get(k) for k in ("name", "role", "family", "kind", "hf_repo", "files", "size_gb", "applies_to")},
+        "entry": {k: entry.get(k) for k in ("name", "role", "family", "kind", "hf_repo", "files", "size_gb", "applies_to", "engine")},
         "download": download_payload,
     })
 

@@ -23,7 +23,7 @@ import MemoryIcon from "@mui/icons-material/Memory";
 import axios from "axios";
 
 import { GENERATION_TYPES } from "../../constants/videoGeneratorPresets";
-import { ActionButton, ConfirmActionDialog } from "../settings/ui";
+import { ActionButton, ConfirmActionDialog, SettingChip } from "../settings/ui";
 import AddVideoModelDialog from "./AddVideoModelDialog";
 
 const TYPE_LABELS = {
@@ -142,7 +142,7 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
     setRemoveBusy(true);
     try {
       const res = await axios.delete(`/api/batch-video/models/user/${encodeURIComponent(removeTarget.id)}`, {
-        params: { delete_files: true },
+        params: { delete_files: removeTarget.deleteFiles !== false },
       });
       if (res.data.success) {
         showMessageRef.current?.(`Removed ${removeTarget.name}`, "success");
@@ -299,7 +299,11 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
                 variant="outlined"
               />
               {model.user && (
-                <ActionButton kind="destructive" onClick={() => setRemoveTarget(model)} disabled={isDownloading}>
+                <ActionButton
+                  kind="destructive"
+                  onClick={() => setRemoveTarget({ ...model, deleteFiles: true })}
+                  disabled={isDownloading}
+                >
                   Remove
                 </ActionButton>
               )}
@@ -316,7 +320,11 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
                 {model.install_size_gb ? `Install (${model.install_size_gb} GB)` : "Install"}
               </Button>
               {model.user && (
-                <ActionButton kind="destructive" onClick={() => setRemoveTarget(model)} disabled={isDownloading}>
+                <ActionButton
+                  kind="destructive"
+                  onClick={() => setRemoveTarget({ ...model, deleteFiles: true })}
+                  disabled={isDownloading}
+                >
                   Remove
                 </ActionButton>
               )}
@@ -420,8 +428,14 @@ const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {
       <ConfirmActionDialog
         open={Boolean(removeTarget)}
         title={`Remove ${removeTarget?.name || "this model"}?`}
-        description="Drops it from your catalog and deletes the downloaded files under ComfyUI/models."
-        facts={removeTarget ? [{ label: "Files", value: (removeTarget.missing_files?.length >= 0 ? (removeTarget.name || removeTarget.id) : removeTarget.id) }] : []}
+        description="Drops it from your catalog. Downloaded files under ComfyUI/models go away unless you turn that off."
+        extra={
+          <SettingChip
+            label="Delete downloaded files"
+            on={removeTarget?.deleteFiles !== false}
+            onToggle={(next) => setRemoveTarget((t) => (t ? { ...t, deleteFiles: next } : t))}
+          />
+        }
         keeps="the shipped Video Models list"
         confirmLabel="Remove"
         busy={removeBusy}

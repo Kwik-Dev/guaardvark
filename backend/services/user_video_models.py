@@ -15,18 +15,23 @@ import re
 import threading
 from pathlib import Path
 
+from backend.services.user_model_families import (
+    DuplicateUserModel,
+    find_duplicate,
+    inspect_hf_repo,
+    match_families,
+    parse_hf_url,
+    sanitize_repo_src,
+)
+
 logger = logging.getLogger(__name__)
 
 USER_MODEL_PREFIX = "user-"
 DEFAULT_ADAPTER_STRENGTH = 0.7
 WEIGHT_SUFFIXES = (".safetensors", ".gguf", ".ckpt", ".pt", ".pth", ".bin")
-_HF_HOST = re.compile(r"^https?://(www\.)?huggingface\.co/", re.I)
 _CATALOG_LOCK = threading.Lock()
 # Tests point this at a temp file. None → data/user_video_models.json.
 _CATALOG_PATH_OVERRIDE = None
-_HF_LIST_CAP = 200
-# Filename fragments that mark a text encoder rather than a UNET or a LoRA.
-_ENCODER_HINTS = ("text_encoder", "text-encoder", "qwen3vl", "qwen3-vl", "umt5", "t5xxl", "_t5_", "gemma", "llava", "clip_l", "/clip/")
 ROLES = ("lora", "generation", "encoder")
 
 # Capability keys copied when the add is "a generation model like X".
@@ -62,34 +67,6 @@ def is_user_model_id(model_id: str) -> bool:
     return str(model_id or "").startswith(USER_MODEL_PREFIX)
 
 
-def parse_hf_url(url: str) -> dict:
-    """Turn a paste into {hf_repo, revision, src}.
-
-    Accepts huggingface.co/{org}/{repo}, /blob|/resolve|/tree/{rev}/{path},
-    and a bare org/repo. Query strings and trailing slashes are stripped.
-    """
-    raw = (url or "").strip()
-    if not raw:
-        raise ValueError("Paste a Hugging Face URL or org/repo.")
-    raw = raw.split("?")[0].split("#")[0].rstrip("/")
-    raw = _HF_HOST.sub("", raw)
-    if "://" in raw or raw.lower().startswith("www."):
-        raise ValueError("Only Hugging Face URLs or org/repo ids are accepted.")
-    parts = [p for p in raw.split("/") if p]
-    if len(parts) < 2:
-        raise ValueError("Need org/repo (for example Comfy-Org/MiniMax-H3).")
-    repo = f"{parts[0]}/{parts[1]}"
-    src = None
-    revision = "main"
-    if len(parts) >= 4 and parts[2] in ("blob", "resolve", "tree"):
-        revision = parts[3] or "main"
-        rest = "/".join(parts[4:])
-        src = rest or None
-    elif len(parts) > 2:
-        src = "/".join(parts[2:])
-    return {"hf_repo": repo, "revision": revision, "src": src}
-
-
 def _slug(text: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     return (s[:48] or "model")
@@ -107,86 +84,49 @@ def unique_user_id(stem: str, taken: set | None = None) -> str:
     return f"{base}-{n}"
 
 
-def suggest_role_and_like(files: list, src: str | None = None) -> tuple[str | None, str | None]:
+def suggest_role_and_like(files: list, src: str | None = None, hf_repo: str = "") -> tuple[str | None, str | None]:
     """Guess LoRA vs encoder vs generation and a shipped family template from filenames."""
-    names = [src] if src else [f.get("src") or "" for f in files]
-    blob = " ".join(names).lower()
-    if any(k in blob for k in ("/loras/", "lora", "lycoris")):
-        if "minimax" in blob or "h3" in blob:
-            return "lora", "minimax-h3-int8"
-        if "i2v" in blob:
-            return "lora", "wan22-14b-i2v"
-        if "wan" in blob or "t2v" in blob:
-            return "lora", "wan22-14b"
-        return "lora", None
-    if any(k in blob for k in _ENCODER_HINTS):
-        if "minimax" in blob or "qwen3vl" in blob or "qwen3-vl" in blob or "_h3_" in blob or "h3-" in blob:
-            return "encoder", "minimax-h3-int8"
-        if "umt5" in blob or "wan" in blob:
-            return "encoder", "wan22-5b"
-        if "gemma4" in blob or "gemma-4" in blob or "ltx-2.5" in blob or "ltx25" in blob:
-            return "encoder", "ltx25-distilled-int8"
-        if "gemma" in blob or "ltx" in blob:
-            return "encoder", "ltx23-distilled-fp8"
-        if "llava" in blob or "hunyuan" in blob:
-            return "encoder", "hunyuan-t2v"
-        return "encoder", None
-    has_high = any(
-        any(tok in n.lower() for tok in ("highnoise", "high_noise", "high_lighting", "_high_"))
-        for n in names
+    matches = match_families(
+        domain="video", files=files, src=src, hf_repo=hf_repo or "", has_model_index=False,
     )
-    has_low = any(
-        any(tok in n.lower() for tok in ("lownoise", "low_noise", "low_lighting", "_low_"))
-        for n in names
-    )
-    if has_high and has_low:
-        return "generation", "wan22-14b-i2v" if "i2v" in blob else "wan22-14b"
-    if "minimax" in blob or "_h3_" in blob or "h3-" in blob:
-        return "generation", "minimax-h3-int8"
-    if "ti2v" in blob or "5b" in blob:
-        return "generation", "wan22-5b"
-    if "hunyuan" in blob:
-        return "generation", "hunyuan-i2v" if "i2v" in blob else "hunyuan-t2v"
-    if "ltx" in blob:
-        return "generation", "ltx23-distilled-fp8"
-    return None, None
-
-
-def list_hf_weight_files(repo_id: str, revision: str = "main") -> tuple[list, bool]:
-    """Weight files in a repo (name + size). Caps at _HF_LIST_CAP. Second value is gated."""
-    from huggingface_hub import HfApi
-
-    api = HfApi()
-    info = api.repo_info(repo_id=repo_id, revision=revision, files_metadata=True)
-    gated = bool(getattr(info, "gated", False))
-    files = []
-    for sib in info.siblings or []:
-        name = getattr(sib, "rfilename", None) or ""
-        if not name.lower().endswith(WEIGHT_SUFFIXES):
-            continue
-        files.append({"src": name, "size": int(getattr(sib, "size", 0) or 0)})
-        if len(files) >= _HF_LIST_CAP:
-            break
-    return files, gated
+    wired = [m for m in matches if m.get("wired")]
+    if not wired:
+        return None, None
+    top = wired[0]
+    return top.get("role"), top.get("like")
 
 
 def preview_hf_url(url: str) -> dict:
     """Parse a paste and list the repo's weight files. Does not download."""
-    parsed = parse_hf_url(url)
-    files, gated = list_hf_weight_files(parsed["hf_repo"], parsed.get("revision") or "main")
-    src = parsed.get("src")
-    if src and not any(f["src"] == src for f in files):
-        files.insert(0, {"src": src, "size": 0})
-    role, like = suggest_role_and_like(files, src)
+    inspected = inspect_hf_repo(url)
+    matches = match_families(
+        domain="video",
+        files=inspected["files"],
+        src=inspected.get("src"),
+        hf_repo=inspected["hf_repo"],
+        has_model_index=inspected.get("has_model_index") or False,
+        pipeline_tag=inspected.get("pipeline_tag"),
+        index_class=inspected.get("index_class"),
+    )
+    wired = [m for m in matches if m.get("wired")]
+    unwired = [m for m in matches if not m.get("wired")]
+    top = (unwired or wired or [None])[0]
     return {
-        "hf_repo": parsed["hf_repo"],
-        "revision": parsed.get("revision") or "main",
-        "src": src,
-        "files": files,
-        "gated": gated,
-        "suggested_role": role,
-        "suggested_like": like,
-        "truncated": len(files) >= _HF_LIST_CAP,
+        "hf_repo": inspected["hf_repo"],
+        "revision": inspected.get("revision") or "main",
+        "src": inspected.get("src"),
+        "files": inspected["files"],
+        "gated": inspected.get("gated") or False,
+        "truncated": inspected.get("truncated") or False,
+        "license": inspected.get("license"),
+        "token_present": inspected.get("token_present") or False,
+        "pipeline_tag": inspected.get("pipeline_tag"),
+        "index_class": inspected.get("index_class"),
+        "warnings": list(inspected.get("warnings") or []),
+        "matches": matches,
+        "suggested_role": (top or {}).get("role") if top and top.get("wired") else None,
+        "suggested_like": (top or {}).get("like") if top and top.get("wired") else None,
+        "unwired": unwired[0] if unwired else None,
     }
 
 
@@ -241,6 +181,7 @@ def build_user_entry(
     model_id: str | None = None,
     description: str | None = None,
     revision: str = "main",
+    known_files: list | None = None,
 ) -> tuple[str, dict]:
     """Build a registry entry cloned from a shipped template. Does not register.
 
@@ -273,10 +214,14 @@ def build_user_entry(
 
     specs = []
     total = 0
+    known = None
+    if known_files is not None:
+        known = {f.get("src") if isinstance(f, dict) else f for f in known_files}
     for item in files:
         src = (item.get("src") if isinstance(item, dict) else None) or ""
-        if not src:
-            raise ValueError("Each file needs an src path inside the repo.")
+        src = sanitize_repo_src(src)
+        if known is not None and src not in known:
+            raise ValueError(f"'{src}' is not a weight file in that repo.")
         expert = (item.get("expert") if isinstance(item, dict) else None) or None
         size = int((item.get("size") if isinstance(item, dict) else 0) or 0)
         total += size
@@ -407,12 +352,18 @@ def add_user_model(**kwargs) -> tuple[str, dict, list]:
     """Validate, persist, and register. Returns (id, entry, verify problems)."""
     from backend.services.video_model_registry import register_video_model, VIDEO_MODEL_REGISTRY
 
-    mid, entry = build_user_entry(**kwargs)
+    files = kwargs.get("files") or []
+    hf_repo = kwargs.get("hf_repo") or ""
+    revision = kwargs.get("revision") or "main"
     with _CATALOG_LOCK:
+        catalog = _read_catalog()
+        dup = find_duplicate(catalog, hf_repo=hf_repo, revision=revision, files=files)
+        if dup:
+            raise DuplicateUserModel(dup)
+        mid, entry = build_user_entry(**kwargs)
         if mid in VIDEO_MODEL_REGISTRY and not is_user_model_id(mid):
             raise ValueError(f"'{mid}' is a shipped model and cannot be replaced.")
         problems = register_video_model(mid, entry, replace=is_user_model_id(mid) and mid in VIDEO_MODEL_REGISTRY)
-        catalog = _read_catalog()
         catalog["models"][mid] = entry
         _write_catalog(catalog)
     return mid, entry, problems

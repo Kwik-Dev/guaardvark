@@ -14,6 +14,7 @@ import ActionButton from "./ActionButton";
  * @param {ReactNode} [description]
  * @param {Array<{label:string,value:ReactNode}>} [facts]  counts or sizes
  * @param {ReactNode} [keeps]      what is NOT touched
+ * @param {ReactNode} [extra]      optional extra control (e.g. keep-vs-delete chip)
  * @param {string}   [confirmLabel]
  * @param {boolean}  [busy]
  * @param {function} onConfirm
@@ -25,6 +26,7 @@ const ConfirmActionDialog = ({
   description,
   facts = [],
   keeps,
+  extra,
   confirmLabel = "Confirm",
   busy = false,
   onConfirm,
@@ -66,6 +68,7 @@ const ConfirmActionDialog = ({
           ))}
         </Box>
       )}
+      {extra}
       {keeps && (
         <Typography variant="caption" color="text.secondary">
           Not touched: {keeps}

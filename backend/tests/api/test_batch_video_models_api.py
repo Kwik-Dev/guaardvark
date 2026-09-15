@@ -26,6 +26,26 @@ def client(monkeypatch):
     return app.test_client()
 
 
+def _stub_video_inspect(monkeypatch, *, hf_repo, files, unwired=None):
+    listed = list(files)
+
+    def fake(_url):
+        return {
+            "hf_repo": hf_repo,
+            "revision": "main",
+            "src": listed[0]["src"] if listed else None,
+            "files": listed,
+            "has_model_index": False,
+            "gated": False,
+            "truncated": False,
+            "warnings": [],
+            "matches": [],
+            "unwired": unwired,
+        }
+
+    monkeypatch.setattr(api, "preview_hf_url", fake)
+
+
 def _rows(client):
     payload = client.get("/api/batch-video/models").get_json()
     assert payload["success"]
@@ -80,11 +100,17 @@ def test_from_hf_rejects_non_hf(client):
 def test_user_add_and_delete(client, tmp_path, monkeypatch):
     from backend.services import user_video_models as uvm
     monkeypatch.setattr(uvm, "_CATALOG_PATH_OVERRIDE", tmp_path / "user_video_models.json")
+    src = "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+    _stub_video_inspect(
+        monkeypatch,
+        hf_repo="Comfy-Org/MiniMax-H3",
+        files=[{"src": src, "size": 1000}],
+    )
     body = {
         "role": "lora",
         "like": "minimax-h3-int8",
         "hf_repo": "Comfy-Org/MiniMax-H3",
-        "files": [{"src": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"}],
+        "files": [{"src": src}],
         "name": "API turbo",
         "install": False,
     }
@@ -113,11 +139,17 @@ def test_user_add_install_true_does_not_500(client, tmp_path, monkeypatch):
     from backend.utils.response_utils import success_response
     monkeypatch.setattr(uvm, "_CATALOG_PATH_OVERRIDE", tmp_path / "user_video_models.json")
     monkeypatch.setattr(api, "start_video_model_download", lambda _mid: success_response({"message": "already installed"}))
+    src = "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+    _stub_video_inspect(
+        monkeypatch,
+        hf_repo="Comfy-Org/MiniMax-H3",
+        files=[{"src": src, "size": 1000}],
+    )
     body = {
         "role": "lora",
         "like": "minimax-h3-int8",
         "hf_repo": "Comfy-Org/MiniMax-H3",
-        "files": [{"src": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"}],
+        "files": [{"src": src}],
         "name": "Install path",
         "install": True,
     }
@@ -131,3 +163,60 @@ def test_user_add_install_true_does_not_500(client, tmp_path, monkeypatch):
             uvm.remove_user_model(mid, delete_files=False)
         except Exception:
             pass
+
+
+def test_user_add_install_409_still_succeeds(client, tmp_path, monkeypatch):
+    from backend.services import user_video_models as uvm
+    from backend.utils.response_utils import error_response
+    monkeypatch.setattr(uvm, "_CATALOG_PATH_OVERRIDE", tmp_path / "user_video_models.json")
+    monkeypatch.setattr(
+        api, "start_video_model_download",
+        lambda _mid: error_response("Already downloading model: other", 409),
+    )
+    src = "loras/unique_turbo.safetensors"
+    _stub_video_inspect(
+        monkeypatch,
+        hf_repo="Comfy-Org/MiniMax-H3",
+        files=[{"src": src, "size": 1000}],
+    )
+    body = {
+        "role": "lora",
+        "like": "minimax-h3-int8",
+        "hf_repo": "Comfy-Org/MiniMax-H3",
+        "files": [{"src": src}],
+        "name": "While busy",
+        "install": True,
+    }
+    payload = client.post("/api/batch-video/models/user", json=body).get_json()
+    assert payload["success"], payload
+    mid = payload["data"]["id"]
+    try:
+        assert payload["data"]["download"]["status"] == 409
+        assert "Already downloading" in (payload["data"]["download"]["error"] or "")
+    finally:
+        try:
+            uvm.remove_user_model(mid, delete_files=False)
+        except Exception:
+            pass
+
+
+def test_user_add_without_url_refuses_unwired(client, tmp_path, monkeypatch):
+    from backend.services import user_video_models as uvm
+    monkeypatch.setattr(uvm, "_CATALOG_PATH_OVERRIDE", tmp_path / "user_video_models.json")
+    _stub_video_inspect(
+        monkeypatch,
+        hf_repo="HiDream-ai/HiDream-I1-Full",
+        files=[{"src": "model.safetensors", "size": 100}],
+        unwired={"family": "hidream", "reason": "HiDream is not wired yet."},
+    )
+    body = {
+        "role": "generation",
+        "like": "minimax-h3-int8",
+        "hf_repo": "HiDream-ai/HiDream-I1-Full",
+        "files": [{"src": "model.safetensors"}],
+        "name": "HiDream",
+        "install": False,
+    }
+    payload = client.post("/api/batch-video/models/user", json=body).get_json()
+    assert payload["success"] is False
+    assert "not wired" in ((payload.get("error") or {}).get("message") or "").lower()

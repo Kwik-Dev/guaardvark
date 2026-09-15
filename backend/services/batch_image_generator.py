@@ -591,10 +591,34 @@ class BatchImageGenerator:
     @staticmethod
     def _is_comfy_flux_model(model_key: str | None) -> bool:
         k = (model_key or "").strip().lower()
-        return k in ("flux-dev", "flux", "flux.1-dev", "flux1-dev") or k.startswith("flux-dev")
+        return "flux" in k
+
+    def _should_use_comfy_stills(self, prompt: BatchPrompt) -> bool:
+        if self._is_comfy_flux_model(prompt.model):
+            return True
+        adapters = getattr(prompt, "adapter_loras", None) or []
+        if not adapters:
+            return False
+        try:
+            from backend.services.stills_defaults import model_family
+            return model_family(prompt.model) in ("sdxl", "flux")
+        except Exception:
+            return False
+
+    def _user_flux_unet(self, model_key: str | None) -> str | None:
+        mid = (model_key or "").strip()
+        if not mid.startswith("user-"):
+            return None
+        try:
+            from backend.services.offline_image_generator import get_image_generator
+            entry = (getattr(get_image_generator(), "user_entries", None) or {}).get(mid) or {}
+            files = entry.get("files") or []
+            return (files[0].get("dst") if files else None) or None
+        except Exception:
+            return None
 
     def _generate_with_comfy_flux(self, prompt: BatchPrompt, batch_id: str = "") -> Optional[ImageGenerationResult]:
-        """Plain FLUX.1-dev stills (no LoRA) via ComfyUI — max-quality batch path."""
+        """FLUX stills or SDXL+LoRA via ComfyUI (user-added weights included)."""
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
         except Exception as e:
@@ -605,19 +629,23 @@ class BatchImageGenerator:
                 prompt_used=prompt.prompt,
             )
 
-        width = prompt.width if prompt.width and prompt.width >= 768 else 1024
-        height = prompt.height if prompt.height and prompt.height >= 768 else 1024
-        # Flux Dev ~2.0 MP design range — soft-clamp before Comfy (not 2048²).
-        try:
-            from backend.services.image_resolution_limits import clamp_image_dimensions
-            ow, oh = width, height
-            width, height, warns = clamp_image_dimensions(width, height, "flux")
-            for msg in warns:
-                logger.warning("FLUX batch: %s", msg)
-            if (width, height) != (ow, oh):
-                logger.info("FLUX batch resolution %sx%s → %sx%s", ow, oh, width, height)
-        except Exception as e:
-            logger.debug("FLUX dim clamp skipped: %s", e)
+        width = prompt.width if prompt.width and prompt.width >= 512 else 1024
+        height = prompt.height if prompt.height and prompt.height >= 512 else 1024
+        if self._is_comfy_flux_model(prompt.model):
+            if prompt.width and prompt.width >= 768:
+                width = prompt.width
+            if prompt.height and prompt.height >= 768:
+                height = prompt.height
+            try:
+                from backend.services.image_resolution_limits import clamp_image_dimensions
+                ow, oh = width, height
+                width, height, warns = clamp_image_dimensions(width, height, "flux")
+                for msg in warns:
+                    logger.warning("FLUX batch: %s", msg)
+                if (width, height) != (ow, oh):
+                    logger.info("FLUX batch resolution %sx%s → %sx%s", ow, oh, width, height)
+            except Exception as e:
+                logger.debug("FLUX dim clamp skipped: %s", e)
         steps = int(prompt.steps if prompt.metadata.get("steps_explicit", False) else (prompt.steps or 28))
         # FluxGuidance value (user "guidance" slider); KSampler cfg stays 1.0 inside Comfy.
         guidance = float(prompt.guidance) if prompt.guidance is not None else 3.5
@@ -631,11 +659,23 @@ class BatchImageGenerator:
         # caller supplied none, so a batch of N prompts burned full GPU time
         # rendering N copies of the same image. Derive per-slot instead.
         seed = resolve_image_seed(prompt, batch_id)
+        loras = list(getattr(prompt, "adapter_loras", None) or [])
+        unet = self._user_flux_unet(prompt.model)
+        model_tag = "flux-dev"
+        if unet and str(unet).lower().endswith(".gguf"):
+            model_tag = "flux-schnell"
+        elif not self._is_comfy_flux_model(prompt.model):
+            model_tag = "sdxl"
         try:
-            gen = ComfyUIImageGenerator(model="flux-dev")
+            gen = ComfyUIImageGenerator(
+                model=model_tag,
+                lora_strength=float(getattr(prompt, "adapter_scale", 0.8) or 0.8),
+                flux_unet=unet if model_tag == "flux-schnell" else None,
+                flux_dev_unet=unet if model_tag == "flux-dev" else None,
+            )
             path = gen.generate_image(
                 prompt=prompt.prompt,
-                loras=[],
+                loras=loras,
                 output_path=out_path,
                 width=width,
                 height=height,
@@ -644,13 +684,13 @@ class BatchImageGenerator:
                 steps=steps,
                 steps_explicit=prompt.metadata.get("steps_explicit", False),
                 cfg=guidance,
-                model="flux-dev",
+                model=model_tag,
             )
             return ImageGenerationResult(
                 success=True,
                 image_path=path,
                 prompt_used=prompt.prompt,
-                model_used="flux-dev",
+                model_used=prompt.model or model_tag,
                 image_size=(width, height),
                 # The seed actually rendered, not the (often None) requested one —
                 # otherwise the batch cannot report or reproduce its own output.
@@ -746,7 +786,7 @@ class BatchImageGenerator:
             # (Z-Image offline or Comfy SDXL/FLUX by train base).
             if getattr(prompt, "subject_ids", None) or getattr(prompt, "loras", None):
                 result = self._generate_with_character_lora(prompt)
-            elif self._is_comfy_flux_model(prompt.model):
+            elif self._should_use_comfy_stills(prompt):
                 result = self._generate_with_comfy_flux(prompt, batch_id)
             else:
                 result = None

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Add new model is a declared family table, and the server checks the paste.** Which
+  architectures a Hugging Face paste can join is now one table (`user_model_families.py`)
+  shared by the Image and Video Add dialogs: Z-Image, Krea 2, SDXL, SD 1.5 and FLUX stills for
+  images (FLUX UNETs and SDXL/FLUX LoRAs install into ComfyUI), Wan, MiniMax, LTX, Hunyuan and
+  CogVideoX for video. A repo the product cannot load (Qwen-Image, SD3, HiDream) is refused by
+  name instead of being filed under SDXL. Look-up reads the licence, gated state, pipeline tag
+  and `model_index.json` class; `hf.co` and `refs/pr/N` revisions parse; dataset and Space
+  URLs are refused. Registering re-inspects the repo on the server (the client's
+  `has_model_index` and file list are no longer trusted, and a file path cannot leave the
+  repo), the same repo and files twice answers 409 with the existing id, and a catalog add
+  succeeds even when the Install could not start. Image installs gained the video downloader's
+  behaviour: persisted status, stall detection that keeps its lock, progress from the real
+  destination folder, already-installed short-circuit. The dialogs share one look-up hook,
+  clear a stale preview when the paste changes, use a radio for a single file, offer a filter
+  for long file lists, show name, family, size and licence before Install, and can add without
+  installing. Remove asks whether to delete the files on both modals; Batch Image has Manage
+  models.
 - **Audio Studio has a Manage models modal, and Generate never downloads weights.** Audio
   Studio's first Generate used to fetch weights from Hugging Face on its own (ACE-Step 8 GB,
   the gated Stable Audio Open). Weights now install only from Audio Studio → Manage models
