@@ -31,6 +31,7 @@ import ImageModelsModal from "../components/modals/ImageModelsModal";
 import InfographicModelsModal from "../components/modals/InfographicModelsModal";
 import VideoModelsModal from "../components/modals/VideoModelsModal";
 import VoiceModelsModal from "../components/modals/VoiceModelsModal";
+import AudioFoundryModelsModal from "../components/modals/AudioFoundryModelsModal";
 import InterconnectorSettingsModal from "../components/modals/InterconnectorSettingsModal";
 import VoiceSettingsModal from "../components/modals/VoiceSettingsModal";
 import ExportChatsButton from "../components/settings/ExportChatsButton";
@@ -314,6 +315,7 @@ const SettingsPage = () => {
     useState(false);
   const [videoModelsModalOpen, setVideoModelsModalOpen] = useState(false);
   const [voiceModelsModalOpen, setVoiceModelsModalOpen] = useState(false);
+  const [audioModelsModalOpen, setAudioModelsModalOpen] = useState(false);
   const [imageGenStatus, setImageGenStatus] = useState(null);
   // /api/batch-image/status reports service_available (the batch image service
   // loaded) and image_generator_available (its image pipeline loaded); usable
@@ -2928,6 +2930,9 @@ const SettingsPage = () => {
           <ActionButton onClick={() => setVoiceModelsModalOpen(true)}>
             Voice
           </ActionButton>
+          <ActionButton onClick={() => setAudioModelsModalOpen(true)}>
+            Audio
+          </ActionButton>
         </Line>
       </Cluster>
     </SettingsPanel>
@@ -3716,6 +3721,11 @@ const SettingsPage = () => {
       <VoiceModelsModal
         open={voiceModelsModalOpen}
         onClose={() => setVoiceModelsModalOpen(false)}
+        showMessage={showMessage}
+      />
+      <AudioFoundryModelsModal
+        open={audioModelsModalOpen}
+        onClose={() => setAudioModelsModalOpen(false)}
         showMessage={showMessage}
       />
     </PageLayout>

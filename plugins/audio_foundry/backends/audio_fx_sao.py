@@ -116,7 +116,7 @@ class StableAudioOpenBackend(AudioBackend):
         if self._pipeline is not None:
             return
 
-        logger.info("Loading %s (first run downloads ~1.5 GB)...", self.MODEL_ID)
+        logger.info("Loading %s from local cache...", self.MODEL_ID)
         import torch
         from diffusers import StableAudioPipeline
 
@@ -128,11 +128,22 @@ class StableAudioOpenBackend(AudioBackend):
         if device == "mps":
             logger.warning("%s on Apple Silicon (MPS) is experimental; please report results", self.MODEL_ID)
 
+        from backends.hub_weights import INSTALL_HINT, WeightsNotInstalled, require_hub_files
+
+        require_hub_files(self.MODEL_ID, ["model_index.json"], "Sound FX")
         try:
             pipe = StableAudioPipeline.from_pretrained(
                 self.MODEL_ID,
                 torch_dtype=dtype,
+                local_files_only=True,
             )
+        except WeightsNotInstalled:
+            raise
+        except OSError as e:
+            raise WeightsNotInstalled(
+                f"Sound FX: weights for '{self.MODEL_ID}' are not on this machine. "
+                f"{INSTALL_HINT}"
+            ) from e
         except Exception as e:  # gated-access / auth failures come through here
             msg = str(e).lower()
             if "401" in msg or "gated" in msg or "access" in msg or "token" in msg:

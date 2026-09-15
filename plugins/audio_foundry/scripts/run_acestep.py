@@ -83,13 +83,26 @@ def _do_load(model_id: str) -> dict[str, Any]:
     if _pipeline is not None:
         return {"ok": True}
 
-    _eprint(f"[run_acestep] loading {model_id} (first run downloads ~10 GB)...")
+    _eprint(f"[run_acestep] loading {model_id} from local cache...")
     import torch
     _torch = torch
 
     dev = _pick_device()
     if dev == "cpu":
         return {"ok": False, "error": "No GPU (CUDA or MPS) available — ACE-Step requires a GPU"}
+
+    try:
+        from huggingface_hub import snapshot_download
+        local = snapshot_download(model_id, local_files_only=True)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": (
+                "ACE-Step weights are not on this machine. "
+                "Open Audio Studio → Manage models and Install ACE-Step. "
+                f"({e})"
+            ),
+        }
 
     try:
         from acestep.pipeline_ace_step import ACEStepPipeline
@@ -101,15 +114,15 @@ def _do_load(model_id: str) -> dict[str, Any]:
 
     try:
         _pipeline = ACEStepPipeline(
-            checkpoint_path=model_id,
-            device=dev,
-            torch_dtype=torch.float16,
+            checkpoint_dir=local,
+            dtype="float16",
         )
     except TypeError:
         # Older ACE-Step releases use a different constructor — be tolerant.
         _pipeline = ACEStepPipeline.from_pretrained(
-            model_id,
+            local,
             torch_dtype=torch.float16,
+            local_files_only=True,
         ).to(dev)
 
     _eprint(f"[run_acestep] {model_id} loaded (fp16, {dev})")

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Audio Studio has a Manage models modal, and Generate never downloads weights.** Audio
+  Studio's first Generate used to fetch weights from Hugging Face on its own (ACE-Step 8 GB,
+  the gated Stable Audio Open). Weights now install only from Audio Studio → Manage models
+  (voice, music, FX rows with sizes, per-row Install and Install all missing; the plugin can be
+  started from there), listed and downloaded by the backend so the modal works with the sidecar
+  stopped. The loaders refuse a cache miss and name the modal instead of downloading.
+  Installs fetch only the files the loaders read: Chatterbox is five files (3.3 GB) out of a
+  13.9 GB repo, Stable Audio Open skips its duplicate root checkpoints (5.3 GB of 15.7). MiniMax
+  Music 3 keeps installing into ComfyUI through the same button. Routes:
+  `GET /api/audio-foundry/models`, `POST .../models/download`, `GET .../models/download-status`.
+
 ## 2.9.0 — Agent skills, a Claude Code plugin, and MiniMax H3 at its ceiling
 
 229 commits since 2.8.1. A coding agent can drive Guaardvark through fifteen Agent Skills, a

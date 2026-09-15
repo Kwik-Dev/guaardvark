@@ -65,7 +65,7 @@ class ChatterboxBackend(AudioBackend):
         if self._model is not None:
             return
 
-        logger.info("Loading Chatterbox TTS (first run downloads ~500 MB)...")
+        logger.info("Loading Chatterbox TTS from local cache...")
         import torch
 
         try:
@@ -75,6 +75,15 @@ class ChatterboxBackend(AudioBackend):
                 "chatterbox-tts package not installed. "
                 "Run: pip install chatterbox-tts"
             ) from e
+
+        from backends.hub_weights import require_hub_files
+
+        require_hub_files(
+            "ResembleAI/chatterbox",
+            ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors",
+             "tokenizer.json", "conds.pt"],
+            "Chatterbox voice",
+        )
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cpu":

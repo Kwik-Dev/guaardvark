@@ -98,7 +98,14 @@ class KokoroBackend(AudioBackend):
         # on first request — keeps cold-start fast and VRAM low.
         if self._pipelines:
             return
-        logger.info("Loading Kokoro-82M (first run downloads ~80 MB)...")
+        logger.info("Loading Kokoro-82M from local cache...")
+        from backends.hub_weights import require_hub_files
+
+        require_hub_files(
+            "hexgrad/Kokoro-82M",
+            ["config.json", "kokoro-v1_0.pth"],
+            "Kokoro voice",
+        )
         self._get_or_load_pipeline(self._lang_code_for(self._default_voice))
         logger.info("Kokoro loaded")
 

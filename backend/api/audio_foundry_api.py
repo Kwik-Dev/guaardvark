@@ -125,6 +125,36 @@ def voices():
     return body, status_code
 
 
+# ---------- Model catalog / install (plugin-offline safe) -------------------
+#
+# Weights live in the shared Hugging Face cache. Listing and download run in
+# this process so a stopped sidecar does not hide the Install button.
+
+
+@audio_foundry_bp.route("/models", methods=["GET"])
+def list_models():
+    from backend.services.audio_foundry_models import list_models as _list
+    payload = _list()
+    return jsonify({"success": True, **payload}), 200
+
+
+@audio_foundry_bp.route("/models/download", methods=["POST"])
+def download_model():
+    from backend.services.audio_foundry_models import start_download
+    body = flask_request.get_json(silent=True) or {}
+    model_id = str(body.get("id") or body.get("model_id") or "").strip()
+    if not model_id:
+        return jsonify({"success": False, "error": "id is required"}), 400
+    payload, status = start_download(model_id)
+    return jsonify(payload), status
+
+
+@audio_foundry_bp.route("/models/download-status", methods=["GET"])
+def download_status():
+    from backend.services.audio_foundry_models import download_status as _status
+    return jsonify(_status()), 200
+
+
 @audio_foundry_bp.route("/generate/voice", methods=["POST"])
 def generate_voice():
     data = flask_request.get_json(silent=True) or {}
