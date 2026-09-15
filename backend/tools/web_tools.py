@@ -188,7 +188,18 @@ class WebAnalysisTool(BaseTool):
             required=False,
             description="Include metadata analysis (meta tags, Open Graph, etc.)",
             default=True
-        )
+        ),
+        "query": ToolParameter(
+            name="query",
+            type="string",
+            required=False,
+            description=(
+                "What the user wants to know from the page. When given, the content "
+                "excerpt is the stretch of the page about it instead of the top of "
+                "the page (which is often navigation)."
+            ),
+            default="",
+        ),
     }
 
     def __init__(self):
@@ -206,6 +217,7 @@ class WebAnalysisTool(BaseTool):
         url = kwargs.get("url", "").strip()
         analysis_type = kwargs.get("analysis_type", "full")
         include_metadata = kwargs.get("include_metadata", True)
+        query = (kwargs.get("query") or "").strip() or None
 
         if not url:
             return ToolResult(
@@ -218,7 +230,7 @@ class WebAnalysisTool(BaseTool):
             from backend.api.web_search_api import extract_website_content
 
             # Extract basic content
-            content_result = extract_website_content(url)
+            content_result = extract_website_content(url, query=query)
             
             if not content_result.get("success"):
                 return ToolResult(
@@ -397,6 +409,17 @@ class FetchUrlTool(BaseTool):
                 "https:// will be added automatically if missing."
             ),
         ),
+        "query": ToolParameter(
+            name="query",
+            type="string",
+            required=False,
+            description=(
+                "What the user wants to know from the page, in their words. When "
+                "given, the returned text is the ~2000-character stretch of the page "
+                "about it; without it, the top of the page, which is often navigation."
+            ),
+            default="",
+        ),
     }
 
     def __init__(self):
@@ -417,11 +440,12 @@ class FetchUrlTool(BaseTool):
                 success=False,
                 error="url parameter is required",
             )
+        query = (kwargs.get("query") or "").strip() or None
 
         try:
             from backend.api.web_search_api import extract_website_content
 
-            result = extract_website_content(url)
+            result = extract_website_content(url, query=query)
             if not result.get("success"):
                 return ToolResult(
                     success=False,

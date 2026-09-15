@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Web pages are read at the passage the question is about.** `fetch_url` and `analyze_website`
+  take an optional `query`; with it, the 2,000-character excerpt is the stretch of the page that
+  holds the most of the question's terms (`backend/utils/text_focus.py`) instead of the top of the
+  page, which on most sites is the navigation. On the Wikipedia page for the aardvark, "what does
+  an aardvark eat" used to return the language menu; it now returns the feeding passage. Without a
+  query nothing changes.
 - **Chat edits photos: Qwen-Image-Edit, inpaint, outpaint, background removal, and a face
   carried into a new scene.** With a picture attached, chat has `edit_image` (prefers
   Qwen-Image-Edit 2509 FP8 when installed, then FLUX.1 Kontext, then img2img), `inpaint_image`,
