@@ -34,3 +34,23 @@ def test_without_a_query_the_content_is_the_head_of_the_page(page):
 def test_with_a_query_the_content_is_the_passage_about_it(page):
     result = web_search_api.extract_website_content("https://example.com/k20", query="Which bolts does the K20 bracket kit need?")
     assert SPEC in result["content"] and result["content_length"] == len(result["content"]) <= 2000
+
+
+def test_fetch_url_and_analyze_website_pass_the_query_through(monkeypatch):
+    """The chat tools carry the person's question to the extractor; no query, no focus."""
+    from backend.tools import web_tools
+
+    seen = []
+
+    def fake_extract(url, query=None):
+        seen.append((url, query))
+        return {"success": True, "url": url, "title": "t", "description": "", "content": "c", "content_length": 1}
+
+    monkeypatch.setattr(web_search_api, "extract_website_content", fake_extract)
+    monkeypatch.setattr(web_tools, "_web_access_block_reason", lambda action: None)
+    web_tools.FetchUrlTool().execute(url="example.com", query="  which bolts  ")
+    web_tools.FetchUrlTool().execute(url="example.com")
+    web_tools.WebAnalysisTool().execute(url="example.com", query="opening hours")
+    assert seen[0] == ("example.com", "which bolts")
+    assert seen[1] == ("example.com", None)
+    assert seen[2] == ("example.com", "opening hours")
