@@ -10,6 +10,14 @@ import logging
 import threading
 from flask import Blueprint, jsonify, request
 
+from backend.utils.privileged_apt import (
+    apt_install_script,
+    desktop_session_available,
+    manual_apt_command,
+    passwordless_sudo_available,
+    run_privileged_apt,
+)
+
 logger = logging.getLogger(__name__)
 
 agent_control_bp = Blueprint("agent_control", __name__, url_prefix="/api/agent-control")
@@ -1436,47 +1444,18 @@ def _probe_display_socket(display_num: int = 99) -> bool:
 
 
 def _passwordless_sudo_available() -> bool:
-    """True when `sudo -n` runs without prompting for a password.
-
-    A Flask request has no controlling terminal, so an interactive sudo prompt can
-    never be answered — `sudo -n` just exits non-zero with "interactive
-    authentication is required". Stock Ubuntu does not grant passwordless sudo, so
-    this is the normal case, not the exception. Checking up front lets the caller
-    hand the user a command they can run instead of failing on a raw apt error.
-    """
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["sudo", "-n", "true"], capture_output=True, timeout=10
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    """True when `sudo -n` runs without prompting for a password."""
+    return passwordless_sudo_available()
 
 
 def _manual_apt_command(packages: list) -> str:
     """The exact line a user should paste to install `packages` themselves."""
-    return "sudo apt-get update && sudo apt-get install -y " + " ".join(packages)
+    return manual_apt_command(packages)
 
 
 def _desktop_session_available() -> bool:
-    """True when pkexec can raise a graphical password prompt.
-
-    pkexec defers to polkit, which needs an authentication agent attached to the
-    caller's session (GNOME ships one in gnome-shell). The backend inherits
-    DISPLAY/WAYLAND_DISPLAY and the session bus when it is launched from a desktop
-    session; with none of those there is nothing to prompt on, and pkexec would
-    just fail after a delay.
-    """
-    import os
-    import shutil
-    if not shutil.which("pkexec"):
-        return False
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        return False
-    return bool(
-        os.environ.get("DBUS_SESSION_BUS_ADDRESS") or os.environ.get("XDG_RUNTIME_DIR")
-    )
+    """True when pkexec can raise a graphical password prompt."""
+    return desktop_session_available()
 
 
 # Everything this endpoint is ever allowed to install. Package names come from the
@@ -1489,55 +1468,25 @@ _ALLOWED_APT_PACKAGES = frozenset(
 
 
 def _apt_install_script(packages: list) -> str:
-    """One shell line that refreshes the index then installs `packages`.
-
-    Combined into a single command on purpose: pkexec authenticates per invocation,
-    so splitting update and install would ask the user for a password twice. The
-    index refresh is best-effort — a warm cache can still satisfy the install.
-    """
-    import shlex
-    unknown = [p for p in packages if p not in _ALLOWED_APT_PACKAGES]
-    if unknown:
-        raise ValueError(f"Refusing to install unexpected packages: {unknown}")
-    quoted = " ".join(shlex.quote(p) for p in packages)
-    return (
-        "apt-get update -qq || true; "
-        f"DEBIAN_FRONTEND=noninteractive apt-get install -y {quoted}"
-    )
+    """One shell line that refreshes the index then installs `packages`."""
+    return apt_install_script(packages, allowed=_ALLOWED_APT_PACKAGES)
 
 
 def _run_privileged_apt(packages: list, timeout: int = 600) -> dict:
     """Install apt packages as root, without a terminal.
 
-    Two ways in, tried in order:
-      1. passwordless sudo — silent when the host is configured for it;
-      2. pkexec — raises a password dialog on the user's desktop.
-    Returns method="none" when neither is possible, so the caller can fall back to
-    telling the user what to run by hand.
+    Looks up the sudo/desktop probes by name at call time so tests can patch
+    ``_passwordless_sudo_available`` / ``_desktop_session_available`` on this
+    module the same way they did before the helper lived in privileged_apt.
     """
-    import subprocess
-
-    script = _apt_install_script(packages)
-
-    if _passwordless_sudo_available():
-        cmd, method = ["sudo", "-n", "/bin/sh", "-c", script], "sudo"
-    elif _desktop_session_available():
-        cmd, method = ["pkexec", "/bin/sh", "-c", script], "pkexec"
-    else:
-        return {"ok": False, "method": "none", "returncode": None, "stderr": ""}
-
-    logger.info(f"Agent display install: escalating via {method} for {packages}")
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "method": method, "returncode": "timeout", "stderr": ""}
-
-    return {
-        "ok": result.returncode == 0,
-        "method": method,
-        "returncode": result.returncode,
-        "stderr": (result.stderr or ""),
-    }
+    return run_privileged_apt(
+        packages,
+        allowed=_ALLOWED_APT_PACKAGES,
+        timeout=timeout,
+        log_label="Agent display install",
+        sudo_probe=_passwordless_sudo_available,
+        desktop_probe=_desktop_session_available,
+    )
 
 
 @agent_control_bp.route("/display-status", methods=["GET"])

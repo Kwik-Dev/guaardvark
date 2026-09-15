@@ -23,6 +23,10 @@ SLASH_COMMAND_TOOL_MAP: Dict[str, str] = {
     "logs": "read_logs",
     "sysmap": "map_codebase",
     "swarm": "swarm_status",
+    "removebg": "remove_background",
+    "outpaint": "outpaint_image",
+    "identity": "generate_identity",
+    "inpaint": "inpaint_image",
 }
 
 
@@ -120,6 +124,29 @@ def resolve_slash_direct_tool(
         return mapped, {"refresh": args.lower() in ("refresh", "--refresh", "1", "true")}
     if slash == "swarm":
         return mapped, {"swarm_id": args} if args else {}
+    if slash == "removebg":
+        return mapped, dict(params)
+    if slash == "outpaint":
+        out = dict(params)
+        if args and not out.get("instruction"):
+            out["instruction"] = args
+        return mapped, out
+    if slash == "inpaint":
+        instruction = params.get("instruction") or args
+        if not instruction:
+            return None, {}
+        out = {"instruction": instruction}
+        if params.get("image"):
+            out["image"] = params["image"]
+        return mapped, out
+    if slash == "identity":
+        prompt = params.get("prompt") or args
+        if not prompt:
+            return None, {}
+        out = {"prompt": prompt, "consented": True}
+        if params.get("image"):
+            out["image"] = params["image"]
+        return mapped, out
 
     return mapped, dict(params)
 

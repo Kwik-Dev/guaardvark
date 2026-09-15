@@ -118,6 +118,29 @@ ensure_custom_nodes() {
             fi
         fi
     done < "$MANIFEST"
+    _apply_custom_node_patches "$PLUGIN_ROOT" "$CN_DIR"
+}
+
+# Apply the plugin's patches to pinned custom nodes. A node pinned to a
+# revision that predates a ComfyUI change is fixed here instead of forked:
+# plugins/comfyui/custom_nodes.patches/<node>.patch is a `git diff` against
+# the manifest revision. Idempotent: a patch that already reverses cleanly is
+# applied; one that neither applies nor reverses is reported, not forced.
+_apply_custom_node_patches() {
+    local plugin_root="$1" cn_dir="$2" patch name dest
+    for patch in "$plugin_root"/custom_nodes.patches/*.patch; do
+        [ -f "$patch" ] || continue
+        name="$(basename "$patch" .patch)"
+        dest="$cn_dir/$name"
+        [ -d "$dest" ] || continue
+        if git -C "$dest" apply --check --reverse "$patch" 2>/dev/null; then
+            continue
+        elif git -C "$dest" apply "$patch" 2>/dev/null; then
+            echo "  patched $name ($(basename "$patch"))"
+        else
+            echo "  WARNING: $name: $(basename "$patch") does not apply to the checked-out revision; the node runs unpatched."
+        fi
+    done
 }
 
 # Print the requirements.txt paths of the manifest's nodes that exist on disk,

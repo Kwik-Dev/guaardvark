@@ -441,6 +441,7 @@ const SettingsPage = () => {
   const [isVoiceTestPlaying, setIsVoiceTestPlaying] = useState(false);
   const [isInstallingVoice, setIsInstallingVoice] = useState(false);
   const [isInstallingWhisper, setIsInstallingWhisper] = useState(false);
+  const [whisperManualInstall, setWhisperManualInstall] = useState(null);
   const [voiceModelsStatus, setVoiceModelsStatus] = useState(null);
 
   // Get VoiceContext to sync voice changes
@@ -611,9 +612,12 @@ const SettingsPage = () => {
 
   const installWhisperCpp = async () => {
     setIsInstallingWhisper(true);
+    setWhisperManualInstall(null);
     try {
       showMessage(
-        "Installing Whisper.cpp... This will clone and build from source (may take 1-2 minutes).",
+        voiceStatus?.install_method === "pkexec"
+          ? "Approve the password prompt on your desktop, then Whisper.cpp will build."
+          : "Installing Whisper.cpp... This will clone and build from source (may take 1-2 minutes).",
         "info",
       );
       const result = await voiceService.installWhisper();
@@ -628,14 +632,36 @@ const SettingsPage = () => {
           );
         }
         await loadVoiceConfiguration();
+      } else if (result.needs_manual_install && result.manual_command) {
+        setWhisperManualInstall({
+          command: result.manual_command,
+          reason: result.error,
+        });
       } else {
         showMessage(`Failed to install Whisper.cpp: ${result.error}`, "error");
       }
     } catch (error) {
       console.error("Failed to install Whisper.cpp:", error);
-      showMessage(`Failed to install Whisper.cpp: ${error.message}`, "error");
+      const data = error.data || {};
+      if (data.needs_manual_install && data.manual_command) {
+        setWhisperManualInstall({
+          command: data.manual_command,
+          reason: data.error || error.message,
+        });
+      } else {
+        showMessage(`Failed to install Whisper.cpp: ${error.message}`, "error");
+      }
     } finally {
       setIsInstallingWhisper(false);
+    }
+  };
+
+  const copyWhisperCommand = async (command) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      showMessage("Command copied to clipboard.", "success");
+    } catch (e) {
+      showMessage("Could not copy — select the command and copy it manually.", "warning");
     }
   };
 
@@ -3550,6 +3576,8 @@ const SettingsPage = () => {
         installDefaultVoiceModel={installDefaultVoiceModel}
         testVoice={testVoice}
         systemName={persistedSystemName}
+        whisperManualInstall={whisperManualInstall}
+        onCopyWhisperCommand={copyWhisperCommand}
       />
       <InterconnectorSettingsModal
         open={interconnectorModalOpen}

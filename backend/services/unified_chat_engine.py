@@ -258,6 +258,16 @@ DESKTOP_TOOLS = ["app_launch", "app_list", "app_focus", "gui_click", "gui_type",
 WEB_TOOLS = ["analyze_website", "fetch_url"]
 MEDIA_TOOLS = ["media_play", "media_control", "media_volume", "media_status"]
 IMAGE_TOOLS = ["generate_image", "generate_animation", "generate_video"]
+# Tools that consume an attached (or last-edited) photo. Pinned whenever a
+# picture is on the turn so a small model can pick inpaint/identity/bg-remove
+# instead of only edit_image.
+_IMAGE_ATTACHMENT_TOOLS = (
+    "edit_image", "remove_background", "inpaint_image", "outpaint_image", "generate_identity",
+)
+_IMAGE_RESULT_TOOLS = frozenset({
+    "generate_image", "generate_animation", "edit_image",
+    "remove_background", "inpaint_image", "outpaint_image", "generate_identity",
+})
 
 # Narrow create-intent phrases for image/video generation — excludes descriptive
 # "image of X on the website" references that falsely triggered direct generate_image.
@@ -568,6 +578,7 @@ _VIDEO_CHROME_RE = re.compile(
 # model off the card before they run.
 GPU_HEAVY_TOOLS = frozenset({
     "generate_image", "generate_animation", "edit_image", "generate_video",
+    "inpaint_image", "outpaint_image", "generate_identity",
 })
 
 
@@ -840,18 +851,21 @@ def _pin_workstation_tools(message: str, selected: List[str], all_tool_names: Li
 
 
 def _pin_image_edit_tools(has_image: bool, selected: List[str], all_tool_names: List[str]) -> List[str]:
-    """Force `edit_image` into the toolset whenever the user attached an image.
+    """Force image-from-photo tools into the toolset whenever the user attached an image.
 
     Real edit requests ("put a cowboy hat on this character", "make it night",
     "remove the sign") almost never contain the words "edit" or "image", so the
-    semantic/keyword selector drops edit_image — and the model, looking at the picture
-    with no edit tool offered, says it can't edit images. Pinning it (prepended so a
-    downstream cap can't truncate it) makes it available; the tool's own description
-    gates when it fires, so this stays harmless for "what's in this image?" questions.
+    semantic/keyword selector drops them — and the model, looking at the picture
+    with no edit tool offered, says it can't edit images. Pinning (prepended so a
+    downstream cap can't truncate them) makes them available; each tool's own
+    description gates when it fires, so this stays harmless for "what's in this
+    image?" questions.
     """
-    if not has_image or "edit_image" not in all_tool_names or "edit_image" in selected:
+    if not has_image:
         return selected
-    return ["edit_image"] + list(selected)
+    available = set(all_tool_names)
+    extra = [t for t in _IMAGE_ATTACHMENT_TOOLS if t in available and t not in selected]
+    return extra + list(selected) if extra else selected
 
 
 _IMAGE_RETRY_PHRASES = (
@@ -864,6 +878,78 @@ def _is_image_retry_message(message: str) -> bool:
     if not msg:
         return False
     return any(phrase in msg for phrase in _IMAGE_RETRY_PHRASES)
+
+
+# Identity generate: new scene, same face. Must not steal "put a hat on this person".
+_EDIT_ON_PERSON_RE = re.compile(
+    r"\bput (?:a |an |the )?.{0,40}\bon (?:this |the )?(?:person|face|guy|girl|"
+    r"man|woman|character|him|her|them)\b",
+    re.IGNORECASE,
+)
+_IDENTITY_INTENT_RE = re.compile(
+    r"(?:this (?:person|face|photo|picture) as\b"
+    r"|put this (?:person|face|guy|girl|man|woman) (?:in|into|on)\b"
+    r"|same (?:face|person|likeness)\b"
+    r"|generate.?identity"
+    r"|/identity\b)",
+    re.IGNORECASE,
+)
+_BG_REMOVE_RE = re.compile(
+    r"(?:\b(?:remove|cut out) (?:the )?background\b"
+    r"|\btransparent background\b)",
+    re.IGNORECASE,
+)
+_OUTPAINT_RE = re.compile(
+    r"(?:\boutpaint\b"
+    r"|\bextend the (?:image|canvas|scene|photo|picture)\b"
+    r"|\bexpand the (?:image|canvas|scene|photo|picture)\b"
+    r"|\bexpand (?:it |the (?:image|photo) )?(?:to the )?(?:left|right|top|bottom)\b)",
+    re.IGNORECASE,
+)
+
+
+def user_wants_identity_generate(message: str) -> bool:
+    """True for 'this person as …' / 'put this person in …'; false for 'put a hat on this person'."""
+    if not (message or "").strip():
+        return False
+    if _EDIT_ON_PERSON_RE.search(message):
+        return False
+    return bool(_IDENTITY_INTENT_RE.search(message))
+
+
+def user_wants_background_remove(message: str) -> bool:
+    return bool(_BG_REMOVE_RE.search(message or ""))
+
+
+def user_wants_outpaint(message: str) -> bool:
+    return bool(_OUTPAINT_RE.search(message or ""))
+
+
+def parse_outpaint_pad(message: str) -> dict:
+    """Pixels to add per side. Named sides get 256; otherwise grow every side."""
+    msg = (message or "").lower()
+    pad = {"left": 0, "right": 0, "top": 0, "bottom": 0, "feathering": 40}
+    found = False
+    for side in ("left", "right", "top", "bottom"):
+        if re.search(rf"\b{side}\b", msg):
+            pad[side] = 256
+            found = True
+    if not found:
+        pad.update({"left": 256, "right": 256, "top": 256, "bottom": 256})
+    return pad
+
+
+def identity_prompt_from_message(message: str) -> str:
+    text = (message or "").strip()
+    stripped = re.sub(
+        r"^(?:please\s+)?(?:can you\s+|could you\s+)?"
+        r"(?:put this (?:person|face) (?:in|into|on)\s+|"
+        r"this (?:person|face|photo|picture) as\s+)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip(" .")
+    return stripped or text
 
 
 def _pin_image_generation_tools(
@@ -933,7 +1019,7 @@ def inject_chat_image_model(
     options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Ensure generate_image / edit_image receive the persisted chat model (force the selected /imagemodel for chat calls, even if LLM provides 'auto' or other)."""
-    if tool_name not in ("generate_image", "edit_image"):
+    if tool_name not in ("generate_image", "edit_image", "inpaint_image"):
         return params
     out = dict(params or {})
     try:
@@ -1646,10 +1732,10 @@ class UnifiedChatEngine:
         return "\n\n".join(parts)
 
     def _inject_attached_image(self, tool_name: str, params: dict) -> dict:
-        """Forward the user's most-recently-attached chat image into edit_image when
-        the LLM called it without an explicit `image` (the common case: the user
+        """Forward the user's most-recently-attached chat image into photo tools when
+        the LLM called them without an explicit `image` (the common case: the user
         attaches a picture and says 'put a cowboy hat on this character')."""
-        if tool_name != "edit_image" or params.get("image"):
+        if tool_name not in _IMAGE_ATTACHMENT_TOOLS or params.get("image"):
             return params
         path = self._materialize_attached_image()
         if path:
@@ -1710,6 +1796,14 @@ class UnifiedChatEngine:
             media_result = self._try_media_direct(message, session_id, emit_fn, request_id)
             if media_result is not None:
                 return media_result
+
+            # Named photo tools first: identity / background / outpaint must not
+            # fall through to generic edit_image ("put" matches both).
+            named_photo = self._try_named_image_direct(
+                message, session_id, emit_fn, request_id, options,
+            )
+            if named_photo is not None:
+                return named_photo
 
             # Image-edit intercept: an attached image + an edit instruction ("put a cowboy
             # hat on this character") deterministically calls edit_image, bypassing the
@@ -2111,7 +2205,7 @@ class UnifiedChatEngine:
                 elif "EOF" in error_str or "status code: -1" in error_str:
                     has_media = bool(generated_images) or any(
                         (s.get("tool_calls") or []) for s in steps if any(
-                            (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", "")) in ("generate_image", "generate_animation", "edit_image")
+                            (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", "")) in _IMAGE_RESULT_TOOLS
                             for tc in (s.get("tool_calls") or [])
                         )
                     )
@@ -2709,7 +2803,7 @@ class UnifiedChatEngine:
             # append the "Latest tool results" that would trigger another LLM call (which
             # would hit the evicted model). The image is already emitted via chat:image.
             # This prevents the "LLM call failed" after GPU image job.
-            _inline_image_tools = frozenset({"generate_image", "generate_animation", "edit_image"})
+            _inline_image_tools = _IMAGE_RESULT_TOOLS
             last_tool_was_image_success = any(
                 (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) in _inline_image_tools
                 and (tc.get("success") if isinstance(tc, dict) else True)
@@ -2998,6 +3092,14 @@ class UnifiedChatEngine:
     ) -> Dict[str, Any]:
         """Execute a registry tool directly with standard chat event emission."""
         params = inject_chat_image_model(tool_name, params, options)
+        params = self._inject_attached_image(tool_name, params)
+        if (
+            tool_name in _IMAGE_ATTACHMENT_TOOLS
+            and not params.get("image")
+        ):
+            last = _SESSION_LAST_EDIT.get(session_id)
+            if last and os.path.exists(last):
+                params = {**params, "image": last}
         if tool_name == "generate_image" and params.get("prompt"):
             from backend.services.image_prompt_sanitize import sanitize_image_prompt
             cleaned = sanitize_image_prompt(params.get("prompt"))
@@ -3089,7 +3191,7 @@ class UnifiedChatEngine:
             })
             # Remember for follow-up natural language edits ("make the ostrich wear sunglasses")
             # so _try_image_edit_direct can pick it up via _SESSION_LAST_EDIT even without a fresh attachment.
-            if tool_name == "generate_image":
+            if tool_name in _IMAGE_RESULT_TOOLS:
                 try:
                     from backend.config import OUTPUT_DIR
                     _fn = (result.metadata or {}).get("filename")
@@ -3289,6 +3391,51 @@ class UnifiedChatEngine:
             }
 
         return None  # Not a media command
+
+    def _chat_image_source(self, session_id: str) -> Optional[str]:
+        """Attached photo this turn, else the last image this session produced."""
+        if getattr(self, "_image_data", None):
+            return self._materialize_attached_image()
+        img_path = _SESSION_LAST_EDIT.get(session_id)
+        if img_path and os.path.exists(img_path):
+            return img_path
+        return None
+
+    def _try_named_image_direct(self, message: str, session_id: str,
+                                emit_fn: Callable, request_id: str,
+                                options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Identity / background-remove / outpaint intercepts. Run before generic edit."""
+        img_path = self._chat_image_source(session_id)
+        if not img_path:
+            return None
+
+        if user_wants_identity_generate(message) and self.registry.get_tool("generate_identity"):
+            prompt = identity_prompt_from_message(message)
+            logger.info("Identity direct: generate_identity(prompt=%r)", prompt[:80])
+            return self._run_direct_tool_execution(
+                "generate_identity",
+                {"prompt": prompt, "image": img_path, "consented": True},
+                session_id, emit_fn, request_id, message, options,
+            )
+
+        if user_wants_background_remove(message) and self.registry.get_tool("remove_background"):
+            logger.info("Background-remove direct: remove_background")
+            return self._run_direct_tool_execution(
+                "remove_background",
+                {"image": img_path},
+                session_id, emit_fn, request_id, message, options,
+            )
+
+        if user_wants_outpaint(message) and self.registry.get_tool("outpaint_image"):
+            pad = parse_outpaint_pad(message)
+            instruction = (message or "").strip()
+            logger.info("Outpaint direct: outpaint_image pad=%s", pad)
+            return self._run_direct_tool_execution(
+                "outpaint_image",
+                {"image": img_path, "instruction": instruction, **{k: pad[k] for k in ("left", "right", "top", "bottom")}},
+                session_id, emit_fn, request_id, message, options,
+            )
+        return None
 
     def _try_image_edit_direct(self, message: str, session_id: str,
                                emit_fn: Callable, request_id: str,

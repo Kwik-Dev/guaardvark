@@ -6,12 +6,39 @@
  */
 
 const BUILT_IN_COMMANDS = [
-  {
+    {
     name: "/imagine",
     description: "Generate an image from a text prompt",
     usage: "/imagine <prompt>",
     category: "generation",
     args: "required",
+    handler: "builtin",
+    ruleId: null,
+  },
+  {
+    name: "/removebg",
+    description: "Remove the background from the attached photo (transparent PNG)",
+    usage: "/removebg",
+    category: "generation",
+    args: "none",
+    handler: "builtin",
+    ruleId: null,
+  },
+  {
+    name: "/inpaint",
+    description: "Change or remove something in the attached photo",
+    usage: "/inpaint <instruction>",
+    category: "generation",
+    args: "required",
+    handler: "builtin",
+    ruleId: null,
+  },
+  {
+    name: "/outpaint",
+    description: "Extend the attached photo and fill the new canvas",
+    usage: "/outpaint [left|right|top|bottom|all] [instruction]",
+    category: "generation",
+    args: "optional",
     handler: "builtin",
     ruleId: null,
   },

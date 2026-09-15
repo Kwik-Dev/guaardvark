@@ -30,6 +30,8 @@ const modelMatchesDownload = (model, currentModel) =>
 const ImageModelsModal = ({ open, onClose, showMessage }) => {
   const [models, setModels] = useState([]);
   const [adapters, setAdapters] = useState([]);
+  // Chat photo-tool packs (Qwen-Image-Edit, Kontext, PuLID, background removal).
+  const [editing, setEditing] = useState([]);
   const [addOpen, setAddOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -56,6 +58,7 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
       if (res.data.success) {
         setModels(res.data.data.models);
         setAdapters(res.data.data.adapters || []);
+        setEditing(res.data.data.editing || []);
       } else {
         setError("Failed to load models");
       }
@@ -154,6 +157,34 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
 
   const isDownloading = downloadStatus.is_downloading;
   const currentModel = downloadStatus.current_model;
+
+  const editingMissing = editing.filter((p) => !p.installed);
+  const editingMissingGb = editingMissing.reduce((sum, p) => sum + (p.download_gb || 0), 0);
+
+  // One pack after another: the downloader takes one plan at a time.
+  const waitForDownloadEnd = () =>
+    new Promise((resolve) => {
+      const check = setInterval(async () => {
+        try {
+          const res = await axios.get("/api/batch-image/models/download-status");
+          if (res.data?.success && !res.data.data?.is_downloading) {
+            clearInterval(check);
+            resolve();
+          }
+        } catch {
+          /* keep waiting */
+        }
+      }, 1000);
+    });
+
+  const handleInstallAllEditing = async () => {
+    for (const pack of editingMissing) {
+      await handleDownload(pack);
+      await new Promise((r) => setTimeout(r, 1500));
+      await waitForDownloadEnd();
+    }
+    fetchModels();
+  };
 
   // Install / Installed / progress cell, shared by model rows and LoRA rows.
   const renderInstallCell = (model) => {
@@ -283,6 +314,57 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
                   }
                 />
                 <Box sx={{ ml: 2, minWidth: 120, textAlign: "right" }}>{renderInstallCell(a)}</Box>
+              </ListItem>
+            ))}
+            {editing.length > 0 && (
+              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mt: 2 }}>
+                <Typography variant="overline" color="text.secondary">
+                  Image editing
+                </Typography>
+                {editingMissing.length > 0 && (
+                  <Button
+                    size="small"
+                    startIcon={<CloudDownloadIcon />}
+                    onClick={handleInstallAllEditing}
+                    disabled={isDownloading}
+                  >
+                    Install all editing tools ({editingMissingGb.toFixed(1)} GB)
+                  </Button>
+                )}
+              </Box>
+            )}
+            {editing.map((pack) => (
+              <ListItem key={pack.id} divider sx={{ py: 1.5 }}>
+                <ListItemIcon>
+                  <ImageIcon color={pack.installed ? "primary" : "action"} />
+                </ListItemIcon>
+                <ListItemText
+                  primary={
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                      <Typography variant="body1" fontWeight={500}>
+                        {pack.name}
+                      </Typography>
+                      {(pack.installed ? pack.size_gb : pack.download_gb) > 0 && (
+                        <Chip
+                          label={`${pack.installed ? pack.size_gb : pack.download_gb} GB`}
+                          size="small"
+                          variant="outlined"
+                        />
+                      )}
+                    </Box>
+                  }
+                  secondary={
+                    <>
+                      <Typography variant="body2" color="text.secondary" component="span" display="block">
+                        {pack.description}
+                      </Typography>
+                      <Typography variant="caption" color="text.disabled" component="span" display="block">
+                        Chat: {(pack.tools || []).join(", ")}
+                      </Typography>
+                    </>
+                  }
+                />
+                <Box sx={{ ml: 2, minWidth: 120, textAlign: "right" }}>{renderInstallCell(pack)}</Box>
               </ListItem>
             ))}
             {models.length === 0 && !loading && (

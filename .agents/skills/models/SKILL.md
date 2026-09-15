@@ -19,6 +19,12 @@ the product never phones home on its own. Always confirm the size and the licenc
 - Download a registry model: `POST $B/api/batch-video/models/download {"model_id": "wan22-14b"}` /
   `POST $B/api/batch-image/models/download {"model_path": "<id>"}`; progress at
   `GET .../models/download-status`.
+- Chat photo-tool packs install from **Manage Image Models → Image editing**: `qwen-image-edit`
+  (~28 GB with its encoder and VAE), `flux-kontext-dev`, `pulid-flux` (with its face files,
+  EVA02-CLIP and `flux-dev`), `bgremove-birefnet` / `bgremove-u2net`. The rows come back as
+  `editing` in `GET $B/api/batch-image/models`; Install with
+  `POST $B/api/batch-image/models/download {"model_path": "comfy:<pack id>"}`. Confirm size and
+  licence; never start those downloads unless the user asked.
 
 ## Add from a Hugging Face URL (the "paste a link" path)
 

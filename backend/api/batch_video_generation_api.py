@@ -872,17 +872,10 @@ _reconcile_download_status_on_load()
 
 
 def _check_model_downloaded(model_id: str) -> bool:
-    """Check if a video model's files exist and are non-empty."""
-    model_info = VIDEO_MODEL_REGISTRY.get(model_id)
-    if not model_info:
-        return False
-    models_dir = _get_comfyui_models_dir()
-    base = models_dir / model_info["local_subdir"]
-    for check_file in model_info["check_files"]:
-        fpath = base / check_file
-        if not fpath.exists() or fpath.stat().st_size == 0:
-            return False
-    return True
+    """Check if a video model's files exist and are non-empty (wherever the
+    entry's `dest` says they live; see video_model_registry.resolve_entry_dir)."""
+    from backend.services.video_model_registry import entry_files_present
+    return entry_files_present(VIDEO_MODEL_REGISTRY.get(model_id))
 
 
 def _missing_check_files(model_id: str) -> List[str]:
@@ -891,11 +884,18 @@ def _missing_check_files(model_id: str) -> List[str]:
     holds GBs of the wrong quant but the one required file is missing, instead of
     leaving the UI with an unexplained is_ready=False.
     """
-    models_dir = _get_comfyui_models_dir()
+    from backend.services.local_weights import is_cached
+    from backend.services.video_model_registry import resolve_entry_dir
+
     missing: List[str] = []
     for eid in _resolve_download_plan(model_id):
         info = VIDEO_MODEL_REGISTRY.get(eid, {})
-        base = models_dir / info.get("local_subdir", "")
+        if info.get("dest") == "hf_cache":
+            for f in info.get("files", []):
+                if not is_cached(info["hf_repo"], f["src"]):
+                    missing.append(f"{eid}:{f['src']}")
+            continue
+        base = resolve_entry_dir(info)
         for cf in info.get("check_files", []):
             fp = base / cf
             if not fp.exists() or fp.stat().st_size == 0:
@@ -1121,7 +1121,13 @@ def start_video_model_download(model_id):
 
             def _pull_one(einfo, local_dir):
                 """Pull a single registry entry's files into local_dir."""
-                if "direct_urls" in einfo:
+                if einfo.get("dest") == "hf_cache":
+                    # The loader that reads this file calls hf_hub_download
+                    # itself, so the file has to sit in the Hugging Face cache
+                    # under its own repo, not in a local_dir.
+                    for spec in einfo.get("files", []):
+                        hf_hub_download(repo_id=einfo["hf_repo"], filename=spec["src"])
+                elif "direct_urls" in einfo:
                     import urllib.request
                     for spec in einfo["direct_urls"]:
                         dst = local_dir / spec["dst"]
@@ -1187,9 +1193,10 @@ def start_video_model_download(model_id):
                 # unet/ may already hold other models). Unique dirs only, so a
                 # shared dir isn't double-counted.
                 entries = []
+                from backend.services.video_model_registry import resolve_entry_dir
                 for eid in plan_ids:
                     einfo = VIDEO_MODEL_REGISTRY[eid]
-                    ldir = models_dir / einfo["local_subdir"]
+                    ldir = resolve_entry_dir(einfo)
                     ldir.mkdir(parents=True, exist_ok=True)
                     entries.append((eid, einfo, ldir))
                 uniq_dirs = list({str(ldir): ldir for (_, _, ldir) in entries}.values())

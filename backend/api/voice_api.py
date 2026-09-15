@@ -22,6 +22,11 @@ from flask import Blueprint, Response, current_app, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 from backend.utils.response_utils import success_response, error_response
 from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
+from backend.utils.privileged_apt import (
+    escalation_method,
+    manual_apt_command,
+    run_privileged_apt,
+)
 
 # Audio Foundry plugin endpoint — Kokoro primary (natural, fast per team voice audit),
 # Chatterbox for reference-clip cloning. Fallback to Piper. See plugins/audio_foundry/.
@@ -682,6 +687,11 @@ def convert_audio_to_wav_ffmpeg(input_path, output_path):
 # Local tool paths (relative to backend directory)
 WHISPER_CLI_PATH = "tools/voice/whisper.cpp/build/bin/whisper-cli"
 WHISPER_MODEL_PATH = "tools/voice/whisper.cpp/models/ggml-base.bin"
+
+# cmake + a compiler to build whisper.cpp; git to clone it. Allowlisted because
+# the names are interpolated into a shell line run as root (same gate as the
+# agent-display installer).
+_WHISPER_APT_PACKAGES = frozenset({"git", "cmake", "build-essential"})
 PIPER_MODEL_PATH = "tools/voice/piper-models/en_US-libritts-high.onnx"
 
 # PERFORMANCE OPTIMIZATION: Voice configuration constants
@@ -1758,6 +1768,13 @@ def voice_status():
         if not whisper_available and not piper_available:
             status = "unavailable"
 
+        whisper_build = _whisper_build_dep_status() if not whisper_cli_available else {
+            "missing_build_packages": [],
+            "can_auto_install": True,
+            "install_method": None,
+            "manual_command": None,
+        }
+
         return jsonify({
             "status": status,
             "speech_recognition": whisper_available,
@@ -1770,6 +1787,10 @@ def voice_status():
             "supported_formats": list(SUPPORTED_AUDIO_FORMATS),
             "available_voices": available_voices,
             "engine": "local (whisper.cpp + piper-tts)",
+            "missing_build_packages": whisper_build["missing_build_packages"],
+            "can_auto_install": whisper_build["can_auto_install"],
+            "install_method": whisper_build["install_method"],
+            "manual_command": whisper_build["manual_command"],
             "optimization": {
                 "enabled": True,
                 "default_model": DEFAULT_WHISPER_MODEL,
@@ -2553,6 +2574,82 @@ def list_all_voice_models():
         return error_response(str(e), 500)
 
 
+def _missing_whisper_apt() -> list:
+    """Apt packages needed to clone and compile whisper.cpp that are not on PATH."""
+    missing = []
+    if not shutil.which("git"):
+        missing.append("git")
+    if not shutil.which("cmake"):
+        missing.append("cmake")
+    if not shutil.which("make") or not shutil.which("gcc"):
+        missing.append("build-essential")
+    return missing
+
+
+def _whisper_build_dep_status() -> dict:
+    """How (or whether) this host can install the whisper.cpp build tools."""
+    missing = _missing_whisper_apt()
+    if not missing:
+        return {
+            "missing_build_packages": [],
+            "can_auto_install": True,
+            "install_method": None,
+            "manual_command": None,
+        }
+    method = escalation_method()
+    return {
+        "missing_build_packages": missing,
+        "can_auto_install": method != "none",
+        "install_method": method,
+        "manual_command": None if method != "none" else manual_apt_command(missing),
+    }
+
+
+def _whisper_apt_failure(apt: dict, packages: list):
+    """JSON response when privileged apt could not install whisper build tools."""
+    if apt["method"] == "none":
+        return jsonify({
+            "success": False,
+            "needs_manual_install": True,
+            "manual_command": manual_apt_command(packages),
+            "missing_build_packages": packages,
+            "error": (
+                "Building Whisper.cpp needs cmake and a compiler, and this session "
+                "has no desktop to show a password prompt on. Run the command below "
+                "on the machine itself, then click Install Whisper again."
+            ),
+        }), 409
+    stderr = (apt.get("stderr") or "").strip()
+    rc = apt["returncode"]
+    if apt["method"] == "pkexec" and rc == 126:
+        return jsonify({
+            "success": False,
+            "error": (
+                "Authorisation was dismissed or the password was wrong. "
+                "Click Install Whisper again and approve the prompt on your desktop."
+            ),
+        }), 403
+    if rc == "timeout":
+        return jsonify({
+            "success": False,
+            "error": (
+                "Timed out waiting for the install. If a password prompt is open "
+                "on your desktop, approve it and try again."
+            ),
+        }), 504
+    return jsonify({
+        "success": False,
+        "needs_manual_install": True,
+        "manual_command": manual_apt_command(packages),
+        "missing_build_packages": packages,
+        "error": (
+            f"apt-get failed (exit {rc}) via {apt['method']}. "
+            "Run the command below in a terminal, then click Install Whisper again."
+        ),
+        "stderr_tail": stderr[-500:],
+    }), 500
+
+
 @voice_bp.route("/install-whisper", methods=["POST"])
 def install_whisper():
     """
@@ -2589,38 +2686,30 @@ def install_whisper():
             except Exception:
                 pass  # Binary exists but doesn't work, proceed with reinstall
 
-        # Check prerequisites
-        missing_deps = []
-        for dep in ["git", "cmake", "make", "gcc"]:
-            if not shutil.which(dep):
-                missing_deps.append(dep)
-
-        if missing_deps:
-            # Try to auto-install missing build dependencies
-            logger.info(f"Voice API: Auto-installing missing deps: {missing_deps}")
-            try:
-                install_result = subprocess.run(
-                    ["sudo", "apt-get", "install", "-y", "cmake", "build-essential"],
-                    capture_output=True, text=True, timeout=120
-                )
-                if install_result.returncode != 0:
-                    return jsonify({
-                        "success": False,
-                        "error": f"Missing build dependencies: {', '.join(missing_deps)}. Auto-install failed. Try: sudo apt install cmake build-essential"
-                    }), 400
-                # Re-check after install
-                still_missing = [dep for dep in ["git", "cmake", "make", "gcc"] if not shutil.which(dep)]
-                if still_missing:
-                    return jsonify({
-                        "success": False,
-                        "error": f"Still missing after install: {', '.join(still_missing)}. Try: sudo apt install {' '.join(still_missing)}"
-                    }), 400
-                logger.info("Voice API: Build dependencies installed successfully")
-            except Exception as e:
+        missing_apt = _missing_whisper_apt()
+        if missing_apt:
+            logger.info("Voice API: Installing whisper.cpp build tools: %s", missing_apt)
+            apt = run_privileged_apt(
+                missing_apt,
+                allowed=_WHISPER_APT_PACKAGES,
+                timeout=300,
+                log_label="Whisper.cpp install",
+            )
+            if not apt["ok"]:
+                return _whisper_apt_failure(apt, missing_apt)
+            still_missing = _missing_whisper_apt()
+            if still_missing:
                 return jsonify({
                     "success": False,
-                    "error": f"Missing build dependencies: {', '.join(missing_deps)}. Auto-install failed: {str(e)}. Try: sudo apt install cmake build-essential"
+                    "needs_manual_install": True,
+                    "manual_command": manual_apt_command(still_missing),
+                    "missing_build_packages": still_missing,
+                    "error": (
+                        "Build tools still missing after install. "
+                        "Run the command below, then click Install Whisper again."
+                    ),
                 }), 400
+            logger.info("Voice API: Whisper.cpp build tools installed")
 
         # Remove placeholder directory if it exists but has no source
         if os.path.isdir(whisper_dir):

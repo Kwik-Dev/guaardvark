@@ -2,9 +2,9 @@
 name: image
 description: >-
   Generate or edit images on the user's own GPU through Guaardvark: single images,
-  instruction edits, consistent characters from the Cast Library, and batch runs of many
-  prompts. Use when the user asks to create, draw, render, visualize, edit, or
-  batch-generate images locally.
+  instruction edits, background cut-outs, inpaint and outpaint, consistent
+  characters from the Cast Library, and batch runs of many prompts. Use when the user asks to create, draw, render, visualize, edit,
+  or batch-generate images locally.
 ---
 
 # Images with Guaardvark
@@ -39,8 +39,35 @@ Read `setup` first if the backend or the `comfyui` plugin state is unknown.
 
 - `instruction` is the change ("put a cowboy hat on him", "make the shirt red"). The image the
   user just attached is used automatically; otherwise pass `image` as a path or URL.
-- `model` `auto` uses FLUX.1 Kontext when installed, else img2img on the current model.
-- For a brand-new picture use `generate_image`, not this.
+  Optional `reference_image_2` / `reference_image_3` (Qwen-Image-Edit only) for extra people or style.
+- `model` `auto` uses **Qwen-Image-Edit** when installed, else FLUX.1 Kontext, else img2img.
+  Override with `qwen-image-edit` or `kontext`. Install those packs from Manage Image Models →
+  Image editing (`qwen-image-edit`, `flux-kontext-dev`) — do not Install unless the user asked.
+- Same canvas, same pose. For a brand-new picture use `generate_image`. For a **new scene
+  that keeps a face** use `generate_identity`.
+
+## New scene from a face: MCP `generate_identity` (off by default)
+
+- Not exposed unless the server runs with `GUAARDVARK_IDENTITY_TOOL=1`: the likeness it keeps
+  has not passed verification yet. If the tool is absent, say so and offer `edit_image` instead.
+- Attach a likeness the user has the right to use (their photo or a Cast subject they uploaded).
+  `consented` must be `true`. Refuse if they have not confirmed that.
+- `prompt` is the new scene. Needs the PuLID identity pack (`pulid-flux`; Manage Image Models →
+  Image editing installs it with its face files, EVA02-CLIP and `flux-dev`). Comfy must have
+  been restarted after the PuLID-Flux custom node was added.
+- This is not a face swap onto an existing poster, and not an instruction edit of the same photo.
+
+## Background remove: MCP `remove_background`
+
+- Cuts the subject out of the attached photo (transparent PNG). ONNX matting, no diffusion;
+  needs a background-removal model from Manage Image Models → Image editing.
+- For a new background, remove first then `edit_image` / `generate_identity`, or describe the
+  new scene in `edit_image` if Qwen-Image-Edit is installed.
+
+## Inpaint / outpaint
+
+- `inpaint_image`: change or remove something ("remove the coffee cup"). Same backends as `edit_image`.
+- `outpaint_image`: extend the canvas (`left`/`right`/`top`/`bottom` pixels) and fill. Prefers Qwen.
 
 ## Many images: REST batch
 

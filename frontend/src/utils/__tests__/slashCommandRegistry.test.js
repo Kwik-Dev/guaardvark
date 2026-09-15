@@ -7,6 +7,9 @@ describe("built-in slash commands", () => {
     expect(names).toContain("/video");
     expect(names).toContain("/music-video");
     expect(names).toContain("/film-crew");
+    expect(names).toContain("/removebg");
+    expect(names).toContain("/outpaint");
+    expect(names).toContain("/inpaint");
     const mv = getBuiltInCommands().find((c) => c.name === "/music-video");
     expect(mv.usage).toContain("<song-path-or-id>");
     expect(mv.description.toLowerCase()).toContain("approve");

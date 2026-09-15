@@ -9,9 +9,11 @@ import {
   Chip,
   Switch,
   FormControlLabel,
+  Tooltip,
 } from "@mui/material";
 import MuiAlert from "@mui/material/Alert";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import voiceService from "../../api/voiceService";
 
 const LiveVolumeMeter = ({ threshold }) => {
@@ -88,7 +90,21 @@ const VoiceSettingsContent = ({
   installDefaultVoiceModel,
   testVoice,
   systemName,
+  whisperManualInstall,
+  onCopyWhisperCommand,
 }) => {
+  const whisperCliMissing = voiceStatus && voiceStatus.whisper_installed === false;
+  const pendingManual = whisperManualInstall
+    || (whisperCliMissing && voiceStatus?.can_auto_install === false && voiceStatus?.manual_command
+      ? {
+        command: voiceStatus.manual_command,
+        reason: 'Building Whisper.cpp needs cmake and a compiler. This machine asks for a sudo password, and Guaardvark cannot type that from a web page. Run the command below in a terminal on this machine, then click Install Whisper again.',
+      }
+      : null);
+  const installTooltip = voiceStatus?.install_method === 'pkexec'
+    ? 'Your desktop will ask for your password, then the build starts.'
+    : 'Clones whisper.cpp and builds it. May take a minute or two.';
+
   return (
     <>
       {isVoiceLoading && (
@@ -103,25 +119,63 @@ const VoiceSettingsContent = ({
         </MuiAlert>
       )}
 
-      {/* Whisper.cpp Installation Alert */}
-      {!isVoiceLoading && !voiceError && voiceStatus && voiceStatus.whisper_installed === false && (
-        <MuiAlert
-          severity="info"
-          sx={{ mb: 2 }}
-          action={
-            <Button
-              color="inherit"
-              size="small"
-              startIcon={isInstallingWhisper ? <CircularProgress size={16} color="inherit" /> : <FileDownloadIcon />}
-              onClick={installWhisperCpp}
-              disabled={isInstallingWhisper}
-            >
-              {isInstallingWhisper ? 'Building...' : 'Install Whisper'}
-            </Button>
-          }
-        >
-          Speech recognition (Whisper.cpp) is not installed. Install it to enable voice input.
-        </MuiAlert>
+      {!isVoiceLoading && !voiceError && whisperCliMissing && (
+        <>
+          <MuiAlert
+            severity="info"
+            sx={{ mb: pendingManual ? 1 : 2 }}
+            action={
+              <Tooltip title={installTooltip}>
+                <span>
+                  <Button
+                    color="inherit"
+                    size="small"
+                    startIcon={isInstallingWhisper ? <CircularProgress size={16} color="inherit" /> : <FileDownloadIcon />}
+                    onClick={installWhisperCpp}
+                    disabled={isInstallingWhisper}
+                  >
+                    {isInstallingWhisper ? 'Building...' : 'Install Whisper'}
+                  </Button>
+                </span>
+              </Tooltip>
+            }
+          >
+            Speech recognition (Whisper.cpp) is not installed. Install it to enable voice input.
+          </MuiAlert>
+          {pendingManual && (
+            <MuiAlert severity="warning" sx={{ mb: 2 }}>
+              <Typography variant="body2" sx={{ mb: 1 }}>{pendingManual.reason}</Typography>
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1,
+                  p: 1,
+                  borderRadius: 1,
+                  bgcolor: 'action.hover',
+                  fontFamily: 'monospace',
+                  fontSize: '0.8rem',
+                  overflowX: 'auto',
+                }}
+              >
+                <Box component="code" sx={{ flex: 1, whiteSpace: 'pre' }}>
+                  {pendingManual.command}
+                </Box>
+                <Tooltip title="Copy command">
+                  <Button
+                    size="small"
+                    color="inherit"
+                    startIcon={<ContentCopyIcon fontSize="small" />}
+                    onClick={() => onCopyWhisperCommand?.(pendingManual.command)}
+                    sx={{ flexShrink: 0 }}
+                  >
+                    Copy
+                  </Button>
+                </Tooltip>
+              </Box>
+            </MuiAlert>
+          )}
+        </>
       )}
 
       {/* Whisper Model Download Alert */}

@@ -40,17 +40,55 @@ def comfyui_models_dir() -> Path:
     return Path(COMFYUI_DIR) / "models"
 
 
-def is_model_installed(model_id: str) -> bool:
-    """True when every check_file for model_id exists and is non-empty."""
-    entry = VIDEO_MODEL_REGISTRY.get(model_id)
+def background_removal_dir() -> Path:
+    """Home of the background-removal ONNX weights (dest "bgremove")."""
+    root = os.environ.get("GUAARDVARK_ROOT") or str(Path(__file__).resolve().parents[2])
+    return Path(root) / "data" / "models" / "background_removal"
+
+
+def resolve_entry_dir(entry: dict) -> Path:
+    """Directory an entry's files land in and are checked from.
+
+    Default: ComfyUI/models/<local_subdir>. `dest` names another loader's home
+    when the code that reads the file is not ComfyUI: "facexlib" (facexlib
+    downloads into its own package folder unless the file is already there),
+    "bgremove" (the backend's background-removal service), "hf_cache" (the
+    Hugging Face cache, for nodes that call hf_hub_download; the directory is
+    only used for progress, the ready check goes through the cache probe).
+    """
+    dest = entry.get("dest")
+    if dest == "facexlib":
+        try:
+            import facexlib
+            return Path(facexlib.__file__).resolve().parent / "weights"
+        except Exception:  # noqa: BLE001 — no facexlib: the node cannot run anyway
+            return comfyui_models_dir() / "facedetection"
+    if dest == "bgremove":
+        return background_removal_dir()
+    if dest == "hf_cache":
+        from backend.services.local_weights import hf_repo_cache_dir
+        return hf_repo_cache_dir(entry["hf_repo"])
+    return comfyui_models_dir() / entry.get("local_subdir", "")
+
+
+def entry_files_present(entry: dict) -> bool:
+    """True when every file the entry declares is on this machine, non-empty."""
     if not entry:
         return False
-    base = comfyui_models_dir() / entry.get("local_subdir", "")
+    if entry.get("dest") == "hf_cache":
+        from backend.services.local_weights import is_cached
+        return all(is_cached(entry["hf_repo"], f["src"]) for f in entry.get("files", []))
+    base = resolve_entry_dir(entry)
     for check_file in entry.get("check_files", []):
         fpath = base / check_file
         if not fpath.exists() or fpath.stat().st_size == 0:
             return False
-    return True
+    return bool(entry.get("check_files"))
+
+
+def is_model_installed(model_id: str) -> bool:
+    """True when every check_file for model_id exists and is non-empty."""
+    return entry_files_present(VIDEO_MODEL_REGISTRY.get(model_id))
 
 
 # ── MiniMax H3 shared capability data ────────────────────────────────────
@@ -566,6 +604,175 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 9.85,
         "vram_mb": 14000,
         "type": "flux-edit",
+    },
+    # ── Qwen-Image-Edit 2509 FP8 — Chat editor + identity-in-a-new-scene ────────
+    # Official Comfy-Org split files (Apache-2.0). FP8 is the 16 GB path; the 2511
+    # bf16 blueprint wants ~40 GB and is not shipped. Sampler floor is Comfy's
+    # own "Original" table (20 steps / CFG 2.5), not the 4-step Lightning LoRA.
+    "qwen-image-vae": {
+        "name": "Qwen-Image VAE",
+        "description": "Shared VAE for Qwen-Image and Qwen-Image-Edit.",
+        "hf_repo": "Comfy-Org/Qwen-Image_ComfyUI",
+        "local_subdir": "vae",
+        "files": [
+            {"src": "split_files/vae/qwen_image_vae.safetensors", "dst": "qwen_image_vae.safetensors"},
+        ],
+        "size_gb": 0.25,
+        "vram_mb": 0,
+        "type": "vae",
+    },
+    "qwen-image-clip": {
+        "name": "Qwen2.5-VL 7B text encoder (FP8)",
+        "description": "CLIPLoader type=qwen_image for Qwen-Image-Edit. Same file Comfy's "
+                       "official edit blueprint loads.",
+        "hf_repo": "Comfy-Org/HunyuanVideo_1.5_repackaged",
+        "local_subdir": "text_encoders",
+        "files": [
+            {
+                "src": "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                "dst": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+            },
+        ],
+        "size_gb": 8.9,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "qwen-image-edit": {
+        "name": "Qwen-Image-Edit 2509 (FP8)",
+        "description": "Instruction image editing with up to three reference images — "
+                       "identity-preserving new scenes, relight, text-on-image. Apache-2.0. "
+                       "FP8 pack for a 16 GB card. Chat uses this for edit_image when installed.",
+        "hf_repo": "Comfy-Org/Qwen-Image-Edit_ComfyUI",
+        "local_subdir": "diffusion_models",
+        "files": [
+            {
+                "src": "split_files/diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+                "dst": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+            },
+        ],
+        "requires": ["qwen-image-clip", "qwen-image-vae"],
+        "size_gb": 19.4,
+        # Measured 2026-09-15 on a 16 GB card: ComfyUI loads 11.2 GB of the
+        # FP8 transformer and offloads 8.2 GB; peak 14.7 GB used on the card
+        # with 2.2 GB of other processes' contexts resident, 4.4 s/step, a
+        # 20-step 768x1024 edit in 108 s. 14000 + the admission headroom asked
+        # for more than the card has and refused every edit.
+        "vram_mb": 12000,
+        "min_steps": 20,
+        "type": "qwen-edit",
+    },
+    # ── PuLID-FLUX — one face photo → new prompt on flux-dev (no LoRA train) ──
+    "pulid-antelopev2": {
+        "name": "InsightFace AntelopeV2 (PuLID)",
+        "description": "Face analysis pack PuLID-FLUX needs. Small ONNX files.",
+        "hf_repo": "DIAMONIK7777/antelopev2",
+        "local_subdir": "insightface/models/antelopev2",
+        "files": [
+            {"src": "1k3d68.onnx", "dst": "1k3d68.onnx"},
+            {"src": "2d106det.onnx", "dst": "2d106det.onnx"},
+            {"src": "genderage.onnx", "dst": "genderage.onnx"},
+            {"src": "glintr100.onnx", "dst": "glintr100.onnx"},
+            {"src": "scrfd_10g_bnkps.onnx", "dst": "scrfd_10g_bnkps.onnx"},
+        ],
+        "size_gb": 0.35,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "pulid-flux": {
+        "name": "PuLID-FLUX v0.9.1",
+        "description": "Zero-shot face identity on FLUX.1-dev: attach a likeness, describe a "
+                       "new scene. Needs flux-dev installed. Chat tool generate_identity. "
+                       "Consent-gated — only a face the user has the right to use.",
+        "hf_repo": "guozinan/PuLID",
+        "local_subdir": "pulid",
+        "files": [
+            {"src": "pulid_flux_v0.9.1.safetensors", "dst": "pulid_flux_v0.9.1.safetensors"},
+        ],
+        "requires": ["pulid-antelopev2", "eva02-clip", "facexlib-face", "flux-dev"],
+        "size_gb": 1.1,
+        # Measured 2026-09-15 on a 16 GB card: FLUX.1-dev FP8 + PuLID + EVA02
+        # + InsightFace peaked at 14.6 GB used with 2.2 GB of other processes'
+        # contexts resident; a 20-step 768x1024 render in 28 s.
+        "vram_mb": 12000,
+        "min_steps": 20,
+        "type": "pulid",
+    },
+    # ── PuLID companions the custom node would otherwise fetch on its own ──
+    # ComfyUI-PuLID-Flux loads EVA02-CLIP through hf_hub_download and facexlib's
+    # detector and parser from GitHub on first use. Installed here instead, into
+    # the exact places those loaders read: the Hugging Face cache (ComfyUI runs
+    # with HF_HUB_OFFLINE=1, so a cache hit is the only way the node finds it)
+    # and facexlib's own weights folder. `dest` names that home; see
+    # resolve_entry_dir().
+    "eva02-clip": {
+        "name": "EVA02-CLIP-L/14 336 (PuLID)",
+        "description": "Vision encoder PuLID-FLUX reads the face with. Lands in the "
+                       "Hugging Face cache, where the PuLID node looks for it.",
+        "hf_repo": "QuanSun/EVA-CLIP",
+        "dest": "hf_cache",
+        "local_subdir": "clip",
+        "files": [
+            {"src": "EVA02_CLIP_L_336_psz14_s6B.pt", "dst": "EVA02_CLIP_L_336_psz14_s6B.pt"},
+        ],
+        "size_gb": 0.86,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "facexlib-face": {
+        "name": "facexlib face detector and parser (PuLID)",
+        "description": "RetinaFace ResNet50 detector and ParseNet parser PuLID crops the "
+                       "face with. Lands in facexlib's weights folder.",
+        "dest": "facexlib",
+        "local_subdir": "facedetection",
+        "direct_urls": [
+            {
+                "url": "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth",
+                "dst": "detection_Resnet50_Final.pth",
+            },
+            {
+                "url": "https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth",
+                "dst": "parsing_parsenet.pth",
+            },
+        ],
+        "size_gb": 0.19,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    # ── Background removal (chat remove_background, Batch Image transparent
+    # background). ONNX weights published by the rembg project; inference is
+    # backend/services/background_removal.py on the onnxruntime already shipped.
+    # Sizes are the release assets' Content-Length, read 2026-09-15.
+    "bgremove-birefnet": {
+        "name": "Background removal, BiRefNet general",
+        "description": "Cuts the subject out of a photo with a clean alpha edge (hair, "
+                       "thin parts). 1024 px matting; a few seconds on CPU. MIT.",
+        "dest": "bgremove",
+        "local_subdir": "background_removal",
+        "direct_urls": [
+            {
+                "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/BiRefNet-general-epoch_244.onnx",
+                "dst": "BiRefNet-general-epoch_244.onnx",
+            },
+        ],
+        "size_gb": 0.97,
+        "vram_mb": 0,
+        "type": "editing",
+    },
+    "bgremove-u2net": {
+        "name": "Background removal, u2net",
+        "description": "The small cut-out model: 320 px matting, under a second on CPU, "
+                       "softer edges than BiRefNet. Apache-2.0.",
+        "dest": "bgremove",
+        "local_subdir": "background_removal",
+        "direct_urls": [
+            {
+                "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
+                "dst": "u2net.onnx",
+            },
+        ],
+        "size_gb": 0.18,
+        "vram_mb": 0,
+        "type": "editing",
     },
     # ── LTX-2.3 (Lightricks) — 16GB Ada: distilled FP8 + Gemma FP4 ──────────────
     # Requires ComfyUI ≥ 0.16.1 (native LTX-2.3). Transformer-only FP8 lives in

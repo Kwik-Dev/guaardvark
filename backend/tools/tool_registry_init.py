@@ -6,6 +6,7 @@ This module should be imported during application startup.
 """
 
 import logging
+import os
 from typing import List, Optional, Dict
 
 from backend.services.agent_tools import (
@@ -616,6 +617,27 @@ def register_image_tools() -> List[str]:
         logger.debug("Registered: EditImageTool")
     except Exception as e:
         logger.warning(f"Failed to register edit_image tool: {e}")
+
+    # generate_identity stays off until its likeness is verified: on this
+    # machine PuLID on FLUX.1-dev FP8 returned a younger, dark-haired man for a
+    # grey-bearded reference at weights 1.0 and 1.5 (2026-09-15). Set
+    # GUAARDVARK_IDENTITY_TOOL=1 to expose it while that is worked on.
+    _photo_tools = [
+        ("RemoveBackgroundTool", "remove_background"),
+        ("InpaintImageTool", "inpaint_image"),
+        ("OutpaintImageTool", "outpaint_image"),
+    ]
+    if os.environ.get("GUAARDVARK_IDENTITY_TOOL") == "1":
+        _photo_tools.append(("GenerateIdentityTool", "generate_identity"))
+    for _cls_name, _tool_name in _photo_tools:
+        try:
+            from backend.tools import image_tools as _image_tools
+            register_tool(getattr(_image_tools, _cls_name)())
+            registered.append(_tool_name)
+            _tool_categories[_tool_name] = "image"
+            logger.debug("Registered: %s", _cls_name)
+        except Exception as e:
+            logger.warning("Failed to register %s: %s", _tool_name, e)
 
     return registered
 

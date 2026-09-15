@@ -128,6 +128,22 @@ IMAGE_FAMILIES = (
         "pipeline_tags": ("flux",),
         "index_classes": ("FluxPipeline", "FluxImg2ImgPipeline", "FluxControlPipeline"),
     },
+    {
+        "id": "qwen-image-edit",
+        "domain": "image",
+        "wired": True,
+        "label": "Qwen-Image-Edit",
+        "engine": "comfy",
+        "like": "qwen-image-edit",
+        "roles": ("generation",),
+        "layout": "comfy_files",
+        "single_file": True,
+        "lora_engine": None,
+        "local_subdir": "diffusion_models",
+        "tokens": ("qwen-image-edit", "qwenimage-edit", "qwen_image_edit"),
+        "pipeline_tags": ("qwen-image-edit",),
+        "index_classes": ("QwenImageEditPipeline", "QwenImageEditPlusPipeline"),
+    },
 )
 
 UNWIRED_FAMILIES = (
@@ -535,6 +551,11 @@ def match_families(
             or tag in {t.lower() for t in row.get("pipeline_tags") or ()}
             or (cls and cls in (row.get("index_classes") or ()))
         )
+        if row["id"] == "qwen-image" and (
+            "edit" in blob or (cls and "edit" in cls.lower())
+        ):
+            # Qwen-Image-Edit is a wired family; do not refuse it as unwired t2i.
+            continue
         if hit:
             unwired.append({
                 "family": row["id"],

@@ -69,8 +69,28 @@ try:
         comfyui_models_dir as _comfy_models_dir,
     )
     KONTEXT_UNET = _VMR.get("flux-kontext-dev", {}).get("hf_filename", "flux1-kontext-dev-Q6_K.gguf")
+    _QWEN_EDIT = _VMR.get("qwen-image-edit") or {}
+    QWEN_EDIT_UNET = ((_QWEN_EDIT.get("files") or [{}])[0].get("dst")
+                      or "qwen_image_edit_2509_fp8_e4m3fn.safetensors")
+    QWEN_EDIT_MIN_STEPS = int(_QWEN_EDIT.get("min_steps") or 20)
+    _QWEN_CLIP = _VMR.get("qwen-image-clip") or {}
+    QWEN_EDIT_CLIP = ((_QWEN_CLIP.get("files") or [{}])[0].get("dst")
+                      or "qwen_2.5_vl_7b_fp8_scaled.safetensors")
+    _QWEN_VAE = _VMR.get("qwen-image-vae") or {}
+    QWEN_EDIT_VAE = ((_QWEN_VAE.get("files") or [{}])[0].get("dst")
+                     or "qwen_image_vae.safetensors")
+    _PULID = _VMR.get("pulid-flux") or {}
+    PULID_FLUX_FILE = ((_PULID.get("files") or [{}])[0].get("dst")
+                       or "pulid_flux_v0.9.1.safetensors")
+    PULID_MIN_STEPS = int(_PULID.get("min_steps") or 20)
 except Exception:  # pragma: no cover - registry import is environment-specific
     KONTEXT_UNET = "flux1-kontext-dev-Q6_K.gguf"
+    QWEN_EDIT_UNET = "qwen_image_edit_2509_fp8_e4m3fn.safetensors"
+    QWEN_EDIT_MIN_STEPS = 20
+    QWEN_EDIT_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+    QWEN_EDIT_VAE = "qwen_image_vae.safetensors"
+    PULID_FLUX_FILE = "pulid_flux_v0.9.1.safetensors"
+    PULID_MIN_STEPS = 20
     _is_model_installed = None
     _comfy_models_dir = None
 
@@ -85,6 +105,15 @@ DEFAULT_NEGATIVE = (
     "human-animal hybrid, anthropomorphic, extra head, two heads, mutated anatomy"
 )
 
+
+
+def _registry_vram(model_id: str, default: int = 12000) -> int:
+    """VRAM debit for a chat edit graph: the registry entry's measured value."""
+    try:
+        from backend.services.video_model_registry import vram_mb_for_model
+        return int(vram_mb_for_model(model_id, default=default))
+    except Exception:  # noqa: BLE001 — registry import is environment-specific
+        return default
 
 class ComfyUIImageGenerator:
     """Implements the storyboard ImageGenerator protocol with real LoRA support.
@@ -427,6 +456,241 @@ class ComfyUIImageGenerator:
             return f.exists() and f.stat().st_size > 0
         except Exception:
             return False
+
+    def _registry_installed(self, model_id: str) -> bool:
+        if _is_model_installed:
+            try:
+                return bool(_is_model_installed(model_id))
+            except Exception:
+                return False
+        return False
+
+    def qwen_edit_installed(self) -> bool:
+        return self._registry_installed("qwen-image-edit")
+
+    def pulid_installed(self) -> bool:
+        return self._registry_installed("pulid-flux") and self._registry_installed("flux-dev")
+
+    def _build_qwen_edit_workflow(
+        self, *, src_names: list[str], instruction: str, steps: int,
+        cfg: float, seed: int, pad: dict | None = None,
+    ) -> dict:
+        """Official Comfy Qwen-Image-Edit 2509 graph (FP8, AuraFlow shift 3, CFGNorm).
+
+        Sampler floor is the Comfy Original table: 20 steps / CFG 2.5. The 4-step
+        Lightning LoRA is not in this graph — it is a different quality contract.
+        """
+        n = max(int(steps), QWEN_EDIT_MIN_STEPS)
+        cfg = float(cfg) if cfg else 2.5
+        names = [s for s in (src_names or []) if s][:3]
+        if not names:
+            raise RuntimeError("Qwen-Image-Edit needs at least one source image")
+        wf: dict = {
+            "unet": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": QWEN_EDIT_UNET, "weight_dtype": "default"},
+            },
+            "clip": {
+                "class_type": "CLIPLoader",
+                "inputs": {"clip_name": QWEN_EDIT_CLIP, "type": "qwen_image"},
+            },
+            "vae_loader": {"class_type": "VAELoader", "inputs": {"vae_name": QWEN_EDIT_VAE}},
+            "cfg_norm": {
+                "class_type": "CFGNorm",
+                "inputs": {"model": ["unet", 0], "strength": 1.0},
+            },
+            "shift": {
+                "class_type": "ModelSamplingAuraFlow",
+                "inputs": {"model": ["cfg_norm", 0], "shift": 3.0},
+            },
+        }
+        image_src = None
+        for i, name in enumerate(names):
+            nid = f"load{i+1}"
+            wf[nid] = {"class_type": "LoadImage", "inputs": {"image": name}}
+            img_ref = [nid, 0]
+            if i == 0:
+                if pad and any(int(pad.get(k) or 0) for k in ("left", "top", "right", "bottom")):
+                    wf["pad"] = {
+                        "class_type": "ImagePadForOutpaint",
+                        "inputs": {
+                            "image": img_ref,
+                            "left": int(pad.get("left") or 0),
+                            "top": int(pad.get("top") or 0),
+                            "right": int(pad.get("right") or 0),
+                            "bottom": int(pad.get("bottom") or 0),
+                            "feathering": int(pad.get("feathering") or 40),
+                        },
+                    }
+                    img_ref = ["pad", 0]
+                wf["scale"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": img_ref}}
+                image_src = ["scale", 0]
+                wf["encode"] = {
+                    "class_type": "VAEEncode",
+                    "inputs": {"pixels": ["scale", 0], "vae": ["vae_loader", 0]},
+                }
+            # Plus node: image1 is the scaled/padded primary; 2 and 3 are extra refs.
+            if i == 0:
+                wf["_img1"] = image_src
+            elif i == 1:
+                wf["_img2"] = img_ref
+            else:
+                wf["_img3"] = img_ref
+        pos_inputs = {
+            "clip": ["clip", 0],
+            "prompt": instruction,
+            "vae": ["vae_loader", 0],
+            "image1": wf.pop("_img1"),
+        }
+        img2 = wf.pop("_img2", None)
+        img3 = wf.pop("_img3", None)
+        if img2:
+            pos_inputs["image2"] = img2
+        if img3:
+            pos_inputs["image3"] = img3
+        wf["pos"] = {"class_type": "TextEncodeQwenImageEditPlus", "inputs": pos_inputs}
+        neg_inputs = dict(pos_inputs)
+        neg_inputs["prompt"] = ""
+        wf["neg"] = {"class_type": "TextEncodeQwenImageEditPlus", "inputs": neg_inputs}
+        wf["sampler"] = {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": seed, "steps": n, "cfg": cfg,
+                "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                "model": ["shift", 0], "positive": ["pos", 0],
+                "negative": ["neg", 0], "latent_image": ["encode", 0],
+            },
+        }
+        wf["vae"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]}}
+        wf["save"] = {"class_type": "SaveImage", "inputs": {"filename_prefix": "edit-qwen", "images": ["vae", 0]}}
+        return wf
+
+    def _build_pulid_workflow(
+        self, *, src_image_name: str, prompt: str, width: int, height: int,
+        steps: int, seed: int, weight: float = 1.0,
+    ) -> dict:
+        n = max(int(steps), PULID_MIN_STEPS)
+        return {
+            "unet": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": self.flux_dev_unet, "weight_dtype": FLUX_DEV_WEIGHT_DTYPE},
+            },
+            "clip": {
+                "class_type": "DualCLIPLoader",
+                "inputs": {"clip_name1": FLUX_DEV_T5, "clip_name2": self.flux_clip, "type": "flux"},
+            },
+            "vae_loader": {"class_type": "VAELoader", "inputs": {"vae_name": self.flux_vae}},
+            "pulid": {"class_type": "PulidFluxModelLoader", "inputs": {"pulid_file": PULID_FLUX_FILE}},
+            "insight": {"class_type": "PulidFluxInsightFaceLoader", "inputs": {"provider": "CPU"}},
+            "eva": {"class_type": "PulidFluxEvaClipLoader", "inputs": {}},
+            "load": {"class_type": "LoadImage", "inputs": {"image": src_image_name}},
+            "apply": {
+                "class_type": "ApplyPulidFlux",
+                "inputs": {
+                    "model": ["unet", 0],
+                    "pulid_flux": ["pulid", 0],
+                    "eva_clip": ["eva", 0],
+                    "face_analysis": ["insight", 0],
+                    "image": ["load", 0],
+                    "weight": float(weight),
+                    "start_at": 0.0,
+                    "end_at": 1.0,
+                    "unique_id": "pulid_apply",
+                },
+            },
+            "pos": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}},
+            "guid": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["pos", 0], "guidance": FLUX_DEV_GUIDANCE}},
+            "neg": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["clip", 0]}},
+            "latent": {
+                "class_type": "EmptySD3LatentImage",
+                "inputs": {"width": int(width), "height": int(height), "batch_size": 1},
+            },
+            "sampler": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": seed, "steps": n, "cfg": 1.0,
+                    "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
+                    "model": ["apply", 0], "positive": ["guid", 0],
+                    "negative": ["neg", 0], "latent_image": ["latent", 0],
+                },
+            },
+            "vae": {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]}},
+            "save": {"class_type": "SaveImage", "inputs": {"filename_prefix": "identity-pulid", "images": ["vae", 0]}},
+        }
+
+    def _run_edit_graph(self, workflow: dict, output_path: str, *, job: str, vram_mb: int, timeout: int) -> str:
+        from backend.services.gpu_resource_policy import gpu_session
+        from backend.services.job_types import JobKind
+        import uuid as _uuid
+        with gpu_session(
+            JobKind.VIDEO_RENDER, f"{job}_{_uuid.uuid4().hex[:8]}",
+            on_busy="raise", evict_ollama=True, free_comfyui=True,
+            vram_estimate_mb=vram_mb, require_fit=True, cross_process=True,
+        ):
+            prompt_id = self._queue(workflow)
+            if not prompt_id:
+                raise RuntimeError("ComfyUI did not accept the image workflow")
+            outputs = self._wait(prompt_id, timeout=timeout)
+            if outputs is None:
+                raise RuntimeError(f"ComfyUI image job timed out (prompt {prompt_id})")
+            result = self._fetch_first_image(outputs, output_path)
+            if result is None:
+                raise RuntimeError(f"ComfyUI produced no image for prompt {prompt_id}")
+        return result
+
+    def edit_image_qwen(
+        self, *, image_paths: list[str], instruction: str, output_path: str,
+        steps: int = 20, cfg: float = 2.5, seed: int = 42, pad: dict | None = None,
+    ) -> str:
+        if not self._available():
+            raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url} — cannot edit image")
+        if not self.qwen_edit_installed():
+            from backend.services.image_editing_packs import missing_message
+            raise RuntimeError(missing_message("edit_image"))
+        names = []
+        for p in image_paths:
+            if not p or not os.path.exists(p):
+                raise RuntimeError(f"Source image not found: {p}")
+            name = self._upload_image_to_comfyui(p)
+            if not name:
+                raise RuntimeError("Failed to upload the source image to ComfyUI")
+            names.append(name)
+        workflow = self._build_qwen_edit_workflow(
+            src_names=names, instruction=instruction,
+            steps=steps, cfg=cfg, seed=seed, pad=pad,
+        )
+        result = self._run_edit_graph(
+            workflow, output_path, job="chat_qwen_edit",
+            vram_mb=_registry_vram("qwen-image-edit"), timeout=600,
+        )
+        logger.info("Qwen-Image-Edit complete: %s", result)
+        return result
+
+    def generate_with_identity(
+        self, *, image_path: str, prompt: str, output_path: str,
+        width: int = 768, height: int = 1024, steps: int = 20, seed: int = 42,
+        weight: float = 1.0,
+    ) -> str:
+        if not self._available():
+            raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url}")
+        if not os.path.exists(image_path):
+            raise RuntimeError(f"Source image not found: {image_path}")
+        if not self.pulid_installed():
+            from backend.services.image_editing_packs import missing_message
+            raise RuntimeError(missing_message("generate_identity"))
+        src_name = self._upload_image_to_comfyui(image_path)
+        if not src_name:
+            raise RuntimeError("Failed to upload the face reference to ComfyUI")
+        workflow = self._build_pulid_workflow(
+            src_image_name=src_name, prompt=prompt,
+            width=width, height=height, steps=steps, seed=seed, weight=weight,
+        )
+        result = self._run_edit_graph(
+            workflow, output_path, job="chat_pulid",
+            vram_mb=_registry_vram("pulid-flux"), timeout=600,
+        )
+        logger.info("PuLID-FLUX identity generate complete: %s", result)
+        return result
 
     def _build_kontext_workflow(self, *, src_image_name: str, instruction: str,
                                 steps: int, guidance: float, seed: int) -> dict:

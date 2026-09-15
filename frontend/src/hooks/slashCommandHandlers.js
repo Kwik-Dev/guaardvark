@@ -20,6 +20,10 @@ export async function executeBuiltinCommand(name, args, context) {
     "/model": handleModel,
     "/imagemodel": handleImageModel,
     "/imagine": handleImagine,
+    "/removebg": handleRemoveBg,
+    "/inpaint": handleInpaint,
+    "/outpaint": handleOutpaint,
+    "/identity": handleIdentity,
     "/video": handleVideo,
     "/music-video": handleMusicVideo,
     "/film-crew": handleFilmCrew,
@@ -199,11 +203,13 @@ async function handleModel(args, { addMessage }) {
 // /imagemodel [name]
 // ============================================================
 
-const KONTEXT_EDIT_OPTION = {
-  id: "kontext",
-  name: "FLUX.1 Kontext [dev] (instruction image editing)",
-  is_downloaded: true,
-};
+// Image-editing packs (Qwen-Image-Edit, Kontext, PuLID, background removal)
+// come back with the image models list; each row names the chat tools it enables.
+function formatEditBackendLine(m) {
+  const flag = m.installed ? "installed" : "not installed";
+  const tools = (m.tools || []).join(", ");
+  return `- \`${m.id}\` — ${m.name} (${flag})${tools ? ` · ${tools}` : ""}`;
+}
 
 async function handleImageModel(args, { addMessage }) {
   if (!args) {
@@ -214,17 +220,19 @@ async function handleImageModel(args, { addMessage }) {
       ]);
       const data = await modelsRes.json();
       const models = data?.data?.models || data?.models || [];
-      const downloaded = [
-        KONTEXT_EDIT_OPTION,
-        ...models.filter((m) => m.is_downloaded),
-      ];
+      const editBackends = data?.data?.editing || data?.editing || [];
+      const downloaded = models.filter((m) => m.is_downloaded);
+      const editLines = editBackends.length
+        ? editBackends.map(formatEditBackendLine).join("\n")
+        : "_(could not load edit backends)_";
       addMessage({
         role: "system",
         content: `**Current image model:** \`${current}\`\n\n`
-          + `Used for \`/imagine\`, **generate_image**, and **edit_image** in chat.\n\n`
-          + `**Available:**\n${downloaded.map((m) => `- \`${m.id}\` — ${m.name}`).join("\n")}\n\n`
-          + `**Not downloaded:**\n${models.filter((m) => !m.is_downloaded).map((m) => `- \`${m.id}\``).join("\n") || "_(none)_"}\n\n`
-          + `_Tip: \`kontext\` / \`auto\` use FLUX Kontext for edits when installed; other models use img2img._`,
+          + `Used for \`/imagine\` and **generate_image**. Edits (\`edit_image\`, \`/inpaint\`) auto-pick **Qwen-Image-Edit** when installed, else **FLUX Kontext**.\n\n`
+          + `**Image editing packs** (Install from Manage Image Models → Image editing):\n${editLines}\n\n`
+          + `**Generation — downloaded:**\n${downloaded.map((m) => `- \`${m.id}\` — ${m.name}`).join("\n") || "_(none)_"}\n\n`
+          + `**Generation — not downloaded:**\n${models.filter((m) => !m.is_downloaded).map((m) => `- \`${m.id}\``).join("\n") || "_(none)_"}\n\n`
+          + `_Tip: \`/imagemodel auto\` uses Qwen-Image-Edit for instruction edits when that pack is installed._`,
         tempId: `imgmodel-${Date.now()}`,
         type: "command",
       });
@@ -235,11 +243,24 @@ async function handleImageModel(args, { addMessage }) {
   }
 
   const modelName = args.trim().toLowerCase();
-  if (modelName === "kontext") {
-    await saveImageModelChoice("kontext");
+  if (modelName === "auto") {
+    await saveImageModelChoice("auto");
     addMessage({
       role: "system",
-      content: "Image model switched to **kontext** (FLUX.1 Kontext instruction editing).",
+      content: "Image model switched to **auto** (Qwen-Image-Edit for edits when installed, else Kontext, else img2img).",
+      tempId: `imgmodel-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+  if (modelName === "kontext" || modelName === "flux-kontext-dev" || modelName === "qwen-image-edit" || modelName === "qwen") {
+    const id = (modelName === "qwen" || modelName === "qwen-image-edit") ? "qwen-image-edit" : "kontext";
+    await saveImageModelChoice(id);
+    addMessage({
+      role: "system",
+      content: id === "qwen-image-edit"
+        ? "Image edits will use **qwen-image-edit** when that pack is installed."
+        : "Image edits will use **kontext** (FLUX.1 Kontext) when installed.",
       tempId: `imgmodel-${Date.now()}`,
       type: "command",
     });
@@ -269,7 +290,7 @@ async function handleImageModel(args, { addMessage }) {
         });
       }
     } else {
-      const available = ["kontext", ...models.filter((m) => m.is_downloaded).map((m) => m.id)].join(", ");
+      const available = ["auto", "qwen-image-edit", "kontext", ...models.filter((m) => m.is_downloaded).map((m) => m.id)].join(", ");
       addMessage({
         role: "system",
         content: `Model \`${modelName}\` not found. Available: ${available}`,
@@ -306,6 +327,79 @@ async function handleImagine(args, { addMessage, onSendMessage }) {
     image_model: model,
   });
 
+  return { handled: true };
+}
+
+async function handleRemoveBg(args, { onSendMessage }) {
+  onSendMessage("/removebg", null, {
+    direct_tool: "remove_background",
+    direct_tool_params: {},
+    slash_command: "removebg",
+  });
+  return { handled: true };
+}
+
+async function handleInpaint(args, { addMessage, onSendMessage }) {
+  if (!args) {
+    addMessage({ role: "system", content: "Usage: `/inpaint <instruction>` — attach a photo, or it uses the last image in this chat.", tempId: `img-${Date.now()}`, type: "command" });
+    return { handled: true };
+  }
+  onSendMessage(`/inpaint ${args}`, null, {
+    direct_tool: "inpaint_image",
+    direct_tool_params: { instruction: args },
+    slash_command: "inpaint",
+    slash_args: args,
+  });
+  return { handled: true };
+}
+
+const OUTPAINT_SIDES = new Set(["left", "right", "top", "bottom", "all"]);
+
+function parseOutpaintArgs(args) {
+  const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
+  const pad = { left: 0, right: 0, top: 0, bottom: 0 };
+  let i = 0;
+  while (i < tokens.length && OUTPAINT_SIDES.has(tokens[i].toLowerCase())) {
+    const side = tokens[i].toLowerCase();
+    if (side === "all") {
+      pad.left = pad.right = pad.top = pad.bottom = 256;
+    } else {
+      pad[side] = 256;
+    }
+    i += 1;
+  }
+  const instruction = tokens.slice(i).join(" ").trim();
+  const named = pad.left || pad.right || pad.top || pad.bottom;
+  return named ? { ...pad, instruction } : { instruction };
+}
+
+async function handleOutpaint(args, { onSendMessage }) {
+  const parsed = parseOutpaintArgs(args);
+  onSendMessage(`/outpaint ${args || ""}`.trim(), null, {
+    direct_tool: "outpaint_image",
+    direct_tool_params: parsed,
+    slash_command: "outpaint",
+    slash_args: args || "",
+  });
+  return { handled: true };
+}
+
+async function handleIdentity(args, { addMessage, onSendMessage }) {
+  if (!args) {
+    addMessage({
+      role: "system",
+      content: "Usage: `/identity <prompt>` — attach a face photo you have the right to use (your likeness or a Cast subject).",
+      tempId: `img-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+  onSendMessage(`/identity ${args}`, null, {
+    direct_tool: "generate_identity",
+    direct_tool_params: { prompt: args, consented: true },
+    slash_command: "identity",
+    slash_args: args,
+  });
   return { handled: true };
 }
 

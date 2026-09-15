@@ -233,12 +233,8 @@ def _video_status_as_audio(fallback: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _hf_repo_cache_dir(repo_id: str) -> Path:
-    try:
-        from huggingface_hub.constants import HF_HUB_CACHE
-        root = Path(HF_HUB_CACHE)
-    except Exception:
-        root = Path.home() / ".cache" / "huggingface" / "hub"
-    return root / f"models--{repo_id.replace('/', '--')}"
+    from backend.services.local_weights import hf_repo_cache_dir
+    return hf_repo_cache_dir(repo_id)
 
 
 def _dir_bytes(d: Path) -> int:

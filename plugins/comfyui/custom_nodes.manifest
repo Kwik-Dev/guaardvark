@@ -17,6 +17,12 @@
 #   ImageResizeKJ               -> ComfyUI-KJNodes
 #   CogVideo* / DownloadAndLoad -> ComfyUI-CogVideoXWrapper
 #   FaceRestoreCF*              -> facerestore_cf
+#   ApplyPulidFlux / PulidFlux* -> ComfyUI-PuLID-Flux  (FLUX identity; not the
+#                                 on-disk PuLID_ComfyUI pack, which is SDXL-only)
+#
+# Patches in custom_nodes.patches/<node>.patch are applied on top of the pinned
+# revision by install_deps.sh (ComfyUI-PuLID-Flux: forward_orig accepts the
+# kwargs ComfyUI >= 0.3.60 passes; upstream is unmaintained).
 #
 # Pins are the master box's tested revisions (captured 2026-08-04). To bump:
 # update the node on master, test video generation, then update the SHA here.
@@ -27,3 +33,4 @@ ComfyUI-Frame-Interpolation|https://github.com/Fannovel16/ComfyUI-Frame-Interpol
 ComfyUI-KJNodes|https://github.com/kijai/ComfyUI-KJNodes|01d9fa9c983273532cacdf9532c74a93c7dc86d2
 ComfyUI-CogVideoXWrapper|https://github.com/kijai/ComfyUI-CogVideoXWrapper|fdb8abd2790b5459ddc7066c31861bb0b62e988b
 facerestore_cf|https://github.com/mav-rik/facerestore_cf.git|ff4d7a5c102441d8f058dd6135797ffb57b6c6ad
+ComfyUI-PuLID-Flux|https://github.com/balazik/ComfyUI-PuLID-Flux|a80912fc3435c358607bf4b43a58dbcbebdb09ff

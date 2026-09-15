@@ -84,3 +84,14 @@ def is_cached(repo_id: str, probe_file: str = "model_index.json",
         logger.debug("cache probe for %s failed: %s", repo_id, e)
         return False
     return isinstance(hit, str) and hit is not _CACHED_NO_EXIST
+
+
+def hf_repo_cache_dir(repo_id: str) -> Path:
+    """The Hugging Face cache folder for `repo_id` (exists only once something
+    from that repo was downloaded). Used to measure install progress."""
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        root = Path(HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001
+        root = Path.home() / ".cache" / "huggingface" / "hub"
+    return root / f"models--{repo_id.replace('/', '--')}"

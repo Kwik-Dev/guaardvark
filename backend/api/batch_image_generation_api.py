@@ -147,11 +147,17 @@ def _reconcile_image_download_status_on_load() -> None:
         model_download_status = persisted
         _persist_image_download_status()
     else:
-        model_download_status = persisted
+        # A finished run was already reported to the person who started it;
+        # carrying "completed" across restarts makes the modal announce it
+        # again every time it opens. Keep the epoch, start idle.
+        model_download_status = _idle_image_download_status()
 
 
 model_download_status = _idle_image_download_status()
 _reconcile_image_download_status_on_load()
+# The image-editing pack whose Install this modal handed to the video
+# downloader; the status route mirrors that run under the pack's id.
+_DELEGATED_PACK: str | None = None
 
 # Approximate model sizes in GB (HuggingFace repo total). Curated set only —
 # matches offline_image_generator.available_models after the 2026-05-29 cull.
@@ -640,6 +646,12 @@ def list_models():
                 unavailable.append(row)
 
         from backend.services.user_image_models import catalog_rows, family_choices
+        try:
+            from backend.services.image_editing_packs import pack_rows
+            editing = pack_rows()
+        except Exception as e:  # noqa: BLE001 — the picker must list even if a pack probe fails
+            logger.warning("image editing pack rows failed: %s", e)
+            editing = []
         return success_response({
             "models": models,
             "unavailable_models": unavailable,
@@ -648,6 +660,9 @@ def list_models():
             # the modal lists them with Install / Remove.
             "adapters": catalog_rows(generator.image_generator),
             "families": family_choices(),
+            # Chat photo tools' packs (Qwen-Image-Edit, PuLID, background
+            # removal): installed through the video downloader, listed here.
+            "editing": editing,
         })
 
     except Exception as e:
@@ -666,9 +681,23 @@ def download_model():
 
 def _start_image_model_download(model_path: str):
     """Start the background download for a catalog key or HF id (the Install button)."""
-    global model_download_status, _IMAGE_DOWNLOAD_EPOCH
+    global model_download_status, _IMAGE_DOWNLOAD_EPOCH, _DELEGATED_PACK
 
     try:
+        # Image-editing packs (chat photo tools) install through the video
+        # downloader; the status route mirrors that run under the pack id.
+        from backend.services.image_editing_packs import pack_by_id
+        pack_key = str(model_path or "").strip()
+        if pack_key.startswith("comfy:"):
+            pack_key = pack_key[len("comfy:"):]
+        if pack_by_id(pack_key):
+            from backend.api import batch_video_generation_api as _video_api
+            resp = _video_api.start_video_model_download(pack_key)
+            status = resp[1] if isinstance(resp, tuple) else getattr(resp, "status_code", 200)
+            if status < 400:
+                _DELEGATED_PACK = pack_key
+            return resp
+
         if not service_available:
             return error_response("Batch image generation service not available", 503)
 
@@ -868,19 +897,27 @@ def _start_image_model_download(model_path: str):
 @batch_image_bp.route("/models/download-status", methods=["GET"])
 def get_download_status():
     """Get the current model download status."""
-    global model_download_status
+    global model_download_status, _DELEGATED_PACK
     try:
         with model_download_lock:
             status = dict(model_download_status)
         if not status.get("is_downloading"):
-            # Comfy-only entries (flux-dev) delegate to the video registry
-            # downloader — mirror its status for flux plans so this modal's
+            # Comfy-only entries (flux-dev) and image-editing packs delegate to
+            # the video registry downloader — mirror its status so this modal's
             # poller tracks progress/completion of the delegated install.
             # Module-attribute access on purpose: the video module REBINDS its
             # status dict per download, so a from-import would go stale.
             from backend.api import batch_video_generation_api as _video_api
             with _video_api._video_model_download_lock:
                 vstatus = dict(_video_api._video_model_download_status)
+            if _DELEGATED_PACK:
+                # The video run names each companion in turn; the modal's row
+                # is the pack, so report the pack. A finished run is reported
+                # once, then forgotten, so reopening the modal stays quiet.
+                vstatus["current_model"] = _DELEGATED_PACK
+                if not vstatus.get("is_downloading"):
+                    _DELEGATED_PACK = None
+                return success_response(vstatus)
             if str(vstatus.get("current_model") or "").startswith("flux"):
                 return success_response(vstatus)
         return success_response(status)

@@ -60,6 +60,23 @@ class TestSlashCommandResolver:
         assert params["prompt"] == "a cat playing piano"
         assert tool != "generate_animation"
 
+    def test_identity_slash_sets_consent(self):
+        from backend.services.slash_command_executor import resolve_slash_direct_tool
+
+        tool, params = resolve_slash_direct_tool({
+            "slash_command": "identity",
+            "slash_args": "a 1940s detective in the rain",
+        })
+        assert tool == "generate_identity"
+        assert params["prompt"] == "a 1940s detective in the rain"
+        assert params["consented"] is True
+
+    def test_removebg_slash(self):
+        from backend.services.slash_command_executor import resolve_slash_direct_tool
+
+        tool, params = resolve_slash_direct_tool({"slash_command": "removebg"})
+        assert tool == "remove_background"
+
 
 class TestDirectToolIntercept:
     def test_try_direct_tool_calls_registry_without_llm(self):

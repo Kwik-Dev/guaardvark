@@ -242,5 +242,7 @@ class TestCommandOnlyMode:
         from backend.services.unified_chat_engine import GPU_HEAVY_TOOLS
         assert "generate_video" in GPU_HEAVY_TOOLS
         assert "generate_image" in GPU_HEAVY_TOOLS
+        assert "generate_identity" in GPU_HEAVY_TOOLS
+        assert "remove_background" not in GPU_HEAVY_TOOLS
         assert "generate_music_video" not in GPU_HEAVY_TOOLS
         assert "start_film_crew" not in GPU_HEAVY_TOOLS

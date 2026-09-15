@@ -23,6 +23,8 @@ const VoiceSettingsModal = ({
   installDefaultVoiceModel,
   testVoice,
   systemName,
+  whisperManualInstall,
+  onCopyWhisperCommand,
 }) => {
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
@@ -44,6 +46,8 @@ const VoiceSettingsModal = ({
           installDefaultVoiceModel={installDefaultVoiceModel}
           testVoice={testVoice}
           systemName={systemName}
+          whisperManualInstall={whisperManualInstall}
+          onCopyWhisperCommand={onCopyWhisperCommand}
         />
       </DialogContent>
     </Dialog>

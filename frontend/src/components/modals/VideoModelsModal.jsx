@@ -41,6 +41,9 @@ const TYPE_LABELS = {
   lora: "Speed / identity LoRA",
   embedding: "Dependency",
   audio: "Music",
+  "qwen-edit": "Image editing",
+  pulid: "Image editing",
+  editing: "Image editing",
 };
 
 const VideoModelsModal = ({ open, onClose, showMessage, highlightModelId }) => {

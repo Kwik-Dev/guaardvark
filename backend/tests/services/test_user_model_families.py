@@ -118,6 +118,25 @@ def test_match_unwired_qwen_image():
     assert "not wired" in matches[0]["reason"]
 
 
+def test_match_wired_qwen_image_edit_repo():
+    matches = umf.match_families(
+        domain="image", files=[{"src": "qwen_image_edit_2509_fp8_e4m3fn.safetensors"}],
+        src=None, hf_repo="Comfy-Org/Qwen-Image-Edit_ComfyUI",
+        has_model_index=False,
+    )
+    assert matches[0]["wired"] is True
+    assert matches[0]["family"] == "qwen-image-edit"
+
+
+def test_match_index_class_qwen_edit_not_unwired_t2i():
+    matches = umf.match_families(
+        domain="image", files=[], src=None, hf_repo="org/untitled-edit",
+        has_model_index=True, index_class="QwenImageEditPlusPipeline",
+    )
+    assert matches[0]["wired"] is True
+    assert matches[0]["family"] == "qwen-image-edit"
+
+
 def test_match_index_class_flux_without_filename_tokens():
     matches = umf.match_families(
         domain="image", files=[], src=None, hf_repo="someone/mystery-stills",

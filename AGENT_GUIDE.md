@@ -189,7 +189,7 @@ Declared next to the models in the registry; the skills repeat them. The ones th
 
 | The user wants | Skill | Runs through |
 |---|---|---|
-| an image, an edit, a batch, a consistent character | `image` | MCP `generate_image`, `edit_image`; REST `/api/batch-image` |
+| an image, an edit, a batch, a consistent character | `image` | MCP `generate_image`, `edit_image`, `remove_background`, `inpaint_image`, `outpaint_image`; REST `/api/batch-image` |
 | a clip, image-to-video, a clip with sound, a batch | `video` | MCP `generate_video`; REST `/api/batch-video` |
 | a music video from a song | `music-video` | MCP `generate_music_video`; REST `/api/music-video` |
 | a short film from a script or logline | `film-crew` | MCP `start_film_crew`; REST `/api/production` |

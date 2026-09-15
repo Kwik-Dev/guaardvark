@@ -2823,12 +2823,12 @@ Negative Prompt: {negative_prompt}""",
                 # clip-art, logos). Post-process pass; diffusion itself outputs opaque RGB.
                 if getattr(request, "remove_background", False):
                     try:
-                        from rembg import remove as _rembg_remove
-                        image = _rembg_remove(image)  # returns an RGBA PIL image
+                        from backend.services.background_removal import remove_background
+                        image = remove_background(image)  # RGBA; needs an installed pack
                         image.save(image_path, "PNG")  # PNG preserves the alpha channel
-                        logger.info("Transparent background applied (rembg)")
+                        logger.info("Transparent background applied")
                     except Exception as e:
-                        logger.error(f"Background removal failed (rembg): {e}")
+                        logger.error(f"Background removal failed: {e}")
 
                 result.success = True
                 result.image_path = str(image_path)

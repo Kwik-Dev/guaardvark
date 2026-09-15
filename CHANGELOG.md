@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Chat edits photos: Qwen-Image-Edit, inpaint, outpaint, background removal, and a face
+  carried into a new scene.** With a picture attached, chat has `edit_image` (prefers
+  Qwen-Image-Edit 2509 FP8 when installed, then FLUX.1 Kontext, then img2img), `inpaint_image`,
+  `outpaint_image` (grows the canvas and fills it) and `remove_background` (an alpha cut-out),
+  plus `/inpaint`, `/outpaint` and `/removebg`. Plain phrasings route on their own ("remove the
+  background", "extend the picture to the left"); "put a hat on this person" stays an edit.
+  `generate_identity` (PuLID on FLUX.1-dev: one face photo, a new scene) is built but off by
+  default: on the reference 16 GB card it returned a younger, dark-haired man for a grey-bearded
+  reference at identity weights 1.0 and 1.5, so it waits behind `GUAARDVARK_IDENTITY_TOOL=1`
+  until the likeness is right. Everything they need installs from **Manage Image Models →
+  Image editing**: one table declares which pack each tool needs, the modal lists the packs with
+  per-row Install and Install all, and a tool without its pack answers one sentence naming that
+  modal. Nothing downloads on its own: the PuLID pack now carries the EVA02-CLIP and facexlib
+  files its ComfyUI node used to fetch at first use (the plugin patches the pinned node so it
+  runs on ComfyUI 0.33; its pack is listed only with the flag), and background removal runs the rembg project's u2net / BiRefNet ONNX
+  files through the onnxruntime already shipped, without the rembg package. Measured on a 16 GB
+  card: a 20-step Qwen edit in 108 s (ComfyUI keeps 11.2 GB of the FP8 weights resident and
+  offloads 8.2 GB), a PuLID render in 28 s, a u2net cut-out in 1 s on CPU; the registry's VRAM
+  estimates are those measurements, since the earlier 14 GB guess plus admission headroom
+  refused every edit on that card. Model entries: `qwen-image-edit`, `qwen-image-clip`,
+  `qwen-image-vae`, `pulid-flux`, `pulid-antelopev2`, `eva02-clip`, `facexlib-face`,
+  `bgremove-birefnet`, `bgremove-u2net`. A finished image download is no longer re-announced
+  each time the Image Models modal opens after a restart.
 - **Add new model is a declared family table, and the server checks the paste.** Which
   architectures a Hugging Face paste can join is now one table (`user_model_families.py`)
   shared by the Image and Video Add dialogs: Z-Image, Krea 2, SDXL, SD 1.5 and FLUX stills for

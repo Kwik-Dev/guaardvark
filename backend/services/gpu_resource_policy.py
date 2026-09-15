@@ -181,6 +181,27 @@ def reclaim_in_process_vram(needed_mb: int = 0) -> int:
         return 0
 
 
+_RECLAIM_SETTLE_MAX_S = 20.0
+
+
+def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str) -> None:
+    """ComfyUI answers /free before the memory is actually back. Poll the fit
+    for up to _RECLAIM_SETTLE_MAX_S instead of sleeping a fixed settle time:
+    a 12 GB FLUX unload took longer than the old fixed wait, so a chat edit
+    that followed an identity render was refused with "try again shortly"
+    every time. Returns as soon as the job fits; the caller re-checks anyway."""
+    deadline = time.monotonic() + _RECLAIM_SETTLE_MAX_S
+    time.sleep(_RECLAIM_SETTLE_S)
+    while time.monotonic() < deadline:
+        try:
+            if fit_verdict(vram_estimate_mb, reserve_mb=reserve_mb).ok:
+                return
+        except Exception:  # noqa: BLE001 — the real check follows
+            return
+        time.sleep(0.5)
+    log.info("gpu_session(%s): freed VRAM did not settle within %.0fs", op_id, _RECLAIM_SETTLE_MAX_S)
+
+
 def reclaim_gpu(
     *,
     evict_ollama: bool = False,
@@ -652,7 +673,7 @@ def gpu_session(
                             needed_mb=vram_estimate_mb,
                         )
                         if free_comfyui:
-                            time.sleep(_RECLAIM_SETTLE_S)
+                            _wait_until_fits(vram_estimate_mb, vram_reserve_mb, op_id)
                     else:
                         log.info("gpu_session(%s): %d MB already fits; skipping eviction", op_id, vram_estimate_mb)
                 elif evict_ollama or free_comfyui:

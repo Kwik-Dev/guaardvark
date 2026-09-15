@@ -14,7 +14,7 @@ invent an endpoint.
 | The user wants | Read | Runs through |
 |---|---|---|
 | what can this box do, or anything is unclear | `.agents/skills/setup/SKILL.md` | health, plugins, models, `inspect_gpu` |
-| an image, an edit, a batch, a consistent character | `image` | MCP `generate_image`, `edit_image`; REST `/api/batch-image` |
+| an image, an edit, a batch, a consistent character | `image` | MCP `generate_image`, `edit_image`, `remove_background`, `inpaint_image`, `outpaint_image`; REST `/api/batch-image` |
 | a clip, image-to-video, a clip with sound, a batch | `video` | MCP `generate_video`; REST `/api/batch-video` |
 | a music video from a song | `music-video` | MCP `generate_music_video`; REST `/api/music-video` (approval gate) |
 | a short film from a script or logline | `film-crew` | MCP `start_film_crew`; REST `/api/production` (two gates) |

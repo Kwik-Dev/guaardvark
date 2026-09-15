@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 _KONTEXT_MODEL_IDS = frozenset({
     "kontext", "flux-kontext", "flux-kontext-dev", "flux.kontext",
 })
+_QWEN_EDIT_MODEL_IDS = frozenset({
+    "qwen", "qwen-image-edit", "qwen-edit", "qwenimage-edit",
+})
 
 
 def _unwrap_nested_prompt_json(prompt: str) -> tuple[str, list[int]]:
@@ -1384,13 +1387,14 @@ class VideoGeneratorTool(BaseTool):
 
 
 class EditImageTool(BaseTool):
-    """Edit an EXISTING image from a natural-language instruction (FLUX.1 Kontext).
+    """Edit an EXISTING image from a natural-language instruction.
 
+    Prefers Qwen-Image-Edit when installed, else FLUX.1 Kontext, else img2img.
     Use when the user SUPPLIES or ATTACHES an image and asks to add/remove/change
     something in it — e.g. 'put a cowboy hat on this character', 'make it night',
-    'remove the sign'. Preserves the original's identity/composition and applies
-    only the requested change. (Contrast generate_image, which makes a brand-new
-    image from text with no input picture.)"""
+    'remove the sign'. Same canvas, same pose. For a brand-new scene of a face
+    use generate_identity; for a brand-new picture with no reference use
+    generate_image."""
 
     name = "edit_image"
     read_only = False
@@ -1401,7 +1405,8 @@ class EditImageTool(BaseTool):
         "remove, or change something in it, e.g. 'put a cowboy hat on this character'. "
         "Preserves the original subject and only applies the requested edit. If the "
         "user did not attach an image, ask them to attach one. Do NOT use this to make "
-        "a brand-new image from scratch — use generate_image for that."
+        "a brand-new image from scratch — use generate_image. For a new scene that "
+        "keeps a face from an attached photo, use generate_identity."
     )
     parameters = {
         "instruction": ToolParameter(
@@ -1424,25 +1429,46 @@ class EditImageTool(BaseTool):
             name="model", type="string",
             description=(
                 "Image model/backend. Default follows /imagemodel (Settings). "
-                "'kontext' or 'auto' uses FLUX.1 Kontext instruction editing when installed; "
-                "other downloaded models (sd-xl, zimage-turbo, …) use img2img."
+                "'qwen-image-edit' or 'auto' uses Qwen-Image-Edit when installed; "
+                "'kontext' uses FLUX.1 Kontext; other downloaded models use img2img."
             ),
             required=False, default="auto",
+        ),
+        "reference_image_2": ToolParameter(
+            name="reference_image_2", type="string",
+            description="Optional second reference (another person or style). Qwen-Image-Edit only.",
+            required=False, default="",
+        ),
+        "reference_image_3": ToolParameter(
+            name="reference_image_3", type="string",
+            description="Optional third reference. Qwen-Image-Edit only.",
+            required=False, default="",
         ),
     }
 
     @staticmethod
-    def _uses_kontext_backend(model: str) -> bool:
+    def _pick_edit_backend(model: str) -> str:
         m = (model or "auto").strip().lower()
+        if m in _QWEN_EDIT_MODEL_IDS:
+            return "qwen"
         if m in _KONTEXT_MODEL_IDS:
-            return True
-        if m == "auto":
-            try:
-                from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-                return ComfyUIImageGenerator()._kontext_installed()
-            except Exception:
-                return False
-        return False
+            return "kontext"
+        if m != "auto":
+            return "img2img"
+        try:
+            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+            gen = ComfyUIImageGenerator()
+            if gen.qwen_edit_installed():
+                return "qwen"
+            if gen._kontext_installed():
+                return "kontext"
+        except Exception:
+            pass
+        return "img2img"
+
+    @staticmethod
+    def _uses_kontext_backend(model: str) -> bool:
+        return EditImageTool._pick_edit_backend(model) == "kontext"
 
     def _edit_via_img2img(
         self, *, src: str, instruction: str, model: str, output_path: str,
@@ -1547,13 +1573,20 @@ class EditImageTool(BaseTool):
         return None
 
     def execute(self, instruction: str, image: str = "", steps: int = 28,
-                model: str = "auto", **kwargs) -> ToolResult:
+                model: str = "auto", reference_image_2: str = "",
+                reference_image_3: str = "", **kwargs) -> ToolResult:
         src = self._resolve_image(image)
         if not src:
             return ToolResult(
                 success=False,
                 error="No image to edit. Ask the user to attach the image they want edited.",
             )
+        extra = []
+        for raw in (reference_image_2, reference_image_3):
+            if raw:
+                p = self._resolve_image(raw)
+                if p:
+                    extra.append(p)
         try:
             from backend.config import OUTPUT_DIR
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
@@ -1564,13 +1597,19 @@ class EditImageTool(BaseTool):
             os.makedirs(output_dir, exist_ok=True)
             filename = f"edit_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
             output_path = os.path.join(output_dir, filename)
+            backend = self._pick_edit_backend(effective_model)
+            gen = ComfyUIImageGenerator()
 
-            if self._uses_kontext_backend(effective_model):
-                ComfyUIImageGenerator().edit_image(
+            if backend == "qwen":
+                gen.edit_image_qwen(
+                    image_paths=[src, *extra], instruction=instruction,
+                    output_path=output_path, steps=int(steps) or 20,
+                )
+            elif backend == "kontext":
+                gen.edit_image(
                     image_path=src, instruction=instruction,
                     output_path=output_path, steps=int(steps),
                 )
-                backend = "kontext"
             else:
                 img2img_result = self._edit_via_img2img(
                     src=src, instruction=instruction,
@@ -1578,7 +1617,6 @@ class EditImageTool(BaseTool):
                 )
                 if not img2img_result.success:
                     return img2img_result
-                image_url = (img2img_result.metadata or {}).get("image_url")
                 return ToolResult(
                     success=True,
                     output=img2img_result.output,
@@ -1589,7 +1627,7 @@ class EditImageTool(BaseTool):
             return ToolResult(
                 success=True,
                 output=(
-                    f"Image edited successfully (kontext).\n"
+                    f"Image edited successfully ({backend}).\n"
                     f"Image URL: {image_url}\nEdit: {instruction}"
                 ),
                 metadata={
@@ -1603,3 +1641,248 @@ class EditImageTool(BaseTool):
         except Exception as e:
             logger.error(f"EditImageTool error: {e}", exc_info=True)
             return ToolResult(success=False, error=f"Image edit failed: {str(e)}")
+
+
+def _chat_png_path(prefix: str) -> tuple[str, str]:
+    from backend.config import OUTPUT_DIR
+    output_dir = os.path.join(OUTPUT_DIR, "generated_images")
+    os.makedirs(output_dir, exist_ok=True)
+    filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.png"
+    return os.path.join(output_dir, filename), filename
+
+
+class RemoveBackgroundTool(BaseTool):
+    """Cut the subject out of an attached photo (transparent PNG)."""
+
+    name = "remove_background"
+    read_only = False
+    destructive = False
+    description = (
+        "Remove the background from an attached photo and return a transparent PNG. "
+        "Use for product shots, stickers, and cut-outs. Does not invent a new scene — "
+        "use generate_identity or edit_image for that. The attached image is used "
+        "automatically if `image` is omitted."
+    )
+    parameters = {
+        "image": ToolParameter(
+            name="image", type="string",
+            description="Path of the photo. Usually omit — the attached image is used.",
+            required=False, default="",
+        ),
+    }
+
+    def execute(self, image: str = "", **kwargs) -> ToolResult:
+        src = EditImageTool()._resolve_image(image)
+        if not src:
+            return ToolResult(success=False, error="Attach the photo to cut out.")
+        from PIL import Image
+        from backend.services.background_removal import (
+            BackgroundRemovalNotInstalled, installed_model, remove_background,
+        )
+        try:
+            model_id = installed_model()
+            with Image.open(src) as im:
+                out = remove_background(im, model_id)
+            output_path, filename = _chat_png_path("nobg")
+            out.save(output_path)
+            image_url = f"/api/outputs/generated_images/{filename}"
+            return ToolResult(
+                success=True,
+                output=f"Background removed.\nImage URL: {image_url}",
+                metadata={"image_url": image_url, "filename": filename, "backend": model_id},
+            )
+        except BackgroundRemovalNotInstalled as e:
+            return ToolResult(success=False, error=str(e))
+        except Exception as e:
+            logger.error("remove_background failed: %s", e, exc_info=True)
+            return ToolResult(success=False, error=f"Background removal failed: {e}")
+
+
+class InpaintImageTool(BaseTool):
+    """Describe what to change or remove in an attached photo."""
+
+    name = "inpaint_image"
+    read_only = False
+    destructive = False
+    description = (
+        "Change or remove something in an attached photo from a natural-language "
+        "instruction ('remove the coffee cup', 'replace the sky with sunset'). "
+        "Uses Qwen-Image-Edit when installed, else FLUX Kontext. For extending the "
+        "canvas use outpaint_image. For a brand-new scene of a person's face use "
+        "generate_identity."
+    )
+    parameters = {
+        "instruction": ToolParameter(
+            name="instruction", type="string",
+            description="What to change or remove.",
+            required=True,
+        ),
+        "image": ToolParameter(
+            name="image", type="string",
+            description="Path of the photo. Usually omit — the attached image is used.",
+            required=False, default="",
+        ),
+        "steps": ToolParameter(
+            name="steps", type="int",
+            description="Diffusion steps. Default 20.",
+            required=False, default=20,
+        ),
+    }
+
+    def execute(self, instruction: str, image: str = "", steps: int = 20, **kwargs) -> ToolResult:
+        model = kwargs.get("model") or "auto"
+        return EditImageTool().execute(
+            instruction=instruction, image=image, steps=int(steps) or 20, model=model,
+        )
+
+
+class OutpaintImageTool(BaseTool):
+    """Extend the canvas and fill the new area."""
+
+    name = "outpaint_image"
+    read_only = False
+    destructive = False
+    description = (
+        "Expand an attached photo in one or more directions and fill the new area "
+        "so it matches the scene. Use when the user says extend, expand the canvas, "
+        "or outpaint. Prefer Qwen-Image-Edit when installed."
+    )
+    parameters = {
+        "image": ToolParameter(
+            name="image", type="string",
+            description="Path of the photo. Usually omit — the attached image is used.",
+            required=False, default="",
+        ),
+        "instruction": ToolParameter(
+            name="instruction", type="string",
+            description="Optional fill direction, e.g. 'continue the forest to the left'.",
+            required=False, default="",
+        ),
+        "left": ToolParameter(name="left", type="int", description="Pixels to add on the left (multiples of 8).", required=False, default=0),
+        "right": ToolParameter(name="right", type="int", description="Pixels to add on the right.", required=False, default=0),
+        "top": ToolParameter(name="top", type="int", description="Pixels to add on the top.", required=False, default=0),
+        "bottom": ToolParameter(name="bottom", type="int", description="Pixels to add on the bottom.", required=False, default=0),
+        "steps": ToolParameter(name="steps", type="int", description="Diffusion steps. Default 20.", required=False, default=20),
+    }
+
+    def execute(self, image: str = "", instruction: str = "", left: int = 0, right: int = 0,
+                top: int = 0, bottom: int = 0, steps: int = 20, **kwargs) -> ToolResult:
+        src = EditImageTool()._resolve_image(image)
+        if not src:
+            return ToolResult(success=False, error="Attach the photo to extend.")
+        pad = {
+            "left": max(0, int(left) or 0),
+            "right": max(0, int(right) or 0),
+            "top": max(0, int(top) or 0),
+            "bottom": max(0, int(bottom) or 0),
+            "feathering": 40,
+        }
+        if not any(pad[k] for k in ("left", "right", "top", "bottom")):
+            # Default: grow 256 px on every side when the user didn't specify.
+            pad.update({"left": 256, "right": 256, "top": 256, "bottom": 256})
+        fill = (instruction or "").strip() or (
+            "Fill the extended canvas so it continues the original scene, matching lighting, "
+            "perspective and style. Do not change the original subject."
+        )
+        try:
+            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+            gen = ComfyUIImageGenerator()
+            output_path, filename = _chat_png_path("outpaint")
+            if gen.qwen_edit_installed():
+                gen.edit_image_qwen(
+                    image_paths=[src], instruction=fill, output_path=output_path,
+                    steps=int(steps) or 20, pad=pad,
+                )
+                backend = "qwen"
+            elif gen._kontext_installed():
+                # Kontext has no pad node in its graph; instruct it instead.
+                gen.edit_image(
+                    image_path=src,
+                    instruction=f"Outpaint: {fill}",
+                    output_path=output_path, steps=max(int(steps) or 20, 20),
+                )
+                backend = "kontext"
+            else:
+                from backend.services.image_editing_packs import missing_message
+                return ToolResult(success=False, error=missing_message("outpaint_image"))
+            image_url = f"/api/outputs/generated_images/{filename}"
+            return ToolResult(
+                success=True,
+                output=f"Canvas extended ({backend}).\nImage URL: {image_url}",
+                metadata={"image_url": image_url, "filename": filename, "backend": backend, "pad": pad},
+            )
+        except Exception as e:
+            logger.error("outpaint_image failed: %s", e, exc_info=True)
+            return ToolResult(success=False, error=f"Outpaint failed: {e}")
+
+
+class GenerateIdentityTool(BaseTool):
+    """New scene from a face photo (PuLID-FLUX). Consent required."""
+
+    name = "generate_identity"
+    read_only = False
+    destructive = False
+    description = (
+        "Generate a brand-new image that keeps the face from an attached photo. "
+        "Use when the user wants this person in a new scene, outfit, or era "
+        "('this person as a 1940s detective'). Requires consented=true — only a "
+        "likeness the user has the right to use (their own photo or a Cast subject "
+        "they uploaded). Not a face swap onto an existing poster; not an instruction "
+        "edit of the same photo (use edit_image for that). Needs pulid-flux + flux-dev."
+    )
+    parameters = {
+        "prompt": ToolParameter(
+            name="prompt", type="string",
+            description="The new scene, in prose. Do not repeat the person's name; identity comes from the photo.",
+            required=True,
+        ),
+        "image": ToolParameter(
+            name="image", type="string",
+            description="Face reference. Usually omit — the attached image is used.",
+            required=False, default="",
+        ),
+        "consented": ToolParameter(
+            name="consented", type="bool",
+            description="Must be true. Confirm the user has the right to use this likeness.",
+            required=True,
+        ),
+        "width": ToolParameter(name="width", type="int", required=False, default=768),
+        "height": ToolParameter(name="height", type="int", required=False, default=1024),
+        "steps": ToolParameter(name="steps", type="int", required=False, default=20),
+    }
+
+    def execute(self, prompt: str, consented: bool = False, image: str = "",
+                width: int = 768, height: int = 1024, steps: int = 20, **kwargs) -> ToolResult:
+        consented = str(consented).lower() in ("1", "true", "yes")
+        if not consented:
+            return ToolResult(
+                success=False,
+                error="generate_identity needs consented=true. Only run it for a likeness "
+                      "the user has the right to use (their photo or a Cast subject they uploaded).",
+            )
+        src = EditImageTool()._resolve_image(image)
+        if not src:
+            return ToolResult(success=False, error="Attach a face photo, then describe the new scene.")
+        try:
+            from backend.services.comfyui_image_generator import ComfyUIImageGenerator
+            output_path, filename = _chat_png_path("identity")
+            ComfyUIImageGenerator().generate_with_identity(
+                image_path=src, prompt=prompt, output_path=output_path,
+                width=int(width) or 768, height=int(height) or 1024,
+                steps=int(steps) or 20,
+            )
+            image_url = f"/api/outputs/generated_images/{filename}"
+            return ToolResult(
+                success=True,
+                output=(
+                    f"New image generated from the face reference (PuLID-FLUX).\n"
+                    f"Image URL: {image_url}\nPrompt: {prompt}"
+                ),
+                metadata={
+                    "image_url": image_url, "filename": filename,
+                    "backend": "pulid-flux", "prompt": prompt,
+                },
+            )
+        except Exception as e:
+            logger.error("generate_identity failed: %s", e, exc_info=True)
+            return ToolResult(success=False, error=f"Identity generate failed: {e}")
