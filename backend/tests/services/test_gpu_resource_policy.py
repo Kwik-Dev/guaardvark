@@ -267,7 +267,8 @@ def test_gpu_session_capacity_refuses_before_reclaim(fresh_gate, monkeypatch):
 
 
 def test_gpu_session_evicts_ollama_at_most_once(fresh_gate, monkeypatch):
-    """One reclaim per session, followed by one settle before the fit probe."""
+    """One reclaim per session; one settle, then bounded fit polls, before the
+    final fit probe (the freed model may still be leaving the card)."""
     _patch_vram(monkeypatch, free_mb=5000, total_mb=16376)
     evictions = []
     sleeps = []
@@ -281,4 +282,5 @@ def test_gpu_session_evicts_ollama_at_most_once(fresh_gate, monkeypatch):
         ):
             pass
     assert evictions == [1]
-    assert sleeps == [grp._RECLAIM_SETTLE_S]
+    assert sleeps[0] == grp._RECLAIM_SETTLE_S
+    assert sleeps[1:] == [grp._RECLAIM_POLL_S] * grp._RECLAIM_POLLS

@@ -181,25 +181,26 @@ def reclaim_in_process_vram(needed_mb: int = 0) -> int:
         return 0
 
 
-_RECLAIM_SETTLE_MAX_S = 20.0
+_RECLAIM_POLL_S = 0.5
+_RECLAIM_POLLS = 34  # with the 3 s settle: up to 20 s for a freed model to leave the card
 
 
 def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str) -> None:
-    """ComfyUI answers /free before the memory is actually back. Poll the fit
-    for up to _RECLAIM_SETTLE_MAX_S instead of sleeping a fixed settle time:
-    a 12 GB FLUX unload took longer than the old fixed wait, so a chat edit
+    """ComfyUI answers /free before the memory is actually back. After the
+    fixed settle, poll the fit up to _RECLAIM_POLLS times instead of trusting
+    the settle alone: a 12 GB FLUX unload took longer than 3 s, so a chat edit
     that followed an identity render was refused with "try again shortly"
     every time. Returns as soon as the job fits; the caller re-checks anyway."""
-    deadline = time.monotonic() + _RECLAIM_SETTLE_MAX_S
     time.sleep(_RECLAIM_SETTLE_S)
-    while time.monotonic() < deadline:
+    for _ in range(_RECLAIM_POLLS):
         try:
             if fit_verdict(vram_estimate_mb, reserve_mb=reserve_mb).ok:
                 return
         except Exception:  # noqa: BLE001 — the real check follows
             return
-        time.sleep(0.5)
-    log.info("gpu_session(%s): freed VRAM did not settle within %.0fs", op_id, _RECLAIM_SETTLE_MAX_S)
+        time.sleep(_RECLAIM_POLL_S)
+    log.info("gpu_session(%s): freed VRAM did not settle within %.0fs", op_id,
+             _RECLAIM_SETTLE_S + _RECLAIM_POLLS * _RECLAIM_POLL_S)
 
 
 def reclaim_gpu(
