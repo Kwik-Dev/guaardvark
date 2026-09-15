@@ -54,5 +54,9 @@
   "14": {
     "batch_id": "ImageBatch_09-05-2026_040341_038",
     "prompt": "cinematic photo of an antique star chart spread on a dark navigator's table, brass dividers resting on it, constellations picked out by a warm lamp, shallow depth of field, no text"
+  },
+  "16": {
+    "batch_id": "ImageBatch_09-13-2026_023002_040",
+    "prompt": "cinematic photo of a vintage telephone switchboard with braided patch cables plugged into glowing jacks, one cable held mid-air, warm tungsten light, dark room, shallow depth of field, no text"
   }
 }
