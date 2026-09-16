@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.utils.lora_timeouts import (
+from backend.utils.platform import (
     IS_APPLE_SILICON,
     LORA_LOAD_TIMEOUT_S,
     LORA_TRAIN_TIMEOUT_S,
@@ -56,7 +56,7 @@ class RealLoraTrainer:
     _ZIMAGE_RUNNER = _PLUGIN_ROOT / "scripts" / "run_zimage_trainer.py"
     _VENV_PYTHON = _PLUGIN_ROOT / "venv-torch" / "bin" / "python"
     _BACKEND_PYTHON = _REPO_ROOT / "backend" / "venv" / "bin" / "python"
-    # Time budgets come from backend.utils.lora_timeouts' one platform flag, so
+    # Time budgets come from backend.utils.platform's one platform flag, so
     # the daemon caps, the Celery task limits, and the reaper cutoff cannot drift
     # apart. Stock (CUDA) values (900 / 1800) are unchanged from main.
     _IS_APPLE_SILICON = IS_APPLE_SILICON

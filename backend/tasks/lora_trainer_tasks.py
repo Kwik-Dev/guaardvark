@@ -13,7 +13,7 @@ from celery import Celery
 from flask import current_app
 
 from backend.models import db, Subject
-from backend.utils.lora_timeouts import (
+from backend.utils.platform import (
     LORA_REAP_STUCK_AFTER_S,
     LORA_TRAIN_TASK_SOFT_TIME_LIMIT_S,
     LORA_TRAIN_TASK_TIME_LIMIT_S,
@@ -277,7 +277,7 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
 
 def create_lora_trainer_tasks(celery_app: Celery):
     # Task limits are derived from the one platform flag in
-    # backend.utils.lora_timeouts so the daemon caps, these task limits, and the
+    # backend.utils.platform so the daemon caps, these task limits, and the
     # reaper cutoff cannot drift apart. On stock (CUDA) both are None, so the
     # global task_soft_time_limit / task_time_limit apply unchanged.
     task_limits = {}
@@ -516,7 +516,7 @@ def reap_stuck_training_subjects() -> dict:
     'failed' so the UI re-enables the Train button. A worker that dies mid-run
     (its trainer daemon now reaped by PR_SET_PDEATHSIG) loses the Celery task, so
     nothing marks the Subject failed — it would otherwise stay 'training' forever.
-    The cutoff comes from the one platform flag in backend.utils.lora_timeouts
+    The cutoff comes from the one platform flag in backend.utils.platform
     (LORA_REAP_STUCK_AFTER_S) so it cannot drift from the daemon and task limits:
     on Apple Silicon it sits past the 255 min task hard-limit, on stock CUDA it
     stays the long-standing 45 min (> the 30 min train cap). Uses the DB clock to
