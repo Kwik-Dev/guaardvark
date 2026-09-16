@@ -10,6 +10,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from backend.utils.lora_timeouts import (
+    IS_APPLE_SILICON,
+    LORA_LOAD_TIMEOUT_S,
+    LORA_TRAIN_TIMEOUT_S,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,14 +56,12 @@ class RealLoraTrainer:
     _ZIMAGE_RUNNER = _PLUGIN_ROOT / "scripts" / "run_zimage_trainer.py"
     _VENV_PYTHON = _PLUGIN_ROOT / "venv-torch" / "bin" / "python"
     _BACKEND_PYTHON = _REPO_ROOT / "backend" / "venv" / "bin" / "python"
-    _LOAD_TIMEOUT_S = 3600   # first download / cold load (slow HF fetch can exceed 15m)
-    # Z-Image training on Apple Silicon/MPS stages each heavy module and runs
-    # ~11s/step, so the default 640-step schedule takes ~2h. A 30-min cap (the
-    # old CUDA-era assumption) kills a healthy run mid-training — see the Elara
-    # run that failed at step 151/640. Raised to cover a full schedule with
-    # margin. (The Celery task time_limit in lora_trainer_tasks.py and the
-    # reap_stuck_training cutoff are sized to be strictly larger than this.)
-    _TRAIN_TIMEOUT_S = 10800  # 3h cap per train call (MPS is slow; do not lower)
+    # Time budgets come from backend.utils.lora_timeouts' one platform flag, so
+    # the daemon caps, the Celery task limits, and the reaper cutoff cannot drift
+    # apart. Stock (CUDA) values (900 / 1800) are unchanged from main.
+    _IS_APPLE_SILICON = IS_APPLE_SILICON
+    _LOAD_TIMEOUT_S = LORA_LOAD_TIMEOUT_S
+    _TRAIN_TIMEOUT_S = LORA_TRAIN_TIMEOUT_S
 
     def __init__(self):
         self._proc: subprocess.Popen | None = None
