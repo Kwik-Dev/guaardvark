@@ -13,6 +13,11 @@ from celery import Celery
 from flask import current_app
 
 from backend.models import db, Subject
+from backend.utils.platform import (
+    LORA_REAP_STUCK_AFTER_S,
+    LORA_TRAIN_TASK_SOFT_TIME_LIMIT_S,
+    LORA_TRAIN_TASK_TIME_LIMIT_S,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,16 +278,16 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
 
 
 def create_lora_trainer_tasks(celery_app: Celery):
-    @celery_app.task(
-        name="lora_trainer.train_lora",
-        # Deliberately larger than the global defaults (task_time_limit=2400s).
-        # The daemon budget is _LOAD_TIMEOUT_S (60 min cold HF download) +
-        # _TRAIN_TIMEOUT_S (now 3h for slow Apple-Silicon/MPS Z-Image staging) =
-        # up to 4h. Sized strictly larger than the daemon train cap so a slow but
-        # healthy training run is never cut off by the task hard-limit.
-        soft_time_limit=14700,  # 245 min soft
-        time_limit=15300,       # 255 min hard (> 3h daemon train + 1h load)
-    )
+    # Task limits are derived from the one platform flag in backend.utils.platform
+    # so the daemon caps, these task limits, and the reaper cutoff cannot drift
+    # apart. On stock (CUDA) both are None, so the global task_soft_time_limit /
+    # task_time_limit apply unchanged.
+    task_limits = {}
+    if LORA_TRAIN_TASK_TIME_LIMIT_S is not None:
+        task_limits["soft_time_limit"] = LORA_TRAIN_TASK_SOFT_TIME_LIMIT_S
+        task_limits["time_limit"] = LORA_TRAIN_TASK_TIME_LIMIT_S
+
+    @celery_app.task(name="lora_trainer.train_lora", **task_limits)
     def train_lora_task(subject_id: int, job_id: str | None = None):
         with current_app.app_context():
             train_subject_lora_for_subject(subject_id, job_id=job_id)
@@ -513,15 +518,18 @@ def reap_stuck_training_subjects() -> dict:
     'failed' so the UI re-enables the Train button. A worker that dies mid-run
     (its trainer daemon now reaped by PR_SET_PDEATHSIG) loses the Celery task, so
     nothing marks the Subject failed — it would otherwise stay 'training' forever.
-    The cutoff is deliberately > the train_lora task's own time_limit (255 min) so
-    a job that is genuinely still running (slow Apple-Silicon/MPS Z-Image training
-    up to 3h, plus up to 60 min cold load, plus overhead) is never reaped as a
-    false positive. Uses the DB clock to avoid process/DB timezone skew."""
+    The cutoff comes from the one platform flag in backend.utils.platform
+    (LORA_REAP_STUCK_AFTER_S) so it cannot drift from the daemon and task limits:
+    on Apple Silicon it sits past the 255 min task hard-limit, on stock CUDA it
+    stays the long-standing 45 min (> the 30 min train cap). Uses the DB clock to
+    avoid process/DB timezone skew."""
     from sqlalchemy import text
+
     stale = (
         Subject.query
         .filter(Subject.training_status == "training",
-                Subject.updated_at < text("now() - interval '270 minutes'"))
+                Subject.updated_at < text("now() - make_interval(secs => :stale_s)"))
+        .params(stale_s=LORA_REAP_STUCK_AFTER_S)
         .all()
     )
     for s in stale:

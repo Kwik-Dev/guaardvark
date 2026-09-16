@@ -50,6 +50,11 @@ as a valid accelerator. Requirements:
     `backend/venv/bin/pip install peft`
   - `PYTORCH_ENABLE_MPS_FALLBACK=1` is set automatically by the trainer driver so
     unsupported MPS ops degrade to CPU instead of hard-failing.
+  - **The longer training timeouts are Apple Silicon only.** On MPS the daemon
+    allows up to 60 min to load and 3h to train (the default 640-step schedule is
+    ~2h at ~11s/step), with matching Celery task limits and a 4.5h stuck-training
+    reaper cutoff. Stock CUDA installs are unchanged: 15 min load / 30 min train
+    caps and the 45 min reaper.
 
 The SDXL-legacy backend still requires `venv-torch/` (CUDA wheels); on Apple
 Silicon use the Z-Image backend instead.
