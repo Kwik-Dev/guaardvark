@@ -76,9 +76,14 @@ def ollama_tuning(gpu: dict[str, Any]) -> dict[str, Any]:
             "VULKAN": 0,
         }
     # >= ~19.5 GB ⇒ 24 GB-class cards (RTX 3090/4090): headroom for 2 parallel
-    # slots + 2 loaded models. 16 GB-class falls through to single-slot.
+    # slots + 2 loaded models. A 16 GB-class card keeps one slot but holds the
+    # embedding model beside a ~9 GB chat model at a 16k window, so retrieval and
+    # answer do not swap models. Below 15 GB, one model.
     if vram >= 20000:
         num_parallel = 2
+        max_loaded = 2
+    elif vram >= 15000:
+        num_parallel = 1
         max_loaded = 2
     else:
         num_parallel = 1

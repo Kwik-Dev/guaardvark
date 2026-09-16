@@ -49,10 +49,10 @@ def test_torch_channel_missing_compute_cap_is_cpu():
     assert hp.torch_channel({"vendor": "nvidia"}) == "cpu"
 
 
-def test_ollama_tuning_16gb_is_single_slot():
+def test_ollama_tuning_16gb_is_single_slot_with_two_models_resident():
     t = hp.ollama_tuning({"vendor": "nvidia", "vram_mb": 16311})
     assert t["NUM_PARALLEL"] == 1
-    assert t["MAX_LOADED_MODELS"] == 1
+    assert t["MAX_LOADED_MODELS"] == 2
     assert t["KV_CACHE_TYPE"] == "f16"
     assert t["FLASH_ATTENTION"] == 1
     assert t["KEEP_ALIVE"] == "15m"
@@ -159,3 +159,9 @@ def test_policy_fingerprint_stable_and_sensitive():
     fp_a2 = hp.policy_fingerprint(dict(hw_a))
     assert fp_a1 == fp_a2                 # stable for identical hardware
     assert hp.policy_fingerprint(hw_b) != fp_a1   # different compute_cap -> different channel -> different fp
+
+
+def test_ollama_tuning_12gb_holds_one_model():
+    t = hp.ollama_tuning({"vendor": "nvidia", "vram_mb": 12288})
+    assert t["NUM_PARALLEL"] == 1
+    assert t["MAX_LOADED_MODELS"] == 1
