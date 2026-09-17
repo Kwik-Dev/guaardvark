@@ -199,7 +199,14 @@ jobs:
           GUAARDVARK_OLLAMA_OPTIONAL: "1"
           # start.sh exits at once under CI unless a job asks for the boot.
           GUAARDVARK_CI_BOOT: "1"
-        run: ./start.sh --no-browser
+        run: |
+          set -o pipefail
+          ./start.sh --no-browser 2>&1 | tee start.out
+
+      # The runner has working DNS (every install above went through it), so this
+      # line appearing means the resolver probe is wrong on macOS again.
+      - name: No false DNS alarm
+        run: "! grep -F 'DNS resolution is broken' start.out"
 
       - name: Backend, database, Redis and Celery answer
         run: |
