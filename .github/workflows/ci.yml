@@ -238,6 +238,11 @@ jobs:
 
       # One message through the route the Chat page uses. The reply streams over
       # Socket.IO and is saved to the session, so the saved reply is what is read.
+      # This proves a model answer comes back through the backend on a Mac, not
+      # its quality: the runner can only hold llama3.2:1b on CPU, stock rules are
+      # off (no persona), and a factual question sends it off to tools. The check
+      # rejects the system text a broken prompt produced before (a failed
+      # agent-screen query repeated back as the answer).
       - name: Chat answers a message
         run: |
           set -a; [ -f .env ] && . ./.env; set +a
@@ -254,7 +259,7 @@ jobs:
           print(next((m["content"] for m in msgs if m.get("role") == "assistant" and (m.get("content") or "").strip()), ""))
           ' 2>/dev/null)
             if [ -n "$reply" ]; then
-              if printf '%s' "$reply" | grep -qi guaardvark; then
+              if [ "${#reply}" -ge 5 ] && ! printf '%s' "$reply" | grep -Eqi 'desktop state|query failed|traceback'; then
                 echo "ok   chat replied after $((i * 5))s: $(printf '%s' "$reply" | head -c 300)"
                 exit 0
               fi
