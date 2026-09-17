@@ -216,7 +216,8 @@ export const getFileIcon = (filename, isSelected, theme, size = 48, indexStatus 
   const getIconColor = (override) => {
     if (override) {
       if (override === 'primary.main') return theme.palette.primary.main;
-      return override;
+      // A theme may set palette.fileIcon to draw every file type in one colour.
+      return theme.palette.fileIcon || override;
     }
     return isSelected ? theme.palette.primary.main : theme.palette.action.active;
   };
@@ -343,7 +344,8 @@ export const getFileIconSmall = (filename, isSelected, theme, indexStatus = null
   const getIconColor = (override) => {
     if (override) {
       if (override === 'primary.main') return theme.palette.primary.main;
-      return override;
+      // A theme may set palette.fileIcon to draw every file type in one colour.
+      return theme.palette.fileIcon || override;
     }
     return isSelected ? theme.palette.primary.main : theme.palette.action.active;
   };
