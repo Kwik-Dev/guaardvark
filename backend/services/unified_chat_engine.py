@@ -4808,10 +4808,15 @@ class UnifiedChatEngine:
         # Without this, it assumes Firefox is open when it's not, etc.
         desktop_block = ""
         try:
-            from backend.services.agent_control_service import AgentControlService
-            desktop = AgentControlService._get_desktop_state()
-            if desktop:
-                desktop_block = f"\n\nAgent virtual screen state:\n{desktop}"
+            from backend.utils.platform import screen_agent_available
+
+            # Off Linux there is no agent screen; querying it only puts
+            # "query failed" in the prompt, which small models repeat back.
+            if screen_agent_available():
+                from backend.services.agent_control_service import AgentControlService
+                desktop = AgentControlService._get_desktop_state()
+                if desktop:
+                    desktop_block = f"\n\nAgent virtual screen state:\n{desktop}"
         except Exception:
             pass  # Agent display not running — no impact on chat
 

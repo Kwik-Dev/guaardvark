@@ -195,8 +195,6 @@ jobs:
 
       - name: ./start.sh
         env:
-          # A GPU-less runner is allowed to lose Ollama; the check below reports it.
-          GUAARDVARK_OLLAMA_OPTIONAL: "1"
           # start.sh exits at once under CI unless a job asks for the boot.
           GUAARDVARK_CI_BOOT: "1"
         run: |
@@ -236,8 +234,43 @@ jobs:
             || { echo "FAIL frontend"; exit 1; }
 
       - name: Ollama answers with the pulled models
-        continue-on-error: true
         run: curl -sS --max-time 10 http://127.0.0.1:11434/api/tags
+
+      # One message through the route the Chat page uses. The reply streams over
+      # Socket.IO and is saved to the session, so the saved reply is what is read.
+      # This proves a model answer comes back through the backend on a Mac, not
+      # its quality: the runner can only hold llama3.2:1b on CPU, stock rules are
+      # off (no persona), and a factual question sends it off to tools. The check
+      # rejects the system text a broken prompt produced before (a failed
+      # agent-screen query repeated back as the answer).
+      - name: Chat answers a message
+        run: |
+          set -a; [ -f .env ] && . ./.env; set +a
+          base="http://127.0.0.1:${FLASK_PORT:-5055}"
+          sid="ci-macos-$(date +%s)"
+          curl -sS --max-time 30 -X POST "$base/api/chat/unified" \
+            -H 'Content-Type: application/json' \
+            -d "{\"session_id\": \"$sid\", \"message\": \"Hi, what is your name?\"}"
+          echo
+          for i in $(seq 1 96); do
+            reply=$(curl -sS --max-time 10 "$base/api/chat/unified/$sid/history" | python3 -c '
+          import json, sys
+          msgs = json.load(sys.stdin).get("messages") or []
+          print(next((m["content"] for m in msgs if m.get("role") == "assistant" and (m.get("content") or "").strip()), ""))
+          ' 2>/dev/null)
+            if [ -n "$reply" ]; then
+              if [ "${#reply}" -ge 5 ] && ! printf '%s' "$reply" | grep -Eqi 'desktop state|query failed|traceback'; then
+                echo "ok   chat replied after $((i * 5))s: $(printf '%s' "$reply" | head -c 300)"
+                exit 0
+              fi
+              echo "FAIL chat: the saved reply is not an answer to the message: $(printf '%s' "$reply" | head -c 500)"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "FAIL chat: no saved reply after 480s"
+          tail -n 60 logs/backend_startup.log 2>/dev/null || ls logs
+          exit 1
 
       - name: ./stop.sh
         if: always()
