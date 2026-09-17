@@ -197,11 +197,13 @@ jobs:
         env:
           # A GPU-less runner is allowed to lose Ollama; the check below reports it.
           GUAARDVARK_OLLAMA_OPTIONAL: "1"
+          # start.sh exits at once under CI unless a job asks for the boot.
+          GUAARDVARK_CI_BOOT: "1"
         run: ./start.sh --no-browser
 
       - name: Backend, database, Redis and Celery answer
         run: |
-          set -a; . ./.env; set +a
+          set -a; [ -f .env ] && . ./.env; set +a
           base="http://127.0.0.1:${FLASK_PORT:-5055}"
           fail=0
           check() {  # $1 = path, $2 = pattern the body must match; retried for 2 min
@@ -221,7 +223,7 @@ jobs:
 
       - name: Frontend serves the app
         run: |
-          set -a; . ./.env; set +a
+          set -a; [ -f .env ] && . ./.env; set +a
           curl -sS --max-time 20 "http://127.0.0.1:${VITE_PORT:-5173}/" | grep -qi '<div id="root"' \
             && echo "ok   frontend on ${VITE_PORT:-5173}" \
             || { echo "FAIL frontend"; exit 1; }

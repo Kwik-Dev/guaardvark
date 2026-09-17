@@ -93,7 +93,8 @@ for arg in "$@"; do
   esac
 done
 
-if [ -n "$CI" ] || [ -n "$CODEX_ENV" ]; then
+# GUAARDVARK_CI_BOOT=1 is the CI job that boots the app on purpose (ci.yml, macos-boot).
+if { [ -n "$CI" ] || [ -n "$CODEX_ENV" ]; } && [ "${GUAARDVARK_CI_BOOT:-0}" != 1 ]; then
   vader_info "CI or Codex environment detected. Exiting start.sh."
   exit 0
 fi
