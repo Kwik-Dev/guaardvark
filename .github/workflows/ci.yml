@@ -245,7 +245,7 @@ jobs:
           sid="ci-macos-$(date +%s)"
           curl -sS --max-time 30 -X POST "$base/api/chat/unified" \
             -H 'Content-Type: application/json' \
-            -d "{\"session_id\": \"$sid\", \"message\": \"Reply with exactly one word: pineapple\"}"
+            -d "{\"session_id\": \"$sid\", \"message\": \"What is the capital of France?\"}"
           echo
           for i in $(seq 1 60); do
             reply=$(curl -sS --max-time 10 "$base/api/chat/unified/$sid/history" | python3 -c '
@@ -254,7 +254,7 @@ jobs:
           print(next((m["content"] for m in msgs if m.get("role") == "assistant" and (m.get("content") or "").strip()), ""))
           ' 2>/dev/null)
             if [ -n "$reply" ]; then
-              if printf '%s' "$reply" | grep -qi pineapple; then
+              if printf '%s' "$reply" | grep -qi paris; then
                 echo "ok   chat replied after $((i * 5))s: $(printf '%s' "$reply" | head -c 300)"
                 exit 0
               fi
