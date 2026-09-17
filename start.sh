@@ -93,7 +93,8 @@ for arg in "$@"; do
   esac
 done
 
-if [ -n "$CI" ] || [ -n "$CODEX_ENV" ]; then
+# GUAARDVARK_CI_BOOT=1 is the CI job that boots the app on purpose (ci.yml, macos-boot).
+if { [ -n "$CI" ] || [ -n "$CODEX_ENV" ]; } && [ "${GUAARDVARK_CI_BOOT:-0}" != 1 ]; then
   vader_info "CI or Codex environment detected. Exiting start.sh."
   exit 0
 fi
@@ -384,6 +385,18 @@ if ! command_exists timeout; then
         timeout() { shift; "$@"; }
     fi
 fi
+
+# host_resolves NAME: does the system resolver answer for NAME? `getent` is glibc
+# only; macOS has none, so without the fallbacks every Mac start reported broken DNS.
+host_resolves() {
+    if command_exists getent; then
+        timeout 5 getent hosts "$1" >/dev/null 2>&1
+    elif command_exists dscacheutil; then
+        timeout 5 dscacheutil -q host -a name "$1" 2>/dev/null | grep -q '^ip'
+    else
+        timeout 5 python3 -c 'import socket, sys; socket.gethostbyname(sys.argv[1])' "$1" >/dev/null 2>&1
+    fi
+}
 
 # Resolve the EFFECTIVE enabled state for a plugin:
 #   1. data/plugin_state.json's `user_enabled[<id>]` if the user has toggled it
@@ -1397,9 +1410,13 @@ ensure_backend_python_environment() {
                 vader_info "Continuing anyway in case a warm pip cache covers this run..."
             fi
             unset _gv_pp _gv_ph _gv_pt
-        elif ! timeout 5 getent hosts pypi.org >/dev/null 2>&1; then
+        elif ! host_resolves pypi.org; then
             vader_error "DNS resolution is broken on this box (cannot resolve pypi.org) — dependency installs WILL fail."
-            vader_error "Try: sudo systemctl restart systemd-resolved   (check: resolvectl status)"
+            if is_macos; then
+                vader_error "Check the network connection and DNS servers (System Settings → Network; check: scutil --dns)"
+            else
+                vader_error "Try: sudo systemctl restart systemd-resolved   (check: resolvectl status)"
+            fi
             vader_info "Continuing anyway in case this box is intentionally offline..."
         fi
         unset _gv_proxy

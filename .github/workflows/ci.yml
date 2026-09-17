@@ -170,6 +170,87 @@ jobs:
           source backend/venv/bin/activate
           python scripts/preflight_check.py || true
 
+  macos-boot:
+    name: macOS (Apple Silicon) boot
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    # The job above proves the backend imports on a Mac; this one proves the app
+    # comes up. It runs ./start.sh on a fresh runner exactly as a Mac user would
+    # (Homebrew Postgres + pgvector, Redis, the frontend build, backend, Celery),
+    # then calls the endpoints a first page load depends on and stops cleanly.
+    # The runner has no usable Metal GPU (PyTorch reports MPS available, then
+    # fails on the first allocation), so generation is out of scope here.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Ollama is a separate install on a Mac (start.sh only installs it through
+      # apt). Homebrew is the common way; the models start.sh pulls are small.
+      - name: Install Ollama
+        run: brew install ollama
+
+      - name: ./start.sh
+        env:
+          # A GPU-less runner is allowed to lose Ollama; the check below reports it.
+          GUAARDVARK_OLLAMA_OPTIONAL: "1"
+          # start.sh exits at once under CI unless a job asks for the boot.
+          GUAARDVARK_CI_BOOT: "1"
+        run: |
+          set -o pipefail
+          ./start.sh --no-browser 2>&1 | tee start.out
+
+      # The runner has working DNS (every install above went through it), so this
+      # line appearing means the resolver probe is wrong on macOS again.
+      - name: No false DNS alarm
+        run: "! grep -F 'DNS resolution is broken' start.out"
+
+      - name: Backend, database, Redis and Celery answer
+        run: |
+          set -a; [ -f .env ] && . ./.env; set +a
+          base="http://127.0.0.1:${FLASK_PORT:-5055}"
+          fail=0
+          check() {  # $1 = path, $2 = pattern the body must match; retried for 2 min
+            for i in $(seq 1 24); do
+              body=$(curl -sS --max-time 20 "$base$1" 2>&1) && printf '%s' "$body" | grep -Eq "$2" \
+                && { echo "ok   $1"; return; }
+              sleep 5
+            done
+            echo "FAIL $1: $(printf '%s' "$body" | head -c 400)"; fail=1
+          }
+          check /api/health '"status": ?"ok"'
+          check /api/health/db '"status": ?"ok"'
+          check /api/health/redis '"status": ?"up"'
+          check /api/health/celery '"status": ?"(up|busy)"'
+          check /api/plugins/ '^[[{]'
+          exit $fail
+
+      - name: Frontend serves the app
+        run: |
+          set -a; [ -f .env ] && . ./.env; set +a
+          curl -sS --max-time 20 "http://127.0.0.1:${VITE_PORT:-5173}/" | grep -qi '<div id="root"' \
+            && echo "ok   frontend on ${VITE_PORT:-5173}" \
+            || { echo "FAIL frontend"; exit 1; }
+
+      - name: Ollama answers with the pulled models
+        continue-on-error: true
+        run: curl -sS --max-time 10 http://127.0.0.1:11434/api/tags
+
+      - name: ./stop.sh
+        if: always()
+        run: ./stop.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-boot-logs
+          path: logs/
+          if-no-files-found: warn
+
   backend-tests:
     name: Backend Tests (CPU smoke)
     runs-on: ubuntu-latest
