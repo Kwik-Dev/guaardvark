@@ -13,6 +13,11 @@ from celery import Celery
 from flask import current_app
 
 from backend.models import db, Subject
+from backend.utils.platform import (
+    LORA_REAP_STUCK_AFTER_S,
+    LORA_TRAIN_TASK_SOFT_TIME_LIMIT_S,
+    LORA_TRAIN_TASK_TIME_LIMIT_S,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,11 +239,13 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
     # Reaching here means the real trainer was NOT selected. Outside of pytest that
     # is a hard failure — we do NOT silently produce a fake LoRA (NO-MOCKS policy).
     # The most common cause in 'auto' is that RealLoraTrainer.is_available() returned
-    # False: the venv-torch CUDA probe didn't see a GPU (or timed out under contention).
-    # Fail loud with guidance; the caller marks the Subject 'failed' with this message.
+    # False: the accelerator probe (CUDA or Apple MPS) didn't see a device (or timed
+    # out under contention). Fail loud with guidance; the caller marks the Subject
+    # 'failed' with this message.
     if not allow_mock:
-        msg = ("Real LoRA trainer unavailable (venv-torch/CUDA probe failed). "
-               "Verify the GPU is free (nvidia-smi) and the trainer venv exists "
+        msg = ("Real LoRA trainer unavailable (accelerator probe failed: no CUDA or "
+               "Apple MPS). Verify the GPU is free (nvidia-smi) or MPS is available "
+               "(Apple Silicon), and the trainer venv exists "
                "(plugins/lora_trainer/scripts/setup_venv.sh), then retry. To bypass "
                "the probe under contention, set GUAARDVARK_LORA_BACKEND=real. "
                "Mock training is disabled by policy.")
@@ -271,7 +278,16 @@ def _train_impl(subject_id: int, job_id: str | None = None) -> dict:
 
 
 def create_lora_trainer_tasks(celery_app: Celery):
-    @celery_app.task(name="lora_trainer.train_lora")
+    # Task limits are derived from the one platform flag in backend.utils.platform
+    # so the daemon caps, these task limits, and the reaper cutoff cannot drift
+    # apart. On stock (CUDA) both are None, so the global task_soft_time_limit /
+    # task_time_limit apply unchanged.
+    task_limits = {}
+    if LORA_TRAIN_TASK_TIME_LIMIT_S is not None:
+        task_limits["soft_time_limit"] = LORA_TRAIN_TASK_SOFT_TIME_LIMIT_S
+        task_limits["time_limit"] = LORA_TRAIN_TASK_TIME_LIMIT_S
+
+    @celery_app.task(name="lora_trainer.train_lora", **task_limits)
     def train_lora_task(subject_id: int, job_id: str | None = None):
         with current_app.app_context():
             train_subject_lora_for_subject(subject_id, job_id=job_id)
@@ -502,14 +518,18 @@ def reap_stuck_training_subjects() -> dict:
     'failed' so the UI re-enables the Train button. A worker that dies mid-run
     (its trainer daemon now reaped by PR_SET_PDEATHSIG) loses the Celery task, so
     nothing marks the Subject failed — it would otherwise stay 'training' forever.
-    The 45-minute cutoff is deliberately > the 30-min _TRAIN_TIMEOUT_S, so a job
-    that is genuinely still running is never reaped. Uses the DB clock to avoid
-    process/DB timezone skew."""
+    The cutoff comes from the one platform flag in backend.utils.platform
+    (LORA_REAP_STUCK_AFTER_S) so it cannot drift from the daemon and task limits:
+    on Apple Silicon it sits past the 255 min task hard-limit, on stock CUDA it
+    stays the long-standing 45 min (> the 30 min train cap). Uses the DB clock to
+    avoid process/DB timezone skew."""
     from sqlalchemy import text
+
     stale = (
         Subject.query
         .filter(Subject.training_status == "training",
-                Subject.updated_at < text("now() - interval '45 minutes'"))
+                Subject.updated_at < text("now() - make_interval(secs => :stale_s)"))
+        .params(stale_s=LORA_REAP_STUCK_AFTER_S)
         .all()
     )
     for s in stale:
