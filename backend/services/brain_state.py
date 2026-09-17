@@ -529,10 +529,15 @@ class BrainState:
 
         desktop_block = ""
         try:
-            from backend.services.agent_control_service import AgentControlService
-            desktop = AgentControlService._get_desktop_state()
-            if desktop:
-                desktop_block = f"Agent virtual screen state:\n{desktop}\n\n"
+            from backend.utils.platform import screen_agent_available
+
+            # Off Linux there is no agent screen; querying it only puts
+            # "query failed" in the prompt, which small models repeat back.
+            if screen_agent_available():
+                from backend.services.agent_control_service import AgentControlService
+                desktop = AgentControlService._get_desktop_state()
+                if desktop:
+                    desktop_block = f"Agent virtual screen state:\n{desktop}\n\n"
         except Exception:
             pass
 
