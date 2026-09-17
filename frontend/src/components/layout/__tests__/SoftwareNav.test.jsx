@@ -76,6 +76,16 @@ describe("SoftwareNav", () => {
     expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
   });
 
+  it("ends the right side with a floating-chat button, off on a page that is a chat itself", () => {
+    const { unmount } = renderNav("/documents");
+    const button = screen.getByRole("button", { name: "Floating chat" });
+    expect(button).toBeEnabled();
+    expect(button.parentElement.nextElementSibling).toBeNull();
+    unmount();
+    renderNav("/chat");
+    expect(screen.getByRole("button", { name: "Floating chat" })).toBeDisabled();
+  });
+
   it("pins a brand page with its live badge count", () => {
     renderNav("/documents/alerts");
     const pin = screen.getByRole("link", { name: "Alerts" });

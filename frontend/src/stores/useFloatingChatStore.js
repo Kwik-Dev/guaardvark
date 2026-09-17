@@ -14,6 +14,15 @@ export const useFloatingChatStore = create(
       setIsOpen: (open) => set({ isOpen: open }),
       toggleOpen: () => set((state) => ({ isOpen: !state.isOpen })),
 
+      // The floating button can be dismissed. The choice outlives a reload only
+      // while the workspace bar shows its own chat button, so a chrome without
+      // one gets the button back on the next load.
+      fabHidden: false,
+      fabHiddenThisSession: false,
+      hideFab: () => set({ fabHidden: true, fabHiddenThisSession: true }),
+      barChatEntry: false,
+      setBarChatEntry: (present) => set({ barChatEntry: Boolean(present) }),
+
       // Window geometry (persisted)
       position: { x: -1, y: -1 }, // -1 signals "use default" on first render
       setPosition: (pos) => set({ position: pos }),
@@ -62,6 +71,7 @@ export const useFloatingChatStore = create(
         size: state.size,
         collapsed: state.collapsed,
         isOpen: state.isOpen,
+        fabHidden: state.fabHidden,
         sessionId: state.sessionId,
         messages: state.messages.slice(-MAX_PERSISTED_MESSAGES),
       }),

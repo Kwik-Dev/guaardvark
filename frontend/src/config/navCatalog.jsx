@@ -528,6 +528,13 @@ export const CORE_NAV_CATALOG = Object.freeze([
     icon: <DesktopWindowsIcon />,
     menu: "View",
   }),
+  // Opens the floating chat from the workspace bar, after the pinned pages.
+  action({
+    id: "floating-chat",
+    label: "Floating chat",
+    icon: <ChatBubbleOutlineIcon />,
+    menu: "View",
+  }),
 ]);
 
 /**

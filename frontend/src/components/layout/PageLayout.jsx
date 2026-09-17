@@ -18,6 +18,7 @@ import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import { useLocation, useNavigate } from "react-router-dom";
 import { spacing, typography as typoTokens } from "../../theme/tokens";
+import brand from "../../config/brand";
 
 /**
  * Colour for the current route from the active theme's `moduleAccents` map,
@@ -47,6 +48,7 @@ function accentForPath(accents, pathname) {
  * @param {boolean} modelStatus  — Show active model chip in header
  * @param {boolean} noPadding    — Disable content padding (useful for fullscreen)
  * @param {ReactNode} headerContent — Extra content below the header bar
+ * @param {boolean} hideHeader   — Drop the title bar; the page places its own actions
  * @param {string}  accent       — Override the route's theme accent colour
  * @param {ReactNode} children   — Page content
  */
@@ -59,6 +61,7 @@ const PageLayout = ({
   activeModel,
   noPadding = false,
   headerContent,
+  hideHeader = false,
   accent,
   children,
 }) => {
@@ -67,7 +70,10 @@ const PageLayout = ({
   const { pathname } = useLocation();
   const accentColor =
     accent ?? accentForPath(theme.palette.moduleAccents, pathname);
-  const showHeader = variant !== "fullscreen";
+  const showHeader = variant !== "fullscreen" && !hideHeader;
+  // The buttons only step the browser's own history, which the router fills
+  // on every navigation; a brand that turns them off keeps back and forward.
+  const showHistoryButtons = brand.pageHistoryButtons !== false;
   const contentPadding = noPadding || variant === "grid" ? 0 : { xs: 1.5, sm: spacing.sectionGap };
 
   return (
@@ -103,20 +109,24 @@ const PageLayout = ({
             }}
           >
             <Box sx={{ display: "flex", alignItems: "center", gap: 0.25 }}>
-              <IconButton
-                size="small"
-                onClick={() => navigate(-1)}
-                sx={{ opacity: 0.5, "&:hover": { opacity: 1 } }}
-              >
-                <ChevronLeftIcon fontSize="small" />
-              </IconButton>
-              <IconButton
-                size="small"
-                onClick={() => navigate(1)}
-                sx={{ opacity: 0.5, "&:hover": { opacity: 1 }, mr: 1.5 }}
-              >
-                <ChevronRightIcon fontSize="small" />
-              </IconButton>
+              {showHistoryButtons && (
+                <>
+                  <IconButton
+                    size="small"
+                    onClick={() => navigate(-1)}
+                    sx={{ opacity: 0.5, "&:hover": { opacity: 1 } }}
+                  >
+                    <ChevronLeftIcon fontSize="small" />
+                  </IconButton>
+                  <IconButton
+                    size="small"
+                    onClick={() => navigate(1)}
+                    sx={{ opacity: 0.5, "&:hover": { opacity: 1 }, mr: 1.5 }}
+                  >
+                    <ChevronRightIcon fontSize="small" />
+                  </IconButton>
+                </>
+              )}
               <Typography
                 variant={typoTokens.pageTitle.variant}
                 sx={{

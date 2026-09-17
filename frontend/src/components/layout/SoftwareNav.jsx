@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   Badge,
@@ -9,9 +9,11 @@ import {
   useTheme,
 } from "@mui/material";
 import { useAppStore } from "../../stores/useAppStore";
+import { useFloatingChatStore } from "../../stores/useFloatingChatStore";
+import { isFloatingChatHiddenRoute } from "../../config/floatingChat";
 import { BrandLogo } from "../branding";
 import brand from "../../config/brand";
-import { landingRouteFor } from "../../config/profile";
+import { chatSurfacesFor, landingRouteFor } from "../../config/profile";
 import { extensionNavGroups } from "../../extensions";
 import {
   buildNavCatalog,
@@ -97,7 +99,19 @@ const SoftwareNav = () => {
   const byId = (id) => catalog.find((item) => item.id === id);
   const metricsAction = byId("system-metrics");
   const agentScreenAction = byId("agent-screen");
+  const chatAction = byId("floating-chat");
   const pins = pinnedItems(catalog);
+
+  const chatOpen = useFloatingChatStore((state) => state.isOpen);
+  const toggleChat = useFloatingChatStore((state) => state.toggleOpen);
+  const setBarChatEntry = useFloatingChatStore((state) => state.setBarChatEntry);
+  // A page that is a chat surface of its own has no floating chat to open.
+  const chatUnavailable = isFloatingChatHiddenRoute(location.pathname, chatSurfacesFor(profile));
+  const hasChatAction = Boolean(chatAction);
+  useEffect(() => {
+    setBarChatEntry(hasChatAction);
+    return () => setBarChatEntry(false);
+  }, [hasChatAction, setBarChatEntry]);
 
   const goWorkspace = (workspaceId) => {
     const tools = toolsForWorkspace(catalog, workspaceId);
@@ -172,6 +186,7 @@ const SoftwareNav = () => {
           >
             {systemName || brand.appName}
           </Typography>
+          {brand.workspaceBarStart && <brand.workspaceBarStart />}
 
           <Box
             sx={{
@@ -257,6 +272,24 @@ const SoftwareNav = () => {
                 </Tooltip>
               );
             })}
+            {chatAction && (
+              <Tooltip title={chatUnavailable ? "This page has its own chat" : chatAction.label}>
+                <span>
+                  <ButtonBase
+                    onClick={toggleChat}
+                    disabled={chatUnavailable}
+                    aria-label={chatAction.label}
+                    aria-pressed={chatOpen}
+                    sx={{
+                      ...pinButtonSx(chatOpen, "primary.main"),
+                      "&.Mui-disabled": { opacity: 0.35 },
+                    }}
+                  >
+                    {chatAction.icon}
+                  </ButtonBase>
+                </span>
+              </Tooltip>
+            )}
           </Box>
         </Box>
 
