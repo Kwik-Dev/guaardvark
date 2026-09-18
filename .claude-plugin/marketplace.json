@@ -10,7 +10,7 @@
       "name": "guaardvark",
       "source": "./",
       "description": "Local image, video, music-video and Film Crew generation, voice and music, upscaling, LoRA training, Hugging Face model onboarding, agent swarms, local knowledge, code intelligence and supervised outreach, driven from Claude Code through the guaardvark MCP server.",
-      "homepage": "https://guaardvark.com",
+      "homepage": "https://guaardvark.com/claude-code/",
       "category": "productivity",
       "keywords": ["local-ai", "self-hosted", "image", "video", "music", "voice", "comfyui", "ollama"]
     }
