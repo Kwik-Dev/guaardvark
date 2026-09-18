@@ -31,6 +31,14 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@types/react"
         update-types: ["version-update:semver-major"]
+      # MUI 5 is imported by ~270 frontend files; a major bump of one MUI
+      # package fails on the other's peer requirement, and the migration to a
+      # current MUI belongs to the same deliberate upgrade as React 19
+      # (PRs #191 and #193 closed 2026-09-18).
+      - dependency-name: "@mui/material"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@mui/icons-material"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
