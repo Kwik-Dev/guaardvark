@@ -25,16 +25,25 @@ def get_version() -> str:
     Resolve Guaardvark version without importing ``backend.app`` (which would
     boot CUDA, the DB client, logger config, and the full service world —
     fine for the Flask process, absurd for a bare stdio subprocess).
-    Parses the literal out of ``backend/app.py`` as text.
+    Reads the repo-root ``VERSION`` file, the same source ``backend.app``
+    uses; a ``__version__`` literal in ``backend/app.py`` is the fallback for
+    layouts that ship without the file.
     """
     global _VERSION
     if _VERSION is not None:
         return _VERSION
     import re
     from pathlib import Path
-    app_py = Path(__file__).resolve().parent.parent / "app.py"
+    backend_dir = Path(__file__).resolve().parent.parent
     try:
-        match = re.search(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", app_py.read_text(), re.M)
+        text = (backend_dir.parent / "VERSION").read_text().strip()
+        if text:
+            _VERSION = text
+            return _VERSION
+    except OSError:
+        pass
+    try:
+        match = re.search(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", (backend_dir / "app.py").read_text(), re.M)
         _VERSION = match.group(1) if match else "0.0.0-unknown"
     except OSError:
         _VERSION = "0.0.0-unknown"
