@@ -34,6 +34,9 @@ def spy(monkeypatch, gen):
     import backend.services.gpu_memory_orchestrator as gmo
     monkeypatch.setattr(gmo, "get_orchestrator", lambda: _Orch())
     monkeypatch.setattr(gen, "_device", "cuda")
+    # The probe runs only when torch reports CUDA; stub it so the eviction
+    # tests exercise the same branch on a CPU-only or Apple Silicon box.
+    monkeypatch.setattr(oig.torch.cuda, "is_available", lambda: True)
     return calls
 
 
@@ -206,11 +209,14 @@ def test_cpu_device_skips_vram_check_but_still_registers(gen, spy, monkeypatch):
     assert spy["requests"] == [("sd:pipeline", 4000, 85)]
 
 
-def test_admission_failure_never_raises(gen, monkeypatch):
-    # Orchestrator down, CUDA query exploding — generation must still proceed.
-    monkeypatch.setattr(gen, "_device", "cuda")
+def test_admission_failure_never_raises(gen, spy, monkeypatch):
+    # A CUDA query exploding must not kill the request: the probe/evict step is
+    # best-effort and the orchestrator is still consulted. (Only the
+    # orchestrator's own hard_fit refusal may raise, so it is stubbed here;
+    # against the real one the outcome would depend on the card's free VRAM.)
     monkeypatch.setattr(oig.torch.cuda, "mem_get_info", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     gen._ensure_vram_for_pipeline("Tongyi-MAI/Z-Image-Turbo")  # must not raise
+    assert len(spy["requests"]) == 1
 
 
 # --- img2img pipeline family routing (Z-Image uses transformer, not unet) ---
