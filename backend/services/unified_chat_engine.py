@@ -2849,6 +2849,56 @@ class UnifiedChatEngine:
                 except Exception:
                     pass
 
+        # 6a. Out of iterations with no final text. The model spent the budget
+        #     calling tools and never committed to an answer, and everything it
+        #     found is sitting in ollama_messages — emitting "" throws that away
+        #     and the user sees an empty reply. One more call, tools off, from
+        #     the same conversation, so the turn ends with the findings.
+        synthesized = False
+        if not accumulated_response.strip() and steps and not is_aborted(session_id):
+            _native_was_active = getattr(self, "_native_toolcalls_active", False)
+            try:
+                self._native_toolcalls_active = False
+                ollama_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have used every tool call available for this turn. "
+                        "Answer the user's question now, from the tool results "
+                        "above and nothing else. Do not call another tool. If "
+                        "what you found is incomplete, say what you found and "
+                        "what is still missing."
+                    ),
+                })
+                from backend.config import AGENTIC_MAX_TOKENS_FINAL
+                synthesis_text, in_tok, out_tok = self._call_llm_streaming(
+                    ollama_messages, emit_fn, session_id,
+                    emit_tokens=True,
+                    max_tokens=AGENTIC_MAX_TOKENS_FINAL,
+                    iteration=iteration,
+                )
+                token_usage["input_tokens"] += in_tok or 0
+                token_usage["output_tokens"] += out_tok or 0
+                if (synthesis_text or "").strip():
+                    accumulated_response = synthesis_text.strip()
+                    synthesized = True
+                    steps.append({
+                        "iteration": iteration,
+                        "thoughts": "Iteration limit reached — answered from the tool results gathered.",
+                        "tool_calls": [],
+                        "synthesized": True,
+                    })
+                    logger.info(
+                        "[UNIFIED_ENGINE] Iteration limit reached with no final answer; "
+                        "synthesised one from %d step(s) of tool results", len(steps) - 1
+                    )
+            except Exception:
+                logger.exception(
+                    "[UNIFIED_ENGINE] Synthesis after the iteration limit failed; "
+                    "returning the empty response"
+                )
+            finally:
+                self._native_toolcalls_active = _native_was_active
+
         # 6b. Escalation "always" mode — replace local response with Claude
         # NOTE: This modifies accumulated_response BEFORE chat:complete emits it.
         from backend.utils.settings_utils import get_setting
@@ -2890,6 +2940,7 @@ class UnifiedChatEngine:
             "generated_images": generated_images,
             "thinking": final_thinking,
             "truncated": final_truncated,
+            "synthesized": synthesized,
         })
 
         # 8. Save assistant message (only if we have actual content)
@@ -2943,6 +2994,7 @@ class UnifiedChatEngine:
             "request_id": request_id,
             "session_id": session_id,
             "token_usage": token_usage,
+            "synthesized": synthesized,
         }
 
     # ── Media command direct intercept ─────────────────────────────────────
