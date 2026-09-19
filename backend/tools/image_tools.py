@@ -1869,7 +1869,30 @@ class GenerateIdentityTool(BaseTool):
         "width": ToolParameter(name="width", type="int", required=False, default=768),
         "height": ToolParameter(name="height", type="int", required=False, default=1024),
         "steps": ToolParameter(name="steps", type="int", required=False, default=20),
+        # Likeness experiment switches; omitted = the generator's defaults.
+        "weight": ToolParameter(
+            name="weight", type="float", required=False,
+            description="PuLID identity weight (default 1.0).",
+        ),
+        "start_at": ToolParameter(
+            name="start_at", type="float", required=False,
+            description="Fraction of the denoise at which identity starts applying (default 0.0).",
+        ),
+        "end_at": ToolParameter(
+            name="end_at", type="float", required=False,
+            description="Fraction of the denoise at which identity stops applying (default 1.0).",
+        ),
+        "unet_dtype": ToolParameter(
+            name="unet_dtype", type="string", required=False,
+            description="FLUX UNET load dtype: fp8_e4m3fn, bf16 or default (default: the configured fp8).",
+        ),
+        "node_variant": ToolParameter(
+            name="node_variant", type="string", required=False,
+            description="PuLID apply node: pulid_flux (default) or pulid_classic.",
+        ),
     }
+
+    _PASSTHROUGH = ("weight", "start_at", "end_at", "unet_dtype", "node_variant")
 
     def execute(self, prompt: str, consented: bool = True, image: str = "",
                 width: int = 768, height: int = 1024, steps: int = 20, **kwargs) -> ToolResult:
@@ -1898,10 +1921,14 @@ class GenerateIdentityTool(BaseTool):
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
             output_path, filename = _chat_png_path("identity")
+            overrides = {
+                k: kwargs[k] for k in self._PASSTHROUGH
+                if kwargs.get(k) is not None and kwargs.get(k) != ""
+            }
             ComfyUIImageGenerator().generate_with_identity(
                 image_path=src, prompt=prompt, output_path=output_path,
                 width=int(width) or 768, height=int(height) or 1024,
-                steps=int(steps) or 20,
+                steps=int(steps) or 20, **overrides,
             )
             image_url = f"/api/outputs/generated_images/{filename}"
             return ToolResult(

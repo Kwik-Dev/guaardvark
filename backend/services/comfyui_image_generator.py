@@ -57,6 +57,70 @@ FLUX_DEV_T5 = os.environ.get("GUAARDVARK_FLUX_DEV_T5", "t5xxl_fp16.safetensors")
 FLUX_DEV_WEIGHT_DTYPE = os.environ.get("GUAARDVARK_FLUX_DEV_DTYPE", "fp8_e4m3fn")
 FLUX_DEV_GUIDANCE = float(os.environ.get("GUAARDVARK_FLUX_DEV_GUIDANCE", "3.5"))
 
+# PuLID identity experiment switches (the likeness loss at weight 1.0 and 1.5
+# on fp8 is what keeps generate_identity behind GUAARDVARK_IDENTITY_TOOL).
+# UNETLoader's weight_dtype choices are default | fp8_e4m3fn | fp8_e4m3fn_fast
+# | fp8_e5m2 (ComfyUI nodes.py, UNETLoader.INPUT_TYPES); there is no bf16
+# choice. "default" loads the tensors as stored, and flux1-dev.safetensors is
+# stored as BF16 (780 tensors in its header, read 2026-09-19), so a bf16
+# request maps to "default".
+PULID_UNET_DTYPES = {
+    "fp8_e4m3fn": "fp8_e4m3fn",
+    "fp8_e4m3fn_fast": "fp8_e4m3fn_fast",
+    "fp8_e5m2": "fp8_e5m2",
+    "bf16": "default",
+    "default": "default",
+}
+# Which apply node builds the graph. PuLID_ComfyUI (the SD/SDXL node) cannot
+# drive FLUX: its loader splits the checkpoint into image_proj.* and
+# ip_adapter.* keys and ApplyPulid patches the UNet's attn2 cross-attention
+# (custom_nodes/PuLID_ComfyUI/pulid.py), while pulid_flux_v0.9.1.safetensors
+# carries only pulid_ca.* and pulid_encoder.* keys and FLUX's double/single
+# blocks have no attn2 (custom_nodes/ComfyUI-PuLID-Flux/pulidflux.py). Both
+# read 2026-09-19.
+PULID_NODE_VARIANTS = {
+    "pulid_flux": {
+        "supported": True,
+        "package": "ComfyUI-PuLID-Flux",
+        "apply_class": "ApplyPulidFlux",
+        "reason": "",
+    },
+    "pulid_classic": {
+        "supported": False,
+        "package": "PuLID_ComfyUI",
+        "apply_class": "ApplyPulid",
+        "reason": (
+            "PuLID_ComfyUI targets SD/SDXL: its loader expects image_proj.* and "
+            "ip_adapter.* keys and ApplyPulid patches attn2 cross-attention; the "
+            "FLUX checkpoint has pulid_ca.*/pulid_encoder.* keys and FLUX blocks "
+            "have no attn2, so this node cannot drive FLUX.1-dev."
+        ),
+    },
+}
+
+
+def resolve_pulid_unet_dtype(unet_dtype: str | None) -> str:
+    """The UNETLoader weight_dtype for a requested dtype; None keeps the env default."""
+    if unet_dtype is None or unet_dtype == "":
+        return FLUX_DEV_WEIGHT_DTYPE
+    try:
+        return PULID_UNET_DTYPES[str(unet_dtype)]
+    except KeyError:
+        raise ValueError(
+            f"unet_dtype {unet_dtype!r} is not one of {sorted(PULID_UNET_DTYPES)}"
+        ) from None
+
+
+def resolve_pulid_node_variant(node_variant: str | None) -> dict:
+    """The variant entry, or ValueError naming why it cannot be used."""
+    key = node_variant or "pulid_flux"
+    entry = PULID_NODE_VARIANTS.get(str(key))
+    if entry is None:
+        raise ValueError(f"node_variant {key!r} is not one of {sorted(PULID_NODE_VARIANTS)}")
+    if not entry["supported"]:
+        raise ValueError(f"node_variant {key!r} unsupported: {entry['reason']}")
+    return entry
+
 # ── FLUX.1 Kontext [dev] — instruction image editing ───────────────────────────
 # The loader filename is single-sourced from the ComfyUI-models registry (SSOT) so
 # the download destination and the loader node can never drift (issue #36 class of
@@ -567,13 +631,24 @@ class ComfyUIImageGenerator:
 
     def _build_pulid_workflow(
         self, *, src_image_name: str, prompt: str, width: int, height: int,
-        steps: int, seed: int, weight: float = 1.0,
+        steps: int, seed: int, weight: float = 1.0, start_at: float = 0.0,
+        end_at: float = 1.0, unet_dtype: str | None = None,
+        node_variant: str | None = "pulid_flux",
     ) -> dict:
+        """The PuLID-FLUX graph. Defaults are the product's; the keyword
+        overrides are the likeness experiment's switches (see
+        scripts/experiments/pulid_matrix.py)."""
         n = max(int(steps), PULID_MIN_STEPS)
+        variant = resolve_pulid_node_variant(node_variant)
+        weight_dtype = resolve_pulid_unet_dtype(unet_dtype)
+        start_at = float(start_at)
+        end_at = float(end_at)
+        if not (0.0 <= start_at <= 1.0 and 0.0 <= end_at <= 1.0 and start_at <= end_at):
+            raise ValueError(f"start_at/end_at must satisfy 0 <= start_at <= end_at <= 1, got {start_at}/{end_at}")
         return {
             "unet": {
                 "class_type": "UNETLoader",
-                "inputs": {"unet_name": self.flux_dev_unet, "weight_dtype": FLUX_DEV_WEIGHT_DTYPE},
+                "inputs": {"unet_name": self.flux_dev_unet, "weight_dtype": weight_dtype},
             },
             "clip": {
                 "class_type": "DualCLIPLoader",
@@ -585,7 +660,7 @@ class ComfyUIImageGenerator:
             "eva": {"class_type": "PulidFluxEvaClipLoader", "inputs": {}},
             "load": {"class_type": "LoadImage", "inputs": {"image": src_image_name}},
             "apply": {
-                "class_type": "ApplyPulidFlux",
+                "class_type": variant["apply_class"],
                 "inputs": {
                     "model": ["unet", 0],
                     "pulid_flux": ["pulid", 0],
@@ -593,8 +668,8 @@ class ComfyUIImageGenerator:
                     "face_analysis": ["insight", 0],
                     "image": ["load", 0],
                     "weight": float(weight),
-                    "start_at": 0.0,
-                    "end_at": 1.0,
+                    "start_at": start_at,
+                    "end_at": end_at,
                     "unique_id": "pulid_apply",
                 },
             },
@@ -669,7 +744,8 @@ class ComfyUIImageGenerator:
     def generate_with_identity(
         self, *, image_path: str, prompt: str, output_path: str,
         width: int = 768, height: int = 1024, steps: int = 20, seed: int = 42,
-        weight: float = 1.0,
+        weight: float = 1.0, start_at: float = 0.0, end_at: float = 1.0,
+        unet_dtype: str | None = None, node_variant: str | None = "pulid_flux",
     ) -> str:
         if not self._available():
             raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url}")
@@ -684,6 +760,8 @@ class ComfyUIImageGenerator:
         workflow = self._build_pulid_workflow(
             src_image_name=src_name, prompt=prompt,
             width=width, height=height, steps=steps, seed=seed, weight=weight,
+            start_at=start_at, end_at=end_at, unet_dtype=unet_dtype,
+            node_variant=node_variant,
         )
         result = self._run_edit_graph(
             workflow, output_path, job="chat_pulid",
