@@ -98,6 +98,10 @@ class PluginMetadata:
     config: PluginConfig = field(default_factory=PluginConfig)
     requirements: Dict[str, bool] = field(default_factory=dict)
     endpoints: Dict[str, str] = field(default_factory=dict)
+    # Proves the process answering the health endpoint is THIS checkout's, not
+    # another install's service parked on the same port. Read by
+    # PluginManager._instance_check; see plugins/comfyui/plugin.json for the shape.
+    instance_check: Dict[str, Any] = field(default_factory=dict)
     
     @classmethod
     def from_json_file(cls, json_path: Path) -> 'PluginMetadata':
@@ -150,6 +154,7 @@ class PluginMetadata:
                 config=config,
                 requirements=data.get('requirements', {}),
                 endpoints=data.get('endpoints', {}),
+                instance_check=data.get('instance_check') or {},
             )
         except Exception as e:
             logger.error(f"Failed to load plugin metadata from {json_path}: {e}")
@@ -171,6 +176,7 @@ class PluginMetadata:
             'config': self.config.to_dict(),
             'requirements': self.requirements,
             'endpoints': self.endpoints,
+            'instance_check': self.instance_check,
         }
     
     def save(self, json_path: Path):
