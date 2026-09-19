@@ -695,10 +695,11 @@ class PluginManager:
                 if self._check_service_running(metadata):
                     self._plugin_status[plugin_id] = PluginStatus.RUNNING
                     came_up = came_up or before != PluginStatus.RUNNING
-                elif self.__dict__.get('_instance_problems', {}).get(plugin_id):
-                    # A stranger holds the port: that is an error to show, not
-                    # a stopped plugin the user can simply start.
-                    self._plugin_status[plugin_id] = PluginStatus.ERROR
+                elif before == PluginStatus.ERROR and self.__dict__.get('_instance_problems', {}).get(plugin_id):
+                    # A start refused because a stranger holds the port set
+                    # ERROR with the reason; a refresh keeps it while the
+                    # stranger is still there instead of flapping to STOPPED.
+                    pass
                 else:
                     self._plugin_status[plugin_id] = PluginStatus.STOPPED
             else:
