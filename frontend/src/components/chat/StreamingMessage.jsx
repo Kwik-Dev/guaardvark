@@ -22,6 +22,7 @@ import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useAppStore } from "../../stores/useAppStore";
 import { BASE_URL } from "../../api/apiClient";
 import ToolCallCard from "./ToolCallCard";
+import { parseConsentApproval } from "./consentApproval";
 import ThinkingCard from "./ThinkingCard";
 import AgentThinkingTrail from "./AgentThinkingTrail";
 import ImageLightbox from "../images/ImageLightbox";
@@ -249,11 +250,18 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
       if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
       setPendingApproval(true);
       setToolCalls((prev) => {
-        const updated = [...prev];
         const approvalTools = new Set(data.tools || []);
-        return updated.map(tc => {
+        return prev.map((tc) => {
           if (tc.isPending && approvalTools.has(tc.tool)) {
-            return { ...tc, requiresApproval: true };
+            const parsed = parseConsentApproval(data, tc.tool, tc.params);
+            return {
+              ...tc,
+              requiresApproval: true,
+              params: parsed.params,
+              consent: parsed.consent,
+              consentImage: parsed.image,
+              consentPrompt: parsed.prompt,
+            };
           }
           return tc;
         });
@@ -544,6 +552,9 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
             sessionId={sessionId}
             outputChunks={tc.outputChunks}
             requiresApproval={tc.requiresApproval}
+            consent={tc.consent}
+            consentImage={tc.consentImage}
+            consentPrompt={tc.consentPrompt}
             onApproval={(approved) => chatService.sendToolApproval(sessionId, approved)}
           />
         ))}

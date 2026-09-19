@@ -29,10 +29,16 @@ import Tooltip from "@mui/material/Tooltip";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { BASE_URL } from "../../api/apiClient";
+import { ActionButton } from "../settings/ui";
+import { guardedMediaSrc } from "../../utils/assetGuard";
 import ArtifactCard, { CSVTable, artifactShape } from "./ArtifactCard";
+import { consentImageSrc } from "./consentApproval";
 
 // Tools that get thumbs up/down feedback — agent actions the user can judge
 const FEEDBACK_TOOLS = new Set(["agent_task_execute", "agent_screen_capture"]);
+
+const CONSENT_COPY =
+  "By approving, you confirm you have the right to use this person's likeness — your own photo, or a Cast subject you uploaded.";
 
 const ToolCallCard = ({
   toolName,
@@ -44,6 +50,9 @@ const ToolCallCard = ({
   outputChunks,
   requiresApproval,
   onApproval,
+  consent,
+  consentImage,
+  consentPrompt,
 }) => {
   const artifact = result?.artifact || null;
   // A card that produced a file opens by default so the file is visible in the thread.
@@ -209,19 +218,73 @@ const ToolCallCard = ({
         <Box sx={{ px: 1.5, pb: 1, fontSize: "0.7rem" }}>
           {/* Approval UI */}
           {requiresApproval && !responded && (
-            <Box sx={{ mb: 1, p: 1, bgcolor: "background.paper", borderRadius: 1, border: "1px solid", borderColor: "error.main" }}>
-              <Typography variant="caption" sx={{ fontWeight: 600, color: "error.main", display: "block", mb: 1 }}>
-                This action requires your approval. Do you want to proceed?
-              </Typography>
-              <ButtonGroup size="small" fullWidth variant="contained">
-                <Button color="success" startIcon={<CheckCircleIcon />} onClick={() => handleApproval(true)}>
-                  Approve
-                </Button>
-                <Button color="error" startIcon={<ErrorIcon />} onClick={() => handleApproval(false)}>
-                  Reject
-                </Button>
-              </ButtonGroup>
-            </Box>
+            consent ? (
+              <Box
+                data-testid="consent-approval-card"
+                sx={{ mb: 1, p: 1.25, bgcolor: "background.paper", borderRadius: 1, border: "1px solid", borderColor: "divider" }}
+              >
+                <Typography variant="body2" sx={{ display: "block", mb: 1, lineHeight: 1.45 }}>
+                  {CONSENT_COPY}
+                </Typography>
+                {(consentImage || consentPrompt) && (
+                  <Box sx={{ display: "flex", gap: 1, alignItems: "flex-start", mb: 1 }}>
+                    {consentImageSrc(consentImage) && (
+                      <Box
+                        component="img"
+                        src={guardedMediaSrc(consentImageSrc(consentImage))}
+                        alt="Reference likeness"
+                        sx={{
+                          width: 72,
+                          height: 72,
+                          objectFit: "cover",
+                          borderRadius: 1,
+                          border: "1px solid",
+                          borderColor: "divider",
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
+                    <Box sx={{ minWidth: 0 }}>
+                      {consentPrompt && (
+                        <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                          {consentPrompt}
+                        </Typography>
+                      )}
+                      {consentImage && !consentImageSrc(consentImage) && (
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
+                          Reference: {consentImage}
+                        </Typography>
+                      )}
+                    </Box>
+                  </Box>
+                )}
+                <Box sx={{ display: "flex", gap: 1, alignItems: "center", flexWrap: "wrap" }}>
+                  <ActionButton kind="primary" onClick={() => handleApproval(true)}>
+                    I have the right to use this likeness
+                  </ActionButton>
+                  <ActionButton kind="link" onClick={() => handleApproval(false)}>
+                    Decline
+                  </ActionButton>
+                </Box>
+              </Box>
+            ) : (
+              <Box
+                data-testid="tool-approval-card"
+                sx={{ mb: 1, p: 1, bgcolor: "background.paper", borderRadius: 1, border: "1px solid", borderColor: "error.main" }}
+              >
+                <Typography variant="caption" sx={{ fontWeight: 600, color: "error.main", display: "block", mb: 1 }}>
+                  This action requires your approval. Do you want to proceed?
+                </Typography>
+                <ButtonGroup size="small" fullWidth variant="contained">
+                  <Button color="success" startIcon={<CheckCircleIcon />} onClick={() => handleApproval(true)}>
+                    Approve
+                  </Button>
+                  <Button color="error" startIcon={<ErrorIcon />} onClick={() => handleApproval(false)}>
+                    Reject
+                  </Button>
+                </ButtonGroup>
+              </Box>
+            )
           )}
 
           {/* Parameters */}
@@ -359,6 +422,9 @@ ToolCallCard.propTypes = {
   outputChunks: PropTypes.string,
   requiresApproval: PropTypes.bool,
   onApproval: PropTypes.func,
+  consent: PropTypes.bool,
+  consentImage: PropTypes.string,
+  consentPrompt: PropTypes.string,
 };
 
 export default ToolCallCard;
