@@ -364,6 +364,17 @@ class BatchImageGenerator:
 
         return prompts
 
+    @staticmethod
+    def _file_dimensions(image_path) -> Optional[str]:
+        """``WxH`` of an image file from its header, or None when unreadable."""
+        try:
+            from PIL import Image
+            with Image.open(image_path) as img:
+                width, height = img.size
+            return f"{width}x{height}"
+        except Exception:  # noqa: BLE001 — a bad header is not a failed render
+            return None
+
     def _create_thumbnail(self, image_path: str, thumbnail_dir: Path) -> Optional[str]:
         try:
             from PIL import Image
@@ -424,6 +435,37 @@ class BatchImageGenerator:
                 logger.info(f"Batch cleanup: RSS {rss_before:.1f}GB -> {rss_after:.1f}GB")
         except Exception:
             pass
+
+    def _batch_running(self, batch_id: Optional[str] = None) -> bool:
+        with self.batch_lock:
+            if batch_id is not None:
+                status = self.active_batches.get(batch_id)
+                return bool(status is not None and status.status == "running")
+            return any(s.status == "running" for s in self.active_batches.values())
+
+    def release_batch_vram(self, batch_id: str) -> bool:
+        """Orchestrator callback for the ``image_batch:<batch_id>`` booking.
+
+        True means the booking may be dropped. A batch that is still running
+        keeps it. For a finished batch the resident pipeline is unloaded too,
+        unless another batch is mid-render on it.
+        """
+        if self._batch_running(batch_id):
+            return False
+        if not self._batch_running():
+            self._cleanup_gpu_memory()
+        return True
+
+    def _release_batch_booking(self, batch_id: str) -> None:
+        """A finished batch drops its own orchestrator booking; the enclosing
+        gpu_session drops it again on exit, which is a no-op by then."""
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+            orchestrator = get_orchestrator_if_created()
+            if orchestrator is not None:
+                orchestrator.drop_booking(f"image_batch:{batch_id}")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("drop_booking(image_batch:%s) failed: %s", batch_id, e)
 
     def _resolve_batch_model_key(self, model_key: str) -> str:
         """Map a batch prompt model key to a catalog key for resource estimates."""
@@ -868,6 +910,18 @@ class BatchImageGenerator:
             import shutil
             shutil.move(result.image_path, target_path)
 
+            # The metadata names the size the FILE has. A generator can render
+            # another canvas than it was asked for (text-mode enlargement did so
+            # on 2026-09-12: 960x544 requested, 1024x1024 written, metadata
+            # said 960x544), and the record is what people trust.
+            requested = f"{prompt.width}x{prompt.height}"
+            actual = self._file_dimensions(target_path) or requested
+            if actual != requested:
+                logger.warning(
+                    "Batch %s prompt %s: asked for %s, the file is %s",
+                    batch_id, prompt.id, requested, actual,
+                )
+
             thumbnail_path = None
             if batch_status and hasattr(batch_status, 'generate_thumbnails') and batch_status.generate_thumbnails:
                 thumbnail_path = self._create_thumbnail(str(target_path), output_dir / "thumbnails")
@@ -899,7 +953,8 @@ class BatchImageGenerator:
                 metadata={
                     "original_prompt": prompt.prompt,
                     "style": prompt.style,
-                    "dimensions": f"{prompt.width}x{prompt.height}",
+                    "dimensions": actual,
+                    **({"dimensions_requested": requested} if actual != requested else {}),
                     "steps": (result.metadata or {}).get("steps", prompt.steps),
                     "steps_requested": prompt.metadata.get(
                         "steps_requested", (result.metadata or {}).get("steps_requested", prompt.steps)),
@@ -1432,12 +1487,14 @@ class BatchImageGenerator:
                         if batch_id in self.executors:
                             del self.executors[batch_id]
                     self._cleanup_gpu_memory()
+                    self._release_batch_booking(batch_id)
 
                 except Exception as e:
                     logger.error(f"Batch generation failed: {e}")
                     batch_status.status = "error"
                     batch_status.error = str(e)
                     self._cleanup_gpu_memory()
+                    self._release_batch_booking(batch_id)
 
                     if self.progress_system:
                         self.progress_system.error_process(

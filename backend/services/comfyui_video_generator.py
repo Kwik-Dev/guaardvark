@@ -58,6 +58,20 @@ except Exception:  # pragma: no cover - defensive
 from backend.services.comfyui_video_workflows import ComfyUIVideoWorkflowMixin
 from backend.services.video_model_registry import FAMILY_SPECS as _FAMILY_SPECS
 
+# How long a render waits for the orchestrator to free the registry estimate
+# before it gives up instead of queuing into a starved card. Same budget the
+# image batch runner uses (GUAARDVARK_IMAGE_VRAM_WAIT_S).
+VRAM_WAIT_ENV = "GUAARDVARK_VIDEO_VRAM_WAIT_S"
+VRAM_WAIT_DEFAULT_S = 600.0
+
+# Consecutive missed liveness probes (~4 s each: HTTP timeout + 2 s sleep)
+# before a queued prompt is declared orphaned. Large model loads legitimately
+# exceed five: loading a 20 GB+ transformer on a 16 GB card stalls Comfy's
+# HTTP server well past 20 s (observed 247 s renders with ~30 s silent loads
+# on an RTX 5080 / 30 GB RAM box), and the 22B LTX loads were falsely failed
+# at 5. Thirty tolerates about two minutes of silence.
+DEAD_PROBE_LIMIT = 30
+
 
 def _looks_like_blank_video(video_path) -> Optional[str]:
     """Zero-placebo guard for the ComfyUI/Wan path (issue #36 Phase 3).
@@ -222,6 +236,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
 
         self.service_available = self._check_comfyui_connection()
         self._object_info_cache: Optional[dict] = None
+        self._vram_booking: Optional[str] = None
+        self._project_root = project_root
 
         if self.service_available:
             logger.info(f"ComfyUI video generator connected to {self.comfy_url}")
@@ -1125,6 +1141,164 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
 
 
 
+    def _running_reserve_vram_gb(self) -> Optional[float]:
+        """The --reserve-vram the serving ComfyUI was launched with, from
+        /system_stats (it reports sys.argv); None when it cannot be read."""
+        try:
+            from backend.services.comfyui_launch_flags import reserve_vram_from_argv
+            response = requests.get(f"{self.comfy_url}/system_stats", timeout=5)
+            response.raise_for_status()
+            argv = ((response.json() or {}).get("system") or {}).get("argv") or []
+            return reserve_vram_from_argv(argv)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("ComfyUI /system_stats probe failed: %s", e)
+            return None
+
+    def _comfyui_queue_idle(self) -> Optional[bool]:
+        """True when nothing is running or pending in ComfyUI; None if unknown."""
+        try:
+            response = requests.get(f"{self.comfy_url}/queue", timeout=5)
+            response.raise_for_status()
+            data = response.json() or {}
+            return not (data.get("queue_running") or data.get("queue_pending"))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("ComfyUI queue probe failed: %s", e)
+            return None
+
+    def _ensure_comfyui_reserve_for(self, model: str) -> Optional[str]:
+        """Relaunch ComfyUI when its --reserve-vram is not the one this model needs.
+
+        The reserve is declared per model in the registry
+        (comfyui_reserve_vram_gb: MiniMax H3 5.0, Wan 2.2 14B 1.0; measured,
+        see the entries). A ComfyUI launched for one is wrong for the other,
+        so the value for the model about to run is written where the plugin's
+        start.sh reads it and the plugin is restarted through the manager.
+        An explicit GUAARDVARK_COMFYUI_RESERVE_VRAM wins and no restart
+        happens. Another render in ComfyUI's queue is left to finish first.
+        Returns an error string to surface, or None to proceed.
+        """
+        try:
+            from backend.services.comfyui_launch_flags import (
+                explicit_reserve_vram_gb, launch_env, write_reserve_request,
+            )
+            from backend.services.video_model_registry import comfyui_reserve_vram_gb_for_model
+        except Exception as e:  # noqa: BLE001
+            logger.debug("reserve helpers unavailable: %s", e)
+            return None
+        needed = comfyui_reserve_vram_gb_for_model(model)
+        if needed is None:
+            return None
+        if explicit_reserve_vram_gb(launch_env(self._project_root)) is not None:
+            logger.debug("%s set explicitly; %s keeps the running ComfyUI reserve", "GUAARDVARK_COMFYUI_RESERVE_VRAM", model)
+            return None
+        running = self._running_reserve_vram_gb()
+        if running is None or abs(running - needed) < 1e-6:
+            return None
+
+        # Do not pull the process out from under another render.
+        deadline = time.time() + VRAM_WAIT_DEFAULT_S
+        while self._comfyui_queue_idle() is False:
+            if time.time() >= deadline:
+                logger.warning(
+                    "ComfyUI still busy after %ds; %s runs with --reserve-vram %g instead of %g",
+                    int(VRAM_WAIT_DEFAULT_S), model, running, needed,
+                )
+                return None
+            time.sleep(5)
+
+        write_reserve_request(self._project_root, needed)
+        logger.info(
+            "Restarting ComfyUI: %s needs --reserve-vram %g, it is running with %g",
+            model, needed, running,
+        )
+        try:
+            from backend.plugins.plugin_manager import get_plugin_manager
+            outcome = get_plugin_manager().restart_plugin("comfyui", cancel_video_jobs=False)
+        except Exception as e:  # noqa: BLE001
+            outcome = {"success": False, "error": str(e)}
+        if not outcome.get("success"):
+            return (
+                f"ComfyUI could not be restarted with --reserve-vram {needed:g} for {model}: "
+                f"{outcome.get('error') or 'unknown error'}"
+            )
+        self._object_info_cache = None
+        self.service_available = self._check_comfyui_connection()
+        if not self.service_available:
+            return f"ComfyUI did not come back after restarting with --reserve-vram {needed:g} for {model}"
+        return None
+
+    def _ensure_vram_for_model(self, model: str, op_id: str) -> Optional[str]:
+        """Book the registry estimate with the orchestrator BEFORE the graph is queued.
+
+        Mirrors offline_image_generator._ensure_vram_for_pipeline: the request
+        evicts what it can (an idle diffusers pipeline left by a keyframe batch,
+        Ollama) and refuses when the card is still short. A refusal is waited
+        out with backoff up to VRAM_WAIT_ENV seconds, because the usual holder
+        is a batch that is about to finish. ComfyUI does not wait on its own: a
+        14B model submitted against a card holding 10 GB of leftover weights
+        loads with ~1 GB usable and offloads the rest to CPU (2026-09-12, 43 min
+        for a 5 s clip). Returns an error string to surface, or None to proceed.
+        Ledger failures never block a render.
+        """
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator
+            from backend.services.gpu_resource_policy import compositor_vram_reserve_mb
+            from backend.services.video_model_registry import vram_mb_for_model
+        except Exception as e:  # noqa: BLE001
+            logger.warning("VRAM admission unavailable (%s); queuing without it", e)
+            return None
+        estimate_mb = vram_mb_for_model(model)
+        slot_id = f"video:comfyui:{op_id}"
+        try:
+            budget_s = max(0.0, float(os.environ.get(VRAM_WAIT_ENV, VRAM_WAIT_DEFAULT_S)))
+        except ValueError:
+            budget_s = VRAM_WAIT_DEFAULT_S
+        deadline = time.time() + budget_s
+        backoff_s = 2.0
+        while True:
+            try:
+                orchestrator = get_orchestrator()
+                orchestrator.request_model(
+                    slot_id, estimate_mb, priority=90, hard_fit=True,
+                    vram_reserve_mb=compositor_vram_reserve_mb(),
+                )
+            except RuntimeError as e:
+                short = str(e)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("VRAM admission failed for %s (%s); queuing without it", model, e)
+                return None
+            else:
+                orchestrator.begin_use(slot_id)
+                self._vram_booking = slot_id
+                return None
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return (
+                    f"Could not free enough VRAM for {model} after waiting "
+                    f"{int(budget_s)}s: {short}"
+                )
+            sleep_for = min(backoff_s, remaining)
+            logger.info(
+                "Waiting for VRAM before queuing %s (~%d MB): %s — retry in %.0fs (%.0fs left)",
+                model, estimate_mb, short, sleep_for, remaining,
+            )
+            time.sleep(sleep_for)
+            backoff_s = min(15.0, backoff_s * 1.5)
+
+    def _release_vram_booking(self) -> None:
+        """Drop the booking made by _ensure_vram_for_model (render finished or failed)."""
+        slot_id, self._vram_booking = self._vram_booking, None
+        if not slot_id:
+            return
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+            orchestrator = get_orchestrator_if_created()
+            if orchestrator is not None:
+                orchestrator.end_use(slot_id)
+                orchestrator.drop_booking(slot_id)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("drop_booking(%s) failed: %s", slot_id, e)
+
     def interrupt(self, prompt_id: Optional[str] = None) -> bool:
         """Stop the named prompt, or every prompt this process queued.
 
@@ -1421,11 +1595,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         idle_kill_s = 90
         idle_since: Optional[float] = None
         consecutive_dead = 0
-        # ~4s per missed probe (HTTP timeout + 2s sleep). Loading a 20GB+
-        # transformer on a 16GB card stalls Comfy's HTTP server well past 20s
-        # (observed 247s renders with ~30s silent loads on an RTX 5080 / 30GB
-        # RAM box), so tolerate ~2 minutes before declaring the prompt orphaned.
-        dead_probe_limit = 30
+        dead_probe_limit = DEAD_PROBE_LIMIT
 
         while True:
             now = time.time()
@@ -1746,12 +1916,24 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             model = request.model or "cogvideox-5b"
             seed = request.seed if request.seed is not None else int(time.time() * 1000) % (2**31)
 
+            # The running ComfyUI must carry this model's --reserve-vram.
+            reserve_error = self._ensure_comfyui_reserve_for(model)
+            if reserve_error:
+                result.error = reserve_error
+                return result
+
             # VRAM preflight: turn a known-under-spec card into an honest error
             # instead of queuing into a silent mid-render OOM. Fail-open on a
             # broken probe (see _vram_preflight); read-only, allocates nothing.
             preflight_error = self._vram_preflight(model)
             if preflight_error:
                 result.error = preflight_error
+                return result
+
+            # Then make the room: evict/wait before anything is queued.
+            vram_error = self._ensure_vram_for_model(model, item_id)
+            if vram_error:
+                result.error = vram_error
                 return result
 
             # Defense-in-depth: cap pixel area, then snap dims, before they enter
@@ -2489,6 +2671,8 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 result.error = err_str
             result.success = False
             return result
+        finally:
+            self._release_vram_booking()
 
 
 _video_generator_instance: Optional[ComfyUIVideoGenerator] = None

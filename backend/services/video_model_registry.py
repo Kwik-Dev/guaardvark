@@ -25,6 +25,7 @@ import re
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,15 @@ H3_DURATION_TIERS = [
 # and `speed_profiles` are per variant.
 _H3_COMMON = {
     "type": "minimax",
+    # --reserve-vram ComfyUI is launched with for this family. Measured
+    # 2026-09-12 on a 16 GB card: 1344x768 x 124 frames ran out of memory at
+    # 3.0 and rendered at 5.0 (see H3_DURATION_TIERS). Wan 2.2 14B needs the
+    # opposite (1.0, on its entries): with 5.0 it loaded ~1 GB usable and
+    # offloaded 9.6 GB, 43 min per 5 s clip. One launch flag cannot serve
+    # both, so the generator restarts ComfyUI when the running reserve
+    # differs from the model's. GUAARDVARK_COMFYUI_RESERVE_VRAM, set
+    # explicitly, overrides every entry.
+    "comfyui_reserve_vram_gb": 5.0,
     "dimension_alignment": 32,
     # Template note: native canvas is a 768px short edge, capped at 768x1344.
     "max_pixel_area": 768 * 1344,
@@ -325,6 +335,10 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 21.0,
         "vram_mb": 11000,
         "type": "wan",
+        # Measured 2026-09-12 on a 16 GB card: launched with --reserve-vram 5.0
+        # (the MiniMax H3 value) the GGUF experts loaded with ~1 GB usable and
+        # 9.6 GB offloaded to CPU, 43 min per 5 s clip; at 1.0 they fit.
+        "comfyui_reserve_vram_gb": 1.0,
         "dimension_alignment": 32,
         "max_pixel_area": 1_000_000,
         # Landscape, its transpose, and square. The earlier claim that off-native
@@ -364,6 +378,10 @@ VIDEO_MODEL_REGISTRY = {
         "size_gb": 21.0,
         "vram_mb": 11000,
         "type": "wan",
+        # Measured 2026-09-12 on a 16 GB card: launched with --reserve-vram 5.0
+        # (the MiniMax H3 value) the GGUF experts loaded with ~1 GB usable and
+        # 9.6 GB offloaded to CPU, 43 min per 5 s clip; at 1.0 they fit.
+        "comfyui_reserve_vram_gb": 1.0,
         "dimension_alignment": 32,
         "max_pixel_area": 1_000_000,
         # Landscape, its transpose, and square. The earlier claim that off-native
@@ -1557,6 +1575,19 @@ def vram_mb_for_model(model_id: str, *, default: int = 11000) -> int:
     entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
     vram = int(entry.get("vram_mb") or 0)
     return vram if vram > 0 else default
+
+
+def comfyui_reserve_vram_gb_for_model(model_id: str) -> Optional[float]:
+    """The --reserve-vram a model's entry declares, or None when it has no opinion."""
+    entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
+    value = entry.get("comfyui_reserve_vram_gb")
+    if value is None:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 # 16GB-consumer defaults — Wan 2.2 5B TI2V fits without CPU offload.

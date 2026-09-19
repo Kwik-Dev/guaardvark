@@ -26,5 +26,28 @@
     "prompt": "/prompt",
     "history": "/history",
     "queue": "/queue"
+  },
+  "instance_check": {
+    "paths": [
+      "/object_info/UNETLoader",
+      "/object_info/UnetLoaderGGUF",
+      "/object_info/CheckpointLoaderSimple"
+    ],
+    "lists_file_from": [
+      "ComfyUI/models/unet",
+      "ComfyUI/models/diffusion_models",
+      "ComfyUI/models/checkpoints"
+    ],
+    "extensions": [
+      ".safetensors",
+      ".sft",
+      ".gguf",
+      ".ckpt",
+      ".pt",
+      ".pt2",
+      ".pth",
+      ".bin",
+      ".pkl"
+    ]
   }
 }

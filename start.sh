@@ -3114,6 +3114,60 @@ start_plugin() {
 
 PLUGINS_STARTED=0
 
+# Pass 0: ComfyUI back the way it was. ./stop.sh kills ComfyUI; the backend
+# restores the plugins it recorded as running when it boots, and this is the
+# second line when that restore did not happen (its health wait timed out, a
+# tripped breaker skipped it): the first video generation otherwise fails with
+# "Start the ComfyUI plugin". The decision (enabled, was running before the
+# stop or default_auto_start, video models installed, port free) lives in
+# backend/plugins/boot_autostart.py; the start goes through the plugin
+# manager, the same path as the Plugins page toggle.
+_comfy_py="$SCRIPT_DIR/backend/venv/bin/python"
+comfyui_boot_decision() {
+    "$_comfy_py" - "$SCRIPT_DIR" <<'AUTOSTART' 2>/dev/null || echo "no|decision helper failed"
+import importlib.util, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "boot_autostart", root / "backend" / "plugins" / "boot_autostart.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.main([str(root)]))
+AUTOSTART
+}
+
+# The API wraps the manager's result: {"success": true, "data": {"success": ..,
+# "message"/"error": ..}}; a gate refusal is a 200 with data.success false.
+comfyui_start_outcome() {
+    "$_comfy_py" -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+except Exception:
+    print("no|no answer from the backend"); sys.exit(0)
+data = body.get("data") if isinstance(body.get("data"), dict) else {}
+ok = bool(body.get("success")) and bool(data.get("success", True))
+text = data.get("message") or data.get("error") or body.get("message") or body.get("error") or ""
+print(("yes|" if ok else "no|") + str(text))
+'
+}
+
+if ! plugin_should_skip comfyui && [ -x "$_comfy_py" ]; then
+    _comfy_decision=$(comfyui_boot_decision)
+    _comfy_reason="${_comfy_decision#*|}"
+    if [ "${_comfy_decision%%|*}" = "yes" ]; then
+        vader_info "Starting ComfyUI plugin through the backend: $_comfy_reason"
+        _comfy_outcome=$(curl -s --max-time 180 -X POST "http://localhost:$FLASK_PORT/api/plugins/comfyui/start" 2>/dev/null | comfyui_start_outcome)
+        if [ "${_comfy_outcome%%|*}" = "yes" ]; then
+            vader_success "ComfyUI plugin started: ${_comfy_outcome#*|}"
+            PLUGINS_STARTED=$((PLUGINS_STARTED + 1))
+        else
+            vader_warn "ComfyUI plugin did not start: ${_comfy_outcome#*|}. Toggle it on the Plugins page."
+        fi
+    else
+        vader_info "ComfyUI plugin not started: $_comfy_reason"
+    fi
+fi
+
 # Pass 1: Start auto_start plugins (always, no flag needed)
 for plugin_dir in "$SCRIPT_DIR"/plugins/*/; do
     plugin_name=$(basename "$plugin_dir")

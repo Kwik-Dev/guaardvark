@@ -8,6 +8,7 @@ this module, so it repeats the same env names and defaults. Tests assert both.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
 # Nothing leaves the machine during generation. ComfyUI itself never downloads
@@ -24,6 +25,59 @@ LOCAL_ONLY_ENV = {
     "DO_NOT_TRACK": "1",
 }
 LOCAL_ONLY_CLI_ARGS = ("--disable-api-nodes",)
+
+# Every launch setting the plugin's start.sh reads is a GUAARDVARK_COMFYUI_*
+# key. They are re-read from the checkout's .env at every plugin start rather
+# than inherited from the backend's environment (frozen at backend start), so
+# editing .env and restarting the plugin is enough; before this, a reserve or
+# attention change still launched the old value until the backend restarted.
+LAUNCH_ENV_PREFIX = "GUAARDVARK_COMFYUI_"
+
+
+def dotenv_launch_overrides(dotenv_path, prefix: str = LAUNCH_ENV_PREFIX) -> dict:
+    """``KEY=VALUE`` lines of a .env file whose key starts with ``prefix``.
+
+    Accepts an optional ``export`` prefix and single or double quotes around
+    the value; comments and blank lines are skipped; ``$VAR`` references are
+    not expanded. An empty value is kept (it means "unset" to the launcher).
+    A missing or unreadable file yields nothing.
+    """
+    found: dict = {}
+    try:
+        text = Path(dotenv_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return found
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key.startswith(prefix) or not key.replace("_", "").isalnum():
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        found[key] = value
+    return found
+
+
+def shell_exports(mapping: Mapping[str, str]) -> str:
+    """``export KEY=value`` lines, quoted for ``eval`` in bash."""
+    import shlex
+    return "\n".join(f"export {key}={shlex.quote(str(value))}" for key, value in mapping.items())
+
+
+def launch_env(project_root, base: Optional[Mapping[str, str]] = None) -> dict:
+    """The environment a ComfyUI launch sees: ``base`` (the process env by
+    default) with the checkout's .env GUAARDVARK_COMFYUI_* keys on top."""
+    merged = dict(base if base is not None else os.environ)
+    merged.update(dotenv_launch_overrides(Path(project_root) / ".env"))
+    return merged
 
 PREVIEW_METHOD_ENV = "GUAARDVARK_COMFYUI_PREVIEW_METHOD"
 PREVIEW_SIZE_ENV = "GUAARDVARK_COMFYUI_PREVIEW_SIZE"
@@ -108,16 +162,70 @@ def attention_cli_args(
 # int8 on 16 GB) finishes a step instead of running out mid-kernel.
 RESERVE_VRAM_ENV = "GUAARDVARK_COMFYUI_RESERVE_VRAM"
 RESERVE_VRAM_DEFAULT = 1.0
+# The reserve the next launch should use when no explicit override is set:
+# written by the video generator for the model about to run (the registry's
+# `comfyui_reserve_vram_gb`), read by plugins/comfyui/scripts/start.sh.
+# Precedence: RESERVE_VRAM_ENV set explicitly > this file > RESERVE_VRAM_DEFAULT.
+RESERVE_REQUEST_FILE = "pids/comfyui.reserve-vram"
 
 
-def reserve_vram_cli_args(env: Optional[Mapping[str, str]] = None) -> Sequence[str]:
-    """Return `--reserve-vram <gb>` for a ComfyUI argv; bad values fall back."""
-    src = env if env is not None else os.environ
-    raw = (src.get(RESERVE_VRAM_ENV) or "").strip()
+def parse_reserve_vram_gb(raw: Optional[str]) -> Optional[float]:
+    """A GB value from text, or None when it is not a non-negative number."""
+    text = (raw or "").strip()
+    if not text:
+        return None
     try:
-        value = float(raw) if raw else RESERVE_VRAM_DEFAULT
+        value = float(text)
     except ValueError:
-        value = RESERVE_VRAM_DEFAULT
-    if value < 0:
-        value = RESERVE_VRAM_DEFAULT
+        return None
+    return value if value >= 0 else None
+
+
+def explicit_reserve_vram_gb(env: Optional[Mapping[str, str]] = None) -> Optional[float]:
+    """The operator's own reserve (RESERVE_VRAM_ENV), or None when unset/invalid."""
+    src = env if env is not None else os.environ
+    return parse_reserve_vram_gb(src.get(RESERVE_VRAM_ENV))
+
+
+def reserve_request_path(project_root) -> Path:
+    return Path(project_root) / RESERVE_REQUEST_FILE
+
+
+def read_reserve_request(project_root) -> Optional[float]:
+    try:
+        return parse_reserve_vram_gb(reserve_request_path(project_root).read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def write_reserve_request(project_root, gb: float) -> Path:
+    path = reserve_request_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{float(gb):g}\n", encoding="utf-8")
+    return path
+
+
+def reserve_vram_cli_args(
+    env: Optional[Mapping[str, str]] = None, *, requested: Optional[float] = None
+) -> Sequence[str]:
+    """Return `--reserve-vram <gb>` for a ComfyUI argv.
+
+    An explicit RESERVE_VRAM_ENV wins; otherwise `requested` (the model's
+    declared reserve, via the request file); otherwise the default.
+    """
+    value = explicit_reserve_vram_gb(env)
+    if value is None:
+        value = requested if requested is not None and requested >= 0 else RESERVE_VRAM_DEFAULT
     return ["--reserve-vram", f"{value:g}"]
+
+
+def reserve_vram_from_argv(argv: Sequence[str]) -> Optional[float]:
+    """The --reserve-vram a running ComfyUI was launched with (its /system_stats
+    reply carries sys.argv), or None when the flag is absent or unreadable."""
+    items = [str(a) for a in (argv or [])]
+    for i, item in enumerate(items):
+        if item == "--reserve-vram" and i + 1 < len(items):
+            return parse_reserve_vram_gb(items[i + 1])
+        if item.startswith("--reserve-vram="):
+            return parse_reserve_vram_gb(item.split("=", 1)[1])
+    return None
