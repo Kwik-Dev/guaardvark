@@ -400,7 +400,7 @@ def create_folder():
         db.session.add(new_folder)
         db.session.commit()
         logger.info(f"Created folder: {new_folder.name} at {new_folder.path}")
-        return success_response(new_folder.to_dict(), 201)
+        return success_response(new_folder.to_dict(), "Folder created successfully", status_code=201)
     except SQLAlchemyError as e:
         db.session.rollback()
         logger.error(f"Database error creating folder: {e}", exc_info=True)
@@ -1026,7 +1026,7 @@ def upload_file():
             response_data['job_id'] = job_id
         
         logger.info(f"Successfully uploaded file {document.filename} (ID: {document.id})")
-        return success_response(response_data, 201)
+        return success_response(response_data, "File uploaded successfully", status_code=201)
         
     except ValueError as e:
         logger.warning(f"Validation error during upload: {e}")
@@ -1211,7 +1211,7 @@ def copy_document(doc_id):
         new_rel_path = new_doc.path
         db.session.commit()
         logger.info(f"Copied document {doc_id} to {new_rel_path} (new id={new_doc.id})")
-        return success_response(new_doc.to_dict(), 201)
+        return success_response(new_doc.to_dict(), "Document copied successfully", status_code=201)
     except SQLAlchemyError as e:
         db.session.rollback()
         logger.error(f"Database error copying document: {e}", exc_info=True)
