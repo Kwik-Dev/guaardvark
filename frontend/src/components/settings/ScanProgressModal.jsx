@@ -23,7 +23,13 @@ import {
 } from "@mui/icons-material";
 import io from "socket.io-client";
 import { selfImprovementService } from "../../api/selfImprovementService";
-import { ActionButton } from "./ui";
+import { ActionButton, StatusPill } from "./ui";
+import {
+  isScanTerminal,
+  resolveScanId,
+  scanStatusFromPayload,
+  scanUiPhase,
+} from "./scanProgressState";
 
 // The six phases the modal walks through. Keys align with the labels we
 // derive from the backend `stage` field below.
@@ -47,6 +53,7 @@ const STAGE_TO_PHASE = {
   verifying: "verify",
   complete: "done",
   error: "done",
+  cancelled: "done",
 };
 
 // Fallback — infer the phase from a polled run row if no live events have
@@ -76,11 +83,16 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
   const [elapsed, setElapsed] = useState(0);
   const [dispatched, setDispatched] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
+  const [cancelRequested, setCancelRequested] = useState(false);
   const startTimeRef = useRef(null);
   const pollRef = useRef(null);
   const tickRef = useRef(null);
   const socketRef = useRef(null);
   const runIdRef = useRef(null);
+  const scanIdRef = useRef(null);
+  const triggerDataRef = useRef(null);
+  const cancelPostedRef = useRef(false);
+  const cancelRequestedRef = useRef(false);
 
   const stopTimers = useCallback(() => {
     if (pollRef.current) {
@@ -107,25 +119,54 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
   // polling the run row is a cheap safety net for when socket events drop.
   const poll = useCallback(async () => {
     try {
-      const [runsRes, fixesRes] = await Promise.allSettled([
+      const [runsRes, fixesRes, statusRes] = await Promise.allSettled([
         selfImprovementService.getRuns(1, 0),
         selfImprovementService.listPendingFixes({ limit: 20 }),
+        selfImprovementService.getStatus(),
       ]);
 
+      let latest = null;
       if (runsRes.status === "fulfilled") {
-        const latest = runsRes.value?.data?.runs?.[0];
+        latest = runsRes.value?.data?.runs?.[0];
         if (latest) {
           const latestTs = new Date(latest.timestamp).getTime();
           // Only accept runs that started after we opened — prevents us from
           // latching onto a stale completed run from earlier in the session.
           if (latestTs >= (startTimeRef.current || 0) - 5000) {
+            const reported = scanStatusFromPayload(
+              statusRes.status === "fulfilled" ? statusRes.value : null,
+              latest,
+            );
+            if (reported && reported !== latest.status) {
+              latest = { ...latest, status: reported };
+            }
             setRun(latest);
             runIdRef.current = latest.id;
-            if (latest.status !== "running") {
+            scanIdRef.current = resolveScanId(triggerDataRef.current, latest);
+            const phase = scanUiPhase({
+              cancelRequested: cancelRequestedRef.current,
+              runStatus: latest.status,
+              liveStage: null,
+            });
+            if (isScanTerminal(phase)) {
               stopTimers();
               onComplete?.(latest);
             }
           }
+        }
+      }
+
+      if (!latest && statusRes.status === "fulfilled") {
+        const reported = scanStatusFromPayload(statusRes.value, null);
+        if (reported && isScanTerminal(scanUiPhase({
+          cancelRequested: cancelRequestedRef.current,
+          runStatus: reported,
+          liveStage: null,
+        }))) {
+          const row = statusRes.value?.data?.last_run || { status: reported };
+          setRun((prev) => prev ? { ...prev, status: reported } : row);
+          stopTimers();
+          onComplete?.(row);
         }
       }
 
@@ -150,13 +191,21 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
       setElapsed(0);
       setDispatched(false);
       setSocketConnected(false);
+      setCancelRequested(false);
       startTimeRef.current = null;
       runIdRef.current = null;
+      scanIdRef.current = null;
+      triggerDataRef.current = null;
+      cancelPostedRef.current = false;
+      cancelRequestedRef.current = false;
       return;
     }
 
     startTimeRef.current = Date.now();
     setDispatched(false);
+    setCancelRequested(false);
+    cancelPostedRef.current = false;
+    cancelRequestedRef.current = false;
 
     // Stand up the socket FIRST so we don't miss the earliest events.
     const socket = io({ path: "/socket.io", transports: ["polling", "websocket"] });
@@ -175,7 +224,7 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
         }
       }
       setLiveEvent(data);
-      if (data.stage === "complete" || data.stage === "error") {
+      if (data.stage === "complete" || data.stage === "error" || data.stage === "cancelled") {
         // Let the final poll pull the row + fixes so the auto-transition has
         // complete data, then stop.
         setTimeout(() => {
@@ -187,7 +236,9 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
 
     (async () => {
       try {
-        await selfImprovementService.triggerRun();
+        const dispatched = await selfImprovementService.triggerRun();
+        triggerDataRef.current = dispatched?.data || dispatched;
+        scanIdRef.current = resolveScanId(triggerDataRef.current, null);
         setDispatched(true);
       } catch (err) {
         setError(err?.message || "Failed to dispatch self-check");
@@ -226,26 +277,76 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
   const currentPhase = livePhase || inferPhase(run);
   const currentPhaseIdx = PHASES.findIndex((p) => p.key === currentPhase);
 
-  const liveStageIsTerminal = liveEvent?.stage === "complete" || liveEvent?.stage === "error";
+  const uiPhase = scanUiPhase({
+    cancelRequested,
+    runStatus: liveEvent?.status || run?.status,
+    liveStage: liveEvent?.stage,
+  });
+  const liveStageIsTerminal = isScanTerminal(uiPhase);
   const isRunning = !liveStageIsTerminal && (!!liveEvent || (!!run && run.status === "running") || dispatched);
+  const isCancelling = uiPhase === "cancelling";
+  const isCancelled = uiPhase === "cancelled";
 
-  // No cancel route on selfImprovementService. Stop watching and leave the
-  // scan running on the server.
+  // X / backdrop still hide the view and leave the scan running. Cancel
+  // actually asks the server to stop, and the modal stays until the status
+  // route reports cancelled or completed.
   const handleDismissToBackground = useCallback(() => {
+    if (cancelRequestedRef.current) return;
     stopTimers();
     teardownSocket();
     onBackground?.();
     onClose?.();
   }, [stopTimers, teardownSocket, onBackground, onClose]);
 
+  const handleCancel = useCallback(async () => {
+    setCancelRequested(true);
+    cancelRequestedRef.current = true;
+    const id = scanIdRef.current || resolveScanId(triggerDataRef.current, run);
+    if (id == null) return;
+    if (cancelPostedRef.current) return;
+    cancelPostedRef.current = true;
+    scanIdRef.current = id;
+    try {
+      const res = await selfImprovementService.cancelScan(id);
+      const reported = scanStatusFromPayload(res, { status: res?.data?.status });
+      if (reported && reported !== "cancelled" && reported !== "running") {
+        setRun((prev) => ({ ...(prev || {}), id, status: reported }));
+      }
+    } catch (err) {
+      cancelPostedRef.current = false;
+      cancelRequestedRef.current = false;
+      setCancelRequested(false);
+      setError(err?.message || "Could not cancel the scan");
+    }
+  }, [run]);
+
+  useEffect(() => {
+    if (!cancelRequested) return;
+    const id = scanIdRef.current || resolveScanId(triggerDataRef.current, run);
+    if (id == null || cancelPostedRef.current) return;
+    cancelPostedRef.current = true;
+    scanIdRef.current = id;
+    selfImprovementService.cancelScan(id).catch((err) => {
+      cancelPostedRef.current = false;
+      cancelRequestedRef.current = false;
+      setCancelRequested(false);
+      setError(err?.message || "Could not cancel the scan");
+    });
+  }, [cancelRequested, run]);
+
   // Prefer the live status if we've seen a terminal event, otherwise trust the row.
-  const status = liveEvent?.status || run?.status || (dispatched ? "running" : null);
+  const status = isCancelled
+    ? "cancelled"
+    : isCancelling
+      ? "cancelling"
+      : (liveEvent?.status || run?.status || (dispatched ? "running" : null));
 
   const statusIcon = (() => {
     if (!run && !liveEvent) return <AutorenewIcon className="spin" />;
     if (status === "success") return <CheckCircleIcon color="success" />;
     if (status === "failed" || liveEvent?.stage === "error") return <ErrorIcon color="error" />;
     if (status === "blocked_by_guardian") return <BlockIcon color="warning" />;
+    if (status === "cancelled" || status === "cancelling") return <BlockIcon color="action" />;
     return <AutorenewIcon />;
   })();
 
@@ -259,13 +360,20 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
     : null;
 
   return (
-    <Dialog open={open} onClose={isRunning ? handleDismissToBackground : onClose} maxWidth="md" fullWidth>
+    <Dialog
+      open={open}
+      onClose={isCancelling ? undefined : isRunning ? handleDismissToBackground : onClose}
+      maxWidth="md"
+      fullWidth
+    >
       <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1, pr: 6 }}>
         {statusIcon}
         <Typography variant="h6" component="span">
           Self-Check in Progress
         </Typography>
         <Box sx={{ flex: 1 }} />
+        {isCancelling && <StatusPill tone="info" label="Cancelling" />}
+        {isCancelled && <StatusPill tone="neutral" label="Cancelled" />}
         <Chip
           size="small"
           label={socketConnected ? "live" : "polling"}
@@ -278,7 +386,8 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
         </Typography>
         <IconButton
           size="small"
-          onClick={isRunning ? handleDismissToBackground : onClose}
+          onClick={isCancelling ? undefined : isRunning ? handleDismissToBackground : onClose}
+          disabled={isCancelling}
           sx={{ position: "absolute", right: 8, top: 8 }}
         >
           <CloseIcon fontSize="small" />
@@ -354,6 +463,7 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
                   status === "success" ? "success.main"
                   : status === "failed" || liveEvent?.stage === "error" ? "error.main"
                   : status === "blocked_by_guardian" ? "warning.main"
+                  : status === "cancelled" || status === "cancelling" ? "text.secondary"
                   : "text.primary",
               }}
             >
@@ -465,10 +575,12 @@ export default function ScanProgressModal({ open, onClose, onComplete, onBackgro
       </DialogContent>
 
       <DialogActions>
-        {isRunning ? (
-          <ActionButton onClick={handleDismissToBackground}>Cancel</ActionButton>
+        {isRunning && !isCancelling ? (
+          <ActionButton onClick={handleCancel}>Cancel</ActionButton>
         ) : (
-          <ActionButton onClick={onClose}>Close</ActionButton>
+          <ActionButton onClick={onClose} disabled={isCancelling}>
+            {isCancelling ? "Cancelling…" : "Close"}
+          </ActionButton>
         )}
       </DialogActions>
     </Dialog>

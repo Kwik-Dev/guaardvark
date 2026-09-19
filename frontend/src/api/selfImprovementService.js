@@ -34,6 +34,14 @@ export const selfImprovementService = {
     return handleResponse(res);
   },
 
+  async cancelScan(scanId) {
+    const res = await fetch(
+      `${BASE_URL}/self-improvement/scans/${encodeURIComponent(scanId)}/cancel`,
+      { method: "POST" },
+    );
+    return handleResponse(res);
+  },
+
   async submitTask(description, targetFiles = [], priority = "medium") {
     const res = await fetch(`${BASE_URL}/self-improvement/task`, {
       method: "POST",
