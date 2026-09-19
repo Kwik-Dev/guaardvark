@@ -26,6 +26,16 @@ from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
 
 logger = logging.getLogger(__name__)
 
+
+class VectorStoreUnavailable(RuntimeError):
+    """The configured vector store cannot be built, so no index may be loaded onto it.
+
+    Raised instead of falling back: get_index treats a generic load error as "start
+    a fresh empty index and persist it", which is the wrong answer when the only
+    thing missing is the connection to where the vectors already are.
+    """
+
+
 @dataclass
 class IndexInfo:
     """Information about a loaded index"""
@@ -103,50 +113,89 @@ class UnifiedIndexManager:
         logger.info(f"Evicting index from cache: {lru_key}")
         del self.cached_indexes[lru_key]
     
-    def _load_index_from_storage(self, persist_dir: Path) -> Tuple[VectorStoreIndex, StorageContext]:
+    @staticmethod
+    def _configured_vector_store(project_id: Optional[str] = None):
+        """The vector store the rest of the system writes to, or None for a file-backed one.
+
+        Built by the same factory as indexing_service so both sides agree on the
+        backend and the per-project table. With pgvector configured, the store is
+        either the real PGVectorStore or nothing: the factory substitutes an EMPTY
+        SimpleVectorStore when Postgres is unreachable, and loading an index onto
+        that answers every query from nothing while looking healthy.
+
+        For a file-backed backend this returns None so that StorageContext reads the
+        persisted vector_store.json; a fresh SimpleVectorStore passed on load would
+        shadow the vectors on disk exactly the way the pgvector split did.
+        """
+        from backend.services.indexing_service import (
+            _make_vector_store, _vector_backend, vector_store_fallback_reason,
+        )
+        if _vector_backend() != "pgvector":
+            return None
+        store = _make_vector_store(project_id)
+        if type(store).__name__ != "PGVectorStore":
+            raise VectorStoreUnavailable(
+                "pgvector is configured but its store could not be built"
+                f" ({vector_store_fallback_reason() or 'unknown reason'});"
+                " refusing to load the index without it"
+            )
+        return store
+
+    def _load_index_from_storage(
+        self, persist_dir: Path, project_id: Optional[str] = None,
+    ) -> Tuple[VectorStoreIndex, StorageContext]:
         """Load index from storage directory"""
         try:
             if not persist_dir.exists():
                 raise FileNotFoundError(f"Storage directory does not exist: {persist_dir}")
-            
+
             # Check for required files
             required_files = ['docstore.json', 'index_store.json']
             for required_file in required_files:
                 if not (persist_dir / required_file).exists():
                     raise FileNotFoundError(f"Required file missing: {required_file}")
-            
-            # Load the index
-            storage_context = StorageContext.from_defaults(persist_dir=str(persist_dir))
+
+            # Load the index. The docstore and index store come from the JSON files;
+            # the vectors live wherever the configured backend keeps them. Loading
+            # with persist_dir alone reads a SimpleVectorStore out of that directory
+            # while the real vectors sit in Postgres -- the split _create_empty_index
+            # warns about, produced here on every load.
+            load_kwargs: Dict[str, Any] = {"persist_dir": str(persist_dir)}
+            vector_store = self._configured_vector_store(project_id)
+            if vector_store is not None:
+                load_kwargs["vector_store"] = vector_store
+            storage_context = StorageContext.from_defaults(**load_kwargs)
             index = load_index_from_storage(storage_context)
-            
+
             logger.info(f"Successfully loaded index from {persist_dir}")
             return index, storage_context
-            
+
         except Exception as e:
             logger.error(f"Failed to load index from {persist_dir}: {e}")
             raise
     
-    def _create_empty_index(self, persist_dir: Path) -> Tuple[VectorStoreIndex, StorageContext]:
+    def _create_empty_index(
+        self, persist_dir: Path, project_id: Optional[str] = None,
+    ) -> Tuple[VectorStoreIndex, StorageContext]:
         """Create a new empty index"""
         try:
             # Ensure directory exists
             persist_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Check if LLM and embedding model are configured
             if not Settings.llm or not Settings.embed_model:
                 raise RuntimeError("LLM and embedding model must be configured in Settings")
-            
+
             # Create storage components
             docstore = SimpleDocumentStore()
             index_store = SimpleIndexStore()
-            
+
             # Use the same vector-store factory as indexing_service: two independent
             # construction sites silently disagreeing about the backend is how an index
-            # ends up half in Postgres and half in a JSON file.
-            try:
-                from backend.services.indexing_service import _make_vector_store
-                vector_store = _make_vector_store()
-            except Exception:
+            # ends up half in Postgres and half in a JSON file. A fresh index has no
+            # vectors on disk to shadow, so the file-backed case gets a new store here.
+            vector_store = self._configured_vector_store(project_id)
+            if vector_store is None:
                 from llama_index.core.vector_stores import SimpleVectorStore
                 vector_store = SimpleVectorStore()
 
@@ -211,21 +260,26 @@ class UnifiedIndexManager:
             
             # Try to load from storage
             try:
-                index, storage_context = self._load_index_from_storage(persist_dir)
+                index, storage_context = self._load_index_from_storage(persist_dir, project_id)
             except FileNotFoundError as e:
                 if create_if_missing:
                     logger.info(f"Index not found, creating new one: {e}")
-                    index, storage_context = self._create_empty_index(persist_dir)
+                    index, storage_context = self._create_empty_index(persist_dir, project_id)
                 else:
                     raise
             except PermissionError as e:
                 logger.error(f"Permission denied accessing index directory {persist_dir}: {e}")
                 raise
+            except VectorStoreUnavailable:
+                # Not a reason to start over: the store on disk is intact and the
+                # vectors are where they always were. Creating an empty index here
+                # would persist it over that store.
+                raise
             except Exception as e:
                 logger.error(f"Unexpected error loading index from {persist_dir}: {e}")
                 if create_if_missing:
                     logger.warning("Attempting to create new index due to load error")
-                    index, storage_context = self._create_empty_index(persist_dir)
+                    index, storage_context = self._create_empty_index(persist_dir, project_id)
                 else:
                     raise
             

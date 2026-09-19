@@ -21,11 +21,18 @@ def expand_with_dependencies(
     results: List[Dict],
     max_related: int = MAX_RELATED_FILES,
     max_chunks: int = MAX_CHUNKS_PER_RELATED,
+    project_id: Optional[int] = None,
 ) -> List[Dict]:
     """Add related-file context to search results based on dependency graph.
 
     Looks up the dependency graph from the folder's repo_metadata and includes
     top chunks from files that import or are imported by the result files.
+
+    `project_id` is the scope of the query that produced `results`. The related
+    files are fetched from the Document table by path, which the retrieval
+    filters never see, so without the scope a project-scoped query came back
+    with another project's file appended whenever a dependency graph named it.
+    None means the query was global and the lookup is too.
     """
     if not results:
         return results
@@ -89,7 +96,14 @@ def expand_with_dependencies(
     expanded = list(results)
 
     for path in related_paths:
-        doc = Document.query.filter(Document.path == path).first()
+        lookup = Document.query.filter(Document.path == path)
+        if project_id is not None:
+            try:
+                scope = int(project_id)
+            except (TypeError, ValueError):
+                scope = project_id
+            lookup = lookup.filter(Document.project_id == scope)
+        doc = lookup.first()
         if not doc or not doc.content:
             continue
 
