@@ -15,6 +15,7 @@ import SendIcon from "@mui/icons-material/Send";
 import StopIcon from "@mui/icons-material/Stop";
 import MinimizeIcon from "@mui/icons-material/Remove";
 import AddIcon from "@mui/icons-material/Add";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import HearingIcon from "@mui/icons-material/Hearing";
 import Tooltip from "@mui/material/Tooltip";
@@ -31,6 +32,15 @@ import useSlashCommands from "../../hooks/useSlashCommands";
 import SlashCommandPopup from "./SlashCommandPopup";
 import { debugLog } from "../../utils/debugLog";
 import { contextChipLabel } from "../../utils/contextChipLabel";
+import { StatusPill } from "../settings/ui";
+import {
+  attachmentExceedsLimit,
+  chatErrorMessage,
+  downscaleChatAttachment,
+  fetchAttachmentMaxBytes,
+  formatAttachmentSize,
+  refuseAttachmentMessage,
+} from "../../utils/chatAttachment";
 
 const MIN_WIDTH = 280;
 const MIN_HEIGHT = 300;
@@ -134,6 +144,21 @@ const FloatingChatCard = () => {
     };
   }, [sessionId, socketRef?.current]);
 
+  // chat:error on the composer. Raw socket so it does not overwrite
+  // StreamingMessage's UnifiedChatService.onError listener.
+  useEffect(() => {
+    const socket = socketRef?.current;
+    if (!socket || !sessionId) return;
+    const handleChatError = (data) => {
+      if (!data || (data.session_id && data.session_id !== sessionId)) return;
+      setError(chatErrorMessage(data));
+    };
+    socket.on("chat:error", handleChatError);
+    return () => {
+      socket.off("chat:error", handleChatError);
+    };
+  }, [sessionId, socketRef, setError]);
+
   // Hydrate session mode from backend on sessionId change so `/agent` state
   // survives reloads / re-mounts. Without this, the floating card's
   // `inAgentMode` is always false and `agent_screen_active` falls back to
@@ -165,12 +190,23 @@ const FloatingChatCard = () => {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, w: 0, h: 0 });
   const [inputText, setInputText] = useState("");
+  const [attachment, setAttachment] = useState(null);
+  const [attachmentMaxBytes, setAttachmentMaxBytes] = useState(null);
 
   const lastClickRef = useRef(0);
   const cardRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const fileRef = useRef(null);
   const streamingMessageRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAttachmentMaxBytes().then((max) => {
+      if (!cancelled) setAttachmentMaxBytes(max);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   // Terminal-style sent-message history (Up/Down to recall).
   const messageHistoryRef = useRef([]);
@@ -267,24 +303,54 @@ const FloatingChatCard = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const handleAttachImage = useCallback(async (file) => {
+    if (!file || !file.type?.startsWith("image/")) return;
+    try {
+      const resized = await downscaleChatAttachment(file);
+      setAttachment({
+        file: resized.file,
+        preview: resized.preview,
+        byteLength: resized.byteLength,
+        mimeType: resized.mimeType,
+      });
+      clearError();
+    } catch (err) {
+      setError(err?.message || "Could not prepare this image");
+    }
+  }, [clearError, setError]);
+
   // Send message handler — uses UnifiedChatService (Socket.IO streaming)
   const handleSendMessage = useCallback(async (overrideText) => {
     const text = overrideText || inputText;
-    if (!text.trim() || isSending) return;
+    const pending = attachment;
+    if ((!text.trim() && !pending) || isSending) return;
+
+    if (pending && attachmentExceedsLimit(pending.byteLength, attachmentMaxBytes)) {
+      setError(refuseAttachmentMessage(pending.byteLength, attachmentMaxBytes));
+      return;
+    }
 
     pushHistory(text);
 
+    const content = text.trim() || (pending ? `Describe this image: ${pending.file.name}` : "");
     const userMessage = {
       id: `user_${Date.now()}`,
       role: "user",
-      content: text,
+      content,
+      imageUrl: pending?.preview,
+      imageFileName: pending?.file?.name,
       timestamp: new Date().toISOString(),
     };
     addMessage(userMessage);
     if (!overrideText) setInputText("");
+    setAttachment(null);
 
     setIsSending(true);
     clearError();
+
+    const imageBase64 = pending?.preview?.includes(",")
+      ? pending.preview.split(",")[1]
+      : null;
 
     if (unifiedChatService) {
       // Primary path: Socket.IO streaming via UnifiedChatService
@@ -293,10 +359,10 @@ const FloatingChatCard = () => {
       try {
         // Page awareness travels as an option so the engine's context providers
         // can render it — keeping the saved message text exactly what was typed.
-        await unifiedChatService.sendMessage(sessionId, text, {
+        await unifiedChatService.sendMessage(sessionId, content, {
           use_rag: true,
           page_context: pageContext,
-        });
+        }, imageBase64);
       } catch (err) {
         console.error("FloatingChat: Unified send failed:", err);
         setIsStreamingMessage(false);
@@ -322,7 +388,7 @@ const FloatingChatCard = () => {
       });
       setError(errorText);
     }
-  }, [inputText, isSending, sessionId, pageContext, addMessage, setIsSending, clearError, setError, unifiedChatService, pushHistory]);
+  }, [inputText, attachment, attachmentMaxBytes, isSending, sessionId, pageContext, addMessage, setIsSending, clearError, setError, unifiedChatService, pushHistory]);
 
   // The input is disabled while a reply streams, which makes the browser drop
   // focus. Restore it when sending finishes so the user can keep typing without
@@ -732,6 +798,35 @@ const FloatingChatCard = () => {
               </Typography>
             )}
 
+            {attachment && (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 1.5, pb: 0.5 }}>
+                <Box
+                  component="img"
+                  src={attachment.preview}
+                  alt={attachment.file.name}
+                  sx={{ width: 40, height: 40, objectFit: "cover", borderRadius: 1 }}
+                />
+                <StatusPill
+                  label={formatAttachmentSize(attachment.byteLength)}
+                  tone={attachmentExceedsLimit(attachment.byteLength, attachmentMaxBytes) ? "error" : "neutral"}
+                  tooltip={
+                    attachmentExceedsLimit(attachment.byteLength, attachmentMaxBytes)
+                      ? refuseAttachmentMessage(attachment.byteLength, attachmentMaxBytes)
+                      : "Size after resize, as it will be sent"
+                  }
+                />
+                <IconButton
+                  size="small"
+                  className="floating-chat-btn"
+                  onClick={() => setAttachment(null)}
+                  aria-label="Remove image"
+                  sx={{ p: 0.25 }}
+                >
+                  <CloseIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Box>
+            )}
+
             {/* Input */}
             <Box
               sx={{
@@ -794,6 +889,29 @@ const FloatingChatCard = () => {
                 anchorEl={inputRef?.current}
                 open={slashCmds.popupVisible}
               />
+              <input
+                type="file"
+                hidden
+                ref={fileRef}
+                accept="image/*"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleAttachImage(file);
+                  e.target.value = "";
+                }}
+              />
+              <Tooltip title="Attach an image">
+                <IconButton
+                  className="floating-chat-btn"
+                  onClick={() => fileRef.current?.click()}
+                  disabled={isSending}
+                  size="small"
+                  aria-label="Attach an image"
+                  sx={{ p: 0.25, color: "text.secondary" }}
+                >
+                  <AttachFileIcon sx={{ fontSize: 16 }} />
+                </IconButton>
+              </Tooltip>
               <TextField
                 size="small"
                 placeholder="Type your message, paste an image, or use voice..."
@@ -803,6 +921,20 @@ const FloatingChatCard = () => {
                   slashCmds.handleInputChange(e.target.value);
                 }}
                 onKeyDown={handleKeyDown}
+                onPaste={(e) => {
+                  const items = e.clipboardData?.items;
+                  if (!items) return;
+                  for (let i = 0; i < items.length; i += 1) {
+                    if (items[i].type.startsWith("image/")) {
+                      const file = items[i].getAsFile();
+                      if (file) {
+                        handleAttachImage(file);
+                        e.preventDefault();
+                      }
+                      break;
+                    }
+                  }
+                }}
                 disabled={isSending}
                 multiline
                 maxRows={3}
@@ -817,7 +949,7 @@ const FloatingChatCard = () => {
               />
               <IconButton
                 onClick={isSending ? handleStop : handleFloatingSend}
-                disabled={!inputText.trim() && !isSending}
+                disabled={!inputText.trim() && !attachment && !isSending}
                 size="small"
                 color="primary"
               >

@@ -25,6 +25,7 @@ export default function UncleClaudeSection() {
   const [testing, setTesting] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanInBackground, setScanInBackground] = useState(false);
+  const [scanCancelled, setScanCancelled] = useState(false);
   const [fixesOpen, setFixesOpen] = useState(false);
 
   const fetchStatus = useCallback(async () => {
@@ -88,6 +89,7 @@ export default function UncleClaudeSection() {
 
   const handleOpenScan = () => {
     setScanInBackground(false);
+    setScanCancelled(false);
     setScanOpen(true);
   };
 
@@ -96,6 +98,10 @@ export default function UncleClaudeSection() {
   const handleScanComplete = useCallback((run) => {
     fetchStatus();
     setScanInBackground(false);
+    if (run?.status === "cancelled") {
+      setScanCancelled(true);
+      return;
+    }
     const proposedAnything =
       (run?.changes_made && run.changes_made.length > 0) ||
       run?.status === "success";
@@ -201,7 +207,7 @@ export default function UncleClaudeSection() {
                 ? "Turn on self-improvement first"
                 : siStatus?.codebase_locked
                   ? "Unlock the codebase first"
-                  : "Runs the checks now. Cancel hides this view; the scan keeps running."
+                  : "Runs the checks now. Cancel asks the server to stop; closing the view leaves the scan running."
             }
           >
             Run self-check
@@ -216,7 +222,10 @@ export default function UncleClaudeSection() {
             : "No runs yet."}
           {siStatus?.codebase_locked ? " Codebase is locked: autonomous edits are blocked." : ""}
         </Hint>
-        {scanInBackground && (
+        {scanCancelled && (
+          <StatusPill tone="neutral" label="Cancelled" />
+        )}
+        {scanInBackground && !scanCancelled && (
           <StatusPill tone="info" label="Scan continues in the background" />
         )}
       </Cluster>
