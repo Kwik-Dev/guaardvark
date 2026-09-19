@@ -277,9 +277,8 @@ def _batch_folder_paths(image_ids: Iterable[str], video_ids: Iterable[str]) -> l
     return [f"Images/{b}" for b in image_ids] + [f"Videos/{b}" for b in video_ids]
 
 
-def _db_targets(image_ids: Iterable[str], video_ids: Iterable[str]) -> tuple[list[int], list[int]]:
-    """(folder ids, document ids) that mirror the given batches and every
-    generated audio file. Root folders are never included."""
+def _batch_targets(image_ids: Iterable[str], video_ids: Iterable[str]) -> tuple[list[int], set[int]]:
+    """(folder ids, document ids) that mirror the given batch directories."""
     from backend.models import db, Document, Folder
 
     folder_ids: list[int] = []
@@ -289,6 +288,15 @@ def _db_targets(image_ids: Iterable[str], video_ids: Iterable[str]) -> tuple[lis
         folder_ids = [fid for (fid,) in db.session.query(Folder.id).filter(Folder.path.in_(paths))]
     if folder_ids:
         doc_ids.update(did for (did,) in db.session.query(Document.id).filter(Document.folder_id.in_(folder_ids)))
+    return folder_ids, doc_ids
+
+
+def _db_targets(image_ids: Iterable[str], video_ids: Iterable[str]) -> tuple[list[int], list[int]]:
+    """(folder ids, document ids) that mirror the given batches and every
+    generated audio file. Root folders are never included."""
+    from backend.models import db, Document, Folder
+
+    folder_ids, doc_ids = _batch_targets(image_ids, video_ids)
     audio_folder_id = db.session.query(Folder.id).filter(Folder.path == "Audio").scalar()
     if audio_folder_id is not None:
         for did, path in db.session.query(Document.id, Document.path).filter(Document.folder_id == audio_folder_id):
@@ -323,6 +331,54 @@ def _job_history_ids(image_ids: Iterable[str], keep: Iterable[str] = ()) -> list
         if native_id in image_set or process_type == "image_generation":
             ids.append(jid)
     return ids
+
+
+def _batch_job_history_ids(batch_ids: Iterable[str]) -> list[str]:
+    """job_history rows recorded for these batches, matched on native_id only.
+
+    The bulk path additionally sweeps every ``unified`` row stamped
+    image_generation, which is right when all batches are going and wrong for
+    one: that would take other batches' history with it.
+    """
+    from backend.models import db, JobHistory
+
+    ids = [b for b in batch_ids if b]
+    if not ids:
+        return []
+    return [jid for (jid,) in db.session.query(JobHistory.id).filter(JobHistory.native_id.in_(ids))]
+
+
+def delete_batch_history_rows(
+    *,
+    image_batch_ids: Iterable[str] = (),
+    video_batch_ids: Iterable[str] = (),
+    triggered_by: str = "batch_delete",
+) -> dict[str, int]:
+    """Remove the database rows mirroring these batch directories.
+
+    The per-batch delete routes own the directory; this owns everything that
+    pointed into it — documents (and their vectors), the folder row and
+    job_history — so deleting one batch leaves the state Settings →
+    Maintenance → Delete History leaves for all of them. Records the same
+    retention_audit row that path records.
+    """
+    image_ids = [b for b in image_batch_ids if b]
+    video_ids = [b for b in video_batch_ids if b]
+    folder_ids, doc_ids = _batch_targets(image_ids, video_ids)
+    jh_ids = _batch_job_history_ids(image_ids + video_ids)
+    deleted = _delete_db_rows(folder_ids, sorted(doc_ids), jh_ids)
+
+    if any(deleted.values()):
+        from backend.services.retention_audit_service import record_deletion
+        record_deletion(
+            actor="user",
+            kind="generation_history_batch",
+            operation="manual_delete",
+            item_count=sum(deleted.values()),
+            parameters={"images": image_ids, "videos": video_ids, **deleted},
+            triggered_by=triggered_by,
+        )
+    return deleted
 
 
 def _delete_db_rows(folder_ids: list[int], doc_ids: list[int], job_history_ids: list[str]) -> dict[str, int]:
