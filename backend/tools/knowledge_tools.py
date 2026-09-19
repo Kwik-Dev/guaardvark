@@ -22,6 +22,16 @@ logger = logging.getLogger(__name__)
 
 _MAX_TEXT = 1200
 
+# RAPTOR writes corpus-level summaries into the same table as the documents they
+# were built from (backend/services/raptor_service.py). They are retrievable
+# passages, not documents, and their source_filename is a synthetic
+# "[corpus summary L<n>#<i>]", so listing them invents documents the user never
+# added. Either marker identifies one.
+_NOT_A_SUMMARY = (
+    "metadata_->>'content_type' IS DISTINCT FROM 'raptor_summary' "
+    "AND metadata_->>'parsed_by' IS DISTINCT FROM 'raptor'"
+)
+
 
 def _table() -> Tuple[Optional[str], Optional[str]]:
     """Return (qualified_table, error)."""
@@ -100,10 +110,11 @@ class ListDocumentsTool(BaseTool):
         limit = max(1, min(int(limit or 40), 200))
         offset = max(0, int(offset or 0))
 
-        where, params = "", []
+        conditions, params = [_NOT_A_SUMMARY], []
         if name_contains:
-            where = "WHERE metadata_->>'source_filename' ILIKE %s"
+            conditions.append("metadata_->>'source_filename' ILIKE %s")
             params.append(f"%{name_contains}%")
+        where = "WHERE " + " AND ".join(conditions)
         params.extend([limit, offset])
 
         rows, qerr = _query(
@@ -119,7 +130,8 @@ class ListDocumentsTool(BaseTool):
             return ToolResult(success=False, error=f"Query failed: {qerr}")
 
         total_rows, _ = _query(
-            f"SELECT count(DISTINCT metadata_->>'source_filename') FROM \"{table}\"", ()
+            f"SELECT count(DISTINCT metadata_->>'source_filename') FROM \"{table}\" "
+            f"WHERE {_NOT_A_SUMMARY}", ()
         )
         total = total_rows[0][0] if total_rows else len(rows)
 
