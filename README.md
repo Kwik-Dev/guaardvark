@@ -443,7 +443,7 @@ First run handles everything: Python 3.12, venv, Node dependencies, PostgreSQL, 
 
 ```bash
 ./start.sh                    # Full startup with health checks
-./start.sh --fast             # Skip dependency checks
+./start.sh --fast             # Reuse venv + node_modules as they are: no installs, no frontend build, no preflight
 ./start.sh --test             # Health diagnostics
 ./start.sh --plugins          # Start all enabled plugins
 ./start.sh --external-ollama  # You run Ollama yourself; never started or stopped by these scripts
