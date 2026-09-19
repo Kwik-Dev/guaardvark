@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **ComfyUI and the GPU, seven truths.** The plugin's health probe proves the process on :8188 is
+  ours (a stranger's ComfyUI on the port used to read as "running" while every Wan batch failed).
+  Image-batch bookings release through their generator and a video render books the model's
+  VRAM estimate and waits for it before queuing, instead of loading with 1 GB usable and 9.6 GB
+  offloaded. The ComfyUI VRAM reserve is declared per model in the registry (MiniMax H3 5.0 GB,
+  Wan 2.2 14B 1.0 GB, both measured 2026-09-12); the first render of the other family after a
+  launch restarts ComfyUI once with the right reserve, and an explicit
+  `GUAARDVARK_COMFYUI_RESERVE_VRAM` still wins. The plugin start re-reads the
+  `GUAARDVARK_COMFYUI_*` keys from `.env` every time, so a reserve or attention change needs a
+  plugin restart, not a backend restart. A chosen canvas under 1024 on a text-intent prompt is
+  kept and batch metadata records the file's real size. A stop/start cycle brings the ComfyUI
+  plugin back the way it was. The dead-probe limit is a named constant with its reason.
+- **RAG: the index tells the truth.** The unified index manager loads onto the configured pgvector
+  store or refuses, never a fresh empty index over the real one. Repository "architectural
+  summaries" come only from the model: the old import target was an empty stub, so every summary
+  indexed to date was a template; a repository whose model call fails is marked pending, not
+  summarised. Purges report a count and a reason; `list_documents` reports an unavailable count
+  instead of the page length. The context expander is project-scoped. `read_logs` over MCP scrubs
+  machine paths from log lines. (Two audit items were already fixed and are now pinned by tests.)
+- **Attachments are answered, not dropped.** A chat attachment over the declared
+  `CHAT_ATTACHMENT_MAX_BYTES` (16 MB) gets HTTP 413 or a `chat:error` instead of vanishing at the
+  socket buffer; `GET /api/chat/config` reports the limit; the chat page downscales photos before
+  sending (longest edge 2048, JPEG 0.9) and shows the size.
+- **A self-improvement scan can be cancelled.** `POST /api/self-improvement/scans/<id>/cancel`,
+  a `cancelled` status the worker honours at its checkpoints, and a Cancel button that waits for
+  it.
+- **Building a plugin manager no longer builds a second one.** The status snapshot emitter used
+  the process singleton, so any privately constructed manager (a test, a tool) spawned a real-
+  registry manager that probed every install port and ran orphan cleanup; one such run under
+  pytest took down this checkout's ComfyUI. The emitter now uses the manager that broadcasts, and
+  the port-kill path refuses to run under a test.
+- **Docs.** HARDWARE.md and INSTALL.md say the same thing about Apple Silicon (stills and LoRA
+  training verified; ComfyUI video on Metal has no evidence on file); `--fast` is documented as
+  what it gates.
 - **Chat asks before it uses a face.** Putting an attached photo's person into a new scene
   (`generate_identity`) now pauses on a consent card: approving records consent next to the photo
   (and under `outputs/consent/` by content hash, so the same image does not ask again), declining
