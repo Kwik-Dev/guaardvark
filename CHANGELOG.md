@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **The server tells the truth about what it did.** Deleting one image or video batch now removes
+  its document, folder and job-history rows and vectors, not just its folder. Starting a service
+  plugin whose process died no longer answers "already running": the manager probes the health
+  endpoint first and starts it. The Plugins page shows the code-search plugin as running when it
+  runs (it answers `/healthz`, not `/health`). `list_documents` over MCP no longer counts RAPTOR
+  summary nodes as documents. The progress-job cleanup script that three callers invoked, and the
+  health check reported missing, now exists (dry run by default, `--execute` to clean).
+- **A chat turn that runs out of tool iterations answers from what it found.** The engine makes one
+  more call with tools off and marks the reply `synthesized` instead of emitting an empty response.
+- **Credentials stay out of the log.** A failed read or write of a `*_key`, `*_token`, `*_secret` or
+  password setting logs the exception type only; SQLAlchemy would otherwise print the bound value.
+- **File Manager copies files and folders.** New `POST /api/files/folder/<id>/copy` deep-copies a
+  folder into a target (or the root) with `(Copy)` naming; the context-menu actions use it.
+- **Settings and Images page say what they do.** Slash commands defined as rules load again (the
+  rules endpoint returns a bare array). On Z-Image and Krea 2 Turbo the negative prompt and
+  "enhance anatomy" controls are disabled with a note, since those models ignore them, and the
+  auto preset's caption says it stuffs quality tags rather than detecting settings. RAG debug shows
+  the performance metrics it fetched; LoRA strength saves on blur or Enter; the scan dialog can be
+  closed with the scan continuing; the memory merge target is picked from a list, not a prompt.
+- **Tests.** `run_tests.py` runs the whole suite by default (4,077 tests) with `--quick` for the old
+  filter, and its migration check points at the script that exists. `backend/mcp/tests` collects
+  from both the repo root and `backend/`. Twenty-one September test files that had never been run
+  now pass; the image generator exposes `get_status()` with the GPU fault the API reports.
 - **Web pages are read at the passage the question is about.** `fetch_url` and `analyze_website`
   take an optional `query`; with it, the 2,000-character excerpt is the stretch of the page that
   holds the most of the question's terms (`backend/utils/text_focus.py`) instead of the top of the
