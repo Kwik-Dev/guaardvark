@@ -264,3 +264,44 @@ class TestSecretRedaction:
 
         assert result is None
         assert "sk-live-SUPERSECRET" not in caplog.text
+
+
+class TestSettingRepr:
+    """Test Setting and SystemSetting string representations with secret redaction."""
+
+    def test_setting_repr_redacts_secret_keys(self):
+        from backend.models import Setting
+
+        secret_setting = Setting(key="openai_api_key", value="sk-1234567890abcdef")
+        assert repr(secret_setting) == "<Setting openai_api_key=<redacted>>"
+
+        password_setting = Setting(key="db_password", value="super_secret_pw")
+        assert repr(password_setting) == "<Setting db_password=<redacted>>"
+
+        token_setting = Setting(key="auth_token", value="jwt.secret.token")
+        assert repr(token_setting) == "<Setting auth_token=<redacted>>"
+
+    def test_setting_repr_preserves_non_secret_values(self):
+        from backend.models import Setting
+
+        theme_setting = Setting(key="theme", value="dark")
+        assert repr(theme_setting) == "<Setting theme=dark>"
+
+        counter_setting = Setting(key="claude_token_usage", value="1500")
+        assert repr(counter_setting) == "<Setting claude_token_usage=1500>"
+
+    def test_system_setting_repr_redacts_secret_keys(self):
+        from backend.models import SystemSetting
+
+        secret_setting = SystemSetting(key="admin_password", value="rootpass123")
+        assert repr(secret_setting) == "<SystemSetting admin_password=<redacted>>"
+
+        api_setting = SystemSetting(key="service_secret", value="topsecret")
+        assert repr(api_setting) == "<SystemSetting service_secret=<redacted>>"
+
+    def test_system_setting_repr_preserves_non_secret_values(self):
+        from backend.models import SystemSetting
+
+        app_setting = SystemSetting(key="site_name", value="Guaardvark")
+        assert repr(app_setting) == "<SystemSetting site_name=Guaardvark>"
+
