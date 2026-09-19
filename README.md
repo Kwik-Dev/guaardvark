@@ -471,7 +471,7 @@ your own is [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md).
 pip install guaardvark
 ```
 
-The CLI connects to a running Guaardvark instance or launches a lightweight embedded server automatically.
+The CLI connects to a running backend on the configured port, or runs `start.sh` from a checkout it finds through `GUAARDVARK_ROOT` or the current directory, stopping with "Guaardvark installation not found" otherwise. An MCP client can invoke `guaardvark mcp serve` as the way to start the server from a pip install plus a checkout.
 
 ---
 
@@ -702,3 +702,5 @@ Full setup, style, and PR expectations: **[CONTRIBUTING.md](CONTRIBUTING.md)**
 <p align="center">
   <em>Guaardvark mascot</em>
 </p>
+
+<!-- mcp-name: io.github.guaardvark/guaardvark -->
