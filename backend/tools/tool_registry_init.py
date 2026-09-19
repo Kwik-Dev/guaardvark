@@ -618,17 +618,15 @@ def register_image_tools() -> List[str]:
     except Exception as e:
         logger.warning(f"Failed to register edit_image tool: {e}")
 
-    # generate_identity stays off until its likeness is verified: on this
-    # machine PuLID on FLUX.1-dev FP8 returned a younger, dark-haired man for a
-    # grey-bearded reference at weights 1.0 and 1.5 (2026-09-15). Set
-    # GUAARDVARK_IDENTITY_TOOL=1 to expose it while that is worked on.
+    # generate_identity is consent-gated in the tool itself (a recorded consent
+    # for the reference image, asked for on a chat card); its likeness was
+    # verified on 2026-09-19 once the PuLID node patch landed.
     _photo_tools = [
         ("RemoveBackgroundTool", "remove_background"),
         ("InpaintImageTool", "inpaint_image"),
         ("OutpaintImageTool", "outpaint_image"),
+        ("GenerateIdentityTool", "generate_identity"),
     ]
-    if os.environ.get("GUAARDVARK_IDENTITY_TOOL") == "1":
-        _photo_tools.append(("GenerateIdentityTool", "generate_identity"))
     for _cls_name, _tool_name in _photo_tools:
         try:
             from backend.tools import image_tools as _image_tools

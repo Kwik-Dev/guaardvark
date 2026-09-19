@@ -41,12 +41,10 @@ def test_missing_message_names_the_image_modal():
     )
 
 
-def test_identity_pack_is_hidden_without_the_flag(monkeypatch):
+def test_identity_pack_is_listed_without_any_flag(monkeypatch):
     monkeypatch.delenv("GUAARDVARK_IDENTITY_TOOL", raising=False)
-    assert packs.pack_by_id("pulid-flux") is None
-    assert "pulid-flux" not in {p["id"] for p in packs.enabled_packs()}
-    # The refusal sentence still names the pack, so a flagged-on server and
-    # the docs agree on the wording.
+    assert packs.pack_by_id("pulid-flux") is not None
+    assert "pulid-flux" in {p["id"] for p in packs.enabled_packs()}
     assert "PuLID" in packs.missing_message("generate_identity")
 
 

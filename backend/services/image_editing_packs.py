@@ -35,9 +35,6 @@ PACKS = (
     },
     {
         "id": "pulid-flux",
-        # Listed only while GUAARDVARK_IDENTITY_TOOL=1: likeness not verified
-        # (see tool_registry_init.register_image_tools).
-        "flag": "GUAARDVARK_IDENTITY_TOOL",
         "name": "PuLID identity on FLUX.1-dev",
         "short": "the PuLID identity pack",
         "description": "A new scene that keeps the face from one photo. Installs PuLID, "

@@ -58,7 +58,7 @@ FLUX_DEV_WEIGHT_DTYPE = os.environ.get("GUAARDVARK_FLUX_DEV_DTYPE", "fp8_e4m3fn"
 FLUX_DEV_GUIDANCE = float(os.environ.get("GUAARDVARK_FLUX_DEV_GUIDANCE", "3.5"))
 
 # PuLID identity experiment switches (the likeness loss at weight 1.0 and 1.5
-# on fp8 is what keeps generate_identity behind GUAARDVARK_IDENTITY_TOOL).
+# on fp8 was the 2026-09-15 suspicion; the real cause was the node freeing its data).
 # UNETLoader's weight_dtype choices are default | fp8_e4m3fn | fp8_e4m3fn_fast
 # | fp8_e5m2 (ComfyUI nodes.py, UNETLoader.INPUT_TYPES); there is no bf16
 # choice. "default" loads the tensors as stored, and flux1-dev.safetensors is

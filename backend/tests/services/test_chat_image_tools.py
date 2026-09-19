@@ -114,11 +114,8 @@ def test_named_image_tools_register(monkeypatch):
     from backend.tools.tool_registry_init import register_image_tools
     monkeypatch.delenv("GUAARDVARK_IDENTITY_TOOL", raising=False)
     names = register_image_tools()
-    for n in ("edit_image", "remove_background", "inpaint_image", "outpaint_image"):
-        assert n in names
-    assert "generate_identity" not in names  # off until its likeness is verified
-    monkeypatch.setenv("GUAARDVARK_IDENTITY_TOOL", "1")
-    assert "generate_identity" in register_image_tools()
+    for n in ("edit_image", "remove_background", "inpaint_image", "outpaint_image", "generate_identity"):
+        assert n in names  # identity is consent-gated in the tool, not by an env flag
 
 
 def test_named_image_direct_identity_not_edit():

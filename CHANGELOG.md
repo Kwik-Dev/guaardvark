@@ -17,6 +17,9 @@
   from the checkout it finds; with no checkout it says what it looked for. The README's PyPI
   paragraph now says what the package does, the package carries keywords, and the README ends with
   the MCP Registry ownership marker.
+- **The identity tool is on by default.** `generate_identity`, its `/identity` command and the PuLID
+  pack row no longer wait behind `GUAARDVARK_IDENTITY_TOOL=1`; the consent card and the recorded
+  consent are the gate. (Operator-approved 2026-09-19.)
 - **Identity renders keep the face again.** PuLID on FLUX had been contributing nothing: the
   pinned node stored its face embedding on the model and deleted it in the node's `__del__`,
   which current ComfyUI fires before the sampler runs, so every render silently ignored the
