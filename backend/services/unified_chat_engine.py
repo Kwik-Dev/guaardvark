@@ -806,6 +806,26 @@ _CODE_SEARCH_NUDGE = (
     "the project, and never say the code is unavailable before searching it."
 )
 
+# With document RAG on, the 2026-09-08 trial answered code questions from the
+# indexed docs and made no search_codebase calls (with RAG off: 8/8 calls,
+# 7/8 right file). The nudge has to win while the docs stay available, so a
+# code question's first prompt carries the nudge and the tools but not the
+# knowledge-base block; the block joins the conversation once a code search
+# has run, labelled as secondary to the search results.
+_KB_SECONDARY_LABEL = (
+    "Knowledge base passages, for context; the code search results above are "
+    "authoritative for this codebase:"
+)
+
+
+def _held_rag_ready(step_info: Dict[str, Any]) -> bool:
+    """True once this iteration ran search_codebase, with hits or without."""
+    return any(
+        (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None))
+        == "search_codebase"
+        for tc in (step_info.get("tool_calls") or [])
+    )
+
 
 def _asks_about_code(message: str) -> bool:
     msg = (message or "").lower()
@@ -2080,8 +2100,13 @@ class UnifiedChatEngine:
 
         # 5. Build Ollama messages array — static content first for prefix cache
         ollama_messages = [{"role": "system", "content": system_prompt}]
+        hold_rag_for_code = False
         if "search_codebase" in (selected_tools or []) and _asks_about_code(message):
             ollama_messages.append({"role": "system", "content": _CODE_SEARCH_NUDGE})
+            hold_rag_for_code = bool(rag_context)
+        # Held back for a code question's first prompt; attached after a code
+        # search has run (see _KB_SECONDARY_LABEL).
+        held_rag_context = rag_context if hold_rag_for_code else ""
 
         # History messages
         for msg in history:
@@ -2107,7 +2132,7 @@ class UnifiedChatEngine:
         self._local_facts_this_turn = any(name != PAGE_PROVIDER_NAME for name, _ in _entries)
         if provider_context:
             context_parts.append(f"Current context:\n{provider_context}")
-        if rag_context:
+        if rag_context and not hold_rag_for_code:
             context_parts.append(f"Relevant context from knowledge base:\n{rag_context}")
         # Vision pipeline context (if active). Ask the plugin manager first so
         # we skip a 2-second HTTP probe on every chat when the plugin is off.
@@ -2851,6 +2876,11 @@ class UnifiedChatEngine:
                 except Exception:
                     pass
 
+            kb_block = ""
+            if held_rag_context and _held_rag_ready(step_info):
+                kb_block = f"{_KB_SECONDARY_LABEL}\n{held_rag_context}\n\n"
+                held_rag_context = ""
+
             ollama_messages.append({
                 "role": "user",
                 "content": (
@@ -2858,6 +2888,7 @@ class UnifiedChatEngine:
                     f"{realtime_nudge}"
                     f"{continuity_block}"
                     f"Latest tool results:\n{observation_text}\n\n"
+                    f"{kb_block}"
                     "Continue reasoning toward the user's goal using all findings above. "
                     "If you have sufficient information, give your final answer directly. "
                     "Otherwise, call another tool. Do not repeat tool calls that already ran."
