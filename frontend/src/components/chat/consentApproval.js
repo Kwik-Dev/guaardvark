@@ -46,6 +46,7 @@ export function parseConsentApproval(data, toolName, existingParams = {}) {
     data?.reference_image_url,
     details.image,
     details.image_url,
+    details.reference_image_url,
     details.reference_image,
     params.image,
     params.image_url,
@@ -84,6 +85,8 @@ export function consentImageSrc(value) {
   }
   const generated = raw.match(/(?:^|[\\/])generated_images[\\/]([^\\/]+)$/);
   if (generated) return `/api/outputs/generated_images/${generated[1]}`;
+  const editInput = raw.match(/(?:^|[\\/])edit_inputs[\\/]([^\\/]+)$/);
+  if (editInput) return `/api/outputs/edit_inputs/${editInput[1]}`;
   const uploads = raw.match(/(?:^|[\\/])uploads[\\/]([^\\/]+)$/);
   if (uploads) return `/api/uploads/${uploads[1]}`;
   if (raw.startsWith("/") && !looksLikeFilesystemPath(raw)) return raw;

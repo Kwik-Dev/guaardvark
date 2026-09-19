@@ -234,3 +234,11 @@ def test_identity_slash_no_longer_grants_consent():
     })
     assert tool == "generate_identity"
     assert params == {"prompt": "a 1940s detective in the rain"}
+
+
+def test_consent_detail_carries_a_served_url_for_chat_attachments():
+    from backend.services.unified_chat_engine import _served_output_url
+    assert _served_output_url("/x/outputs/edit_inputs/edit_src_ab12.png") == "/api/outputs/edit_inputs/edit_src_ab12.png"
+    assert _served_output_url("/x/outputs/generated_images/a.png") == "/api/outputs/generated_images/a.png"
+    assert _served_output_url("/tmp/elsewhere/a.png") is None
+    assert _served_output_url(None) is None

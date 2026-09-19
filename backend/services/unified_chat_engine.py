@@ -197,6 +197,14 @@ def set_approval_response(
 APPROVAL_TIMEOUT_S = 300
 
 
+def _served_output_url(path: Optional[str]) -> Optional[str]:
+    """URL the UI can load for a file under outputs/edit_inputs or generated_images, else None."""
+    if not path:
+        return None
+    m = re.search(r"(?:^|[\\/])(edit_inputs|generated_images)[\\/]([^\\/]+)$", str(path))
+    return f"/api/outputs/{m.group(1)}/{m.group(2)}" if m else None
+
+
 def _consent_reference(tool, params: Dict[str, Any]) -> Optional[str]:
     """The reference image a consent-gated tool would use, or None."""
     if not getattr(tool, "consent_gate", False):
@@ -234,6 +242,7 @@ def _approval_detail(tool, tool_name: str, params: Dict[str, Any], reasoning: st
         detail["consent"] = True
         detail["approval_prompt"] = getattr(tool, "approval_prompt", "") or ""
         detail["reference_image"] = _consent_reference(tool, params)
+        detail["reference_image_url"] = _served_output_url(detail["reference_image"])
         if not detail["reasoning"]:
             detail["reasoning"] = detail["approval_prompt"]
     return detail

@@ -105,6 +105,26 @@ def serve_generated_image(image_name):
         abort(404, "Image not found")
 
 
+@output_bp.route('/edit_inputs/<image_name>', methods=['GET'])
+def serve_edit_input(image_name):
+    """Serve a chat attachment the engine materialised under outputs/edit_inputs.
+
+    The consent card shows the reference photo before an identity render; the
+    engine hands the UI this path's URL alongside the disk path.
+    """
+    try:
+        safe_name = secure_filename(image_name)
+        if not safe_name:
+            abort(400, "Invalid filename")
+        image_path = os.path.join(OUTPUT_DIR, "edit_inputs", safe_name)
+        if not os.path.isfile(image_path):
+            abort(404, "Image not found")
+        return send_file(image_path, mimetype="image/png")
+    except Exception as e:
+        logger.error(f"Error serving edit input {image_name}: {e}")
+        abort(404, "Image not found")
+
+
 @output_bp.route('/generated_animations/<filename>', methods=['GET'])
 def serve_generated_animation(filename):
     """Serve generated animations (GIF/MP4) from the outputs directory."""
