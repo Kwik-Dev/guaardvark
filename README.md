@@ -471,7 +471,7 @@ your own is [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md).
 pip install guaardvark
 ```
 
-The CLI connects to a running backend on the configured port, or runs `start.sh` from a checkout it finds through `GUAARDVARK_ROOT` or the current directory, stopping with "Guaardvark installation not found" otherwise. An MCP client can invoke `guaardvark mcp serve` as the way to start the server from a pip install plus a checkout.
+The package is the `guaardvark` command. It talks to a running backend on the configured port, or starts one with `start.sh` from a checkout it finds through `GUAARDVARK_ROOT` or the current directory; with no checkout it stops with "Guaardvark installation not found". An MCP client can start the server with `guaardvark mcp serve` from a pip install plus a checkout.
 
 ---
 
