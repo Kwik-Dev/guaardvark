@@ -475,3 +475,103 @@ def test_search_scopes_the_expander_and_every_returned_node():
     assert 'trace["filtered_out"] = _pre_filter - len(nodes)' in src
     assert 'GUAARDVARK_RAG_GLOBAL_FALLBACK", "false"' in src
     assert '_fb_trace["degraded"] = True' in src
+
+
+# --------------------------------------------------------------------------
+# R8. Concurrent retrievals never share a connection
+# --------------------------------------------------------------------------
+class _ExclusiveConn:
+    """A connection that fails the test if two operations overlap on it or if a
+    second thread ever touches it. Records who used it."""
+
+    def __init__(self, registry):
+        import threading
+
+        self.registry = registry
+        self.owner = None
+        self.busy = threading.Lock()
+        self.closed = False
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        import threading
+        import time
+
+        me = threading.current_thread().name
+        assert self.owner in (None, me), f"connection shared: {self.owner} and {me}"
+        self.owner = me
+        assert self.busy.acquire(blocking=False), "another operation is in progress"
+        try:
+            time.sleep(0.02)  # long enough for the other thread to collide if it could
+            self.registry.append(me)
+        finally:
+            self.busy.release()
+
+    def fetchall(self):
+        return [("n1", "hello world", {"document_id": "doc_1_x"}, 0.5)]
+
+    def close(self):
+        self.closed = True
+
+
+def test_concurrent_sparse_retrievals_each_get_their_own_connection(monkeypatch):
+    """Retrieval died with "another operation is in progress" when one asyncpg
+    connection was driven twice. The keyword leg opens a connection per call and
+    the fused retriever runs synchronously on the pooled engine; two retrievals at
+    once must never touch the same connection."""
+    import threading
+    import backend.services.indexing_service as isvc
+
+    conns, used = [], []
+
+    def _connect():
+        c = _ExclusiveConn(used)
+        conns.append(c)
+        return c
+
+    monkeypatch.setattr(isvc, "_pg_connect", _connect)
+    retriever = isvc.PostgresSparseRetriever(table="t_384", top_k=5)
+    start = threading.Barrier(2)
+    out, errors = {}, []
+
+    def _go(name):
+        try:
+            start.wait()
+            out[name] = retriever.retrieve("hello world")
+        except BaseException as e:  # AssertionError inside execute must surface
+            errors.append(e)
+
+    threads = [threading.Thread(target=_go, args=(n,), name=n) for n in ("q1", "q2")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+
+    assert not errors, errors
+    assert len(out["q1"]) == 1 and len(out["q2"]) == 1
+    assert len(conns) >= 2 and all(c.closed for c in conns)
+    assert {c.owner for c in conns} == {"q1", "q2"}
+
+
+def test_fused_retrieval_runs_synchronously():
+    """use_async=True drives both legs through a nested event loop and the vector
+    store's single asyncpg connection; the sync path takes a pooled session per
+    query. Both fusion constructions must stay sync."""
+    import inspect
+    import re
+    import backend.services.indexing_service as isvc
+
+    src = inspect.getsource(isvc.search_with_llamaindex)
+    fusions = re.findall(r"QueryFusionRetriever\((.*?)\n\s*\)", src, flags=re.S)
+    assert len(fusions) == 2
+    assert all("use_async=False" in f for f in fusions)
+    assert ".aretrieve(" not in src and ".aquery(" not in src
+
