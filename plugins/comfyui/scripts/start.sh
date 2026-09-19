@@ -52,6 +52,25 @@ if [ ! -f "$VENV_PYTHON" ]; then
     exit 1
 fi
 
+# Launch settings (GUAARDVARK_COMFYUI_*) come from the checkout's .env at every
+# start, on top of the inherited environment, so editing .env and restarting
+# the plugin is enough for a reserve or attention change. The backend's own
+# environment is frozen at backend start and used to win here. Parsed by
+# dotenv_launch_overrides in backend/services/comfyui_launch_flags.py (loaded
+# by path: no backend package import).
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    _dotenv_exports=$("$VENV_PYTHON" - "$PROJECT_ROOT" <<'DOTENV'
+import importlib.util, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "comfyui_launch_flags", root / "backend" / "services" / "comfyui_launch_flags.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod.shell_exports(mod.dotenv_launch_overrides(root / ".env")))
+DOTENV
+    ) && eval "$_dotenv_exports"
+fi
+
 # Install ComfyUI + custom-node deps into backend/venv (shared — no plugin venv)
 # shellcheck source=install_deps.sh
 source "$SCRIPT_DIR/install_deps.sh"

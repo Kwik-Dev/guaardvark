@@ -26,6 +26,59 @@ LOCAL_ONLY_ENV = {
 }
 LOCAL_ONLY_CLI_ARGS = ("--disable-api-nodes",)
 
+# Every launch setting the plugin's start.sh reads is a GUAARDVARK_COMFYUI_*
+# key. They are re-read from the checkout's .env at every plugin start rather
+# than inherited from the backend's environment (frozen at backend start), so
+# editing .env and restarting the plugin is enough; before this, a reserve or
+# attention change still launched the old value until the backend restarted.
+LAUNCH_ENV_PREFIX = "GUAARDVARK_COMFYUI_"
+
+
+def dotenv_launch_overrides(dotenv_path, prefix: str = LAUNCH_ENV_PREFIX) -> dict:
+    """``KEY=VALUE`` lines of a .env file whose key starts with ``prefix``.
+
+    Accepts an optional ``export`` prefix and single or double quotes around
+    the value; comments and blank lines are skipped; ``$VAR`` references are
+    not expanded. An empty value is kept (it means "unset" to the launcher).
+    A missing or unreadable file yields nothing.
+    """
+    found: dict = {}
+    try:
+        text = Path(dotenv_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return found
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key.startswith(prefix) or not key.replace("_", "").isalnum():
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        found[key] = value
+    return found
+
+
+def shell_exports(mapping: Mapping[str, str]) -> str:
+    """``export KEY=value`` lines, quoted for ``eval`` in bash."""
+    import shlex
+    return "\n".join(f"export {key}={shlex.quote(str(value))}" for key, value in mapping.items())
+
+
+def launch_env(project_root, base: Optional[Mapping[str, str]] = None) -> dict:
+    """The environment a ComfyUI launch sees: ``base`` (the process env by
+    default) with the checkout's .env GUAARDVARK_COMFYUI_* keys on top."""
+    merged = dict(base if base is not None else os.environ)
+    merged.update(dotenv_launch_overrides(Path(project_root) / ".env"))
+    return merged
+
 PREVIEW_METHOD_ENV = "GUAARDVARK_COMFYUI_PREVIEW_METHOD"
 PREVIEW_SIZE_ENV = "GUAARDVARK_COMFYUI_PREVIEW_SIZE"
 PREVIEW_METHOD_DEFAULT = "auto"

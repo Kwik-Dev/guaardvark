@@ -1171,7 +1171,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         """
         try:
             from backend.services.comfyui_launch_flags import (
-                explicit_reserve_vram_gb, write_reserve_request,
+                explicit_reserve_vram_gb, launch_env, write_reserve_request,
             )
             from backend.services.video_model_registry import comfyui_reserve_vram_gb_for_model
         except Exception as e:  # noqa: BLE001
@@ -1180,7 +1180,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         needed = comfyui_reserve_vram_gb_for_model(model)
         if needed is None:
             return None
-        if explicit_reserve_vram_gb() is not None:
+        if explicit_reserve_vram_gb(launch_env(self._project_root)) is not None:
             logger.debug("%s set explicitly; %s keeps the running ComfyUI reserve", "GUAARDVARK_COMFYUI_RESERVE_VRAM", model)
             return None
         running = self._running_reserve_vram_gb()
