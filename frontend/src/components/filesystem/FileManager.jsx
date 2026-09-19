@@ -204,6 +204,7 @@ const FileManager = () => {
   const { showMessage } = useSnackbar();
   const { gridSettings } = useLayout();
   const [currentPath, setCurrentPath] = useState('/');
+  const [currentFolderId, setCurrentFolderId] = useState(null);
   const [items, setItems] = useState({ folders: [], documents: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -506,10 +507,12 @@ const FileManager = () => {
       const response = await axios.get(`${API_BASE}/browse`, {
         params: { path: currentPath },
       });
+      const listing = response.data.data || {};
       setItems({
-        folders: response.data.data.folders || [],
-        documents: response.data.data.documents || [],
+        folders: listing.folders || [],
+        documents: listing.documents || [],
       });
+      setCurrentFolderId(listing.folder_id ?? null);
     } catch (err) {
       setError(err.response?.data?.message || err.message);
     } finally {
@@ -1460,9 +1463,13 @@ const FileManager = () => {
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
   };
 
-  // Cut and Paste operations (Copy not yet implemented)
   const handleCut = () => {
     setClipboard({ item: selectedItem, operation: 'cut' });
+    handleCloseContextMenu();
+  };
+
+  const handleCopy = () => {
+    setClipboard({ item: selectedItem, operation: 'copy' });
     handleCloseContextMenu();
   };
 
@@ -1476,30 +1483,30 @@ const FileManager = () => {
 
       if (item.itemType === 'file') {
         if (operation === 'cut') {
-          // Move file
           await axios.post(`${API_BASE}/document/${item.id}/move`, {
             destination_path: currentPath,
           });
-          setClipboard(null); // Clear clipboard after cut
+          setClipboard(null);
           showMessage('File moved successfully', 'success');
         } else {
-          // Copy file - TODO: implement file copy endpoint
-          showMessage('File copy functionality is not yet implemented', 'info');
-          return;
+          await axios.post(`${API_BASE}/document/${item.id}/copy`, {
+            destination_path: currentPath,
+          });
+          showMessage('File copied successfully', 'success');
         }
       } else if (item.itemType === 'folder') {
         if (operation === 'cut') {
-          // Move folder
           await axios.put(`${API_BASE}/folder/${item.id}`, {
             name: item.name,
             parent_path: currentPath,
           });
-          setClipboard(null); // Clear clipboard after cut
+          setClipboard(null);
           showMessage('Folder moved successfully', 'success');
         } else {
-          // Copy folder - TODO: implement folder copy endpoint
-          showMessage('Folder copy functionality is not yet implemented', 'info');
-          return;
+          await axios.post(`${API_BASE}/folder/${item.id}/copy`, {
+            target_folder_id: currentFolderId,
+          });
+          showMessage('Folder copied successfully', 'success');
         }
       }
 
@@ -2361,6 +2368,9 @@ const FileManager = () => {
           <MenuItem key="cut" onClick={(e) => { e.stopPropagation(); handleCut(); }}>
             <ListItemText>Cut</ListItemText>
           </MenuItem>,
+          <MenuItem key="copy" onClick={(e) => { e.stopPropagation(); handleCopy(); }}>
+            <ListItemText>Copy</ListItemText>
+          </MenuItem>,
           <MenuItem key="paste" onClick={(e) => { e.stopPropagation(); handlePaste(); }} disabled={!clipboard}>
             <ListItemText>Paste</ListItemText>
           </MenuItem>,
@@ -2400,6 +2410,9 @@ const FileManager = () => {
         {selectedItems.size <= 1 && selectedItem?.itemType === 'file' && [
           <MenuItem key="cut" onClick={(e) => { e.stopPropagation(); handleCut(); }}>
             <ListItemText>Cut</ListItemText>
+          </MenuItem>,
+          <MenuItem key="copy" onClick={(e) => { e.stopPropagation(); handleCopy(); }}>
+            <ListItemText>Copy</ListItemText>
           </MenuItem>,
           <MenuItem key="paste" onClick={(e) => { e.stopPropagation(); handlePaste(); }} disabled={!clipboard}>
             <ListItemText>Paste</ListItemText>
