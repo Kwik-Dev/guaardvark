@@ -25,6 +25,8 @@ import argparse
 import itertools
 import json
 import os
+import time
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -36,6 +38,24 @@ DEFAULT_DTYPES = "fp8_e4m3fn,bf16"
 DEFAULT_WEIGHTS = "1.0,1.5"
 DEFAULT_START_ATS = "0.0,0.2"
 DEFAULT_VARIANTS = "pulid_flux"
+
+
+
+_COOLDOWN_RE = re.compile(r"try again in ([0-9.]+)s")
+
+
+def _render_with_cooldown_retry(gen, name, *, attempts=6, **kwargs):
+    """Back-to-back cells hit the job gate's GPU cooldown; wait it out instead of failing the cell."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return gen.generate_with_identity(**kwargs)
+        except Exception as exc:  # the gate raises a plain Exception carrying the wait
+            m = _COOLDOWN_RE.search(str(exc))
+            if not m or attempt == attempts:
+                raise
+            wait = float(m.group(1)) + 2.0
+            print(f"== {name}: GPU cooling down, waiting {wait:.0f}s (attempt {attempt}/{attempts})", flush=True)
+            time.sleep(wait)
 
 
 def _floats(text: str) -> list[float]:
@@ -133,7 +153,9 @@ def main(argv=None) -> int:
                 entry["status"] = "dry-run"
             else:
                 print(f"== {case['name']}: rendering", flush=True)
-                gen.generate_with_identity(image_path=image, output_path=output_path, **common, **overrides)
+                _render_with_cooldown_retry(
+                    gen, case["name"], image_path=image, output_path=output_path, **common, **overrides,
+                )
                 entry["status"] = "ok"
         except ValueError as exc:
             # An unsupported switch (pulid_classic on FLUX, an unknown dtype):
