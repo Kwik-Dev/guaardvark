@@ -150,14 +150,18 @@ Partial, actively improving — tracked in
 - **Works:** chat, RAG, and voice through Ollama (which uses Metal on its
   own); the install and startup path; the video editor (with `melt`/Shotcut
   installed).
+- **Verified on Apple Silicon:** offline image generation for the Z-Image
+  and Krea 2 families runs natively on Metal (MPS; #183, live renders), and
+  LoRA training runs on MPS (#182; slow, with timeouts raised to match).
 - **Conservative default:** ARM machines currently get the small
   `llama3.2:1b` tier regardless of unified memory — pull a larger model
   manually if your machine can hold it.
-- **Experimental:** the offline (diffusers) video path has an MPS branch with
-  tentative, advisory limits — untested on real Apple hardware.
-- **Not available:** the ComfyUI video pipeline (requires NVIDIA), the offline
-  image generator's GPU path (CUDA-only today), and the agent virtual desktop
-  (X11-only: Xvfb + XFCE + x11vnc).
+- **Not verified by this project:** video generation through ComfyUI on
+  Metal (no render on a Mac is on file); the other offline image families
+  on MPS; the offline (diffusers) video path, which has an MPS branch with
+  tentative, advisory limits untested on real Apple hardware.
+- **Not available:** the agent virtual desktop (X11-only: Xvfb + XFCE +
+  x11vnc).
 
 ## AMD (ROCm)
 
