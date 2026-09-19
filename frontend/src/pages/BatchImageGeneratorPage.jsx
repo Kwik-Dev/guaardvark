@@ -61,7 +61,7 @@ import BatchHistoryCard from '../components/images/BatchHistoryCard';
 import GpuGateBanner from '../components/common/GpuGateBanner';
 import useJobsGate from '../hooks/useJobsGate';
 import { formatUiError } from '../utils/uiError';
-import { ActionButton } from '../components/settings/ui';
+import { ActionButton, Hint, SettingChip } from '../components/settings/ui';
 import {
   ZIMAGE_GUIDANCE,
   ZIMAGE_PRESET_STEPS,
@@ -69,6 +69,7 @@ import {
   MAX_QUANTITY,
   buildFinalPrompts,
   clampQuantity,
+  ignoresNegativeAndAnatomy,
   isZimageModel,
   modelFamily,
   qualityPresetsForModel,
@@ -131,6 +132,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [inputMode, setInputMode] = useState('single'); // 'single' (default, whole text as one prompt), 'bulk', 'csv', or 'blueprint'
   const [batchItems, setBatchItems] = useState(''); // Bulk textarea input like FileGenerationPage
   const [lookAndFeel, setLookAndFeel] = useState(''); // Style/aesthetic to apply to all prompts
+  const [negativePrompt, setNegativePrompt] = useState('');
   const [csvFile, setCsvFile] = useState(null);
   const [blueprintFile, setBlueprintFile] = useState(null);
   const [quantity, setQuantity] = useState(1); // Number of images to generate
@@ -282,6 +284,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // Quality presets — family-aware (see utils/batchImageSettings for the tables).
   const isFlux = family === 'flux';
   const isZimage = isZimageModel(params.model);
+  const unusedNegAnat = ignoresNegativeAndAnatomy(params.model);
   const isModernDit = family === 'auto' || family === 'zimage' || family.startsWith('krea');
   const qualityPresets = qualityPresetsForModel(params.model);
 
@@ -919,6 +922,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           inputMode,
           batchItems,
           lookAndFeel,
+          negativePrompt,
           quantity,
           params,
           castSubjectIds,
@@ -946,6 +950,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
             // Quality enhancement parameters
             content_preset: selectedPreset === 'auto' ? null : selectedPreset,
             auto_enhance: autoEnhance,
+            negative_prompt: negativePrompt,
             enhance_anatomy: enhanceAnatomy,
             enhance_faces: enhanceFaces,
             enhance_hands: enhanceHands,
@@ -1069,6 +1074,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         if (cfg.inputMode) setInputMode(cfg.inputMode);
         if (typeof cfg.batchItems === 'string') setBatchItems(cfg.batchItems);
         if (typeof cfg.lookAndFeel === 'string') setLookAndFeel(cfg.lookAndFeel);
+        if (typeof cfg.negativePrompt === 'string') setNegativePrompt(cfg.negativePrompt);
         if (typeof cfg.quantity === 'number') setQuantity(cfg.quantity);
         if (cfg.params && typeof cfg.params === 'object') {
           setParams((prev) => ({ ...prev, ...cfg.params }));
@@ -1306,7 +1312,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       <Box>
                         <Typography variant="body2" sx={{ fontWeight: 500 }}>Auto-detect (Recommended)</Typography>
                         <Typography variant="caption" color="text.secondary">
-                          Automatically optimizes settings based on your prompt
+                          Stuffs quality tags into the prompt from its content. Does not detect or change generation settings.
                         </Typography>
                       </Box>
                     </MenuItem>
@@ -1575,6 +1581,39 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       Preview Prompts
                     </Button>
                   </Box>
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    maxRows={4}
+                    label="Negative prompt"
+                    placeholder="blurry, distorted hands, extra fingers"
+                    value={negativePrompt}
+                    disabled={unusedNegAnat}
+                    onChange={(e) => setNegativePrompt(e.target.value)}
+                    helperText={
+                      unusedNegAnat
+                        ? 'This model does not use a negative prompt.'
+                        : undefined
+                    }
+                    sx={{ mt: 2 }}
+                  />
+                  <Box sx={{ mt: 1.5, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                    <SettingChip
+                      label="Enhance anatomy"
+                      on={enhanceAnatomy}
+                      disabled={unusedNegAnat}
+                      tooltip={
+                        unusedNegAnat
+                          ? 'This model does not use anatomy enhancement.'
+                          : 'Adds anatomy phrasing when the prompt is a person.'
+                      }
+                      onToggle={setEnhanceAnatomy}
+                    />
+                    {unusedNegAnat && (
+                      <Hint>This model does not use a negative prompt or anatomy enhancement.</Hint>
+                    )}
+                  </Box>
                 </Box>
               )}
 
@@ -1833,7 +1872,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                                 <Typography variant="body2">Enhance prompts automatically</Typography>
                                 <Typography variant="caption" color="text.secondary">
                                   {autoEnhance
-                                    ? 'Adds the content type\u2019s quality and anatomy phrasing (and negatives) to each prompt. Steps and guidance are not changed.'
+                                    ? (unusedNegAnat
+                                      ? 'Adds the content type\u2019s quality phrasing to each prompt. Anatomy tags and negatives are not used by this model. Steps and guidance are not changed.'
+                                      : 'Adds the content type\u2019s quality and anatomy phrasing (and negatives) to each prompt. Steps and guidance are not changed.')
                                     : 'Off — prompts are sent as written.'}
                                 </Typography>
                               </Box>
