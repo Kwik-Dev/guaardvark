@@ -656,14 +656,36 @@ class PluginManager:
         self._refresh_status()
         return {pid: status.value for pid, status in self._plugin_status.items()}
     
+    HEALTH_PROBE_INTERVAL_S = 0.5
+
+    @classmethod
+    def _health_wait_probes(cls, metadata: PluginMetadata) -> int:
+        """Probes to spend waiting for a started service: its manifest timeout
+        (seconds) at HEALTH_PROBE_INTERVAL_S, never fewer than 20 (10 s)."""
+        try:
+            timeout_s = float(getattr(getattr(metadata, 'config', None), 'timeout', 30) or 30)
+        except (TypeError, ValueError):
+            timeout_s = 30.0
+        return max(20, int(timeout_s / cls.HEALTH_PROBE_INTERVAL_S))
+
     def _refresh_status(self):
-        """Refresh status of all plugins"""
+        """Refresh status of all plugins.
+
+        A service seen answering after its start timed out (or started by
+        hand) joins the persisted running set, so the next boot restores it.
+        Nothing is removed here: stop.sh takes ComfyUI down while the backend
+        is still answering, and a refresh in that window must not forget that
+        the plugin was running.
+        """
+        came_up = False
         for plugin_id, metadata in self.registry.get_all_plugins().items():
+            before = self._plugin_status.get(plugin_id)
             if not metadata.config.enabled:
                 self._plugin_status[plugin_id] = PluginStatus.DISABLED
             elif metadata.type == 'service':
                 if self._check_service_running(metadata):
                     self._plugin_status[plugin_id] = PluginStatus.RUNNING
+                    came_up = came_up or before != PluginStatus.RUNNING
                 else:
                     self._plugin_status[plugin_id] = PluginStatus.STOPPED
             else:
@@ -671,6 +693,16 @@ class PluginManager:
                 # "enabled" means available/ready (work runs via the task queue), so
                 # don't leave them UNKNOWN or flap them to STOPPED like a dead server.
                 self._plugin_status[plugin_id] = PluginStatus.RUNNING
+        if came_up:
+            try:
+                running = set(self.state_store.get_running())
+                now_running = {pid for pid, st in self._plugin_status.items()
+                               if st == PluginStatus.RUNNING
+                               and getattr(self.registry.get_plugin(pid), 'type', None) == 'service'}
+                if not now_running <= running:
+                    self.state_store.set_running(list(running | now_running))
+            except Exception as e:  # noqa: BLE001 — persistence must never break a listing
+                logger.debug(f"could not persist running set after refresh: {e}")
     
     def _fail_plugin_start(self, plugin_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         # Core pillars (e.g. ollama — the inference backbone) are exempt from the
@@ -859,8 +891,14 @@ class PluginManager:
                         plugin_id, {'success': False, 'error': f'Start script failed: {detail}'}
                     )
 
-                # Wait for service to become healthy (retry loop)
-                max_retries = 20
+                # Wait for the service to answer, for as long as its manifest
+                # says a start takes (config.timeout, ComfyUI 60 s). A fixed
+                # 10 s here marked ComfyUI ERROR while it was still importing
+                # torch and its custom nodes; the boot restore then dropped it
+                # from the running set and the next start.sh never brought it
+                # back, so the first video generation after a deploy failed
+                # with "Start the ComfyUI plugin".
+                max_retries = self._health_wait_probes(metadata)
                 problem = None
                 for i in range(max_retries):
                     if self._check_service_running(metadata):
