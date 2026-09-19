@@ -23,6 +23,7 @@ import { useAppStore } from "../../stores/useAppStore";
 import { BASE_URL } from "../../api/apiClient";
 import ToolCallCard from "./ToolCallCard";
 import { parseConsentApproval } from "./consentApproval";
+import SynthesizedAnswerChip from "./SynthesizedAnswerChip";
 import ThinkingCard from "./ThinkingCard";
 import AgentThinkingTrail from "./AgentThinkingTrail";
 import ImageLightbox from "../images/ImageLightbox";
@@ -78,6 +79,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
   const [images, setImages] = useState([]); // [{url, alt, caption}]
   const [lightbox, setLightbox] = useState(null);
   const [pendingApproval, setPendingApproval] = useState(false);
+  const [synthesized, setSynthesized] = useState(false);
   const mountedRef = useRef(true);
   const imagesRef = useRef([]); // Keep a ref for images to avoid stale closure in onComplete
   const logo = useAppStore((s) => s.systemLogo);
@@ -291,6 +293,9 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
       }
       const isTruncated = data.truncated === true;
       setTruncated(isTruncated);
+      const isSynthesized = data.synthesized === true
+        || (Array.isArray(data.steps) && data.steps.some((s) => s && s.synthesized === true));
+      setSynthesized(isSynthesized);
       // The final answer call's reasoning is authoritative; the live
       // segments only stand in when chat:complete carries none.
       const finalThinking = typeof data.thinking === "string" && data.thinking
@@ -336,6 +341,14 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
               })),
             }]
           : [];
+        if (isSynthesized && !backendSteps) {
+          streamingSteps.push({
+            iteration: (data.iterations || streamingSteps.length) + 1,
+            thoughts: "",
+            tool_calls: [],
+            synthesized: true,
+          });
+        }
         debugLog('[StreamingMessage] CALLING onComplete prop with agentThinkingSteps.length=', agentStepsRef.current.length);
         onCompleteRef.current({
           content: data.response || "",
@@ -355,6 +368,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
           agentThinkingSteps: agentStepsRef.current,
           thinking: finalThinking,
           truncated: isTruncated,
+          synthesized: isSynthesized,
         });
       }
     });
@@ -617,6 +631,12 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
                 )}
               </Box>
             ))}
+          </Box>
+        )}
+
+        {synthesized && (
+          <Box sx={{ mb: content ? 0.75 : 0, mt: toolCalls.length > 0 ? 1 : 0 }}>
+            <SynthesizedAnswerChip />
           </Box>
         )}
 

@@ -365,6 +365,7 @@ const FloatingChatCard = () => {
         toolCalls: result.toolCalls || [],
         thinking: result.thinking || "",
         truncated: result.truncated === true,
+        synthesized: result.synthesized === true,
         timestamp: new Date().toISOString(),
       });
     }
