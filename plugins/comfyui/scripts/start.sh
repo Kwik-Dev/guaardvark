@@ -241,11 +241,24 @@ case "$ATTENTION" in
     sage) [ "$SAGE_OK" = "1" ] && ATTN_FLAG="--use-sage-attention" ;;
 esac
 echo "Attention: ${ATTN_FLAG:-pytorch (default)}"
+# Reserve precedence (keep in lockstep with reserve_vram_cli_args in
+# backend/services/comfyui_launch_flags.py): an explicit
+# GUAARDVARK_COMFYUI_RESERVE_VRAM wins; otherwise the value the video generator
+# requested for the model about to run (pids/comfyui.reserve-vram, from the
+# registry's comfyui_reserve_vram_gb); otherwise 1.0.
+RESERVE_REQUEST_FILE="$PROJECT_ROOT/pids/comfyui.reserve-vram"
+RESERVE_SOURCE="default"
+if [ -n "${GUAARDVARK_COMFYUI_RESERVE_VRAM:-}" ]; then
+    RESERVE_SOURCE="GUAARDVARK_COMFYUI_RESERVE_VRAM"
+elif [ -f "$RESERVE_REQUEST_FILE" ]; then
+    GUAARDVARK_COMFYUI_RESERVE_VRAM=$(head -n 1 "$RESERVE_REQUEST_FILE" 2>/dev/null | tr -d '[:space:]')
+    RESERVE_SOURCE="requested by the model (pids/comfyui.reserve-vram)"
+fi
 RESERVE_VRAM="${GUAARDVARK_COMFYUI_RESERVE_VRAM:-1.0}"
 case "$RESERVE_VRAM" in
-    ''|*[!0-9.]*) RESERVE_VRAM=1.0 ;;
+    ''|*[!0-9.]*) RESERVE_VRAM=1.0; RESERVE_SOURCE="default (value was not a number)" ;;
 esac
-echo "Reserve VRAM: ${RESERVE_VRAM} GB"
+echo "Reserve VRAM: ${RESERVE_VRAM} GB (${RESERVE_SOURCE})"
 "$VENV_PYTHON" main.py --listen "${GUAARDVARK_COMFYUI_LISTEN:-127.0.0.1}" --port "$PORT" --disable-smart-memory --cache-none --reserve-vram "$RESERVE_VRAM" --disable-api-nodes $PIN_FLAG $PREVIEW_FLAGS $ATTN_FLAG >> "$LOG_FILE" 2>&1 &
 
 # Save PID

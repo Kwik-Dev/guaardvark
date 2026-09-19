@@ -904,12 +904,16 @@ class PluginManager:
             self._gate.release(plugin_id)
             self._broadcast_plugins_status(f"start:{plugin_id}")
     
-    def stop_plugin(self, plugin_id: str) -> Dict[str, Any]:
+    def stop_plugin(self, plugin_id: str, *, cancel_video_jobs: bool = True) -> Dict[str, Any]:
         """
         Stop a plugin.
 
         Args:
             plugin_id: Plugin ID to stop
+            cancel_video_jobs: For ComfyUI, cancel in-flight video batches
+                first (the user stopping the sidecar). A render that restarts
+                ComfyUI to relaunch it with its own flags passes False: the
+                batch it belongs to must survive.
 
         Returns:
             Result dictionary with status and message. If the operation gate
@@ -947,7 +951,7 @@ class PluginManager:
 
             # Video generation rides ComfyUI — cancel in-flight batches before
             # killing the sidecar so the worker doesn't keep spinning.
-            if plugin_id == "comfyui":
+            if plugin_id == "comfyui" and cancel_video_jobs:
                 try:
                     from backend.services.batch_video_generator import get_batch_video_generator
                     cancelled = get_batch_video_generator().cancel_all_active(
@@ -1017,9 +1021,9 @@ class PluginManager:
             self._gate.release(plugin_id)
             self._broadcast_plugins_status(f"stop:{plugin_id}")
     
-    def restart_plugin(self, plugin_id: str) -> Dict[str, Any]:
+    def restart_plugin(self, plugin_id: str, *, cancel_video_jobs: bool = True) -> Dict[str, Any]:
         """Restart a plugin by stopping and starting it"""
-        stop_result = self.stop_plugin(plugin_id)
+        stop_result = self.stop_plugin(plugin_id, cancel_video_jobs=cancel_video_jobs)
         if not stop_result.get('success') and 'already stopped' not in stop_result.get('message', ''):
             return stop_result
 

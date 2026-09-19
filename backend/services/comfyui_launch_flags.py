@@ -8,6 +8,7 @@ this module, so it repeats the same env names and defaults. Tests assert both.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
 # Nothing leaves the machine during generation. ComfyUI itself never downloads
@@ -108,16 +109,70 @@ def attention_cli_args(
 # int8 on 16 GB) finishes a step instead of running out mid-kernel.
 RESERVE_VRAM_ENV = "GUAARDVARK_COMFYUI_RESERVE_VRAM"
 RESERVE_VRAM_DEFAULT = 1.0
+# The reserve the next launch should use when no explicit override is set:
+# written by the video generator for the model about to run (the registry's
+# `comfyui_reserve_vram_gb`), read by plugins/comfyui/scripts/start.sh.
+# Precedence: RESERVE_VRAM_ENV set explicitly > this file > RESERVE_VRAM_DEFAULT.
+RESERVE_REQUEST_FILE = "pids/comfyui.reserve-vram"
 
 
-def reserve_vram_cli_args(env: Optional[Mapping[str, str]] = None) -> Sequence[str]:
-    """Return `--reserve-vram <gb>` for a ComfyUI argv; bad values fall back."""
-    src = env if env is not None else os.environ
-    raw = (src.get(RESERVE_VRAM_ENV) or "").strip()
+def parse_reserve_vram_gb(raw: Optional[str]) -> Optional[float]:
+    """A GB value from text, or None when it is not a non-negative number."""
+    text = (raw or "").strip()
+    if not text:
+        return None
     try:
-        value = float(raw) if raw else RESERVE_VRAM_DEFAULT
+        value = float(text)
     except ValueError:
-        value = RESERVE_VRAM_DEFAULT
-    if value < 0:
-        value = RESERVE_VRAM_DEFAULT
+        return None
+    return value if value >= 0 else None
+
+
+def explicit_reserve_vram_gb(env: Optional[Mapping[str, str]] = None) -> Optional[float]:
+    """The operator's own reserve (RESERVE_VRAM_ENV), or None when unset/invalid."""
+    src = env if env is not None else os.environ
+    return parse_reserve_vram_gb(src.get(RESERVE_VRAM_ENV))
+
+
+def reserve_request_path(project_root) -> Path:
+    return Path(project_root) / RESERVE_REQUEST_FILE
+
+
+def read_reserve_request(project_root) -> Optional[float]:
+    try:
+        return parse_reserve_vram_gb(reserve_request_path(project_root).read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def write_reserve_request(project_root, gb: float) -> Path:
+    path = reserve_request_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{float(gb):g}\n", encoding="utf-8")
+    return path
+
+
+def reserve_vram_cli_args(
+    env: Optional[Mapping[str, str]] = None, *, requested: Optional[float] = None
+) -> Sequence[str]:
+    """Return `--reserve-vram <gb>` for a ComfyUI argv.
+
+    An explicit RESERVE_VRAM_ENV wins; otherwise `requested` (the model's
+    declared reserve, via the request file); otherwise the default.
+    """
+    value = explicit_reserve_vram_gb(env)
+    if value is None:
+        value = requested if requested is not None and requested >= 0 else RESERVE_VRAM_DEFAULT
     return ["--reserve-vram", f"{value:g}"]
+
+
+def reserve_vram_from_argv(argv: Sequence[str]) -> Optional[float]:
+    """The --reserve-vram a running ComfyUI was launched with (its /system_stats
+    reply carries sys.argv), or None when the flag is absent or unreadable."""
+    items = [str(a) for a in (argv or [])]
+    for i, item in enumerate(items):
+        if item == "--reserve-vram" and i + 1 < len(items):
+            return parse_reserve_vram_gb(items[i + 1])
+        if item.startswith("--reserve-vram="):
+            return parse_reserve_vram_gb(item.split("=", 1)[1])
+    return None

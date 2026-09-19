@@ -229,6 +229,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         self.service_available = self._check_comfyui_connection()
         self._object_info_cache: Optional[dict] = None
         self._vram_booking: Optional[str] = None
+        self._project_root = project_root
 
         if self.service_available:
             logger.info(f"ComfyUI video generator connected to {self.comfy_url}")
@@ -1132,6 +1133,92 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
 
 
 
+    def _running_reserve_vram_gb(self) -> Optional[float]:
+        """The --reserve-vram the serving ComfyUI was launched with, from
+        /system_stats (it reports sys.argv); None when it cannot be read."""
+        try:
+            from backend.services.comfyui_launch_flags import reserve_vram_from_argv
+            response = requests.get(f"{self.comfy_url}/system_stats", timeout=5)
+            response.raise_for_status()
+            argv = ((response.json() or {}).get("system") or {}).get("argv") or []
+            return reserve_vram_from_argv(argv)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("ComfyUI /system_stats probe failed: %s", e)
+            return None
+
+    def _comfyui_queue_idle(self) -> Optional[bool]:
+        """True when nothing is running or pending in ComfyUI; None if unknown."""
+        try:
+            response = requests.get(f"{self.comfy_url}/queue", timeout=5)
+            response.raise_for_status()
+            data = response.json() or {}
+            return not (data.get("queue_running") or data.get("queue_pending"))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("ComfyUI queue probe failed: %s", e)
+            return None
+
+    def _ensure_comfyui_reserve_for(self, model: str) -> Optional[str]:
+        """Relaunch ComfyUI when its --reserve-vram is not the one this model needs.
+
+        The reserve is declared per model in the registry
+        (comfyui_reserve_vram_gb: MiniMax H3 5.0, Wan 2.2 14B 1.0; measured,
+        see the entries). A ComfyUI launched for one is wrong for the other,
+        so the value for the model about to run is written where the plugin's
+        start.sh reads it and the plugin is restarted through the manager.
+        An explicit GUAARDVARK_COMFYUI_RESERVE_VRAM wins and no restart
+        happens. Another render in ComfyUI's queue is left to finish first.
+        Returns an error string to surface, or None to proceed.
+        """
+        try:
+            from backend.services.comfyui_launch_flags import (
+                explicit_reserve_vram_gb, write_reserve_request,
+            )
+            from backend.services.video_model_registry import comfyui_reserve_vram_gb_for_model
+        except Exception as e:  # noqa: BLE001
+            logger.debug("reserve helpers unavailable: %s", e)
+            return None
+        needed = comfyui_reserve_vram_gb_for_model(model)
+        if needed is None:
+            return None
+        if explicit_reserve_vram_gb() is not None:
+            logger.debug("%s set explicitly; %s keeps the running ComfyUI reserve", "GUAARDVARK_COMFYUI_RESERVE_VRAM", model)
+            return None
+        running = self._running_reserve_vram_gb()
+        if running is None or abs(running - needed) < 1e-6:
+            return None
+
+        # Do not pull the process out from under another render.
+        deadline = time.time() + VRAM_WAIT_DEFAULT_S
+        while self._comfyui_queue_idle() is False:
+            if time.time() >= deadline:
+                logger.warning(
+                    "ComfyUI still busy after %ds; %s runs with --reserve-vram %g instead of %g",
+                    int(VRAM_WAIT_DEFAULT_S), model, running, needed,
+                )
+                return None
+            time.sleep(5)
+
+        write_reserve_request(self._project_root, needed)
+        logger.info(
+            "Restarting ComfyUI: %s needs --reserve-vram %g, it is running with %g",
+            model, needed, running,
+        )
+        try:
+            from backend.plugins.plugin_manager import get_plugin_manager
+            outcome = get_plugin_manager().restart_plugin("comfyui", cancel_video_jobs=False)
+        except Exception as e:  # noqa: BLE001
+            outcome = {"success": False, "error": str(e)}
+        if not outcome.get("success"):
+            return (
+                f"ComfyUI could not be restarted with --reserve-vram {needed:g} for {model}: "
+                f"{outcome.get('error') or 'unknown error'}"
+            )
+        self._object_info_cache = None
+        self.service_available = self._check_comfyui_connection()
+        if not self.service_available:
+            return f"ComfyUI did not come back after restarting with --reserve-vram {needed:g} for {model}"
+        return None
+
     def _ensure_vram_for_model(self, model: str, op_id: str) -> Optional[str]:
         """Book the registry estimate with the orchestrator BEFORE the graph is queued.
 
@@ -1824,6 +1911,12 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             image_path = request.metadata.get("image_path") if request.metadata else None
             model = request.model or "cogvideox-5b"
             seed = request.seed if request.seed is not None else int(time.time() * 1000) % (2**31)
+
+            # The running ComfyUI must carry this model's --reserve-vram.
+            reserve_error = self._ensure_comfyui_reserve_for(model)
+            if reserve_error:
+                result.error = reserve_error
+                return result
 
             # VRAM preflight: turn a known-under-spec card into an honest error
             # instead of queuing into a silent mid-render OOM. Fail-open on a

@@ -40,7 +40,8 @@ def test_start_sh_matches_python_helper():
     assert "int8_attention_is_available" in text
     assert "import sageattention" in text
     assert ":-pytorch}" in text  # same default as ATTENTION_DEFAULT
-    assert "$ATTN_FLAG" in text.split("main.py")[1].split("\n")[0]
+    # The launch line, not the earlier "main.py exists" check.
+    assert "$ATTN_FLAG" in text.split('"$VENV_PYTHON" main.py')[1].split("\n")[0]
 
 
 def test_reserve_vram_defaults_and_overrides():
