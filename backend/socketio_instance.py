@@ -40,12 +40,56 @@ lan_patterns = [
 ]
 allowed_origins = lan_patterns + allowed_origins
 
+# Largest decoded chat attachment the server accepts: the base64 ``image`` on a
+# ``chat:send`` packet or a ``POST /api/chat/unified`` body. 16 MB fits a phone
+# photo (a 48 MP HEIC/JPEG straight off a current phone is 4-12 MB). Anything
+# larger is answered with ``chat:error`` / HTTP 413 instead of vanishing. The
+# chat UI reads this value from ``GET /api/chat/config`` before it sends.
+CHAT_ATTACHMENT_MAX_BYTES = 16 * 1024 * 1024
+
+# Socket.IO packet ceiling. python-engineio closes the connection on any packet
+# over this size before a handler runs and offers no hook to answer the client,
+# so the ceiling must carry the largest allowed attachment as base64 (4/3 of
+# the bytes) plus the message text and JSON envelope. At the previous 1 MB a
+# 1.3 MB photo never reached ``handle_chat_send`` and the client heard nothing.
+SOCKET_MAX_HTTP_BUFFER_SIZE = CHAT_ATTACHMENT_MAX_BYTES * 4 // 3 + 1024 * 1024
+
+
+def chat_attachment_size_bytes(image_data) -> int:
+    """Decoded size of a base64 chat attachment, computed without decoding it.
+
+    Accepts the bare base64 string the chat UI sends or a ``data:`` URL; any
+    other value counts as no attachment. Base64 carries 3 bytes in 4
+    characters, less one byte per ``=`` of padding.
+    """
+    if isinstance(image_data, bytes):
+        image_data = image_data.decode("ascii", "ignore")
+    if not isinstance(image_data, str):
+        return 0
+    if image_data.startswith("data:"):
+        image_data = image_data.split(",", 1)[-1]
+    encoded = "".join(image_data.split())
+    padding = len(encoded) - len(encoded.rstrip("="))
+    return max(0, len(encoded) * 3 // 4 - padding)
+
+
+def chat_attachment_too_large(image_data) -> str | None:
+    """Plain-language rejection for an attachment over the limit, else ``None``."""
+    size = chat_attachment_size_bytes(image_data)
+    if size <= CHAT_ATTACHMENT_MAX_BYTES:
+        return None
+    return (
+        f"Attachment is {size / (1024 * 1024):.1f} MB; the limit is "
+        f"{CHAT_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB. Resize the image and try again."
+    )
+
+
 # Configure SocketIO with memory leak prevention
 socketio = SocketIO(
     cors_allowed_origins=allowed_origins,
     ping_timeout=60,  # 60 second ping timeout
     ping_interval=25,  # 25 second ping interval
-    max_http_buffer_size=1024 * 1024,  # 1MB max buffer size
+    max_http_buffer_size=SOCKET_MAX_HTTP_BUFFER_SIZE,
     async_mode='threading',  # Use threading for better memory management
     # manage_session=False is REQUIRED with Werkzeug >= 3.1: Flask-SocketIO 5.3.6's
     # managed-session path does `ctx.session = session_obj`, but Werkzeug 3.1 made

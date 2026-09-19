@@ -10,10 +10,27 @@ import uuid
 
 from flask import Blueprint, current_app, request, jsonify
 from backend.services.tool_activity import broadcast_tool_activity
+from backend.socketio_instance import CHAT_ATTACHMENT_MAX_BYTES, chat_attachment_too_large
+from backend.utils.response_utils import success_response
 
 logger = logging.getLogger(__name__)
 
 unified_chat_bp = Blueprint("unified_chat", __name__, url_prefix="/api/chat/unified")
+
+# Limits the chat UI needs before it sends. Its own blueprint because the
+# unified one is mounted under /api/chat/unified and this is not a chat call.
+chat_config_bp = Blueprint("chat_config", __name__, url_prefix="/api/chat")
+
+
+@chat_config_bp.route("/config", methods=["GET"])
+def chat_config():
+    """
+    GET /api/chat/config
+    Returns { success, data: { attachment_max_bytes } }. The attachment limit
+    is declared once, in backend/socketio_instance.py, and enforced on both
+    POST /api/chat/unified and the chat:send socket event.
+    """
+    return success_response(data={"attachment_max_bytes": CHAT_ATTACHMENT_MAX_BYTES})
 
 # Per-session in-flight chat threads. Without this, a stuck Ollama vision call
 # would let retries pile up forever — every retry spawned a fresh thread that
@@ -69,6 +86,15 @@ def unified_chat():
 
     if not message and not image_data and not has_direct_tool:
         return jsonify({"success": False, "error": "Message or image is required"}), 400
+
+    too_large = chat_attachment_too_large(image_data)
+    if too_large:
+        return jsonify({
+            "success": False,
+            "error": too_large,
+            "code": "attachment_too_large",
+            "attachment_max_bytes": CHAT_ATTACHMENT_MAX_BYTES,
+        }), 413
 
     # If image provided but no message, set a default
     if not message and image_data:

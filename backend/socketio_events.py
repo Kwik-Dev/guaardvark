@@ -635,6 +635,20 @@ def _handle_chat_send_local(payload):
 def handle_chat_send(payload):
     """Cluster-aware chat:send. Routes to a remote primary if cluster routing
     says so; falls through to local engine otherwise."""
+    # Size gate first, before any routing: an attachment over the declared
+    # limit is answered on the caller's socket rather than forwarded or
+    # decoded. Packets over the Socket.IO buffer never get this far (see
+    # SOCKET_MAX_HTTP_BUFFER_SIZE), which is why the buffer is sized above it.
+    if isinstance(payload, dict):
+        from backend.socketio_instance import chat_attachment_too_large
+        reason = chat_attachment_too_large(payload.get("image"))
+        if reason:
+            emit("chat:error", {
+                "error": reason,
+                "code": "attachment_too_large",
+                "session_id": payload.get("session_id"),
+            })
+            return
     try:
         from flask import current_app, request as _req
         import os as _os
