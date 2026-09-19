@@ -2057,7 +2057,9 @@ def search_with_llamaindex(
         # Expand results with cross-file dependency context
         try:
             from backend.utils.context_expander import expand_with_dependencies
-            results = expand_with_dependencies(results)
+            # Same scope as the retrieval: the expander reads the Document table
+            # by path, which the metadata filters above never touch.
+            results = expand_with_dependencies(results, project_id=project_id)
         except Exception as e:
             logger.debug(f"Context expansion skipped: {e}")
 

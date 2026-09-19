@@ -381,3 +381,97 @@ def test_list_documents_reports_the_real_total_when_the_count_works(monkeypatch)
 
     assert "37 document(s) indexed" in res.output
     assert "(36 more — call again with offset=1)" in res.output
+
+
+# --------------------------------------------------------------------------
+# R7. A project-scoped query never yields another project's rows
+# --------------------------------------------------------------------------
+class _Col:
+    """Stands in for a mapped column: `Document.path == x` becomes a predicate."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return lambda doc: getattr(doc, self.name) == other
+
+    __hash__ = object.__hash__
+
+
+class _Query:
+    def __init__(self, docs, preds=()):
+        self.docs, self.preds = docs, list(preds)
+
+    def filter(self, *preds):
+        return _Query(self.docs, self.preds + list(preds))
+
+    def first(self):
+        for d in self.docs:
+            if all(p(d) for p in self.preds):
+                return d
+        return None
+
+
+def _expander(monkeypatch, docs):
+    import json
+    from types import SimpleNamespace
+    from backend.utils import context_expander as ce
+
+    folder = SimpleNamespace(repo_metadata=json.dumps({"dependency_graph": {"a.py": ["b.py"]}}))
+    monkeypatch.setattr(ce, "db", SimpleNamespace(session=SimpleNamespace(get=lambda m, fid: folder)))
+    monkeypatch.setattr(ce, "Document", SimpleNamespace(
+        path=_Col("path"), project_id=_Col("project_id"), query=_Query(docs),
+    ))
+    return ce
+
+
+def _doc(path, project_id):
+    from types import SimpleNamespace
+    return SimpleNamespace(id=hash(path) % 1000, path=path, filename=path, content="x = 1\n",
+                           file_metadata=None, project_id=project_id)
+
+
+def _results():
+    return [{"text": "import b", "score": 0.9,
+             "metadata": {"file_path": "a.py", "folder_id": 1, "project_id": "7"}}]
+
+
+def test_expander_does_not_append_another_projects_file(monkeypatch):
+    """b.py exists only in project 12. A project-7 query must not receive it."""
+    ce = _expander(monkeypatch, [_doc("b.py", 12)])
+
+    out = ce.expand_with_dependencies(_results(), project_id=7)
+
+    assert [r["metadata"]["file_path"] for r in out] == ["a.py"]
+
+
+def test_expander_appends_the_same_projects_file(monkeypatch):
+    ce = _expander(monkeypatch, [_doc("b.py", 7)])
+
+    out = ce.expand_with_dependencies(_results(), project_id="7")
+
+    assert [r["metadata"]["file_path"] for r in out] == ["a.py", "b.py"]
+    assert out[1]["metadata"]["context_type"] == "related_dependency"
+
+
+def test_expander_is_global_only_when_the_query_was(monkeypatch):
+    ce = _expander(monkeypatch, [_doc("b.py", 12)])
+
+    out = ce.expand_with_dependencies(_results(), project_id=None)
+
+    assert [r["metadata"]["file_path"] for r in out] == ["a.py", "b.py"]
+
+
+def test_search_scopes_the_expander_and_every_returned_node():
+    """The retrieval side of the same leak: the expander is handed the query's
+    scope, every fused node is re-checked against the project filter (BM25 has
+    none), and the global retry is off unless an install opts in and then marks
+    itself degraded."""
+    import inspect
+    import backend.services.indexing_service as isvc
+
+    src = inspect.getsource(isvc.search_with_llamaindex)
+    assert "expand_with_dependencies(results, project_id=project_id)" in src
+    assert 'trace["filtered_out"] = _pre_filter - len(nodes)' in src
+    assert 'GUAARDVARK_RAG_GLOBAL_FALLBACK", "false"' in src
+    assert '_fb_trace["degraded"] = True' in src
