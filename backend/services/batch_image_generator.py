@@ -425,6 +425,37 @@ class BatchImageGenerator:
         except Exception:
             pass
 
+    def _batch_running(self, batch_id: Optional[str] = None) -> bool:
+        with self.batch_lock:
+            if batch_id is not None:
+                status = self.active_batches.get(batch_id)
+                return bool(status is not None and status.status == "running")
+            return any(s.status == "running" for s in self.active_batches.values())
+
+    def release_batch_vram(self, batch_id: str) -> bool:
+        """Orchestrator callback for the ``image_batch:<batch_id>`` booking.
+
+        True means the booking may be dropped. A batch that is still running
+        keeps it. For a finished batch the resident pipeline is unloaded too,
+        unless another batch is mid-render on it.
+        """
+        if self._batch_running(batch_id):
+            return False
+        if not self._batch_running():
+            self._cleanup_gpu_memory()
+        return True
+
+    def _release_batch_booking(self, batch_id: str) -> None:
+        """A finished batch drops its own orchestrator booking; the enclosing
+        gpu_session drops it again on exit, which is a no-op by then."""
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+            orchestrator = get_orchestrator_if_created()
+            if orchestrator is not None:
+                orchestrator.drop_booking(f"image_batch:{batch_id}")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("drop_booking(image_batch:%s) failed: %s", batch_id, e)
+
     def _resolve_batch_model_key(self, model_key: str) -> str:
         """Map a batch prompt model key to a catalog key for resource estimates."""
         if not model_key or model_key in ("auto", ""):
@@ -1432,12 +1463,14 @@ class BatchImageGenerator:
                         if batch_id in self.executors:
                             del self.executors[batch_id]
                     self._cleanup_gpu_memory()
+                    self._release_batch_booking(batch_id)
 
                 except Exception as e:
                     logger.error(f"Batch generation failed: {e}")
                     batch_status.status = "error"
                     batch_status.error = str(e)
                     self._cleanup_gpu_memory()
+                    self._release_batch_booking(batch_id)
 
                     if self.progress_system:
                         self.progress_system.error_process(

@@ -836,14 +836,7 @@ class GPUMemoryOrchestrator:
             elif slot.model_type == ModelType.RERANKER:
                 success = self._unload_reranker()
             elif slot.model_type == ModelType.IMAGE_BATCH:
-                # A live session booking. Its owner releases it (drop_booking /
-                # _orchestrator_release); evicting it here would free nothing while
-                # crediting the caller its full estimate.
-                logger.debug(
-                    "Refusing unload of %s: session booking, released by its owner",
-                    slot.slot_id,
-                )
-                success = False
+                success = self._unload_image_batch(slot)
             else:
                 # External / plugin-driven slot — registry-only cleanup.
                 registry_only = True
@@ -861,9 +854,43 @@ class GPUMemoryOrchestrator:
         else:
             # Revert to whatever state we found it in, not blindly to LOADED.
             slot.state = original_state
-            logger.warning(f"Failed to unload {slot.slot_id}; reverted to {original_state.value}")
+            if slot.model_type == ModelType.IMAGE_BATCH:
+                # Expected while the batch runs; the booking is freed by its owner.
+                logger.debug(f"Keeping {slot.slot_id}: its image batch is still running")
+            else:
+                logger.warning(f"Failed to unload {slot.slot_id}; reverted to {original_state.value}")
 
         return success
+
+    def _unload_image_batch(self, slot: ModelSlot) -> bool:
+        """Free what an ``image_batch:<id>`` booking still accounts for.
+
+        The booking is the batch image generator's session slot: the weights
+        behind it are the diffusers pipeline (``sd:pipeline``), which the
+        generator keeps resident between images. A running batch keeps its
+        booking (nothing can be freed under it). A finished batch's booking is
+        stale: the generator releases the idle pipeline and the slot is dropped
+        from the registry, so a video render queued right after a keyframe
+        batch gets the card instead of loading against 10 GB of leftover
+        weights (2026-09-12: Wan 14B came up with ~1 GB usable, 9.6 GB
+        offloaded to CPU).
+        """
+        batch_id = slot.slot_id.split(":", 1)[1] if ":" in slot.slot_id else ""
+        try:
+            from backend.services import batch_image_generator as _big
+            generator = _big._batch_generator_instance
+        except Exception as e:  # noqa: BLE001
+            logger.debug("image batch generator unavailable for %s: %s", slot.slot_id, e)
+            generator = None
+        if generator is None:
+            # Bookings live in this process's registry; with no generator here
+            # nothing is running behind this one.
+            return True
+        try:
+            return bool(generator.release_batch_vram(batch_id))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("release_batch_vram(%s) failed: %s", batch_id, e)
+            return False
 
     def _unload_ollama_model(self, slot_id: str) -> bool:
         """Unload an Ollama model by setting keep_alive=0."""
