@@ -46,6 +46,7 @@ import UnifiedChatService from "../api/unifiedChatService";
 import StreamingMessage from "../components/chat/StreamingMessage";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import extractSpeakableText from "../utils/extractSpeakableText";
+import { chatErrorMessage } from "../utils/chatAttachment";
 
 import { createPlan } from "../api/orchestratorService";
 import { mergeActivePlanIntoMessages, hydrateOrchestratorFields } from "../utils/orchestratorChat";
@@ -142,6 +143,7 @@ const ChatPage = () => {
 
   const [messages, setMessages] = useState([]);
   const [error, setError] = useState('');
+  const [composerError, setComposerError] = useState("");
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [previousChatsOpen, setPreviousChatsOpen] = useState(false);
   const [sessionId, _setSessionId] = useState(() => {
@@ -309,6 +311,22 @@ const ChatPage = () => {
     socket.on("chat:complete", handleComplete);
     return () => {
       socket.off("chat:complete", handleComplete);
+    };
+  }, [socketRef?.current, sessionId]);
+
+  // chat:error on the composer — oversized attachments (and any other socket
+  // refusal) used to vanish with no UI. Attached on the raw socket so it does
+  // not contend with StreamingMessage's UnifiedChatService.onError slot.
+  useEffect(() => {
+    const socket = socketRef?.current;
+    if (!socket || !sessionId) return;
+    const handleChatError = (data) => {
+      if (!data || (data.session_id && data.session_id !== sessionId)) return;
+      setComposerError(chatErrorMessage(data));
+    };
+    socket.on("chat:error", handleChatError);
+    return () => {
+      socket.off("chat:error", handleChatError);
     };
   }, [socketRef?.current, sessionId]);
 
@@ -1080,6 +1098,7 @@ const ChatPage = () => {
       // Allow image analysis messages through even when inputText is empty
       if (!inputText.trim() && !file && !voiceOptions?.isImageAnalysis) return;
       if (isSending) return;
+      setComposerError("");
 
 
       const messageKey = `${inputText.trim()}_${voiceOptions?.isImageAnalysis ? `image_${Date.now()}` : voiceOptions?.isVoiceMessage ? "voice" : "text"
@@ -2377,6 +2396,8 @@ const ChatPage = () => {
         disabled={isSending}
         sessionId={sessionId}
         projectId={projectId}
+        composerError={composerError}
+        onClearComposerError={() => setComposerError("")}
         ref={chatInputRef}
         onVoiceStateChange={handleVoiceStateChange}
         onAddMessage={(msg) => setMessages((prev) => [...prev, { ...msg, id: msg.tempId || `msg_${Date.now()}` }])}

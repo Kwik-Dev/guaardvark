@@ -33,6 +33,14 @@ import { useVoiceSettings } from "../../hooks/useVoiceSettings";
 import useSlashCommands from "../../hooks/useSlashCommands";
 import SlashCommandPopup from "./SlashCommandPopup";
 import { debugLog } from "../../utils/debugLog";
+import { StatusPill } from "../settings/ui";
+import {
+  attachmentExceedsLimit,
+  downscaleChatAttachment,
+  fetchAttachmentMaxBytes,
+  formatAttachmentSize,
+  refuseAttachmentMessage,
+} from "../../utils/chatAttachment";
 
 const WEB_SEARCH_ENABLED_KEY = "guaardvark_webSearchEnabled";
 
@@ -217,7 +225,7 @@ const analyzeSitemap = async (url) => {
 };
 
 const ChatInput = forwardRef(
-  ({ onSendMessage, onStop, disabled = false, sessionId = "default", codeGenMode = false, onVoiceStateChange = () => { }, onAddMessage, onUpdateMessage, onClearMessages, onPlanCreated, projectId }, ref) => {
+  ({ onSendMessage, onStop, disabled = false, sessionId = "default", codeGenMode = false, onVoiceStateChange = () => { }, onAddMessage, onUpdateMessage, onClearMessages, onPlanCreated, projectId, composerError, onClearComposerError }, ref) => {
     const [inputText, setInputText] = useState("");
     const fileRef = useRef(null);
     const inputRef = useRef(null);
@@ -377,13 +385,24 @@ const ChatInput = forwardRef(
       error: null,
     });
 
-    // Image upload and paste state (supports multiple images)
+    // Image upload and paste state (supports multiple images).
+    // Each entry is already downscaled (see handleImageUpload); byteLength is
+    // the payload that will ride on chat:send.
     const MAX_IMAGES = 4;
     const [imageState, setImageState] = useState({
-      images: [],        // Array of { file, preview, id }
+      images: [],        // Array of { file, preview, id, byteLength, mimeType }
       analyzing: false,
       error: null,
     });
+    const [attachmentMaxBytes, setAttachmentMaxBytes] = useState(null);
+
+    useEffect(() => {
+      let cancelled = false;
+      fetchAttachmentMaxBytes().then((max) => {
+        if (!cancelled) setAttachmentMaxBytes(max);
+      });
+      return () => { cancelled = true; };
+    }, []);
     // Backwards-compatible getters for single-image code paths
     const _selectedImage = imageState.images.length > 0 ? imageState.images[0].file : null;
     const _imagePreview = imageState.images.length > 0 ? imageState.images[0].preview : null;
@@ -897,11 +916,11 @@ Please select a supported file type.`;
       };
     }, []);
 
-    // Image handling functions
-    const handleImageUpload = (file) => {
+    // Image handling functions — downscale through a canvas before the
+    // preview is stored, so chat:send never carries a raw phone photo.
+    const handleImageUpload = async (file) => {
       if (!file) return;
 
-      // Check if it's an image
       if (!file.type.startsWith("image/")) {
         setImageState((prev) => ({
           ...prev,
@@ -910,42 +929,33 @@ Please select a supported file type.`;
         return;
       }
 
-      // Check file size (20MB limit)
-      const maxSize = 20 * 1024 * 1024; // 20MB
-      if (file.size > maxSize) {
+      try {
+        const resized = await downscaleChatAttachment(file);
+        setImageState((prev) => {
+          if (prev.images.length >= MAX_IMAGES) {
+            return { ...prev, error: `Maximum ${MAX_IMAGES} images allowed` };
+          }
+          return {
+            ...prev,
+            images: [
+              ...prev.images,
+              {
+                file: resized.file,
+                preview: resized.preview,
+                byteLength: resized.byteLength,
+                mimeType: resized.mimeType,
+                id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+              },
+            ],
+            error: null,
+          };
+        });
+      } catch (err) {
         setImageState((prev) => ({
           ...prev,
-          error: "Image file too large. Maximum size is 20MB.",
+          error: err?.message || "Could not prepare this image",
         }));
-        return;
       }
-
-      // Check max images
-      if (imageState.images.length >= MAX_IMAGES) {
-        setImageState((prev) => ({
-          ...prev,
-          error: `Maximum ${MAX_IMAGES} images allowed`,
-        }));
-        return;
-      }
-
-      // Create preview and accumulate
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setImageState((prev) => ({
-          ...prev,
-          images: [
-            ...prev.images,
-            {
-              file,
-              preview: e.target.result,
-              id: `img_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-            },
-          ],
-          error: null,
-        }));
-      };
-      reader.readAsDataURL(file);
     };
 
     // Drag-and-drop: accept LOCAL image files only. We read dataTransfer.FILES and
@@ -999,6 +1009,18 @@ Please select a supported file type.`;
       if (imageState.images.length === 0) return;
 
       const primaryImage = imageState.images[0];
+      const maxBytes = attachmentMaxBytes;
+      const over = imageState.images.find((img) =>
+        attachmentExceedsLimit(img.byteLength, maxBytes),
+      );
+      if (over) {
+        setImageState((prev) => ({
+          ...prev,
+          error: refuseAttachmentMessage(over.byteLength, maxBytes),
+        }));
+        return;
+      }
+
       const useUnified = localStorage.getItem("use_unified_chat") !== "false";
 
       setImageState((prev) => ({ ...prev, analyzing: true, error: null }));
@@ -1298,37 +1320,48 @@ Total URLs: ${analysis.totalUrls}`;
           <Card sx={{ mb: 1, p: 1.5 }}>
             <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
               {imageState.images.map((img) => (
-                <Box key={img.id} sx={{ position: "relative", width: 80, height: 80 }}>
-                  <CardMedia
-                    component="img"
-                    sx={{
-                      width: 80,
-                      height: 80,
-                      objectFit: "cover",
-                      borderRadius: 1,
-                      border: "1px solid #e0e0e0",
-                    }}
-                    image={img.preview}
-                    alt={img.file.name}
+                <Box key={img.id} sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0.5 }}>
+                  <Box sx={{ position: "relative", width: 80, height: 80 }}>
+                    <CardMedia
+                      component="img"
+                      sx={{
+                        width: 80,
+                        height: 80,
+                        objectFit: "cover",
+                        borderRadius: 1,
+                        border: "1px solid #e0e0e0",
+                      }}
+                      image={img.preview}
+                      alt={img.file.name}
+                    />
+                    <IconButton
+                      size="small"
+                      onClick={() => clearImage(img.id)}
+                      disabled={imageState.analyzing}
+                      sx={{
+                        position: "absolute",
+                        top: -8,
+                        right: -8,
+                        bgcolor: "background.paper",
+                        border: "1px solid",
+                        borderColor: "divider",
+                        width: 20,
+                        height: 20,
+                        "&:hover": { bgcolor: "error.light", color: "white" },
+                      }}
+                    >
+                      <CloseIcon sx={{ fontSize: 12 }} />
+                    </IconButton>
+                  </Box>
+                  <StatusPill
+                    label={formatAttachmentSize(img.byteLength)}
+                    tone={attachmentExceedsLimit(img.byteLength, attachmentMaxBytes) ? "error" : "neutral"}
+                    tooltip={
+                      attachmentExceedsLimit(img.byteLength, attachmentMaxBytes)
+                        ? refuseAttachmentMessage(img.byteLength, attachmentMaxBytes)
+                        : "Size after resize, as it will be sent"
+                    }
                   />
-                  <IconButton
-                    size="small"
-                    onClick={() => clearImage(img.id)}
-                    disabled={imageState.analyzing}
-                    sx={{
-                      position: "absolute",
-                      top: -8,
-                      right: -8,
-                      bgcolor: "background.paper",
-                      border: "1px solid",
-                      borderColor: "divider",
-                      width: 20,
-                      height: 20,
-                      "&:hover": { bgcolor: "error.light", color: "white" },
-                    }}
-                  >
-                    <CloseIcon sx={{ fontSize: 12 }} />
-                  </IconButton>
                 </Box>
               ))}
               {imageState.images.length < MAX_IMAGES && (
@@ -1377,6 +1410,16 @@ Total URLs: ${analysis.totalUrls}`;
             onClose={() => setImageState((prev) => ({ ...prev, error: null }))}
           >
             {imageState.error}
+          </Alert>
+        )}
+
+        {composerError && (
+          <Alert
+            severity="error"
+            sx={{ mb: 1, py: 0 }}
+            onClose={() => onClearComposerError?.()}
+          >
+            {composerError}
           </Alert>
         )}
 
