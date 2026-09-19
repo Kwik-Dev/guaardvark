@@ -548,6 +548,109 @@ def move_folder(folder_id):
         return error_response("Failed to move folder", 500, "MOVE_ERROR")
 
 
+# Folder attributes a duplicate inherits — everything that describes the folder
+# rather than identifying it. name/path/parent_id are set by the copy itself.
+_COPIED_FOLDER_FIELDS = (
+    "is_repository", "description", "repo_metadata",
+    "client_id", "project_id", "website_id", "tags", "notes",
+)
+
+
+def _available_folder_name(dest_path: str, name: str) -> str:
+    """A folder name free at ``dest_path``, suffixed the way a copy is named."""
+    def taken(candidate: str) -> bool:
+        path = f"{dest_path}/{candidate}" if dest_path else candidate
+        return (
+            Folder.query.filter_by(path=path).first() is not None
+            or get_physical_path(path).exists()
+        )
+
+    if not taken(name):
+        return name
+    candidate = f"{name} (Copy)"
+    n = 2
+    while taken(candidate):
+        candidate = f"{name} (Copy {n})"
+        n += 1
+    return candidate
+
+
+def _copy_folder_tree(folder: Folder, dest_path: str, dest_folder_id, new_name: str) -> Folder:
+    """Recreate ``folder`` and everything under it at ``dest_path``.
+
+    Rows are added but not committed: one tree is one transaction, so a failure
+    halfway down does not leave half a folder in the database.
+    """
+    new_path = f"{dest_path}/{new_name}" if dest_path else new_name
+    os.makedirs(get_physical_path(new_path), exist_ok=True)
+
+    new_folder = Folder(name=new_name, path=new_path, parent_id=dest_folder_id)
+    for field in _COPIED_FOLDER_FIELDS:
+        if hasattr(folder, field):
+            setattr(new_folder, field, getattr(folder, field))
+    db.session.add(new_folder)
+    db.session.flush()  # the children need the new id
+
+    for document in folder.documents.all():
+        _copy_document_into(document, new_path, new_folder.id)
+    for subfolder in folder.subfolders.all():
+        _copy_folder_tree(subfolder, new_path, new_folder.id, subfolder.name)
+    return new_folder
+
+
+@files_bp.route("/folder/<int:folder_id>/copy", methods=["POST"])
+@ensure_db_session_cleanup
+def copy_folder(folder_id):
+    """POST /api/files/folder/:id/copy - Deep-copy a folder into another folder
+
+    Body: {"target_folder_id": <int|null>} — null copies into the root.
+    """
+    logger.info(f"API: Copy folder {folder_id}")
+    try:
+        folder = db.session.get(Folder, folder_id)
+        if not folder:
+            return error_response("Folder not found", 404, "FOLDER_NOT_FOUND")
+
+        data = request.get_json(silent=True) or {}
+        target_folder_id = data.get("target_folder_id")
+
+        dest_path = ""
+        if target_folder_id is not None:
+            try:
+                target_folder_id = int(target_folder_id)
+            except (TypeError, ValueError):
+                return error_response("Invalid target folder id", 400, "INVALID_TARGET")
+            if target_folder_id == folder.id:
+                return error_response("Cannot copy folder into itself", 400, "INVALID_COPY")
+            target = db.session.get(Folder, target_folder_id)
+            if not target:
+                return error_response("Destination folder not found", 404, "DEST_NOT_FOUND")
+            dest_path = target.path
+            # A copy into a descendant would walk into the tree it is writing.
+            if dest_path == folder.path or dest_path.startswith(folder.path + "/"):
+                return error_response(
+                    "Cannot copy folder into its own subfolder", 400, "INVALID_COPY"
+                )
+
+        new_folder = _copy_folder_tree(
+            folder, dest_path, target_folder_id,
+            _available_folder_name(dest_path, folder.name),
+        )
+        db.session.commit()
+        logger.info(f"Copied folder {folder_id} to {new_folder.path} (new id={new_folder.id})")
+        # The folder dict the folder POST returns, under a real 201: the
+        # sibling routes pass 201 as the *message* argument and answer 200.
+        return success_response(new_folder.to_dict(), "Folder copied", 201)
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error(f"Database error copying folder: {e}", exc_info=True)
+        return error_response("Database error", 500, "DB_ERROR")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error copying folder: {e}", exc_info=True)
+        return error_response("Failed to copy folder", 500, "COPY_ERROR")
+
+
 def _cascade_properties_to_folder(folder: Folder, properties: dict, stats: dict):
     """Recursively apply properties to all files and subfolders within a folder"""
     # Update all documents in this folder
@@ -1035,6 +1138,51 @@ def move_document(doc_id):
         return error_response("Failed to move document", 500, "MOVE_ERROR")
 
 
+def _copy_document_into(document, dest_path: str, dest_folder_id):
+    """Copy one document's file, thumbnail and row into ``dest_path``.
+
+    Returns the new (added, uncommitted) row so a caller copying a whole tree
+    commits once.
+    """
+    old_physical = get_physical_path(document.path)
+    physical_filename = Path(document.path).name
+    prefix = dest_path.lstrip("/") if dest_path and dest_path != "/" else ""
+    new_rel_path = f"{prefix}/{physical_filename}" if prefix else physical_filename
+
+    # Handle name collision
+    new_physical = get_physical_path(new_rel_path)
+    if new_physical.exists():
+        new_filename = f"{old_physical.stem} (Copy){old_physical.suffix}"
+        new_rel_path = f"{prefix}/{new_filename}" if prefix else new_filename
+        new_physical = get_physical_path(new_rel_path)
+
+    new_physical.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(old_physical), str(new_physical))
+
+    # Also copy thumbnail if it exists
+    thumb_name = old_physical.stem + ".jpg"
+    thumb_src = old_physical.parent / "thumbnails" / thumb_name
+    if thumb_src.exists():
+        dest_thumb_dir = new_physical.parent / "thumbnails"
+        dest_thumb_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(thumb_src), str(dest_thumb_dir / thumb_name))
+
+    new_doc = DBDocument(
+        filename=Path(new_rel_path).name,
+        path=new_rel_path,
+        type=document.type,
+        folder_id=dest_folder_id,
+        size=document.size,
+        index_status="NOT_INDEXED",
+        is_code_file=document.is_code_file,
+        file_metadata=document.file_metadata,
+        uploaded_at=datetime.datetime.now(),
+        updated_at=datetime.datetime.now(),
+    )
+    db.session.add(new_doc)
+    return new_doc
+
+
 @files_bp.route("/document/<int:doc_id>/copy", methods=["POST"])
 @ensure_db_session_cleanup
 def copy_document(doc_id):
@@ -1059,52 +1207,8 @@ def copy_document(doc_id):
                 return error_response("Destination folder not found", 404, "DEST_NOT_FOUND")
             dest_folder_id = dest_folder.id
 
-        # Physical copy
-        old_physical = get_physical_path(document.path)
-        physical_filename = Path(document.path).name
-        if dest_path and dest_path != "/":
-            new_rel_path = f"{dest_path.lstrip('/')}/{physical_filename}"
-        else:
-            new_rel_path = physical_filename
-
-        # Handle name collision
-        new_physical = get_physical_path(new_rel_path)
-        if new_physical.exists():
-            stem = old_physical.stem
-            ext = old_physical.suffix
-            new_filename = f"{stem} (Copy){ext}"
-            if dest_path and dest_path != "/":
-                new_rel_path = f"{dest_path.lstrip('/')}/{new_filename}"
-            else:
-                new_rel_path = new_filename
-            new_physical = get_physical_path(new_rel_path)
-
-        new_physical.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(old_physical), str(new_physical))
-
-        # Also copy thumbnail if it exists
-        thumb_dir = old_physical.parent / "thumbnails"
-        thumb_name = old_physical.stem + ".jpg"
-        thumb_src = thumb_dir / thumb_name
-        if thumb_src.exists():
-            dest_thumb_dir = new_physical.parent / "thumbnails"
-            dest_thumb_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(thumb_src), str(dest_thumb_dir / thumb_name))
-
-        # Create new document record
-        new_doc = DBDocument(
-            filename=Path(new_rel_path).name,
-            path=new_rel_path,
-            type=document.type,
-            folder_id=dest_folder_id,
-            size=document.size,
-            index_status="NOT_INDEXED",
-            is_code_file=document.is_code_file,
-            file_metadata=document.file_metadata,
-            uploaded_at=datetime.datetime.now(),
-            updated_at=datetime.datetime.now(),
-        )
-        db.session.add(new_doc)
+        new_doc = _copy_document_into(document, dest_path, dest_folder_id)
+        new_rel_path = new_doc.path
         db.session.commit()
         logger.info(f"Copied document {doc_id} to {new_rel_path} (new id={new_doc.id})")
         return success_response(new_doc.to_dict(), 201)
