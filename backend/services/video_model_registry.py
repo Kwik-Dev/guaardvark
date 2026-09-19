@@ -690,6 +690,13 @@ VIDEO_MODEL_REGISTRY = {
         ],
         "requires": ["pulid-antelopev2", "eva02-clip", "facexlib-face", "flux-dev"],
         "size_gb": 1.1,
+        # Measured 2026-09-19 (matrix of fp8/bf16 x weight 0.8/1.0/1.3 x start 0.0/0.2,
+        # synthetic late-sixties bearded reference, seed 1984, 20 steps 768x1024):
+        # every cell kept the face once the node fix landed; weight 1.3 at start 0
+        # let the identity override the prompt (the fedora vanished), weight 0.8
+        # trimmed the beard, and 1.0 with start 0.2 kept the likeness and the scene.
+        # bf16 vs fp8 made no visible difference, so the loader default (fp8) stays.
+        "identity_defaults": {"weight": 1.0, "start_at": 0.2, "end_at": 1.0},
         # Measured 2026-09-15 on a 16 GB card: FLUX.1-dev FP8 + PuLID + EVA02
         # + InsightFace peaked at 14.6 GB used with 2.2 GB of other processes'
         # contexts resident; a 20-step 768x1024 render in 28 s.

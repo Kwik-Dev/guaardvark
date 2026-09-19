@@ -78,6 +78,21 @@ PULID_UNET_DTYPES = {
 # carries only pulid_ca.* and pulid_encoder.* keys and FLUX's double/single
 # blocks have no attn2 (custom_nodes/ComfyUI-PuLID-Flux/pulidflux.py). Both
 # read 2026-09-19.
+# The identity weight/window defaults live on the pulid-flux registry entry
+# (with the measurement behind them); None in a signature means "use those".
+PULID_IDENTITY_DEFAULTS = {"weight": 1.0, "start_at": 0.2, "end_at": 1.0}
+try:
+    PULID_IDENTITY_DEFAULTS.update(
+        (_VMR.get("pulid-flux") or {}).get("identity_defaults") or {}
+    )
+except Exception:
+    pass
+
+
+def _identity_default(name: str, value):
+    return PULID_IDENTITY_DEFAULTS[name] if value is None else value
+
+
 PULID_NODE_VARIANTS = {
     "pulid_flux": {
         "supported": True,
@@ -631,13 +646,16 @@ class ComfyUIImageGenerator:
 
     def _build_pulid_workflow(
         self, *, src_image_name: str, prompt: str, width: int, height: int,
-        steps: int, seed: int, weight: float = 1.0, start_at: float = 0.0,
-        end_at: float = 1.0, unet_dtype: str | None = None,
+        steps: int, seed: int, weight: float | None = None, start_at: float | None = None,
+        end_at: float | None = None, unet_dtype: str | None = None,
         node_variant: str | None = "pulid_flux",
     ) -> dict:
         """The PuLID-FLUX graph. Defaults are the product's; the keyword
         overrides are the likeness experiment's switches (see
         scripts/experiments/pulid_matrix.py)."""
+        weight = _identity_default('weight', weight)
+        start_at = _identity_default('start_at', start_at)
+        end_at = _identity_default('end_at', end_at)
         n = max(int(steps), PULID_MIN_STEPS)
         variant = resolve_pulid_node_variant(node_variant)
         weight_dtype = resolve_pulid_unet_dtype(unet_dtype)
@@ -744,9 +762,12 @@ class ComfyUIImageGenerator:
     def generate_with_identity(
         self, *, image_path: str, prompt: str, output_path: str,
         width: int = 768, height: int = 1024, steps: int = 20, seed: int = 42,
-        weight: float = 1.0, start_at: float = 0.0, end_at: float = 1.0,
+        weight: float | None = None, start_at: float | None = None, end_at: float | None = None,
         unet_dtype: str | None = None, node_variant: str | None = "pulid_flux",
     ) -> str:
+        weight = _identity_default('weight', weight)
+        start_at = _identity_default('start_at', start_at)
+        end_at = _identity_default('end_at', end_at)
         if not self._available():
             raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url}")
         if not os.path.exists(image_path):

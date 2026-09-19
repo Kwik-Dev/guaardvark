@@ -28,13 +28,16 @@ def _build(**overrides):
 
 # ── builder ────────────────────────────────────────────────────────────────
 
-def test_defaults_are_unchanged():
+def test_defaults_come_from_the_registry_entry():
     wf = _build()
     assert wf["unet"]["inputs"]["weight_dtype"] == cig.FLUX_DEV_WEIGHT_DTYPE
     assert wf["apply"]["class_type"] == "ApplyPulidFlux"
-    assert wf["apply"]["inputs"]["weight"] == 1.0
-    assert wf["apply"]["inputs"]["start_at"] == 0.0
-    assert wf["apply"]["inputs"]["end_at"] == 1.0
+    # The defaults are declared on the pulid-flux registry entry with the
+    # measurement behind them (2026-09-19 matrix); the graph must carry those.
+    assert wf["apply"]["inputs"]["weight"] == cig.PULID_IDENTITY_DEFAULTS["weight"]
+    assert wf["apply"]["inputs"]["start_at"] == cig.PULID_IDENTITY_DEFAULTS["start_at"]
+    assert wf["apply"]["inputs"]["end_at"] == cig.PULID_IDENTITY_DEFAULTS["end_at"]
+    assert cig.PULID_IDENTITY_DEFAULTS == {"weight": 1.0, "start_at": 0.2, "end_at": 1.0}
 
 
 def test_overrides_land_in_the_apply_and_unet_nodes():

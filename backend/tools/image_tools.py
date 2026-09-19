@@ -1872,11 +1872,11 @@ class GenerateIdentityTool(BaseTool):
         # Likeness experiment switches; omitted = the generator's defaults.
         "weight": ToolParameter(
             name="weight", type="float", required=False,
-            description="PuLID identity weight (default 1.0).",
+            description="PuLID identity weight; default from the pulid-flux registry entry (1.0, measured 2026-09-19).",
         ),
         "start_at": ToolParameter(
             name="start_at", type="float", required=False,
-            description="Fraction of the denoise at which identity starts applying (default 0.0).",
+            description="Fraction of the denoise at which identity starts applying; default from the registry (0.2: keeps the scene, then the face).",
         ),
         "end_at": ToolParameter(
             name="end_at", type="float", required=False,
