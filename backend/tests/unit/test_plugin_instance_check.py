@@ -24,6 +24,10 @@ OUR_FILE = "Wan2.2-I2V/HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf"
 @pytest.fixture
 def plugins_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("GUAARDVARK_PROFILE_PLUGIN_DEFAULTS", raising=False)
+    # The registry also loads extension sidecars from the checkout it runs in;
+    # this test must see only the temporary plugin, whatever the checkout holds.
+    import backend.extensions as _ext
+    monkeypatch.setattr(_ext, "plugin_dirs", lambda *_a, **_k: [])
     root = tmp_path / "plugins"
     plugin = root / PLUGIN_ID
     (plugin / "scripts").mkdir(parents=True)

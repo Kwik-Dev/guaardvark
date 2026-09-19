@@ -447,16 +447,17 @@ class PluginManager:
             return False
 
         ours, problem = self._instance_check(metadata, service_url)
-        self._note_instance_problem(metadata.id, problem)
+        self._note_instance_problem(getattr(metadata, 'id', None), problem)
         return ours
 
     def _note_instance_problem(self, plugin_id: str, problem: Optional[str]) -> None:
         if problem:
-            if self._instance_problems.get(plugin_id) != problem:
+            problems = self.__dict__.setdefault('_instance_problems', {})
+            if problems.get(plugin_id) != problem:
                 logger.warning(f"Plugin '{plugin_id}': {problem}")
-            self._instance_problems[plugin_id] = problem
+            problems[plugin_id] = problem
         else:
-            self._instance_problems.pop(plugin_id, None)
+            self.__dict__.setdefault('_instance_problems', {}).pop(plugin_id, None)
 
     @staticmethod
     def _local_model_files(plugin_dir: Optional[Path], subdirs: List[str], extensions: List[str]) -> set:
@@ -538,6 +539,11 @@ class PluginManager:
     def _kill_by_port(self, port: int):
         """Kill any process listening on the given port (orphan cleanup).
 
+        Never under pytest: a manager built by a test over a temporary registry
+        still resolves ports that the real install uses, and a "foreign
+        instance" verdict from a stubbed HTTP layer must not reach a real
+        process (2026-09-19: a test run took down the checkout's ComfyUI).
+
         SAFETY: never kill our own PID, our parent's PID, or anything in our
         own process group. This protects against pre-existing manifest bugs
         where a disabled plugin claims the same port as the main Flask
@@ -546,6 +552,9 @@ class PluginManager:
         backend that just spawned us — exactly the pattern that took the
         system down on 2026-04-28.
         """
+        if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("GUAARDVARK_MODE") == "test":
+            logger.warning(f"Not killing the process on port {port}: running under a test")
+            return
         if not port:
             return
 
@@ -686,6 +695,10 @@ class PluginManager:
                 if self._check_service_running(metadata):
                     self._plugin_status[plugin_id] = PluginStatus.RUNNING
                     came_up = came_up or before != PluginStatus.RUNNING
+                elif self.__dict__.get('_instance_problems', {}).get(plugin_id):
+                    # A stranger holds the port: that is an error to show, not
+                    # a stopped plugin the user can simply start.
+                    self._plugin_status[plugin_id] = PluginStatus.ERROR
                 else:
                     self._plugin_status[plugin_id] = PluginStatus.STOPPED
             else:
@@ -729,7 +742,7 @@ class PluginManager:
         """Push plugin list to Socket.IO subscribers (replaces HTTP polling)."""
         try:
             from backend.services.plugin_status_emitter import emit_plugins_snapshot
-            emit_plugins_snapshot(reason)
+            emit_plugins_snapshot(reason, manager=self)
         except Exception:
             pass
 
