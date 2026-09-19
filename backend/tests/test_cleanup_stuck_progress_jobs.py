@@ -144,3 +144,102 @@ def test_missing_store_is_not_an_error(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "Cleaned up 0 orphaned jobs" in result.stdout
+
+
+def test_system_maintenance_handler_runs_cleanup_script_and_parses_count(monkeypatch):
+    from backend.services.task_handlers.system_maintenance_handler import SystemMaintenanceHandler
+    from backend.services.task_handlers.base_handler import TaskResultStatus
+
+    handler = SystemMaintenanceHandler()
+    called_cmds = []
+
+    def mock_run(cmd, capture_output=True, text=True, timeout=60):
+        called_cmds.append(cmd)
+        class DummyResult:
+            returncode = 0
+            stdout = "Kept 1 job(s)\nCleaned up 3 orphaned jobs\n"
+            stderr = ""
+        return DummyResult()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    progress = []
+    start_time = datetime.now(timezone.utc)
+    result = handler._cleanup_progress_jobs(
+        task=None,
+        config={"max_age_days": 2, "clean_completed": True, "dry_run": False},
+        progress_callback=lambda pct, msg, data: progress.append((pct, msg)),
+        started_at=start_time,
+    )
+
+    assert result.status == TaskResultStatus.SUCCESS
+    assert result.message == "Cleaned 3 stuck progress jobs"
+    assert result.output_data["cleaned_count"] == 3
+    assert result.output_data["dry_run"] is False
+    assert result.output_data["max_age_hours"] == 48
+
+    cmd = called_cmds[0]
+    assert "--execute" in cmd
+    assert "--clean-completed" in cmd
+    assert "--max-age-hours" in cmd
+    assert "48" in cmd
+
+
+def test_system_maintenance_handler_dry_run_omits_execute(monkeypatch):
+    from backend.services.task_handlers.system_maintenance_handler import SystemMaintenanceHandler
+    from backend.services.task_handlers.base_handler import TaskResultStatus
+
+    handler = SystemMaintenanceHandler()
+    called_cmds = []
+
+    def mock_run(cmd, capture_output=True, text=True, timeout=60):
+        called_cmds.append(cmd)
+        class DummyResult:
+            returncode = 0
+            stdout = "Dry run: 2 orphaned job(s) would be removed\nCleaned up 0 orphaned jobs\n"
+            stderr = ""
+        return DummyResult()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    start_time = datetime.now(timezone.utc)
+    result = handler._cleanup_progress_jobs(
+        task=None,
+        config={"dry_run": True},
+        progress_callback=lambda pct, msg, data: None,
+        started_at=start_time,
+    )
+
+    assert result.status == TaskResultStatus.SUCCESS
+    assert result.output_data["cleaned_count"] == 0
+    assert result.output_data["dry_run"] is True
+
+    cmd = called_cmds[0]
+    assert "--execute" not in cmd
+
+
+def test_system_maintenance_handler_handles_script_failure(monkeypatch):
+    from backend.services.task_handlers.system_maintenance_handler import SystemMaintenanceHandler
+    from backend.services.task_handlers.base_handler import TaskResultStatus
+
+    handler = SystemMaintenanceHandler()
+
+    def mock_run(cmd, capture_output=True, text=True, timeout=60):
+        class DummyResult:
+            returncode = 1
+            stdout = ""
+            stderr = "Permission denied"
+        return DummyResult()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    start_time = datetime.now(timezone.utc)
+    result = handler._cleanup_progress_jobs(
+        task=None,
+        config={"dry_run": False},
+        progress_callback=lambda pct, msg, data: None,
+        started_at=start_time,
+    )
+
+    assert result.status == TaskResultStatus.FAILED
+    assert "Permission denied" in result.error_message

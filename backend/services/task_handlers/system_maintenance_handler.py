@@ -205,22 +205,69 @@ class SystemMaintenanceHandler(BaseTaskHandler):
         progress_callback: Callable,
         started_at: datetime
     ) -> TaskResult:
-        max_age_hours = config.get("max_age_days", 1) * 24
+        max_age_hours = config.get("max_age_hours", config.get("max_age_days", 1) * 24)
         clean_completed = config.get("clean_completed", False)
         dry_run = config.get("dry_run", False)
 
         progress_callback(0, "Cleaning progress jobs...", None)
 
         try:
-            from backend.utils.unified_progress_system import cleanup_stuck_jobs
+            import subprocess
+            import sys
+            from pathlib import Path
+
+            script_path = Path(__file__).resolve().parents[3] / "scripts" / "cleanup_stuck_progress_jobs.py"
+            if not script_path.exists():
+                return TaskResult(
+                    status=TaskResultStatus.FAILED,
+                    message="Progress jobs cleanup script not found",
+                    error_message=f"Script not found at {script_path}",
+                    started_at=started_at,
+                    completed_at=datetime.now(),
+                )
 
             progress_callback(30, "Identifying stuck jobs...", None)
 
-            cleaned = 0
+            cmd = [sys.executable, str(script_path)]
             if not dry_run:
-                cleaned = cleanup_stuck_jobs(max_age_hours=max_age_hours)
+                cmd.append("--execute")
+            if clean_completed:
+                cmd.append("--clean-completed")
+                if "max_completed_age_days" in config:
+                    cmd.extend(["--max-age-days", str(config["max_completed_age_days"])])
+            if max_age_hours:
+                cmd.extend(["--max-age-hours", str(max_age_hours)])
 
-            completed_at = datetime.now()
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            if result.returncode != 0:
+                logger.error(f"Progress jobs cleanup script failed: {result.stderr}")
+                return TaskResult(
+                    status=TaskResultStatus.FAILED,
+                    message=f"Cleanup failed: {result.stderr}",
+                    error_message=result.stderr,
+                    started_at=started_at,
+                    completed_at=datetime.now(),
+                )
+
+            cleaned = 0
+            for line in result.stdout.splitlines():
+                if "Cleaned up" in line and "orphaned jobs" in line:
+                    try:
+                        parts = line.split()
+                        for i, part in enumerate(parts):
+                            if part.isdigit() and i + 1 < len(parts) and "orphaned" in parts[i + 1]:
+                                cleaned = int(part)
+                                break
+                    except (ValueError, IndexError):
+                        pass
+
+            completed_at = datetime.now(started_at.tzinfo) if started_at.tzinfo else datetime.now()
             duration = (completed_at - started_at).total_seconds()
 
             progress_callback(100, "Progress job cleanup complete", None)
@@ -231,21 +278,13 @@ class SystemMaintenanceHandler(BaseTaskHandler):
                 output_data={
                     "cleaned_count": cleaned,
                     "max_age_hours": max_age_hours,
-                    "dry_run": dry_run
+                    "dry_run": dry_run,
                 },
                 started_at=started_at,
                 completed_at=completed_at,
-                duration_seconds=duration
+                duration_seconds=duration,
             )
 
-        except ImportError:
-            return TaskResult(
-                status=TaskResultStatus.SUCCESS,
-                message="Progress job cleanup not available",
-                output_data={"note": "cleanup_stuck_jobs function not available"},
-                started_at=started_at,
-                completed_at=datetime.now()
-            )
         except Exception as e:
             logger.error(f"Progress job cleanup failed: {e}", exc_info=True)
             return TaskResult(
@@ -253,7 +292,7 @@ class SystemMaintenanceHandler(BaseTaskHandler):
                 message=f"Cleanup failed: {str(e)}",
                 error_message=str(e),
                 started_at=started_at,
-                completed_at=datetime.now()
+                completed_at=datetime.now(),
             )
 
     def _cleanup_behavior_logs(
