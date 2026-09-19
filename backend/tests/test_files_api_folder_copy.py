@@ -164,16 +164,46 @@ def test_unknown_target_is_404_and_copies_nothing(client, tree):
     assert db.session.query(Folder).count() == before
 
 
-def test_document_copy_contract_is_unchanged(client, tree, uploads):
-    """Its quirks included: it passes 201 as the message and answers 200."""
+def test_document_copy_contract_returns_201_with_message(client, tree, uploads):
+    """Document copy returns 201 Created with a clear message."""
     doc_id = db.session.query(DBDocument.id).filter_by(path="Reports/summary.txt").scalar()
 
     resp = client.post(f"/api/files/document/{doc_id}/copy",
                        json={"destination_path": "Archive"})
 
-    assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["message"] == 201
+    assert resp.status_code == 201, resp.get_json()
+    assert resp.get_json()["message"] == "Document copied successfully"
     data = resp.get_json()["data"]
     assert data["path"] == "Archive/summary.txt"
     assert data["index_status"] == "NOT_INDEXED"
     assert (uploads / "Archive" / "summary.txt").read_text() == "top"
+
+
+def test_create_folder_returns_201_with_message(client, uploads):
+    """Folder creation returns 201 Created with a clear message."""
+    resp = client.post("/api/files/folder",
+                       json={"name": "NewProject", "parent_path": ""})
+
+    assert resp.status_code == 201, resp.get_json()
+    assert resp.get_json()["message"] == "Folder created successfully"
+    data = resp.get_json()["data"]
+    assert data["name"] == "NewProject"
+    assert data["path"] == "NewProject"
+
+
+def test_upload_file_returns_201_with_message(client, uploads):
+    """File upload returns 201 Created with a clear message."""
+    import io
+
+    data = {
+        "file": (io.BytesIO(b"file content here"), "upload_test.txt"),
+        "folder_path": "",
+    }
+    resp = client.post("/api/files/upload",
+                       data=data,
+                       content_type="multipart/form-data")
+
+    assert resp.status_code == 201, resp.get_json()
+    assert resp.get_json()["message"] == "File uploaded successfully"
+    assert resp.get_json()["data"]["filename"] == "upload_test.txt"
+

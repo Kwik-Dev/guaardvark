@@ -61,7 +61,10 @@ class Setting(db.Model):
     )
 
     def __repr__(self):
-        return f"<Setting {self.key}={self.value}>"
+        from backend.utils.settings_utils import is_secret_key
+
+        val = "<redacted>" if is_secret_key(self.key) else self.value
+        return f"<Setting {self.key}={val}>"
 
     def to_dict(self):
         return {
@@ -83,7 +86,10 @@ class SystemSetting(db.Model):
     )
 
     def __repr__(self):
-        return f"<SystemSetting {self.key}={self.value}>"
+        from backend.utils.settings_utils import is_secret_key
+
+        val = "<redacted>" if is_secret_key(self.key) else self.value
+        return f"<SystemSetting {self.key}={val}>"
 
     def to_dict(self):
         return {
