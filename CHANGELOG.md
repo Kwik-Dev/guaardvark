@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **Chat asks before it uses a face.** Putting an attached photo's person into a new scene
+  (`generate_identity`) now pauses on a consent card: approving records consent next to the photo
+  (and under `outputs/consent/` by content hash, so the same image does not ask again), declining
+  ends the turn with a refusal and no render. The chat intercepts no longer grant consent on the
+  user's behalf, and MCP or CLI callers need a recorded consent for the reference image.
+- **Code questions search the code before they read the docs.** When a question mentions the
+  source and `search_codebase` is available, the first prompt carries the code tools and holds the
+  knowledge-base passages back; they are added, labelled secondary, once a code search has run or
+  returned nothing. Other questions are unchanged.
+- **The answer says when it was assembled from tool results.** A reply produced after the tool
+  budget ran out carries an "Assembled from tool results" chip and its own step row.
+- **`guaardvark mcp serve`.** The pip-installed CLI can start the MCP server (stdio, or `--http`)
+  from the checkout it finds; with no checkout it says what it looked for. The README's PyPI
+  paragraph now says what the package does, the package carries keywords, and the README ends with
+  the MCP Registry ownership marker.
+- **Identity renders keep the face again.** PuLID on FLUX had been contributing nothing: the
+  pinned node stored its face embedding on the model and deleted it in the node's `__del__`,
+  which current ComfyUI fires before the sampler runs, so every render silently ignored the
+  reference at any weight. The shipped patch (`plugins/comfyui/custom_nodes.patches/`) moves the
+  data onto the cloned patcher's `transformer_options`, where the forward reads it on every step.
+  Measured on a synthetic reference (late sixties, white hair, full grey beard): before the fix,
+  weights 1.0, 1.5 and 5.0 gave the same clean-shaven man in his thirties; after it, the default
+  (fp8, weight 1.0, start 0) renders the reference's hair, beard, age and eyes.
+  `generate_with_identity` also takes `weight`, `start_at`, `end_at` and the UNET dtype, and
+  `scripts/experiments/pulid_matrix.py` renders a likeness matrix through the product path.
+- **Small truths.** The maintenance handler's progress-job cleanup runs the real script instead of
+  importing a function that never existed; folder create, upload and document copy answer HTTP 201
+  with a message instead of 200 with `"message": 201`; a Setting's repr redacts secret values; a
+  chat attachment is served at `/api/outputs/edit_inputs/<name>` so the consent card can show it.
 - **The server tells the truth about what it did.** Deleting one image or video batch now removes
   its document, folder and job-history rows and vectors, not just its folder. Starting a service
   plugin whose process died no longer answers "already running": the manager probes the health

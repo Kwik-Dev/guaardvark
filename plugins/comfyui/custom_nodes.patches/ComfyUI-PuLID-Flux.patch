@@ -1,5 +1,5 @@
 diff --git a/pulidflux.py b/pulidflux.py
-index 50c0818..5ea7da6 100644
+index 50c0818..431291b 100644
 --- a/pulidflux.py
 +++ b/pulidflux.py
 @@ -72,7 +72,17 @@ def forward_orig(
@@ -20,3 +20,77 @@ index 50c0818..5ea7da6 100644
      if img.ndim != 3 or txt.ndim != 3:
          raise ValueError("Input img and txt tensors must have 3 dimensions.")
  
+@@ -91,6 +101,11 @@ def forward_orig(
+     pe = self.pe_embedder(ids)
+ 
+     ca_idx = 0
++    # Per-run identity data travels in transformer_options (set by ApplyPulidFlux on a
++    # cloned ModelPatcher). Current ComfyUI frees node instances before sampling, so
++    # data stored on this module by the node and deleted in its __del__ was empty by
++    # the first step; every render silently ignored the reference face.
++    pulid_data = (transformer_options or {}).get("pulid_flux") or getattr(self, "pulid_data", None) or {}
+     for i, block in enumerate(self.double_blocks):
+         img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+ 
+@@ -102,10 +117,10 @@ def forward_orig(
+                     img += add
+ 
+         # PuLID attention
+-        if self.pulid_data:
++        if pulid_data:
+             if i % self.pulid_double_interval == 0:
+                 # Will calculate influence of all pulid nodes at once
+-                for _, node_data in self.pulid_data.items():
++                for _, node_data in pulid_data.items():
+                     if torch.any((node_data['sigma_start'] >= timesteps) & (timesteps >= node_data['sigma_end'])):
+                         img = img + node_data['weight'] * self.pulid_ca[ca_idx](node_data['embedding'], img)
+                 ca_idx += 1
+@@ -123,11 +138,11 @@ def forward_orig(
+                     img[:, txt.shape[1] :, ...] += add
+ 
+         # PuLID attention
+-        if self.pulid_data:
++        if pulid_data:
+             real_img, txt = img[:, txt.shape[1]:, ...], img[:, :txt.shape[1], ...]
+             if i % self.pulid_single_interval == 0:
+                 # Will calculate influence of all nodes at once
+-                for _, node_data in self.pulid_data.items():
++                for _, node_data in pulid_data.items():
+                     if torch.any((node_data['sigma_start'] >= timesteps) & (timesteps >= node_data['sigma_end'])):
+                         real_img = real_img + node_data['weight'] * self.pulid_ca[ca_idx](node_data['embedding'], real_img)
+                 ca_idx += 1
+@@ -384,25 +399,23 @@ class ApplyPulidFlux:
+             new_method = forward_orig.__get__(flux_model, flux_model.__class__)
+             setattr(flux_model, 'forward_orig', new_method)
+ 
+-        # Patch is already in place, add data (weight, embedding, sigma_start, sigma_end) under unique node index
+-        flux_model.pulid_data[unique_id] = {
++        # The data for this apply rides on a cloned patcher's transformer_options, which
++        # ComfyUI hands to forward_orig on every step. Chained ApplyPulidFlux nodes each
++        # add their own entry; nothing is stored on the shared module and nothing is
++        # deleted when the node instance goes away.
++        model = model.clone()
++        transformer_options = model.model_options.setdefault("transformer_options", {})
++        pulid_entries = dict(transformer_options.get("pulid_flux") or {})
++        pulid_entries[unique_id] = {
+             'weight': weight,
+             'embedding': cond,
+             'sigma_start': sigma_start,
+             'sigma_end': sigma_end,
+         }
+-
+-        # Keep a reference for destructor (if node is deleted the data will be deleted as well)
+-        self.pulid_data_dict = {'data': flux_model.pulid_data, 'unique_id': unique_id}
++        transformer_options["pulid_flux"] = pulid_entries
+ 
+         return (model,)
+ 
+-    def __del__(self):
+-        # Destroy the data for this node
+-        if self.pulid_data_dict:
+-            del self.pulid_data_dict['data'][self.pulid_data_dict['unique_id']]
+-            del self.pulid_data_dict
+-
+ 
+ NODE_CLASS_MAPPINGS = {
+     "PulidFluxModelLoader": PulidFluxModelLoader,
