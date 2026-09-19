@@ -24,6 +24,16 @@ export function modelFamily(model) {
 /** Z-Image proper (CFG-distilled). `auto` is deliberately NOT included. */
 export const isZimageModel = (model) => modelFamily(model) === 'zimage';
 
+/**
+ * CFG-free stills path (guidance 0): Z-Image and Krea 2 Turbo. The backend
+ * ignores negative prompt and enhance-anatomy on this path. Krea Raw still
+ * uses both; `auto` may route to SDXL so it stays editable.
+ */
+export function ignoresNegativeAndAnatomy(model) {
+  const fam = modelFamily(model);
+  return fam === 'zimage' || fam === 'krea-turbo';
+}
+
 export const ZIMAGE_STEPS = 9;
 export const ZIMAGE_GUIDANCE = 0;
 

@@ -4,7 +4,6 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  Button,
   Box,
   Stack,
   Chip,
@@ -24,6 +23,7 @@ import {
 } from "@mui/icons-material";
 import io from "socket.io-client";
 import { selfImprovementService } from "../../api/selfImprovementService";
+import { ActionButton } from "./ui";
 
 // The six phases the modal walks through. Keys align with the labels we
 // derive from the backend `stage` field below.
@@ -68,7 +68,7 @@ function formatElapsed(sec) {
   return `${m}m ${s}s`;
 }
 
-export default function ScanProgressModal({ open, onClose, onComplete }) {
+export default function ScanProgressModal({ open, onClose, onComplete, onBackground }) {
   const [run, setRun] = useState(null);
   const [liveEvent, setLiveEvent] = useState(null);
   const [pendingFixes, setPendingFixes] = useState([]);
@@ -228,7 +228,15 @@ export default function ScanProgressModal({ open, onClose, onComplete }) {
 
   const liveStageIsTerminal = liveEvent?.stage === "complete" || liveEvent?.stage === "error";
   const isRunning = !liveStageIsTerminal && (!!liveEvent || (!!run && run.status === "running") || dispatched);
-  const isDone = liveStageIsTerminal || (!!run && run.status !== "running");
+
+  // No cancel route on selfImprovementService. Stop watching and leave the
+  // scan running on the server.
+  const handleDismissToBackground = useCallback(() => {
+    stopTimers();
+    teardownSocket();
+    onBackground?.();
+    onClose?.();
+  }, [stopTimers, teardownSocket, onBackground, onClose]);
 
   // Prefer the live status if we've seen a terminal event, otherwise trust the row.
   const status = liveEvent?.status || run?.status || (dispatched ? "running" : null);
@@ -251,7 +259,7 @@ export default function ScanProgressModal({ open, onClose, onComplete }) {
     : null;
 
   return (
-    <Dialog open={open} onClose={isRunning ? undefined : onClose} maxWidth="md" fullWidth>
+    <Dialog open={open} onClose={isRunning ? handleDismissToBackground : onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1, pr: 6 }}>
         {statusIcon}
         <Typography variant="h6" component="span">
@@ -270,8 +278,7 @@ export default function ScanProgressModal({ open, onClose, onComplete }) {
         </Typography>
         <IconButton
           size="small"
-          onClick={onClose}
-          disabled={isRunning}
+          onClick={isRunning ? handleDismissToBackground : onClose}
           sx={{ position: "absolute", right: 8, top: 8 }}
         >
           <CloseIcon fontSize="small" />
@@ -458,9 +465,11 @@ export default function ScanProgressModal({ open, onClose, onComplete }) {
       </DialogContent>
 
       <DialogActions>
-        <Button size="small" onClick={onClose} disabled={isRunning}>
-          {isDone ? "Close" : "Running…"}
-        </Button>
+        {isRunning ? (
+          <ActionButton onClick={handleDismissToBackground}>Cancel</ActionButton>
+        ) : (
+          <ActionButton onClick={onClose}>Close</ActionButton>
+        )}
       </DialogActions>
     </Dialog>
   );

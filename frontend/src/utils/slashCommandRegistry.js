@@ -238,6 +238,23 @@ let _dbCommandsCacheTime = 0;
 const DB_COMMANDS_TTL = 60000; // 60 seconds
 
 /**
+ * COMMAND_RULE list from GET /api/rules. The live handler returns a bare array
+ * (`jsonify(items)`). Older envelopes used `{rules}` or `{data: {rules}}`.
+ */
+export function extractCommandRules(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.data?.rules)) return payload.data.rules;
+  if (Array.isArray(payload?.rules)) return payload.rules;
+  return [];
+}
+
+/** Drop the 60s COMMAND_RULE cache (tests). */
+export function resetDbCommandsCache() {
+  _dbCommandsCache = null;
+  _dbCommandsCacheTime = 0;
+}
+
+/**
  * Fetch COMMAND_RULE entries from the backend.
  * Cached for 60 seconds to avoid redundant fetches on re-mount.
  */
@@ -251,7 +268,7 @@ async function fetchDbCommands() {
     const res = await fetch("/api/rules?type=COMMAND_RULE&is_active=true");
     if (!res.ok) return _dbCommandsCache || [];
     const data = await res.json();
-    const rules = data.data?.rules || data.rules || [];
+    const rules = extractCommandRules(data);
     _dbCommandsCache = rules
       .filter((r) => r.command_label)
       .map((r) => ({
@@ -326,4 +343,11 @@ export function parseCommand(input) {
   };
 }
 
-export default { getAllCommands, getBuiltInCommands, filterCommands, parseCommand };
+export default {
+  getAllCommands,
+  getBuiltInCommands,
+  filterCommands,
+  parseCommand,
+  extractCommandRules,
+  resetDbCommandsCache,
+};

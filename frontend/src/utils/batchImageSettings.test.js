@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildFinalPrompts,
   clampQuantity,
+  ignoresNegativeAndAnatomy,
   isZimageModel,
   modelFamily,
   qualityPresetsForModel,
@@ -23,6 +24,20 @@ describe('modelFamily', () => {
   it('does not treat auto as Z-Image (the router may pick SDXL)', () => {
     expect(isZimageModel('auto')).toBe(false);
     expect(isZimageModel('zimage-turbo')).toBe(true);
+  });
+});
+
+describe('ignoresNegativeAndAnatomy', () => {
+  it('is true on the guidance-0 path (Z-Image, Krea 2 Turbo)', () => {
+    expect(ignoresNegativeAndAnatomy('zimage-turbo')).toBe(true);
+    expect(ignoresNegativeAndAnatomy('krea2-turbo')).toBe(true);
+  });
+
+  it('is false for Krea Raw, auto, and CFG families', () => {
+    expect(ignoresNegativeAndAnatomy('krea2-raw')).toBe(false);
+    expect(ignoresNegativeAndAnatomy('auto')).toBe(false);
+    expect(ignoresNegativeAndAnatomy('flux-dev')).toBe(false);
+    expect(ignoresNegativeAndAnatomy('sd-xl')).toBe(false);
   });
 });
 
