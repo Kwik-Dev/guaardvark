@@ -103,7 +103,8 @@ def _print_summary(result: dict) -> None:
 
 
 def _parse_pytest_output(output: str) -> dict:
-    summary_match = re.search(r"(\d+\s+passed).*", output.splitlines()[-1])
+    lines = output.splitlines()
+    summary_match = re.search(r"(\d+\s+passed).*", lines[-1]) if lines else None
     counts = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0}
     if summary_match:
         summary_line = summary_match.group(0)
@@ -114,7 +115,7 @@ def _parse_pytest_output(output: str) -> dict:
     failures = []
     current = []
     collecting = False
-    for line in output.splitlines():
+    for line in lines:
         if line.startswith("_") and "::" in line:
             collecting = True
             if current:
@@ -134,18 +135,32 @@ def _parse_pytest_output(output: str) -> dict:
     return {"counts": counts, "failures": failures}
 
 
-def run_all():
+QUICK_FILTER = (
+    "test_brain_state or test_tier_routing or test_stepbudget or "
+    "facts or budget or agent_executor or test_agent_control or memory_contract"
+)
+
+
+def run_all(quick: bool = False, extra_args: list = None):
+    if extra_args is None:
+        extra_args = []
     repo_root = os.path.abspath(os.path.dirname(__file__))
     phases = {"install": [], "config": [], "run": [], "teardown": []}
 
-    _ensure_llama_index()
-    install_requirements(repo_root)
-    phases["install"].append("requirements installed")
-    install_playwright_browsers()
-    phases["install"].append("playwright browsers installed")
+    is_collect = any(arg in extra_args for arg in ("--collect-only", "--co"))
 
-    check_script = os.path.join(repo_root, "backend", "check_migrations.py")
-    if os.path.exists(check_script):
+    if not is_collect:
+        _ensure_llama_index()
+        install_requirements(repo_root)
+        phases["install"].append("requirements installed")
+        install_playwright_browsers()
+        phases["install"].append("playwright browsers installed")
+
+    check_script = os.path.join(repo_root, "scripts", "check_migrations.py")
+    if not os.path.exists(check_script):
+        raise RuntimeError(f"Migration check script missing: {check_script}")
+
+    if not is_collect:
         mig_proc = subprocess.run(
             [sys.executable, check_script, "--merge"],
             capture_output=True,
@@ -158,7 +173,14 @@ def run_all():
                 f"Database migration failed:\n{mig_proc.stdout}\n{mig_proc.stderr}"
             )
 
-    cmd = [sys.executable, "-m", "pytest", "backend/tests", "-q", "-rA", "-k", "test_brain_state or test_tier_routing or test_stepbudget or facts or budget or agent_executor or test_agent_control or memory_contract"]  # Phase 2.x: broader for useful GUI suites + 2.1/2.2 coverage. For exhaustive use `python -m pytest backend/tests -q` or omit -k. Real-ish tests preferred (see A/B in user notes).
+    cmd = [sys.executable, "-m", "pytest"]
+    if quick:
+        cmd.extend(["-k", QUICK_FILTER])
+    if extra_args:
+        cmd.extend(extra_args)
+    else:
+        cmd.extend(["-q", "-rA"])
+
     env = os.environ.copy()
     env["GUAARDVARK_MODE"] = "test"
     env["DISABLE_CELERY"] = "true"
@@ -184,13 +206,28 @@ def run_all():
 
 
 def main():
-    result = run_all()
+    quick = "--quick" in sys.argv
+    extra_args = [arg for arg in sys.argv[1:] if arg != "--quick"]
+    is_collect_or_help = any(
+        arg in extra_args for arg in ("--collect-only", "--co", "-h", "--help")
+    )
+
+    result = run_all(quick=quick, extra_args=extra_args)
+
+    if is_collect_or_help:
+        if result.get("stdout"):
+            sys.stdout.write(result["stdout"])
+        if result.get("stderr"):
+            sys.stderr.write(result["stderr"])
+        return result["returncode"]
+
     print(json.dumps(result))
     _print_summary(result)
     code = result["returncode"]
     if code in (4, 5):
         code = 0
     return code
+
 
 
 if __name__ == "__main__":

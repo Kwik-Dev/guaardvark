@@ -36,7 +36,7 @@ def test_preflight_audio_branch(monkeypatch):
 
 def test_workflow_is_the_text_to_music_template():
     wf = m3.build_music_workflow(caption="warm indie folk, female vocal", lyrics="[Verse]\nhello", seconds=90, seed=7)
-    assert wf["2"]["inputs"] == {"clip": "minimax_music3_text_encoder_pruned_int8_convrot.safetensors", "type": "minimax", "device": "default"}
+    assert wf["2"]["inputs"] == {"clip_name": "minimax_music3_text_encoder_pruned_int8_convrot.safetensors", "type": "minimax", "device": "default"}
     enc = wf["4"]["inputs"]
     assert enc["caption"].startswith("warm indie") and enc["lyrics"].startswith("[Verse]")
     assert enc["max_duration"] == 90.0 and enc["cfg_scale"] == 1.7 and enc["top_k"] == 50 and enc["seed"] == 7

@@ -590,6 +590,8 @@ def get_service_status():
                 "cache_dir": str(generator.cache_dir),
                 "image_generator_available": generator.image_generator is not None
             }
+            if generator.image_generator and hasattr(generator.image_generator, "get_status"):
+                status["image_generator"] = generator.image_generator.get_status()
         except Exception as status_error:
             logger.error(f"Error creating basic status: {status_error}")
             status = {"service_available": False, "error": str(status_error)}

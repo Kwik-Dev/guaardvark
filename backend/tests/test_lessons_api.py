@@ -250,7 +250,8 @@ class TestEndLesson:
             mem = db.session.query(AgentMemory).filter_by(id=body["memory_id"]).first()
             assert mem is not None
             assert mem.source == "lesson_summary"
-            assert mem.session_id == "lesson-h"  # lesson-id reused as key
+            assert mem.session_id == "sess-h"
+            assert mem.lesson_id == "lesson-h"
 
     def test_end_removes_from_active_lessons(self, client, app):
         self._seed_pearls(app, "lesson-r", "sess-r", ["step a"])
