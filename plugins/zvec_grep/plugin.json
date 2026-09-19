@@ -25,6 +25,7 @@
     "node": ">=22"
   },
   "endpoints": {
-    "mcp": "/mcp"
+    "mcp": "/mcp",
+    "health": "/healthz"
   }
 }
