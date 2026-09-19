@@ -254,3 +254,130 @@ def test_analyze_repository_indexes_the_llm_summary_when_it_answers(monkeypatch)
     assert summaries[0]["replace_where"] == ["type", "folder_id"]
     assert stored["summary_status"] == "ok" and "summary_error" not in stored
     assert folder.description == text.strip()
+
+
+# --------------------------------------------------------------------------
+# R6. purge_document_vectors says why it removed nothing
+# --------------------------------------------------------------------------
+class _Cursor:
+    def __init__(self, rowcount, fail=None):
+        self.rowcount = rowcount
+        self.fail = fail
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        if self.fail:
+            raise self.fail
+        self.executed.append((sql, params))
+
+
+class _Conn:
+    def __init__(self, rowcount=0, fail=None):
+        self.cur = _Cursor(rowcount, fail)
+        self.committed = False
+        self.closed = False
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        self.committed = True
+
+    def close(self):
+        self.closed = True
+
+
+def _pgvector(monkeypatch, table="t_384", conn=None):
+    import backend.services.indexing_service as isvc
+
+    monkeypatch.setattr(isvc, "_vector_backend", lambda: "pgvector")
+    monkeypatch.setattr(isvc, "_pg_table_name", lambda project_id=None, profile=None: table)
+    if conn is not None:
+        monkeypatch.setattr(isvc, "_pg_connect", lambda: conn)
+
+
+def test_purge_reports_each_way_it_could_not_run(monkeypatch):
+    import backend.services.indexing_service as isvc
+
+    monkeypatch.setattr(isvc, "_vector_backend", lambda: "simple")
+    r = isvc.purge_document_vectors(5)
+    assert r == 0 and not r.ok and r.reason == "not_pgvector"
+
+    _pgvector(monkeypatch)
+    r = isvc.purge_document_vectors(None)
+    assert r == 0 and not r.ok and r.reason == "no_document_id"
+
+    _pgvector(monkeypatch, table=None)
+    r = isvc.purge_document_vectors(5)
+    assert r == 0 and not r.ok and r.reason == "no_table"
+
+    _pgvector(monkeypatch, conn=_Conn(fail=RuntimeError("connection refused")))
+    r = isvc.purge_document_vectors(5)
+    assert r == 0 and not r.ok
+    assert r.reason.startswith("error: RuntimeError: connection refused")
+
+
+def test_purge_distinguishes_nothing_to_purge_from_could_not_purge(monkeypatch):
+    import backend.services.indexing_service as isvc
+
+    conn = _Conn(rowcount=0)
+    _pgvector(monkeypatch, conn=conn)
+    r = isvc.purge_document_vectors(5)
+    assert r == 0 and r.ok and r.reason is None
+    assert conn.committed and conn.closed
+
+    conn = _Conn(rowcount=3)
+    _pgvector(monkeypatch, conn=conn)
+    r = isvc.purge_document_vectors(5)
+    assert r == 3 and r.ok
+    # The existing callers sum it and truth-test it; both must keep working.
+    assert isinstance(r, int) and (0 + r) == 3 and bool(r) is True
+    assert bool(isvc.PurgeResult(0, "no_table")) is False
+
+
+def test_reindex_warns_when_the_purge_did_not_run():
+    """The caller in add_file_to_index inserts regardless; it must say when the
+    previous copy may still be there, and stay quiet on a file-backed store,
+    where there is nothing to purge."""
+    import inspect
+    import backend.services.indexing_service as isvc
+
+    src = inspect.getsource(isvc.add_file_to_index)
+    assert "_purged = purge_document_vectors(" in src
+    assert 'if not _purged.ok and _purged.reason != "not_pgvector"' in src
+
+
+def _list_documents(monkeypatch, count_result, rows, limit=None):
+    from backend.tools import knowledge_tools as kt
+
+    monkeypatch.setattr(kt, "_table", lambda: ("data_t", None))
+    answers = iter([(rows, None), count_result])
+    monkeypatch.setattr(kt, "_query", lambda sql, params: next(answers))
+    return kt.ListDocumentsTool().execute(limit=limit)
+
+
+def test_list_documents_reports_an_unavailable_count_instead_of_the_page_length(monkeypatch):
+    rows = [("a.md", 4, 1, "docling"), ("b.md", 2, 1, "docling")]
+    res = _list_documents(monkeypatch, (None, "canceling statement due to timeout"), rows, limit=2)
+
+    assert res.success
+    assert "document count unavailable (canceling statement due to timeout)" in res.output
+    assert "2 document(s) indexed" not in res.output
+    assert "a.md — 4 passages" in res.output
+    # A full page with no total: the caller is told there may be more, not that
+    # the corpus is exactly this big.
+    assert "there may be more — call again with offset=2" in res.output
+
+
+def test_list_documents_reports_the_real_total_when_the_count_works(monkeypatch):
+    rows = [("a.md", 4, 1, "docling")]
+    res = _list_documents(monkeypatch, ([(37,)], None), rows, limit=1)
+
+    assert "37 document(s) indexed" in res.output
+    assert "(36 more — call again with offset=1)" in res.output

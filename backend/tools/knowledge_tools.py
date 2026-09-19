@@ -129,23 +129,34 @@ class ListDocumentsTool(BaseTool):
         if qerr:
             return ToolResult(success=False, error=f"Query failed: {qerr}")
 
-        total_rows, _ = _query(
+        total_rows, count_err = _query(
             f"SELECT count(DISTINCT metadata_->>'source_filename') FROM \"{table}\" "
             f"WHERE {_NOT_A_SUMMARY}", ()
         )
-        total = total_rows[0][0] if total_rows else len(rows)
+        # A failed count used to fall back to the page length, so "how big is the
+        # knowledge base" was answered with "as many as fit on this page". The
+        # page is still useful; the total is reported as unknown, not invented.
+        if count_err:
+            total = None
+            logger.warning("list_documents: corpus count failed: %s", count_err)
+        else:
+            total = total_rows[0][0] if total_rows else 0
 
         if not rows:
             return ToolResult(success=True, output="No documents match. The knowledge base may be empty.")
 
-        lines = [f"KNOWLEDGE BASE — {total} document(s) indexed"
+        head = (f"KNOWLEDGE BASE — {total} document(s) indexed" if total is not None
+                else f"KNOWLEDGE BASE — document count unavailable ({count_err})")
+        lines = [head
                  + (f", filtered by '{name_contains}'" if name_contains else "")
                  + f" · showing {offset + 1}-{offset + len(rows)}"]
         for src, chunks, sections, parsed_by in rows:
             extra = f", {sections} sections" if sections and sections > 1 else ""
             lines.append(f"  {src or '(unknown)'} — {chunks} passages{extra} [{parsed_by or '?'}]")
-        if offset + len(rows) < total:
+        if total is not None and offset + len(rows) < total:
             lines.append(f"\n({total - offset - len(rows)} more — call again with offset={offset + len(rows)})")
+        elif total is None and len(rows) == limit:
+            lines.append(f"\n(there may be more — call again with offset={offset + len(rows)})")
 
         return ToolResult(success=True, output="\n".join(lines),
                           metadata={"total": total, "returned": len(rows), "offset": offset})

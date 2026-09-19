@@ -872,8 +872,39 @@ def _pg_connect():
     return psycopg2.connect(host=host, port=port, dbname=database, user=user, password=password)
 
 
-def purge_document_vectors(document_id, project_id=None, profile: Optional[str] = None) -> int:
-    """Remove a document's existing vectors before re-indexing it. Returns rows removed.
+class PurgeResult(int):
+    """Rows removed by `purge_document_vectors`, and why when that is zero.
+
+    Five conditions used to come back as a bare 0 -- no pgvector, no document id,
+    no table, a failed DELETE, and a genuine "nothing to purge" -- and the callers
+    that delete or re-index a document could not tell "already clean" from "the
+    old copy is still there". This is an int so the callers that sum or
+    truth-test the count keep working; `reason` is None when the DELETE ran (so a
+    zero means nothing was there) and names the condition when it did not.
+    """
+
+    reason: Optional[str]
+
+    def __new__(cls, removed: int = 0, reason: Optional[str] = None):
+        obj = int.__new__(cls, removed)
+        obj.reason = reason
+        return obj
+
+    @property
+    def ok(self) -> bool:
+        """Whether the purge actually ran, whatever it removed."""
+        return self.reason is None
+
+    def __repr__(self) -> str:
+        return f"PurgeResult({int(self)}, reason={self.reason!r})"
+
+
+def purge_document_vectors(document_id, project_id=None, profile: Optional[str] = None) -> PurgeResult:
+    """Remove a document's existing vectors before re-indexing it.
+
+    Returns a `PurgeResult`: the rows removed, with `reason` set when no DELETE
+    ran (`not_pgvector`, `no_document_id`, `no_table`, or `error: ...`). A plain
+    zero with no reason means the table was checked and held nothing for this id.
 
     The JSON store kept embeddings in a dict keyed by node id, so re-indexing a file
     overwrote its nodes in place. pgvector does not: `add()` INSERTs, so every
@@ -885,11 +916,13 @@ def purge_document_vectors(document_id, project_id=None, profile: Optional[str] 
     Deletes by the `document_id` metadata stamped on every node at ingest, which
     covers all of a file's parsed documents at once (a PDF contributes one per page).
     """
-    if _vector_backend() != "pgvector" or document_id is None:
-        return 0
+    if _vector_backend() != "pgvector":
+        return PurgeResult(0, "not_pgvector")
+    if document_id is None:
+        return PurgeResult(0, "no_document_id")
     table = _pg_table_name(project_id, profile)
     if not table:
-        return 0
+        return PurgeResult(0, "no_table")
     # The stored key is the LlamaIndex document id, `doc_<db_id>_<content_hash>` --
     # NOT the bare database id. One file yields several of them (a PDF contributes
     # one per page), and the hash changes whenever the file's content changes, which
@@ -916,10 +949,10 @@ def purge_document_vectors(document_id, project_id=None, profile: Optional[str] 
         if removed:
             logger.info("Re-index: removed %d existing vector(s) for document %s",
                         removed, document_id)
-        return removed
+        return PurgeResult(removed)
     except Exception as e:
         logger.warning("Could not purge existing vectors for document %s: %s", document_id, e)
-        return 0
+        return PurgeResult(0, f"error: {e.__class__.__name__}: {str(e)[:200]}")
 
 
 def resolve_existing_vector_table(project_id=None, profile: Optional[str] = None) -> Optional[str]:
@@ -2953,8 +2986,17 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
             # the new one.
             try:
                 with _phase("purge_ms", timings):
-                    purge_document_vectors(getattr(db_document, "id", None),
-                                           getattr(db_document, "project_id", None))
+                    _purged = purge_document_vectors(getattr(db_document, "id", None),
+                                                     getattr(db_document, "project_id", None))
+                # A file-backed store overwrites nodes in place, so there is nothing
+                # to purge there. Anywhere else, a purge that did not run means the
+                # insert below may leave the previous copy beside the new one.
+                if not _purged.ok and _purged.reason != "not_pgvector":
+                    logger.warning(
+                        "Pre-insert purge did not run for document %s (%s); a previous "
+                        "copy may remain in the index",
+                        getattr(db_document, "id", None), _purged.reason,
+                    )
             except Exception as _pe:
                 logger.warning("Pre-insert purge skipped: %s", _pe)
 
