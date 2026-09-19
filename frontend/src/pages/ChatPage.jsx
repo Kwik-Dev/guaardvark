@@ -688,24 +688,33 @@ const ChatPage = () => {
 
                 return true;
               })
-              .map((msg) => hydrateOrchestratorFields({
-                ...msg,
-                isLocal: false,
-                status: "persisted",
-                // Hydrate fields that MessageItem reads as top-level props from
-                // their persisted form inside extra_data. The backend saves
-                // agentThinkingSteps and tool-call steps under extra_data on
-                // the LLMMessage row; without this hydration both vanish on
-                // hard refresh because MessageItem looks at message.toolCalls /
-                // message.agentThinkingSteps directly.
-                toolCalls: msg.toolCalls ?? msg.extra_data?.steps,
-                agentThinkingSteps: msg.agentThinkingSteps ?? msg.extra_data?.agentThinkingSteps,
-                generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
-                thinking: msg.thinking ?? msg.extra_data?.thinking,
-                truncated: msg.truncated ?? msg.extra_data?.truncated,
-                // Note: these hydrated agentThinkingSteps come from persisted DB extra_data (backend drain on agent complete).
-                // They render via MessageItem + AgentThinkingTrail but are *not* live-streamed steps.
-              }));
+              .map((msg) => {
+                const hydratedSteps = msg.toolCalls ?? msg.extra_data?.steps;
+                return hydrateOrchestratorFields({
+                  ...msg,
+                  isLocal: false,
+                  status: "persisted",
+                  // Hydrate fields that MessageItem reads as top-level props from
+                  // their persisted form inside extra_data. The backend saves
+                  // agentThinkingSteps and tool-call steps under extra_data on
+                  // the LLMMessage row; without this hydration both vanish on
+                  // hard refresh because MessageItem looks at message.toolCalls /
+                  // message.agentThinkingSteps directly.
+                  toolCalls: hydratedSteps,
+                  agentThinkingSteps: msg.agentThinkingSteps ?? msg.extra_data?.agentThinkingSteps,
+                  generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
+                  thinking: msg.thinking ?? msg.extra_data?.thinking,
+                  truncated: msg.truncated ?? msg.extra_data?.truncated,
+                  isUnifiedChat: msg.isUnifiedChat || Boolean(hydratedSteps && hydratedSteps.length),
+                  // extra_data does not currently store a top-level synthesized
+                  // flag; the last step in extra_data.steps carries it.
+                  synthesized: msg.synthesized
+                    ?? msg.extra_data?.synthesized
+                    ?? (Array.isArray(hydratedSteps) && hydratedSteps.some((s) => s?.synthesized === true)),
+                  // Note: these hydrated agentThinkingSteps come from persisted DB extra_data (backend drain on agent complete).
+                  // They render via MessageItem + AgentThinkingTrail but are *not* live-streamed steps.
+                });
+              });
 
             let allMessages = [...currentMessages, ...historyMessages];
             allMessages.sort((a, b) => {
@@ -2284,6 +2293,7 @@ const ChatPage = () => {
                   agentThinkingSteps: result.agentThinkingSteps || [],
                   thinking: result.thinking || "",
                   truncated: result.truncated === true,
+                  synthesized: result.synthesized === true,
                   iterations: result.iterations || 0,
                   budget: result.budget || budgetTelemetry,  // Phase 2.1 surface budget telemetry
                 };
@@ -2335,6 +2345,9 @@ const ChatPage = () => {
                           role: "assistant",
                           content: data.response || "",
                           isUnifiedChat: true,
+                          toolCalls: data.steps || [],
+                          synthesized: data.synthesized === true
+                            || (Array.isArray(data.steps) && data.steps.some((s) => s?.synthesized === true)),
                           timestamp: new Date().toISOString(),
                         },
                       ];

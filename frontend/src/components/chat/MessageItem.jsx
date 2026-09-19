@@ -28,6 +28,8 @@ import AgentResultDisplay from "./AgentResultDisplay";
 import { StatusChip } from "../../utils/familyColors";
 import ToolCallCard from "./ToolCallCard";
 import ThinkingCard from "./ThinkingCard";
+import SynthesizedAnswerChip from "./SynthesizedAnswerChip";
+import { isSynthesizedMessage, isSynthesizedStep } from "./synthesizedAnswer";
 import AgentThinkingTrail from "./AgentThinkingTrail";
 import OrchestratorPlanView from "../orchestrator/OrchestratorPlanView";
 import ImageLightbox from "../images/ImageLightbox";
@@ -565,6 +567,31 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
         {message.isUnifiedChat && message.toolCalls && message.toolCalls.length > 0 && (
           <Box sx={{ mb: 1 }}>
             {message.toolCalls.map((step, stepIdx) => (
+              isSynthesizedStep(step) ? (
+                <Box
+                  key={`step-${stepIdx}`}
+                  data-testid="synthesized-step"
+                  sx={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 1,
+                    mb: 0.75,
+                    mt: stepIdx === 0 ? 0 : 0.5,
+                    pl: 1,
+                    borderLeft: 2,
+                    borderColor: "divider",
+                    opacity: 0.9,
+                  }}
+                >
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ fontStyle: "italic", whiteSpace: "pre-wrap", fontSize: "0.7rem" }}
+                  >
+                    {step.thoughts?.trim() || ""}
+                  </Typography>
+                </Box>
+              ) : (
               <Box key={`step-${stepIdx}`}>
                 {/* Per-iteration thinking: the agent's reasoning for this step */}
                 {step.thoughts && step.thoughts.trim() && (
@@ -610,7 +637,14 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
                   />
                 ))}
               </Box>
+              )
             ))}
+          </Box>
+        )}
+
+        {!isUser && isSynthesizedMessage(message) && (
+          <Box sx={{ mb: 0.75 }}>
+            <SynthesizedAnswerChip />
           </Box>
         )}
 
@@ -812,6 +846,8 @@ MessageItem.propTypes = {
     messageType: PropTypes.string,
     thinking: PropTypes.string,
     truncated: PropTypes.bool,
+    synthesized: PropTypes.bool,
+    extra_data: PropTypes.object,
   }).isRequired,
   sessionId: PropTypes.string,
   onOrchestratorUpdate: PropTypes.func,

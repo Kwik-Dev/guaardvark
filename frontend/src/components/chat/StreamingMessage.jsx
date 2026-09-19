@@ -22,6 +22,8 @@ import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useAppStore } from "../../stores/useAppStore";
 import { BASE_URL } from "../../api/apiClient";
 import ToolCallCard from "./ToolCallCard";
+import { parseConsentApproval } from "./consentApproval";
+import SynthesizedAnswerChip from "./SynthesizedAnswerChip";
 import ThinkingCard from "./ThinkingCard";
 import AgentThinkingTrail from "./AgentThinkingTrail";
 import ImageLightbox from "../images/ImageLightbox";
@@ -77,6 +79,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
   const [images, setImages] = useState([]); // [{url, alt, caption}]
   const [lightbox, setLightbox] = useState(null);
   const [pendingApproval, setPendingApproval] = useState(false);
+  const [synthesized, setSynthesized] = useState(false);
   const mountedRef = useRef(true);
   const imagesRef = useRef([]); // Keep a ref for images to avoid stale closure in onComplete
   const logo = useAppStore((s) => s.systemLogo);
@@ -249,11 +252,18 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
       if (!mountedRef.current || data.session_id !== sessionIdRef.current) return;
       setPendingApproval(true);
       setToolCalls((prev) => {
-        const updated = [...prev];
         const approvalTools = new Set(data.tools || []);
-        return updated.map(tc => {
+        return prev.map((tc) => {
           if (tc.isPending && approvalTools.has(tc.tool)) {
-            return { ...tc, requiresApproval: true };
+            const parsed = parseConsentApproval(data, tc.tool, tc.params);
+            return {
+              ...tc,
+              requiresApproval: true,
+              params: parsed.params,
+              consent: parsed.consent,
+              consentImage: parsed.image,
+              consentPrompt: parsed.prompt,
+            };
           }
           return tc;
         });
@@ -283,6 +293,9 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
       }
       const isTruncated = data.truncated === true;
       setTruncated(isTruncated);
+      const isSynthesized = data.synthesized === true
+        || (Array.isArray(data.steps) && data.steps.some((s) => s && s.synthesized === true));
+      setSynthesized(isSynthesized);
       // The final answer call's reasoning is authoritative; the live
       // segments only stand in when chat:complete carries none.
       const finalThinking = typeof data.thinking === "string" && data.thinking
@@ -328,6 +341,14 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
               })),
             }]
           : [];
+        if (isSynthesized && !backendSteps) {
+          streamingSteps.push({
+            iteration: (data.iterations || streamingSteps.length) + 1,
+            thoughts: "",
+            tool_calls: [],
+            synthesized: true,
+          });
+        }
         debugLog('[StreamingMessage] CALLING onComplete prop with agentThinkingSteps.length=', agentStepsRef.current.length);
         onCompleteRef.current({
           content: data.response || "",
@@ -347,6 +368,7 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
           agentThinkingSteps: agentStepsRef.current,
           thinking: finalThinking,
           truncated: isTruncated,
+          synthesized: isSynthesized,
         });
       }
     });
@@ -544,6 +566,9 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
             sessionId={sessionId}
             outputChunks={tc.outputChunks}
             requiresApproval={tc.requiresApproval}
+            consent={tc.consent}
+            consentImage={tc.consentImage}
+            consentPrompt={tc.consentPrompt}
             onApproval={(approved) => chatService.sendToolApproval(sessionId, approved)}
           />
         ))}
@@ -606,6 +631,12 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
                 )}
               </Box>
             ))}
+          </Box>
+        )}
+
+        {synthesized && (
+          <Box sx={{ mb: content ? 0.75 : 0, mt: toolCalls.length > 0 ? 1 : 0 }}>
+            <SynthesizedAnswerChip />
           </Box>
         )}
 
