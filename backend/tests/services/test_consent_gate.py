@@ -1,0 +1,236 @@
+"""The identity tool's consent gate: a stored record, obtained through the card.
+
+``generate_identity`` runs only when a ``.consent`` record exists for the
+reference image (``backend.services.consent_records``). The chat's direct
+path pauses on the consent card, writes the record on approval, and answers
+with a refusal on decline; a caller's ``consented=true`` alone is never enough.
+"""
+
+import shutil
+
+import pytest
+
+import backend.services.consent_records as cr
+import backend.services.unified_chat_engine as uce
+from backend.services.agent_tools import ToolResult
+from backend.tools.image_tools import GenerateIdentityTool
+
+
+@pytest.fixture
+def face(tmp_path, monkeypatch):
+    """A reference image on disk, with the hash index and OUTPUT_DIR under tmp."""
+    monkeypatch.setattr(cr, "_hash_dir", lambda: str(tmp_path / "consent"))
+    import backend.config as cfg
+    monkeypatch.setattr(cfg, "OUTPUT_DIR", str(tmp_path / "outputs"))
+    p = tmp_path / "face.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"face-bytes" * 16)
+    return str(p)
+
+
+class _FakeGen:
+    calls = []
+
+    def generate_with_identity(self, **kw):
+        _FakeGen.calls.append(kw)
+        with open(kw["output_path"], "wb") as f:
+            f.write(b"png")
+        return kw["output_path"]
+
+
+@pytest.fixture
+def fake_generator(monkeypatch):
+    _FakeGen.calls = []
+    monkeypatch.setattr(
+        "backend.services.comfyui_image_generator.ComfyUIImageGenerator", _FakeGen,
+    )
+    return _FakeGen
+
+
+# ── consent_records ────────────────────────────────────────────────────────
+
+def test_record_is_a_sidecar_with_who_when_how(face):
+    assert cr.has_consent(face) is False
+    rec = cr.record_consent(face, "chat_approval", session_id="s1")
+    assert cr.has_consent(face) is True
+    stored = cr.consent_record(face)
+    assert stored["source"] == "chat_approval"
+    assert stored["session_id"] == "s1"
+    assert stored["sha256"] == rec["sha256"]
+    assert stored["recorded_at"]
+    import os
+    assert os.path.isfile(face + ".consent")
+
+
+def test_same_photo_at_a_new_path_is_still_consented(face, tmp_path):
+    """The chat writes each attachment to a fresh temp path; the hash copy covers it."""
+    cr.record_consent(face, "chat_approval")
+    again = tmp_path / "edit_src_other.png"
+    shutil.copyfile(face, again)
+    assert cr.has_consent(str(again)) is True
+    different = tmp_path / "someone_else.png"
+    different.write_bytes(b"other-bytes")
+    assert cr.has_consent(str(different)) is False
+
+
+def test_missing_file_has_no_consent(tmp_path):
+    assert cr.has_consent(str(tmp_path / "nope.png")) is False
+    with pytest.raises(FileNotFoundError):
+        cr.record_consent(str(tmp_path / "nope.png"), "ui_upload")
+
+
+# ── the tool ───────────────────────────────────────────────────────────────
+
+def test_tool_refuses_without_a_record_even_when_caller_says_consented(face, fake_generator):
+    result = GenerateIdentityTool().execute(prompt="a detective", image=face, consented=True)
+    assert result.success is False
+    assert result.metadata["needs_consent"] is True
+    assert result.metadata["reference_image"] == face
+    assert "consent" in result.error.lower()
+    assert fake_generator.calls == []
+
+
+def test_tool_runs_with_a_record(face, fake_generator):
+    cr.record_consent(face, "chat_approval")
+    result = GenerateIdentityTool().execute(prompt="a detective", image=face)
+    assert result.success is True, result.error
+    assert result.metadata["backend"] == "pulid-flux"
+    assert len(fake_generator.calls) == 1
+    assert fake_generator.calls[0]["image_path"] == face
+
+
+def test_tool_still_honours_an_explicit_consented_false(face, fake_generator):
+    cr.record_consent(face, "chat_approval")
+    result = GenerateIdentityTool().execute(prompt="a detective", image=face, consented=False)
+    assert result.success is False
+    assert "consented=false" in result.error
+    assert fake_generator.calls == []
+
+
+def test_tool_is_marked_for_the_consent_card():
+    tool = GenerateIdentityTool()
+    assert tool.requires_approval is True
+    assert tool.consent_gate is True
+    assert "right to use this person's likeness" in tool.approval_prompt
+
+
+# ── the chat direct path ───────────────────────────────────────────────────
+
+class _Registry:
+    def __init__(self):
+        self.tool = GenerateIdentityTool()
+        self.executions = []
+
+    def get_tool(self, name):
+        return self.tool if name == "generate_identity" else None
+
+    def execute_tool(self, name, **params):
+        self.executions.append((name, params))
+        return self.tool.execute(**params)
+
+
+def _engine(monkeypatch):
+    e = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+    e.registry = _Registry()
+    e._image_data = None
+    e.saved = []
+    e._save_message = lambda sid, role, content, extra_data=None: e.saved.append((role, content, extra_data))
+    monkeypatch.setattr(uce, "is_aborted", lambda session_id: False)
+    monkeypatch.setattr(uce, "APPROVAL_TIMEOUT_S", 0.2)
+    return e
+
+
+def _run_direct(e, face, answer):
+    """Drive the identity intercept; ``answer`` is what the card returns (None = silence)."""
+    events = []
+
+    def emit(name, payload):
+        events.append((name, payload))
+        if name == "chat:tool_approval_request" and answer is not None:
+            uce.set_approval_response(payload["session_id"], answer)
+
+    e._chat_image_source = lambda sid: face
+    result = e._try_named_image_direct("this person as a 1940s detective", "sess-c", emit, "req-1", {})
+    return result, events
+
+
+def _card(events):
+    cards = [p for n, p in events if n == "chat:tool_approval_request"]
+    return cards[0] if cards else None
+
+
+def test_direct_path_pauses_and_the_card_carries_the_consent_shape(face, fake_generator, monkeypatch):
+    e = _engine(monkeypatch)
+    result, events = _run_direct(e, face, True)
+    card = _card(events)
+    assert card is not None
+    assert card["consent"] is True
+    assert card["tools"] == ["generate_identity"]
+    detail = card["tool_details"][0]
+    assert detail["tool"] == "generate_identity"
+    assert detail["consent"] is True
+    assert detail["reference_image"] == face
+    assert "likeness" in detail["approval_prompt"]
+    assert detail["reasoning"] == detail["approval_prompt"]
+    assert "consented" not in detail["params"]
+    # The card came before the tool call, and the tool ran after approval.
+    names = [n for n, _ in events]
+    assert names.index("chat:tool_approval_request") < names.index("chat:tool_call")
+    assert result["success"] is True
+    assert len(e.registry.executions) == 1
+    assert "consented" not in e.registry.executions[0][1]
+
+
+def test_approval_writes_the_record_then_runs(face, fake_generator, monkeypatch):
+    e = _engine(monkeypatch)
+    assert cr.has_consent(face) is False
+    _run_direct(e, face, True)
+    rec = cr.consent_record(face)
+    assert rec["source"] == "chat_approval"
+    assert rec["session_id"] == "sess-c"
+    assert len(fake_generator.calls) == 1
+
+
+def test_decline_refuses_without_running(face, fake_generator, monkeypatch):
+    e = _engine(monkeypatch)
+    result, events = _run_direct(e, face, False)
+    assert result["success"] is False
+    assert "consent" in result["response"].lower()
+    assert cr.has_consent(face) is False
+    assert e.registry.executions == []
+    assert fake_generator.calls == []
+    names = [n for n, _ in events]
+    assert "chat:tool_call" not in names
+    tool_result = [p for n, p in events if n == "chat:tool_result"][0]
+    assert tool_result["result"]["needs_consent"] is True
+    assert tool_result["result"]["reference_image"] == face
+    assert [p for n, p in events if n == "chat:complete"][0]["response"] == result["response"]
+    assert e.saved[-1][0] == "assistant"
+
+
+def test_silence_counts_as_decline(face, fake_generator, monkeypatch):
+    e = _engine(monkeypatch)
+    result, _ = _run_direct(e, face, None)
+    assert result["success"] is False
+    assert e.registry.executions == []
+
+
+def test_a_recorded_photo_does_not_ask_again(face, fake_generator, monkeypatch):
+    cr.record_consent(face, "chat_approval")
+    e = _engine(monkeypatch)
+    result, events = _run_direct(e, face, None)
+    assert _card(events) is None
+    assert result["success"] is True
+    assert len(fake_generator.calls) == 1
+
+
+# ── the slash mapping ──────────────────────────────────────────────────────
+
+def test_identity_slash_no_longer_grants_consent():
+    from backend.services.slash_command_executor import resolve_slash_direct_tool
+
+    tool, params = resolve_slash_direct_tool({
+        "slash_command": "identity",
+        "slash_args": "a 1940s detective in the rain",
+    })
+    assert tool == "generate_identity"
+    assert params == {"prompt": "a 1940s detective in the rain"}
