@@ -102,44 +102,58 @@ class RepositoryAnalysisService:
         key_file_contents = RepositoryAnalysisService._read_key_files(all_files)
 
         # Generate LLM summary
-        summary = RepositoryAnalysisService._generate_llm_summary(
+        summary, summary_error = RepositoryAnalysisService._generate_llm_summary(
             folder.name, frameworks, languages, file_list_str, key_file_contents
         )
 
-        # Save metadata
+        # Save metadata. summary_status is how a caller tells a repository whose
+        # summary is still owed from one that has been analysed: a template
+        # standing in for the LLM's answer is indistinguishable from a real one
+        # once it is in the index, so nothing is indexed until the LLM answers.
         metadata = {
             "languages": languages,
             "frameworks": frameworks,
             "file_count": len(all_files),
             "analyzed_at": datetime.now().isoformat(),
             "analysis_version": "1.0",
+            "summary_status": "ok" if summary else "pending",
         }
+        if summary_error:
+            metadata["summary_error"] = summary_error
 
-        folder.description = summary
+        if summary:
+            folder.description = summary
+        else:
+            # A previous real summary, if any, stays: it is still the best
+            # description on record and still the copy in the index.
+            logger.warning(
+                "Repository summary for %s is pending: %s", folder.name, summary_error
+            )
         folder.repo_metadata = json.dumps(metadata)
         folder.is_repository = True
         db.session.commit()
 
         # Index summary for RAG
-        try:
-            add_text_to_index(
-                text=summary,
-                metadata={
-                    "type": "repository_summary",
-                    "folder_id": folder.id,
-                    "folder_name": folder.name,
-                    "folder_path": folder.path,
-                    "source": "repository_analysis",
-                    "content_type": "repository_summary",
-                },
-                # Re-analysing a repository must replace its previous summary, not
-                # add a second one. Both stay retrievable otherwise, and the stale
-                # one competes with the current at query time.
-                replace_where=["type", "folder_id"],
-            )
-            logger.info(f"Indexed repository summary for {folder.name}")
-        except Exception as e:
-            logger.error(f"Failed to index summary: {e}")
+        if summary:
+            try:
+                add_text_to_index(
+                    text=summary,
+                    metadata={
+                        "type": "repository_summary",
+                        "folder_id": folder.id,
+                        "folder_name": folder.name,
+                        "folder_path": folder.path,
+                        "source": "repository_analysis",
+                        "content_type": "repository_summary",
+                    },
+                    # Re-analysing a repository must replace its previous summary, not
+                    # add a second one. Both stay retrievable otherwise, and the stale
+                    # one competes with the current at query time.
+                    replace_where=["type", "folder_id"],
+                )
+                logger.info(f"Indexed repository summary for {folder.name}")
+            except Exception as e:
+                logger.error(f"Failed to index summary: {e}")
 
         # Build dependency graph
         try:
@@ -488,8 +502,14 @@ class RepositoryAnalysisService:
         languages: Dict[str, int],
         file_tree: str,
         key_files: Dict[str, str],
-    ) -> str:
-        """Generate an architectural summary using the local LLM."""
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Generate an architectural summary using the local LLM.
+
+        Returns (summary, None) on success and (None, reason) when the LLM did
+        not answer. There is deliberately no template fallback: a summary built
+        from the file list is indexed as `repository_summary` and retrieved with
+        the same confidence as a real one, and the reader cannot tell them apart.
+        """
         key_files_section = ""
         for fname, content in key_files.items():
             truncated = content[:2000] + "\n...(truncated)" if len(content) > 2000 else content
@@ -516,26 +536,24 @@ Provide:
 
 Be concise. Focus on what a developer needs to understand the codebase."""
 
+        # generate_text_basic answers None when no LLM is configured and "" when
+        # the call failed or came back empty; both mean the summary is still owed.
         try:
-            from backend.services.llm_service import LLMService
-            response = LLMService.generate(prompt)
-            if response and len(response.strip()) > 50:
-                return response.strip()
-            logger.warning("LLM returned empty/short response, using fallback")
+            from backend.utils.llm_service import generate_text_basic
+            response = generate_text_basic(prompt=prompt)
         except Exception as e:
-            logger.warning(f"LLM summary generation failed: {e}")
+            reason = f"LLM call failed: {e.__class__.__name__}: {str(e)[:200]}"
+            logger.warning("LLM summary generation failed for %s: %s", name, reason)
+            return None, reason
 
-        # Fallback: structured summary without LLM
-        top_dirs = sorted(
-            set(f.split("/")[0] for f in file_tree.splitlines() if "/" in f),
-        )[:10]
-        return (
-            f"Repository: {name}\n"
-            f"Frameworks: {', '.join(frameworks) if frameworks else 'Unknown'}\n"
-            f"Total Files: {sum(languages.values())}\n"
-            f"Languages: {json.dumps(languages)}\n"
-            f"Top Directories: {', '.join(top_dirs)}\n"
-        )
+        if response is None:
+            reason = "no LLM available"
+        elif len(response.strip()) <= 50:
+            reason = "LLM returned an empty or too-short response"
+        else:
+            return response.strip(), None
+        logger.warning("LLM summary generation failed for %s: %s", name, reason)
+        return None, reason
 
     @staticmethod
     def _read_key_files(documents: list) -> Dict[str, str]:

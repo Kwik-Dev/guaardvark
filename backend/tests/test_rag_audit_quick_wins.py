@@ -134,3 +134,123 @@ def test_manager_file_backend_loads_the_persisted_vectors(monkeypatch, tmp_path)
     load = [c for c in calls if c[0] == "from_defaults"]
     assert len(load) == 1
     assert "vector_store" not in load[0][1]
+
+
+# --------------------------------------------------------------------------
+# R3. A repository summary is the LLM's answer or it is not indexed at all
+# --------------------------------------------------------------------------
+def _summary_args():
+    return ("repo", ["Flask"], {".py": 3}, "backend/app.py\nbackend/models.py", {})
+
+
+def _llm(monkeypatch, behaviour):
+    import backend.utils.llm_service as llm
+
+    def _generate(prompt=None, llm=None, is_json_response=False):
+        if isinstance(behaviour, Exception):
+            raise behaviour
+        return behaviour
+
+    monkeypatch.setattr(llm, "generate_text_basic", _generate)
+
+
+def test_summary_is_none_with_a_reason_when_the_llm_raises(monkeypatch):
+    from backend.services.repository_analysis_service import RepositoryAnalysisService as S
+
+    _llm(monkeypatch, ConnectionError("ollama down"))
+    summary, reason = S._generate_llm_summary(*_summary_args())
+    assert summary is None
+    assert "ConnectionError" in reason and "ollama down" in reason
+
+
+@pytest.mark.parametrize("answer, expected", [
+    (None, "no LLM available"),
+    ("", "empty or too-short"),
+    ("too short", "empty or too-short"),
+])
+def test_summary_is_none_when_the_llm_does_not_answer(monkeypatch, answer, expected):
+    from backend.services.repository_analysis_service import RepositoryAnalysisService as S
+
+    _llm(monkeypatch, answer)
+    summary, reason = S._generate_llm_summary(*_summary_args())
+    assert summary is None
+    assert expected in reason
+
+
+def test_summary_is_the_llm_answer_when_it_answers(monkeypatch):
+    from backend.services.repository_analysis_service import RepositoryAnalysisService as S
+
+    _llm(monkeypatch, "  " + "A Flask monolith with a Celery worker. " * 3 + "  ")
+    summary, reason = S._generate_llm_summary(*_summary_args())
+    assert summary.startswith("A Flask monolith") and not summary.endswith(" ")
+    assert reason is None
+
+
+def test_no_template_summary_remains(monkeypatch):
+    """The template ("Repository: <name> / Frameworks: ... / Top Directories: ...")
+    was indexed as repository_summary whenever Ollama was down, and nothing in the
+    index distinguished it from a real one."""
+    import inspect
+    from backend.services import repository_analysis_service as ras
+
+    src = inspect.getsource(ras.RepositoryAnalysisService._generate_llm_summary)
+    assert "Top Directories" not in src
+    assert "backend.services.llm_service" not in src, "that module is empty; the import always failed"
+
+
+class _FakeFolder:
+    def __init__(self):
+        self.id = 4
+        self.name = "repo"
+        self.path = "repos/repo"
+        self.description = "the real summary from last week"
+        self.repo_metadata = None
+        self.is_repository = False
+
+
+def _analyze(monkeypatch, llm_behaviour):
+    import json
+    from types import SimpleNamespace
+    from backend.services import repository_analysis_service as ras
+
+    folder = _FakeFolder()
+    indexed = []
+    _llm(monkeypatch, llm_behaviour)
+    monkeypatch.setattr(ras, "db", SimpleNamespace(session=SimpleNamespace(
+        get=lambda model, fid: folder if fid == 4 else None,
+        commit=lambda: None,
+    )))
+    monkeypatch.setattr(ras, "add_text_to_index", lambda **kw: indexed.append(kw) or True)
+    S = ras.RepositoryAnalysisService
+    monkeypatch.setattr(S, "_get_all_files_recursive", staticmethod(lambda folder: []))
+    monkeypatch.setattr(S, "_read_key_files", staticmethod(lambda docs: {}))
+    monkeypatch.setattr(S, "build_dependency_graph", staticmethod(lambda fid: {}))
+    monkeypatch.setattr(S, "generate_repository_map", staticmethod(lambda fid, budget=4096: ""))
+
+    metadata = S.analyze_repository(4)
+    return folder, indexed, json.loads(folder.repo_metadata), metadata
+
+
+def test_analyze_repository_records_pending_and_indexes_nothing_when_the_llm_is_down(monkeypatch):
+    folder, indexed, stored, returned = _analyze(monkeypatch, RuntimeError("ollama down"))
+
+    assert [kw["metadata"]["type"] for kw in indexed] == [], "a summary was indexed without an LLM"
+    assert stored["summary_status"] == "pending"
+    assert "ollama down" in stored["summary_error"]
+    assert returned["summary_status"] == "pending"
+    # The last real summary is still the best description on record.
+    assert folder.description == "the real summary from last week"
+    assert folder.is_repository is True
+
+
+def test_analyze_repository_indexes_the_llm_summary_when_it_answers(monkeypatch):
+    text = "A Flask monolith with a Celery worker. " * 3
+    folder, indexed, stored, _ = _analyze(monkeypatch, text)
+
+    summaries = [kw for kw in indexed if kw["metadata"]["type"] == "repository_summary"]
+    assert len(summaries) == 1
+    assert summaries[0]["text"] == text.strip()
+    assert summaries[0]["metadata"]["folder_id"] == 4
+    assert summaries[0]["replace_where"] == ["type", "folder_id"]
+    assert stored["summary_status"] == "ok" and "summary_error" not in stored
+    assert folder.description == text.strip()
