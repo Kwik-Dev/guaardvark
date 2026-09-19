@@ -646,8 +646,18 @@ class PluginManager:
                 return {'success': False, 'error': 'Plugin is disabled. Enable it first.'}
 
         if self._plugin_status.get(plugin_id) == PluginStatus.RUNNING:
-            self._broadcast_plugins_status(f"start:{plugin_id}:already_running")
-            return {'success': True, 'message': 'Plugin already running'}
+            # The status is this process's memory and outlives a service that
+            # died, so for a service plugin the flag is only worth trusting if
+            # the service still answers. Without the probe, Start reported
+            # success with nothing listening on the port.
+            if metadata.type != 'service' or self._check_service_running(metadata):
+                self._broadcast_plugins_status(f"start:{plugin_id}:already_running")
+                return {'success': True, 'message': 'Plugin already running'}
+            logger.warning(
+                f"Plugin '{plugin_id}' was marked running but its health endpoint "
+                f"is not answering — starting it"
+            )
+            self._plugin_status[plugin_id] = PluginStatus.STOPPED
 
         # Non-service plugins (e.g. lora_trainer — a TOOL the celery worker invokes
         # on demand) have NO long-running server to launch or health-check. "Starting"
