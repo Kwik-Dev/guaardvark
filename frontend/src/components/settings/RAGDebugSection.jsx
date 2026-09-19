@@ -33,6 +33,7 @@ import {
   getHealthColor,
   getHealthPercentage,
 } from "../../api/ragDebugService";
+import { Cluster, DashboardStrip, DashboardTile } from "./ui";
 
 // Modal components
 import TestRetrievalModal from "../modals/TestRetrievalModal";
@@ -43,7 +44,7 @@ const RAGDebugSection = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [systemHealth, setSystemHealth] = useState(null);
-  const [_performanceMetrics, setPerformanceMetrics] = useState(null);
+  const [performanceMetrics, setPerformanceMetrics] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
 
   // Modal states
@@ -62,7 +63,7 @@ const RAGDebugSection = () => {
       ]);
 
       setSystemHealth(healthResponse.data);
-      setPerformanceMetrics(metricsResponse.data);
+      setPerformanceMetrics(metricsResponse.data ?? metricsResponse);
       setLastUpdated(new Date());
     } catch (err) {
       console.error("Failed to fetch RAG data:", err);
@@ -225,6 +226,48 @@ const RAGDebugSection = () => {
               </Stack>
             </Paper>
           </Grid>
+
+          {performanceMetrics && (
+            <Grid item xs={12}>
+              <Cluster
+                label="Retrieval window"
+                note={performanceMetrics.time_period || "Last 24 hours"}
+              >
+                <DashboardStrip>
+                  <DashboardTile
+                    label="Retrievals"
+                    value={performanceMetrics.retrieval_stats?.total_retrievals ?? 0}
+                    sub="count"
+                  />
+                  <DashboardTile
+                    label="Avg retrieval"
+                    value={(performanceMetrics.retrieval_stats?.avg_retrieval_time ?? 0).toFixed(2)}
+                    sub="ms"
+                  />
+                  <DashboardTile
+                    label="Avg nodes"
+                    value={(performanceMetrics.retrieval_stats?.avg_nodes_retrieved ?? 0).toFixed(1)}
+                    sub="nodes"
+                  />
+                  <DashboardTile
+                    label="Avg similarity"
+                    value={(performanceMetrics.retrieval_stats?.avg_similarity_score ?? 0).toFixed(3)}
+                    sub="score"
+                  />
+                  <DashboardTile
+                    label="Avg relevance"
+                    value={(performanceMetrics.context_quality_stats?.avg_relevance_score ?? 0).toFixed(3)}
+                    sub="score"
+                  />
+                  <DashboardTile
+                    label="Assessments"
+                    value={performanceMetrics.context_quality_stats?.total_assessments ?? 0}
+                    sub="count"
+                  />
+                </DashboardStrip>
+              </Cluster>
+            </Grid>
+          )}
 
           {(
             <Grid item xs={12}>

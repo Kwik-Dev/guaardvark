@@ -24,6 +24,7 @@ export default function UncleClaudeSection() {
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
+  const [scanInBackground, setScanInBackground] = useState(false);
   const [fixesOpen, setFixesOpen] = useState(false);
 
   const fetchStatus = useCallback(async () => {
@@ -86,6 +87,7 @@ export default function UncleClaudeSection() {
   };
 
   const handleOpenScan = () => {
+    setScanInBackground(false);
     setScanOpen(true);
   };
 
@@ -93,6 +95,7 @@ export default function UncleClaudeSection() {
   // fresh closure on every render would re-dispatch the scan.
   const handleScanComplete = useCallback((run) => {
     fetchStatus();
+    setScanInBackground(false);
     const proposedAnything =
       (run?.changes_made && run.changes_made.length > 0) ||
       run?.status === "success";
@@ -198,7 +201,7 @@ export default function UncleClaudeSection() {
                 ? "Turn on self-improvement first"
                 : siStatus?.codebase_locked
                   ? "Unlock the codebase first"
-                  : "Runs the checks now; takes a few minutes and cannot be cancelled."
+                  : "Runs the checks now. Cancel hides this view; the scan keeps running."
             }
           >
             Run self-check
@@ -213,11 +216,15 @@ export default function UncleClaudeSection() {
             : "No runs yet."}
           {siStatus?.codebase_locked ? " Codebase is locked: autonomous edits are blocked." : ""}
         </Hint>
+        {scanInBackground && (
+          <StatusPill tone="info" label="Scan continues in the background" />
+        )}
       </Cluster>
 
       <ScanProgressModal
         open={scanOpen}
         onClose={() => setScanOpen(false)}
+        onBackground={() => setScanInBackground(true)}
         onComplete={handleScanComplete}
       />
       <FixesModal

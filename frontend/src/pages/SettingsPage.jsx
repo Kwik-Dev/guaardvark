@@ -156,6 +156,12 @@ const SettingsPage = () => {
     train_profiles: [],
     stills_profiles: [],
   });
+  const lastSavedLoraRef = useRef({});
+  const [loraSaveState, setLoraSaveState] = useState({
+    zimage: "saved",
+    sdxl: "saved",
+    flux: "saved",
+  });
   const [behaviorLearningEnabled, setBehaviorLearningEnabled] = useState(
     getInitialBehaviorLearning,
   );
@@ -1135,6 +1141,10 @@ const SettingsPage = () => {
         const result = await apiService.getMediaModels();
         const data = result?.data ?? result;
         if (data && typeof data === "object" && !data.error) {
+          if (data.character_lora_strength && typeof data.character_lora_strength === "object") {
+            lastSavedLoraRef.current = { ...data.character_lora_strength };
+            setLoraSaveState({ zimage: "saved", sdxl: "saved", flux: "saved" });
+          }
           setMediaModelsState((prev) => ({
             ...prev,
             stills_model: data.stills_model || prev.stills_model,
@@ -2075,20 +2085,30 @@ const SettingsPage = () => {
     }
   };
 
-  const saveLoraStrength = async (field, label, raw) => {
+  const saveLoraStrength = async (key, field, label, raw) => {
     const v = parseFloat(raw);
     if (Number.isNaN(v)) return;
+    if (lastSavedLoraRef.current[key] === v) {
+      setLoraSaveState((s) => ({ ...s, [key]: "saved" }));
+      return;
+    }
     try {
       const res = await apiService.setMediaModels({ [field]: v });
+      if (res?.error) throw new Error(res.error);
       const data = res?.data ?? res;
       if (data?.character_lora_strength) {
         setMediaModelsState((p) => ({
           ...p,
           character_lora_strength: data.character_lora_strength,
         }));
+        lastSavedLoraRef.current = { ...data.character_lora_strength };
+      } else {
+        lastSavedLoraRef.current = { ...lastSavedLoraRef.current, [key]: v };
       }
+      setLoraSaveState((s) => ({ ...s, [key]: "saved" }));
       showMessage(`${label} LoRA strength: ${v}`, "success");
     } catch (err) {
+      setLoraSaveState((s) => ({ ...s, [key]: "error" }));
       showMessage(err.message || "Failed to save LoRA strength", "error");
     }
   };
@@ -2892,29 +2912,49 @@ const SettingsPage = () => {
               def: 0.9,
             },
           ].map(({ key, label, field, def }) => (
-            <TextField
-              key={key}
-              size="small"
-              type="number"
-              className="grow"
-              label={label}
-              inputProps={{ min: 0, max: 1.5, step: 0.05 }}
-              value={mediaModels.character_lora_strength?.[key] ?? def}
-              onChange={(e) => {
-                const v = e.target.value;
-                setMediaModelsState((p) => ({
-                  ...p,
-                  character_lora_strength: {
-                    ...(p.character_lora_strength || {}),
-                    [key]: v,
-                  },
-                }));
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.target.blur();
-              }}
-              onBlur={(e) => saveLoraStrength(field, label, e.target.value)}
-            />
+            <Box key={key} className="grow" sx={{ display: "flex", flexDirection: "column", gap: 0.5, minWidth: 0 }}>
+              <TextField
+                size="small"
+                type="number"
+                label={label}
+                inputProps={{ min: 0, max: 1.5, step: 0.05 }}
+                value={mediaModels.character_lora_strength?.[key] ?? def}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setMediaModelsState((p) => ({
+                    ...p,
+                    character_lora_strength: {
+                      ...(p.character_lora_strength || {}),
+                      [key]: v,
+                    },
+                  }));
+                  setLoraSaveState((s) => ({ ...s, [key]: "unsaved" }));
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    saveLoraStrength(key, field, label, e.target.value);
+                  }
+                }}
+                onBlur={(e) => saveLoraStrength(key, field, label, e.target.value)}
+              />
+              <StatusPill
+                tone={
+                  loraSaveState[key] === "saved"
+                    ? "ok"
+                    : loraSaveState[key] === "error"
+                      ? "error"
+                      : "warn"
+                }
+                label={
+                  loraSaveState[key] === "saved"
+                    ? "saved"
+                    : loraSaveState[key] === "error"
+                      ? "not saved"
+                      : "unsaved"
+                }
+              />
+            </Box>
           ))}
         </Line>
       </Cluster>

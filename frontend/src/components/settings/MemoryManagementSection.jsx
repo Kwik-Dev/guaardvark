@@ -27,6 +27,7 @@ import SearchIcon from "@mui/icons-material/Search";
 import MemoryIcon from "@mui/icons-material/Memory";
 import SettingsSection from "./SettingsSection";
 import LessonSummaryModal from "../modals/LessonSummaryModal";
+import { ActionButton, ChoiceChips, ConfirmActionDialog, Hint } from "./ui";
 
 // Compact spreadsheet-style timestamp: "MM/DD HH:MM:SS". Full ISO available
 // on hover via title attribute for forensic detail.
@@ -102,6 +103,10 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
   const [lessonEdit, setLessonEdit] = useState(null); // { memoryId, title, steps }
   const [editContent, setEditContent] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
+  const [mergePickerOpen, setMergePickerOpen] = useState(false);
+  const [mergeTargetId, setMergeTargetId] = useState("");
+  const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
+  const [merging, setMerging] = useState(false);
 
   const openEditForMemory = (memory) => {
     if (memory?.source === "lesson_summary") {
@@ -180,6 +185,13 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     fetchMemories();
   }, []);
 
+  useEffect(() => {
+    if (editTarget) return;
+    setMergePickerOpen(false);
+    setMergeConfirmOpen(false);
+    setMergeTargetId("");
+  }, [editTarget]);
+
   const handleSearch = (e) => {
     e.preventDefault();
     fetchMemories(searchQuery);
@@ -222,18 +234,21 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     }
   };
 
-  const handleMergeDuplicate = async () => {
+  const handleMergeDuplicate = () => {
     if (!editTarget?.id) return;
-    const targetId = window.prompt("Merge this memory into target memory ID:");
-    if (!targetId || targetId === editTarget.id) return;
-    const target = memories.find((m) => m.id === targetId);
-    if (!target) {
-      alert("Target memory is not loaded in the current list.");
-      return;
-    }
-    const mergedContent = `${target.content}\n\nMerged duplicate ${editTarget.id}: ${editContent.trim()}`;
+    setMergeTargetId("");
+    setMergePickerOpen(true);
+  };
+
+  const mergeCandidates = memories.filter((m) => String(m.id) !== String(editTarget?.id));
+  const mergeTarget = memories.find((m) => String(m.id) === String(mergeTargetId));
+
+  const confirmMerge = async () => {
+    if (!editTarget?.id || !mergeTarget) return;
+    setMerging(true);
+    const mergedContent = `${mergeTarget.content}\n\nMerged duplicate ${editTarget.id}: ${editContent.trim()}`;
     try {
-      const updateRes = await fetch(`${BASE_URL}/memory/${target.id}`, {
+      const updateRes = await fetch(`${BASE_URL}/memory/${mergeTarget.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: mergedContent }),
@@ -244,10 +259,15 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
         return;
       }
       await handleStatusChange(editTarget, "archived");
-      setMemories((prev) => prev.map((m) => (m.id === target.id ? updateData.memory : m)));
+      setMemories((prev) => prev.map((m) => (m.id === mergeTarget.id ? updateData.memory : m)));
       setEditTarget(null);
+      setMergeConfirmOpen(false);
+      setMergePickerOpen(false);
+      setMergeTargetId("");
     } catch (err) {
       alert(err.message);
+    } finally {
+      setMerging(false);
     }
   };
 
@@ -590,9 +610,9 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           >
             Delete
           </Button>
-          <Button onClick={handleMergeDuplicate} disabled={savingEdit}>
+          <ActionButton onClick={handleMergeDuplicate} disabled={savingEdit}>
             Merge Duplicate
-          </Button>
+          </ActionButton>
           <Button onClick={() => setEditTarget(null)} disabled={savingEdit}>Cancel</Button>
           <Button
             onClick={handleSavePlainEdit}
@@ -603,6 +623,65 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           </Button>
         </DialogActions>
       </Dialog>
+
+      <Dialog
+        open={mergePickerOpen}
+        onClose={() => !merging && setMergePickerOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Merge into another memory</DialogTitle>
+        <DialogContent>
+          <Hint sx={{ display: "block", mb: 1.5 }}>
+            Pick the memory to keep. This one is appended to it, then archived.
+          </Hint>
+          {mergeCandidates.length === 0 ? (
+            <Typography variant="body2" color="text.secondary">
+              No other memories are loaded to merge into.
+            </Typography>
+          ) : (
+            <Box sx={{ maxHeight: 280, overflow: "auto", py: 0.5 }}>
+              <ChoiceChips
+                ariaLabel="Merge target memory"
+                value={mergeTargetId}
+                onChange={setMergeTargetId}
+                options={mergeCandidates.map((m) => ({
+                  value: String(m.id),
+                  label: ((m.content || "").trim().slice(0, 72) || `#${m.id}`) + (m.content && m.content.length > 72 ? "…" : ""),
+                  tooltip: m.content,
+                }))}
+              />
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <ActionButton onClick={() => setMergePickerOpen(false)} disabled={merging}>
+            Cancel
+          </ActionButton>
+          <ActionButton
+            kind="destructive"
+            disabled={!mergeTargetId || merging}
+            onClick={() => setMergeConfirmOpen(true)}
+          >
+            Merge
+          </ActionButton>
+        </DialogActions>
+      </Dialog>
+
+      <ConfirmActionDialog
+        open={mergeConfirmOpen}
+        title="Merge this memory"
+        description="The chosen memory keeps its text with this one appended. This memory is archived."
+        facts={[
+          { label: "Source", value: (editContent || editTarget?.content || "").slice(0, 120) || `#${editTarget?.id}` },
+          { label: "Target", value: (mergeTarget?.content || "").slice(0, 120) || `#${mergeTargetId}` },
+        ]}
+        keeps="Other memories, and the target's type and tags"
+        confirmLabel="Merge"
+        busy={merging}
+        onConfirm={confirmMerge}
+        onClose={() => !merging && setMergeConfirmOpen(false)}
+      />
 
       {/* Structured step editor for lesson_summary memories */}
       <LessonSummaryModal
