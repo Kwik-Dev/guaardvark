@@ -64,6 +64,14 @@ from backend.services.video_model_registry import FAMILY_SPECS as _FAMILY_SPECS
 VRAM_WAIT_ENV = "GUAARDVARK_VIDEO_VRAM_WAIT_S"
 VRAM_WAIT_DEFAULT_S = 600.0
 
+# Consecutive missed liveness probes (~4 s each: HTTP timeout + 2 s sleep)
+# before a queued prompt is declared orphaned. Large model loads legitimately
+# exceed five: loading a 20 GB+ transformer on a 16 GB card stalls Comfy's
+# HTTP server well past 20 s (observed 247 s renders with ~30 s silent loads
+# on an RTX 5080 / 30 GB RAM box), and the 22B LTX loads were falsely failed
+# at 5. Thirty tolerates about two minutes of silence.
+DEAD_PROBE_LIMIT = 30
+
 
 def _looks_like_blank_video(video_path) -> Optional[str]:
     """Zero-placebo guard for the ComfyUI/Wan path (issue #36 Phase 3).
@@ -1587,11 +1595,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         idle_kill_s = 90
         idle_since: Optional[float] = None
         consecutive_dead = 0
-        # ~4s per missed probe (HTTP timeout + 2s sleep). Loading a 20GB+
-        # transformer on a 16GB card stalls Comfy's HTTP server well past 20s
-        # (observed 247s renders with ~30s silent loads on an RTX 5080 / 30GB
-        # RAM box), so tolerate ~2 minutes before declaring the prompt orphaned.
-        dead_probe_limit = 30
+        dead_probe_limit = DEAD_PROBE_LIMIT
 
         while True:
             now = time.time()
