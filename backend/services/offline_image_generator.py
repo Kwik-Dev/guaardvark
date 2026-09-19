@@ -632,6 +632,19 @@ class OfflineImageGenerator:
             "its download are fine. Driver details: journalctl -k -b | grep -i xid"
         )
 
+    def get_status(self) -> Dict[str, Any]:
+        """Lightweight operational status of the image generator.
+
+        Returns device, current loaded model, pipeline state, and any
+        recorded GPU fault.
+        """
+        return {
+            "device": self._device,
+            "current_model": self._current_model,
+            "pipeline_loaded": self._pipeline is not None,
+            "gpu_fault": self._gpu_fault,
+        }
+
     def _load_failure_reason(self, model_key: str, model_id: str) -> str:
         """Explain a load failure in terms the user can act on."""
         fault = self.gpu_fault_message()
