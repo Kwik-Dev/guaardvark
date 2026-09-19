@@ -1817,18 +1817,35 @@ class OutpaintImageTool(BaseTool):
 
 
 class GenerateIdentityTool(BaseTool):
-    """New scene from a face photo (PuLID-FLUX). Consent required."""
+    """New scene from a face photo (PuLID-FLUX). Consent is a stored record.
+
+    The likeness gate is a ``.consent`` sidecar next to the resolved reference
+    image (``backend.services.consent_records``), written only by the chat
+    consent card or a UI upload. A ``consented`` argument from a caller is
+    validated but is not proof: without the record the tool refuses with
+    ``needs_consent`` in its metadata so the caller can obtain one.
+    """
 
     name = "generate_identity"
     read_only = False
     destructive = False
+    # The chat engine pauses on this tool and shows a consent card; on approval
+    # it records consent for the reference image and then runs the tool.
+    requires_approval = True
+    consent_gate = True
+    approval_prompt = (
+        "Confirm you have the right to use this person's likeness: it is your "
+        "own photo, or a Cast subject you uploaded. Guaardvark keeps a record "
+        "next to the photo so it will not ask again for the same image."
+    )
     description = (
         "Generate a brand-new image that keeps the face from an attached photo. "
         "Use when the user wants this person in a new scene, outfit, or era "
-        "('this person as a 1940s detective'). Requires consented=true — only a "
-        "likeness the user has the right to use (their own photo or a Cast subject "
-        "they uploaded). Not a face swap onto an existing poster; not an instruction "
-        "edit of the same photo (use edit_image for that). Needs pulid-flux + flux-dev."
+        "('this person as a 1940s detective'). Runs only for a likeness the user "
+        "has confirmed they may use (their own photo or a Cast subject they "
+        "uploaded); the chat asks for that confirmation. Not a face swap onto an "
+        "existing poster; not an instruction edit of the same photo (use edit_image "
+        "for that). Needs pulid-flux + flux-dev."
     )
     parameters = {
         "prompt": ToolParameter(
@@ -1843,26 +1860,41 @@ class GenerateIdentityTool(BaseTool):
         ),
         "consented": ToolParameter(
             name="consented", type="bool",
-            description="Must be true. Confirm the user has the right to use this likeness.",
-            required=True,
+            description=(
+                "Caller's statement that the user may use this likeness. Not proof on "
+                "its own: the tool runs only when a consent record exists for the image."
+            ),
+            required=False, default=True,
         ),
         "width": ToolParameter(name="width", type="int", required=False, default=768),
         "height": ToolParameter(name="height", type="int", required=False, default=1024),
         "steps": ToolParameter(name="steps", type="int", required=False, default=20),
     }
 
-    def execute(self, prompt: str, consented: bool = False, image: str = "",
+    def execute(self, prompt: str, consented: bool = True, image: str = "",
                 width: int = 768, height: int = 1024, steps: int = 20, **kwargs) -> ToolResult:
+        from backend.services.consent_records import has_consent
         consented = str(consented).lower() in ("1", "true", "yes")
         if not consented:
             return ToolResult(
                 success=False,
-                error="generate_identity needs consented=true. Only run it for a likeness "
-                      "the user has the right to use (their photo or a Cast subject they uploaded).",
+                error="generate_identity was called with consented=false. Only run it for a "
+                      "likeness the user has the right to use (their photo or a Cast subject "
+                      "they uploaded).",
             )
         src = EditImageTool()._resolve_image(image)
         if not src:
             return ToolResult(success=False, error="Attach a face photo, then describe the new scene.")
+        if not has_consent(src):
+            return ToolResult(
+                success=False,
+                error=(
+                    "No consent record for this reference image. The user must confirm "
+                    "they have the right to use this likeness (in chat, approve the consent "
+                    "card; the record is stored next to the photo)."
+                ),
+                metadata={"needs_consent": True, "reference_image": src},
+            )
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
             output_path, filename = _chat_png_path("identity")

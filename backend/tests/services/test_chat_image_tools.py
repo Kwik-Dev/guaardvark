@@ -72,12 +72,22 @@ def test_identity_prompt_strips_chrome():
     assert identity_prompt_from_message("this person as a 1940s detective") == "a 1940s detective"
 
 
-def test_generate_identity_requires_consent():
+def test_generate_identity_requires_a_consent_record(tmp_path, monkeypatch):
     result = GenerateIdentityTool().execute(prompt="a detective", consented=False)
     assert result.success is False
     assert "consented" in (result.error or "").lower()
     result_str = GenerateIdentityTool().execute(prompt="a detective", consented="false")
     assert result_str.success is False
+    # consented=true is not proof: without the stored record the tool refuses
+    # and says what is missing (the full gate is in test_consent_gate.py).
+    import backend.services.consent_records as cr
+    monkeypatch.setattr(cr, "_hash_dir", lambda: str(tmp_path / "consent"))
+    face = tmp_path / "face.png"
+    face.write_bytes(b"png-bytes")
+    result = GenerateIdentityTool().execute(prompt="a detective", image=str(face), consented=True)
+    assert result.success is False
+    assert result.metadata["needs_consent"] is True
+    assert result.metadata["reference_image"] == str(face)
 
 
 def test_pin_image_edit_tools_when_attached():
@@ -138,7 +148,7 @@ def test_named_image_direct_identity_not_edit():
     )
     assert result is not None
     assert engine._calls[0][0] == "generate_identity"
-    assert engine._calls[0][1]["consented"] is True
+    assert "consented" not in engine._calls[0][1]  # the card decides, not the intercept
 
     engine._calls.clear()
     skipped = engine._try_named_image_direct(

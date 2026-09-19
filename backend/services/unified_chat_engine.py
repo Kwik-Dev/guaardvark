@@ -191,6 +191,66 @@ def set_approval_response(
         if session_id in _approval_events:
             _approval_events[session_id].set()
 
+
+# How long a turn waits for the approval card before treating silence as a
+# decline. Tests shorten it.
+APPROVAL_TIMEOUT_S = 300
+
+
+def _consent_reference(tool, params: Dict[str, Any]) -> Optional[str]:
+    """The reference image a consent-gated tool would use, or None."""
+    if not getattr(tool, "consent_gate", False):
+        return None
+    ref = params.get("image") or ""
+    return ref or None
+
+
+def _tool_needs_approval_card(tool, tool_name: str, params: Dict[str, Any], preapproved: set) -> bool:
+    """Whether this call must pause for the card.
+
+    A consent-gated tool whose reference image already has a consent record
+    does not ask again: the record is the durable answer.
+    """
+    if not tool or not getattr(tool, "requires_approval", False) or tool_name in preapproved:
+        return False
+    if getattr(tool, "consent_gate", False):
+        ref = _consent_reference(tool, params)
+        if ref:
+            from backend.services.consent_records import has_consent
+            if has_consent(ref):
+                return False
+    return True
+
+
+def _approval_detail(tool, tool_name: str, params: Dict[str, Any], reasoning: str = "") -> Dict[str, Any]:
+    """One entry of ``tool_details`` in ``chat:tool_approval_request``.
+
+    Consent-gated tools add ``consent: True``, ``approval_prompt`` and
+    ``reference_image`` so the UI renders the consent wording instead of the
+    generic approve card.
+    """
+    detail: Dict[str, Any] = {"tool": tool_name, "params": params, "reasoning": reasoning or ""}
+    if getattr(tool, "consent_gate", False):
+        detail["consent"] = True
+        detail["approval_prompt"] = getattr(tool, "approval_prompt", "") or ""
+        detail["reference_image"] = _consent_reference(tool, params)
+        if not detail["reasoning"]:
+            detail["reasoning"] = detail["approval_prompt"]
+    return detail
+
+
+def _record_approved_consent(tool, params: Dict[str, Any], session_id: str) -> None:
+    """After an approved card, store consent for the reference image."""
+    ref = _consent_reference(tool, params)
+    if not ref:
+        return
+    try:
+        from backend.services.consent_records import record_consent
+        record_consent(ref, "chat_approval", session_id=session_id)
+    except Exception as exc:
+        logger.warning("consent record not written for %s: %s", ref, exc)
+
+
 def set_abort_flag(session_id: str):
     """Signal that a session should abort its current generation."""
     with _abort_lock:
@@ -2386,57 +2446,28 @@ class UnifiedChatEngine:
             _pre = _preapproved_tool_names(session_id)
             approval_jobs = []
             approval_details = []
+            approval_pending = []
             for tc, tool_name, params in tool_jobs:
                 tool = self.registry.get_tool(tool_name)
-                if tool and tool.requires_approval and tool_name not in _pre:
+                if _tool_needs_approval_card(tool, tool_name, params, _pre):
                     approval_jobs.append(tool_name)
-                    approval_details.append({
-                        "tool": tool_name,
-                        "params": params,
-                        "reasoning": tc.reasoning,
-                    })
+                    approval_details.append(_approval_detail(tool, tool_name, params, tc.reasoning))
+                    approval_pending.append((tool, params))
 
             if approval_jobs and not is_aborted(session_id):
-                logger.info(f"Session {session_id} waiting for approval of: {approval_jobs}")
-                emit_fn("chat:thinking", {
-                    "iteration": iteration, 
-                    "status": f"Waiting for approval to run: {', '.join(approval_jobs)}..."
-                })
-                with _approval_lock:
-                    _approval_batch_meta[session_id] = {
-                        "tools": list(approval_jobs),
-                        "iteration": iteration,
-                        "request_id": request_id,
-                        "approved": None,
-                        "scope": None,
-                    }
-                emit_fn("chat:tool_approval_request", {
-                    "tools": approval_jobs,
-                    "tool_details": approval_details,
-                    "iteration": iteration,
-                    "available_scopes": ["once", "session", "task"],
-                })
-                
-                # Create and wait on event
-                event = threading.Event()
-                with _approval_lock:
-                    _approval_events[session_id] = event
-                    _approval_responses.pop(session_id, None)
-                
-                # Wait for up to 5 minutes for user response
-                event.wait(timeout=300)
-                
-                with _approval_lock:
-                    _approval_events.pop(session_id, None)
-                    approved = _approval_responses.pop(session_id, False)
-                
+                approved = self._await_tool_approval(
+                    session_id, emit_fn, request_id, iteration, approval_details,
+                )
+                if approved:
+                    for tool, params in approval_pending:
+                        _record_approved_consent(tool, params, session_id)
+
                 if not approved:
-                    logger.warning(f"Session {session_id} tool approval REJECTED or TIMED OUT")
                     # Synthetic rejection results for all approval-required tools
                     rejected_observations = []
                     for tc, tool_name, params in tool_jobs:
                         tool = self.registry.get_tool(tool_name)
-                        if tool and tool.requires_approval:
+                        if _tool_needs_approval_card(tool, tool_name, params, _pre):
                             emit_fn("chat:tool_result", {
                                 "tool": tool_name,
                                 "result": {"success": False, "error": "USER REJECTED: This action was not approved by the user."},
@@ -2457,10 +2488,7 @@ class UnifiedChatEngine:
                     # Remove rejected jobs from tool_jobs so they aren't executed
                     tool_jobs = [
                         (tc, tn, p) for tc, tn, p in tool_jobs
-                        if (
-                            not (self.registry.get_tool(tn) and self.registry.get_tool(tn).requires_approval)
-                            or tn in _pre
-                        )
+                        if not _tool_needs_approval_card(self.registry.get_tool(tn), tn, p, _pre)
                     ]
                     
                     if not tool_jobs:
@@ -3132,6 +3160,107 @@ class UnifiedChatEngine:
         text = (text or "").strip()
         return text if text and text != _REASONING_ONLY_FALLBACK_TEXT else raw
 
+    def _await_tool_approval(
+        self,
+        session_id: str,
+        emit_fn: Callable,
+        request_id: str,
+        iteration: int,
+        approval_details: List[Dict[str, Any]],
+    ) -> bool:
+        """Show the approval card and block until the answer arrives.
+
+        Emits ``chat:tool_approval_request`` and waits for
+        ``set_approval_response`` (the ``chat:tool_approval_response`` socket
+        event). The wait slot is armed before the card is emitted so an answer
+        that arrives at once is not discarded. Silence for
+        ``APPROVAL_TIMEOUT_S`` counts as a decline. Shared by the tool loop and
+        the direct (no-model) path.
+        """
+        approval_jobs = [d["tool"] for d in approval_details]
+        consent = any(d.get("consent") for d in approval_details)
+        logger.info(f"Session {session_id} waiting for approval of: {approval_jobs}")
+        emit_fn("chat:thinking", {
+            "iteration": iteration,
+            "status": (
+                "Waiting for likeness consent..." if consent
+                else f"Waiting for approval to run: {', '.join(approval_jobs)}..."
+            ),
+        })
+        event = threading.Event()
+        with _approval_lock:
+            _approval_batch_meta[session_id] = {
+                "tools": list(approval_jobs),
+                "iteration": iteration,
+                "request_id": request_id,
+                "approved": None,
+                "scope": None,
+            }
+            _approval_events[session_id] = event
+            _approval_responses.pop(session_id, None)
+        payload: Dict[str, Any] = {
+            "tools": approval_jobs,
+            "tool_details": approval_details,
+            "iteration": iteration,
+            "available_scopes": ["once", "session", "task"],
+            "session_id": session_id,
+            "request_id": request_id,
+        }
+        if consent:
+            payload["consent"] = True
+        emit_fn("chat:tool_approval_request", payload)
+
+        event.wait(timeout=APPROVAL_TIMEOUT_S)
+
+        with _approval_lock:
+            _approval_events.pop(session_id, None)
+            approved = bool(_approval_responses.pop(session_id, False))
+        if not approved:
+            logger.warning(f"Session {session_id} tool approval REJECTED or TIMED OUT")
+        return approved
+
+    def _direct_tool_declined(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        detail: Dict[str, Any],
+        session_id: str,
+        emit_fn: Callable,
+        request_id: str,
+    ) -> Dict[str, Any]:
+        """The turn's answer when the card was declined: a refusal, no tool run."""
+        if detail.get("consent"):
+            error = (
+                "Not generated: consent to use this person's likeness was not given. "
+                "Only your own photo, or a Cast subject you uploaded, can be used."
+            )
+        else:
+            error = "USER REJECTED: This action was not approved by the user."
+        result_payload: Dict[str, Any] = {"success": False, "output": None, "error": error}
+        if detail.get("consent"):
+            result_payload["needs_consent"] = True
+            result_payload["reference_image"] = detail.get("reference_image")
+        emit_fn("chat:tool_result", {"tool": tool_name, "result": result_payload, "duration_ms": 0})
+        emit_fn("chat:complete", {
+            "response": error, "iterations": 1, "steps": [],
+            "session_id": session_id, "request_id": request_id,
+        })
+        self._save_message(session_id, "assistant", error, extra_data={"steps": [{
+            "iteration": 1,
+            "thoughts": "",
+            "tool_calls": [{
+                "tool_name": tool_name,
+                "params": params,
+                "success": False,
+                "duration_ms": 0,
+                "output_preview": error[:2000],
+            }],
+        }]})
+        return {
+            "success": False, "error": error, "response": error,
+            "request_id": request_id, "session_id": session_id,
+        }
+
     def _run_direct_tool_execution(
         self,
         tool_name: str,
@@ -3162,6 +3291,23 @@ class UnifiedChatEngine:
             m = params.get("model", "auto")
             logger.info(f"Direct /imagine (or generate_image) will use image model: {m} (respects /imagemodel selection)")
         self._save_message(session_id, "user", user_message)
+
+        # The direct path skips the model, not the approval card: a tool that
+        # requires approval (the identity tool's consent gate) pauses here
+        # exactly as it would inside the loop.
+        _tool_obj = self.registry.get_tool(tool_name)
+        if (
+            _tool_needs_approval_card(_tool_obj, tool_name, params, _preapproved_tool_names(session_id))
+            and not is_aborted(session_id)
+        ):
+            detail = _approval_detail(_tool_obj, tool_name, params)
+            if self._await_tool_approval(session_id, emit_fn, request_id, 1, [detail]):
+                _record_approved_consent(_tool_obj, params, session_id)
+            else:
+                return self._direct_tool_declined(
+                    tool_name, params, detail, session_id, emit_fn, request_id,
+                )
+
         emit_fn("chat:tool_call", {"tool": tool_name, "params": params, "iteration": 1})
         _t0 = time.time()
         try:
@@ -3207,6 +3353,9 @@ class UnifiedChatEngine:
             "output": str(result.output)[:2000] if result.success else None,
             "error": result.error if not result.success else None,
         }
+        if not result.success and (result.metadata or {}).get("needs_consent"):
+            _direct_result["needs_consent"] = True
+            _direct_result["reference_image"] = (result.metadata or {}).get("reference_image")
         _direct_artifact = _artifact_for_result(result) if result.success else None
         if _direct_artifact:
             _direct_result["artifact"] = _direct_artifact
@@ -3466,7 +3615,7 @@ class UnifiedChatEngine:
             logger.info("Identity direct: generate_identity(prompt=%r)", prompt[:80])
             return self._run_direct_tool_execution(
                 "generate_identity",
-                {"prompt": prompt, "image": img_path, "consented": True},
+                {"prompt": prompt, "image": img_path},
                 session_id, emit_fn, request_id, message, options,
             )
 

@@ -60,7 +60,8 @@ class TestSlashCommandResolver:
         assert params["prompt"] == "a cat playing piano"
         assert tool != "generate_animation"
 
-    def test_identity_slash_sets_consent(self):
+    def test_identity_slash_does_not_grant_consent(self):
+        """Consent is a stored record obtained through the chat card, not a flag."""
         from backend.services.slash_command_executor import resolve_slash_direct_tool
 
         tool, params = resolve_slash_direct_tool({
@@ -69,7 +70,7 @@ class TestSlashCommandResolver:
         })
         assert tool == "generate_identity"
         assert params["prompt"] == "a 1940s detective in the rain"
-        assert params["consented"] is True
+        assert "consented" not in params
 
     def test_removebg_slash(self):
         from backend.services.slash_command_executor import resolve_slash_direct_tool

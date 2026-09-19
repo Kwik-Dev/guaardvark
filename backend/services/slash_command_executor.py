@@ -143,7 +143,9 @@ def resolve_slash_direct_tool(
         prompt = params.get("prompt") or args
         if not prompt:
             return None, {}
-        out = {"prompt": prompt, "consented": True}
+        # No consent flag here: the engine shows the consent card and records
+        # the answer for the reference image before the tool runs.
+        out = {"prompt": prompt}
         if params.get("image"):
             out["image"] = params["image"]
         return mapped, out
