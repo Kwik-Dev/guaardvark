@@ -160,3 +160,107 @@ class TestActiveVideoModelSettings:
 
         with patch("backend.utils.settings_utils.get_setting", return_value="wan22-5b"):
             assert get_active_video_model() == "wan22-5b"
+
+
+class TestSecretRedaction:
+    """A failed settings write must not put the credential in the log."""
+
+    def test_secret_key_shapes_are_recognised(self):
+        from backend.utils.settings_utils import is_secret_key
+        for key in (
+            "address_provider_key",
+            "openai_api_key",
+            "GITHUB_TOKEN",
+            "client_secret",
+            "smtp_password",
+            "DB_PASSWORD_FILE",
+        ):
+            assert is_secret_key(key), key
+
+    def test_ordinary_keys_are_not_treated_as_secrets(self):
+        from backend.utils.settings_utils import is_secret_key
+        for key in (
+            "claude_token_usage",
+            "active_video_model",
+            "allow_web_search",
+            "keyboard_layout",
+            "",
+        ):
+            assert not is_secret_key(key), key
+
+    def test_dbapi_error_text_carries_the_value_it_failed_to_write(self):
+        """The premise: SQLAlchemy stringifies bound parameters into the message."""
+        from sqlalchemy.exc import DBAPIError
+        exc = DBAPIError.instance(
+            "UPDATE settings SET value=%(value)s WHERE key=%(key)s",
+            {"value": "sk-live-SUPERSECRET", "key": "address_provider_key"},
+            Exception("connection reset"),
+            Exception,
+        )
+        assert "sk-live-SUPERSECRET" in str(exc)
+
+    def test_redaction_withholds_the_message_for_secret_keys(self):
+        from sqlalchemy.exc import DBAPIError
+        from backend.utils.settings_utils import redact_exception
+        exc = DBAPIError.instance(
+            "UPDATE settings SET value=%(value)s WHERE key=%(key)s",
+            {"value": "sk-live-SUPERSECRET", "key": "address_provider_key"},
+            Exception("connection reset"),
+            Exception,
+        )
+        text = redact_exception(exc, "address_provider_key")
+        assert "sk-live-SUPERSECRET" not in text
+        assert "DBAPIError" in text
+
+    def test_redaction_keeps_the_message_for_ordinary_keys(self):
+        from backend.utils.settings_utils import redact_exception
+        text = redact_exception(RuntimeError("connection reset"), "active_video_model")
+        assert text == "connection reset"
+
+    def test_one_secret_key_redacts_a_multi_key_write(self):
+        from backend.utils.settings_utils import redact_exception
+        text = redact_exception(RuntimeError("boom"), "address_provider", "address_provider_key")
+        assert "boom" not in text
+
+    def test_save_setting_failure_does_not_log_the_secret(self, caplog):
+        import logging
+        from unittest.mock import MagicMock, patch
+        from sqlalchemy.exc import DBAPIError
+        from backend.utils.settings_utils import save_setting
+
+        exc = DBAPIError.instance(
+            "UPDATE settings SET value=%(value)s WHERE key=%(key)s",
+            {"value": "sk-live-SUPERSECRET", "key": "address_provider_key"},
+            Exception("connection reset"),
+            Exception,
+        )
+        with patch("backend.utils.settings_utils.has_app_context", return_value=True):
+            with patch("backend.utils.settings_utils.db") as mock_db:
+                mock_db.session.get.side_effect = exc
+                with caplog.at_level(logging.ERROR, logger="backend.utils.settings_utils"):
+                    save_setting("address_provider_key", "sk-live-SUPERSECRET")
+
+        assert caplog.text, "the failure should still be reported"
+        assert "sk-live-SUPERSECRET" not in caplog.text
+        assert "address_provider_key" in caplog.text
+
+    def test_get_setting_failure_does_not_log_the_secret(self, caplog):
+        import logging
+        from unittest.mock import patch
+        from sqlalchemy.exc import DBAPIError
+        from backend.utils.settings_utils import get_setting
+
+        exc = DBAPIError.instance(
+            "INSERT INTO settings (key, value) VALUES (%(key)s, %(value)s)",
+            {"value": "sk-live-SUPERSECRET", "key": "address_provider_key"},
+            Exception("duplicate key"),
+            Exception,
+        )
+        with patch("backend.utils.settings_utils.has_app_context", return_value=True):
+            with patch("backend.utils.settings_utils.db") as mock_db:
+                mock_db.session.get.side_effect = exc
+                with caplog.at_level(logging.WARNING, logger="backend.utils.settings_utils"):
+                    result = get_setting("address_provider_key", default=None)
+
+        assert result is None
+        assert "sk-live-SUPERSECRET" not in caplog.text

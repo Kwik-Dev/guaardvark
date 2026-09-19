@@ -11,7 +11,7 @@ except Exception:  # pragma: no cover - optional dependency
 from backend.models import Setting, SystemSetting, db
 from backend.utils.response_utils import error_response, success_response
 from backend.utils.password_validation import validate_password_strength
-from backend.utils.settings_utils import get_web_access
+from backend.utils.settings_utils import get_web_access, redact_exception
 
 settings_bp = Blueprint("settings_api", __name__, url_prefix="/api/settings")
 
@@ -121,7 +121,10 @@ def set_address_provider():
         db.session.commit()
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Failed to update address provider setting: {e}")
+        current_app.logger.error(
+            "Failed to update address provider setting: %s",
+            redact_exception(e, *updates),
+        )
         return error_response("Failed to update setting", status_code=500)
     return success_response(
         {

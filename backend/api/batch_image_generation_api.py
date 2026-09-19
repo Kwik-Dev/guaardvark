@@ -2248,8 +2248,21 @@ def delete_batch(batch_id: str):
 
         generator.forget_batch(batch_id)
 
+        # The directory is gone, so the rows that pointed into it have to go
+        # too — otherwise the Documents tree keeps an empty folder and the
+        # Jobs page keeps history for a batch that no longer exists.
+        db_removed = {}
+        try:
+            from backend.services.generation_history_service import delete_batch_history_rows
+            db_removed = delete_batch_history_rows(
+                image_batch_ids=[batch_id], triggered_by="batch_image_delete"
+            )
+        except Exception as e:
+            logger.error(f"Batch {batch_id} files deleted but its database rows remain: {e}")
+
         return success_response({
             "batch_id": batch_id,
+            "deleted": db_removed,
             "message": "Batch deleted successfully"
         })
 

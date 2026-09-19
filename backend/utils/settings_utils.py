@@ -130,6 +130,31 @@ ENV_VAR_MAP = {
 
 _BOOL_TRUTHY = {"true", "1", "yes"}
 
+_SECRET_KEY_SUFFIXES = ("_key", "_token", "_secret")
+
+
+def is_secret_key(key: str) -> bool:
+    """True for setting keys whose value is a credential.
+
+    Suffix-matched on purpose: claude_token_usage is a counter, not a token.
+    """
+    lowered = (key or "").lower()
+    return lowered.endswith(_SECRET_KEY_SUFFIXES) or "password" in lowered
+
+
+def redact_exception(exc: BaseException, *keys: str) -> str:
+    """Exception text that is safe to log while handling *keys*.
+
+    A failed DBAPI statement stringifies with its bound parameters attached
+    ("[parameters: {'value': 'sk-live-...'}]"), so logging a write error for a
+    credential key writes the credential to the log. For those keys only the
+    exception type is reported; the type is what tells the operator whether the
+    database was down or the statement was wrong.
+    """
+    if any(is_secret_key(key) for key in keys):
+        return f"{type(exc).__name__} (details withheld: secret setting)"
+    return str(exc)
+
 
 def _cast_value(value: str, cast):
     """Cast a string value to the desired type."""
@@ -153,7 +178,7 @@ def get_setting(key: str, default=None, cast=str):
                 if row and row.value is not None:
                     return _cast_value(row.value, cast) if cast != str else row.value
         except Exception as e:
-            logger.warning(f"get_setting({key!r}) DB read failed: {e}")
+            logger.warning("get_setting(%r) DB read failed: %s", key, redact_exception(e, key))
 
     # 2. Try env var
     env_name = ENV_VAR_MAP.get(key)
@@ -191,7 +216,7 @@ def save_setting(key: str, value: str):
             db.session.add(row)
         db.session.commit()
     except Exception as e:
-        logger.error(f"save_setting({key!r}) failed: {e}")
+        logger.error("save_setting(%r) failed: %s", key, redact_exception(e, key))
         try:
             db.session.rollback()
         except Exception:

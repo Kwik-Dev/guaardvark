@@ -1933,10 +1933,24 @@ class BatchVideoGenerator:
             shutil.rmtree(batch_dir)
             with self.batch_lock:
                 self.active_batches.pop(batch_id, None)
-            return True
         except Exception as e:  # pragma: no cover
             logger.error(f"Failed to delete batch {batch_id}: {e}")
             return False
+
+        # The directory is gone, so the rows that pointed into it have to go
+        # too — otherwise the Documents tree keeps an empty folder and the
+        # Jobs page keeps history for a batch that no longer exists. A database
+        # failure does not undo the files that are already deleted.
+        try:
+            from backend.services.generation_history_service import delete_batch_history_rows
+            delete_batch_history_rows(
+                video_batch_ids=[batch_id], triggered_by="batch_video_delete"
+            )
+        except Exception as e:
+            logger.error(
+                "Batch %s files deleted but its database rows remain: %s", batch_id, e
+            )
+        return True
 
     def rename_batch(self, batch_id: str, new_name: str) -> bool:
         batch_dir = self._get_batch_dir(batch_id)
