@@ -575,3 +575,34 @@ def test_fused_retrieval_runs_synchronously():
     assert all("use_async=False" in f for f in fusions)
     assert ".aretrieve(" not in src and ".aquery(" not in src
 
+
+# --------------------------------------------------------------------------
+# R9. read_logs does not carry machine paths over MCP
+# --------------------------------------------------------------------------
+def test_read_logs_returns_relative_path_and_scrubbed_lines(monkeypatch, tmp_path):
+    from pathlib import Path
+    from backend.tools import workstation_tools as wt
+
+    root = tmp_path / "checkout"
+    (root / "logs").mkdir(parents=True)
+    monkeypatch.setenv("GUAARDVARK_ROOT", str(root))
+    monkeypatch.setattr(wt, "_log_dir", lambda: root / "logs")
+    home = Path.home()
+    (root / "logs" / "backend.log").write_text(
+        f"INFO started from {root}/backend/app.py\n"
+        f"ERROR Traceback (most recent call last):\n"
+        f'  File "{root}/backend/services/indexing_service.py", line 1, in x\n'
+        f"WARNING config read from {home}/.config/thing.json\n"
+    )
+
+    res = wt.ReadLogsTool().execute(name="backend.log", lines=10)
+
+    assert res.success, res.error
+    assert res.output["path"] == "logs/backend.log"
+    text = res.output["text"]
+    assert str(root) not in text
+    assert str(home) not in text
+    assert "started from ./backend/app.py" in text
+    assert 'File "./backend/services/indexing_service.py"' in text
+    assert "~/.config/thing.json" in text
+    assert res.output["returned_lines"] == 4

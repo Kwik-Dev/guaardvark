@@ -303,7 +303,7 @@ class ReadLogsTool(BaseTool):
                 error=f"Unknown log '{raw_name}'. Allowed: {sorted(_LOG_ALLOWLIST)}",
             )
         try:
-            from backend.utils.display_paths import display_path
+            from backend.utils.display_paths import display_path, display_text
 
             path = _log_dir() / raw_name
             if not path.is_file():
@@ -323,7 +323,9 @@ class ReadLogsTool(BaseTool):
                     "matched_lines": len(rows),
                     "returned_lines": len(tail),
                     "query": query or None,
-                    "text": "\n".join(tail),
+                    # Tracebacks and file logs name the checkout and the home
+                    # directory on nearly every line; those leave with the text.
+                    "text": "\n".join(display_text(ln) for ln in tail),
                 },
             )
         except Exception as e:
