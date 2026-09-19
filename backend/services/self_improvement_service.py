@@ -94,6 +94,13 @@ class SelfImprovementService:
     _instance = None
     _lock = threading.Lock()
 
+    # Terminal status a cancelled run ends in; reported by every status route.
+    CANCELLED = "cancelled"
+    # Runs cancelled from inside this process. Class-level so a checkpoint can
+    # read it whatever way the singleton was built; the run row is the flag
+    # that crosses processes (the API usually cancels a Celery worker's run).
+    _cancel_requested_ids: set = set()
+
     def __new__(cls, *args, **kwargs):
         with cls._lock:
             if cls._instance is None:
@@ -144,6 +151,62 @@ class SelfImprovementService:
             logger.warning("Self-improvement already running")
             return False
         return True
+
+    def request_cancel(self, run_id: int) -> bool:
+        """Ask a running scan to stop at its next checkpoint.
+
+        The run row is the flag: its status flips to ``cancelled`` now, so the
+        status routes report it immediately, and the runner re-reads the row
+        between steps and finishes without overwriting it. The step in flight
+        (the pytest subprocess can take minutes) is not interrupted. Returns
+        False for an unknown run or one that has already finished.
+        """
+        from backend.models import db, SelfImprovementRun
+        run = db.session.get(SelfImprovementRun, run_id)
+        if run is None or run.status != "running":
+            return False
+        run.status = self.CANCELLED
+        run.error_message = "Cancelled by the user"
+        db.session.commit()
+        self._cancel_requested_ids.add(run_id)
+        # run_id is passed explicitly: the API process has no _current_run_id.
+        self._emit_progress("cancelled", "Stopping at the next step", 0.0,
+                            status=self.CANCELLED, run_id=run_id)
+        return True
+
+    def _cancel_requested(self, run_id: Optional[int]) -> bool:
+        """Checkpoint between steps: was this run cancelled, here or elsewhere?
+
+        Reads the status column directly rather than the loaded row, so a
+        cancel committed by another process is seen and the row's pending
+        changes are untouched.
+        """
+        if run_id is None:
+            return False
+        if run_id in self._cancel_requested_ids:
+            return True
+        try:
+            from backend.models import db, SelfImprovementRun
+            status = db.session.query(SelfImprovementRun.status).filter_by(id=run_id).scalar()
+        except Exception as e:
+            logger.debug(f"Cancel checkpoint could not read run {run_id}: {e}")
+            return False
+        if status == self.CANCELLED:
+            self._cancel_requested_ids.add(run_id)
+            return True
+        return False
+
+    def _finish_cancelled(self, run_record, start_time: float, changes: List[Dict]) -> Dict[str, Any]:
+        """Close out a run that hit a cancel checkpoint, keeping what it did."""
+        from backend.models import db
+        run_record.status = self.CANCELLED
+        run_record.changes_made = json.dumps(changes)
+        run_record.duration_seconds = time.time() - start_time
+        db.session.commit()
+        self._emit_progress("cancelled", f"Stopped after {len(changes)} fix(es)", 1.0,
+                            status=self.CANCELLED, fixes_applied=len(changes))
+        return {"success": False, "cancelled": True, "run_id": run_record.id,
+                "fixes_applied": len(changes), "changes": changes}
 
     def dispatch_precheck(self) -> Dict[str, Any]:
         """Public, side-effect-free check of whether a directed dispatch can run.
@@ -272,6 +335,9 @@ class SelfImprovementService:
                 "return_code": result.returncode,
             })
 
+            if self._cancel_requested(run_record.id):
+                return self._finish_cancelled(run_record, start_time, [])
+
             self._emit_progress("analyzed", f"Found {len(failures)} failure(s)", 0.3,
                                 failures_found=len(failures), return_code=result.returncode)
 
@@ -288,6 +354,8 @@ class SelfImprovementService:
 
             changes = []
             for i, failure in enumerate(failures):
+                if self._cancel_requested(run_record.id):
+                    return self._finish_cancelled(run_record, start_time, changes)
                 if not self._is_safe_to_run():
                     break
                 progress = 0.3 + (0.6 * (i / max(len(failures), 1)))
@@ -296,6 +364,9 @@ class SelfImprovementService:
                 change = self._attempt_fix(failure)
                 if change:
                     changes.append(change)
+
+            if self._cancel_requested(run_record.id):
+                return self._finish_cancelled(run_record, start_time, changes)
 
             # Verification: re-run tests to confirm fixes worked
             if changes:
@@ -478,7 +549,10 @@ class SelfImprovementService:
             }
             change = self._attempt_fix(failure)
 
-            run_record.status = "success" if change else "failed"
+            if self._cancel_requested(run_record.id):
+                run_record.status = self.CANCELLED
+            else:
+                run_record.status = "success" if change else "failed"
             run_record.changes_made = json.dumps([change] if change else [])
             db.session.commit()
 
@@ -531,6 +605,12 @@ class SelfImprovementService:
             # listing, and were recorded as "success" with nothing in the queue.
             from backend.models import PendingFix
             staged = PendingFix.query.filter_by(run_id=run_record.id).all()
+            if self._cancel_requested(run_record.id):
+                run_record.status = self.CANCELLED
+                run_record.changes_made = "[]"
+                db.session.commit()
+                return {"success": False, "cancelled": True, "run_id": run_record.id,
+                        "change": change, "pending_fix_ids": [f.id for f in staged]}
             if staged:
                 run_record.status = "success"
                 run_record.changes_made = json.dumps([

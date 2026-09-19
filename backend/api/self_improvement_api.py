@@ -106,6 +106,36 @@ def get_runs():
     })
 
 
+@self_improvement_bp.route("/scans/<int:scan_id>", methods=["GET"])
+def get_scan(scan_id):
+    """One scan by id (a SelfImprovementRun row; the ``run_id`` on progress
+    events and the ``id`` in /runs). ``status`` is ``running`` or terminal:
+    success, failed, unverified, no_change, blocked_by_guardian, cancelled."""
+    from backend.models import db, SelfImprovementRun
+    run = db.session.get(SelfImprovementRun, scan_id)
+    if run is None:
+        return error_response(f"Scan {scan_id} not found", 404)
+    return success_response(data=run.to_dict())
+
+
+@self_improvement_bp.route("/scans/<int:scan_id>/cancel", methods=["POST"])
+def cancel_scan(scan_id):
+    """Cancel a running scan. The row reports ``cancelled`` from this moment;
+    the runner stops at its next checkpoint (the step in flight finishes).
+    409 when the scan has already reached a terminal status."""
+    from backend.models import db, SelfImprovementRun
+    from backend.services.self_improvement_service import get_self_improvement_service
+    run = db.session.get(SelfImprovementRun, scan_id)
+    if run is None:
+        return error_response(f"Scan {scan_id} not found", 404)
+    if run.status != "running":
+        return error_response(f"Scan {scan_id} already finished with status: {run.status}", 409,
+                              data={"scan_id": scan_id, "status": run.status})
+    get_self_improvement_service().request_cancel(scan_id)
+    return success_response(data={"scan_id": scan_id, "status": "cancelled"},
+                            message="Scan cancelled; the runner stops at its next step")
+
+
 @self_improvement_bp.route("/task", methods=["POST"])
 def submit_task():
     """Submit a directed improvement task (async via Celery)."""
