@@ -977,13 +977,57 @@ class OfflineImageGenerator:
 
         return _cb
 
+    # "no text", "without any letters", "no visible typography or signage":
+    # a prompt ruling text OUT. The shared keyword detector matches the noun
+    # regardless, so these are removed before it looks (2026-09-12: a 16:9 key
+    # art prompt ending "no text, no letters, no typography, no signage" was
+    # routed to text mode and rendered 1024x1024 instead of 960x544).
+    _NEGATED_TEXT_RE = re.compile(
+        r"\b(?:no|without|free\s+of|not\s+any|zero|avoid(?:ing)?)\s+"
+        r"(?:(?:any|visible|readable|legible|on-?screen|on-?image|written)\s+)*"
+        r"(?:text|texts|letters?|lettering|typography|signage|signs?|words?|captions?|"
+        r"subtitles?|watermarks?|logos?|labels?|writing|titles?|banners?|slogans?|headlines?)"
+        r"(?:\s+(?:or|and|,)\s*(?:text|letters?|lettering|typography|signage|signs?|words?|"
+        r"captions?|subtitles?|watermarks?|logos?|labels?|writing|titles?|banners?|slogans?|headlines?))*"
+        r"(?:\s+(?:visible|shown|present|anywhere|at\s+all|in\s+(?:the\s+)?(?:frame|image|scene)))?",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _without_negated_text(cls, prompt: str) -> str:
+        return cls._NEGATED_TEXT_RE.sub(" ", prompt or "")
+
     def _has_text_intent(self, prompt: str) -> bool:
         """True if the prompt asks for on-image text — bypass enhancement to keep
         spelling intact (HULK -> HUK otherwise). Shared detector lives in
-        prompt_enhancer.has_text_intent so image + video stay in sync.
+        prompt_enhancer.has_text_intent so image + video stay in sync; phrases
+        that rule text out are removed first.
         """
         from backend.utils.prompt_enhancer import has_text_intent
-        return has_text_intent(prompt)
+        return has_text_intent(self._without_negated_text(prompt))
+
+    # SD-era placeholder canvas. Every modern family defaults to 1024 (see
+    # stills_defaults), so a request at or below this on both axes is the old
+    # default, not a choice.
+    _LEGACY_CANVAS = 512
+
+    @classmethod
+    def _text_canvas(cls, width: int, height: int, family: str) -> Tuple[int, int]:
+        """Canvas for a prompt that asks for on-image text.
+
+        Crisp type needs room: at 512 it renders as mush, so the legacy 512
+        placeholder is enlarged to 1024 on families that can. Any other size
+        was chosen by the caller and is kept: an explicit value wins (the
+        2026-09-12 batch above asked 960x544 and got a 1024x1024 file while
+        its metadata still said 960x544).
+        """
+        if (
+            family in ("sdxl", "zimage", "krea2")
+            and width <= cls._LEGACY_CANVAS
+            and height <= cls._LEGACY_CANVAS
+        ):
+            return 1024, 1024
+        return width, height
 
     def _cuda_total_vram_gb(self) -> float:
         """Total device VRAM in GB, or 0 if CUDA is unavailable."""
@@ -2398,15 +2442,15 @@ Negative Prompt: {negative_prompt}""",
                         len(enhanced_prompt or ""),
                     )
                 elif text_mode:
-                    # Crisp text/logos need a larger canvas — at 512 the type renders
-                    # as mush. Bump capable models to 1024 when the request is below it
-                    # (within the per-model max already clamped above: 1536 for these).
-                    if family in ("sdxl", "zimage", "krea2") and request.width < 1024 and request.height < 1024:
+                    # Legible type needs a larger canvas than the SD-era 512
+                    # placeholder; a size the caller chose is kept (_text_canvas).
+                    text_w, text_h = self._text_canvas(request.width, request.height, family)
+                    if (text_w, text_h) != (request.width, request.height):
                         logger.info(
-                            f"Text intent: enlarging canvas {request.width}x{request.height} -> 1024x1024 for legible type"
+                            f"Text intent: enlarging canvas {request.width}x{request.height} -> {text_w}x{text_h} for legible type"
                         )
-                        request.width = 1024
-                        request.height = 1024
+                        request.width = text_w
+                        request.height = text_h
                         result.image_size = (request.width, request.height)
                     style_config = self.style_configs.get(
                         request.style, self.style_configs.get("realistic", {})

@@ -364,6 +364,17 @@ class BatchImageGenerator:
 
         return prompts
 
+    @staticmethod
+    def _file_dimensions(image_path) -> Optional[str]:
+        """``WxH`` of an image file from its header, or None when unreadable."""
+        try:
+            from PIL import Image
+            with Image.open(image_path) as img:
+                width, height = img.size
+            return f"{width}x{height}"
+        except Exception:  # noqa: BLE001 — a bad header is not a failed render
+            return None
+
     def _create_thumbnail(self, image_path: str, thumbnail_dir: Path) -> Optional[str]:
         try:
             from PIL import Image
@@ -899,6 +910,18 @@ class BatchImageGenerator:
             import shutil
             shutil.move(result.image_path, target_path)
 
+            # The metadata names the size the FILE has. A generator can render
+            # another canvas than it was asked for (text-mode enlargement did so
+            # on 2026-09-12: 960x544 requested, 1024x1024 written, metadata
+            # said 960x544), and the record is what people trust.
+            requested = f"{prompt.width}x{prompt.height}"
+            actual = self._file_dimensions(target_path) or requested
+            if actual != requested:
+                logger.warning(
+                    "Batch %s prompt %s: asked for %s, the file is %s",
+                    batch_id, prompt.id, requested, actual,
+                )
+
             thumbnail_path = None
             if batch_status and hasattr(batch_status, 'generate_thumbnails') and batch_status.generate_thumbnails:
                 thumbnail_path = self._create_thumbnail(str(target_path), output_dir / "thumbnails")
@@ -930,7 +953,8 @@ class BatchImageGenerator:
                 metadata={
                     "original_prompt": prompt.prompt,
                     "style": prompt.style,
-                    "dimensions": f"{prompt.width}x{prompt.height}",
+                    "dimensions": actual,
+                    **({"dimensions_requested": requested} if actual != requested else {}),
                     "steps": (result.metadata or {}).get("steps", prompt.steps),
                     "steps_requested": prompt.metadata.get(
                         "steps_requested", (result.metadata or {}).get("steps_requested", prompt.steps)),
