@@ -81,12 +81,6 @@ PULID_UNET_DTYPES = {
 # The identity weight/window defaults live on the pulid-flux registry entry
 # (with the measurement behind them); None in a signature means "use those".
 PULID_IDENTITY_DEFAULTS = {"weight": 1.0, "start_at": 0.2, "end_at": 1.0}
-try:
-    PULID_IDENTITY_DEFAULTS.update(
-        (_VMR.get("pulid-flux") or {}).get("identity_defaults") or {}
-    )
-except Exception:
-    pass
 
 
 def _identity_default(name: str, value):
@@ -162,6 +156,7 @@ try:
     PULID_FLUX_FILE = ((_PULID.get("files") or [{}])[0].get("dst")
                        or "pulid_flux_v0.9.1.safetensors")
     PULID_MIN_STEPS = int(_PULID.get("min_steps") or 20)
+    PULID_IDENTITY_DEFAULTS.update(_PULID.get("identity_defaults") or {})
 except Exception:  # pragma: no cover - registry import is environment-specific
     KONTEXT_UNET = "flux1-kontext-dev-Q6_K.gguf"
     QWEN_EDIT_UNET = "qwen_image_edit_2509_fp8_e4m3fn.safetensors"
