@@ -39,6 +39,12 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@mui/icons-material"
         update-types: ["version-update:semver-major"]
+      # eslint 10 fails eslint-plugin-react 7.33's peer requirement
+      # ("^3 || ... || ^8 || ^9.7"), so the lint stack has to move together —
+      # plugin bumps plus the flat-config migration. That belongs with the
+      # frontend platform upgrade in #198 (PR #210 closed 2026-09-19).
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
