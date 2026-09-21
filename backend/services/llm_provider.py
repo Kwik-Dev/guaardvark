@@ -49,13 +49,11 @@ def _mistral_available() -> bool:
 
 
 def _openai_available() -> bool:
-    if config.OPENAI_API_KEY:
-        return True
-    # Allow keyless OpenAI-compatible endpoints (e.g. local Ollama / vLLM on /v1).
-    return bool(
-        config.OPENAI_BASE_URL
-        and config.OPENAI_BASE_URL != "https://api.openai.com/v1"
-    )
+    # Single source of truth: openai_provider.available(). Consent is a
+    # GUAARDVARK_OPENAI_API_KEY or an explicit GUAARDVARK_OPENAI_BASE_URL — a bare
+    # OPENAI_API_KEY must never enable a cloud route.
+    from backend.services import openai_provider
+    return openai_provider.available()
 
 
 CLOUD_PROVIDERS: Dict[str, Dict] = {
@@ -171,6 +169,9 @@ def set_active_provider(provider: str) -> str:
             raise ValueError(f"Cannot select {provider}: {env} is not configured.")
     _set_setting(_PROVIDER_KEY, provider)
     logger.info("LLM provider set to '%s'", provider)
+    if provider == OPENAI:
+        from backend.services import openai_provider
+        logger.info("OpenAI-compatible chat route: %s", openai_provider.describe(get_openai_model()))
     return provider
 
 

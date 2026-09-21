@@ -152,14 +152,50 @@ def _compose_prompt(
 
 
 def _default_llm(*, system: str, user: str, model: str = "gemma4:12b") -> str:
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+    # Prefer the OpenAI-compatible provider when the operator opted in
+    # (GUAARDVARK_OPENAI_API_KEY / GUAARDVARK_OPENAI_BASE_URL). Same JSON contract
+    # as the local branch below: the strict-schema agents cannot use prose.
+    try:
+        from backend.services import openai_provider
+        if openai_provider.available():
+            try:
+                from backend.services.llm_provider import get_openai_model
+                chat_model = get_openai_model()
+            except Exception:
+                from backend.config import OPENAI_DEFAULT_MODEL
+                chat_model = OPENAI_DEFAULT_MODEL
+            api_messages = list(messages)
+            # OpenAI's json_object mode requires the word "json" in the messages.
+            if "json" not in f"{system}\n{user}".lower():
+                api_messages[0] = {
+                    "role": "system",
+                    "content": f"{system}\n\nRespond with a single JSON object.",
+                }
+            resp = openai_provider.chat(
+                model=chat_model,
+                messages=api_messages,
+                stream=False,
+                response_format={"type": "json_object"},
+            )
+            content = (resp.get("message", {}) or {}).get("content", "") or ""
+            if content.strip():
+                return content
+    except Exception as e:
+        log.warning(
+            "OpenAI-compatible Character Generator LLM failed (%s); falling back to Ollama %s",
+            e, model,
+        )
+
     import ollama
     from backend.utils.ollama_resource_manager import think_payload
     resp = ollama.chat(
         model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
         format="json",  # hardens JSON parsing for the strict-schema agents
         **think_payload(model),
     )

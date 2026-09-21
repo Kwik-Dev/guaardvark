@@ -40,11 +40,47 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Availability + config helpers
 # ---------------------------------------------------------------------------
+
+# OpenAI's public endpoint. Only reached when the operator set
+# GUAARDVARK_OPENAI_API_KEY; never defaulted to on a bare OPENAI_API_KEY.
+_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+
+
+def _base_url() -> str:
+    """Endpoint actually used: the configured one, else OpenAI's public URL.
+
+    The fallback only applies once consent exists (a namespaced key or an
+    explicit base URL), which ``available()`` enforces.
+    """
+    return (config.OPENAI_BASE_URL or _DEFAULT_BASE_URL).rstrip("/")
+
+
+def describe(model: Optional[str] = None) -> str:
+    """One-line summary for the logs: which endpoint + model are in use."""
+    return f"endpoint={_base_url()} model={model or config.OPENAI_DEFAULT_MODEL}"
+
+
+# Log a route once per distinct endpoint+model, not once per token.
+_LOGGED_ROUTES: set = set()
+
+
+def _log_route_once(model: str) -> None:
+    key = (_base_url(), model)
+    if key not in _LOGGED_ROUTES:
+        _LOGGED_ROUTES.add(key)
+        logger.info("OpenAI-compatible route: endpoint=%s model=%s", _base_url(), model)
+
+
 def available() -> bool:
-    """True when an OpenAI-compatible endpoint is usable (key set, or a custom base URL)."""
+    """True when the operator opted into an OpenAI-compatible endpoint.
+
+    Consent is GUAARDVARK_OPENAI_API_KEY (namespaced) or an explicit
+    GUAARDVARK_OPENAI_BASE_URL. A bare OPENAI_API_KEY is deliberately ignored so
+    a globally-exported key cannot send a user's prompts to api.openai.com.
+    """
     if config.OPENAI_API_KEY:
         return True
-    return bool(config.OPENAI_BASE_URL and config.OPENAI_BASE_URL != "https://api.openai.com/v1")
+    return bool(config.OPENAI_BASE_URL)
 
 
 def _headers() -> Dict[str, str]:
@@ -104,7 +140,7 @@ def list_models() -> List[Dict[str, Any]]:
         return []
     try:
         resp = requests.get(
-            f"{config.OPENAI_BASE_URL}/models",
+            f"{_base_url()}/models",
             headers=_headers(),
             timeout=15,
         )
@@ -133,6 +169,7 @@ def chat(
     messages: List[Dict[str, Any]],
     stream: bool = True,
     options: Optional[Dict[str, Any]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
     **_kwargs: Any,
 ):
     """Call the OpenAI-compatible chat completions endpoint.
@@ -147,16 +184,22 @@ def chat(
         raise RuntimeError("OpenAI-compatible provider selected but not configured.")
 
     model = model or config.OPENAI_DEFAULT_MODEL
+    _log_route_once(model)
     payload: Dict[str, Any] = {
         "model": model,
         "messages": _normalize_messages(messages),
         "stream": bool(stream),
         **_map_options(options),
     }
+    # JSON mode for the strict-schema callers (mirrors the Ollama format="json"
+    # branch in character_generator_service). Servers that do not support it will
+    # reject the request, and the caller falls back to Ollama.
+    if response_format:
+        payload["response_format"] = response_format
 
     if not stream:
         resp = requests.post(
-            f"{config.OPENAI_BASE_URL}/chat/completions",
+            f"{_base_url()}/chat/completions",
             headers=_headers(),
             json=payload,
             timeout=config.OPENAI_REQUEST_TIMEOUT,
@@ -184,7 +227,7 @@ def _stream_chat(payload: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
     prompt_tokens = 0
     completion_tokens = 0
     with requests.post(
-        f"{config.OPENAI_BASE_URL}/chat/completions",
+        f"{_base_url()}/chat/completions",
         headers=_headers(),
         json=payload,
         stream=True,
