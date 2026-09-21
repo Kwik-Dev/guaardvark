@@ -243,7 +243,22 @@ class InspectGpuTool(BaseTool):
     )
     parameters: Dict[str, ToolParameter] = {}
 
+    @staticmethod
+    def _plugin_rows(plugins) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": p.get("id"),
+                "running": p.get("running"),
+                "status": p.get("status"),
+                "port": p.get("port"),
+                "vram_estimate_mb": p.get("vram_estimate_mb"),
+            }
+            for p in (plugins or [])
+        ]
+
     def execute(self, **kwargs) -> ToolResult:
+        if is_mcp_transport(self):
+            return self._inspect_via_backend()
         payload: Dict[str, Any] = {"nvidia": _nvidia_smi()}
         try:
             from backend.services.gpu_resource_coordinator import get_gpu_coordinator
@@ -257,19 +272,36 @@ class InspectGpuTool(BaseTool):
             payload["orchestrator"] = {"error": str(e)}
         try:
             from backend.plugins.plugin_manager import get_plugin_manager
-            plugins = get_plugin_manager().list_plugins()
-            payload["plugins"] = [
-                {
-                    "id": p.get("id"),
-                    "running": p.get("running"),
-                    "status": p.get("status"),
-                    "port": p.get("port"),
-                    "vram_estimate_mb": p.get("vram_estimate_mb"),
-                }
-                for p in plugins
-            ]
+            payload["plugins"] = self._plugin_rows(get_plugin_manager().list_plugins())
         except Exception as e:
             payload["plugins"] = {"error": str(e)}
+        return ToolResult(success=True, output=payload)
+
+    def _inspect_via_backend(self) -> ToolResult:
+        """Read the same state over HTTP instead of importing the orchestrator.
+
+        Building the orchestrator pulls torch into this process, and a CUDA
+        context here is VRAM a render on the same card cannot use — the reason
+        backend.app refuses to be imported under GUAARDVARK_MCP_PROCESS at all.
+        nvidia-smi stays local: it is a subprocess, not a CUDA client.
+        """
+        payload: Dict[str, Any] = {"nvidia": _nvidia_smi()}
+        for key, path in (
+            ("lock", "/api/gpu/status"),
+            ("orchestrator", "/api/gpu/memory/status"),
+            ("plugins", "/api/plugins/"),
+        ):
+            try:
+                data = request_json("GET", path).data
+            except BackendError as e:
+                payload[key] = {"error": str(e)}
+                continue
+            if key == "plugins":
+                # GET /api/plugins/ answers {"count": N, "plugins": [...]}
+                data = data.get("plugins") if isinstance(data, dict) else data
+                payload[key] = self._plugin_rows(data)
+            else:
+                payload[key] = data
         return ToolResult(success=True, output=payload)
 
 
