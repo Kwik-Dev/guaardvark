@@ -35,7 +35,10 @@ The Mac's memory is reserved for image generation, routed through ComfyUI (works
 - **`feat/zimage-comfyui`** — route Z-Image image generation through ComfyUI; don't free ComfyUI resident models when rendering through ComfyUI.
 - **`feat/zimage-comfyui-mps`** — enable Z-Image generation on Apple Silicon via ComfyUI; apply Z-Image character LoRAs model-only in the ComfyUI Z-Image graph; auto-link trained LoRAs into ComfyUI when Z-Image is routed through ComfyUI.
 - **`feat/imagemodel-comfyui`** — add `/imagemodel comfyui` chat image backend; accept it regardless of download status; detect ComfyUI engines from live `/object_info` instead of a bundled dir.
+- **`pr/m4-comfyui-image` (#197)** — the consolidated route above, off by default: `GUAARDVARK_ZIMAGE_USE_COMFYUI=1` opts Z-Image (chat, batch and Cast stills) into the ComfyUI graph (UNETLoader + Lumina2 CLIP + `ModelSamplingAuraFlow`, CFG-free with `ConditioningZeroOut`, LoRA chain model-only via `LoraLoaderModelOnly`); `/imagemodel comfyui` picks whichever engine ComfyUI has installed; the ComfyUI loras dir is overridable; Z-Image's `min_steps` floor also applies to the `comfyui` selector.
 - **`fix/chat-cast-lora-resolution`** — resolve a cast LoRA from the user message in `generate_image` (so `[starship_captain]` / "Starship Captain" loads the trained LoRA even when the LLM strips the trigger).
+
+> **Z-Image → ComfyUI is opt-in.** The offline Diffusers Z-Image path is CUDA-only, so on Apple Silicon the ComfyUI route needs `GUAARDVARK_ZIMAGE_USE_COMFYUI=1`. With the flag off nothing changes for a user who has not set it. When on, the same flag routes Cast stills through ComfyUI (so the GPU session does **not** evict ComfyUI's resident models), links freshly trained LoRAs into ComfyUI's `models/loras`, and is checked in one place (`character_still_pipeline._zimage_via_comfyui_enabled`).
 
 ## 3. LoRA training — RunPod plugin (offload to cloud GPU)
 
@@ -120,7 +123,7 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 | Variable | Purpose |
 |----------|---------|
 | `GUAARDVARK_DEFAULT_LLM` | Default chat model. |
-| `GUAARDVARK_OPENAI_API_KEY` / `GUAARDVARK_OPENAI_BASE_URL` / `GUAARDVARK_OPENAI_MODEL` | OpenAI-compatible provider — used to point the chat brain at **ollama-cloud `deepseek-v4`** so no large LLM is held in local memory. |
+| `GUAARDVARK_OPENAI_API_KEY` / `GUAARDVARK_OPENAI_BASE_URL` / `GUAARDVARK_OPENAI_MODEL` | OpenAI-compatible provider — used to point the chat brain at **ollama-cloud `deepseek-v4`** so no large LLM is held in local memory. Opt-in only: a bare `OPENAI_API_KEY` (exported for another tool) is deliberately ignored — the namespaced key, or an explicit `GUAARDVARK_OPENAI_BASE_URL`, is the consent. The endpoint + model in use are logged at INFO. |
 | `GUAARDVARK_MISTRAL_API_KEY` / `GUAARDVARK_MISTRAL_MODEL` / `GUAARDVARK_MISTRAL_BASE_URL` | Optional Mistral provider (multi-provider escalation). |
 | `OLLAMA_BASE_URL` | Local Ollama endpoint (used when not routing to the cloud). |
 | `GUAARDVARK_EMBEDDING_MODEL` | Embedding model for RAG. |
@@ -133,7 +136,13 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 | `GUAARDVARK_COMFYUI_URL` | ComfyUI endpoint (default `http://127.0.0.1:8188`). |
 | `GUAARDVARK_COMFYUI_VENV` | ComfyUI virtualenv path. |
 | `GUAARDVARK_COMFYUI_IDLE_TIMEOUT` | Idle timeout before ComfyUI is freed. |
+| `GUAARDVARK_COMFYUI_LORAS_DIR` | Path to the running ComfyUI's `models/loras` (checked first); where trained Cast LoRAs are symlinked so `LoraLoaderModelOnly` can resolve them by basename. |
 | `COMFYUI_OUTPUT_DIR` | ComfyUI output directory. |
+| `GUAARDVARK_ZIMAGE_USE_COMFYUI` | Opt-in flag (`1`/`true`/`yes`/`on`) that routes Z-Image through ComfyUI instead of the CUDA-only offline Diffusers path. Required on Apple Silicon. Off by default. |
+| `GUAARDVARK_ZIMAGE_UNET` / `_CLIP` / `_CLIP_TYPE` / `_VAE` | Z-Image ComfyUI graph assets (defaults `z_image_turbo_bf16.safetensors`, `qwen_3_4b.safetensors`, `lumina2`, `ae.safetensors`). Must exist in the reachable ComfyUI. |
+| `GUAARDVARK_ZIMAGE_SAMPLER` / `_SCHEDULER` | Z-Image sampler/scheduler (defaults `res_multistep` / `simple`). |
+| `GUAARDVARK_ZIMAGE_SHIFT` | `ModelSamplingAuraFlow` flow-matching shift (default `3`, from the working Z-Image Turbo workflow). |
+| `GUAARDVARK_ZIMAGE_CFG` | CFG used when the requested guidance is below 1.0 (default `1.0`); ComfyUI's KSampler needs a real cfg, unlike the offline CFG-free path. |
 
 ### RunPod / LoRA training (offloaded to cloud GPU)
 | Variable | Purpose |
@@ -165,6 +174,7 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 | `GUAARDVARK_GPU_IDLE_TIMEOUT` | Idle timeout before a GPU model is evicted. |
 | `GUAARDVARK_GPU_EVICTION_GRACE` | Grace period before eviction. |
 | `GUAARDVARK_GPU_QUALITY_TIER` | Quality tier (e.g. `balanced`). |
+| `GUAARDVARK_SWAP_HARD_MAX_GB` | Raise the swap hard-block threshold (default `8` GB) — macOS holds swap "sticky" and a fixed cap can block legitimate work on a healthy Mac. |
 | `GUAARDVARK_CHAT_KEEP_ALIVE_CPU` / `GUAARDVARK_CHAT_KEEP_ALIVE_GPU` | Keep-alive for the chat model on CPU vs GPU. |
 | `GUAARDVARK_EMBED_KEEP_ALIVE_CPU` / `GUAARDVARK_EMBED_KEEP_ALIVE_GPU` | Keep-alive for the embedding model. |
 
