@@ -4,8 +4,8 @@
 def cut_on_whitespace(text: str, limit: int) -> str:
     """The first ``limit`` characters of ``text``, ending on whitespace.
 
-    A cut inside a token hands the model half a value: "4:12" clipped to
-    "4:1" was copied into an answer as a slope limit. The cut backs up to
+    A cut inside a token hands the model half a value: "16:9" clipped to
+    "16:" was copied into an answer as a ratio. The cut backs up to
     the last space when that keeps at least half the budget; otherwise
     (no spaces, one huge token) the plain slice stands.
     """

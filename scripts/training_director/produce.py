@@ -33,8 +33,8 @@ from config import API, FOUNDRY, OUT_ROOT  # noqa: E402
 # project.py to exercise its trade's vocabulary instead.
 DEFAULT_VOICE_TEST_LINES = [
     "Fasten every 12 to 16 inches on center along the flange.",
-    "Each fastener must penetrate a minimum of 3/4 inch, per section R905.10.4.",
-    "Any slope over 4:12 requires additional support.",
+    "Each fastener must penetrate a minimum of 3/4 inch, per section E3901.4.",
+    "Any ramp steeper than 1:12 requires a handrail.",
     "Use #10 x 1.5\" fasteners throughout.",
     "The panel is 15/32-inch thick and the backing is 7/16-inch.",
     "Maintain a 0.030-inch gap and torque to 100-pound force.",

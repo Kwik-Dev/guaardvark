@@ -80,9 +80,9 @@ like a professional trainer, not a colleague talking shop.
    the narration may not.
 3. **Name a standard before citing its number** — "the OSHA fall protection
    standard, 29 CFR 1926.501".
-4. **Explain a convention on first use.** A roof pitch is introduced as "rises
-   four inches for every twelve inches of run"; later mentions may use "a four
-   in twelve pitch".
+4. **Explain a convention on first use.** A ramp slope is introduced as "rises
+   one inch for every twelve inches of run"; later mentions may use "a one in
+   twelve slope".
 5. **Lead a safety section with why it matters**, then give the requirement.
 6. **State consequences plainly**, without slang.
 

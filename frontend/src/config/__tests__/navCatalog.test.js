@@ -98,7 +98,7 @@ describe("filterCatalog", () => {
 describe("buildNavCatalog", () => {
   it("prepends extension items so they list ahead of core", () => {
     const catalog = buildNavCatalog([
-      { label: "Acme", items: [{ text: "Roof", path: "/acme", icon: "x" }] },
+      { label: "Acme", items: [{ text: "Reports", path: "/acme", icon: "x" }] },
     ]);
     expect(catalog[0]).toMatchObject({ path: "/acme", sidebarGroup: "Acme", workspace: "system" });
     const groups = catalogToNavGroups(catalog);
@@ -113,7 +113,7 @@ describe("buildNavCatalog", () => {
       { id: "team", kind: "page", listed: true, path: "/team", label: "Team", sidebarGroup: "Office", workspace: "office" },
     ];
     const catalog = buildNavCatalog(
-      [{ label: "Acme", items: [{ text: "Roof", path: "/acme", icon: "x" }] }],
+      [{ label: "Acme", items: [{ text: "Reports", path: "/acme", icon: "x" }] }],
       core,
       workspaces,
     );

@@ -101,7 +101,7 @@ def _digit_string(digits: str) -> str:
 
 
 def _code_citation(match: re.Match) -> str:
-    """Render 'R905.10.4' / '1926.501' as a spoken code reference."""
+    """Render 'E3901.4' / '1926.501' as a spoken code reference."""
     letter = match.group("letter") or ""
     parts = match.group("num").split(".")
     head = _digit_string(parts[0])
@@ -115,7 +115,7 @@ def _code_citation(match: re.Match) -> str:
 def _make_ratio(noun: str | None, context: frozenset[str]):
     """Build the ratio renderer for one project's vocabulary.
 
-    A ratio like '4:12' is spoken 'four in twelve'. Bare, that is heard as
+    A ratio like '1:12' is spoken 'one in twelve'. Bare, that is heard as
     'four AND twelve'; a trailing noun is what makes it unambiguous, so one is
     supplied when the surrounding text lacks it. Which noun — and which words
     already imply it — is the trade's business, not the engine's. A project

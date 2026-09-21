@@ -2,15 +2,15 @@ from backend.utils.text_cut import cut_on_whitespace
 
 
 def test_short_text_is_untouched():
-    assert cut_on_whitespace("slope 4:12 max", 100) == "slope 4:12 max"
+    assert cut_on_whitespace("aspect 16:9 max", 100) == "aspect 16:9 max"
 
 
 def test_cut_backs_up_to_whitespace_so_a_value_survives_whole():
-    text = "The roof pitch limit is 4:12 for this shingle"
-    limit = text.index("4:12") + 3  # a hard slice would leave "4:1"
+    text = "The render preset is 16:9 for this clip"
+    limit = text.index("16:9") + 3  # a hard slice would leave "16:"
     out = cut_on_whitespace(text, limit)
-    assert out.endswith("limit is")
-    assert "4:1" not in out
+    assert out.endswith("preset is")
+    assert "16:" not in out
 
 
 def test_no_whitespace_falls_back_to_the_hard_cut():

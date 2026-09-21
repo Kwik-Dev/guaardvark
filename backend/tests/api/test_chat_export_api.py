@@ -53,13 +53,13 @@ def _seed(app):
         db.session.flush()
         db.session.add_all(
             [
-                LLMMessage(session_id=first.id, role="user", content="How much ice and water for 30 squares?\nSecond line", timestamp=base + timedelta(seconds=1)),
-                LLMMessage(session_id=first.id, role="assistant", content="About 3 rolls at eaves only.", extra_data={"model": "gemma"}, timestamp=base + timedelta(seconds=2)),
+                LLMMessage(session_id=first.id, role="user", content="How many frames for a 30 second clip?\nSecond line", timestamp=base + timedelta(seconds=1)),
+                LLMMessage(session_id=first.id, role="assistant", content="About 720 at 24 fps.", extra_data={"model": "gemma"}, timestamp=base + timedelta(seconds=2)),
                 LLMMessage(session_id=second.id, role="system", content="context", timestamp=base + timedelta(minutes=5, seconds=1)),
-                LLMMessage(session_id=second.id, role="user", content="Run the takeoff", timestamp=base + timedelta(minutes=5, seconds=2)),
+                LLMMessage(session_id=second.id, role="user", content="Run the batch", timestamp=base + timedelta(minutes=5, seconds=2)),
             ]
         )
-        db.session.add(LLMSessionSummary(session_id=first.id, summary="Talked about ice and water.", message_count=2))
+        db.session.add(LLMSessionSummary(session_id=first.id, summary="Talked about frame counts.", message_count=2))
         db.session.commit()
 
 
@@ -96,18 +96,18 @@ def test_session_json_carries_ordered_messages_summaries_and_title(app, client):
 
     with open(os.path.join(body["directory"], "sessions", "sess-one.json"), encoding="utf-8") as fh:
         session = json.load(fh)
-    assert session["title"] == "How much ice and water for 30 squares?"
+    assert session["title"] == "How many frames for a 30 second clip?"
     assert session["mode"] == "chat"
     assert [m["role"] for m in session["messages"]] == ["user", "assistant"]
     assert session["messages"][1]["extra_data"] == {"model": "gemma"}
-    assert session["summaries"][0]["summary"] == "Talked about ice and water."
+    assert session["summaries"][0]["summary"] == "Talked about frame counts."
     assert session["first_message_at"] < session["last_message_at"]
 
     with open(os.path.join(body["directory"], "sessions", "sess-one.md"), encoding="utf-8") as fh:
         markdown = fh.read()
-    assert markdown.startswith("# How much ice and water for 30 squares?")
+    assert markdown.startswith("# How many frames for a 30 second clip?")
     assert "## user" in markdown and "## assistant" in markdown
-    assert "About 3 rolls at eaves only." in markdown
+    assert "About 720 at 24 fps." in markdown
     assert "## Rolling summaries" in markdown
 
     with open(os.path.join(body["directory"], "sessions", "sess-empty.json"), encoding="utf-8") as fh:

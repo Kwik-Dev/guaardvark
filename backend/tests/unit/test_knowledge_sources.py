@@ -22,10 +22,10 @@ def test_registry_starts_empty():
 
 
 def test_register_and_unregister():
-    ks.register_knowledge_source("catalogue", lambda q, k: [hit("Shingles")])
+    ks.register_knowledge_source("catalogue", lambda q, k: [hit("Install Guide")])
 
     assert ks.list_knowledge_sources() == ["catalogue"]
-    assert ks.retrieve_from_sources("roof")[0]["title"] == "Shingles"
+    assert ks.retrieve_from_sources("install")[0]["title"] == "Install Guide"
 
     assert ks.unregister_knowledge_source("catalogue") is True
     assert ks.list_knowledge_sources() == []
@@ -55,9 +55,9 @@ def test_query_and_top_k_reach_the_retriever():
         return []
 
     ks.register_knowledge_source("spy", spy)
-    ks.retrieve_from_sources("gutter pitch", top_k=3)
+    ks.retrieve_from_sources("render presets", top_k=3)
 
-    assert seen == {"query": "gutter pitch", "top_k": 3}
+    assert seen == {"query": "render presets", "top_k": 3}
 
 
 def test_min_score_drops_weak_hits():
@@ -133,9 +133,9 @@ def pgvector_results(monkeypatch):
 
 
 def test_rag_output_is_unchanged_when_no_sources_are_registered(engine, pgvector_results):
-    pgvector_results.append({"text": "shingle spec", "metadata": {"source_filename": "spec.pdf"}})
+    pgvector_results.append({"text": "quickstart spec", "metadata": {"source_filename": "spec.pdf"}})
 
-    assert engine._retrieve_rag_context("q") == "[Source: spec.pdf]\nshingle spec"
+    assert engine._retrieve_rag_context("q") == "[Source: spec.pdf]\nquickstart spec"
 
 
 def test_rag_returns_empty_string_when_nothing_matches(engine, pgvector_results):
@@ -143,19 +143,19 @@ def test_rag_returns_empty_string_when_nothing_matches(engine, pgvector_results)
 
 
 def test_rag_appends_source_hits_after_pgvector_chunks(engine, pgvector_results):
-    pgvector_results.append({"text": "shingle spec", "metadata": {"source_filename": "spec.pdf"}})
-    ks.register_knowledge_source("catalogue", lambda q, k: [hit("Ridge Vent")])
+    pgvector_results.append({"text": "quickstart spec", "metadata": {"source_filename": "spec.pdf"}})
+    ks.register_knowledge_source("catalogue", lambda q, k: [hit("Release Notes")])
 
     assert engine._retrieve_rag_context("q") == (
-        "[Source: spec.pdf]\nshingle spec\n\n"
-        "[Source: Ridge Vent]\nRidge Vent body"
+        "[Source: spec.pdf]\nquickstart spec\n\n"
+        "[Source: Release Notes]\nRelease Notes body"
     )
 
 
 def test_rag_returns_source_hits_even_when_pgvector_is_empty(engine, pgvector_results):
-    ks.register_knowledge_source("catalogue", lambda q, k: [hit("Ridge Vent")])
+    ks.register_knowledge_source("catalogue", lambda q, k: [hit("Release Notes")])
 
-    assert engine._retrieve_rag_context("q") == "[Source: Ridge Vent]\nRidge Vent body"
+    assert engine._retrieve_rag_context("q") == "[Source: Release Notes]\nRelease Notes body"
 
 
 def test_rag_clips_source_snippets_like_pgvector_chunks(engine, pgvector_results):

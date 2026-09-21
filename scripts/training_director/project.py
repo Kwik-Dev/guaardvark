@@ -38,7 +38,7 @@ class Project:
     # Acronyms this trade expects spelled out letter by letter.
     spelled_acronyms: tuple[str, ...] = ()
 
-    # What a bare ratio like "4:12" measures in this trade, e.g. "pitch".
+    # What a bare ratio like "1:12" measures in this trade, e.g. "slope".
     # Left unset, ratios are read as plain digits. ratio_context lists words
     # that already imply the noun, so it is not said twice.
     ratio_noun: str | None = None
