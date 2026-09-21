@@ -123,7 +123,7 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 | Variable | Purpose |
 |----------|---------|
 | `GUAARDVARK_DEFAULT_LLM` | Default chat model. |
-| `GUAARDVARK_OPENAI_API_KEY` / `GUAARDVARK_OPENAI_BASE_URL` / `GUAARDVARK_OPENAI_MODEL` | OpenAI-compatible provider — used to point the chat brain at **ollama-cloud `deepseek-v4`** so no large LLM is held in local memory. Opt-in only: a bare `OPENAI_API_KEY` (exported for another tool) is deliberately ignored — the namespaced key, or an explicit `GUAARDVARK_OPENAI_BASE_URL`, is the consent. The endpoint + model in use are logged at INFO. |
+| `GUAARDVARK_OPENAI_API_KEY` / `GUAARDVARK_OPENAI_BASE_URL` / `GUAARDVARK_OPENAI_MODEL` | OpenAI-compatible provider — used to point the chat brain at **ollama-cloud `deepseek-v4`** so no large LLM is held in local memory. Opt-in only, and the endpoint is always explicit: **`GUAARDVARK_OPENAI_BASE_URL` is required** (there is no implicit `api.openai.com` default). The key is optional (local vLLM / Ollama need none), and a bare `OPENAI_API_KEY` (exported for another tool) is deliberately ignored. The endpoint + model in use are logged at INFO. |
 | `GUAARDVARK_MISTRAL_API_KEY` / `GUAARDVARK_MISTRAL_MODEL` / `GUAARDVARK_MISTRAL_BASE_URL` | Optional Mistral provider (multi-provider escalation). |
 | `OLLAMA_BASE_URL` | Local Ollama endpoint (used when not routing to the cloud). |
 | `GUAARDVARK_EMBEDDING_MODEL` | Embedding model for RAG. |
