@@ -195,7 +195,10 @@ def _default_llm(*, system: str, user: str, model: str = "gemma4:12b") -> str:
     from backend.utils.ollama_resource_manager import think_payload
     resp = ollama.chat(
         model=model,
-        messages=messages,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
         format="json",  # hardens JSON parsing for the strict-schema agents
         **think_payload(model),
     )

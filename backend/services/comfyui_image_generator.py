@@ -57,9 +57,12 @@ ZIMAGE_CLIP_TYPE = os.environ.get("GUAARDVARK_ZIMAGE_CLIP_TYPE", "lumina2")
 ZIMAGE_VAE = os.environ.get("GUAARDVARK_ZIMAGE_VAE", "ae.safetensors")
 ZIMAGE_SAMPLER = os.environ.get("GUAARDVARK_ZIMAGE_SAMPLER", "res_multistep")
 ZIMAGE_SCHEDULER = os.environ.get("GUAARDVARK_ZIMAGE_SCHEDULER", "simple")
-# Flow-matching shift for Z-Image Turbo (ModelSamplingAuraFlow). The distilled
-# model is CFG-free: positive conditioning drives the sampler, the negative is
-# zeroed via ConditioningZeroOut, and cfg stays 1.0.
+# Flow-matching shift for Z-Image Turbo (ModelSamplingAuraFlow). 3 matches the
+# working Z-Image Turbo workflow on the reference machine (ComfyUI's
+# image_z_image_turbo-api_guaardvark.json sets ModelSamplingAuraFlow shift=3);
+# it is not a guess. The distilled model is CFG-free: positive conditioning
+# drives the sampler, the negative is zeroed via ConditioningZeroOut, and cfg
+# stays 1.0. Env-overridable for other Z-Image builds.
 ZIMAGE_SHIFT = float(os.environ.get("GUAARDVARK_ZIMAGE_SHIFT", "3"))
 
 # FLUX-dev (full transformer) keyframe path — the identity-lock route for trained
@@ -208,12 +211,14 @@ def _registry_vram(model_id: str, default: int = 12000) -> int:
 def _comfyui_loras_dir() -> Optional[Path]:
     """Locate the running ComfyUI's ``models/loras`` directory (best-effort).
 
-    The configured ``COMFYUI_DIR`` may point at a bundled/plugins copy that does
-    not exist, while the actually-running ComfyUI lives elsewhere (e.g.
-    ``~/ComfyUI-Installs/ComfyUI/ComfyUI``). Probe the configured path plus the
-    common install locations and return the first that exists.
+    ``GUAARDVARK_COMFYUI_LORAS_DIR`` wins when set (the operator knows where the
+    running ComfyUI keeps its loras). Otherwise the configured ``COMFYUI_DIR`` and
+    the bundled plugin copy are probed, and the first that exists wins.
     """
     candidates: list[Path] = []
+    env_dir = os.environ.get("GUAARDVARK_COMFYUI_LORAS_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
     try:
         from backend.config import COMFYUI_DIR
         candidates.append(Path(COMFYUI_DIR) / "models" / "loras")
@@ -222,7 +227,6 @@ def _comfyui_loras_dir() -> Optional[Path]:
     candidates.append(
         Path(__file__).resolve().parents[3] / "plugins" / "comfyui" / "ComfyUI" / "models" / "loras"
     )
-    candidates.append(Path.home() / "ComfyUI-Installs" / "ComfyUI" / "ComfyUI" / "models" / "loras")
     for c in candidates:
         if c.is_dir():
             return c
@@ -247,6 +251,14 @@ def ensure_lora_in_comfyui(lora_path: str) -> bool:
         logger.warning("ensure_lora_in_comfyui: could not locate ComfyUI loras dir for %s", p.name)
         return False
     target = loras_dir / p.name
+    if target.is_symlink() and not target.exists():
+        # Dangling symlink (target moved or removed): a broken link reads as
+        # absent to ``exists()``, so heal it instead of failing to link below.
+        try:
+            target.unlink()
+        except OSError as e:
+            logger.warning("Could not remove dangling LoRA link %s: %s", target, e)
+            return False
     if target.exists():
         return True
     try:
