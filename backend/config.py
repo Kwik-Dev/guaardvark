@@ -336,13 +336,12 @@ MISTRAL_REQUEST_TIMEOUT = int(os.environ.get("GUAARDVARK_MISTRAL_TIMEOUT", "120"
 # Together, vLLM, and Ollama's OpenAI-compat endpoint. Base URL is the only thing
 # that changes between them (e.g. https://api.openai.com/v1, https://openrouter.ai/api/v1).
 #
-# Opt-in ONLY. A bare OPENAI_API_KEY — which many developers export globally for
-# unrelated tools — must never route a user's prompts off their machine. Setting
-# the Guaardvark-namespaced key (or base URL) below is the consent.
+# Opt-in ONLY, and the endpoint is always explicit: GUAARDVARK_OPENAI_BASE_URL is
+# required (there is no implicit api.openai.com default — a remote default is not
+# the same thing as a remote option). The key is optional for local endpoints, and
+# a bare OPENAI_API_KEY — which many developers export globally for unrelated
+# tools — is never read.
 OPENAI_API_KEY = os.environ.get("GUAARDVARK_OPENAI_API_KEY", "").strip()
-# Empty until the operator configures it. openai_provider falls back to OpenAI's
-# public URL only when the namespaced key is set — a remote default is not the
-# same thing as a remote option.
 OPENAI_BASE_URL = os.environ.get("GUAARDVARK_OPENAI_BASE_URL", "").strip().rstrip("/")
 OPENAI_DEFAULT_MODEL = os.environ.get("GUAARDVARK_OPENAI_MODEL", "gpt-4o-mini").strip()
 OPENAI_REQUEST_TIMEOUT = int(os.environ.get("GUAARDVARK_OPENAI_TIMEOUT", "120"))

@@ -63,7 +63,9 @@ def list_provider_models():
     if provider == lp.OPENAI:
         if not lp.provider_available(lp.OPENAI):
             return error_response(
-                "OpenAI-compatible provider not configured (set GUAARDVARK_OPENAI_API_KEY / GUAARDVARK_OPENAI_BASE_URL in .env).",
+                "OpenAI-compatible provider not configured (set "
+                "GUAARDVARK_OPENAI_BASE_URL, plus GUAARDVARK_OPENAI_API_KEY if the "
+                "endpoint needs one, in .env).",
                 400,
             )
         from backend.services import openai_provider

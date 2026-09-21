@@ -382,7 +382,7 @@ const ModelManagementSection = ({
               title={
                 openaiAvailable
                   ? "Route chat to your OpenAI-compatible provider"
-                  : `Set ${openaiProvider?.key_env || 'GUAARDVARK_OPENAI_API_KEY'} in .env to enable`
+                  : "Set GUAARDVARK_OPENAI_BASE_URL (and a key if the endpoint needs one) in .env to enable"
               }
             >
               <span>
@@ -413,8 +413,9 @@ const ModelManagementSection = ({
               sx={{ mt: 0.5 }}
             >
               OpenAI-compatible unavailable — set{' '}
-              <code>{openaiProvider?.key_env || 'GUAARDVARK_OPENAI_API_KEY'}</code>
-              {' '}(and/or <code>GUAARDVARK_OPENAI_BASE_URL</code>) in .env.
+              <code>GUAARDVARK_OPENAI_BASE_URL</code>
+              {' '}(and <code>{openaiProvider?.key_env || 'GUAARDVARK_OPENAI_API_KEY'}</code>
+              {' '}if the endpoint needs one) in .env.
             </Typography>
           )}
 

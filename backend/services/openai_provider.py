@@ -41,18 +41,11 @@ logger = logging.getLogger(__name__)
 # Availability + config helpers
 # ---------------------------------------------------------------------------
 
-# OpenAI's public endpoint. Only reached when the operator set
-# GUAARDVARK_OPENAI_API_KEY; never defaulted to on a bare OPENAI_API_KEY.
-_DEFAULT_BASE_URL = "https://api.openai.com/v1"
-
 
 def _base_url() -> str:
-    """Endpoint actually used: the configured one, else OpenAI's public URL.
-
-    The fallback only applies once consent exists (a namespaced key or an
-    explicit base URL), which ``available()`` enforces.
-    """
-    return (config.OPENAI_BASE_URL or _DEFAULT_BASE_URL).rstrip("/")
+    """Endpoint actually used. Always the operator's explicit choice: there is no
+    implicit remote default (``available()`` guarantees it is set)."""
+    return config.OPENAI_BASE_URL.rstrip("/")
 
 
 def describe(model: Optional[str] = None) -> str:
@@ -74,12 +67,12 @@ def _log_route_once(model: str) -> None:
 def available() -> bool:
     """True when the operator opted into an OpenAI-compatible endpoint.
 
-    Consent is GUAARDVARK_OPENAI_API_KEY (namespaced) or an explicit
-    GUAARDVARK_OPENAI_BASE_URL. A bare OPENAI_API_KEY is deliberately ignored so
-    a globally-exported key cannot send a user's prompts to api.openai.com.
+    The base URL must be set deliberately — there is NO fallback to
+    api.openai.com, because a remote default is not the same thing as a remote
+    option. A key is optional (local vLLM / Ollama need none), and a bare
+    OPENAI_API_KEY is deliberately ignored so a key exported globally for another
+    tool can never enable a cloud route.
     """
-    if config.OPENAI_API_KEY:
-        return True
     return bool(config.OPENAI_BASE_URL)
 
 
