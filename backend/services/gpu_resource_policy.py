@@ -185,6 +185,34 @@ _RECLAIM_POLL_S = 0.5
 _RECLAIM_POLLS = 34  # with the 3 s settle: up to 20 s for a freed model to leave the card
 
 
+def vram_holders_text(*, limit: int = 6) -> str:
+    """Processes holding VRAM right now, largest first, as one readable line.
+
+    A refusal that says only "another model/render may be resident" cannot be
+    acted on; the desktop, a screen recorder's encoder and stray sidecars are
+    as likely as a model. Never raises — diagnostics must not fail a render.
+    """
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        rows = []
+        for line in (out.stdout or "").splitlines():
+            parts = [c.strip() for c in line.split(",")]
+            if len(parts) != 3:
+                continue
+            rows.append((int(parts[2] or 0), os.path.basename(parts[1]), parts[0]))
+        if not rows:
+            return "no compute processes listed"
+        rows.sort(reverse=True)
+        return ", ".join(f"{name}[{pid}] {mb}MB" for mb, name, pid in rows[:limit])
+    except Exception:  # noqa: BLE001
+        return "unavailable"
+
+
 def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str) -> None:
     """ComfyUI answers /free before the memory is actually back. After the
     fixed settle, poll the fit up to _RECLAIM_POLLS times instead of trusting
@@ -199,8 +227,19 @@ def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str) -> None
         except Exception:  # noqa: BLE001 — the real check follows
             return
         time.sleep(_RECLAIM_POLL_S)
-    log.info("gpu_session(%s): freed VRAM did not settle within %.0fs", op_id,
-             _RECLAIM_SETTLE_S + _RECLAIM_POLLS * _RECLAIM_POLL_S)
+    waited = _RECLAIM_SETTLE_S + _RECLAIM_POLLS * _RECLAIM_POLL_S
+    fit = None
+    try:
+        fit = fit_verdict(vram_estimate_mb, reserve_mb=reserve_mb)
+    except Exception:  # noqa: BLE001 — diagnostics only
+        pass
+    log.warning(
+        "gpu_session(%s): freed VRAM did not settle within %.0fs — need %sMB, "
+        "free %sMB. Holding the card: %s",
+        op_id, waited,
+        getattr(fit, "need_mb", vram_estimate_mb), getattr(fit, "free_mb", "?"),
+        vram_holders_text(),
+    )
 
 
 def reclaim_gpu(
@@ -673,8 +712,12 @@ def gpu_session(
                             in_process=True,
                             needed_mb=vram_estimate_mb,
                         )
-                        if free_comfyui:
-                            _wait_until_fits(vram_estimate_mb, vram_reserve_mb, op_id)
+                        # Every resident answers its eviction before the memory
+                        # is actually back: ComfyUI acks /free early, and Ollama's
+                        # keep_alive=0 returns before the runner drops its CUDA
+                        # context. Waiting only for ComfyUI left the Ollama-only
+                        # callers measuring mid-unload and refusing a job that fits.
+                        _wait_until_fits(vram_estimate_mb, vram_reserve_mb, op_id)
                     else:
                         log.info("gpu_session(%s): %d MB already fits; skipping eviction", op_id, vram_estimate_mb)
                 elif evict_ollama or free_comfyui:
