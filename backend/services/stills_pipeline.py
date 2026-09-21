@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -280,6 +281,7 @@ def _generate_one(
             prompt=prompt, negative=negative, model=f"comfyui ({engine})",
             width=width, height=height, steps=steps, guidance=guidance,
             seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
+            comfy_model=comfy_model,
         )
 
     try:
@@ -449,7 +451,13 @@ def _generate_comfy_flux(
     enhance_mode: str,
     output: str,
     output_dir: Path | str | None,
+    comfy_model: str | None = None,
 ) -> StillResult:
+    # The caller's model tag chooses the graph (upstream #218): "flux" + "dev" is
+    # the FLUX-dev graph, plain "flux" the schnell GGUF branch. The generic
+    # ``comfyui`` selector passes the engine it resolved via ``comfy_model`` so
+    # dispatch matches the family defaults it was resolved from.
+    model_tag = comfy_model or model
     try:
         from backend.services.comfyui_image_generator import ComfyUIImageGenerator
         gen = ComfyUIImageGenerator()
@@ -463,12 +471,7 @@ def _generate_comfy_flux(
             height=height,
             negative_prompt=negative or None,
             seed=seed if seed is not None else 42,
-            # The caller's tag, not a hard-coded "flux": _build_workflow picks the
-            # FLUX-dev graph on "flux" + "dev" and the schnell GGUF graph otherwise.
-            # Collapsing every tag to "flux" sent flux-dev requests through schnell
-            # while still applying the flux family's 28 steps / cfg 3.5 — dev
-            # settings on a 4-step distilled model.
-            model=model,
+            model=model_tag,
             steps=steps,
             steps_explicit=steps_explicit,
             cfg=guidance,
@@ -561,6 +564,7 @@ def _generate_comfy_zimage(
         out_path = None
         if output_dir:
             out_path = str(Path(output_dir) / f"zimage_{uuid.uuid4().hex[:8]}.png")
+        tmp_dir = tempfile.gettempdir()
 
         # ComfyUI KSampler needs cfg >= 1.0; offline Z-Image uses CFG-free distilled.
         _cfg_default = float(os.environ.get("GUAARDVARK_ZIMAGE_CFG", "1.0"))
@@ -568,7 +572,7 @@ def _generate_comfy_zimage(
 
         path = gen.generate_image(
             prompt=prompt,
-            output_path=out_path or str(Path("/tmp") / f"zimage_{uuid.uuid4().hex[:8]}.png"),
+            output_path=out_path or str(Path(tmp_dir) / f"zimage_{uuid.uuid4().hex[:8]}.png"),
             width=width,
             height=height,
             negative_prompt=negative or "",
