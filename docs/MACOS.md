@@ -24,6 +24,15 @@ The chat brain is moved to the cloud so the Mac doesn't hold a big local model.
 - **`fix/vision-sync`** — never treat text-only `gemma4:26b-mlx` as vision-capable; prefer `qwen3.8`; route cast identity sync through `qwen3.8` vision + cloud consensus model.
 
 > **Local image analysis model:** Guaardvark's local vision analysis (`VisionAnalyzer`) runs through Ollama. It **prefers a Qwen model** (e.g. `qwen3.8`) for image analysis, because `gemma4:26b-mlx` is text-only despite the name (it returns `400 "does not support image input"`). Gemma4 remains only as a **fallback** (priority: Qwen → any vision model already in VRAM → configured gemma4 → `gemma4:e4b`/`moondream`/`llava`). Gemma4:12b is still used as the default **text** LLM for planning (e.g. character-sheet generation), not for image analysis.
+
+> **Provider routing spec (current):** which env var drives which path —
+> - **Vision (image → text)** — `backend/utils/vision_analyzer.py` reads **only `OLLAMA_BASE_URL`** (`POST /api/chat` with the base64 image). It never reads `GUAARDVARK_OPENAI_*`, so vision **cannot** be routed to the cloud today and images never leave the machine. The vision model is auto-detected (Qwen first); `GUAARDVARK_DECISION_MODEL` only overrides its text/decision model.
+> - **Chat** — `unified_chat_engine` → `llm_provider` (master `cloud_models_enabled` + active provider, set in Settings).
+> - **Text / planning / agents** — `get_default_llm()` and `character_generator_service._default_llm()`: **cloud** when `GUAARDVARK_OPENAI_BASE_URL` + `GUAARDVARK_OPENAI_MODEL` are set, otherwise Ollama.
+> - **Cast identity consensus** (text-only merge, `character_bible_from_refs._default_consensus_llm` from `fix/vision-sync`) — goes through `openai_provider` (**cloud**, same `GUAARDVARK_OPENAI_*`); it is **not** independently switchable today.
+> - **Embeddings / RAG** — `OLLAMA_BASE_URL`.
+>
+> Consequences: `OLLAMA_BASE_URL` is **shared** by vision, embeddings and the local-chat fallback, so pointing it at a remote/cloud Ollama moves all three. `OLLAMA_API_KEY` is honoured by the `ollama` client (chat / consensus / local branches) but **not** by `VisionAnalyzer`, which posts raw HTTP without an auth header — a cloud `OLLAMA_BASE_URL` therefore 401s for vision. Use the `GUAARDVARK_OPENAI_*` route for cloud (key handled), and keep `OLLAMA_BASE_URL` for the local Qwen vision endpoint.
 - **`chore/llm-providers-followup`** — ModelManagementSection collapsible alert + ISSUES note.
 
 ## 2. Image generation — Z-Image Turbo via ComfyUI (the local memory budget)
@@ -125,7 +134,8 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 | `GUAARDVARK_DEFAULT_LLM` | Default chat model. |
 | `GUAARDVARK_OPENAI_API_KEY` / `GUAARDVARK_OPENAI_BASE_URL` / `GUAARDVARK_OPENAI_MODEL` | OpenAI-compatible provider — used to point the chat brain at **ollama-cloud `deepseek-v4`** so no large LLM is held in local memory. Opt-in only, and the endpoint is always explicit: **`GUAARDVARK_OPENAI_BASE_URL` is required** (there is no implicit `api.openai.com` default). The key is optional (local vLLM / Ollama need none), and a bare `OPENAI_API_KEY` (exported for another tool) is deliberately ignored. The endpoint + model in use are logged at INFO. |
 | `GUAARDVARK_MISTRAL_API_KEY` / `GUAARDVARK_MISTRAL_MODEL` / `GUAARDVARK_MISTRAL_BASE_URL` | Optional Mistral provider (multi-provider escalation). |
-| `OLLAMA_BASE_URL` | Local Ollama endpoint (used when not routing to the cloud). |
+| `OLLAMA_BASE_URL` | Ollama endpoint used by **vision analysis** (`VisionAnalyzer`), embeddings, and the local-chat fallback. Shared — changing it moves all three. |
+| `OLLAMA_API_KEY` | Bearer token for a remote/cloud Ollama endpoint. Read by the `ollama` client (chat, consensus, local branches) — **not** by `VisionAnalyzer`'s raw HTTP calls. |
 | `GUAARDVARK_EMBEDDING_MODEL` | Embedding model for RAG. |
 | `GUAARDVARK_CLAUDE_API_ENABLED` / `GUAARDVARK_CLAUDE_MODEL` / `GUAARDVARK_CLAUDE_MAX_TOKENS` / `GUAARDVARK_CLAUDE_TOKEN_BUDGET` / `GUAARDVARK_CLAUDE_ESCALATION_MODE` | Optional "Uncle Claude" guardian / escalation. |
 
