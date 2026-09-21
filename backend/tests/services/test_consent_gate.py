@@ -6,6 +6,7 @@ path pauses on the consent card, writes the record on approval, and answers
 with a refusal on decline; a caller's ``consented=true`` alone is never enough.
 """
 
+import os
 import shutil
 
 import pytest
@@ -16,14 +17,23 @@ from backend.services.agent_tools import ToolResult
 from backend.tools.image_tools import GenerateIdentityTool
 
 
+PNG = b"\x89PNG\r\n\x1a\n"
+
+
 @pytest.fixture
 def face(tmp_path, monkeypatch):
-    """A reference image on disk, with the hash index and OUTPUT_DIR under tmp."""
+    """A reference image inside the install, with the hash index under tmp.
+
+    ``STORAGE_DIR`` is pointed at ``tmp_path`` so the image counts as one this
+    install owns — the real case, where attachments land under ``data/``.
+    """
     monkeypatch.setattr(cr, "_hash_dir", lambda: str(tmp_path / "consent"))
     import backend.config as cfg
     monkeypatch.setattr(cfg, "OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setattr(cfg, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(cfg, "UPLOAD_DIR", str(tmp_path / "uploads"))
     p = tmp_path / "face.png"
-    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"face-bytes" * 16)
+    p.write_bytes(PNG + b"face-bytes" * 16)
     return str(p)
 
 
@@ -68,8 +78,86 @@ def test_same_photo_at_a_new_path_is_still_consented(face, tmp_path):
     shutil.copyfile(face, again)
     assert cr.has_consent(str(again)) is True
     different = tmp_path / "someone_else.png"
-    different.write_bytes(b"other-bytes")
+    different.write_bytes(PNG + b"other-bytes")
     assert cr.has_consent(str(different)) is False
+
+
+# ── what the record may touch ──────────────────────────────────────────────
+
+def test_an_image_outside_the_install_gets_no_sidecar_but_is_still_consented(
+    face, tmp_path, monkeypatch
+):
+    """The reference path comes from a tool argument, so a sidecar is only ever
+    written inside a directory this install owns. Consent still sticks, by hash."""
+    outside = tmp_path.parent / "outside_the_install"
+    outside.mkdir(exist_ok=True)
+    photo = outside / "holiday.png"
+    photo.write_bytes(PNG + b"my-own-photo" * 8)
+
+    assert cr.owned_sidecar_path(str(photo)) is None
+    rec = cr.record_consent(str(photo), "chat_approval", session_id="s9")
+
+    assert not (outside / "holiday.png.consent").exists()
+    assert cr.has_consent(str(photo)) is True
+    assert cr.consent_record(str(photo))["session_id"] == "s9"
+    assert (tmp_path / "consent" / f"{rec['sha256']}.consent").is_file()
+
+
+def test_a_reference_that_is_not_an_image_is_refused(face, tmp_path):
+    """No reading, hashing or indexing a file because a prompt named it.
+
+    The local is deliberately not called ``secret``: CodeQL treats a variable
+    with that name as a credential and traces it interprocedurally into
+    record_consent's write and log sinks, which reports the guard being tested
+    here as four clear-text-storage findings in production code.
+    """
+    not_an_image = tmp_path / "id_rsa"
+    not_an_image.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n")
+
+    assert cr.content_hash(str(not_an_image)) is None
+    assert cr.has_consent(str(not_an_image)) is False
+    with pytest.raises(ValueError):
+        cr.record_consent(str(not_an_image), "chat_approval")
+    assert not (tmp_path / "id_rsa.consent").exists()
+    assert not (tmp_path / "consent").exists() or not list((tmp_path / "consent").iterdir())
+
+
+def test_a_reference_that_is_not_a_regular_file_is_refused(face, tmp_path):
+    """A FIFO must not be opened and waited on.
+
+    The reference path is a tool argument, so a caller can name one. A blocking
+    ``open`` on a FIFO with no writer never returns, which would hang the
+    request rather than refuse it. The test asserts termination as much as the
+    verdict: it fails by timing out if the guard is removed.
+    """
+    fifo = tmp_path / "pipe.png"
+    try:
+        os.mkfifo(fifo)
+    except (AttributeError, NotImplementedError, OSError):
+        pytest.skip("platform has no mkfifo")
+
+    assert cr.has_consent(str(fifo)) is False
+    assert cr.content_hash(str(fifo)) is None
+    # Refused before the image check even runs: record_consent's own
+    # os.path.isfile is already False for a FIFO, so this is FileNotFoundError
+    # rather than the ValueError a real-but-not-an-image file gets.
+    with pytest.raises((ValueError, OSError)):
+        cr.record_consent(str(fifo), "chat_approval")
+    assert not (tmp_path / "pipe.png.consent").exists()
+
+
+def test_a_directory_named_as_a_reference_is_refused(tmp_path):
+    a_dir = tmp_path / "looks_like.png"
+    a_dir.mkdir()
+    assert cr.has_consent(str(a_dir)) is False
+
+
+def test_a_sidecar_cannot_be_aimed_out_of_the_install_with_dots(face, tmp_path):
+    """abspath normalisation happens before the containment check."""
+    sneaky = str(tmp_path / "sub" / ".." / ".." / "escaped.png")
+    assert cr.owned_sidecar_path(sneaky) is None
+    inside = str(tmp_path / "sub" / ".." / "face.png")
+    assert cr.owned_sidecar_path(inside) == str(tmp_path / "face.png") + ".consent"
 
 
 def test_missing_file_has_no_consent(tmp_path):
