@@ -3038,13 +3038,20 @@ Reply ONLY with JSON:
                 }
             try:
                 img, _ = screen.capture()
-                # Tight prompt keeps latency low — yes/no with one-line justification.
+                # Ask about a STATE, not a thing. Proofs arrive as sentences
+                # ("Example Domain heading now visible"); asked "is the
+                # following visible: <sentence>" three gemma sizes read it
+                # literally and said no on a loaded example.com (measured
+                # 2026-09-22, 3 of 4 eyes), and the loop rejected a correct
+                # done eight times. Asked whether the screenshot shows that
+                # state, all four said yes, and all four still said no on a
+                # blank page.
                 result = analyzer.analyze(
                     img,
                     prompt=(
-                        f"Is the following visible on this screen RIGHT NOW: \"{target_description}\"?\n"
+                        f"Does this screenshot show the following state right now: \"{target_description}\"?\n"
                         "Answer with EXACTLY one word on the first line: yes or no.\n"
-                        "Do not guess — only say yes if you can actually see it in the image."
+                        "Only say yes if the image itself shows it; do not guess."
                     ),
                     num_predict=8,
                     temperature=0.0,
