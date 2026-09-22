@@ -651,6 +651,12 @@ class AgentControlService:
         # Attempts per click target this task: the second try at the same
         # target asks the servo for precision (arms its correction loop).
         self._click_attempts: Dict[str, int] = {}
+        # The stuck target is per task. Left over, a Google task's "first
+        # organic search result" was re-ground into every prompt of the dots
+        # task that followed it.
+        self._stuck_target = ""
+        self._stuck_target_count = 0
+        self._failure_reports = []
         # Who thinks, who looks. Resolved once per task; the loop reads it.
         self._brain_eye = self.resolve_brain_eye(screen_size=screen.screen_size())
         if not self._brain_eye.eye:
