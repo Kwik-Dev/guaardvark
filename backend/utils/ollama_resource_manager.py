@@ -131,11 +131,23 @@ def get_ollama_base_url() -> str:
 
 
 def is_vision_model(model_name: str) -> bool:
-    """Check if a model is a vision/multimodal model by name pattern."""
+    """Whether this model can accept images. Delegates to the capability resolver.
+
+    Kept as a function because callers import it by name; the answer no longer
+    comes from VISION_MODEL_PATTERNS below. Pattern matching got this wrong in
+    both directions on real installed models — calling a vision-less
+    "gemma4"-named build multimodal, and calling genuinely multimodal Mistral
+    and Qwen builds blind. The patterns survive as the resolver's offline
+    fallback for when Ollama cannot be reached.
+    """
     if not model_name:
         return False
-    lower = model_name.lower()
-    return any(re.search(p, lower) for p in VISION_MODEL_PATTERNS)
+    try:
+        from backend.services.model_capability_resolver import sees_natively
+        return sees_natively(model_name)
+    except Exception:  # resolver unavailable (import cycle at boot, etc.)
+        lower = model_name.lower()
+        return any(re.search(p, lower) for p in VISION_MODEL_PATTERNS)
 
 
 def is_text_chat_model(model_name: str) -> bool:
@@ -297,7 +309,12 @@ def get_model_info(model_name: str) -> Optional[dict]:
             "architecture": details.get("family", "unknown"),
             "families": details.get("families", []),
             "quantization": details.get("quantization_level", "unknown"),
-            "is_vision": is_vision_model(model_name) or "clip" in str(details.get("families", [])).lower(),
+            # Read from the payload we just fetched, never from a name pattern.
+            # This used to call is_vision_model(), which now asks the capability
+            # resolver, which asks this function — a cycle. It was also simply
+            # wrong: Ollama has already told us the answer two lines up.
+            "is_vision": ("vision" in capabilities
+                          or "clip" in str(details.get("families", [])).lower()),
             "capabilities": capabilities,
             "_cached_at": time.time(),
         }
