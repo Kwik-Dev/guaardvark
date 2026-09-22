@@ -101,8 +101,10 @@ class ClaudeAdvisorService:
             if self._escalation_base_url:
                 self._effective_provider = "openai_compat"
                 logger.info(
-                    "ClaudeAdvisorService initialized with OpenAI-compatible provider: %s",
+                    "ClaudeAdvisorService initialized with OpenAI-compatible provider: "
+                    "endpoint=%s model=%s",
                     self._escalation_base_url,
+                    self._escalation_model or "(provider default)",
                 )
             else:
                 logger.warning("OpenAI-compatible escalation provider selected but no GUAARDVARK_ESCALATION_BASE_URL set.")
