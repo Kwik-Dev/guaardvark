@@ -63,7 +63,9 @@ def list_provider_models():
     if provider == lp.OPENAI:
         if not lp.provider_available(lp.OPENAI):
             return error_response(
-                "OpenAI-compatible provider not configured (set GUAARDVARK_OPENAI_API_KEY / GUAARDVARK_OPENAI_BASE_URL in .env).",
+                "OpenAI-compatible provider not configured (set "
+                "GUAARDVARK_OPENAI_BASE_URL, plus GUAARDVARK_OPENAI_API_KEY if the "
+                "endpoint needs one, in .env).",
                 400,
             )
         from backend.services import openai_provider
@@ -104,9 +106,10 @@ def test_mistral():
     if provider == lp.OLLAMA or provider not in lp.CLOUD_PROVIDERS:
         return error_response("No active cloud provider selected to test.", 400)
     if not lp.provider_available(provider):
-        env = lp.CLOUD_PROVIDERS[provider]["key_env"]
+        meta = lp.CLOUD_PROVIDERS[provider]
+        env = meta.get("required_env") or meta["key_env"]
         return error_response(
-            f"{lp.CLOUD_PROVIDERS[provider]['label']} not configured (set {env} in .env).", 400)
+            f"{meta['label']} not configured (set {env} in .env).", 400)
     model = lp.get_active_cloud_model()
     if provider == lp.MISTRAL:
         from backend.services import mistral_provider as provider_mod
