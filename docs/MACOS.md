@@ -19,7 +19,9 @@ Everything below is the set of modifications (across 42 GitButler virtual branch
 The chat brain is moved to the cloud so the Mac doesn't hold a big local model.
 
 - **`feat/llm-providers`** — OpenAI-compatible chat provider + smart multi-provider escalation; force UTF-8 decoding in cloud LLM streaming (fixes mojibake); model-management UI + cloud model in status bar; surface `.env` cloud models in the Music Video Director dropdown.
-- **`voice-openai-routing`** — guard: don't load a local Ollama model when an OpenAI-compatible endpoint is active; Discord voice via pi-omni router + OpenAI-compatible main chat.
+- **`voice-openai-routing`** — guard: don't load a local Ollama model when an OpenAI-compatible endpoint is active.
+- **`pr/discord-voice`** — Discord voice gets an **opt-in** backend. `voice.backend: "guaardvark"` (default) keeps Guaardvark's own Audio Foundry for STT/TTS; `"pi-omni"` routes through an OpenAI-compatible voice router (`voice.router_url`, whisper.cpp + Kokoro) and **falls back to Guaardvark's voice API** when the router is unreachable. `voice.router_tts_voice` selects the Kokoro voice; `voice.join_greeting` is empty (silent) by default. The external stack is started only when `GUAARDVARK_START_VOICE_STACK=1`. Split out of #214 so the LLM-provider PR stays provider-only.
+- **`pr/g5-vision-llm-routing`** — the consolidated follow-up PR: `fix/vision-sync` + `chore/llm-providers-followup` + `feat/filmcrew-openai-compatible`, stacked on #214.
 - **`feat/filmcrew-openai-compatible`** — route Film Crew agents and the director_service LLM calls through the OpenAI-compatible provider (so film crew doesn't need a local LLM).
 - **`fix/vision-sync`** — never treat text-only `gemma4:26b-mlx` as vision-capable; prefer `qwen3.8`; route cast identity sync through `qwen3.8` vision + cloud consensus model.
 
@@ -28,7 +30,7 @@ The chat brain is moved to the cloud so the Mac doesn't hold a big local model.
 > **Provider routing spec (current):** which env var drives which path —
 > - **Vision (image → text)** — `backend/utils/vision_analyzer.py` reads **only `OLLAMA_BASE_URL`** (`POST /api/chat` with the base64 image). It never reads `GUAARDVARK_OPENAI_*`, so vision **cannot** be routed to the cloud today and images never leave the machine. The vision model is auto-detected (Qwen first); `GUAARDVARK_DECISION_MODEL` only overrides its text/decision model.
 > - **Chat** — `unified_chat_engine` → `llm_provider` (master `cloud_models_enabled` + active provider, set in Settings).
-> - **Text / planning / agents** — `get_default_llm()` and `character_generator_service._default_llm()`: **cloud** when `GUAARDVARK_OPENAI_BASE_URL` + `GUAARDVARK_OPENAI_MODEL` are set, otherwise Ollama.
+> - **Text / planning / agents** — `get_default_llm()`: **cloud** when `GUAARDVARK_OPENAI_BASE_URL` + `GUAARDVARK_OPENAI_MODEL` are set, otherwise Ollama. `character_generator_service._default_llm()` is stricter: it follows the **master cloud switch / active provider** (`llm_provider.get_active_provider() == OPENAI`), so a configured base URL alone does **not** route it — the operator has to have the provider selected (and cloud models enabled).
 > - **Cast identity consensus** (text-only merge, `character_bible_from_refs._default_consensus_llm` from `fix/vision-sync`) — goes through `openai_provider` (**cloud**, same `GUAARDVARK_OPENAI_*`); it is **not** independently switchable today.
 > - **Embeddings / RAG** — `OLLAMA_BASE_URL`.
 >
@@ -44,7 +46,7 @@ The Mac's memory is reserved for image generation, routed through ComfyUI (works
 - **`feat/zimage-comfyui`** — route Z-Image image generation through ComfyUI; don't free ComfyUI resident models when rendering through ComfyUI.
 - **`feat/zimage-comfyui-mps`** — enable Z-Image generation on Apple Silicon via ComfyUI; apply Z-Image character LoRAs model-only in the ComfyUI Z-Image graph; auto-link trained LoRAs into ComfyUI when Z-Image is routed through ComfyUI.
 - **`feat/imagemodel-comfyui`** — add `/imagemodel comfyui` chat image backend; accept it regardless of download status; detect ComfyUI engines from live `/object_info` instead of a bundled dir.
-- **`pr/m4-comfyui-image` (#197)** — the consolidated route above, off by default: `GUAARDVARK_ZIMAGE_USE_COMFYUI=1` opts Z-Image (chat, batch and Cast stills) into the ComfyUI graph (UNETLoader + Lumina2 CLIP + `ModelSamplingAuraFlow`, CFG-free with `ConditioningZeroOut`, LoRA chain model-only via `LoraLoaderModelOnly`); `/imagemodel comfyui` picks whichever engine ComfyUI has installed; the ComfyUI loras dir is overridable; Z-Image's `min_steps` floor also applies to the `comfyui` selector.
+- **`pr/m4-comfyui-image` (#197)** — the consolidated route above, off by default: `GUAARDVARK_ZIMAGE_USE_COMFYUI=1` opts Z-Image (chat, batch and Cast stills) into the ComfyUI graph (UNETLoader + Lumina2 CLIP + `ModelSamplingAuraFlow`, CFG-free with `ConditioningZeroOut`, LoRA chain model-only via `LoraLoaderModelOnly`); `/imagemodel comfyui` picks whichever engine ComfyUI has installed, but **skips the Z-Image engine unless `GUAARDVARK_ZIMAGE_USE_COMFYUI=1`** (falling back to FLUX when present), so the selector cannot silently turn the opt-in on; the ComfyUI loras dir is overridable; Z-Image's `min_steps` floor also applies to the `comfyui` selector. Only the Z-Image route skips freeing ComfyUI's resident models — the FLUX/SDXL Comfy paths keep their historic eviction behaviour.
 - **`fix/chat-cast-lora-resolution`** — resolve a cast LoRA from the user message in `generate_image` (so `[starship_captain]` / "Starship Captain" loads the trained LoRA even when the LLM strips the trigger).
 
 > **Z-Image → ComfyUI is opt-in.** The offline Diffusers Z-Image path is CUDA-only, so on Apple Silicon the ComfyUI route needs `GUAARDVARK_ZIMAGE_USE_COMFYUI=1`. With the flag off nothing changes for a user who has not set it. When on, the same flag routes Cast stills through ComfyUI (so the GPU session does **not** evict ComfyUI's resident models), links freshly trained LoRAs into ComfyUI's `models/loras`, and is checked in one place (`character_still_pipeline._zimage_via_comfyui_enabled`).
@@ -138,6 +140,7 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 | `OLLAMA_API_KEY` | Bearer token for a remote/cloud Ollama endpoint. Read by the `ollama` client (chat, consensus, local branches) — **not** by `VisionAnalyzer`'s raw HTTP calls. |
 | `GUAARDVARK_EMBEDDING_MODEL` | Embedding model for RAG. |
 | `GUAARDVARK_CLAUDE_API_ENABLED` / `GUAARDVARK_CLAUDE_MODEL` / `GUAARDVARK_CLAUDE_MAX_TOKENS` / `GUAARDVARK_CLAUDE_TOKEN_BUDGET` / `GUAARDVARK_CLAUDE_ESCALATION_MODE` | Optional "Uncle Claude" guardian / escalation. |
+| `GUAARDVARK_ESCALATION_PROVIDER` / `_BASE_URL` / `_API_KEY` / `_MODEL` | Escalation provider for `smart`/`always` modes: `auto`, `anthropic`, or **any OpenAI-compatible endpoint**. `_BASE_URL` is what selects the OpenAI-compatible path; legacy `ANTHROPIC_API_KEY` + `GUAARDVARK_CLAUDE_MODEL` still resolve to Anthropic. |
 
 ### ComfyUI / image generation
 | Variable | Purpose |
@@ -146,6 +149,7 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 | `GUAARDVARK_COMFYUI_URL` | ComfyUI endpoint (default `http://127.0.0.1:8188`). |
 | `GUAARDVARK_COMFYUI_VENV` | ComfyUI virtualenv path. |
 | `GUAARDVARK_COMFYUI_IDLE_TIMEOUT` | Idle timeout before ComfyUI is freed. |
+| `GUAARDVARK_COMFYUI_ENGINE_CACHE_TTL` | Seconds to cache the live `/object_info` engine list (default `5`, `0` disables). Keeps per-model listings and a down ComfyUI from probing once per row. |
 | `GUAARDVARK_COMFYUI_LORAS_DIR` | Path to the running ComfyUI's `models/loras` (checked first); where trained Cast LoRAs are symlinked so `LoraLoaderModelOnly` can resolve them by basename. |
 | `COMFYUI_OUTPUT_DIR` | ComfyUI output directory. |
 | `GUAARDVARK_ZIMAGE_USE_COMFYUI` | Opt-in flag (`1`/`true`/`yes`/`on`) that routes Z-Image through ComfyUI instead of the CUDA-only offline Diffusers path. Required on Apple Silicon. Off by default. |
@@ -167,6 +171,7 @@ Guaardvark reads its configuration from the repo-root `.env` file. The variables
 | Variable | Purpose |
 |----------|---------|
 | `GUAARDVARK_USE_WHISPER_SERVER` | Opt-in flag (`1`) to route STT through an external `whisper.cpp` server instead of the bundled build. |
+| `GUAARDVARK_START_VOICE_STACK` | Opt-in flag (`1`) that lets the Discord plugin's start/stop scripts bring up / shut down the external pi-omni voice stack (whisper + Kokoro + router on `8081`). Off by default; only used when `voice.backend: "pi-omni"`. |
 | `GUAARDVARK_WHISPER_SERVER_BIN` | Path to the `whisper-server` binary (defaults to `command -v whisper-server`). |
 | `GUAARDVARK_WHISPER_SERVER_MODEL` | Path to the whisper model (e.g. `ggml-base.bin`). |
 | `GUAARDVARK_WHISPER_SERVER_PORT` | Server port (default `5800`). |
