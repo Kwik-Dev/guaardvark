@@ -382,6 +382,11 @@ def main(argv: Optional[list] = None):
                     help="build a manifest from --frames-glob and exit")
     ap.add_argument("--frames-glob", default="")
     ap.add_argument("--prompt-template", default="{colour} dot {letter}")
+    ap.add_argument("--coord-order", choices=["xy", "yx"], default="",
+                    help="force the axis order instead of using the model's config — "
+                         "the coordinate probe runs both and compares")
+    ap.add_argument("--grid", type=int, default=0,
+                    help="force the normalisation denominator (0 = use the config)")
     ap.add_argument("--out", default="")
     args = ap.parse_args(argv)
 
@@ -427,8 +432,14 @@ def main(argv: Optional[list] = None):
     for m in models:
         for mode in modes:
             print(f"\n===== {m}  [{mode}] =====")
-            r = eval_frames(m, size, frames, MODE_OVERLAYS[mode], hit_radius)
+            overlay = dict(MODE_OVERLAYS[mode])
+            if args.coord_order:
+                overlay["coord_order"] = args.coord_order
+            if args.grid:
+                overlay["internal_width"] = args.grid
+            r = eval_frames(m, size, frames, overlay, hit_radius)
             r["mode"] = mode
+            r["coord_order"] = overlay.get("coord_order", "(config)")
             for row in r["targets"]:
                 if row.get("err_x") is None:
                     print(f"  {row['target']:16s} FAIL {row.get('reason')}")
