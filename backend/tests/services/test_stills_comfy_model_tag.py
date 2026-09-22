@@ -101,3 +101,49 @@ def test_comfyui_selector_explicit_steps_win(monkeypatch):
 
     assert seen["steps"] == 12
     assert seen["steps_explicit"] is True
+
+
+# ── the generic comfyui selector needs the Z-Image opt-in flag ─────────────────
+# Without GUAARDVARK_ZIMAGE_USE_COMFYUI the selector must not silently turn on the
+# Z-Image-through-ComfyUI route; it falls back to a FLUX engine when one exists.
+
+class _EngineGen:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def _available(self):
+        return True
+
+    def comfyui_installed_engines(self):
+        return ["zimage"]
+
+
+def test_comfyui_selector_skips_zimage_without_the_flag(monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.comfyui_image_generator.ComfyUIImageGenerator", _EngineGen
+    )
+    monkeypatch.delenv("GUAARDVARK_ZIMAGE_USE_COMFYUI", raising=False)
+
+    assert sp._comfyui_backend_choice() is None
+
+
+def test_comfyui_selector_uses_zimage_when_opted_in(monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.comfyui_image_generator.ComfyUIImageGenerator", _EngineGen
+    )
+    monkeypatch.setenv("GUAARDVARK_ZIMAGE_USE_COMFYUI", "1")
+
+    assert sp._comfyui_backend_choice() == ("zimage", "zimage")
+
+
+def test_comfyui_selector_falls_back_to_flux_without_the_flag(monkeypatch):
+    class _EngineGenFlux(_EngineGen):
+        def comfyui_installed_engines(self):
+            return ["zimage", "flux-dev"]
+
+    monkeypatch.setattr(
+        "backend.services.comfyui_image_generator.ComfyUIImageGenerator", _EngineGenFlux
+    )
+    monkeypatch.delenv("GUAARDVARK_ZIMAGE_USE_COMFYUI", raising=False)
+
+    assert sp._comfyui_backend_choice() == ("flux-dev", "flux-dev")

@@ -418,6 +418,10 @@ class ComfyUIImageGenerator:
                     effective_model = tag
                     ml = tag
                 elif info.get("family") == "zimage" and "zimage" not in ml and "z-image" not in ml:
+                    # Deliberate: a Z-Image LoRA paired with another engine is
+                    # corrected to the Z-Image graph instead of being refused
+                    # (the old RuntimeError path), so a trained identity is
+                    # applied rather than silently dropped.
                     logger.warning(
                         "LoRAs are Z-Image (base=%s) but model=%r — overriding to zimage so identity applies.",
                         info.get("base_model_id"), effective_model,
