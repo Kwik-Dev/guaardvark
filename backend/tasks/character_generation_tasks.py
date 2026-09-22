@@ -562,10 +562,11 @@ def generate_samples(subject_id: int, job_id: str | None = None, use_lora: bool 
             JobKind.VIDEO_RENDER,
             f"char_samples_{subject_id}",
             evict_ollama=True,
-            # Only unload ComfyUI's resident models when we are NOT rendering
-            # through ComfyUI. Freeing them on the Comfy path would force a full
-            # Z-Image reload (and apparent "restart") on every generation.
-            free_comfyui=not use_comfy,
+            # Skip freeing ComfyUI's resident models only for the Z-Image route
+            # (this PR's opt-in path): freeing them would force a full Z-Image
+            # reload (and apparent "restart") on every generation. Existing
+            # FLUX/SDXL Comfy paths keep their historic eviction behaviour.
+            free_comfyui=not (use_comfy and route.get("family") == "zimage"),
             vram_estimate_mb=int(route.get("vram_estimate_mb") or 11000),
             require_fit=True,
             cross_process=True,

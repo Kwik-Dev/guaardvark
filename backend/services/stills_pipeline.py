@@ -298,7 +298,8 @@ def _generate_one(
                 success=False,
                 error=(
                     "ComfyUI is not reachable or has no installed image engine. "
-                    "Start the ComfyUI plugin and install Z-Image or FLUX assets first."
+                    "Start the ComfyUI plugin and install Z-Image or FLUX assets first "
+                    "(Z-Image also needs GUAARDVARK_ZIMAGE_USE_COMFYUI=1)."
                 ),
                 prompt_used=prompt,
                 enhance_mode=enhance_mode,
@@ -572,10 +573,17 @@ def _comfyui_backend_choice() -> tuple[str, str] | None:
         if not gen._available():
             return None
 
+        # Z-Image-via-ComfyUI is the opt-in route, so the generic selector must
+        # not silently turn it on: without GUAARDVARK_ZIMAGE_USE_COMFYUI the
+        # Z-Image engine is skipped and the selector falls back to FLUX when the
+        # live server has it.
+        zimage_ok = zimage_via_comfyui_enabled()
         # Authoritative check against the live server's /object_info — this finds
         # engines on an external Comfy Desktop install as well as the bundled one.
         for engine in gen.comfyui_installed_engines():
             if engine == "zimage":
+                if not zimage_ok:
+                    continue
                 return ("zimage", "zimage")
             if engine == "flux-dev":
                 return ("flux-dev", "flux-dev")

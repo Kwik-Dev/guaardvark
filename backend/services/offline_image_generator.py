@@ -548,8 +548,13 @@ class OfflineImageGenerator:
         """
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
-            gen = ComfyUIImageGenerator()
-            return bool(gen.comfyui_installed_engines())
+            from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+            engines = gen.comfyui_installed_engines()
+            if not zimage_via_comfyui_enabled():
+                # The generic selector cannot use Z-Image without the opt-in flag,
+                # so in that case only FLUX engines count as available.
+                engines = [e for e in engines if e != "zimage"]
+            return bool(engines)
         except Exception:
             return False
 
