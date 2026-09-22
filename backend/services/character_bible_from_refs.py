@@ -126,28 +126,51 @@ def _parse_consensus_json(raw: str) -> dict[str, str]:
 def _default_consensus_llm(*, system: str, user: str, model: str = None) -> str:
     """Consensus LLM for merging per-photo descriptions into a bible.
 
-    Text-only (no images), so it can use the configured OpenAI-compatible cloud
-    model (e.g. deepseek-v4-flash:cloud) rather than a local Ollama model.
+    Text-only (no images). Uses the OpenAI-compatible provider only when the
+    operator has consented to cloud (master switch on + OpenAI active); a
+    configured ``GUAARDVARK_OPENAI_BASE_URL`` alone is capability, not consent.
+    Falls back to a local Ollama call in JSON mode otherwise — the same contract
+    as the cloud branch.
     """
-    from backend import config
-    from backend.services import openai_provider
-    m = model or config.OPENAI_DEFAULT_MODEL
-    resp = openai_provider.chat(
-        model=m,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        stream=False,
-        options={
-            "temperature": 0.2,
-            # deepseek-v4-flash:cloud spends tokens on reasoning before the JSON,
-            # so a small budget (400) returns empty content. Give it room.
-            "num_predict": 2000,
-            "response_format": {"type": "json_object"},
-        },
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    try:
+        from backend.services import llm_provider
+        if llm_provider.is_openai_active():
+            from backend.services import openai_provider
+            resp = openai_provider.chat(
+                model=model or llm_provider.get_openai_model(),
+                messages=messages,
+                stream=False,
+                options={
+                    "temperature": 0.2,
+                    # deepseek-v4-flash:cloud spends tokens on reasoning before the
+                    # JSON, so a small budget (400) returns empty content. Give it room.
+                    "num_predict": 2000,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            content = (resp.get("message") or {}).get("content") or ""
+            if content.strip():
+                return content
+    except Exception as e:  # noqa: BLE001 — never let the cloud path break consensus
+        log.warning("bible_from_refs: cloud consensus failed (%s); using local LLM", e)
+
+    # Consent off (or the cloud call failed): local Ollama in JSON mode — the same
+    # contract the cloud branch asks for. Mirrors character_generator._default_llm.
+    import ollama
+    from backend.utils.llm_service import get_saved_active_model_name
+    from backend.utils.ollama_resource_manager import think_payload
+    local_model = get_saved_active_model_name() or "gemma4:12b"
+    local = ollama.chat(
+        model=local_model,
+        messages=messages,
+        format="json",
+        **think_payload(local_model),
     )
-    return (resp.get("message") or {}).get("content") or ""
+    return (local.get("message") or {}).get("content") or ""
 
 
 def consensus_identity_from_descriptions(
