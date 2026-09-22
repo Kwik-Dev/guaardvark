@@ -18,6 +18,12 @@
 #   scripts/check_portable.sh --range REVS     scan messages and added lines of the
 #                                              commits REVS selects (pre-push hook),
 #                                              e.g. origin/main..HEAD
+#   scripts/check_portable.sh --file FILE [TO]  scan one file's whole contents, for a
+#                                              document leaving the machine by a route
+#                                              git never sees (a mailbox file, a report).
+#                                              TO names the recipient: a local pattern
+#                                              scoped to them is theirs to read, and is
+#                                              skipped for that file only.
 #
 # Two untracked lists extend it per-clone, because naming their contents in a
 # tracked file would publish exactly what they exist to withhold:
@@ -37,6 +43,25 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 MODE="${1:-tracked}"
 TARGET="${2:-}"
+RECIPIENT="${3:-}"
+
+# Validate the mode before anything scans. An unknown option used to fall through
+# to the tracked-tree scan, which answers a different question and usually passes:
+# a caller asking "is THIS file safe to send?" would be told yes without the file
+# ever being read. An unusable invocation fails loudly instead.
+case "$MODE" in
+    tracked|--staged) ;;
+    --message|--range|--file)
+        [ -n "$TARGET" ] || { echo "check_portable.sh: $MODE needs an argument" >&2; exit 2; } ;;
+    *)
+        echo "check_portable.sh: unknown option '$MODE'" >&2
+        echo "Usage: check_portable.sh [--staged | --message FILE | --range REVS | --file FILE]" >&2
+        exit 2 ;;
+esac
+if [ "$MODE" = "--file" ] && [ ! -f "$TARGET" ]; then
+    echo "check_portable.sh: no such file: $TARGET" >&2
+    exit 2
+fi
 
 # Paths allowed to contain these patterns, as extended regex matched against
 # the repo-relative path. Tests need fake home directories; the architecture
@@ -158,6 +183,20 @@ scan_message() {
     fi
 }
 
+# One file's entire contents, for a document that leaves the machine by a route
+# git never sees: a file written into a client's mailbox, a report handed over.
+# Unlike a commit message there is nothing to skip — a leading '#' here is a
+# Markdown heading, which can name a machine as readily as prose can.
+scan_file() {
+    local pattern="$1" explanation="$2" hit
+    while IFS= read -r hit; do
+        [ -z "$hit" ] && continue
+        echo "✗ ${TARGET}:${hit%%:*} — ${explanation}"
+        echo "    $(printf '%s' "${hit#*:}" | cut -c1-120)"
+        status=1
+    done < <(grep -nE -- "$pattern" "$TARGET" | head -5)
+}
+
 # Everything a push would publish: the message and the added lines of each
 # commit REVS selects. The last gate before content leaves the machine, and the
 # only one that sees commits made with --no-verify or before the hooks existed.
@@ -190,14 +229,21 @@ scan_range() {
     done
 }
 
-scan_paths
+[ "$MODE" = "--file" ] || scan_paths
 
-while IFS=$'\t' read -r pattern explanation; do
+while IFS=$'\t' read -r pattern explanation scope; do
     [ -z "$pattern" ] && continue
+    # A pattern scoped to a recipient guards their name against the public repo,
+    # not against themselves: a report written for them may say who they are.
+    # Every other pattern still applies — our machines and identity are not theirs.
+    if [ "$MODE" = "--file" ] && [ -n "$scope" ] && [ "$scope" = "$RECIPIENT" ]; then
+        continue
+    fi
     case "$MODE" in
         --staged)  scan_staged "$pattern" "$explanation" ;;
         --message) scan_message "$pattern" "$explanation" ;;
         --range)   scan_range "$pattern" "$explanation" ;;
+        --file)    scan_file "$pattern" "$explanation" ;;
         *)         scan_tracked "$pattern" "$explanation" ;;
     esac
 done <<< "$RULES"
@@ -216,6 +262,9 @@ if [ "$status" -ne 0 ]; then
         --range)
             echo "Refusing the push: a commit in $TARGET would publish content this"
             echo "repo keeps private. Amend or rewrite it before it leaves the machine." ;;
+        --file)
+            echo "Refusing the file: $TARGET names something that does not leave this"
+            echo "machine. Reword it — describe the role, not the box, project or person." ;;
         *)
             echo "Machine-specific content found in tracked files." ;;
     esac
@@ -230,5 +279,6 @@ case "$MODE" in
     --staged)  echo "✓ Staged changes carry no machine-specific paths, identity or secrets." ;;
     --message) echo "✓ Commit message carries no private names." ;;
     --range)   echo "✓ $TARGET carries no machine-specific paths, identity or secrets." ;;
+    --file)    echo "✓ $TARGET carries no machine-specific paths, identity or secrets." ;;
     *)         echo "✓ No machine-specific paths or hosts in tracked files." ;;
 esac
