@@ -112,7 +112,9 @@ class VisionAnalyzer:
             logger.debug(f"Vision detection error: {e}")
         return "moondream:latest"  # Final fallback
 
-    def text_query(self, prompt: str, model: str = None, think: bool = False) -> VisionResult:
+    def text_query(self, prompt: str, model: str = None, think: bool = False,
+                   system: Optional[str] = None, num_predict: Optional[int] = None,
+                   temperature: Optional[float] = None) -> VisionResult:
         """
         Query a text LLM (no image) for reasoning/decision-making.
 
@@ -129,17 +131,32 @@ class VisionAnalyzer:
         Returns:
             VisionResult with the LLM's text response
         """
-        model = model or self._get_decision_model()
+        if not model:
+            # The agent loop must always name its brain. A silent auto-pick is
+            # how a blind user model ended up "deciding" through a third model
+            # nobody chose; see resolve_brain_eye in agent_control_service.
+            logger.warning("[VISION] text_query called without model= — auto-picking a decision "
+                           "model (legacy path; pass the brain explicitly)")
+            model = self._get_decision_model()
 
         try:
             import time
             start = time.time()
 
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": prompt})
+            opts = {}
+            if num_predict is not None:
+                opts["num_predict"] = num_predict
+            if temperature is not None:
+                opts["temperature"] = temperature
             request_body = {
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "stream": False,
-                "options": request_options(model),
+                "options": request_options(model, **opts),
             }
             if not think:
                 request_body["think"] = False
@@ -177,7 +194,14 @@ class VisionAnalyzer:
             return VisionResult(success=False, error=str(e), model_used=model)
 
     def _get_decision_model(self) -> str:
-        """Auto-detect best available text model for decision-making."""
+        """Legacy fallback: pick some text model when the caller named none.
+
+        Only for callers that genuinely have no brain of their own
+        (apprentice_engine, film_curator). The agent loop passes its brain
+        explicitly and must never land here. The gemma4 entries were removed
+        from the preference list on 2026-09-22: a vision model quietly becoming
+        the decider for a text-model user was exactly the fault being fixed.
+        """
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
             if response.status_code == 200:
@@ -187,8 +211,8 @@ class VisionAnalyzer:
                 override = os.environ.get("GUAARDVARK_DECISION_MODEL")
                 if override and override in models:
                     return override
-                for preferred in ["gemma4:e4b", "gemma4:e2b", "llama3.1:8b",
-                                  "llama3:8b", "llama3:latest", "mistral:latest", "gemma2:latest"]:
+                for preferred in ["llama3.1:8b", "llama3:8b", "llama3:latest",
+                                  "mistral:latest", "gemma2:latest"]:
                     if preferred in models:
                         return preferred
                 # Fall back to any non-vision model

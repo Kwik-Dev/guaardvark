@@ -1,0 +1,60 @@
+STOP. "scroll: 3" already failed TWICE in a row. Doing it a third time will hard-abort the task — you will not reach the goal by repeating this action.
+YOUR NEXT ACTION MUST BE EXACTLY ONE OF THESE:
+  • {"action": "hotkey", "keys": ["Escape"], "reasoning": "release focus from search/address bar so scroll reaches page"}
+  • {"action": "hotkey", "keys": ["Home"], "reasoning": "jump to top of page"}
+  • {"action": "hotkey", "keys": ["End"], "reasoning": "jump to bottom"}
+  • {"action": "hotkey", "keys": ["Page_Up"], "reasoning": "page up"}
+  • {"action": "hotkey", "keys": ["Page_Down"], "reasoning": "page down"}
+  • {"action": "click", "target_description": "comment input field", "reasoning": "focus the textarea directly"}
+  • {"action": "click", "target_description": "reply button", "reasoning": "open reply UI"}
+Pick one. Do not pick the exact same "scroll: 3" again.
+
+Recent conversation context:
+user said hi
+
+Task: open youtube and find the comments
+
+Desktop state: Firefox window (fixture)
+WorldState:
+- timestamp: 2026-09-22T00:00:00
+- cursor: (10, 20)
+- dom_url: https://example.com
+- dom_title: Example
+- dom_elements: 3
+- last_action: scroll [FAIL]
+- progress: partial_progress (conf=0.40)
+- progress_evidence: fixture
+- next_hint: try End
+- learned_recovery: none
+- blocked_actions: none
+- current_subgoal: open page
+- next_subgoal: read heading
+- subgoal_signal: heading visible
+- scene_hint: a page
+
+Interactive elements on this page:
+  [1] button "Go"
+
+WORLD_OBSERVED: 3 elements (fixture)
+
+Done:
+  click: Firefox icon [OK]
+  scroll:  [FAIL]
+  scroll:  [FAIL]
+
+TRAINING MODE: NEVER say done. Click the next target.
+Step 4. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. Browser is visible. Screen mid-load or transient: wait, do not quit. If the goal is already visible, you may output done on Step 1. Otherwise, Step 1 done is forbidden.
+
+State Management: You must track task status (INITIAL -> IN_PROGRESS -> COMPLETE). IMPORTANT: If the goal state is visible (e.g., the window you wanted to open is open, the comment you posted is visible), you MUST immediately set status='COMPLETE' and action='done' without performing any additional waiting, scrolling, or hotkey actions. PRIORITIZE THE GOAL OVER THE PROCESS. Even if a previous step was marked [FAIL] in history, if the goal is now visible, the task is COMPLETE.
+
+target_description rules: SHORT label, ≤6 words, one distinctive adjective. Examples: "primary submit button", "chat input field", "main navigation icon", "desktop background". NOT a multi-clause description with position phrases — long descriptions break the vision detector and land at (0,0). Describe one shape (color, label, or icon), not a sentence. When an "Interactive elements on this page" list is present above, prefer a target_description that matches one of those real element labels; if the field you need is already marked (focused), skip the click and type directly.
+
+For high-impact clicks (launch, submit, comment, modal dismiss), set expected_effect to the visible state that should appear after the click. Keep it short and vision-checkable.
+
+done rule: when action="done", success_proof MUST describe the visible state that proves the task is complete (e.g. "cursor inside text area", "comment now visible in thread"). Empty or generic ("n/a", "task done") is rejected. This rule applies to all models and paths.
+When your most recent history step shows [OK] for a concrete target (e.g. "GOTHAM RISING video thumbnail [OK]" or servo DPC verified change), base the success_proof directly on that target + "now visible/achieved". Prior servo-verified clicks are strong evidence the goal state is real; use them to ground your proof rather than re-inventing a description.
+
+Reply ONLY with JSON:
+{"status": "IN_PROGRESS|COMPLETE", "action": "click|right_click|type|hotkey|scroll|wait|done|navigate|tool", "target_description": "...", "text": "literal value only", "keys": ["ctrl","t"], "url": "https://...", "reasoning": "why", "expected_effect": "visible result after this action", "success_proof": "visible state proving done (only when action=done)", "tool_name": "optional for action=tool", "tool_params": {}}
+
+Full toolbox awareness (SkillOpt-style skills + tools): You have access to a large agent toolbox (code, web search/scrape, media/music, batch generation, memory/lessons, general tools, and screen control via these recipes/skills). In /agent mode with capable models (Gemma4+), use natural language to invoke any -- e.g. describe a general task to trigger tool calling, or screen task to use recipes + actions here. Recipes (skills) are optimized deterministic shortcuts for common screen patterns (triggers match natural language); the system auto-matches and executes them for reliability. For full list or self-introspection, call agent_status. Skills/recipes + self-knowledge are external (like SkillOpt .md artifacts) and can be auto-tuned from trajectories without changing model weights. Prioritize matching/using recipes for screen reliability; fall back to structured actions or general tools (use action="tool", tool_name=..., tool_params=...) as needed. Cross-model: these skills make even smaller models effective at complex multi-step work.

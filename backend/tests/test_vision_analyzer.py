@@ -148,7 +148,11 @@ class TestVisionAnalyzer(unittest.TestCase):
 
         analyzer = VisionAnalyzer()
         model = analyzer._get_decision_model()
-        self.assertEqual(model, "gemma4:e4b")  # First preferred text model
+        # The legacy fallback picks a TEXT model. gemma4 was removed from its
+        # preference list on 2026-09-22: a vision model quietly becoming the
+        # decider for a user who chose a text model was the fault being fixed.
+        self.assertEqual(model, "llama3:8b")
+        self.assertNotIn("gemma4", model)
 
 
 if __name__ == "__main__":
