@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Guaardvark Vision Trainer — Grid</title>
+<!--
+  Multi-target blind calibration surface.
+
+  Two properties matter here and both are load-bearing:
+
+  1. MARKERS ARE ACHROMATIC. Every click leaves a hollow grey ring and nothing
+     else. The page this replaces marked clicks with a red dot inside a yellow
+     ring while asking the agent to find "red dot A" and "orange dot D" — so the
+     board accumulated fresh instances of the very thing it was asking for. Over
+     one 15-click session the red pixel mass grew 60% and its centroid walked
+     96px away from the actual dot. Measurements taken against a board that
+     rewrites its own ground truth are worth nothing. No red, orange or yellow
+     appears anywhere on this page outside the target dots.
+
+  2. POSITIONS MOVE BETWEEN ROUNDS. servo_calibrate's fit_and_gate refuses to
+     fit fewer than 12 distinct target positions, and five fixed dots can never
+     reach that no matter how long you run. __newRound() reseeds the layout, so
+     four rounds of five dots clears the floor with room for a hold-out split.
+
+  The filename deliberately contains "vision_trainer" so TrainerTruthProbe
+  activates on it, and <body data-truth-page> is the same signal for probes that
+  have been widened to look for the contract instead of the filename.
+-->
+<style>
+  /* Size to the VIEWPORT, never to the display. The browser window is not the
+     screen: chrome eats ~140px of height and the window may not be maximised.
+     A page pinned to 1000x1000 pushes its bottom row of targets out of sight,
+     where the agent cannot click them and __truth() still cheerfully reports
+     coordinates for them. Everything below is measured from clientWidth /
+     clientHeight at layout time, so the arena is always exactly what is on
+     screen. */
+  html, body { margin: 0; padding: 0; width: 100vw; height: 100vh; overflow: hidden; }
+  body { background: #fff; font-family: system-ui, "DejaVu Sans", sans-serif; }
+
+  #header {
+    height: 44px; box-sizing: border-box; padding: 0 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; white-space: nowrap; overflow: hidden;
+    background: #1a1a2e; color: #e0e0e0; font-size: 15px; letter-spacing: .03em;
+  }
+  #header b { font-weight: 600; }
+  .score  { color: #4caf50; font-weight: bold; }
+  .misses { color: #90a4ae; font-weight: bold; }
+
+  #arena { position: relative; width: 100vw; height: calc(100vh - 44px); background: #fff; }
+
+  /* The dot. Pure saturated fill so a colour-blob truth extractor can find its
+     centroid unambiguously. Nothing else on the page is saturated. */
+  .target {
+    position: absolute; border-radius: 50%;
+    border: 2px solid #111; box-sizing: border-box;
+    z-index: 2;   /* see .click-marker */
+  }
+  /* The letter sits ABOVE the dot, never inside it — a glyph drawn over the
+     fill would eat pixels out of the centroid the truth extractor computes. */
+  .tlabel {
+    position: absolute; color: #111; font-weight: 700; font-size: 20px;
+    text-align: center; pointer-events: none; user-select: none; z-index: 2;
+  }
+
+  /* Achromatic, hollow, and thin. Invisible to a saturation-keyed extractor,
+     and it cannot be mistaken for any target by a model reading colour names. */
+  /* Behind the targets, deliberately. A marker drawn ON a dot would occlude
+     some of the dot's own pixels and shift the centroid a colour-blob truth
+     extractor computes — measured at 15px of drift after 11 clicks when the
+     marker was on top. Underneath, a hit is simply hidden by the dot it hit and
+     the target's pixels are bit-identical no matter how many clicks land. The
+     hit is still counted in #clicks; misses, which land on bare background,
+     stay fully visible. */
+  .click-marker {
+    position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+    border: 2px solid #808080; border-radius: 50%;
+    background: none; pointer-events: none; z-index: 0;
+  }
+</style>
+</head>
+<body data-truth-page="grid">
+
+<div id="header">
+  <span><b>Vision Trainer — Grid</b></span>
+  <span>
+    round <span id="round">1</span> &nbsp;·&nbsp;
+    hits <span class="score" id="clicks">0</span> &nbsp;·&nbsp;
+    misses <span class="misses" id="misses">0</span> &nbsp;·&nbsp;
+    <span id="accuracy">0</span>%
+  </span>
+</div>
+
+<div id="arena"></div>
+
+<script>
+(function () {
+  var arena = document.getElementById('arena');
+  var DOT = 40;              // diameter
+  var PAD = 60;              // keep dots clear of the arena edges
+  // Target separation, shrunk to fit when the viewport is small. The point is
+  // that two dots never share one 300px refine crop; on a short window that is
+  // not always satisfiable, so ask for what fits rather than silently packing
+  // them together after the rejection sampler gives up.
+  function minSep() {
+    return Math.max(180, Math.min(300, Math.min(arena.clientWidth,
+                                                arena.clientHeight) * 0.34));
+  }
+  var COLOURS = [
+    ['red',    '#ff0000'],
+    ['blue',   '#0000ff'],
+    ['green',  '#008100'],
+    ['orange', '#ffa500'],
+    ['purple', '#7f007f'],
+    ['cyan',   '#00b8d4'],
+    ['pink',   '#ff2d95']
+  ];
+
+  var clicks = 0, misses = 0, roundNo = 0;
+  var targets = [];
+
+  // Seeded PRNG so a round can be re-staged exactly after a failed run.
+  function rng(seed) {
+    var a = (seed >>> 0) || 1;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function stats() {
+    document.getElementById('clicks').textContent = clicks;
+    document.getElementById('misses').textContent = misses;
+    var t = clicks + misses;
+    document.getElementById('accuracy').textContent =
+      t ? Math.round((clicks / t) * 100) : 0;
+    document.getElementById('round').textContent = roundNo;
+  }
+
+  function clearMarkers() {
+    var ms = arena.querySelectorAll('.click-marker');
+    for (var i = 0; i < ms.length; i++) ms[i].remove();
+    return ms.length;
+  }
+
+  function marker(x, y) {
+    var m = document.createElement('div');
+    m.className = 'click-marker';
+    m.style.left = x + 'px';
+    m.style.top = y + 'px';
+    arena.appendChild(m);
+  }
+
+  function place(n, seed) {
+    var rand = rng(seed);
+    var W = arena.clientWidth, H = arena.clientHeight;
+    var cols = Math.ceil(Math.sqrt(n));
+    var rows = Math.ceil(n / cols);
+    var cw = (W - 2 * PAD) / cols, ch = (H - 2 * PAD) / rows;
+    var sep = minSep();
+    var pts = [], i, tries;
+    for (i = 0; i < n; i++) {
+      var col = i % cols, row = Math.floor(i / cols);
+      for (tries = 0; tries < 40; tries++) {
+        var x = PAD + col * cw + cw / 2 + (rand() - 0.5) * cw * 0.55;
+        var y = PAD + row * ch + ch / 2 + (rand() - 0.5) * ch * 0.55;
+        x = Math.max(PAD, Math.min(W - PAD, x));
+        y = Math.max(PAD, Math.min(H - PAD, y));
+        var ok = true;
+        for (var j = 0; j < pts.length; j++) {
+          var dx = pts[j][0] - x, dy = pts[j][1] - y;
+          if (Math.sqrt(dx * dx + dy * dy) < sep) { ok = false; break; }
+        }
+        if (ok) break;
+      }
+      pts.push([Math.round(x), Math.round(y)]);
+    }
+    // Reading order so letters read A, B, C... top-left to bottom-right.
+    pts.sort(function (p, q) {
+      return Math.abs(p[1] - q[1]) > 60 ? p[1] - q[1] : p[0] - q[0];
+    });
+    return pts;
+  }
+
+  function newRound(n, seed) {
+    n = n || 5;
+    roundNo += 1;
+    seed = (seed === undefined || seed === null) ? roundNo : seed;
+    clearMarkers();
+    for (var k = 0; k < targets.length; k++) {
+      targets[k].dot.remove();
+      targets[k].label.remove();
+    }
+    targets = [];
+
+    var pts = place(n, seed);
+    for (var i = 0; i < pts.length; i++) {
+      var letter = String.fromCharCode(65 + i);
+      var c = COLOURS[i % COLOURS.length];
+      var x = pts[i][0], y = pts[i][1];
+
+      var dot = document.createElement('div');
+      dot.className = 'target';
+      dot.style.left = (x - DOT / 2) + 'px';
+      dot.style.top = (y - DOT / 2) + 'px';
+      dot.style.width = DOT + 'px';
+      dot.style.height = DOT + 'px';
+      dot.style.background = c[1];
+      dot.dataset.prompt = c[0] + ' dot ' + letter;
+      dot.dataset.letter = letter;
+      dot.dataset.colour = c[0];
+      arena.appendChild(dot);
+
+      var lab = document.createElement('div');
+      lab.className = 'tlabel';
+      lab.textContent = letter;
+      lab.style.left = (x - 20) + 'px';
+      lab.style.top = (y - DOT / 2 - 28) + 'px';
+      lab.style.width = '40px';
+      arena.appendChild(lab);
+
+      targets.push({dot: dot, label: lab, x: x, y: y, letter: letter,
+                    prompt: c[0] + ' dot ' + letter});
+    }
+    stats();
+    return n;
+  }
+
+  arena.addEventListener('click', function (e) {
+    var r = arena.getBoundingClientRect();
+    var x = e.clientX - r.left, y = e.clientY - r.top;
+    var hit = false;
+    for (var i = 0; i < targets.length; i++) {
+      var dx = targets[i].x - x, dy = targets[i].y - y;
+      if (Math.sqrt(dx * dx + dy * dy) <= DOT / 2) { hit = true; break; }
+    }
+    if (hit) { clicks += 1; } else { misses += 1; }
+    marker(x, y);
+    stats();
+  });
+
+  // ---- The contract other tools read -------------------------------------
+  // Screen coordinates, not page coordinates. mozInnerScreenX/Y is the
+  // viewport's own absolute position as Gecko measures it, so it already
+  // accounts for window position and real rendered chrome height — the same
+  // construction trainer_truth_probe.py and servo_calibrate.py already use.
+  window.__truth = function () {
+    return JSON.stringify(targets.map(function (t) {
+      var r = t.dot.getBoundingClientRect();
+      return {
+        letter: t.letter,
+        prompt: t.prompt,
+        cx: Math.round(r.left + r.width / 2 + window.mozInnerScreenX),
+        cy: Math.round(r.top + r.height / 2 + window.mozInnerScreenY),
+        r: Math.round(r.width / 2)
+      };
+    }));
+  };
+  window.__newRound = function (n, seed) { return newRound(n, seed); };
+  window.__clearMarkers = function () { return clearMarkers(); };
+  window.__stats = function () {
+    return JSON.stringify({round: roundNo, clicks: clicks, misses: misses,
+                           targets: targets.length});
+  };
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'c') clearMarkers();
+    if (e.key === 'n') newRound(targets.length || 5);
+  });
+
+  newRound(5, 1);
+})();
+</script>
+</body>
+</html>
