@@ -1372,6 +1372,55 @@ try:
                     except Exception:
                         pass
 
+            # Feedback rows learned to name a reply and carry what they taught
+            # (2026-09-22). Additive, nullable; legacy rows keep working.
+            for _col, _ddl in (
+                ("message_id", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS message_id INTEGER"),
+                ("request_id", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS request_id VARCHAR(64)"),
+                ("kind", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS kind VARCHAR(120) DEFAULT 'response'"),
+                ("verdict", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS verdict VARCHAR(8)"),
+                ("why_text", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS why_text TEXT"),
+                ("why_tags", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS why_tags JSON"),
+                ("provenance", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS provenance JSON"),
+                ("applied", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS applied JSON"),
+                ("updated_at", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP"),
+                ("retracted_at", "ALTER TABLE tool_feedback ADD COLUMN IF NOT EXISTS retracted_at TIMESTAMP"),
+            ):
+                try:
+                    from sqlalchemy import text as _sa_text
+                    existing = db.session.execute(_sa_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'tool_feedback' AND column_name = :c"
+                    ), {"c": _col}).fetchone()
+                    if existing is None:
+                        app.logger.warning(f"Adding missing tool_feedback.{_col} column (legacy DB)")
+                        db.session.execute(_sa_text(_ddl))
+                        db.session.commit()
+                except Exception as col_err:
+                    app.logger.warning(f"Failed to ensure tool_feedback.{_col} column: {col_err}")
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+            for _stmt in (
+                "UPDATE tool_feedback SET verdict = CASE WHEN positive THEN 'up' ELSE 'down' END WHERE verdict IS NULL",
+                "UPDATE tool_feedback SET kind = 'response' WHERE kind IS NULL",
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_tool_feedback_message_kind "
+                "ON tool_feedback (message_id, kind) WHERE message_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS ix_tool_feedback_request_id ON tool_feedback (request_id)",
+                "CREATE INDEX IF NOT EXISTS ix_tool_feedback_message_id ON tool_feedback (message_id)",
+            ):
+                try:
+                    from sqlalchemy import text as _sa_text
+                    db.session.execute(_sa_text(_stmt))
+                    db.session.commit()
+                except Exception as idx_err:
+                    app.logger.warning(f"tool_feedback reconcile skipped: {idx_err}")
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+
             # Agent memory scope/curation fields added after the base schema.
             # Existing Postgres databases need additive ALTERs because
             # db.create_all() does not change existing tables.

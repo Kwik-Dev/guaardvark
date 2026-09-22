@@ -931,172 +931,114 @@ def _distill_pearl_memory(app, session_id: str):
 
 @agent_control_bp.route("/feedback", methods=["POST"])
 def submit_feedback():
-    """Record thumbs up/down feedback for an agent task.
+    """Record a thumb on one reply and make it count.
 
-    Body: {
-        positive: bool,         # true = thumbs up, false = thumbs down
-        task: str,              # the task description
-        session_id: str?,       # chat session that triggered the task
-        steps: int?,            # number of steps the task took
-        time_seconds: float?,   # total execution time
-        comment: str?,          # optional user comment
-    }
+    Body: {verdict: "up"|"down"|"none" (or legacy positive: bool),
+           kind: "response" | "tool:<name>@<step>.<call>",
+           message_id, request_id, session_id, lesson_id,
+           task (fallback for rows without ids), tool_name, steps,
+           time_seconds, model, why_text, why_tags}
 
-    Writes to data/training/knowledge/feedback.jsonl — same dir as servo_archive.
-    Each entry carries the human verdict so the learning loop has ground truth.
+    The reply is resolved by id, then by request id, then by content prefix.
+    One feedback row per (message, kind): a re-thumb updates it and an
+    un-thumb ("none") retracts what the earlier verdict applied. Effects
+    (memory credit and blame, recipe stats, a correction memory from the
+    why-text, recipe induction, a lesson pearl) come from feedback_teacher
+    and are returned as `taught` so the client can show what changed.
+    Every event is also appended to data/training/knowledge/feedback.jsonl.
     """
-    data = request.get_json(silent=True)
-    if not data or "positive" not in data:
-        return jsonify({"success": False, "error": "'positive' field required (true/false)"}), 400
+    data = request.get_json(silent=True) or {}
+    from backend.services import feedback_teacher as ft
 
-    import json
-    import time
-    from datetime import datetime
-    from pathlib import Path
-    from backend.config import GUAARDVARK_ROOT
+    verdict = ft.normalise_verdict(data)
+    if verdict is None:
+        return jsonify({"success": False,
+                        "error": "'verdict' must be up, down or none (or legacy 'positive': true/false)"}), 400
 
-    # Read lesson_id from body; if absent, auto-attach from the active-lesson
-    # registry so the frontend doesn't have to carry it. Belt-and-suspenders:
-    # even if MessageItem forgets to send lesson_id, pearls captured inside an
-    # open Begin/End bracket get grouped correctly.
-    lesson_id = (data.get("lesson_id") or None)
-    session_id = data.get("session_id")
+    session_id = data.get("session_id") or None
+    lesson_id = data.get("lesson_id") or None
     if not lesson_id and session_id:
         try:
             from backend.api.lessons_api import get_active_lesson_id
             lesson_id = get_active_lesson_id(session_id)
         except Exception:
             lesson_id = None
+    if lesson_id:
+        data["lesson_id"] = lesson_id
 
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "epoch": time.time(),
-        "positive": bool(data["positive"]),
-        "task": data.get("task", ""),
-        "type": data.get("type", "tool_action"),  # "tool_action" or "response"
-        "session_id": session_id,
-        "lesson_id": lesson_id,
-        "steps": data.get("steps"),
-        "time_seconds": data.get("time_seconds"),
-        "comment": data.get("comment", ""),
-        "model": data.get("model", ""),
-    }
-
-    # Session-less pearls can't be grouped into a thread later, so surface
-    # that here — the frontend should send session_id on every feedback ping.
-    if entry["session_id"] is None:
-        logger.warning(
-            "[FEEDBACK] session_id missing on %s — pearl won't be groupable by session",
-            entry["type"],
-        )
-
-    feedback_file = Path(GUAARDVARK_ROOT) / "data" / "training" / "knowledge" / "feedback.jsonl"
     try:
-        feedback_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(feedback_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-        logger.info(f"[FEEDBACK] {'positive' if entry['positive'] else 'negative'} task=\"{entry['task'][:60]}\"")
-        
-        # PERSIST TO DATABASE (Structured storage)
-        db_entry_id = None
-        try:
-            from backend.models import db, ToolFeedback
-            db_entry = ToolFeedback(
-                session_id=entry["session_id"],
-                lesson_id=entry["lesson_id"],
-                tool_name=data.get("tool_name", entry["task"][:100]), # preferred tool_name
-                task=entry["task"],
-                positive=entry["positive"],
-                steps=entry["steps"],
-                time_seconds=entry["time_seconds"],
-                model=entry["model"]
-            )
-            db.session.add(db_entry)
-            db.session.commit()
-            db_entry_id = db_entry.id
-            logger.debug(f"[FEEDBACK] Persisted to database: ID={db_entry.id}")
-        except Exception as db_err:
-            logger.warning(f"[FEEDBACK] Failed to persist to database (non-fatal): {db_err}")
+        row, resolved_by = ft.resolve_message(data)
+        if row is not None and not session_id:
+            session_id = row.session_id
+            data["session_id"] = session_id
+        if row is None and session_id is None:
+            logger.warning("[FEEDBACK] no message and no session on a %s thumb; recorded only", verdict)
 
-        # Stamp the feedback state onto the matching chat message so the
-        # thumb-icon survives a page refresh. Match by session_id + content
-        # prefix — the "task" field is already content[:200] from the frontend.
-        if entry["session_id"] and entry["task"]:
-            try:
-                from backend.models import db, LLMMessage
-                msg = (
-                    LLMMessage.query
-                    .filter(
-                        LLMMessage.session_id == entry["session_id"],
-                        LLMMessage.role == ("user" if entry["type"] == "tool_action" else "assistant"),
-                        LLMMessage.content.like(entry["task"][:100].replace("%", r"\%").replace("_", r"\_") + "%"),
-                    )
-                    .order_by(LLMMessage.timestamp.desc())
-                    .first()
-                )
-                if msg is not None:
-                    current_extra = dict(msg.extra_data or {})
-                    current_extra["feedback"] = "up" if entry["positive"] else "down"
-                    msg.extra_data = current_extra
-                    # JSON mutation assignment — SQLAlchemy needs flag_modified
-                    # for nested dicts, but whole-dict reassignment is tracked.
-                    db.session.commit()
-            except Exception as stamp_err:
-                logger.warning(f"[FEEDBACK] Could not stamp message extra_data: {stamp_err}")
-                try:
-                    from backend.models import db
-                    db.session.rollback()
-                except Exception:
-                    pass
+        fb, previous = ft.upsert_feedback(row, data, verdict)
+        taught = []
+        if previous not in (None, "none") and previous != verdict:
+            taught.extend(ft.retract(fb))
+        if verdict == "none":
+            if previous in (None, "none"):
+                taught.append({"kind": "retracted", "ref": str(fb.id), "label": "feedback withdrawn"})
+            ft.stamp_message(row, "none", None)
+            event = "retract"
+        else:
+            ft.stamp_message(row, verdict, fb.id)
+            from flask import current_app
+            _app = current_app._get_current_object()
+            taught.extend(ft.apply(fb, row, ft.preceding_user_message(row), app=_app))
+            event = "set"
+            logger.info(f"[FEEDBACK] {verdict} kind={fb.kind} message={fb.message_id} "
+                        f"resolved_by={resolved_by} task=\"{(fb.task or '')[:60]}\"")
 
-        # Positive pearl handling:
-        #   - Active lesson  → emit a live pearl event so the lesson floater
-        #     shows progress. Real distillation runs on POST /api/lessons/<id>/end,
-        #     which produces vision-actionable, parameterized lesson steps.
-        #   - No active lesson → spawn AWM-style recipe induction. Replaces the
-        #     deprecated _distill_pearl_memory junk distiller. Inducer is gated
-        #     to only fire on a successful last_result that matches the feedback
-        #     task, and it produces a candidate_recipe row in AgentMemory for
-        #     user review (never auto-promoted to recipes.json).
-        if entry["positive"] and entry["session_id"]:
-            if entry["lesson_id"]:
-                try:
-                    from backend.socketio_events import emit_lesson_event
-                    emit_lesson_event("pearl_added", {
-                        "lesson_id": entry["lesson_id"],
-                        "session_id": entry["session_id"],
-                        "pearl_id": db_entry_id,
-                        "task": entry["task"],
-                        "created_at": entry["timestamp"],
-                    })
-                except Exception as emit_err:
-                    logger.warning(f"[LESSON] emit pearl_added failed (non-fatal): {emit_err}")
-            else:
-                try:
-                    from flask import current_app
-                    _app = current_app._get_current_object()
-                    is_strong = _detect_strong_positive(
-                        entry.get("comment") or "",
-                        session_id=entry["session_id"],
-                    )
-                    if is_strong:
-                        logger.info(
-                            f"[INDUCE] strong-positive signal detected for "
-                            f"session={entry['session_id'][:8]} — candidate gets importance boost"
-                        )
-                    threading.Thread(
-                        target=_induce_candidate_recipe,
-                        args=(_app, entry["session_id"], entry["task"] or ""),
-                        kwargs={"strong_positive": is_strong},
-                        daemon=True,
-                        name=f"induce-{entry['session_id'][:8]}",
-                    ).start()
-                except Exception as spawn_err:
-                    logger.warning(f"[INDUCE] Failed to spawn induction thread: {spawn_err}")
+            if verdict == "up" and session_id:
+                if lesson_id:
+                    # Inside a lesson the thumb is a pearl; End Lesson distils.
+                    try:
+                        from backend.socketio_events import emit_lesson_event
+                        emit_lesson_event("pearl_added", {
+                            "lesson_id": lesson_id,
+                            "session_id": session_id,
+                            "pearl_id": fb.id,
+                            "task": fb.task or "",
+                            "created_at": fb.created_at.isoformat() if fb.created_at else None,
+                        })
+                        taught.append({"kind": "pearl", "ref": lesson_id, "label": "pearl added to the open lesson"})
+                    except Exception as emit_err:
+                        logger.warning(f"[LESSON] emit pearl_added failed (non-fatal): {emit_err}")
+                else:
+                    # A verified screen task that pleased the user becomes a
+                    # recipe (provisional; a thumbs-down on a later run that
+                    # uses it disables it). Gated inside on the run being
+                    # verified and matching this task.
+                    try:
+                        prov = fb.provenance or {}
+                        task_for_induction = (prov.get("agent_tasks") or [fb.task or ""])[-1]
+                        is_strong = _detect_strong_positive(fb.why_text or "", session_id=session_id)
+                        if is_strong:
+                            logger.info(f"[INDUCE] strong-positive signal for session={session_id[:8]}")
+                        threading.Thread(
+                            target=_induce_candidate_recipe,
+                            args=(_app, session_id, task_for_induction),
+                            kwargs={"strong_positive": is_strong},
+                            daemon=True,
+                            name=f"induce-{session_id[:8]}",
+                        ).start()
+                        taught.append({"kind": "induction", "ref": session_id, "label": "checking whether this run becomes a recipe"})
+                    except Exception as spawn_err:
+                        logger.warning(f"[INDUCE] Failed to spawn induction thread: {spawn_err}")
 
-        return jsonify({"success": True, "feedback": entry}), 201
+        ft.append_jsonl(ft.log_entry(fb, event, data, taught, resolved_by))
+        return jsonify({"success": True, "feedback": fb.to_dict(),
+                        "resolved_by": resolved_by, "taught": taught}), 201
     except Exception as e:
-        logger.error(f"Failed to write feedback: {e}")
+        logger.error(f"Failed to record feedback: {e}", exc_info=True)
+        try:
+            from backend.models import db
+            db.session.rollback()
+        except Exception:
+            pass
         return jsonify({"success": False, "error": str(e)}), 500
 
 
