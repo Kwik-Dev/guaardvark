@@ -261,16 +261,21 @@ class AgentBrain:
             # Gated on _screen_active — inactive screen = fall through to
             # normal tier routing so the model uses tools like web_search and
             # analyze_website instead of emitting JSON click actions.
-            if (self.state.model_caps.is_vision_model
-                    and "gemma4" in self.state.active_model.lower()
-                    and not force_tier
+            # Direct screen path for ANY brain the loop can drive with: the
+            # active model itself when it can see and point, or the active
+            # model deciding with a borrowed eye when it cannot. The old gate
+            # tested the literal string "gemma4", which excluded every other
+            # model from the screen — including one whose name contained
+            # "gemma4" and had no vision at all.
+            if (not force_tier
                     and _screen_active
-                    and not force_standard_image):
+                    and not force_standard_image
+                    and self._screen_drivable()):
                 logger.debug(
-                    f"[EMIT-HANDOFF][BRAIN] entering _gemma4_direct session={session_id} "
+                    f"[EMIT-HANDOFF][BRAIN] entering _screen_direct session={session_id} "
                     f"emit_fn_id={id(emit_fn)} threadlocal_get? (will log inside ACS if used)"
                 )
-                result = self._gemma4_direct(
+                result = self._screen_direct(
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
@@ -432,7 +437,7 @@ class AgentBrain:
 
     # -- Gemma4 direct path -------------------------------------------------
 
-    def _gemma4_direct(
+    def _screen_direct(
         self,
         session_id: str,
         message: str,
@@ -849,15 +854,15 @@ class AgentBrain:
                 # them work. Per data/agent/LEARNING_PRINCIPLES.md.
                 if target:
                     try:
-                        from backend.services.servo_controller import ServoController
                         from backend.services.training_data_collector import TrainingDataCollector
-                        from backend.services.servo_knowledge_store import get_vision_config
-                        from backend.utils.vision_analyzer import VisionAnalyzer
-                        servo = ServoController(
-                            screen, VisionAnalyzer(),
-                            collector=TrainingDataCollector(),
-                            vision_config=get_vision_config(),
-                        )
+                        from backend.services.agent_control_service import (
+                            AgentControlService, build_servo)
+                        # Same eye, same config, same measured accuracy as the
+                        # loop. This path used to build its own eye with a
+                        # bare VisionAnalyzer() and a model-less config.
+                        be = AgentControlService.resolve_brain_eye(
+                            self.state.active_model, screen.screen_size())
+                        _, servo = build_servo(screen, be.eye, collector=TrainingDataCollector())
                         result = servo.click_target(target, button=button)
                         if result.get("success"):
                             cx, cy = result.get("x"), result.get("y")
@@ -1309,6 +1314,18 @@ class AgentBrain:
 
     # -- Routing helpers ----------------------------------------------------
 
+    # Historical name; the path is no longer Gemma-specific.
+    _gemma4_direct = None  # rebound below the class body
+
+    def _screen_drivable(self) -> bool:
+        """Can the agent loop drive the screen with the active model as brain?"""
+        try:
+            from backend.services.agent_control_service import AgentControlService
+            return bool(AgentControlService.resolve_brain_eye(self.state.active_model).eye)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"screen-drivable check failed: {e}")
+            return False
+
     def _is_vision_task(self, message: str, image_data: str = None) -> bool:
         """Check if this is a vision/screen task."""
         if image_data:
@@ -1362,3 +1379,6 @@ class AgentBrain:
             "tier": tier,
             **extra,
         }
+
+# Kept for callers and tests that still use the old name.
+AgentBrain._gemma4_direct = AgentBrain._screen_direct

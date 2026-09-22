@@ -93,6 +93,19 @@ def probe(model: str, manifest: str, max_targets: int = 12,
     conv = coords_for(model, tuple(size))
     fam_style = conv.style
     budget = int(getattr(conv, "min_num_predict", 128) or 128)
+    # A recorded failure carries no budget, and it must not hide the family's
+    # hint: a thinking model probed at 128 tokens answers nothing in any
+    # dialect and then looks unusable forever. Take the larger of the two.
+    try:
+        from backend.utils.ollama_resource_manager import get_model_info
+        from backend.services.model_capability_data import FAMILY_COORD_DEFAULTS
+        fam = ((get_model_info(model) or {}).get("architecture") or "").lower()
+        fd = FAMILY_COORD_DEFAULTS.get(fam) or {}
+        budget = max(budget, int(fd.get("min_num_predict", 0) or 0))
+        if conv.source == "probe_failed" and fd.get("style"):
+            fam_style = fd["style"]
+    except Exception:
+        pass
     order_of_styles = styles or ([fam_style] + [s for s in COORD_STYLES if s != fam_style])
 
     tried = []

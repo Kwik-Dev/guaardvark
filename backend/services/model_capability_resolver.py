@@ -51,6 +51,10 @@ PROBE_STORE = Path(__file__).resolve().parents[2] / "data" / "training" / "model
 # Below this, a convention is a guess rather than a measurement, and the model
 # is reported as unable to drive the screen until someone probes it.
 MEASURED_CONFIDENCE = 0.7
+# A measured eye worse than this is ranked below a trusted unmeasured one. On a
+# 1000px board, 100px is two and a half typical buttons; an eye that coarse is
+# a known quantity, but not a good one.
+USABLE_ACCURACY_PX = 100.0
 
 # How candidate eyes are ordered. "accuracy" (default): the best MEASURED eye on
 # this screen wins, then convention confidence, then size. "confidence": the
@@ -176,6 +180,7 @@ def _conv_from_record(rec: Dict[str, Any], source: str) -> CoordConvention:
         return CoordConvention(order=None, grid=None, normalised=False,
                                source="probe_failed", confidence=0.0,
                                style=rec.get("style") or DEFAULT_STYLE,
+                               min_num_predict=int(rec.get("min_num_predict", 128) or 128),
                                detail={"tried": rec.get("tried", []), "reason": rec.get("reason", "")})
     grid = rec.get("grid", 1000)
     return CoordConvention(
@@ -273,15 +278,25 @@ def eye_ranking_mode() -> str:
     return mode if mode in ("accuracy", "confidence") else "accuracy"
 
 
-def _available_vram_mb() -> Optional[float]:
-    """None when the coordinator cannot say; a soft signal, never a hard gate."""
+def _vram_budget_mb() -> Optional[float]:
+    """The card's total VRAM; None when the coordinator cannot say.
+
+    Total, not free: what is free right now is an accident of whichever model
+    happened to load last (a 24B bake-off model left resident by a sweep made
+    every other eye "not fit" and won the ranking by default). Ollama swaps
+    models in and out on demand, so the question that is stable across
+    sessions is whether the eye fits on the card at all. A soft signal, never
+    a hard gate.
+    """
     try:
         from backend.services.gpu_resource_coordinator import get_available_vram
         v = get_available_vram() or {}
         if v.get("success") is False:
             return None
-        mb = v.get("available_mb", v.get("free_mb"))
-        return float(mb) if mb is not None else None
+        mb = v.get("total_mb")
+        if not mb:
+            mb = v.get("available_mb", v.get("free_mb"))
+        return float(mb) if mb else None
     except Exception:
         return None
 
@@ -301,7 +316,8 @@ def rank_eyes(candidates: list, screen: Optional[Tuple[int, int]] = None) -> lis
     """
     mode = eye_ranking_mode()
     want = f"{screen[0]}x{screen[1]}" if screen else None
-    free = _available_vram_mb()
+    budget = _vram_budget_mb()
+    resident = set(_resident())
     rows = []
     for tag in candidates:
         m = _measurements(tag, screen)
@@ -309,7 +325,9 @@ def rank_eyes(candidates: list, screen: Optional[Tuple[int, int]] = None) -> lis
         acc_px = acc.get("median_px")
         conv = coords_for(tag, screen)
         size = _size_mb(tag)
-        fits = None if free is None else (free >= size * 1.15)
+        # An eye already resident evidently fits; otherwise ask whether it
+        # would, with headroom for its context.
+        fits = True if tag in resident else (None if budget is None else (budget >= size * 1.15))
         rows.append({
             "tag": tag,
             "accuracy_px": float(acc_px) if acc_px is not None else None,
@@ -322,8 +340,24 @@ def rank_eyes(candidates: list, screen: Optional[Tuple[int, int]] = None) -> lis
     if mode == "confidence":
         rows.sort(key=lambda r: (-r["confidence"], r["size_mb"]))
     else:
+        # Buckets first, numbers second. "Measured" must not beat "unmeasured"
+        # regardless of how bad the measurement is: the first live run ranked a
+        # 138px eye above a hand-measured row simply because it was the only
+        # one with a number yet. A measured-and-usable eye outranks a trusted
+        # unmeasured one, which outranks a measured-but-poor one, which
+        # outranks a guess.
+        def _bucket(r):
+            acc = r["accuracy_px"]
+            if acc is not None and acc <= USABLE_ACCURACY_PX:
+                return 0
+            if acc is None and r["confidence"] >= MEASURED_CONFIDENCE:
+                return 1
+            if acc is not None:
+                return 2
+            return 3
         rows.sort(key=lambda r: (
             1 if r["fits"] is False else 0,
+            _bucket(r),
             0 if r["same_screen"] else 1,
             r["accuracy_px"] if r["accuracy_px"] is not None else float("inf"),
             -r["confidence"],

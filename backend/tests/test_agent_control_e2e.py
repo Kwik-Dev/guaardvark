@@ -21,14 +21,18 @@ class MockScreen:
     def __init__(self):
         self.actions = []  # Track all actions performed
         self._capture_count = 0
+        self._shade = 200
 
     def capture(self):
         self._capture_count += 1
-        img = Image.new("RGB", (1920, 1080), color=(200, 200, 200))
+        img = Image.new("RGB", (1920, 1080), color=(self._shade,) * 3)
         return img, (500, 300)
 
     def click(self, x, y, button="left", clicks=1):
         self.actions.append(("click", x, y, button))
+        # A screen that reacts: the servo's pixel-change check after a click
+        # is real, so a click must change what the next capture shows.
+        self._shade = 120
         return {"success": True}
 
     def move(self, x, y):
@@ -56,6 +60,19 @@ class MockScreen:
 
 class TestAgentControlE2E(unittest.TestCase):
 
+    def setUp(self):
+        # Brain and eye are resolved from Ollama's capability report now; with
+        # requests mocked there is no report, so every test here declares the
+        # pair the suite has always assumed: a text brain deciding, moondream
+        # looking.
+        from backend.services.agent_control_service import AgentControlService, BrainEye
+        p1 = patch.object(AgentControlService, "resolve_brain_eye",
+                          staticmethod(lambda active="", screen_size=None: BrainEye(
+                              "llama3:8b", "moondream", False, "sibling_vlm", "test fixture")))
+        p2 = patch("backend.services.agent_control_service._eye_accuracy_px", lambda *a: None)
+        p1.start(); p2.start()
+        self.addCleanup(p1.stop); self.addCleanup(p2.stop)
+
     @patch("backend.utils.vision_analyzer.requests.post")
     @patch("backend.utils.vision_analyzer.requests.get")
     def test_full_loop_click_then_done(self, mock_get, mock_post):
@@ -68,25 +85,35 @@ class TestAgentControlE2E(unittest.TestCase):
         mock_get_resp.json.return_value = {"models": [{"name": "llama3:8b"}, {"name": "moondream"}]}
         mock_get.return_value = mock_get_resp
 
-        # Responses returned by Ollama (vision calls + text calls interleaved):
-        # Each call to requests.post returns a new MagicMock response
+        # Scripted /api/chat turns, in the order the split loop makes them:
+        # eye describes, brain decides, eye anchors the click for the servo
+        # (the pixel-change check verifies it, no extra turn), eye describes
+        # again, brain reports done with proof, eye confirms the proof.
         call_count = [0]
         responses = [
             # Iteration 1:
             "Browser showing Twitter homepage. Tweet button -> D4. Address bar -> D1.",  # vision: scene
             '{"action": "click", "target_cell": "D4", "target_description": "Tweet button", "reasoning": "Click tweet"}',  # text: decision
-            "center",  # vision: sub-cell refinement
-            "The tweet compose dialog opened. Action succeeded.",  # vision: verification
+            '[{"box_2d": [380, 420, 440, 520], "label": "Tweet button"}]',  # vision: servo anchor
             # Iteration 2:
             "Tweet compose dialog is open. Text field -> D4. Post button -> F4.",  # vision: scene
-            '{"action": "done", "reasoning": "Tweet dialog opened, task complete"}',  # text: decision
+            '{"action": "done", "reasoning": "Tweet dialog opened, task complete", '
+            '"success_proof": "Tweet compose dialog with a Post button"}',  # text: decision
+            "yes",  # vision: the eye confirms the proof is on screen
         ]
 
         def make_response(*args, **kwargs):
-            idx = min(call_count[0], len(responses) - 1)
-            call_count[0] += 1
+            url = args[0] if args else kwargs.get("url", "")
             resp = MagicMock()
             resp.status_code = 200
+            if not str(url).endswith("/api/chat"):
+                # Capability lookups (/api/show) and the keep-alive ping
+                # (/api/generate) share requests.post; they must not eat a
+                # scripted chat turn.
+                resp.json.return_value = {}
+                return resp
+            idx = min(call_count[0], len(responses) - 1)
+            call_count[0] += 1
             resp.json.return_value = {"message": {"content": responses[idx]}}
             return resp
 

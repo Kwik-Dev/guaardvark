@@ -277,6 +277,73 @@ class Expectation:
     confidence: float = 0.5            # 0..1; how strongly the source asserted it
 
 
+@dataclass(frozen=True)
+class BrainEye:
+    """Who decides and who looks, for one task.
+
+    brain   the model that reads the scene and chooses the next action
+    eye     the model that looks at the screen and points
+    unified brain is eye and can drive the screen on its own
+    """
+    brain: str
+    eye: str
+    unified: bool
+    eye_mechanism: str   # native | sibling_vlm | none
+    reason: str
+
+
+def _read_saved_active_model() -> str:
+    """The user's chosen chat model, without needing Flask or the database."""
+    try:
+        from backend.config import _read_saved_model_name
+        name = _read_saved_model_name()
+        if name:
+            return name
+    except Exception:
+        pass
+    try:
+        from backend.models import get_active_model_name
+        name = get_active_model_name()
+        if name and name != "default_model_name":
+            return name
+    except Exception:
+        pass
+    return ""
+
+
+def _eye_accuracy_px(eye_model: str, screen_w: int, screen_h: int):
+    """Measured median pointing error for this eye on this screen, or None."""
+    try:
+        from backend.services.servo_knowledge_store import load_model_measurements
+        acc = (load_model_measurements(eye_model, screen_w, screen_h) or {}).get("accuracy") or {}
+        v = acc.get("median_px")
+        return float(v) if v is not None else None
+    except Exception:
+        return None
+
+
+def build_servo(screen, eye_model: str, collector=None, config_overlay: Optional[dict] = None):
+    """The one way to build a servo: eye-keyed config plus measured accuracy.
+
+    Both the agent loop and the chat side's fallback click construct their
+    servo here, so they cannot drift apart again (they had: the chat path was
+    building a different eye with a different config than the loop).
+    """
+    from backend.services.servo_knowledge_store import get_vision_config
+    from backend.utils.vision_analyzer import VisionAnalyzer
+    from backend.services.servo_controller import ServoController
+    cfg = dict(get_vision_config(eye_model))
+    cfg.update(config_overlay or {})
+    analyzer = VisionAnalyzer(default_model=eye_model)
+    w, h = screen.screen_size()
+    acc = cfg.pop("eye_accuracy_px", None)
+    if acc is None:
+        acc = _eye_accuracy_px(eye_model, w, h)
+    servo = ServoController(screen, analyzer, collector=collector, vision_config=cfg,
+                            eye_accuracy_px=acc)
+    return analyzer, servo
+
+
 class AgentControlService:
     """
     Master-side orchestration service for Agent Vision Control.
@@ -577,28 +644,19 @@ class AgentControlService:
             self._session_expectations = None
             self._click_history = []
 
-        # Pick the vision model for servo coordinate estimation.
-        # If vision_model is None, the model does its own coords — no middleman.
-        from backend.services.servo_knowledge_store import get_vision_config
-        unified_model_for_config = self._get_unified_model() or self.config.vision_model
-        vision_config = get_vision_config(unified_model_for_config)
-        servo_vision_model = vision_config.get("vision_model")  # None = model does its own coords
-
-        if servo_vision_model:
-            logger.info(f"[AGENT] Servo eyes: {servo_vision_model} (external)")
-        else:
-            # Auto-detect — use the same model that's doing the unified see+decide
-            servo_vision_model = unified_model_for_config
-            logger.info(f"[AGENT] Servo eyes: {servo_vision_model} (same model sees, decides, AND clicks)")
-
-        # Re-read the config for the actual coordinate-estimation model. Text
-        # models can delegate to external eyes; those eyes have their own grid.
-        vision_config = get_vision_config(servo_vision_model)
-
-        logger.info(f"[AGENT] Vision config: servo_eyes={servo_vision_model} scale=({vision_config['scale_x']}, {vision_config['scale_y']})")
-        analyzer = VisionAnalyzer(default_model=servo_vision_model)
+        # Who thinks, who looks. Resolved once per task; the loop reads it.
+        self._brain_eye = self.resolve_brain_eye(screen_size=screen.screen_size())
+        if not self._brain_eye.eye:
+            logger.error(f"[AGENT] no drivable eye: {self._brain_eye.reason}")
+            return finish(AgentResult(success=False, reason=f"no_drivable_eye: {self._brain_eye.reason}",
+                                      task=task))
+        logger.info(
+            "[AGENT] Brain: %s (%s) | Eye: %s (%s) — %s",
+            self._brain_eye.brain, "sighted" if self._brain_eye.unified else "blind",
+            self._brain_eye.eye, self._brain_eye.eye_mechanism, self._brain_eye.reason,
+        )
         collector = TrainingDataCollector()
-        servo = ServoController(screen, analyzer, collector=collector, vision_config=vision_config)
+        analyzer, servo = build_servo(screen, self._brain_eye.eye, collector=collector)
         if training_mode:
             # Training sessions get TRUE hit/miss labels from the trainer
             # page's own scoreboard (probe is inert when the page isn't the
@@ -730,13 +788,16 @@ class AgentControlService:
 
                 scene_desc = ""  # Will be populated by either unified or split path
 
-                # Check for unified vision+decision model (gemma4:e4b)
-                unified_model = self._get_unified_model()
+                # Unified when the brain can see and point for itself; otherwise
+                # the eye describes and points and the brain decides.
+                unified_model = self._brain_eye.brain if self._brain_eye.unified else ""
+
+                # Refresh DOM once per iteration, for BOTH modes, so the prompt
+                # builder and the click-time DOM-match guard see the same
+                # elements. Split mode never had a snapshot before this.
+                self._refresh_dom_snapshot()
 
                 if unified_model:
-                    # Refresh DOM once per iteration so the prompt builder and
-                    # the click-time DOM-match guard see the same elements.
-                    self._refresh_dom_snapshot()
                     self._world_state = self._build_world_state(cursor_pos=cursor_pos, scene_hint="")
                     # UNIFIED MODE: Compact prompt — vision model sees screenshot + short context
                     unified_prompt = self._build_unified_prompt(
@@ -796,9 +857,14 @@ class AgentControlService:
 
                     # 3. THINK — Text LLM decides next action
                     decision_prompt = self._build_decision_prompt(
-                        task, scene.description, self._action_history, world_state=self._world_state
+                        task, scene.description, self._action_history, world_state=self._world_state,
+                        training_mode=training_mode, chat_context=chat_context,
                     )
-                    decision_result = analyzer.text_query(decision_prompt)
+                    persistent_system = self._build_persistent_knowledge_system(task=task, full=True)
+                    decision_result = analyzer.text_query(
+                        decision_prompt, model=self._brain_eye.brain,
+                        system=persistent_system or None, num_predict=256, temperature=0.1,
+                    )
                     if not decision_result.success:
                         logger.error(f"[AGENT][STEP {iteration+1}][THINK] Decision failed")
                         consecutive_failures += 1
@@ -2329,6 +2395,17 @@ class AgentControlService:
 
         thinking_model = self._get_thinking_model()
         if not thinking_model:
+            # No dedicated thinking model installed (the historical list named
+            # two tags this box has never had). Use the brain if Ollama says it
+            # can think; otherwise fall through to the Escape fallback below.
+            try:
+                from backend.services.model_capability_resolver import resolve
+                be = getattr(self, "_brain_eye", None)
+                if be and be.brain and resolve(be.brain, "agent_screen").supports_thinking:
+                    thinking_model = be.brain
+            except Exception:
+                thinking_model = ""
+        if not thinking_model:
             # No thinking model available, try Escape as fallback
             screen.hotkey("Escape")
             _time.sleep(0.5)
@@ -2431,6 +2508,124 @@ class AgentControlService:
                 return True
         return False
 
+    # ---- prompt blocks shared by the unified and split builders ----------
+    # One copy each. Split mode used to carry its own weaker versions of
+    # several of these (a loop warning at 3, when the loop breaker also fires
+    # at 3) and none at all of the others.
+
+    _STATE_MANAGEMENT = (
+        "State Management: You must track task status (INITIAL -> IN_PROGRESS -> COMPLETE). "
+        "IMPORTANT: If the goal state is visible (e.g., the window you wanted to open is open, the comment you posted is visible), "
+        "you MUST immediately set status='COMPLETE' and action='done' without performing "
+        "any additional waiting, scrolling, or hotkey actions. PRIORITIZE THE GOAL OVER THE PROCESS. "
+        "Even if a previous step was marked [FAIL] in history, if the goal is now visible, the task is COMPLETE."
+    )
+    _TARGET_DESCRIPTION_RULES = (
+        "target_description rules: SHORT label, ≤6 words, one distinctive adjective. Examples: \"primary submit button\", \"chat input field\", \"main navigation icon\", \"desktop background\". NOT a multi-clause description with position phrases — long descriptions break the vision detector and land at (0,0). Describe one shape (color, label, or icon), not a sentence. When an \"Interactive elements on this page\" list is present above, prefer a target_description that matches one of those real element labels; if the field you need is already marked (focused), skip the click and type directly."
+    )
+    _EXPECTED_EFFECT_RULE = (
+        "For high-impact clicks (launch, submit, comment, modal dismiss), set expected_effect to the visible state that should appear after the click. Keep it short and vision-checkable."
+    )
+    _DONE_RULE = (
+        "done rule: when action=\"done\", success_proof MUST describe the visible state that proves the task is complete (e.g. \"cursor inside text area\", \"comment now visible in thread\"). Empty or generic (\"n/a\", \"task done\") is rejected. This rule applies to all models and paths.\n"
+        "When your most recent history step shows [OK] for a concrete target (e.g. \"GOTHAM RISING video thumbnail [OK]\" or servo DPC verified change), base the success_proof directly on that target + \"now visible/achieved\". Prior servo-verified clicks are strong evidence the goal state is real; use them to ground your proof rather than re-inventing a description."
+    )
+    _SCHEMA_FULL = (
+        "{\"status\": \"IN_PROGRESS|COMPLETE\", \"action\": \"click|right_click|type|hotkey|scroll|wait|done|navigate|tool\", \"target_description\": \"...\", \"text\": \"literal value only\", \"keys\": [\"ctrl\",\"t\"], \"url\": \"https://...\", \"reasoning\": \"why\", \"expected_effect\": \"visible result after this action\", \"success_proof\": \"visible state proving done (only when action=done)\", \"tool_name\": \"optional for action=tool\", \"tool_params\": {}}"
+    )
+    _SCHEMA_MOUSE_ONLY = (
+        "{\"status\": \"IN_PROGRESS|COMPLETE\", \"action\": \"click|right_click|done\", \"target_description\": \"...\", \"reasoning\": \"why\", \"expected_effect\": \"visible result after this action\", \"success_proof\": \"visible state proving done (only when action=done)\"}"
+    )
+    _TOOLBOX_NOTE = (
+        "Full toolbox awareness (SkillOpt-style skills + tools): You have access to a large agent toolbox (code, web search/scrape, media/music, batch generation, memory/lessons, general tools, and screen control via these recipes/skills). In /agent mode with capable models (Gemma4+), use natural language to invoke any -- e.g. describe a general task to trigger tool calling, or screen task to use recipes + actions here. Recipes (skills) are optimized deterministic shortcuts for common screen patterns (triggers match natural language); the system auto-matches and executes them for reliability. For full list or self-introspection, call agent_status. Skills/recipes + self-knowledge are external (like SkillOpt .md artifacts) and can be auto-tuned from trajectories without changing model weights. Prioritize matching/using recipes for screen reliability; fall back to structured actions or general tools (use action=\"tool\", tool_name=..., tool_params=...) as needed. Cross-model: these skills make even smaller models effective at complex multi-step work."
+    )
+
+    @staticmethod
+    def _history_block(history, n: int) -> str:
+        if not history:
+            return ""
+        steps = []
+        for h in history[-n:]:
+            status = "FAIL" if h.failed else "OK"
+            desc = h.action.text or h.action.target_description or str(h.action.keys or "")
+            steps.append(f"  {h.action.action_type}: {desc} [{status}]")
+        return "Done:\n" + "\n".join(steps) + "\n"
+
+    @staticmethod
+    def _pivot_block(history) -> str:
+        # Fire at 2 identical actions, not 3. The loop breaker also trips at
+        # 3, so a warning at 3 never reaches the model; at 2 it gets one
+        # iteration to actually pivot before the task is aborted.
+        if not history or len(history) < 2:
+            return ""
+        last_full = [
+            (h.action.action_type, h.action.target_description, h.action.text, tuple(h.action.keys or []), h.action.scroll_amount, h.action.url)
+            for h in history[-2:]
+        ]
+        if len(set(last_full)) != 1:
+            return ""
+        a_type, a_target, a_text, a_keys, a_scroll, a_url = last_full[0]
+        a_desc = a_target or a_text or (str(list(a_keys)) if a_keys else "") or a_url or (str(a_scroll) if a_scroll else "")
+        # Concrete options the model can copy: gemma4:e4b acknowledged a soft
+        # "pick something different" and repeated itself anyway.
+        return (
+            f"STOP. \"{a_type}: {a_desc}\" already failed TWICE in a row. "
+            f"Doing it a third time will hard-abort the task — you will not "
+            f"reach the goal by repeating this action.\n"
+            f"YOUR NEXT ACTION MUST BE EXACTLY ONE OF THESE:\n"
+            f"  • {{\"action\": \"hotkey\", \"keys\": [\"Escape\"], \"reasoning\": \"release focus from search/address bar so scroll reaches page\"}}\n"
+            f"  • {{\"action\": \"hotkey\", \"keys\": [\"Home\"], \"reasoning\": \"jump to top of page\"}}\n"
+            f"  • {{\"action\": \"hotkey\", \"keys\": [\"End\"], \"reasoning\": \"jump to bottom\"}}\n"
+            f"  • {{\"action\": \"hotkey\", \"keys\": [\"Page_Up\"], \"reasoning\": \"page up\"}}\n"
+            f"  • {{\"action\": \"hotkey\", \"keys\": [\"Page_Down\"], \"reasoning\": \"page down\"}}\n"
+            f"  • {{\"action\": \"click\", \"target_description\": \"comment input field\", \"reasoning\": \"focus the textarea directly\"}}\n"
+            f"  • {{\"action\": \"click\", \"target_description\": \"reply button\", \"reasoning\": \"open reply UI\"}}\n"
+            f"Pick one. Do not pick the exact same \"{a_type}: {a_desc}\" again.\n\n"
+        )
+
+    @staticmethod
+    def _training_override(training_mode: bool) -> str:
+        return "\nTRAINING MODE: NEVER say done. Click the next target.\n" if training_mode else ""
+
+    @staticmethod
+    def _confidence_line(task: str, desktop_state: str) -> str:
+        # Terse on purpose: verbose prompt text leaks into typed actions when
+        # the model parrots context.
+        confidence = (
+            "Screen mid-load or transient: wait, do not quit. "
+            "If the goal is already visible, you may output done on Step 1. Otherwise, Step 1 done is forbidden."
+        )
+        browser_visible = "firefox" in desktop_state.lower()
+        is_web_task = any(w in task.lower() for w in ["google", "youtube", "reddit", "search", "navigate", "url", "http", "browser", "website", "web page"])
+        if not browser_visible and is_web_task:
+            return (
+                "NO BROWSER VISIBLE: You MUST click the Firefox icon on the desktop first. "
+                "The navigate action will NOT work until a browser window is on screen and focused. "
+                "If the goal is already visible, you may output done on Step 1. Otherwise, Step 1 done is forbidden."
+            )
+        if not browser_visible:
+            return "No browser visible, but task doesn't explicitly require one. If the goal is already visible, you may output done on Step 1. Otherwise, Step 1 done is forbidden."
+        return "Browser is visible. " + confidence
+
+    def _consume_world_observed_block(self) -> str:
+        # Re-grounding output, when a stuck cluster fired one. Cleared once the
+        # model has seen it so the next prompt isn't padded with a stale
+        # observation. Split mode used to set this and never clear it.
+        if not self._pending_world_observed:
+            return ""
+        block = self._pending_world_observed + "\n\n"
+        self._pending_world_observed = ""
+        return block
+
+    @staticmethod
+    def _chat_context_block(chat_context: str) -> str:
+        return f"Recent conversation context:\n{chat_context}\n\n" if chat_context else ""
+
+    def _budget_block(self) -> str:
+        if getattr(self, '_current_budget', None) is None:
+            return ""
+        return self._current_budget.to_llm_summary() + " (cross-tier budget — be efficient with steps; this is visible to you for awareness.)\n\n"
+
     def _build_unified_prompt(
         self,
         task: str,
@@ -2442,113 +2637,24 @@ class AgentControlService:
         """Build a compact prompt for unified vision+decision models.
 
         Shorter prompts = better detection accuracy. Only include what the model
-        needs to pick the next action.
+        needs to pick the next action. Assembled from the shared blocks above;
+        the output is pinned byte-for-byte by tests/fixtures/unified_prompt_golden.txt.
         """
         # This prompt asks for success_proof; the done-guard keys on that fact.
         self._proof_contract = True
-        # Last 3 actions only — enough for context, not enough to overwhelm
-        done_lines = ""
-        pivot_block = ""
-        if history:
-            recent = history[-3:]
-            steps = []
-            for h in recent:
-                status = "FAIL" if h.failed else "OK"
-                desc = h.action.text or h.action.target_description or str(h.action.keys or "")
-                steps.append(f"  {h.action.action_type}: {desc} [{status}]")
-            done_lines = "Done:\n" + "\n".join(steps) + "\n"
-
-            # Fire the pivot at 2 identical actions, not 3. With it at 3, the
-            # loop_breaker (which also triggers at 3) had already aborted by
-            # the time the LLM would have seen this warning — so the warning
-            # never reached the model. At 2 identical, the LLM gets the
-            # warning on the iteration BEFORE the loop_breaker fires, giving
-            # it one chance to actually pivot before we abort the task.
-            if len(history) >= 2:
-                last_full = [
-                    (h.action.action_type, h.action.target_description, h.action.text, tuple(h.action.keys or []), h.action.scroll_amount, h.action.url)
-                    for h in history[-2:]
-                ]
-                if len(set(last_full)) == 1:
-                    a_type, a_target, a_text, a_keys, a_scroll, a_url = last_full[0]
-                    a_desc = a_target or a_text or (str(list(a_keys)) if a_keys else "") or a_url or (str(a_scroll) if a_scroll else "")
-                    # Gemma4:e4b ignored a soft "you must pick something
-                    # different" — it acknowledged the warning and scrolled
-                    # again anyway. Replace the abstract instruction with
-                    # explicit options the model can copy. If it can't
-                    # deviate even from concrete choices, that's a model
-                    # ceiling, not a prompt problem.
-                    pivot_block = (
-                        f"STOP. \"{a_type}: {a_desc}\" already failed TWICE in a row. "
-                        f"Doing it a third time will hard-abort the task — you will not "
-                        f"reach the goal by repeating this action.\n"
-                        f"YOUR NEXT ACTION MUST BE EXACTLY ONE OF THESE:\n"
-                        f"  • {{\"action\": \"hotkey\", \"keys\": [\"Escape\"], \"reasoning\": \"release focus from search/address bar so scroll reaches page\"}}\n"
-                        f"  • {{\"action\": \"hotkey\", \"keys\": [\"Home\"], \"reasoning\": \"jump to top of page\"}}\n"
-                        f"  • {{\"action\": \"hotkey\", \"keys\": [\"End\"], \"reasoning\": \"jump to bottom\"}}\n"
-                        f"  • {{\"action\": \"hotkey\", \"keys\": [\"Page_Up\"], \"reasoning\": \"page up\"}}\n"
-                        f"  • {{\"action\": \"hotkey\", \"keys\": [\"Page_Down\"], \"reasoning\": \"page down\"}}\n"
-                        f"  • {{\"action\": \"click\", \"target_description\": \"comment input field\", \"reasoning\": \"focus the textarea directly\"}}\n"
-                        f"  • {{\"action\": \"click\", \"target_description\": \"reply button\", \"reasoning\": \"open reply UI\"}}\n"
-                        f"Pick one. Do not pick the exact same \"{a_type}: {a_desc}\" again.\n\n"
-                    )
-
-
+        done_lines = self._history_block(history, 3)
+        pivot_block = self._pivot_block(history)
         desktop_state = AgentControlService._get_desktop_state()
-
-        training_override = ""
-        if training_mode:
-            training_override = "\nTRAINING MODE: NEVER say done. Click the next target.\n"
-
-        # One-line confidence rules. Kept terse on purpose — verbose
-        # prompt text leaks into typed actions when the model parrots context.
-        confidence = (
-            "Screen mid-load or transient: wait, do not quit. "
-            "If the goal is already visible, you may output done on Step 1. Otherwise, Step 1 done is forbidden."
-        )
-
-        browser_visible = "firefox" in desktop_state.lower()
-        is_web_task = any(w in task.lower() for w in ["google", "youtube", "reddit", "search", "navigate", "url", "http", "browser", "website", "web page"])
-        
-        if not browser_visible and is_web_task:
-            confidence = (
-                "NO BROWSER VISIBLE: You MUST click the Firefox icon on the desktop first. "
-                "The navigate action will NOT work until a browser window is on screen and focused. "
-                "If the goal is already visible, you may output done on Step 1. Otherwise, Step 1 done is forbidden."
-            )
-        elif not browser_visible:
-            # Not a web task (or at least doesn't look like one), don't force Firefox
-            confidence = "No browser visible, but task doesn't explicitly require one. If the goal is already visible, you may output done on Step 1. Otherwise, Step 1 done is forbidden."
-        else:
-            # Browser is already open
-            confidence = "Browser is visible. " + confidence
-
-        state_management = (
-            "State Management: You must track task status (INITIAL -> IN_PROGRESS -> COMPLETE). "
-            "IMPORTANT: If the goal state is visible (e.g., the window you wanted to open is open, the comment you posted is visible), "
-            "you MUST immediately set status='COMPLETE' and action='done' without performing "
-            "any additional waiting, scrolling, or hotkey actions. PRIORITIZE THE GOAL OVER THE PROCESS. "
-            "Even if a previous step was marked [FAIL] in history, if the goal is now visible, the task is COMPLETE."
-        )
-
+        training_override = self._training_override(training_mode)
+        confidence = self._confidence_line(task, desktop_state)
         world_block = self._format_world_state_for_prompt(world_state or self._world_state)
         dom_grounding_block = self._format_dom_grounding_for_prompt()
         failure_block = self._format_failure_history()
         if failure_block:
             failure_block = failure_block + "\n\n"
-        # Re-grounding output, when a stuck cluster fired one. Cleared after
-        # the model has seen it so the next prompt isn't padded with stale
-        # observation.
-        world_observed_block = ""
-        if self._pending_world_observed:
-            world_observed_block = self._pending_world_observed + "\n\n"
-            self._pending_world_observed = ""
-            
-        chat_context_block = f"Recent conversation context:\n{chat_context}\n\n" if chat_context else ""
-
-        budget_block = ""
-        if getattr(self, '_current_budget', None) is not None:
-            budget_block = self._current_budget.to_llm_summary() + " (cross-tier budget — be efficient with steps; this is visible to you for awareness.)\n\n"
+        world_observed_block = self._consume_world_observed_block()
+        chat_context_block = self._chat_context_block(chat_context)
+        budget_block = self._budget_block()
 
         return f"""{pivot_block}{budget_block}{chat_context_block}Task: {task}
 
@@ -2556,23 +2662,22 @@ class AgentControlService:
 {world_block}
 {dom_grounding_block}{world_observed_block}{failure_block}{done_lines}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
 
-{state_management}
+{self._STATE_MANAGEMENT}
 
-target_description rules: SHORT label, ≤6 words, one distinctive adjective. Examples: "primary submit button", "chat input field", "main navigation icon", "desktop background". NOT a multi-clause description with position phrases — long descriptions break the vision detector and land at (0,0). Describe one shape (color, label, or icon), not a sentence. When an "Interactive elements on this page" list is present above, prefer a target_description that matches one of those real element labels; if the field you need is already marked (focused), skip the click and type directly.
+{self._TARGET_DESCRIPTION_RULES}
 
-For high-impact clicks (launch, submit, comment, modal dismiss), set expected_effect to the visible state that should appear after the click. Keep it short and vision-checkable.
+{self._EXPECTED_EFFECT_RULE}
 
-done rule: when action="done", success_proof MUST describe the visible state that proves the task is complete (e.g. "cursor inside text area", "comment now visible in thread"). Empty or generic ("n/a", "task done") is rejected. This rule applies to all models and paths.
-When your most recent history step shows [OK] for a concrete target (e.g. "GOTHAM RISING video thumbnail [OK]" or servo DPC verified change), base the success_proof directly on that target + "now visible/achieved". Prior servo-verified clicks are strong evidence the goal state is real; use them to ground your proof rather than re-inventing a description.
+{self._DONE_RULE}
 
 Reply ONLY with JSON:
-{{"status": "IN_PROGRESS|COMPLETE", "action": "click|right_click|type|hotkey|scroll|wait|done|navigate|tool", "target_description": "...", "text": "literal value only", "keys": ["ctrl","t"], "url": "https://...", "reasoning": "why", "expected_effect": "visible result after this action", "success_proof": "visible state proving done (only when action=done)", "tool_name": "optional for action=tool", "tool_params": {{}}}}
+{self._SCHEMA_FULL}
 
-Full toolbox awareness (SkillOpt-style skills + tools): You have access to a large agent toolbox (code, web search/scrape, media/music, batch generation, memory/lessons, general tools, and screen control via these recipes/skills). In /agent mode with capable models (Gemma4+), use natural language to invoke any -- e.g. describe a general task to trigger tool calling, or screen task to use recipes + actions here. Recipes (skills) are optimized deterministic shortcuts for common screen patterns (triggers match natural language); the system auto-matches and executes them for reliability. For full list or self-introspection, call agent_status. Skills/recipes + self-knowledge are external (like SkillOpt .md artifacts) and can be auto-tuned from trajectories without changing model weights. Prioritize matching/using recipes for screen reliability; fall back to structured actions or general tools (use action="tool", tool_name=..., tool_params=...) as needed. Cross-model: these skills make even smaller models effective at complex multi-step work.
+{self._TOOLBOX_NOTE}
 """
 
     @staticmethod
-    def _get_unified_model(active: str = "") -> str:
+    def _get_unified_model(active: str = "", screen=None) -> str:
         """Pick a model that can both see the screen and decide what to do on it.
 
         This used to be the literal list ``["gemma4:e4b"]``, which made the whole
@@ -2594,32 +2699,73 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         """
         try:
             from backend.services.model_capability_resolver import (
-                MEASURED_CONFIDENCE, _installed, resolve,
+                MEASURED_CONFIDENCE, _installed, sees_natively, coords_for,
             )
         except Exception:  # resolver unavailable — keep the old floor
             return "gemma4:e4b"
 
-        def _drivable(tag: str):
+        def _drivable(tag: str) -> bool:
+            # Cheap: vision truth + convention only. resolve() would also
+            # compute who lends this tag eyes, which for a blind tag ranks
+            # every installed model — n² HTTP and a log line per candidate.
             try:
-                p = resolve(tag, "agent_screen")
+                if not sees_natively(tag):
+                    return False
+                c = coords_for(tag, screen)
+                return bool(c.order and c.confidence >= MEASURED_CONFIDENCE)
             except Exception:
-                return None
-            if p.sees_natively and p.coords.order and p.coords.confidence >= MEASURED_CONFIDENCE:
-                return p
-            return None
+                return False
 
         if active and _drivable(active):
             return active
 
-        best, best_key = "", None
-        for tag in _installed():
-            p = _drivable(tag)
-            if not p:
-                continue
-            key = (-p.coords.confidence, p.size_mb)
-            if best_key is None or key < best_key:
-                best, best_key = tag, key
-        return best
+        from backend.services.model_capability_resolver import rank_eyes
+        drivable = [tag for tag in _installed() if _drivable(tag)]
+        if not drivable:
+            return ""
+        return rank_eyes(drivable, screen)[0]["tag"]
+
+    @staticmethod
+    def resolve_brain_eye(active: str = "", screen_size=None) -> BrainEye:
+        """Decide who thinks and who looks for this task.
+
+        The brain is the user's chosen model, always; GUAARDVARK_DECISION_MODEL
+        is the one explicit override. If that model can see and point, it is
+        also the eye and the loop runs unified. Otherwise the resolver lends
+        the best measured eye and the loop runs split: the eye describes and
+        points, the brain decides. Before this, a blind user model meant a
+        third, auto-picked text model did the deciding — the dropdown was
+        decorative as far as the screen agent was concerned.
+        """
+        from backend.services.model_capability_resolver import resolve, eyes_for
+
+        active = active or _read_saved_active_model()
+        brain = os.environ.get("GUAARDVARK_DECISION_MODEL") or active
+        screen = tuple(screen_size) if screen_size else None
+
+        def _drivable(tag: str) -> bool:
+            try:
+                p = resolve(tag, "agent_screen", screen=screen)
+                return bool(p.sees_natively and p.can_drive_screen)
+            except Exception:
+                return False
+
+        pick = AgentControlService._get_unified_model(active=brain, screen=screen)
+        if brain and pick == brain:
+            return BrainEye(brain, brain, True, "native", "model sees and points for itself")
+        loaned = None
+        if brain:
+            try:
+                loaned = eyes_for(brain, "agent_screen", screen).model
+            except Exception:
+                loaned = None
+        eye = loaned if (loaned and _drivable(loaned)) else pick
+        if not eye:
+            return BrainEye(brain, "", False, "none", "no drivable eye installed")
+        if not brain:
+            return BrainEye(eye, eye, True, "native", "no saved model; best eye drives")
+        return BrainEye(brain, eye, False, "sibling_vlm",
+                        f"{brain} is blind or unprobed; {eye} looks and points")
 
     @staticmethod
     def _get_thinking_model() -> str:
@@ -2812,10 +2958,13 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         from backend.utils.vision_analyzer import VisionAnalyzer
 
         analyzer = VisionAnalyzer()
-        # Same model that sees and decides also verifies gates — no qwen3-vl
-        # middleman (avoids MAX_LOADED_MODELS=1 swap thrash; see trust-the-model-
-        # native-format.md). Resolved once per call (not per poll).
-        verify_model = analyzer.default_model
+        # The task's eye verifies its own gates: the same model that looked and
+        # pointed. Anything else (the analyzer's default is "whichever sighted
+        # model is resident") judges a different picture than the one the loop
+        # acted on, and a bake-off model left loaded by a sweep once vetoed a
+        # correct "done". Resolved once per call (not per poll).
+        be = getattr(self, "_brain_eye", None)
+        verify_model = (be.eye if be is not None and be.eye else None) or analyzer.default_model
         deadline = _time.monotonic() + timeout_s
         polls = 0
         last_err = None
@@ -3410,13 +3559,18 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         return ""
 
     @classmethod
-    def _build_persistent_knowledge_system(cls) -> str:
+    def _build_persistent_knowledge_system(cls, task: str = "", full: bool = False) -> str:
         """Build the system-message content carrying the agent's persistent
-        knowledge — compact facts plus recipe index plus distilled lessons.
+        knowledge — compact facts plus distilled lessons, and with ``full``
+        the long self-knowledge, recipe index and example traces too.
         Routed via Ollama's system role so it doesn't compete with the
         per-step user prompt for action-format conditioning. This is the
         cross-session memory slot: anything in here survives reboots and
         primes every decision.
+
+        ``full=False`` is exactly what the unified path has always received.
+        ``full=True`` is what split mode used to inline into its user prompt,
+        now carried in the system slot so the brain gets the lessons as well.
         """
         parts = []
         sk = cls._load_self_knowledge_compact()
@@ -3425,6 +3579,18 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         lessons = cls._load_lesson_memories()
         if lessons:
             parts.append(lessons)
+        if full:
+            long_sk = cls._load_self_knowledge()
+            if long_sk:
+                parts.append("## Screen-Control Knowledge (hypotheses; current screen wins)\n" + long_sk.strip())
+            recipe_index = cls._load_recipe_index()
+            if recipe_index:
+                parts.append(
+                    "## Available Recipes (the system auto-executes these on matching task strings; "
+                    "knowing they exist tells you what shortcuts the environment offers)\n" + recipe_index)
+            traces = cls._load_example_traces(task) if task else ""
+            if traces:
+                parts.append(traces.strip())
         return "\n\n".join(parts)
 
     @staticmethod
@@ -4457,98 +4623,65 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
         except Exception:
             return ""
 
-    def _build_decision_prompt(self, task, scene, history, world_state: Optional[WorldState] = None):
-        """Build the prompt for the LLM to decide the next action."""
-        # Split mode's schema has no success_proof field, so there is nothing to
-        # enforce. Preserves today's behaviour exactly; adding the field here is a
-        # separate, deliberate change.
-        self._proof_contract = False
-        history_text = ""
-        if history:
-            lines = []
-            recent = history[-5:]
-            for i, step in enumerate(recent):
-                status = "FAIL" if step.failed else "OK"
-                desc = step.action.target_description or step.action.text or str(step.action.keys)
-                lines.append(f"  {step.action.action_type}: {desc} [{status}]")
-            history_text = "Done:\n" + "\n".join(lines)
-            history_text += f"\n\nStep {len(history) + 1}."
+    def _build_decision_prompt(self, task, scene, history, world_state: Optional[WorldState] = None,
+                               training_mode: bool = False, chat_context: str = ""):
+        """The brain's prompt in split mode: same blocks as the unified prompt,
+        plus the eye's scene description in place of the screenshot.
 
-        loop_warning = ""
-        if len(history) >= 3:
-            last_actions = [(s.action.action_type, s.action.text, s.action.target_description) for s in history[-3:]]
-            if len(set(last_actions)) == 1:
-                loop_warning = "\nYou repeated the same action 3 times. Do something DIFFERENT.\n"
-
+        Until 2026-09-22 this carried its own weaker versions of a few of the
+        shared blocks and none of the rest: no budget, no pivot, no chat
+        context, no target-description rules, no success_proof in the schema,
+        no tool action. Its knowledge was inlined into the user prompt instead
+        of riding the system slot, so lessons never reached it. Its "done" was
+        never verified. Split mode is the path a blind user model takes, so
+        that was the pillar's own path being the degraded one.
+        """
+        # This prompt asks for success_proof; the done-guard keys on that fact.
+        self._proof_contract = True
         mouse_only = getattr(self, '_mouse_only', False)
-
-        state_management = (
-            "State Management: You must track task status (INITIAL -> IN_PROGRESS -> COMPLETE). "
-            "IMPORTANT: If the goal state is visible (e.g., the window you wanted to open is open, the comment you posted is visible), "
-            "you MUST immediately set status='COMPLETE' and action='done'. PRIORITIZE THE GOAL OVER THE PROCESS. "
-            "Even if a previous step was marked [FAIL] in history, if the goal is now visible, the task is COMPLETE."
-        )
-
-        if mouse_only:
-            rules = f"""MOUSE ONLY. Actions: click, right_click, done.
-{state_management}
-
-Reply ONLY with JSON:
-{{"status": "IN_PROGRESS|COMPLETE", "action": "click|right_click|done", "target_description": "...", "reasoning": "why", "expected_effect": "visible result after this action"}}"""
-        else:
-            rules = f"""One action per step. After typing a URL, press Return.
-{state_management}
-
-Reply ONLY with JSON:
-{{"status": "IN_PROGRESS|COMPLETE", "action": "click|right_click|type|hotkey|scroll|wait|done|navigate", "target_description": "...", "text": "literal value only", "keys": ["ctrl","t"], "url": "https://...", "reasoning": "why", "expected_effect": "visible result after this action"}}"""
-
+        done_lines = self._history_block(history, 5)
+        pivot_block = self._pivot_block(history)
         desktop_state = self._get_desktop_state()
+        training_override = self._training_override(training_mode)
+        confidence = self._confidence_line(task, desktop_state)
         world_block = self._format_world_state_for_prompt(world_state or self._world_state)
         dom_grounding_block = self._format_dom_grounding_for_prompt()
         failures_block = self._format_failure_reports_for_prompt()
+        world_observed_block = self._consume_world_observed_block()
+        chat_context_block = self._chat_context_block(chat_context)
+        budget_block = self._budget_block()
 
-        # Persistent knowledge — loaded once per call, stable across sessions.
-        # This is the cross-session memory: what the agent has learned about
-        # its own environment, the shortcuts it can rely on, and patterns
-        # that have worked before. Without these the LLM rediscovers the
-        # screen layout every step.
-        self_knowledge = self._load_self_knowledge()
-        recipe_index = self._load_recipe_index()
-        example_traces = self._load_example_traces(task)
+        if mouse_only:
+            rules = f"MOUSE ONLY. Actions: click, right_click, done.\n{self._STATE_MANAGEMENT}"
+            schema = self._SCHEMA_MOUSE_ONLY
+        else:
+            rules = f"One action per step. After typing a URL, press Return.\n{self._STATE_MANAGEMENT}"
+            schema = self._SCHEMA_FULL
 
-        knowledge_block = ""
-        if self_knowledge:
-            knowledge_block += f"## Screen-Control Knowledge (hypotheses; current screen wins)\n{self_knowledge.strip()}\n\n"
-        if recipe_index:
-            knowledge_block += (
-                "## Available Recipes (the system auto-executes these on matching task strings; "
-                "knowing they exist tells you what shortcuts the environment offers)\n"
-                f"{recipe_index}\n\n"
-            )
-        if example_traces:
-            knowledge_block += f"{example_traces.strip()}\n\n"
-
-        # Phase-1 verification log: confirm the loaders fire and how much
-        # knowledge gets injected. Remove once we're sure it's wired right.
-        logger.warning(
-            f"[AGENT][PROMPT] knowledge_block={len(knowledge_block)}ch "
-            f"self_knowledge={len(self_knowledge)}ch "
-            f"recipe_index={len(recipe_index)}ch "
-            f"example_traces={len(example_traces)}ch"
-        )
-
-        return f"""{knowledge_block}{failures_block}---
+        return f"""{pivot_block}{budget_block}{chat_context_block}{failures_block}---
 
 Task: {task}
 
 {desktop_state}
 {world_block}
 
-Screen: {scene}
+Screen (as described by the vision model): {scene}
 
-{dom_grounding_block}{history_text}
-{loop_warning}
-{rules}"""
+{dom_grounding_block}{world_observed_block}{done_lines}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
+
+{rules}
+
+{self._TARGET_DESCRIPTION_RULES}
+
+{self._EXPECTED_EFFECT_RULE}
+
+{self._DONE_RULE}
+
+Reply ONLY with JSON:
+{schema}
+
+{self._TOOLBOX_NOTE}
+"""
 
     def _parse_decision(self, llm_output: str) -> AgentDecision:
         """Parse the LLM's JSON decision into an AgentDecision."""

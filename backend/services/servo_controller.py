@@ -44,11 +44,16 @@ class ServoController:
         result = servo.click_target("Reply button under first comment")
     """
 
-    def __init__(self, screen, analyzer, max_corrections: int = 4, collector=None, vision_config: Dict = None):
+    def __init__(self, screen, analyzer, max_corrections: int = 4, collector=None,
+                 vision_config: Dict = None, eye_accuracy_px: Optional[float] = None):
         self.screen = screen
         self.analyzer = analyzer
         self.max_corrections = max_corrections
         self.collector = collector
+        # Measured median pointing error of this eye on this screen, from the
+        # measurement store; None when unmeasured. The correction loop arms on
+        # it: an eye coarser than the target earns a second look.
+        self.eye_accuracy_px = eye_accuracy_px
         # Optional TrainerTruthProbe (trainer_truth_probe.py) — attached by the
         # agent loop during training sessions. When present, clicks on the
         # vision trainer get TRUE hit/miss labels from the page's own

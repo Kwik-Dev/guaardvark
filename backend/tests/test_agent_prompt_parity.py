@@ -13,3 +13,48 @@ def test_unified_prompt_is_byte_identical_to_the_golden():
         expected = f.read()
     got = build()
     assert got == expected, "the unified prompt changed; if intentional, regenerate the golden deliberately"
+
+
+def _svc():
+    from backend.services.agent_control_service import AgentControlService
+    svc = AgentControlService()
+    svc._pending_world_observed = "WORLD_OBSERVED: fixture"
+    svc._failure_reports = []
+    svc._current_budget = None
+    return svc
+
+
+def test_split_prompt_has_what_unified_has():
+    from unittest.mock import patch
+    from backend.services.agent_control_service import AgentControlService, ActionStep, AgentAction
+    svc = _svc()
+    hist = [ActionStep(iteration=1, action=AgentAction(action_type="scroll", scroll_amount=3), failed=True),
+            ActionStep(iteration=2, action=AgentAction(action_type="scroll", scroll_amount=3), failed=True)]
+    with patch.object(AgentControlService, "_get_desktop_state", staticmethod(lambda display=None: "Desktop: fixture")), \
+         patch.object(AgentControlService, "_format_dom_grounding_for_prompt", lambda self: ""):
+        p = svc._build_decision_prompt("open youtube", "a page with a video", hist,
+                                       training_mode=True, chat_context="user said hi")
+    assert svc._proof_contract is True, "split mode must ask for a proof so the done-guard enforces one"
+    assert '"success_proof"' in p and '"tool"' in p
+    assert "STOP." in p, "the 2-identical pivot must reach the brain before the loop breaker fires"
+    assert "TRAINING MODE" in p and "Recent conversation context" in p
+    assert "WORLD_OBSERVED: fixture" in p
+    assert svc._pending_world_observed == "", "re-grounding output must be consumed, not left to pad every prompt"
+    assert "target_description rules" in p
+
+
+def test_mouse_only_schema_still_asks_for_a_proof():
+    from unittest.mock import patch
+    from backend.services.agent_control_service import AgentControlService
+    svc = _svc(); svc._mouse_only = True
+    with patch.object(AgentControlService, "_get_desktop_state", staticmethod(lambda display=None: "d")), \
+         patch.object(AgentControlService, "_format_dom_grounding_for_prompt", lambda self: ""):
+        p = svc._build_decision_prompt("t", "s", [])
+    assert "MOUSE ONLY" in p and '"success_proof"' in p
+
+
+def test_full_knowledge_is_a_superset_of_compact():
+    from backend.services.agent_control_service import AgentControlService as A
+    compact = A._build_persistent_knowledge_system()
+    full = A._build_persistent_knowledge_system(task="open youtube", full=True)
+    assert full.startswith(compact)

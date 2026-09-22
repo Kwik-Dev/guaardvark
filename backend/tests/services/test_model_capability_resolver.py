@@ -128,7 +128,7 @@ class EyeRankingTest(unittest.TestCase):
     def test_accuracy_mode_prefers_the_better_measured_eye(self):
         with patch.object(R, "_info", return_value=_info(["completion", "vision"])), \
              patch.object(R, "_measurements", side_effect=self._meas({"gemma4:e4b": 61.0, "qwen3.5:9b": 15.0})), \
-             patch.object(R, "_available_vram_mb", return_value=None), \
+             patch.object(R, "_vram_budget_mb", return_value=None), \
              patch.dict("os.environ", {R.EYE_RANKING_ENV: "accuracy"}):
             order = [r["tag"] for r in R.rank_eyes(["gemma4:e4b", "qwen3.5:9b"], (1000, 1000))]
         self.assertEqual(order[0], "qwen3.5:9b")
@@ -136,7 +136,7 @@ class EyeRankingTest(unittest.TestCase):
     def test_confidence_mode_is_the_old_order(self):
         with patch.object(R, "_info", return_value=_info(["completion", "vision"])), \
              patch.object(R, "_measurements", side_effect=self._meas({"gemma4:e4b": 61.0, "qwen3.5:9b": 15.0})), \
-             patch.object(R, "_available_vram_mb", return_value=None), \
+             patch.object(R, "_vram_budget_mb", return_value=None), \
              patch.dict("os.environ", {R.EYE_RANKING_ENV: "confidence"}):
             order = [r["tag"] for r in R.rank_eyes(["gemma4:e4b", "qwen3.5:9b"], (1000, 1000))]
         self.assertEqual(order[0], "gemma4:e4b", "row confidence 1.0 outranks a family default")
@@ -144,17 +144,41 @@ class EyeRankingTest(unittest.TestCase):
     def test_nothing_measured_falls_through_to_confidence(self):
         with patch.object(R, "_info", return_value=_info(["completion", "vision"])), \
              patch.object(R, "_measurements", side_effect=self._meas({})), \
-             patch.object(R, "_available_vram_mb", return_value=None), \
+             patch.object(R, "_vram_budget_mb", return_value=None), \
              patch.dict("os.environ", {R.EYE_RANKING_ENV: "accuracy"}):
             order = [r["tag"] for r in R.rank_eyes(["qwen3.5:9b", "gemma4:e4b"], (1000, 1000))]
         self.assertEqual(order[0], "gemma4:e4b", "a fresh clone must behave as before")
+
+    def test_a_poor_measurement_does_not_beat_a_trusted_unmeasured_eye(self):
+        # The first live split run picked a 138px eye over a hand-measured row
+        # because it was the only one with a number yet.
+        with patch.object(R, "_info", return_value=_info(["completion", "vision"])), \
+             patch.object(R, "_measurements", side_effect=self._meas({"ministral-3:14b": 138.0})), \
+             patch.object(R, "_vram_budget_mb", return_value=None), \
+             patch.dict("os.environ", {R.EYE_RANKING_ENV: "accuracy"}):
+            order = [r["tag"] for r in R.rank_eyes(["ministral-3:14b", "gemma4:e4b", "qwen3.5:9b"], (1000, 1000))]
+        self.assertEqual(order, ["gemma4:e4b", "qwen3.5:9b", "ministral-3:14b"])
+
+    def test_fit_is_judged_against_the_card_not_against_what_is_free(self):
+        # A 24B bake-off model left resident by a sweep must not make every
+        # other eye "not fit" and win by default.
+        def info(tag):
+            return _info(["completion", "vision"], size=15000.0 if tag == "devstral-small-2:24b" else 6600.0)
+        with patch.object(R, "_info", side_effect=info), \
+             patch.object(R, "_resident", return_value=["devstral-small-2:24b"]), \
+             patch.object(R, "_measurements", side_effect=self._meas({"devstral-small-2:24b": 114.0})), \
+             patch.object(R, "_vram_budget_mb", return_value=16376.0), \
+             patch.dict("os.environ", {R.EYE_RANKING_ENV: "accuracy"}):
+            rows = R.rank_eyes(["devstral-small-2:24b", "qwen3.5:9b"], (1000, 1000))
+        self.assertEqual(rows[0]["tag"], "qwen3.5:9b")
+        self.assertIs(rows[0]["fits"], True)
 
     def test_an_eye_that_does_not_fit_is_demoted_not_dropped(self):
         def info(tag):
             return _info(["completion", "vision"], size=9600.0 if tag == "gemma4:e4b" else 6600.0)
         with patch.object(R, "_info", side_effect=info), \
              patch.object(R, "_measurements", side_effect=self._meas({"gemma4:e4b": 15.0, "qwen3.5:9b": 61.0})), \
-             patch.object(R, "_available_vram_mb", return_value=8000.0), \
+             patch.object(R, "_vram_budget_mb", return_value=8000.0), \
              patch.dict("os.environ", {R.EYE_RANKING_ENV: "accuracy"}):
             rows = R.rank_eyes(["gemma4:e4b", "qwen3.5:9b"], (1000, 1000))
         self.assertEqual([r["tag"] for r in rows], ["qwen3.5:9b", "gemma4:e4b"])
