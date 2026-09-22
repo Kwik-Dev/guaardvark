@@ -174,6 +174,41 @@ def load_labeled_pairs_from_archive(archive_path=None):
     return pairs
 
 
+def load_labeled_pairs_from_bench(bench_path):
+    """(truth_xy, raw_anchor_xy, screen_wh) triples from an eye_bakeoff run.
+
+    Same shape as load_labeled_pairs_from_archive, different source. The bench
+    rows come from frames captured with no clicks and truth read out of the
+    page DOM, so they carry none of the marker contamination a live click
+    session leaves behind — and unlike a live session this can be re-fitted
+    offline as many times as you like without a display, a browser or Ollama.
+
+    Only rows from a run with the refinement OFF are usable: the correction
+    targets the ANCHOR, because the anchor is what places the refine crop.
+    """
+    import json as _j
+    from pathlib import Path as _P
+    d = _j.loads(_P(bench_path).read_text())
+    disp = d.get("display") or [1000, 1000]
+    pairs = []
+    for res in d.get("results", []):
+        mode = res.get("mode", "")
+        if mode not in ("anchor", "calibrated"):
+            print(f"  skipping mode={mode!r} — needs the anchor, not a refined point")
+            continue
+        if mode == "calibrated":
+            print("  WARNING: mode=calibrated rows already have a fit applied; "
+                  "fitting on them stacks a correction on a correction")
+        for row in res.get("targets", []):
+            if row.get("err_x") is None or not row.get("pred"):
+                continue
+            gx, gy = row["gt"]
+            px, py = row["pred"]
+            pairs.append(((float(gx), float(gy)), (float(px), float(py)),
+                          (int(disp[0]), int(disp[1]))))
+    return pairs
+
+
 def fit_radial(pairs):
     """The X-leg model: raw ≈ C + k·(truth − C). Fit k robustly (median of
     per-sample radius ratios about screen center)."""
@@ -225,12 +260,33 @@ def evaluate_candidate(cand, pairs, catch_px=80.0):
     """(mean_error, catch_rate) of corrected anchors vs truth."""
     if not pairs:
         return float("inf"), 0.0
-    errs = []
+    m = evaluate_candidate_axes(cand, pairs, catch_px)
+    return m["mean"], m["catch"]
+
+
+def evaluate_candidate_axes(cand, pairs, catch_px=80.0):
+    """Same evaluation, but keeping the axes apart.
+
+    A fit that halves Y error while doubling X error is a clear win on mean
+    Euclidean distance and a clear loss in practice. The aggregate cannot show
+    that; these numbers can.
+    """
+    import statistics as _st
+    if not pairs:
+        return {"mean": float("inf"), "catch": 0.0, "med_x": None, "med_y": None, "n": 0}
+    errs, ex, ey = [], [], []
     for (tx, ty), (rx, ry), (w, h) in pairs:
         px, py = _apply_candidate(cand, rx, ry, w, h)
+        ex.append(abs(px - tx))
+        ey.append(abs(py - ty))
         errs.append(((px - tx) ** 2 + (py - ty) ** 2) ** 0.5)
-    catch = sum(1 for e in errs if e <= catch_px) / len(errs)
-    return sum(errs) / len(errs), catch
+    return {
+        "mean": sum(errs) / len(errs),
+        "catch": sum(1 for e in errs if e <= catch_px) / len(errs),
+        "med_x": _st.median(ex),
+        "med_y": _st.median(ey),
+        "n": len(errs),
+    }
 
 
 def split_by_position(pairs, eval_frac=0.25, seed=11):
@@ -307,21 +363,33 @@ def fit_and_gate(pairs, model_name: str, dry_run: bool) -> int:
     rx = [p[1][0] for p in train]; ry = [p[1][1] for p in train]
     a_x, b_x, _ = fit_axis(tx, rx)
     a_y, b_y, _ = fit_axis(ty, ry)
+    # A Y-only candidate alongside the joint fit. Measured three times now, on
+    # three different boards, the eye's X is unbiased (slope 1.006, intercept
+    # 7px on 2026-09-22) while its Y is a stable compression toward screen
+    # centre (slope 0.65-0.69 every time). Fitting X on a couple of dozen noisy
+    # samples can only import that noise as a correction. Stored as family
+    # "linear" with b_x exactly 1.0, which _apply_calibration computes as
+    # (x - 0)/1 — an exact identity on X, not an approximate one. The held-out
+    # gate below picks between this and the joint fit on the evidence.
     candidates = [None,
                   {"model": "linear", "a_x": round(a_x, 2), "b_x": round(b_x, 4),
+                   "a_y": round(a_y, 2), "b_y": round(b_y, 4)},
+                  {"model": "linear", "a_x": 0.0, "b_x": 1.0,
                    "a_y": round(a_y, 2), "b_y": round(b_y, 4)},
                   fit_radial(train)]
     candidates += fit_piecewise_y(train)
     candidates = [c for c in candidates if c is not None or c is None]  # keep identity marker
 
-    print("\ncandidate            held-out mean err   catch(≤80px)")
+    print("\ncandidate                                    held-out mean   catch(≤80px)   med|X|   med|Y|")
     scored = []
     for cand in candidates:
         if cand is not None and cand["model"] == "linear" and not (0.3 <= abs(b_x) <= 1.7 and 0.3 <= abs(b_y) <= 1.7):
             continue
-        mean_e, catch = evaluate_candidate(cand, heldout)
+        m = evaluate_candidate_axes(cand, heldout)
+        mean_e, catch = m["mean"], m["catch"]
         name = "identity" if cand is None else json.dumps(cand)[:44]
-        print(f"  {name:44s} {mean_e:7.1f}px      {catch*100:5.1f}%")
+        print(f"  {name:44s} {mean_e:7.1f}px        {catch*100:5.1f}%   "
+              f"{m['med_x']:6.1f}   {m['med_y']:6.1f}")
         scored.append((mean_e, -catch, cand))
     # Incumbent challenge: the currently-stored fit must be beaten, not just
     # identity — otherwise a lucky/unlucky held-out draw can replace a better
@@ -333,7 +401,9 @@ def fit_and_gate(pairs, model_name: str, dry_run: bool) -> int:
     inc_err, inc_catch = (evaluate_candidate(incumbent, heldout)
                           if incumbent else (float("inf"), -1.0))
     if incumbent:
-        print(f"  {'INCUMBENT ' + incumbent.get('model', '?'):44s} {inc_err:7.1f}px      {inc_catch*100:5.1f}%")
+        _im = evaluate_candidate_axes(incumbent, heldout)
+        print(f"  {'INCUMBENT ' + incumbent.get('model', '?'):44s} {inc_err:7.1f}px        "
+              f"{inc_catch*100:5.1f}%   {_im['med_x']:6.1f}   {_im['med_y']:6.1f}")
 
     scored.sort(key=lambda s: (s[0], s[1]))
     best_err, neg_catch, best = scored[0]
@@ -383,8 +453,23 @@ def main(argv: Optional[list] = None):
                     help="Wave 2: fit+validate from truth-labeled archive rows (no live probing)")
     ap.add_argument("--live-fit", action="store_true",
                     help="Wave 2: collect spread samples live (fresh position each), then fit+gate")
+    ap.add_argument("--from-bench", default="",
+                    help="fit+validate from one or more eye_bakeoff runs, comma-separated "
+                         "(offline: no display, no browser, no Ollama). Point it at "
+                         "bakeoff_anchor.json.")
     args = ap.parse_args(argv)
 
+    if args.from_bench:
+        pairs = []
+        for _b in [b.strip() for b in args.from_bench.split(",") if b.strip()]:
+            got = load_labeled_pairs_from_bench(_b)
+            print(f"  {len(got):4d} pairs from {_b}")
+            pairs += got
+        print(f"loaded {len(pairs)} truth-labeled pairs")
+        if not pairs:
+            print("ABORT: no usable rows — was the run made with --mode anchor?")
+            return 1
+        return fit_and_gate(pairs, args.model, args.dry_run)
     if args.from_archive:
         return fit_from_archive(args.model, args.dry_run)
     if args.live_fit:
