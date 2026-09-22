@@ -128,25 +128,12 @@ def get_llm_instance(
             return None
 
     # Cloud provider routing: when the master cloud toggle is on AND a cloud
-    # provider (e.g. Mistral) is the active selection, hand back a cloud-backed
-    # LlamaIndex LLM so every .chat()/.complete() caller routes to the API.
-    # Resolved per-call (cheap) so the toggle takes effect without a restart.
-    # Falls through to the local Ollama instance otherwise (and on any error).
-    try:
-        from backend.services import llm_provider as _llm_provider
-        _provider = _llm_provider.get_active_provider()
-        if _provider != _llm_provider.OLLAMA:
-            cloud_model = _llm_provider.get_active_cloud_model()
-            if _provider == _llm_provider.MISTRAL:
-                from backend.services import mistral_provider
-                cloud_llm = mistral_provider.make_llamaindex_llm(cloud_model)
-            else:
-                from backend.services import openai_provider
-                cloud_llm = openai_provider.make_llamaindex_llm(cloud_model)
-            if cloud_llm is not None:
-                return cloud_llm  # type: ignore
-    except Exception as e:  # noqa: BLE001 - never let provider logic break LLM access
-        logger.warning("Cloud provider resolution failed, falling back to Ollama: %s", e)
+    # provider is the active selection, hand back a cloud-backed LlamaIndex LLM
+    # so every .chat()/.complete() caller routes to the API. Resolved per-call
+    # (cheap) so the toggle takes effect without a restart.
+    cloud_llm = _active_cloud_llm()
+    if cloud_llm is not None:
+        return cloud_llm  # type: ignore
 
     if not current_app:
         logger.error("Flask current_app context not available.")
@@ -485,33 +472,52 @@ def _default_chat_sampling():
     return temperature, profile
 
 
-def _openai_compatible_llm() -> Optional["Ollama"]:
-    """Return the OpenAI-compatible LLM when both GUAARDVARK_OPENAI_BASE_URL and
-    GUAARDVARK_OPENAI_MODEL are configured, else None.
+def _active_cloud_llm() -> Optional["Ollama"]:
+    """Return a LlamaIndex LLM for the DB-selected cloud provider, or None.
 
-    Guards every local-Ollama factory so we never construct/load a local model
-    (squatting VRAM) when the main chat is routed to an OpenAI-compatible endpoint.
+    Single gate for every non-chat call site: the master ``cloud_models_enabled``
+    switch and the active provider selection live in ``llm_provider``, so a
+    configured ``GUAARDVARK_OPENAI_BASE_URL`` alone can never route a call
+    off-box while airplane mode is on. This mirrors ``unified_chat_engine`` and
+    ``character_generator_service._default_llm``.
     """
-    if not (os.environ.get("GUAARDVARK_OPENAI_BASE_URL") and os.environ.get("GUAARDVARK_OPENAI_MODEL")):
-        return None
     try:
+        from backend.services import llm_provider as _llm_provider
+        provider = _llm_provider.get_active_provider()
+        if provider == _llm_provider.OLLAMA:
+            return None
+        model = _llm_provider.get_active_cloud_model()
+        if provider == _llm_provider.MISTRAL:
+            from backend.services import mistral_provider
+            return mistral_provider.make_llamaindex_llm(model)  # type: ignore[return-value]
         from backend.services import openai_provider
-        return openai_provider.make_llamaindex_llm()  # type: ignore[return-value]
-    except Exception as e:
-        logger.warning("OpenAI-compatible LLM init failed (%s); falling back to local", e)
+        return openai_provider.make_llamaindex_llm(model)  # type: ignore[return-value]
+    except Exception as e:  # noqa: BLE001 - never let provider logic break LLM access
+        logger.warning("Cloud provider resolution failed (%s); staying local", e)
         return None
+
+
+def _openai_compatible_llm() -> Optional["Ollama"]:
+    """Back-compat name for :func:`_active_cloud_llm`.
+
+    Routing is decided by ``llm_provider`` (master switch + active provider), not
+    by the raw ``GUAARDVARK_OPENAI_*`` env vars — see ``_active_cloud_llm``.
+    """
+    return _active_cloud_llm()
 
 
 def get_default_llm() -> Ollama:
     """Instantiate and return the default LLM.
 
-    When ``GUAARDVARK_OPENAI_BASE_URL`` + ``GUAARDVARK_OPENAI_MODEL`` are set, return the
-    OpenAI-compatible LLM instead of loading a local Ollama model (avoids squatting VRAM).
-    Otherwise instantiate the default Ollama LLM, preferring the saved active model.
+    When the master cloud switch is ON and a cloud provider is the active
+    selection (``llm_provider``), return that provider's LLM instead of loading a
+    local Ollama model. A configured ``GUAARDVARK_OPENAI_BASE_URL`` alone is not
+    enough: the operator has to have enabled cloud models and selected the
+    provider, so airplane mode always wins.
     """
     openai_llm = _openai_compatible_llm()
     if openai_llm is not None:
-        logger.info("get_default_llm: routed to OpenAI-compatible LLM; skipping local model load")
+        logger.info("get_default_llm: routed to the active cloud provider; skipping local model load")
         return openai_llm
     from backend.config import LLM_REQUEST_TIMEOUT, get_chat_keep_alive
     timeout_value = min(LLM_REQUEST_TIMEOUT, 180.0)
@@ -550,20 +556,18 @@ def get_default_llm() -> Ollama:
 def get_llm_for_startup() -> Ollama:
     """Return the LLM used for the main chat engine at startup.
 
-    When ``GUAARDVARK_OPENAI_BASE_URL`` and ``GUAARDVARK_OPENAI_MODEL`` are both set
-    in .env, the main chat is routed through the OpenAI-compatible endpoint instead
-    of Ollama. Otherwise, fall back to an Ollama instance using the last active
+    When the master cloud switch is on and a cloud provider is the active
+    selection, the main chat is routed through that endpoint instead of Ollama —
+    the ``GUAARDVARK_OPENAI_*`` env vars only supply the endpoint, they are not
+    consent. Otherwise, fall back to an Ollama instance using the last active
     model (validating it's actually pulled before returning; on a stale/missing
     model, fall through to the first installed model rather than warming a ghost).
     """
-    # Route main chat through the OpenAI-compatible endpoint when both env vars
-    # are configured in .env. Falls back to Ollama if the LLM can't be built.
+    # Route main chat through the active cloud provider when the operator has
+    # enabled it. Falls back to Ollama if the LLM can't be built.
     openai_llm = _openai_compatible_llm()
     if openai_llm is not None:
-        logger.info(
-            "[LLM-Init] Main chat routed to OpenAI-compatible LLM (model=%s)",
-            os.environ.get("GUAARDVARK_OPENAI_MODEL"),
-        )
+        logger.info("[LLM-Init] Main chat routed to the active cloud provider")
         return openai_llm
 
     from backend.config import LLM_REQUEST_TIMEOUT, get_chat_keep_alive
