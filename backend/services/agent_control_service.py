@@ -863,7 +863,13 @@ class AgentControlService:
                     proof = (decision.action.success_proof or "").strip()
                     proof_lc = proof.lower()
                     trivial_proofs = {"", "n/a", "na", "task complete", "done", "task done", "ok", "complete"}
-                    enforce_proof = bool(self._get_unified_model())
+                    # Keyed on whether the prompt we actually sent asked for a
+                    # proof — not on which model is loaded. It used to be
+                    # bool(self._get_unified_model()), so choosing a model that
+                    # happened not to be gemma4:e4b silently disabled this
+                    # check. A safety rule that can be turned off by picking a
+                    # different model is not a safety rule.
+                    enforce_proof = bool(getattr(self, "_proof_contract", True))
 
                     # Ground success_proof from prior successful (servo-verified) step when the
                     # model provided none or a trivial one. Re-uses the last target_description
@@ -2438,6 +2444,8 @@ class AgentControlService:
         Shorter prompts = better detection accuracy. Only include what the model
         needs to pick the next action.
         """
+        # This prompt asks for success_proof; the done-guard keys on that fact.
+        self._proof_contract = True
         # Last 3 actions only — enough for context, not enough to overwhelm
         done_lines = ""
         pivot_block = ""
@@ -2564,20 +2572,54 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
 """
 
     @staticmethod
-    def _get_unified_model() -> str:
-        """Find a vision model capable of both seeing and deciding (4b+ VLM)."""
+    def _get_unified_model(active: str = "") -> str:
+        """Pick a model that can both see the screen and decide what to do on it.
+
+        This used to be the literal list ``["gemma4:e4b"]``, which made the whole
+        agent loop depend on one exact tag being installed. Three things went
+        wrong with that beyond the obvious inflexibility:
+
+        * Switching the chat model changed nothing here, so the dropdown was a
+          lie as far as the screen agent was concerned.
+        * When the tag was absent it returned "", and the empty string was also
+          being used as the switch for done-proof enforcement — so an unrelated
+          model choice silently turned off a safety check.
+        * Nobody could evaluate an alternative, because an unconfigured model
+          was read with the wrong axis order and therefore measured as useless.
+
+        Ranking is: the user's own model if it can drive the screen, then by how
+        well we know its coordinate convention, then by size. The confidence
+        ordering is what keeps this a no-op where it matters — a hand-measured
+        row outranks a probe, which outranks a family default.
+        """
         try:
-            import requests as _requests
-            response = _requests.get("http://127.0.0.1:11434/api/tags", timeout=5)
-            if response.status_code == 200:
-                models = [m["name"] for m in response.json().get("models", [])]
-                # Prefer larger VLMs that can reason + see
-                for preferred in ["gemma4:e4b"]:
-                    if preferred in models:
-                        return preferred
-        except Exception:
-            pass
-        return ""
+            from backend.services.model_capability_resolver import (
+                MEASURED_CONFIDENCE, _installed, resolve,
+            )
+        except Exception:  # resolver unavailable — keep the old floor
+            return "gemma4:e4b"
+
+        def _drivable(tag: str):
+            try:
+                p = resolve(tag, "agent_screen")
+            except Exception:
+                return None
+            if p.sees_natively and p.coords.order and p.coords.confidence >= MEASURED_CONFIDENCE:
+                return p
+            return None
+
+        if active and _drivable(active):
+            return active
+
+        best, best_key = "", None
+        for tag in _installed():
+            p = _drivable(tag)
+            if not p:
+                continue
+            key = (-p.coords.confidence, p.size_mb)
+            if best_key is None or key < best_key:
+                best, best_key = tag, key
+        return best
 
     @staticmethod
     def _get_thinking_model() -> str:
@@ -4417,6 +4459,10 @@ Full toolbox awareness (SkillOpt-style skills + tools): You have access to a lar
 
     def _build_decision_prompt(self, task, scene, history, world_state: Optional[WorldState] = None):
         """Build the prompt for the LLM to decide the next action."""
+        # Split mode's schema has no success_proof field, so there is nothing to
+        # enforce. Preserves today's behaviour exactly; adding the field here is a
+        # separate, deliberate change.
+        self._proof_contract = False
         history_text = ""
         if history:
             lines = []
