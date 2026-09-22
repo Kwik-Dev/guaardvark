@@ -157,18 +157,17 @@ def _default_llm(*, system: str, user: str, model: str = "gemma4:12b") -> str:
         {"role": "user", "content": user},
     ]
 
-    # Prefer the OpenAI-compatible provider when the operator opted in
-    # (GUAARDVARK_OPENAI_API_KEY / GUAARDVARK_OPENAI_BASE_URL). Same JSON contract
-    # as the local branch below: the strict-schema agents cannot use prose.
+    # Prefer the OpenAI-compatible provider, but only when llm_provider says it is
+    # the active route. openai_provider.available() is just "a base URL is
+    # configured"; the master cloud toggle (airplane mode) and the selected
+    # provider live in llm_provider, so this call has to consult them like every
+    # other call site instead of reaching around the gate. Same JSON contract as
+    # the local branch below: the strict-schema agents cannot use prose.
     try:
-        from backend.services import openai_provider
-        if openai_provider.available():
-            try:
-                from backend.services.llm_provider import get_openai_model
-                chat_model = get_openai_model()
-            except Exception:
-                from backend.config import OPENAI_DEFAULT_MODEL
-                chat_model = OPENAI_DEFAULT_MODEL
+        from backend.services import llm_provider
+        if llm_provider.get_active_provider() == llm_provider.OPENAI:
+            from backend.services import openai_provider
+            chat_model = llm_provider.get_openai_model()
             api_messages = list(messages)
             # OpenAI's json_object mode requires the word "json" in the messages.
             if "json" not in f"{system}\n{user}".lower():

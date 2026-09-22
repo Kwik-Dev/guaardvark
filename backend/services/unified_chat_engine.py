@@ -2337,7 +2337,9 @@ class UnifiedChatEngine:
 
                 # Smart escalation: the local LLM failed. If smart mode is on and an
                 # escalation provider is configured, answer via the provider instead.
-                smart_resp = self._maybe_smart_escalate(message, [])
+                # Pass the real history so the escalated answer keeps the conversation
+                # context (same as the empty-local-response branch below).
+                smart_resp = self._maybe_smart_escalate(message, history)
                 if smart_resp:
                     emit_fn("chat:complete", {
                         "response": smart_resp, "iterations": iteration,

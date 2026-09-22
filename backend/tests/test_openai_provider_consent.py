@@ -64,3 +64,76 @@ def test_explicit_local_base_url_is_consent_without_a_key(monkeypatch):
     assert openai_provider.describe() == (
         f"endpoint=http://localhost:11434/v1 model={config.OPENAI_DEFAULT_MODEL}"
     )
+
+
+# ── the gate is consulted, and the right env var is named ─────────────────────
+
+def test_selecting_openai_names_the_base_url_not_the_optional_key(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "")
+    monkeypatch.setattr(llm_provider, "cloud_models_enabled", lambda: True)
+
+    with pytest.raises(ValueError) as exc:
+        llm_provider.set_active_provider("openai")
+
+    msg = str(exc.value)
+    assert "GUAARDVARK_OPENAI_BASE_URL" in msg
+    assert "GUAARDVARK_OPENAI_API_KEY" not in msg
+
+
+def test_provider_state_exposes_both_env_names(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "")
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
+
+    by_id = {p["id"]: p for p in llm_provider.provider_state()["providers"]}
+    assert by_id["openai"]["required_env"] == "GUAARDVARK_OPENAI_BASE_URL"
+    assert by_id["openai"]["key_env"] == "GUAARDVARK_OPENAI_API_KEY"
+    assert by_id["mistral"]["required_env"] == "MISTRAL_API_KEY"
+
+
+def _stub_ollama(monkeypatch):
+    import ollama
+
+    monkeypatch.setattr(
+        ollama, "chat",
+        lambda **kwargs: {"message": {"content": '{"ok": true}'}},
+    )
+
+
+def test_character_generator_respects_the_master_cloud_gate(monkeypatch):
+    """A configured base URL is not consent: the Character Generator must stay on
+    Ollama while cloud models are off / Ollama is the active provider."""
+    from backend.services import character_generator_service as cgs
+    from backend.services import openai_provider as op
+
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://api.openai.com/v1")
+    calls = {"openai": 0}
+
+    def fake_chat(**kwargs):
+        calls["openai"] += 1
+        return {"message": {"content": '{"ok": true}'}}
+
+    monkeypatch.setattr(op, "chat", fake_chat)
+    monkeypatch.setattr(llm_provider, "get_active_provider", lambda: llm_provider.OLLAMA)
+    _stub_ollama(monkeypatch)
+
+    assert cgs._default_llm(system="s", user="u") == '{"ok": true}'
+    assert calls["openai"] == 0
+
+
+def test_character_generator_uses_openai_when_it_is_the_active_provider(monkeypatch):
+    from backend.services import character_generator_service as cgs
+    from backend.services import openai_provider as op
+
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://api.openai.com/v1")
+    calls = {"openai": 0}
+
+    def fake_chat(**kwargs):
+        calls["openai"] += 1
+        return {"message": {"content": '{"ok": true}'}}
+
+    monkeypatch.setattr(op, "chat", fake_chat)
+    monkeypatch.setattr(llm_provider, "get_active_provider", lambda: llm_provider.OPENAI)
+    monkeypatch.setattr(llm_provider, "get_openai_model", lambda: "gpt-4o-mini")
+
+    assert cgs._default_llm(system="s", user="u") == '{"ok": true}'
+    assert calls["openai"] == 1

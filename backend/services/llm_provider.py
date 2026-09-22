@@ -49,9 +49,10 @@ def _mistral_available() -> bool:
 
 
 def _openai_available() -> bool:
-    # Single source of truth: openai_provider.available(). Consent is a
-    # GUAARDVARK_OPENAI_API_KEY or an explicit GUAARDVARK_OPENAI_BASE_URL — a bare
-    # OPENAI_API_KEY must never enable a cloud route.
+    # Single source of truth: openai_provider.available(). This provider is
+    # available when GUAARDVARK_OPENAI_BASE_URL is set; GUAARDVARK_OPENAI_API_KEY
+    # is optional (local vLLM / Ollama need none). A bare OPENAI_API_KEY must
+    # never enable a cloud route.
     from backend.services import openai_provider
     return openai_provider.available()
 
@@ -60,11 +61,15 @@ CLOUD_PROVIDERS: Dict[str, Dict] = {
     MISTRAL: {
         "label": "Mistral (cloud)",
         "key_env": "MISTRAL_API_KEY",
+        "required_env": "MISTRAL_API_KEY",
         "available_fn": _mistral_available,
     },
     OPENAI: {
         "label": "OpenAI-compatible (cloud)",
+        # key_env is the optional bearer token; required_env is what actually
+        # makes the provider available, so error messages name the right var.
         "key_env": "GUAARDVARK_OPENAI_API_KEY",
+        "required_env": "GUAARDVARK_OPENAI_BASE_URL",
         "available_fn": _openai_available,
     },
 }
@@ -125,7 +130,7 @@ def set_cloud_models_enabled(enabled: bool) -> bool:
 
 
 def provider_available(provider: str) -> bool:
-    """True when the provider's key is configured (independent of the master switch)."""
+    """True when the provider's consent env is configured (independent of the master switch)."""
     meta = CLOUD_PROVIDERS.get((provider or "").strip().lower())
     return bool(meta and meta["available_fn"]())
 
@@ -165,7 +170,8 @@ def set_active_provider(provider: str) -> str:
         if not cloud_models_enabled():
             raise ValueError("Cloud models are disabled. Enable them first (master toggle).")
         if not provider_available(provider):
-            env = CLOUD_PROVIDERS[provider]["key_env"]
+            meta = CLOUD_PROVIDERS[provider]
+            env = meta.get("required_env") or meta["key_env"]
             raise ValueError(f"Cannot select {provider}: {env} is not configured.")
     _set_setting(_PROVIDER_KEY, provider)
     logger.info("LLM provider set to '%s'", provider)
@@ -242,6 +248,7 @@ def provider_state() -> Dict:
             "label": meta["label"],
             "available": meta["available_fn"](),
             "key_env": meta["key_env"],
+            "required_env": meta.get("required_env") or meta["key_env"],
             "cloud": True,
         })
     return {
