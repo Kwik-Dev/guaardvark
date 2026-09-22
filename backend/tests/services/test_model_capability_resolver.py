@@ -84,12 +84,81 @@ class CoordConventionTest(unittest.TestCase):
             c = R.coords_for("gemma4:some-unlisted-tag")
         self.assertEqual((c.order, c.source), ("yx", "family"))
 
-    def test_a_probed_row_beats_the_family_default(self):
-        probed = {"qwen3-vl:8b": {"order": "xy", "grid": 1000, "confidence": 0.9}}
+    def test_a_measured_convention_beats_the_family_default(self):
+        meas = {"screen": "1000x1000", "accuracy": None,
+                "coords": {"style": "qwen_bbox2d_abs", "order": "xy", "grid": None, "confidence": 0.9}}
         with patch.object(R, "_info", return_value=_info(["completion", "vision"], "qwen3vl")), \
-             patch.object(R, "_load_probe_store", return_value=probed):
+             patch.object(R, "_measurements", return_value=meas), \
+             patch.object(R, "_load_probe_store", return_value={}):
+            c = R.coords_for("qwen3-vl:8b", (1000, 1000))
+        self.assertEqual((c.order, c.source, c.style, c.grid), ("xy", "probe", "qwen_bbox2d_abs", None))
+
+    def test_the_old_probe_file_still_counts_but_says_so(self):
+        legacy = {"qwen3-vl:8b": {"order": "xy", "grid": 1000, "confidence": 0.9}}
+        with patch.object(R, "_info", return_value=_info(["completion", "vision"], "qwen3vl")), \
+             patch.object(R, "_measurements", return_value={"screen": None, "coords": None, "accuracy": None}), \
+             patch.object(R, "_load_probe_store", return_value=legacy):
             c = R.coords_for("qwen3-vl:8b")
-        self.assertEqual((c.order, c.source), ("xy", "probe"))
+        self.assertEqual((c.order, c.source), ("xy", "probe_legacy"))
+
+    def test_a_recorded_probe_failure_names_the_dialects_it_tried(self):
+        meas = {"screen": "1000x1000", "accuracy": None,
+                "coords": {"order": None, "tried": [{"style": "google_box2d"}, {"style": "point_xy_abs"}]}}
+        with patch.object(R, "_info", return_value=_info(["completion", "vision"], "mistral3")), \
+             patch.object(R, "_measurements", return_value=meas), \
+             patch.object(R, "_installed", return_value=[]):
+            p = R.resolve("ministral-3:14b", "agent_screen", (1000, 1000))
+        self.assertFalse(p.can_drive_screen)
+        self.assertTrue(any("google_box2d" in b and "point_xy_abs" in b for b in p.blockers))
+
+
+class EyeRankingTest(unittest.TestCase):
+    """Measured accuracy decides; a fresh box falls through to the old order."""
+
+    def setUp(self):
+        R.invalidate()
+
+    def _meas(self, table):
+        def f(tag, screen=None):
+            acc = table.get(tag)
+            return {"screen": "1000x1000" if acc is not None else None,
+                    "coords": None, "accuracy": {"median_px": acc} if acc is not None else None}
+        return f
+
+    def test_accuracy_mode_prefers_the_better_measured_eye(self):
+        with patch.object(R, "_info", return_value=_info(["completion", "vision"])), \
+             patch.object(R, "_measurements", side_effect=self._meas({"gemma4:e4b": 61.0, "qwen3.5:9b": 15.0})), \
+             patch.object(R, "_available_vram_mb", return_value=None), \
+             patch.dict("os.environ", {R.EYE_RANKING_ENV: "accuracy"}):
+            order = [r["tag"] for r in R.rank_eyes(["gemma4:e4b", "qwen3.5:9b"], (1000, 1000))]
+        self.assertEqual(order[0], "qwen3.5:9b")
+
+    def test_confidence_mode_is_the_old_order(self):
+        with patch.object(R, "_info", return_value=_info(["completion", "vision"])), \
+             patch.object(R, "_measurements", side_effect=self._meas({"gemma4:e4b": 61.0, "qwen3.5:9b": 15.0})), \
+             patch.object(R, "_available_vram_mb", return_value=None), \
+             patch.dict("os.environ", {R.EYE_RANKING_ENV: "confidence"}):
+            order = [r["tag"] for r in R.rank_eyes(["gemma4:e4b", "qwen3.5:9b"], (1000, 1000))]
+        self.assertEqual(order[0], "gemma4:e4b", "row confidence 1.0 outranks a family default")
+
+    def test_nothing_measured_falls_through_to_confidence(self):
+        with patch.object(R, "_info", return_value=_info(["completion", "vision"])), \
+             patch.object(R, "_measurements", side_effect=self._meas({})), \
+             patch.object(R, "_available_vram_mb", return_value=None), \
+             patch.dict("os.environ", {R.EYE_RANKING_ENV: "accuracy"}):
+            order = [r["tag"] for r in R.rank_eyes(["qwen3.5:9b", "gemma4:e4b"], (1000, 1000))]
+        self.assertEqual(order[0], "gemma4:e4b", "a fresh clone must behave as before")
+
+    def test_an_eye_that_does_not_fit_is_demoted_not_dropped(self):
+        def info(tag):
+            return _info(["completion", "vision"], size=9600.0 if tag == "gemma4:e4b" else 6600.0)
+        with patch.object(R, "_info", side_effect=info), \
+             patch.object(R, "_measurements", side_effect=self._meas({"gemma4:e4b": 15.0, "qwen3.5:9b": 61.0})), \
+             patch.object(R, "_available_vram_mb", return_value=8000.0), \
+             patch.dict("os.environ", {R.EYE_RANKING_ENV: "accuracy"}):
+            rows = R.rank_eyes(["gemma4:e4b", "qwen3.5:9b"], (1000, 1000))
+        self.assertEqual([r["tag"] for r in rows], ["qwen3.5:9b", "gemma4:e4b"])
+        self.assertIs(rows[1]["fits"], False)
 
 
 class EyesTest(unittest.TestCase):

@@ -736,6 +736,20 @@ def _load_calibration_file() -> Dict[str, Any]:
         return data
 
 
+# One entry per model@WxH now carries three kinds of fact about a model on this
+# machine: the calibration FIT (flat keys, as always), the coordinate CONVENTION
+# it was measured to speak, and its measured pointing ACCURACY. They used to
+# live in three files written by three tools, and the resolver could read only
+# one of them — which is why a hand-written row outranked an eye four times more
+# accurate. Same file, same lock, same mtime cache; only the shape grows.
+_FIT_KEYS = ("model", "a_x", "b_x", "a_y", "b_y", "k", "cx", "cy", "elbow")
+_MEASUREMENT_SECTIONS = ("coords", "accuracy")
+
+
+def _has_fit(entry: Optional[Dict[str, Any]]) -> bool:
+    return bool(entry) and any(k in entry for k in _FIT_KEYS)
+
+
 def load_servo_calibration(model: str, screen_w: int, screen_h: int) -> Optional[Dict[str, Any]]:
     """Return the calibration fit for (model, resolution), or None.
 
@@ -751,7 +765,10 @@ def load_servo_calibration(model: str, screen_w: int, screen_h: int) -> Optional
     make aim WORSE than uncalibrated.
     """
     entry = _load_calibration_file().get(_calibration_key(model, screen_w, screen_h))
-    if not entry:
+    # A measurement-only entry (coords/accuracy, no fit) is not malformed; it is
+    # a model that has been probed but never calibrated. Without this guard the
+    # KeyError below logged "malformed" on every servo init for such a model.
+    if not entry or not _has_fit(entry):
         return None
     try:
         family = str(entry.get("model", "linear"))
@@ -793,9 +810,75 @@ def save_servo_calibration(model: str, screen_w: int, screen_h: int, fit: Dict[s
             data = json.loads(_CALIBRATION_PATH.read_text())
         except (OSError, json.JSONDecodeError):
             pass
-        data[key] = fit
+        prior = data.get(key) or {}
+        # Replace the fit, keep the measurements. The fit tool knows nothing about
+        # coords/accuracy and must not be able to erase them by saving.
+        merged = {k: prior[k] for k in _MEASUREMENT_SECTIONS if k in prior}
+        merged.update(fit)
+        rb = merged.get("_rollback")
+        if isinstance(rb, dict):
+            merged["_rollback"] = {k: v for k, v in rb.items() if k not in _MEASUREMENT_SECTIONS}
+        data[key] = merged
         _CALIBRATION_PATH.parent.mkdir(parents=True, exist_ok=True)
         _CALIBRATION_PATH.write_text(json.dumps(data, indent=2) + "\n")
         _calibration_cache.update(mtime=None, data={})  # force re-read
     logger.info(f"servo calibration saved for {key}: {fit}")
     return key
+
+
+def record_measurement(model: str, screen_w: int, screen_h: int,
+                       section: str, data: Dict[str, Any]) -> str:
+    """Write one measurement section for model@WxH, leaving the fit and the other
+    section untouched. `section` is "coords" or "accuracy"."""
+    if section not in _MEASUREMENT_SECTIONS:
+        raise ValueError(f"unknown measurement section {section!r}; expected one of {_MEASUREMENT_SECTIONS}")
+    key = _calibration_key(model, screen_w, screen_h)
+    with _calibration_lock:
+        store = {}
+        try:
+            store = json.loads(_CALIBRATION_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+        entry = store.setdefault(key, {})
+        entry[section] = dict(data)
+        _CALIBRATION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CALIBRATION_PATH.write_text(json.dumps(store, indent=2) + "\n")
+        _calibration_cache.update(mtime=None, data={})
+    try:
+        from backend.services.model_capability_resolver import invalidate
+        invalidate(model)
+    except Exception:
+        pass
+    logger.info(f"servo measurement recorded for {key}: {section}")
+    return key
+
+
+def load_model_measurements(model: str, screen_w: Optional[int] = None,
+                            screen_h: Optional[int] = None) -> Dict[str, Any]:
+    """{"screen": "WxH"|None, "coords": dict|None, "accuracy": dict|None}.
+
+    With a screen: that exact entry. Without one: the newest entry for the model
+    at any resolution — a coordinate convention does not depend on resolution,
+    accuracy does, so the returned "screen" says which resolution the accuracy
+    was measured at and the ranker can discount a mismatch.
+    """
+    store = _load_calibration_file()
+    if screen_w and screen_h:
+        entry = store.get(_calibration_key(model, screen_w, screen_h)) or {}
+        return {"screen": f"{int(screen_w)}x{int(screen_h)}" if entry else None,
+                "coords": entry.get("coords"), "accuracy": entry.get("accuracy")}
+    prefix = f"{(model or 'unknown').strip()}@"
+    best_key, best_stamp = None, ""
+    for key, entry in store.items():
+        if not key.startswith(prefix) or not isinstance(entry, dict):
+            continue
+        stamp = max(str((entry.get("coords") or {}).get("probed_at", "")),
+                    str((entry.get("accuracy") or {}).get("measured_at", "")),
+                    str(entry.get("fitted_at", "")))
+        if best_key is None or stamp > best_stamp:
+            best_key, best_stamp = key, stamp
+    if best_key is None:
+        return {"screen": None, "coords": None, "accuracy": None}
+    entry = store[best_key]
+    return {"screen": best_key.split("@", 1)[1], "coords": entry.get("coords"),
+            "accuracy": entry.get("accuracy")}

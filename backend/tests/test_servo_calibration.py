@@ -164,3 +164,55 @@ class TestGatedFit:
         tp = {(round(p[0][0]), round(p[0][1])) for p in train}
         hp = {(round(p[0][0]), round(p[0][1])) for p in heldout}
         assert tp.isdisjoint(hp) and heldout
+
+
+class TestMeasurementStore:
+    """coords and accuracy live beside the fit and survive each other's writes."""
+
+    def _tmp_store(self, tmp_path):
+        return patch.object(sks, "_CALIBRATION_PATH", tmp_path / "servo_calibration.json")
+
+    def test_measurement_survives_a_fit_save_and_vice_versa(self, tmp_path):
+        with self._tmp_store(tmp_path):
+            sks._calibration_cache.update(mtime=None, data={})
+            sks.record_measurement("m", 1000, 1000, "coords", {"style": "google_box2d", "order": "xy"})
+            sks.save_servo_calibration("m", 1000, 1000, {"a_x": 0, "b_x": 1, "a_y": 5, "b_y": 0.7})
+            sks.record_measurement("m", 1000, 1000, "accuracy", {"median_px": 15.0, "n": 40})
+            got = sks.load_model_measurements("m", 1000, 1000)
+            fit = sks.load_servo_calibration("m", 1000, 1000)
+        assert got["coords"]["order"] == "xy"
+        assert got["accuracy"]["median_px"] == 15.0
+        assert fit["b_y"] == 0.7
+
+    def test_rollback_carries_no_measurement_sections(self, tmp_path):
+        with self._tmp_store(tmp_path):
+            sks._calibration_cache.update(mtime=None, data={})
+            sks.record_measurement("m", 1000, 1000, "accuracy", {"median_px": 60.0})
+            sks.save_servo_calibration("m", 1000, 1000, {"a_x": 0, "b_x": 1, "a_y": 1, "b_y": 0.7})
+            prior = sks._load_calibration_file()["m@1000x1000"]
+            sks.save_servo_calibration("m", 1000, 1000,
+                                       {"a_x": 0, "b_x": 1, "a_y": 2, "b_y": 0.7, "_rollback": prior})
+            entry = sks._load_calibration_file()["m@1000x1000"]
+        assert "accuracy" in entry, "measurement must survive a second fit save"
+        assert "accuracy" not in entry["_rollback"], "rollback must hold the prior fit only"
+
+    def test_measurement_only_entry_is_not_a_malformed_fit(self, tmp_path, caplog):
+        with self._tmp_store(tmp_path):
+            sks._calibration_cache.update(mtime=None, data={})
+            sks.record_measurement("m", 1000, 1000, "coords", {"order": "yx"})
+            assert sks.load_servo_calibration("m", 1000, 1000) is None
+        assert "malformed" not in caplog.text
+
+    def test_newest_entry_wins_without_a_screen_and_reports_which(self, tmp_path):
+        with self._tmp_store(tmp_path):
+            sks._calibration_cache.update(mtime=None, data={})
+            sks.record_measurement("m", 1280, 720, "accuracy", {"median_px": 90, "measured_at": "2026-01-01"})
+            sks.record_measurement("m", 1000, 1000, "accuracy", {"median_px": 15, "measured_at": "2026-09-22"})
+            got = sks.load_model_measurements("m")
+        assert got["screen"] == "1000x1000" and got["accuracy"]["median_px"] == 15
+
+    def test_unknown_section_is_refused(self, tmp_path):
+        with self._tmp_store(tmp_path):
+            import pytest
+            with pytest.raises(ValueError):
+                sks.record_measurement("m", 1000, 1000, "vibes", {})

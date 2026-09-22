@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from backend.services.model_capability_data import (
+    COORD_STYLES,
+    DEFAULT_STYLE,
     EXTERNAL_MODEL_ROWS,
     FAMILY_COORD_DEFAULTS,
     name_looks_vision,
@@ -50,8 +52,14 @@ PROBE_STORE = Path(__file__).resolve().parents[2] / "data" / "training" / "model
 # is reported as unable to drive the screen until someone probes it.
 MEASURED_CONFIDENCE = 0.7
 
+# How candidate eyes are ordered. "accuracy" (default): the best MEASURED eye on
+# this screen wins, then convention confidence, then size. "confidence": the
+# pre-2026-09-22 order, for comparison or rollback. On a box with nothing
+# measured the two agree, so a fresh clone behaves as it always did.
+EYE_RANKING_ENV = "GUAARDVARK_EYE_RANKING"
+
 _CACHE_TTL = 60.0
-_cache: Dict[Tuple[str, str], Tuple[float, "ModelProfile"]] = {}
+_cache: Dict[Tuple[str, str, Optional[Tuple[int, int]]], Tuple[float, "ModelProfile"]] = {}
 _lock = threading.Lock()
 
 
@@ -70,8 +78,12 @@ class CoordConvention:
     order: Optional[str]          # "xy" | "yx" | None
     grid: Optional[int]           # normalisation denominator, None = raw pixels
     normalised: bool
-    source: str                   # row | probe | family | prompt_contract | unknown
+    source: str                   # row | probe | probe_legacy | family | prompt_contract | probe_failed
     confidence: float
+    style: str = "google_box2d"   # which request dialect to send (COORD_STYLES key)
+    min_num_predict: int = 128
+    think_uncontrollable: bool = False
+    detail: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -142,69 +154,90 @@ def _vision_with_evidence(tag: str) -> Tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 def _load_probe_store() -> dict:
+    """The pre-store probe file. Kept one release for migration; see coords_for."""
     try:
         return json.loads(PROBE_STORE.read_text())
     except Exception:
         return {}
 
 
+def _measurements(tag: str, screen: Optional[Tuple[int, int]]) -> Dict[str, Any]:
+    """Thin seam over the calibration store so tests can patch one name."""
+    try:
+        from backend.services.servo_knowledge_store import load_model_measurements
+        return load_model_measurements(tag, *(screen or (None, None)))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("measurement store unavailable for %r: %s", tag, e)
+        return {"screen": None, "coords": None, "accuracy": None}
+
+
+def _conv_from_record(rec: Dict[str, Any], source: str) -> CoordConvention:
+    if not rec.get("order"):
+        return CoordConvention(order=None, grid=None, normalised=False,
+                               source="probe_failed", confidence=0.0,
+                               style=rec.get("style") or DEFAULT_STYLE,
+                               detail={"tried": rec.get("tried", []), "reason": rec.get("reason", "")})
+    grid = rec.get("grid", 1000)
+    return CoordConvention(
+        order=rec["order"], grid=grid, normalised=bool(grid),
+        source=source, confidence=float(rec.get("confidence", 0.9)),
+        style=rec.get("style") or DEFAULT_STYLE,
+        min_num_predict=int(rec.get("min_num_predict", 128)),
+        detail={"tried": rec.get("tried", []), "reason": rec.get("reason", "")},
+    )
+
+
 def coords_for(tag: str, screen: Optional[Tuple[int, int]] = None) -> CoordConvention:
-    """What convention this model points in, and how sure we are.
+    """What convention this model points in, how to ask, and how sure we are.
 
     Order of authority:
 
     1. An explicit ``coord_order`` in MODEL_VISION_CONFIGS. Hand-measured and
-       load-bearing; never overridden here.
-    2. A probed row, written by the coordinate probe after measuring the model.
-    3. The architecture family default, declared in model_capability_data.
-    4. The prompt contract. The servo's own anchor prompt demands
-       ``[y1,x1,y2,x2]`` normalised to 1000, so a model that answers with a
-       box_2d at all is claiming to have followed it. This replaces a silent
-       "xy" default that contradicted the very prompt the system had just sent —
-       on the shipped default model that meant clicking with the axes swapped.
-       Low confidence on purpose: it is a guess, just a defensible one.
+       load-bearing; never overridden here. Rows are Gemma-dialect by
+       construction.
+    2. A measured ``coords`` section in the calibration store, written by the
+       coordinate probe after trying every dialect against known targets.
+    3. The pre-store probe file, for one release, with a nudge to migrate.
+    4. The architecture family default, declared in model_capability_data.
+    5. The prompt contract: the Google-style request the servo sends by default
+       demands ``[y1,x1,y2,x2]`` normalised to 1000, so a model that answers
+       with a box at all is claiming to have followed it. Low confidence on
+       purpose. It replaces a silent "xy" default that contradicted the very
+       prompt the system had just sent.
     """
     try:
-        from backend.services.servo_knowledge_store import MODEL_VISION_CONFIGS, get_vision_config
+        from backend.services.servo_knowledge_store import get_vision_config
         cfg = get_vision_config(tag) or {}
         if cfg.get("coord_order"):
-            return CoordConvention(
-                order=cfg["coord_order"],
-                grid=cfg.get("internal_width", 1000),
-                normalised=True, source="row", confidence=1.0,
-            )
+            return CoordConvention(order=cfg["coord_order"], grid=cfg.get("internal_width", 1000),
+                                   normalised=True, source="row", confidence=1.0,
+                                   style=cfg.get("coord_style", DEFAULT_STYLE))
     except Exception as e:  # noqa: BLE001
         logger.debug("vision config lookup failed for %r: %s", tag, e)
 
-    key = tag if screen is None else f"{tag}@{screen[0]}x{screen[1]}"
-    store = _load_probe_store()
-    probed = store.get(key) or store.get(tag)
-    if probed:
-        if probed.get("order"):
-            return CoordConvention(
-                order=probed["order"], grid=probed.get("grid", 1000),
-                normalised=probed.get("normalised", True),
-                source="probe", confidence=float(probed.get("confidence", 0.9)),
-            )
-        # Probed and found wanting. Measured 2026-09-22:
-        # qwen3-vl:8b-thinking-q8_0 returns an empty string to the pointing
-        # prompt at every token budget tried, and ministral-3:14b answers in
-        # the right format but says the target is not visible. Both have the
-        # vision capability. Seeing is not the same as pointing, and only a
-        # probe can tell the two apart.
-        return CoordConvention(order=None, grid=None, normalised=False,
-                               source="probe_failed", confidence=0.0)
+    rec = _measurements(tag, screen).get("coords")
+    if rec:
+        return _conv_from_record(rec, "probe")
+
+    legacy = _load_probe_store()
+    rec = legacy.get(tag) if tag else None
+    if rec:
+        logger.info("coords for %s came from the pre-store probe file; run "
+                    "`probe_coord_order --migrate-legacy` to move it into the calibration store", tag)
+        return _conv_from_record(rec, "probe_legacy")
 
     info = _info(tag) or {}
     fam = (info.get("architecture") or "").lower()
     fd = FAMILY_COORD_DEFAULTS.get(fam)
     if fd:
-        return CoordConvention(order=fd["order"], grid=fd["grid"],
-                               normalised=fd["normalised"],
-                               source="family", confidence=fd["confidence"])
+        return CoordConvention(order=fd["order"], grid=fd["grid"], normalised=fd["normalised"],
+                               source="family", confidence=fd["confidence"],
+                               style=fd.get("style", DEFAULT_STYLE),
+                               min_num_predict=int(fd.get("min_num_predict", 128)),
+                               think_uncontrollable=bool(fd.get("think_uncontrollable", False)))
 
     return CoordConvention(order="yx", grid=1000, normalised=True,
-                           source="prompt_contract", confidence=0.5)
+                           source="prompt_contract", confidence=0.5, style=DEFAULT_STYLE)
 
 
 # ---------------------------------------------------------------------------
@@ -231,16 +264,95 @@ def _resident() -> list:
         return []
 
 
-def eyes_for(tag: str, surface: str = "agent_screen") -> Eyes:
+def _size_mb(tag: str) -> float:
+    return float((_info(tag) or {}).get("size_mb") or 1e9)
+
+
+def eye_ranking_mode() -> str:
+    mode = (os.environ.get(EYE_RANKING_ENV) or "accuracy").strip().lower()
+    return mode if mode in ("accuracy", "confidence") else "accuracy"
+
+
+def _available_vram_mb() -> Optional[float]:
+    """None when the coordinator cannot say; a soft signal, never a hard gate."""
+    try:
+        from backend.services.gpu_resource_coordinator import get_available_vram
+        v = get_available_vram() or {}
+        if v.get("success") is False:
+            return None
+        mb = v.get("available_mb", v.get("free_mb"))
+        return float(mb) if mb is not None else None
+    except Exception:
+        return None
+
+
+def rank_eyes(candidates: list, screen: Optional[Tuple[int, int]] = None) -> list:
+    """Order candidate eyes. Returns [{tag, accuracy_px, accuracy_screen,
+    same_screen, confidence, size_mb, fits}], best first.
+
+    In "accuracy" mode the key is (does_not_fit, screen_mismatch, accuracy_px or
+    INF, -confidence, size_mb). A model with no measurement sorts after every
+    measured one, which is what makes a fresh clone fall through to the old
+    confidence order. `fits` is soft: an eye that will not sit beside the brain
+    in VRAM is demoted, never removed, and unknown VRAM counts as fits.
+
+    One INFO line lists every candidate's number, so whichever eye was chosen
+    the reason is in the log rather than in someone's head.
+    """
+    mode = eye_ranking_mode()
+    want = f"{screen[0]}x{screen[1]}" if screen else None
+    free = _available_vram_mb()
+    rows = []
+    for tag in candidates:
+        m = _measurements(tag, screen)
+        acc = (m.get("accuracy") or {})
+        acc_px = acc.get("median_px")
+        conv = coords_for(tag, screen)
+        size = _size_mb(tag)
+        fits = None if free is None else (free >= size * 1.15)
+        rows.append({
+            "tag": tag,
+            "accuracy_px": float(acc_px) if acc_px is not None else None,
+            "accuracy_screen": m.get("screen"),
+            "same_screen": (want is None) or (m.get("screen") == want),
+            "confidence": conv.confidence,
+            "size_mb": size,
+            "fits": fits,
+        })
+    if mode == "confidence":
+        rows.sort(key=lambda r: (-r["confidence"], r["size_mb"]))
+    else:
+        rows.sort(key=lambda r: (
+            1 if r["fits"] is False else 0,
+            0 if r["same_screen"] else 1,
+            r["accuracy_px"] if r["accuracy_px"] is not None else float("inf"),
+            -r["confidence"],
+            r["size_mb"],
+        ))
+    if rows:
+        logger.info(
+            "eye ranking=%s on %s: %s", mode, want or "any screen",
+            "; ".join(
+                f"{r['tag']} conf={r['confidence']:.2f} "
+                f"acc={'%.0fpx' % r['accuracy_px'] if r['accuracy_px'] is not None else 'unmeasured'}"
+                f"{'' if r['same_screen'] else '@' + str(r['accuracy_screen'])} "
+                f"fits={'?' if r['fits'] is None else ('yes' if r['fits'] else 'no')}"
+                for r in rows
+            ),
+        )
+    return rows
+
+
+def eyes_for(tag: str, surface: str = "agent_screen",
+             screen: Optional[Tuple[int, int]] = None) -> Eyes:
     """Who looks at the screen for this model.
 
-    A model that can see does its own looking — no detour, no second model, no
-    VRAM. Only a blind one borrows eyes, and then we prefer a vision model
-    already resident so the answer costs no model swap.
+    A model that can see does its own looking. Only a blind one borrows eyes,
+    ranked by rank_eyes, with a model already resident preferred among the
+    top-ranked so the answer costs no model swap.
     """
     if sees_natively(tag):
-        return Eyes(model=None, mechanism="native",
-                    reason="This model sees the screen itself.")
+        return Eyes(model=None, mechanism="native", reason="This model sees the screen itself.")
 
     installed = _installed()
     if not installed:
@@ -249,27 +361,26 @@ def eyes_for(tag: str, surface: str = "agent_screen") -> Eyes:
 
     candidates = [m for m in installed if m != tag and sees_natively(m)]
     if surface == "agent_screen":
-        # Pointing is a harder job than describing: prefer an eye whose
-        # coordinate convention we actually know.
-        candidates.sort(key=lambda m: (-coords_for(m).confidence, _size_mb(m)))
-    else:
-        candidates.sort(key=_size_mb)
+        candidates = [m for m in candidates if coords_for(m, screen).order]
     if not candidates:
         return Eyes(model=None, mechanism="none",
                     reason="No vision-capable model is installed to lend eyes.")
 
+    ranked = [r["tag"] for r in rank_eyes(candidates, screen)] if surface == "agent_screen" \
+        else sorted(candidates, key=_size_mb)
     resident = set(_resident())
-    for m in candidates:
-        if m in resident:
-            return Eyes(model=m, mechanism="sibling_vlm",
-                        reason=f"{m} is already loaded and can see; no model swap needed.")
-    pick = candidates[0]
+    # Resident wins only among eyes that are at least as good as the best: a
+    # loaded but poor eye should not beat an unloaded excellent one.
+    if ranked and ranked[0] not in resident:
+        best = ranked[0]
+        for m in ranked:
+            if m in resident and _measurements(m, screen).get("accuracy") == _measurements(best, screen).get("accuracy"):
+                return Eyes(model=m, mechanism="sibling_vlm",
+                            reason=f"{m} is already loaded and can see; no model swap needed.")
+    pick = ranked[0]
+    why = "already loaded" if pick in resident else "will be loaded alongside it"
     return Eyes(model=pick, mechanism="sibling_vlm",
-                reason=f"{tag} cannot see, so {pick} will be loaded alongside it to look.")
-
-
-def _size_mb(tag: str) -> float:
-    return float((_info(tag) or {}).get("size_mb") or 1e9)
+                reason=f"{tag} cannot see, so {pick} ({why}) will look.")
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +391,7 @@ def resolve(tag: str, surface: str = "agent_screen",
             screen: Optional[Tuple[int, int]] = None) -> ModelProfile:
     if surface not in SURFACES:
         raise ValueError(f"unknown surface {surface!r}; expected one of {SURFACES}")
-    ck = (tag or "", surface)
+    ck = (tag or "", surface, tuple(screen) if screen else None)
     now = time.time()
     with _lock:
         hit = _cache.get(ck)
@@ -289,7 +400,7 @@ def resolve(tag: str, surface: str = "agent_screen",
 
     info = _info(tag)
     vision, evidence = _vision_with_evidence(tag)
-    eyes = eyes_for(tag, surface)
+    eyes = eyes_for(tag, surface, screen)
     coords = coords_for(tag, screen)
 
     blockers = []
@@ -298,8 +409,9 @@ def resolve(tag: str, surface: str = "agent_screen",
     if not vision and eyes.model is None:
         blockers.append(eyes.reason)
     if coords.source == "probe_failed":
-        blockers.append("Probed and could not point: this model returns no usable answer to "
-                        "the pointing prompt, even though it can see.")
+        tried = ", ".join(sorted({t.get("style", "?") for t in coords.detail.get("tried", [])})) or "the default dialect"
+        blockers.append("Probed and could not point: no usable answer to the pointing prompt "
+                        f"in any of: {tried}. It can see; it cannot point.")
     elif coords.order is None:
         blockers.append("Coordinate convention unknown — run the coordinate probe before clicking.")
     elif coords.confidence < MEASURED_CONFIDENCE:
@@ -342,23 +454,26 @@ def invalidate(tag: Optional[str] = None) -> None:
                 _cache.pop(k, None)
 
 
-def describe_for_ui(tag: str, surface: str = "agent_screen") -> dict:
+def describe_for_ui(tag: str, surface: str = "agent_screen",
+                    screen: Optional[Tuple[int, int]] = None) -> dict:
     """The shape a model picker needs: can it drive the screen, and what else loads."""
-    p = resolve(tag, surface)
+    p = resolve(tag, surface, screen)
     alongside = []
     if p.eyes.model:
         alongside.append({"kind": "model", "tag": p.eyes.model,
                           "vram_mb": round(_size_mb(p.eyes.model)), "why": "eyes"})
+    acc = (_measurements(tag, screen).get("accuracy") or {})
     return {
         "tag": p.tag, "exists": p.exists, "sees_natively": p.sees_natively,
         "can_drive_screen": p.can_drive_screen, "blockers": list(p.blockers),
         "supports_tools": p.supports_tools, "supports_thinking": p.supports_thinking,
         "context_window": p.context_window, "size_mb": round(p.size_mb),
         "architecture": p.architecture,
-        "coords": {"order": p.coords.order, "grid": p.coords.grid,
+        "coords": {"order": p.coords.order, "grid": p.coords.grid, "style": p.coords.style,
                    "source": p.coords.source, "confidence": p.coords.confidence},
-        "eyes": {"model": p.eyes.model, "mechanism": p.eyes.mechanism,
-                 "reason": p.eyes.reason},
+        "accuracy": {"median_px": acc.get("median_px"), "n": acc.get("n"),
+                     "screen": _measurements(tag, screen).get("screen")},
+        "eyes": {"model": p.eyes.model, "mechanism": p.eyes.mechanism, "reason": p.eyes.reason},
         "will_load_alongside": alongside,
         "evidence": p.evidence,
     }
