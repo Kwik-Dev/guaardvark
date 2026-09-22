@@ -95,11 +95,27 @@ if [ -x "$SNAP_FIREFOX" ] && command -v snap >/dev/null 2>&1; then
 fi
 
 if [ "$use_snap" = true ]; then
-    nohup snap run --shell firefox -c '
+    # snapd refuses to start an app it cannot place in its own cgroup scope,
+    # and it asks the systemd user manager on the session bus to make one.
+    # The agent desktop runs on a private bus from dbus-run-session with no
+    # systemd behind it, so a click on the desktop icon died with
+    # "... is not a snap cgroup for tag snap.firefox.firefox" (2026-09-21).
+    # Hand snapd the user's real bus and runtime dir for that step only.
+    # Inside the sandbox the browser keeps the agent's bus address instead;
+    # the snap cannot reach that socket (private /tmp), so Firefox runs
+    # without a session bus and never opens host portals or dialogs.
+    snap_env=()
+    if [ -S "/run/user/$(id -u)/bus" ]; then
+        snap_env=(XDG_RUNTIME_DIR="/run/user/$(id -u)"
+                  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus")
+    fi
+    nohup env "${snap_env[@]}" snap run --shell firefox -c '
         export DISPLAY="$0" GDK_BACKEND=x11 MOZ_ENABLE_WAYLAND=0
         unset WAYLAND_DISPLAY
+        if [ -n "$1" ]; then export DBUS_SESSION_BUS_ADDRESS="$1"; else unset DBUS_SESSION_BUS_ADDRESS; fi
+        shift
         exec /snap/firefox/current/usr/lib/firefox/firefox "$@"
-    ' "$DISPLAY" \
+    ' "$DISPLAY" "${DBUS_SESSION_BUS_ADDRESS:-}" \
         --no-remote \
         "${CDP_ARGS[@]}" \
         --profile "$PROFILE_DIR" \
