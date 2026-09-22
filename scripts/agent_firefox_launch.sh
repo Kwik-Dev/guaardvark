@@ -31,6 +31,9 @@ if [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; the
 fi
 
 # Serialize check-and-launch so two parallel calls don't both decide to start.
+# The browser must not inherit fd 9 (9>&- on the launch lines), or it holds
+# the lock for its whole lifetime and every later invocation exits here
+# instead of reaching the raise-existing-window branch.
 exec 9>"$LOCKFILE"
 if ! flock -n 9; then
     # Another invocation is mid-launch; let it finish.
@@ -72,8 +75,39 @@ fi
 # Launch detached so the wrapper script returns quickly (tint2 doesn't want
 # its launcher process held open). nohup + & + redirect, no exec — exec would
 # replace the shell with firefox and the trailing & wouldn't apply correctly.
-nohup firefox \
-    --no-remote \
-    "${CDP_ARGS[@]}" \
-    --profile "$PROFILE_DIR" \
-    >/dev/null 2>&1 &
+#
+# Snap Firefox (Ubuntu's default) needs a different route. Its own launch
+# wrapper runs inside the sandbox after our environment and sets
+# GDK_BACKEND=wayland and WAYLAND_DISPLAY, so GTK never tries :$DISPLAY_NUM
+# and Firefox exits with "cannot open display". Measured 2026-09-21 on the
+# firefox 156 snap: the same binary opens on the virtual display once
+# GDK_BACKEND=x11 is exported *inside* the sandbox, after the wrapper.
+# `snap run --shell` is that hook; $0 carries the display and "$@" the
+# browser arguments through to the real binary.
+SNAP_FIREFOX="/snap/firefox/current/usr/lib/firefox/firefox"
+firefox_on_path="$(command -v firefox 2>/dev/null || true)"
+use_snap=false
+if [ -x "$SNAP_FIREFOX" ] && command -v snap >/dev/null 2>&1; then
+    case "$(readlink -f "$firefox_on_path" 2>/dev/null)" in
+        /snap/bin/*|/usr/bin/snap) use_snap=true ;;
+        *) grep -qs '/snap/bin/firefox' "$firefox_on_path" && use_snap=true ;;
+    esac
+fi
+
+if [ "$use_snap" = true ]; then
+    nohup snap run --shell firefox -c '
+        export DISPLAY="$0" GDK_BACKEND=x11 MOZ_ENABLE_WAYLAND=0
+        unset WAYLAND_DISPLAY
+        exec /snap/firefox/current/usr/lib/firefox/firefox "$@"
+    ' "$DISPLAY" \
+        --no-remote \
+        "${CDP_ARGS[@]}" \
+        --profile "$PROFILE_DIR" \
+        >/dev/null 2>&1 9>&- &
+else
+    nohup firefox \
+        --no-remote \
+        "${CDP_ARGS[@]}" \
+        --profile "$PROFILE_DIR" \
+        >/dev/null 2>&1 9>&- &
+fi

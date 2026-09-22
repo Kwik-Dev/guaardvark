@@ -338,6 +338,34 @@ XFCEDESKTOPXML
     fi
 }
 
+# seed_agent_desktop writes the trust checksum through the caller's session
+# bus, i.e. the host's gvfsd-metadata. The XFCE session started below runs
+# its own bus and its own gvfsd-metadata, which only learns of that write
+# once the host daemon flushes to the on-disk database, minutes later. Until
+# then every click on Firefox.desktop lands in the "Untrusted application
+# launcher" dialog (seen 2026-09-21 on a fresh session, checksum on disk
+# already matching). Re-apply it through the session's own bus so its
+# daemon has the value at once.
+mark_launcher_trusted_in_session() {
+    command -v gio >/dev/null 2>&1 || return 0
+    local launcher="$AGENT_DESKTOP_DIR/Firefox.desktop"
+    [ -f "$launcher" ] || return 0
+    local bus="" pid
+    for _ in $(seq 1 20); do
+        for pid in $(pgrep -x xfdesktop 2>/dev/null); do
+            if grep -qaz "DISPLAY=:$DISPLAY_NUM" /proc/$pid/environ 2>/dev/null; then
+                bus=$(tr '\0' '\n' < /proc/$pid/environ 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
+                break 2
+            fi
+        done
+        sleep 0.5
+    done
+    [ -n "$bus" ] || return 0
+    local sha
+    sha=$(sha256sum "$launcher" | awk '{print $1}')
+    DBUS_SESSION_BUS_ADDRESS="$bus" gio set "$launcher" metadata::xfce-exe-checksum "$sha" 2>/dev/null || true
+}
+
 start_xfce_session() {
     # Start an XFCE session on the virtual display via dbus-run-session,
     # which gives XFCE the per-session DBus it expects without a real
@@ -387,6 +415,7 @@ start_xfce_session() {
         for pid in $(pgrep -f "xfce4-session" 2>/dev/null); do
             if grep -qaz "DISPLAY=:$DISPLAY_NUM" /proc/$pid/environ 2>/dev/null; then
                 echo "  XFCE session already running on :$DISPLAY_NUM (PID $pid)"
+                mark_launcher_trusted_in_session
                 return 0
             fi
         done
@@ -448,6 +477,7 @@ start_xfce_session() {
     # On a true fresh install the panel files don't exist until xfce4-panel
     # writes them above; re-run the patch now that they should be on disk.
     seed_agent_panel_firefox "$agent_config_home"
+    mark_launcher_trusted_in_session
     echo "  XFCE session started (PID $(cat $PID_DIR/xfce.pid), log: $LOG_DIR/xfce_agent.log)"
     echo "  Agent desktop:    $AGENT_DESKTOP_DIR"
     echo "  Agent XFCE config: $agent_config_home"
