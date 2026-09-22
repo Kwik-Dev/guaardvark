@@ -89,7 +89,7 @@ def _consecutive_tail_misses(rows) -> int:
     return n
 
 
-def run(sessions: int, minutes: float, stuck_misses: int, port: int) -> int:
+def run(sessions: int, minutes: float, stuck_misses: int, port: int, correction_mode=None) -> int:
     from backend.services.dom_metadata_extractor import DOMMetadataExtractor
 
     ok, why = DOMMetadataExtractor.get_instance().ensure_agent_firefox()
@@ -106,7 +106,10 @@ def run(sessions: int, minutes: float, stuck_misses: int, port: int) -> int:
         if _agent_active(port):
             print("agent busy — aborting")
             return 1
-        r = requests.post(_api(port, "execute"), json={"task": TASK, "training_mode": True}, timeout=10)
+        body = {"task": TASK, "training_mode": True}
+        if correction_mode:
+            body["correction_mode"] = correction_mode
+        r = requests.post(_api(port, "execute"), json=body, timeout=10)
         if not r.json().get("success"):
             print(f"session {s}: failed to start: {r.text[:120]}")
             return 1
@@ -162,8 +165,11 @@ def main(argv=None):
     ap.add_argument("--minutes", type=float, default=4)
     ap.add_argument("--stuck-misses", type=int, default=4)
     ap.add_argument("--port", type=int, default=5000)
+    ap.add_argument("--correction-mode", choices=("off", "shadow", "on"), default=None,
+                    help="servo correction loop for these sessions; a training run leaves it "
+                         "off unless set here (the off/shadow/on measurement runs)")
     a = ap.parse_args(argv)
-    return run(a.sessions, a.minutes, a.stuck_misses, a.port)
+    return run(a.sessions, a.minutes, a.stuck_misses, a.port, correction_mode=a.correction_mode)
 
 
 if __name__ == "__main__":

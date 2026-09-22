@@ -69,6 +69,13 @@ def execute_task():
 
         mouse_only = data.get("mouse_only", False)
         training_mode = data.get("training_mode", False)
+        # Servo correction loop for this task only (off | shadow | on); absent
+        # means the environment/reflex precedence decides.
+        correction_mode = data.get("correction_mode")
+        if correction_mode is not None:
+            correction_mode = str(correction_mode).strip().lower()
+            if correction_mode not in ("off", "shadow", "on"):
+                return jsonify({"success": False, "error": "correction_mode must be off, shadow or on"}), 400
 
         # Capture the Flask app so the worker thread can push an app context.
         # Without this, anything inside execute_task that touches db.session
@@ -83,7 +90,8 @@ def execute_task():
         # Run in background thread so the API doesn't block
         def run_task():
             with flask_app.app_context():
-                result = service.execute_task(task, screen, mouse_only=mouse_only, training_mode=training_mode)
+                result = service.execute_task(task, screen, mouse_only=mouse_only, training_mode=training_mode,
+                                              correction_mode=correction_mode)
                 logger.info(f"Task completed: success={result.success}, reason={result.reason}, "
                            f"steps={len(result.steps)}, time={result.total_time_seconds:.1f}s")
 

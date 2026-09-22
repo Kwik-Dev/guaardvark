@@ -542,9 +542,13 @@ class AgentControlService:
 
     def execute_task(self, task: str, screen, mouse_only: bool = False, training_mode: bool = False,
                      emit_fn: Optional[Callable] = None, chat_context: str = "", max_steps: Optional[int] = None,
-                     budget: Optional[StepBudget] = None) -> AgentResult:
+                     budget: Optional[StepBudget] = None, correction_mode: Optional[str] = None) -> AgentResult:
         """
         Execute a task using the see-think-act loop.
+
+        correction_mode: off | shadow | on for this task's servo, overriding the
+                environment and the reflex; None leaves that precedence alone. The
+                off/shadow/on measurement runs set it per request, no restart.
 
         budget: preferred explicit StepBudget from AgentBrain (carries cross-tier history and
                 remaining count). If provided, takes precedence for capping.
@@ -644,6 +648,9 @@ class AgentControlService:
             self._session_expectations = None
             self._click_history = []
 
+        # Attempts per click target this task: the second try at the same
+        # target asks the servo for precision (arms its correction loop).
+        self._click_attempts: Dict[str, int] = {}
         # Who thinks, who looks. Resolved once per task; the loop reads it.
         self._brain_eye = self.resolve_brain_eye(screen_size=screen.screen_size())
         if not self._brain_eye.eye:
@@ -656,7 +663,10 @@ class AgentControlService:
             self._brain_eye.eye, self._brain_eye.eye_mechanism, self._brain_eye.reason,
         )
         collector = TrainingDataCollector()
-        analyzer, servo = build_servo(screen, self._brain_eye.eye, collector=collector)
+        analyzer, servo = build_servo(
+            screen, self._brain_eye.eye, collector=collector,
+            config_overlay=({"correction_mode": correction_mode} if correction_mode else None),
+        )
         if training_mode:
             # Training sessions get TRUE hit/miss labels from the trainer
             # page's own scoreboard (probe is inert when the page isn't the
@@ -1190,7 +1200,15 @@ class AgentControlService:
                         }
                         failed = False
                     else:
-                        servo_result = servo.click_target(target, button=button, single_attempt=training_mode)
+                        attempt_key = target.strip().lower()
+                        attempt = self._click_attempts.get(attempt_key, 0) + 1
+                        self._click_attempts[attempt_key] = attempt
+                        servo_result = servo.click_target(
+                            target, button=button, single_attempt=training_mode,
+                            precision=(True if attempt >= 2 else None), attempt=attempt,
+                        )
+                        if servo_result.get("verified"):
+                            self._click_attempts.pop(attempt_key, None)
                         decision.action.coordinates = (servo_result.get("x", 0), servo_result.get("y", 0))
                         # Track issued clicks for the circuit breaker
                         self._click_history.append(decision.action.coordinates)

@@ -118,6 +118,7 @@ ENV_VAR_MAP = {
     "vision_pipeline_escalation_model": "GUAARDVARK_VISION_ESCALATION_MODEL",
     "vision_pipeline_auto_select": "GUAARDVARK_VISION_AUTO_SELECT",
     "eye_ranking": "GUAARDVARK_EYE_RANKING",
+    "servo_correction": "GUAARDVARK_SERVO_CORRECTION",
     "gpu_quality_tier": "GUAARDVARK_GPU_QUALITY_TIER",
     "gpu_eviction_grace": "GUAARDVARK_GPU_EVICTION_GRACE",
     "gpu_idle_timeout": "GUAARDVARK_GPU_IDLE_TIMEOUT",

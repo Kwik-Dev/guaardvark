@@ -20,22 +20,30 @@ from PIL import Image, ImageDraw
 
 logger = logging.getLogger(__name__)
 
-# Cache generated bullseyes by size
-_bullseye_cache: Dict[int, Image.Image] = {}
+# Cache generated bullseyes by (size, ring colour)
+_bullseye_cache: Dict[Tuple[int, Tuple[int, int, int]], Image.Image] = {}
+
+WHITE_RING = (255, 255, 255)
 
 
-def generate_bullseye(size: int = 48) -> Image.Image:
+def generate_bullseye(size: int = 48, ring: Tuple[int, int, int] = None) -> Image.Image:
     """
     Generate a bullseye reticle image with transparent background.
 
     Args:
         size: Diameter in pixels (default 48)
+        ring: RGB colour of the inner ring strokes (default white). The servo's
+              correction probes draw a red one so the eye can be asked about
+              "the red marker" and not confuse it with the cursor reticle.
 
     Returns:
         RGBA PIL Image of the bullseye
     """
-    if size in _bullseye_cache:
-        return _bullseye_cache[size]
+    ring = tuple(ring) if ring else WHITE_RING
+    key = (size, ring)
+    if key in _bullseye_cache:
+        return _bullseye_cache[key]
+    ring_rgba = ring + (255,)
 
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -51,11 +59,11 @@ def generate_bullseye(size: int = 48) -> Image.Image:
          center + outer_radius, center + outer_radius],
         outline=(0, 0, 0, 255), width=outer_stroke
     )
-    # Outer ring — white inner stroke
+    # Outer ring — coloured inner stroke
     draw.ellipse(
         [center - outer_radius + outer_stroke, center - outer_radius + outer_stroke,
          center + outer_radius - outer_stroke, center + outer_radius - outer_stroke],
-        outline=(255, 255, 255, 255), width=inner_stroke
+        outline=ring_rgba, width=inner_stroke
     )
 
     # Inner ring — black stroke
@@ -65,11 +73,11 @@ def generate_bullseye(size: int = 48) -> Image.Image:
          center + inner_radius, center + inner_radius],
         outline=(0, 0, 0, 255), width=outer_stroke
     )
-    # Inner ring — white inner stroke
+    # Inner ring — coloured inner stroke
     draw.ellipse(
         [center - inner_radius + outer_stroke, center - inner_radius + outer_stroke,
          center + inner_radius - outer_stroke, center + inner_radius - outer_stroke],
-        outline=(255, 255, 255, 255), width=inner_stroke
+        outline=ring_rgba, width=inner_stroke
     )
 
     # Crosshair lines (with gap around center for the hole)
@@ -96,15 +104,16 @@ def generate_bullseye(size: int = 48) -> Image.Image:
         fill=(0, 0, 0, 0)
     )
 
-    _bullseye_cache[size] = img
-    logger.debug(f"Generated bullseye reticle: {size}x{size}px")
+    _bullseye_cache[key] = img
+    logger.debug(f"Generated bullseye reticle: {size}x{size}px ring={ring}")
     return img
 
 
 def composite_bullseye(
     screenshot: Image.Image,
     cursor_pos: Tuple[int, int],
-    size: int = 48
+    size: int = 48,
+    ring: Tuple[int, int, int] = None,
 ) -> Image.Image:
     """
     Composite the bullseye reticle onto a screenshot at cursor position.
@@ -113,11 +122,12 @@ def composite_bullseye(
         screenshot: RGB PIL Image of the screen
         cursor_pos: (x, y) pixel coordinates of cursor
         size: Bullseye diameter in pixels
+        ring: RGB colour of the ring strokes (default white)
 
     Returns:
         RGB PIL Image with bullseye composited
     """
-    bullseye = generate_bullseye(size)
+    bullseye = generate_bullseye(size, ring)
     result = screenshot.copy().convert("RGBA")
     half = size // 2
     paste_x = cursor_pos[0] - half

@@ -10,7 +10,9 @@ Every interaction can be recorded by a TrainingDataCollector for self-supervised
 
 import json
 import logging
+import os
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
@@ -34,10 +36,65 @@ DIRECTION_MAP = {
 
 TASKBAR_H = 30  # tint2 taskbar at the bottom — never click here
 
+CORRECTION_MODES = ("off", "shadow", "on")
+CORRECTION_ENV = "GUAARDVARK_SERVO_CORRECTION"
+PROBE_RING = (220, 30, 30)   # the correction probe's marker: red, unlike the cursor reticle
+PROBE_MARKER_PX = 48
+PROBE_CROP_MIN = 320
+PROBE_CROP_MAX = 600
+SEED_HALF_MAX = 600.0
+FINAL_DRIFT_MAX = 250.0
+
+
+@dataclass
+class CorrectionOutcome:
+    """What one run of the correction loop did, and why it stopped."""
+    estimate: Tuple[int, int]
+    final: Tuple[int, int]
+    mode: str
+    armed_reason: str
+    stop_reason: str = ""
+    steps: List[Dict[str, Any]] = field(default_factory=list)
+    elapsed_ms: int = 0
+    applied: bool = False
+    clamped: bool = False
+    unparsed: int = 0
+
+    @property
+    def drift_px(self) -> float:
+        ex, ey = self.estimate
+        fx, fy = self.final
+        return ((fx - ex) ** 2 + (fy - ey) ** 2) ** 0.5
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "armed_reason": self.armed_reason,
+            "stop_reason": self.stop_reason,
+            "estimate": list(self.estimate),
+            "final": list(self.final),
+            "drift_px": round(self.drift_px, 1),
+            "steps": len(self.steps),
+            "applied": self.applied,
+            "clamped": self.clamped,
+            "unparsed": self.unparsed,
+            "elapsed_ms": self.elapsed_ms,
+        }
+
 
 class ServoController:
-    """
-    Closed-loop motor control for precise mouse targeting.
+    """Aim, look again, click.
+
+    One shot by default: the eye estimates where the target is, the cursor
+    moves, the click lands, and a pixel-change poll verifies the screen
+    reacted. When the eye's measured accuracy is coarser than the target, or
+    unknown, a correction loop runs first: a red marker is drawn at the
+    estimate on the captured frame, the eye is asked only which way the
+    target lies from the marker's centre, and a search box narrows until it
+    says "same" or the budget runs out. The mouse never moves during probes.
+    In shadow mode the loop runs and is logged but the estimate is clicked;
+    in on mode the final is. The numbers live in REFLEXES["correction_*"]
+    (servo_knowledge_store) next to what they were measured against.
 
     Usage:
         servo = ServoController(screen, analyzer)
@@ -54,6 +111,12 @@ class ServoController:
         # measurement store; None when unmeasured. The correction loop arms on
         # it: an eye coarser than the target earns a second look.
         self.eye_accuracy_px = eye_accuracy_px
+        # Correction loop. Precedence: an explicit vision_config value, then the
+        # environment, then the reflex. "explicit" is what lets a training
+        # (single_attempt) run exercise the loop when it asks for it.
+        self.correction_mode, self._correction_explicit = self._resolve_correction_mode(vision_config or {})
+        self._corrections_armed_this_session = 0
+        self._last_correction_skip = ""
         # Optional TrainerTruthProbe (trainer_truth_probe.py) — attached by the
         # agent loop during training sessions. When present, clicks on the
         # vision trainer get TRUE hit/miss labels from the page's own
@@ -203,16 +266,26 @@ class ServoController:
             "inference_ms": self._last_inference_ms,
         }
 
-    def click_target(self, target_description: str, button: str = "left", single_attempt: bool = False) -> Dict[str, Any]:
+    def click_target(self, target_description: str, button: str = "left", single_attempt: bool = False,
+                     precision: Optional[bool] = None, attempt: int = 1) -> Dict[str, Any]:
         """
-        Click on a described target element. ONE-SHOT, human-pattern:
+        Click on a described target element, human-pattern:
           1. See — capture screen, ask vision model to locate target
+          1b. Look again — the correction loop, when the eye's measured
+              accuracy says the estimate deserves it (see _should_correct)
           2. Move — cursor to those coords (via screen.move → xdotool)
           3. Click — at those coords (via screen.click → xdotool)
           4. Verify — Differential Pixel Comparison (DPC) polling
           5. Record — to training archive
+
+        single_attempt: a training run; the loop stays off unless the mode was
+            set explicitly for this run.
+        precision: True arms the loop (the caller's second try at the same
+            target); False forbids it; None leaves it to the accuracy gate.
+        attempt: the caller's attempt number at this target, recorded as-is.
         """
         start = time.time()
+        correction: Optional[CorrectionOutcome] = None
 
         # 1. SEE — capture + vision-model coordinate estimate
         screenshot, _ = self.screen.capture()
@@ -271,6 +344,15 @@ class ServoController:
                 }
 
         x, y = coords
+        # 1b. LOOK AGAIN
+        armed, armed_reason = self._should_correct(target_description, single_attempt, precision, screenshot)
+        if armed:
+            self._corrections_armed_this_session += 1
+            correction = self._correct_estimate(screenshot, target_description, (x, y), armed_reason)
+            if correction.applied:
+                x, y = correction.final
+        else:
+            self._last_correction_skip = armed_reason
         # 2. MOVE
         move_result = self.screen.move(x, y)
         if not move_result.get("success", False):
@@ -285,13 +367,16 @@ class ServoController:
                 elapsed_ms=elapsed_ms,
                 reason="move_failed",
                 post_action_effect="not_checked",
+                correction=correction,
+                attempt=attempt,
             )
             return {
                 "success": False, "verified": False,
                 "target_found": True, "click_issued": False,
                 "post_action_effect": "not_checked",
                 "x": x, "y": y,
-                "corrections": 0, "attempt": 1,
+                "corrections": len(correction.steps) if correction else 0, "attempt": attempt,
+                "correction": correction.summary() if correction else None,
                 "time_ms": elapsed_ms,
                 "reason": "move_failed",
                 "error": move_result.get("error", "move failed"),
@@ -345,6 +430,8 @@ class ServoController:
             reason="" if click_issued else click_result.get("error", "click_failed"),
             post_action_effect=post_action_effect,
             truth=truth,
+            correction=correction,
+            attempt=attempt,
         )
 
         return {
@@ -352,7 +439,8 @@ class ServoController:
             "target_found": True, "click_issued": click_issued,
             "post_action_effect": post_action_effect,
             "x": x, "y": y,
-            "corrections": 0, "attempt": 1,
+            "corrections": len(correction.steps) if correction else 0, "attempt": attempt,
+            "correction": correction.summary() if correction else None,
             "time_ms": elapsed_ms,
             "reason": "" if click_issued else "click_failed",
             "error": click_result.get("error"),
@@ -441,9 +529,18 @@ class ServoController:
         reason: str = "",
         post_action_effect: str = "",
         truth: Dict[str, Any] | None = None,
+        correction: Optional[CorrectionOutcome] = None,
+        attempt: int = 1,
     ) -> None:
         """Record telemetry without treating predicted coords as ground truth."""
         x, y = coords
+        corr_summary = correction.summary() if correction else None
+        corr_log = [
+            {"direction": st.get("direction", ""), "dx": st.get("dx"), "dy": st.get("dy"),
+             "probe": st.get("probe"), "visible": st.get("visible")}
+            for st in (correction.steps if correction else [])
+            if st.get("direction")
+        ]
         raw = getattr(self, "_last_raw_coords", (0, 0))
         scale = getattr(self, "_last_scale", (1.0, 1.0))
         model_name = getattr(self.analyzer, "default_model", "unknown")
@@ -466,6 +563,9 @@ class ServoController:
         # gate on truth.true_hit and label from (target_cx, target_cy).
         if truth is not None:
             metadata["truth"] = truth
+        if corr_summary is not None:
+            metadata["correction"] = corr_summary
+        metadata["attempt"] = attempt
         if self.collector:
             try:
                 self.collector.record(
@@ -473,7 +573,7 @@ class ServoController:
                     crosshair_pos=(x, y),
                     target_description=target_description,
                     target_actual=(x, y),
-                    corrections=[],
+                    corrections=corr_log,
                     success=success,
                     metadata=metadata,
                 )
@@ -490,11 +590,11 @@ class ServoController:
                 actual_click_coords=(x, y),
                 scale_factor=scale,
                 success=success,
-                corrections=0,
-                attempt=1,
+                corrections=len(corr_log),
+                attempt=attempt,
                 time_ms=elapsed_ms,
                 screen_size=(self.screen_w, self.screen_h),
-                correction_log=[],
+                correction_log=corr_log,
                 raw_response=self._last_raw_response,
                 parse_path=self._last_parse_path,
                 detection_source=self._last_detection_source,
@@ -505,6 +605,7 @@ class ServoController:
                 reason=reason,
                 inference_ms=self._last_inference_ms,
                 truth=truth,
+                correction=corr_summary,
             )
         except Exception as e:
             logger.debug(f"Archive record failed (non-fatal): {e}")
@@ -853,6 +954,264 @@ class ServoController:
         return self._anchor_result(anchor_coords, result1, "anchor_only")
 
 
+    # ------------------------------------------------------------------
+    # Correction loop
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_correction_mode(vision_config: Dict[str, Any]) -> Tuple[str, bool]:
+        """(mode, explicit). Explicit means a caller or the environment chose it."""
+        for value, explicit in ((vision_config.get("correction_mode"), True),
+                                (os.environ.get(CORRECTION_ENV), True),
+                                (get_reflex("correction_mode", "shadow"), False)):
+            if value is None or value == "":
+                continue
+            mode = str(value).strip().lower()
+            if mode in CORRECTION_MODES:
+                return mode, explicit
+            logger.warning("Servo: correction mode %r is not one of %s; ignoring it", value, CORRECTION_MODES)
+        return "shadow", False
+
+    def _should_correct(self, target: str, single_attempt: bool, precision: Optional[bool],
+                        screenshot: Image.Image) -> Tuple[bool, str]:
+        """Arm the loop from what is known, never from being stuck.
+
+        Never: mode off, a DOM-sourced estimate (already exact), a calibration
+        run (measuring the raw eye), the session cap, or a caller that said
+        precision=False. A training run arms only when the mode was set
+        explicitly for it. Otherwise arm when the caller asked (its second
+        try at the same target), when the eye is unmeasured, or when its
+        measured error exceeds the target size. An animating screen refuses
+        the probes: the frame they would judge is already stale.
+        """
+        if self.correction_mode == "off":
+            return False, "mode_off"
+        if self._last_detection_source == "dom":
+            return False, "dom_sourced"
+        if (self._vision_config or {}).get("disable_calibration"):
+            return False, "calibration_run"
+        cap = int(get_reflex("correction_session_cap", 12))
+        if self._corrections_armed_this_session >= cap:
+            return False, f"session_cap({cap})"
+        if precision is False:
+            return False, "precision_off"
+        if single_attempt and not self._correction_explicit:
+            return False, "single_attempt"
+        target_px = float(get_reflex("correction_target_px", 24))
+        acc = self.eye_accuracy_px
+        if precision is True:
+            reason = "precision_requested"
+        elif acc is None:
+            reason = "eye_unmeasured"
+        elif acc > target_px:
+            reason = f"eye_coarse({acc:.0f}px>{target_px:.0f}px)"
+        else:
+            return False, f"eye_accurate({acc:.0f}px<={target_px:.0f}px)"
+        try:
+            time.sleep(0.15)
+            again, _ = self.screen.capture()
+            if self._screen_changed(screenshot, again, click_pos=None):
+                return False, "screen_animating"
+        except Exception as e:  # noqa: BLE001
+            logger.debug("correction pre-check capture failed: %s", e)
+        return True, reason
+
+    def _seed_box(self, estimate: Tuple[int, int]) -> List[float]:
+        """[lo_x, lo_y, hi_x, hi_y] around the estimate: ±1.15 × accuracy per
+        axis (100 when unmeasured). With no calibration active the side away
+        from screen centre is extended along the centre-to-estimate spoke by
+        1.15 × |v| × (1/gain − 1), which is where a centre-pulling eye leaves
+        the target. Capped and clamped on screen."""
+        acc = float(self.eye_accuracy_px) if self.eye_accuracy_px is not None else 100.0
+        half = min(SEED_HALF_MAX, 1.15 * acc)
+        ex, ey = estimate
+        cx, cy = self.screen_w / 2.0, self.screen_h / 2.0
+        lo = [ex - half, ey - half]
+        hi = [ex + half, ey + half]
+        if not self._calibration:
+            gains = (float(get_reflex("correction_gain_x", 1.0)), float(get_reflex("correction_gain_y", 0.69)))
+            for axis, (e, c, k) in enumerate(((ex, cx, gains[0]), (ey, cy, gains[1]))):
+                if k <= 0 or k >= 1.0:
+                    continue
+                v = e - c
+                ext = min(SEED_HALF_MAX, 1.15 * abs(v) * (1.0 / k - 1.0))
+                if v >= 0:
+                    hi[axis] += ext
+                else:
+                    lo[axis] -= ext
+        return [max(0.0, lo[0]), max(0.0, lo[1]),
+                min(self.screen_w - 1.0, hi[0]), min(self.screen_h - TASKBAR_H - 1.0, hi[1])]
+
+    @staticmethod
+    def _update_axis(lo: float, hi: float, probe: float, call: str, keep: float, target_px: float) -> Tuple[float, float]:
+        """`same` collapses the axis to the target width; a side call cuts at
+        the probe and keeps (1 − keep) of the discarded half."""
+        if call == "same":
+            return probe - target_px / 2.0, probe + target_px / 2.0
+        slack = max(0.0, 1.0 - keep)
+        if call in ("left", "above"):
+            return lo, probe + slack * max(0.0, hi - probe)
+        return probe - slack * max(0.0, probe - lo), hi
+
+    @staticmethod
+    def _parse_relative_judgment(text: str) -> Optional[Dict[str, Any]]:
+        """Strict: a JSON object with a boolean `visible` and, when visible,
+        `dx` in left/right/same and `dy` in above/below/same. Anything else is
+        None. Never a default direction: a guessed "down" is how the old
+        loop walked clicks off their targets."""
+        if not text:
+            return None
+        t = text.strip()
+        start, end = t.find("{"), t.rfind("}") + 1
+        if start < 0 or end <= start:
+            return None
+        try:
+            obj = json.loads(t[start:end])
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(obj, dict) or not isinstance(obj.get("visible"), bool):
+            return None
+        if not obj["visible"]:
+            return {"visible": False, "dx": None, "dy": None}
+        dx = str(obj.get("dx", "")).strip().lower()
+        dy = str(obj.get("dy", "")).strip().lower()
+        if dx not in ("left", "right", "same") or dy not in ("above", "below", "same"):
+            return None
+        return {"visible": True, "dx": dx, "dy": dy}
+
+    def _probe_relative(self, screenshot: Image.Image, target: str, probe: Tuple[int, int],
+                        box: List[float]) -> Tuple[Optional[Dict[str, Any]], str, int]:
+        """Draw the marker at the probe on the captured frame, crop around it,
+        scale 2x, and ask one question. The mouse does not move."""
+        from backend.utils.cursor_overlay import composite_bullseye
+        px, py = int(probe[0]), int(probe[1])
+        marked = composite_bullseye(screenshot, (px, py), size=PROBE_MARKER_PX, ring=PROBE_RING)
+        span = max(box[2] - box[0], box[3] - box[1])
+        half = int(min(PROBE_CROP_MAX, max(PROBE_CROP_MIN, span + 80)) // 2)
+        left = max(0, min(self.screen_w - 2 * half, px - half))
+        top = max(0, min(self.screen_h - 2 * half, py - half))
+        crop = marked.crop((left, top, left + 2 * half, top + 2 * half))
+        crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
+        prompt = (
+            f"A red ring marker is drawn on this image. Is the {target} visible in this image, "
+            f"and where is it relative to the CENTRE of the red marker?\n"
+            f'Reply with ONLY this JSON: {{"visible": true or false, "dx": "left" or "right" or "same", '
+            f'"dy": "above" or "below" or "same"}}\n'
+            f'"same" means the marker\'s centre is already on it. No distances, no other words.'
+        )
+        t0 = time.monotonic()
+        result = self.analyzer.analyze_fullsize(crop, prompt=prompt, num_predict=48, temperature=0.0)
+        ms = int((time.monotonic() - t0) * 1000)
+        raw = (result.description or "") if getattr(result, "success", False) else ""
+        return self._parse_relative_judgment(raw), raw, ms
+
+    def _correct_estimate(self, screenshot: Image.Image, target: str, estimate: Tuple[int, int],
+                          armed_reason: str) -> CorrectionOutcome:
+        """Narrow a search box around the estimate with relative judgments
+        until the eye says "same" on both axes, the box is target-sized, the
+        step or time budget runs out, or an axis reverses twice. Shadow logs
+        and leaves the estimate; on applies the final, drift-clamped."""
+        mode = self.correction_mode
+        out = CorrectionOutcome(estimate=estimate, final=estimate, mode=mode, armed_reason=armed_reason)
+        target_px = float(get_reflex("correction_target_px", 24))
+        keep = float(get_reflex("correction_keep_fraction", 0.55))
+        max_steps = int(get_reflex("correction_max_steps", self.max_corrections))
+        deadline_s = float(get_reflex("correction_deadline_s", 4.0))
+        box = self._seed_box(estimate)
+        t_start = time.monotonic()
+        last_probe_s: Optional[float] = None
+        judged = False
+        calls_x: List[str] = []
+        calls_y: List[str] = []
+        reversals = {"x": 0, "y": 0}
+        stop = "max_steps"
+        for step in range(max_steps + 1):
+            elapsed = time.monotonic() - t_start
+            remaining = deadline_s - elapsed
+            if remaining <= 0 or (last_probe_s is not None and last_probe_s > remaining):
+                stop = "deadline"
+                break
+            probe = estimate if step == 0 else (int(round((box[0] + box[2]) / 2)), int(round((box[1] + box[3]) / 2)))
+            judgment, raw, ms = self._probe_relative(screenshot, target, probe, box)
+            last_probe_s = ms / 1000.0
+            rec: Dict[str, Any] = {"probe": [int(probe[0]), int(probe[1])], "ms": ms, "raw": raw[:120]}
+            if judgment is None:
+                out.unparsed += 1
+                rec.update({"visible": None, "dx": None, "dy": None, "direction": ""})
+                out.steps.append(rec)
+                stop = "unparseable"
+                break
+            if not judgment["visible"]:
+                rec.update({"visible": False, "dx": None, "dy": None, "direction": ""})
+                out.steps.append(rec)
+                stop = "not_visible"
+                break
+            judged = True
+            dx, dy = judgment["dx"], judgment["dy"]
+            dy_name = {"above": "up", "below": "down", "same": "same"}[dy]
+            if dx != "same" and dy != "same":
+                direction = f"{dx}_and_{dy_name}"
+            elif dx != "same":
+                direction = dx
+            elif dy != "same":
+                direction = dy_name
+            else:
+                direction = "on_target"
+            box[0], box[2] = self._update_axis(box[0], box[2], probe[0], dx, keep, target_px)
+            box[1], box[3] = self._update_axis(box[1], box[3], probe[1], dy, keep, target_px)
+            rec.update({"visible": True, "dx": dx, "dy": dy, "direction": direction,
+                        "box_after": [round(v) for v in box]})
+            out.steps.append(rec)
+            if dx != "same":
+                if calls_x and self._direction_reversed(calls_x[-1], dx):
+                    reversals["x"] += 1
+                calls_x.append(dx)
+            if dy != "same":
+                if calls_y and self._direction_reversed(calls_y[-1], dy_name):
+                    reversals["y"] += 1
+                calls_y.append(dy_name)
+            if dx == "same" and dy == "same":
+                stop = "on_target"
+                break
+            if (box[2] - box[0]) <= target_px and (box[3] - box[1]) <= target_px:
+                stop = "converged"
+                break
+            if reversals["x"] >= 2 or reversals["y"] >= 2:
+                stop = "oscillating_" + ("x" if reversals["x"] >= 2 else "y")
+                break
+        out.stop_reason = stop
+        out.elapsed_ms = int((time.monotonic() - t_start) * 1000)
+
+        if judged:
+            fx = (box[0] + box[2]) / 2.0
+            fy = (box[1] + box[3]) / 2.0
+            ex, ey = estimate
+            v = ((ex - self.screen_w / 2.0) ** 2 + (ey - self.screen_h / 2.0) ** 2) ** 0.5
+            acc = float(self.eye_accuracy_px) if self.eye_accuracy_px is not None else 100.0
+            # Drift bound: errors scale with distance from centre (the eye's
+            # centre-pull), floored at the eye's own noise so a central target
+            # still gets a noise-sized correction.
+            max_drift = max(acc, min(FINAL_DRIFT_MAX, 0.75 * v))
+            d = ((fx - ex) ** 2 + (fy - ey) ** 2) ** 0.5
+            if d > max_drift and d > 0:
+                fx = ex + (fx - ex) * max_drift / d
+                fy = ey + (fy - ey) * max_drift / d
+                out.clamped = True
+            out.final = (max(0, min(self.screen_w - 1, int(round(fx)))),
+                         max(0, min(self.screen_h - TASKBAR_H - 1, int(round(fy)))))
+        out.applied = (mode == "on") and judged and out.final != estimate
+        logger.info(
+            "Servo correction[%s]: armed(%s) estimate=%s final=%s drift=%.0fpx steps=%d stop=%s %dms applied=%s%s",
+            mode, armed_reason, estimate, out.final, out.drift_px, len(out.steps), stop,
+            out.elapsed_ms, out.applied, " clamped" if out.clamped else "",
+        )
+        return out
+
+    # Superseded by _correct_estimate (2026-09-22). _check_on_target and
+    # _parse_correction answer with a DEFAULT direction on any failure, which
+    # is how the earlier loop walked clicks off their targets; the nudge table
+    # moved fixed distances instead of narrowing a box. Not called by the click
+    # path; kept for readers and the tests that pin them, pending removal.
     def _check_on_target(self, screenshot: Image.Image, target: str) -> Dict[str, Any]:
         prompt = (
             f'Is the crosshair on the {target}? Reply ONLY JSON: '

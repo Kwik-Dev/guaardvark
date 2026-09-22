@@ -95,6 +95,7 @@ class TestAgentControlE2E(unittest.TestCase):
             "Browser showing Twitter homepage. Tweet button -> D4. Address bar -> D1.",  # vision: scene
             '{"action": "click", "target_cell": "D4", "target_description": "Tweet button", "reasoning": "Click tweet"}',  # text: decision
             '[{"box_2d": [380, 420, 440, 520], "label": "Tweet button"}]',  # vision: servo anchor
+            '{"visible": true, "dx": "same", "dy": "same"}',  # vision: correction probe (eye unmeasured arms it)
             # Iteration 2:
             "Tweet compose dialog is open. Text field -> D4. Post button -> F4.",  # vision: scene
             '{"action": "done", "reasoning": "Tweet dialog opened, task complete", '

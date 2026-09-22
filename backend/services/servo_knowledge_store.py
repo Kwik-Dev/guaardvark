@@ -98,6 +98,82 @@ REFLEXES = {
             "keeps 9 of 15 and median |X| returns to 37px."
         ),
     },
+    # ---- Correction loop (servo_controller._correct_estimate) ----
+    # Armed from the eye's MEASURED accuracy, not from being stuck: an eye
+    # coarser than the target earns a second look before the click. Numbers
+    # below carry what they were measured against; change them with a new
+    # measurement, not a hunch.
+    "correction_mode": {
+        "value": "shadow",
+        "source": "operator decision 2026-09-22: shadow for one measurement cycle, "
+                  "then decide the default from the archive numbers",
+        "confidence": 0.5,
+        "model": "universal",
+        "notes": (
+            "off: never probe. shadow: run the loop, log estimate/final/drift, click "
+            "the ESTIMATE. on: click the FINAL. Precedence: vision_config "
+            "correction_mode > env GUAARDVARK_SERVO_CORRECTION > this value. The "
+            "shadow pass criterion (plan 2026-09-22): median |final-truth| on Y at "
+            "most 0.7 of |estimate-truth|, X no worse than estimate+5px, unparseable "
+            "or not-visible stops at most 15% of armed rows."
+        ),
+    },
+    "correction_target_px": {
+        "value": 24,
+        "source": "vision_trainer_grid dot diameter 24px; a UI button is rarely smaller",
+        "confidence": 0.5,
+        "model": "universal",
+        "notes": "An eye measured at or under this needs no second look. A box narrowed "
+                 "to this on both axes counts as converged.",
+    },
+    "correction_max_steps": {
+        "value": 4,
+        "source": "initial_design; the ServoController ctor's max_corrections default",
+        "confidence": 0.5,
+        "model": "universal",
+        "notes": "Probes per click after probe 0 (the estimate itself).",
+    },
+    "correction_deadline_s": {
+        "value": 4.0,
+        "source": "gemma4:e4b anchor inference 0.6-1.2s per call on this box, 2026-09-22",
+        "confidence": 0.5,
+        "model": "universal",
+        "notes": "Wall-clock budget for the probes. A probe that cannot finish inside "
+                 "it is never started, so the worst case is deadline + one in flight.",
+    },
+    "correction_session_cap": {
+        "value": 12,
+        "source": "initial_design: 12 armed clicks x ~5.5s worst case = about 66s per task",
+        "confidence": 0.5,
+        "model": "universal",
+        "notes": "Armed clicks (shadow or on) per servo instance; past it the loop disarms.",
+    },
+    "correction_keep_fraction": {
+        "value": 0.55,
+        "source": "initial_design",
+        "confidence": 0.4,
+        "model": "universal",
+        "notes": "After a left/right or above/below call the box is cut at the probe and "
+                 "(1 - this) of the discarded half is kept, so one wrong call cannot "
+                 "exclude the target.",
+    },
+    "correction_gain_y": {
+        "value": 0.69,
+        "source": "gemma4:e4b Y compression slope 0.65-0.70 across three boards @1000x1000, "
+                  "2026-09-22 (servo_calibrate --from-bench)",
+        "confidence": 0.6,
+        "model": "universal",
+        "notes": "How much of the true centre-to-target distance the eye reports on Y. With "
+                 "no calibration active the seed box is extended away from screen centre "
+                 "by 1.15 * |v| * (1/gain - 1) so the box still covers the target.",
+    },
+    "correction_gain_x": {
+        "value": 1.0,
+        "source": "gemma4:e4b X error is 22px noise with no centre-pull, same boards",
+        "confidence": 0.6,
+        "model": "universal",
+        "notes": "1.0 means no spoke extension on X.",
+    },
     "refine_y_echo_band": {
         "value": 20,
         "source": "servo_20260921_222821: refine returned y of exactly 499 or 500 on 9 of 15 "
@@ -350,6 +426,7 @@ class ServoArchive:
         reason: str = "",
         inference_ms: int = 0,
         truth: Optional[Dict[str, Any]] = None,
+        correction: Optional[Dict[str, Any]] = None,
     ):
         """Record a servo interaction to the universal archive."""
         entry = {
@@ -396,6 +473,18 @@ class ServoArchive:
         # can see which way the model was consistently off
         if correction_log:
             entry["correction_log"] = correction_log
+        # Correction-loop summary (mode, why it armed, estimate, final, drift,
+        # why it stopped). ADDITIVE. With truth present both |estimate - truth|
+        # and |final - truth| are computable per row, which is the shadow
+        # measurement the default mode is decided from.
+        if correction:
+            entry["correction"] = correction
+            tx, ty = (truth or {}).get("target_cx"), (truth or {}).get("target_cy")
+            est = correction.get("estimate")
+            fin = correction.get("final")
+            if tx is not None and ty is not None and est and fin:
+                entry["correction"]["estimate_error_px"] = round(((est[0] - tx) ** 2 + (est[1] - ty) ** 2) ** 0.5, 1)
+                entry["correction"]["final_error_px"] = round(((fin[0] - tx) ** 2 + (fin[1] - ty) ** 2) ** 0.5, 1)
 
         with self._write_lock:
             with open(self._archive_path, "a") as f:
