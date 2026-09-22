@@ -36,11 +36,17 @@ logger = logging.getLogger(__name__)
 
 BIDI_URL = "ws://localhost:9222/session"
 TRAINER_MARKER = "vision_trainer"  # substring of location.href that activates truth
+TRAINER_DOM_MARKER = "[data-truth-page]"  # ...or this attribute, for pages named otherwise
 
 # Reads counters + current target center in SCREEN coordinates (mozInnerScreenX/Y
 # converts the page-relative rect; same proven pattern as servo_calibrate.py).
 _SNAPSHOT_JS = """(() => {
-  if (location.href.indexOf('vision_trainer') === -1) return "not_trainer";
+  // Two ways to qualify: the historical filename, or the DOM contract. A truth
+  // page named anything else used to be silently inert here — the probe returned
+  // None, no truth block reached the archive, and the calibration fit then found
+  // zero labelled pairs with nothing anywhere saying why.
+  if (location.href.indexOf('vision_trainer') === -1 &&
+      !document.querySelector('[data-truth-page]')) return "not_trainer";
   const c = document.getElementById('clicks');
   const m = document.getElementById('misses');
   if (!c || !m) return "no_counters";
