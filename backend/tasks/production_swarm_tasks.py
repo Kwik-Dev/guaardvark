@@ -89,15 +89,14 @@ def _default_ollama_llm(*, system: str, user: str, model: str = "gemma4:e4b") ->
         {"role": "user", "content": user},
     ]
 
-    # Prefer the OpenAI-compatible provider (the same cloud/remote model the
-    # chat bot uses via GUAARDVARK_OPENAI_BASE_URL / GUAARDVARK_OPENAI_MODEL)
-    # when it is configured. Fall back to the local Ollama model otherwise.
+    # Prefer the OpenAI-compatible provider when the operator has consented to it
+    # (master cloud switch on + OpenAI active). GUAARDVARK_OPENAI_BASE_URL alone is
+    # only capability; falling back to the local Ollama model otherwise.
     try:
-        from backend.services import openai_provider
-        if openai_provider.available():
-            from backend.config import OPENAI_DEFAULT_MODEL
+        from backend.services import llm_provider, openai_provider
+        if llm_provider.is_openai_active():
             resp = openai_provider.chat(
-                model=OPENAI_DEFAULT_MODEL,
+                model=llm_provider.get_openai_model(),
                 messages=messages,
                 stream=False,
             )
