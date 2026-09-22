@@ -177,6 +177,29 @@ class VoiceHandler:
             finally:
                 self._queue.task_done()
 
+    def _voice_backend(self) -> str:
+        """STT/TTS backend: "pi-omni" routes through the external OpenAI-compatible
+        voice router; anything else (default "guaardvark") uses Guaardvark's own
+        Audio Foundry. The router path falls back to Guaardvark when unreachable."""
+        backend = str(
+            (self.config.get("voice", {}) or {}).get("backend") or "guaardvark"
+        ).strip().lower()
+        return "pi-omni" if backend in ("pi-omni", "pi_omni", "router", "openai") else "guaardvark"
+
+    async def _transcribe(self, wav_bytes: bytes) -> str:
+        """STT via the configured backend, falling back to Guaardvark's voice API."""
+        if self._voice_backend() == "pi-omni":
+            try:
+                return (await self.api.speech_to_text_router(wav_bytes)).strip()
+            except APIError as e:
+                if e.status_code == 400:
+                    raise  # no speech detected — do not mask it with a fallback attempt
+                logger.warning("pi-omni STT failed (%s); using Guaardvark voice API", e)
+            except Exception as e:
+                logger.warning("pi-omni STT unavailable (%s); using Guaardvark voice API", e)
+        result = await self.api.speech_to_text(wav_bytes)
+        return (result.get("text", "") or "").strip()
+
     async def process_audio(self, pcm_data: bytes, user_id: int, display_name: str = ""):
         """Process a completed utterance: STT -> LLM -> TTS -> playback."""
         self._processing = True
@@ -185,14 +208,13 @@ class VoiceHandler:
             wav_bytes = pcm_to_wav(pcm_data)
             t0 = time.monotonic()
             try:
-                stt_result = await self.api.speech_to_text(wav_bytes)
+                text = (await self._transcribe(wav_bytes)).strip()
             except APIError as e:
                 # 400 = "No speech detected" — benign (breath, cough, keyboard noise)
                 if e.status_code == 400:
                     logger.debug("No speech in %.1fs utterance from %s", utt_seconds, display_name)
                     return
                 raise
-            text = stt_result.get("text", "").strip()
             if not text:
                 return
             stt_s = time.monotonic() - t0
@@ -248,7 +270,18 @@ class VoiceHandler:
 
     async def speak(self, text: str):
         """TTS the text and play it in the connected voice channel."""
-        tts_result = await self.api.text_to_speech(text, voice=self.config.get("voice", {}).get("tts_voice", "ryan"))
+        voice_cfg = self.config.get("voice", {}) or {}
+        if self._voice_backend() == "pi-omni":
+            voice = voice_cfg.get("router_tts_voice") or "af_heart"
+            try:
+                wav_audio = await self.api.text_to_speech_router(text, voice=voice)
+                logger.info("Voice TTS via pi-omni router (voice=%s, %d bytes)", voice, len(wav_audio))
+                await self._play_audio(wav_audio)
+                return
+            except Exception as e:
+                logger.warning("pi-omni TTS failed (%s); using Guaardvark voice API", e)
+        # Guaardvark Audio Foundry (default)
+        tts_result = await self.api.text_to_speech(text, voice=voice_cfg.get("tts_voice", "ryan"))
         audio_url = tts_result.get("audio_url")
         if not audio_url and tts_result.get("filename"):
             audio_url = f"/api/voice/audio/{tts_result['filename']}"

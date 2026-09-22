@@ -1,7 +1,7 @@
 bot:
   token: "${DISCORD_BOT_TOKEN}"
   # Guaardvark Discord server — enables instant slash-command sync on boot
-  guild_id: 1481468315187810306
+  guild_id: "1540529554991354017"
 
 api:
   base_url: "http://localhost:${FLASK_PORT:-5002}/api"
@@ -26,9 +26,17 @@ rate_limits:
 
 voice:
   enabled: true
+  # STT/TTS backend. "guaardvark" (default) uses Guaardvark's own Audio Foundry;
+  # "pi-omni" routes through an external OpenAI-compatible voice router
+  # (whisper.cpp + Kokoro at router_url), falling back to Guaardvark when that
+  # router is unreachable.
+  backend: "guaardvark"
+  router_url: "http://localhost:8081"  # only used when backend: pi-omni
   silence_threshold_ms: 1500
   max_listen_duration_s: 30
-  tts_voice: "ryan"
+  tts_voice: "ryan"  # Guaardvark/Piper voice
+  router_tts_voice: "af_heart"  # pi-omni/Kokoro voice
+  join_greeting: ""  # spoken welcome on /voice join (empty = silent)
   interrupt_on_speech: true  # barge-in not implemented yet (reserved)
   min_utterance_ms: 400  # discard blips shorter than this (coughs, key clicks)
 
@@ -41,7 +49,7 @@ conversation:
   max_history: 50
 
 channel_chat:
-  channel_ids: []  # Add channel IDs where the bot listens to all messages
+  channel_ids: ["1540532313627172924"]  # Add channel IDs where the bot listens to all messages
   respond_to_mentions: true  # Respond when @mentioned in any channel or when replying to bot messages
 
 vip:
