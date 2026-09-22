@@ -92,6 +92,41 @@ class ServoController:
             except Exception as e:
                 logger.debug(f"servo calibration load skipped: {e}")
 
+        # Coordinate convention. An explicit value in vision_config always wins —
+        # that is how a hand-measured row and the eye bake-off's deliberate
+        # overrides keep working. Everything else asks the capability resolver
+        # rather than falling back to a silent "xy", which contradicted the very
+        # prompt this class sends ("box_2d: [y1, x1, y2, x2]") and, on any model
+        # without its own row, clicked with the axes swapped. Measured on
+        # gemma4:e4b: 326px median error read the wrong way against 63px read
+        # the right way, on the same frames.
+        self._coords = None
+        if not self._vision_config.get("coord_order"):
+            try:
+                from backend.services.model_capability_resolver import coords_for
+                conv = coords_for(getattr(analyzer, "default_model", "") or "",
+                                  (self.screen_w, self.screen_h))
+                self._coords = conv
+                if conv.order:
+                    self._vision_config = dict(self._vision_config)
+                    self._vision_config["coord_order"] = conv.order
+                    if conv.grid:
+                        self._vision_config.setdefault("internal_width", conv.grid)
+                    logger.info(
+                        "Servo coordinate convention for %s: %s/%s (%s, confidence %.2f)",
+                        getattr(analyzer, "default_model", "?"), conv.order, conv.grid,
+                        conv.source, conv.confidence,
+                    )
+                else:
+                    logger.warning(
+                        "Servo has no known coordinate convention for %s (%s) — clicks "
+                        "will be refused rather than guessed. Run "
+                        "backend.tools.probe_coord_order.",
+                        getattr(analyzer, "default_model", "?"), conv.source,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("coordinate convention lookup skipped: %s", e)
+
         logger.info(f"Servo initialized for {self.screen_w}x{self.screen_h} screen")
 
     def _apply_calibration(self, x: int, y: int) -> Tuple[int, int]:
@@ -616,6 +651,19 @@ class ServoController:
         # previous target's model output in the servo log.
         self._last_raw_response = ""
         self._last_parse_path = ""
+
+        # No known convention means no click. Reading a model's numbers with the
+        # wrong axis order does not fail loudly — it lands a plausible click on
+        # the wrong thing and reports success, which is worse than not clicking.
+        if self._coords is not None and self._coords.order is None:
+            self._last_failure_reason = "coord_convention_unknown"
+            logger.warning(
+                "Servo refusing to click: no measured coordinate convention for %s. "
+                "Run backend.tools.probe_coord_order against this model.",
+                getattr(self.analyzer, "default_model", "?"),
+            )
+            return None
+
         prompt_pass1 = (
             f"Detect the {target}. Reply with ONLY a JSON list "
             f'[{{"box_2d": [y1, x1, y2, x2], "label": "{target}"}}] '
