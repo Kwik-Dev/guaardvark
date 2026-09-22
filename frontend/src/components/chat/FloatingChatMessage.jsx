@@ -8,6 +8,7 @@ import {
   Tooltip,
   useTheme,
 } from "@mui/material";
+import { alpha } from "@mui/material/styles";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import ThinkingCard from "./ThinkingCard";
@@ -140,7 +141,9 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           <Box
             sx={{
               maxWidth: "85%",
-              bgcolor: "primary.main",
+              // Half-opaque so the bubble reads over whatever the floating
+              // card is sitting on without hiding it entirely.
+              bgcolor: alpha(theme.palette.primary.main, 0.5),
               color: "#fff",
               borderRadius: "12px 12px 2px 12px",
               px: 1.5,
@@ -194,12 +197,12 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
       <Box
         sx={{
           maxWidth: "85%",
+          // Half-opaque paper: the old 6% tint let text get lost against
+          // bright page content behind the floating card.
           bgcolor:
             m.role === "system"
               ? "error.dark"
-              : theme.palette.mode === "dark"
-              ? "rgba(255,255,255,0.06)"
-              : "rgba(0,0,0,0.04)",
+              : alpha(theme.palette.background.paper, 0.5),
           color: m.role === "system" ? "#fff" : "text.primary",
           borderRadius: "12px 12px 12px 2px",
           px: 1.5,
