@@ -356,6 +356,9 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
           iterations: data.iterations || 0,
           aborted: data.aborted || false,
           sessionId: data.session_id,
+          // The turn's id. chat:message_saved names the database row by it
+          // once the reply is written, which is what a thumb refers to.
+          requestId: data.request_id || null,
           tokenUsage: data.token_usage || null,
           generatedImages: mergedImages,
           // Cleared on completion — persisting the last "Calling LLM..."

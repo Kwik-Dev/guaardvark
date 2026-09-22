@@ -16,6 +16,7 @@ Memory tiers in this app are intentionally separate:
 """
 
 import json
+import threading
 import logging
 import uuid
 from datetime import datetime
@@ -738,6 +739,19 @@ def get_memories_for_context(
         )
 
 
+# The ids behind the last memory block built on this thread. Feedback on a
+# reply needs to know which memories shaped it; the block itself is prose and
+# the chat engine must not re-run the query. Pop, never peek: a reused worker
+# thread must not hand one request's selection to the next.
+_LAST_SELECTED = threading.local()
+
+
+def pop_last_selected_ids() -> list:
+    ids = list(getattr(_LAST_SELECTED, "ids", None) or [])
+    _LAST_SELECTED.ids = []
+    return ids
+
+
 def _get_memories_for_context_inner(
     limit: int = 20,
     max_tokens: int = 500,
@@ -757,6 +771,7 @@ def _get_memories_for_context_inner(
         workspace_root=workspace_root,
         cli_working_memory=cli_working_memory,
     )
+    _LAST_SELECTED.ids = [m.id for m in (memories or [])]
 
     if not memories:
         return ""

@@ -130,6 +130,69 @@ VISION_PATTERNS = re.compile(
 # AgentBrain
 # ---------------------------------------------------------------------------
 
+def _brain_provenance(request_id: str, tier: int, model, thinking_steps, eye=None) -> Dict[str, Any]:
+    """Provenance for a reply the brain saved itself (reflex, screen-direct,
+    deliberate): the same keys the chat engine writes, so feedback treats
+    every path alike. Recipe usage and agent tasks are drained from the
+    agent service, as the engine does."""
+    prov: Dict[str, Any] = {"request_id": request_id or "", "tier": int(tier)}
+    if model:
+        prov["model"] = model
+    if eye:
+        prov["eye"] = eye
+    tools = []
+    for st in thinking_steps or []:
+        for name in (st or {}).get("tools") or []:
+            if name not in tools:
+                tools.append(name)
+    if tools:
+        prov["tools"] = tools
+    try:
+        from backend.services.agent_control_service import get_agent_control_service
+        prov.update(get_agent_control_service().drain_recipe_usage())
+    except Exception:
+        pass
+    return prov
+
+
+def _persist_turn(app, session_id: str, role: str, content: str, extra: Optional[Dict[str, Any]],
+                  emit_fn: Optional[Callable] = None, request_id: str = "", project_id=None) -> Optional[int]:
+    """Write one chat row and, for an assistant row, announce its id.
+
+    One helper for the three brain paths that used to carry their own copy
+    of this block; `chat:message_saved` is what lets the client attach a
+    thumb to the row rather than to a content prefix. Best effort: a failed
+    save is logged and never surfaces to the user.
+    """
+    if not app or not content:
+        return None
+    new_id = None
+    try:
+        with app.app_context():
+            from backend.models import LLMMessage, db
+            msg = LLMMessage(
+                session_id=session_id,
+                role=role,
+                content=content,
+                extra_data=extra or None,
+                project_id=project_id,
+                timestamp=datetime.now(),
+            )
+            db.session.add(msg)
+            db.session.commit()
+            new_id = msg.id
+    except Exception:
+        logger.exception("Failed to persist %s turn for session %s", role, session_id)
+        return None
+    if role == "assistant":
+        try:
+            from backend.services.unified_chat_engine import emit_message_saved
+            emit_message_saved(emit_fn, session_id, request_id, new_id, role)
+        except Exception:
+            pass
+    return new_id
+
+
 class AgentBrain:
     """
     Three-tier agent router.  Single entry point for all chat/agent
@@ -172,7 +235,12 @@ class AgentBrain:
             force_tier: Override tier routing (for agent_chat_api, testing)
         """
         start_time = time.monotonic()
-        request_id = str(uuid.uuid4())
+        # Reuse the id the HTTP layer minted (it is already in the client's
+        # ack); mint one only for callers that did not. Every exit below emits
+        # and saves under this one id.
+        request_id = str((options or {}).get("request_id") or "") or str(uuid.uuid4())
+        if isinstance(options, dict):
+            options["request_id"] = request_id
         tier_used = 0
         tools_called: List[str] = []
         tool_params_log: List[Dict] = []
@@ -294,7 +362,7 @@ class AgentBrain:
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
-                    budget=budget,
+                    budget=budget, request_id=request_id,
                 )
 
             # -- Tier 1: Reflexes (<1ms check, <100ms execute) --
@@ -312,6 +380,21 @@ class AgentBrain:
                             emit_fn, session_id, result.response, request_id
                         )
                         budget.charge(1, 1, "tier1 reflex")
+                        # A reflex reply is still a reply: persisted (after the
+                        # emit, so latency is unchanged) so it survives a
+                        # refresh and can be thumbed like any other.
+                        if app and (options or {}).get("persist", True) is not False:
+                            _persist_turn(app, session_id, "user", message, None,
+                                          project_id=project_id)
+                            _persist_turn(
+                                app, session_id, "assistant", result.response,
+                                {"provenance": {
+                                    "request_id": request_id, "tier": 1,
+                                    "reflex": reflex_action.name,
+                                    "tools": [result.tool_called] if result.tool_called else [],
+                                }},
+                                emit_fn=emit_fn, request_id=request_id, project_id=project_id,
+                            )
                         return self._build_result(
                             result.response, session_id, request_id, tier=1,
                         )
@@ -361,7 +444,7 @@ class AgentBrain:
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
-                    budget=budget,
+                    budget=budget, request_id=request_id,
                 )
 
             # -- Default: Tier 2 (single-shot with tools) --
@@ -395,7 +478,7 @@ class AgentBrain:
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
                     initial_context=result,
-                    budget=budget,
+                    budget=budget, request_id=request_id,
                 )
 
             return result
@@ -589,35 +672,27 @@ class AgentBrain:
 
             # Save assistant response (with generated images for persistence)
             if app and response:
-                with app.app_context():
-                    try:
-                        from backend.models import LLMMessage, db
-                        from datetime import datetime as _dt
-                        clean = re.sub(r'<[^>]*>', '', response).strip()
-                        extra = {}
-                        if generated_images:
-                            extra["generatedImages"] = generated_images
-                        try:
-                            agent_thinking_steps = acs.drain_thinking_steps()
-                            logger.debug(
-                                f"[EMIT-HANDOFF][BRAIN_DRAIN] gemma4_direct drain returned {len(agent_thinking_steps)} steps"
-                            )
-                            if agent_thinking_steps:
-                                extra["agentThinkingSteps"] = agent_thinking_steps
-                        except Exception:
-                            pass
-                        content = clean if not clean.startswith("{") else f"[Action] {response}"
-                        msg = LLMMessage(
-                            session_id=session_id,
-                            role="assistant",
-                            content=content,
-                            extra_data=extra or None,
-                            timestamp=_dt.now(),
-                        )
-                        db.session.add(msg)
-                        db.session.commit()
-                    except Exception:
-                        pass
+                clean = re.sub(r'<[^>]*>', '', response).strip()
+                extra = {}
+                if generated_images:
+                    extra["generatedImages"] = generated_images
+                agent_thinking_steps = []
+                try:
+                    agent_thinking_steps = acs.drain_thinking_steps()
+                    logger.debug(
+                        f"[EMIT-HANDOFF][BRAIN_DRAIN] screen_direct drain returned {len(agent_thinking_steps)} steps"
+                    )
+                    if agent_thinking_steps:
+                        extra["agentThinkingSteps"] = agent_thinking_steps
+                except Exception:
+                    pass
+                be = getattr(acs, "_brain_eye", None)
+                extra["provenance"] = _brain_provenance(
+                    request_id, 0, getattr(be, "brain", None), agent_thinking_steps,
+                    eye=getattr(be, "eye", None))
+                content = clean if not clean.startswith("{") else f"[Action] {response}"
+                _persist_turn(app, session_id, "assistant", content, extra,
+                              emit_fn=emit_fn, request_id=request_id, project_id=project_id)
 
             return {
                 "success": True,
@@ -1130,6 +1205,7 @@ class AgentBrain:
         image_url: str = None,
         is_voice_message: bool = False,
         budget: Optional[StepBudget] = None,
+        request_id: str = "",
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -1218,31 +1294,20 @@ class AgentBrain:
             except Exception:
                 pass
 
-            self._emit_response(emit_fn, session_id, response_text, "")
+            self._emit_response(emit_fn, session_id, response_text, request_id or "")
 
             # Persist the assistant turn (Tier 3 direct path bypasses legacy
             # UnifiedChatEngine which normally does the save + drain). Mirrors
-            # the save block in gemma4 direct and the legacy engine.
+            # the save block in the screen-direct path and the legacy engine.
             if app and response_text:
-                with app.app_context():
-                    try:
-                        from backend.models import LLMMessage, db
-                        from datetime import datetime as _dt
-                        clean = re.sub(r'<[^>]*>', '', response_text).strip()
-                        extra = {}
-                        if agent_thinking_steps:
-                            extra["agentThinkingSteps"] = agent_thinking_steps
-                        msg = LLMMessage(
-                            session_id=session_id,
-                            role="assistant",
-                            content=clean or response_text,
-                            extra_data=extra or None,
-                            timestamp=_dt.now(),
-                        )
-                        db.session.add(msg)
-                        db.session.commit()
-                    except Exception:
-                        pass
+                clean = re.sub(r'<[^>]*>', '', response_text).strip()
+                extra = {}
+                if agent_thinking_steps:
+                    extra["agentThinkingSteps"] = agent_thinking_steps
+                extra["provenance"] = _brain_provenance(
+                    request_id, 3, getattr(self.state.llm, "model", None), agent_thinking_steps)
+                _persist_turn(app, session_id, "assistant", clean or response_text, extra,
+                              emit_fn=emit_fn, request_id=request_id, project_id=project_id)
 
             return {
                 "success": result.success,

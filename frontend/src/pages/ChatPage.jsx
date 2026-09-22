@@ -314,6 +314,31 @@ const ChatPage = () => {
     };
   }, [socketRef?.current, sessionId]);
 
+  // chat:message_saved — the backend writes the assistant row after
+  // chat:complete, so the row id arrives on its own event. Attach it to the
+  // message with the same request_id (never touching `id`, the React key). If
+  // the event lands before the message is appended, park the id by request_id
+  // and let the append pick it up.
+  const pendingSavedIdsRef = useRef({});
+  useEffect(() => {
+    const socket = socketRef?.current;
+    if (!socket || !sessionId) return;
+    const handleSaved = (data) => {
+      if (!data || data.session_id !== sessionId || data.role !== "assistant") return;
+      if (!data.request_id || data.message_id == null) return;
+      pendingSavedIdsRef.current[data.request_id] = data.message_id;
+      setMessages((prev) => prev.map((m) => (
+        m.role === "assistant" && m.request_id === data.request_id && m.message_id == null
+          ? { ...m, message_id: data.message_id }
+          : m
+      )));
+    };
+    socket.on("chat:message_saved", handleSaved);
+    return () => {
+      socket.off("chat:message_saved", handleSaved);
+    };
+  }, [socketRef?.current, sessionId]);
+
   // chat:error on the composer — oversized attachments (and any other socket
   // refusal) used to vanish with no UI. Attached on the raw socket so it does
   // not contend with StreamingMessage's UnifiedChatService.onError slot.
@@ -712,6 +737,11 @@ const ChatPage = () => {
                   ...msg,
                   isLocal: false,
                   status: "persisted",
+                  // The database row and the turn it came from: what a thumb
+                  // names. History rows carry both; live rows get them from
+                  // chat:complete and chat:message_saved.
+                  message_id: typeof msg.id === "number" ? msg.id : (msg.message_id ?? null),
+                  request_id: msg.request_id ?? msg.extra_data?.provenance?.request_id ?? null,
                   // Hydrate fields that MessageItem reads as top-level props from
                   // their persisted form inside extra_data. The backend saves
                   // agentThinkingSteps and tool-call steps under extra_data on
@@ -2303,6 +2333,8 @@ const ChatPage = () => {
                 const completedMessage = {
                   id: `asst_unified_${Date.now()}`,
                   role: "assistant",
+                  request_id: result.requestId || null,
+                  message_id: result.requestId ? (pendingSavedIdsRef.current[result.requestId] ?? null) : null,
                   content: result.content || "",
                   toolCalls: result.toolCalls || [],
                   isUnifiedChat: true,

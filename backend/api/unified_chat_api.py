@@ -114,6 +114,9 @@ def unified_chat():
     if project_root:
         options["project_root"] = str(project_root)
     options = _merge_session_mode_options(session_id, options)
+    # The same id must reach the brain and the engine, so the ack, the socket
+    # events and the saved row all name one turn.
+    options["request_id"] = request_id
 
     # Also forward to direct-tool for slash commands etc.
     if project_root and "project_root" not in options:

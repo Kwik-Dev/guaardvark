@@ -1710,6 +1710,25 @@ def _artifact_for_result(res) -> Optional[Dict[str, Any]]:
     return artifact
 
 
+def emit_message_saved(emit_fn, session_id: str, request_id, message_id, role: str = "assistant") -> None:
+    """Tell the client which database row a reply became.
+
+    `chat:complete` is emitted before the assistant row is written, so it
+    cannot carry the id; this follows it. The client matches on request_id.
+    """
+    if not emit_fn or message_id is None:
+        return
+    try:
+        emit_fn("chat:message_saved", {
+            "session_id": session_id,
+            "request_id": request_id or "",
+            "message_id": message_id,
+            "role": role,
+        })
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"chat:message_saved emit failed (non-fatal): {e}")
+
+
 class UnifiedChatEngine:
     """Core engine combining RAG + tools + conversation in one ReACT loop."""
 
@@ -1740,10 +1759,16 @@ class UnifiedChatEngine:
         Returns:
             Result dict with response, iterations, steps
         """
-        request_id = str(uuid.uuid4())
+        # One id per turn, minted by whoever received the request (the HTTP
+        # layer or the brain) and reused here, so the ack, chat:complete and
+        # the saved row all agree. Feedback resolves a reply by this id.
+        request_id = str((options or {}).get("request_id") or "") or str(uuid.uuid4())
         clear_abort_flag(session_id)
         clear_task_scoped_tool_grants(session_id)
         steps = []
+        self._request_id = request_id
+        self._emit_fn = emit_fn
+        self._prov = {"request_id": request_id, "tier": int((options or {}).get("tier", 2) or 2)}
 
         try:
             # Store app reference for thread-safe DB access in helper methods
@@ -1964,6 +1989,7 @@ class UnifiedChatEngine:
 
         # 3. Route-aware tool selection (skipped for social / skip_tools path)
         model_name = getattr(self.llm, "model", "unknown")
+        self._prov_note("model", model_name)
         _skip_tools = bool(getattr(self, "_skip_tools", False) or options.get("skip_tools"))
 
         if _skip_tools:
@@ -4798,16 +4824,20 @@ class UnifiedChatEngine:
             project_id = getattr(self, '_project_id', None)
             results = search_with_llamaindex(query, project_id=project_id)
             chunks = []
+            sources = []
             for r in results or []:
                 source = r.get("metadata", {}).get("source_filename", "Unknown")
                 text = cut_on_whitespace(r.get("text", ""), 500)
                 chunks.append(f"[Source: {source}]\n{text}")
+                sources.append(str(source))
             try:
                 from backend.services.knowledge_sources import retrieve_from_sources
                 for hit in retrieve_from_sources(query):
                     chunks.append(f"[Source: {hit['title']}]\n{cut_on_whitespace(hit['snippet'], 500)}")
+                    sources.append("ks:" + str(hit.get("title", "")))
             except Exception as e:
                 logger.debug(f"Knowledge source retrieval skipped: {e}")
+            self._prov_note("rag_sources", list(dict.fromkeys(sources))[:10])
             return "\n\n".join(chunks)
         except Exception as e:
             logger.debug(f"RAG retrieval skipped: {e}")
@@ -5041,6 +5071,8 @@ class UnifiedChatEngine:
                 )
             if memory_text:
                 memory_block = f"\n\n{memory_text}"
+            from backend.api.memory_api import pop_last_selected_ids
+            self._prov_note("memory_ids", pop_last_selected_ids())
         except Exception:
             pass  # Memory system unavailable — no impact on chat
 
@@ -5231,11 +5263,64 @@ You are a private, local AI assistant running on the user's own hardware. There 
         text = re.sub(r"https?://[^\s)\]<>\"']*oaiusercontent[^\s)\]<>\"']*", "[remote image removed]", text)
         return text
 
+    def _prov_note(self, key: str, value) -> None:
+        """Record one fact about how the current reply is being produced."""
+        try:
+            if not isinstance(getattr(self, "_prov", None), dict):
+                self._prov = {}
+            self._prov[key] = value
+        except Exception:
+            pass
+
+    def _provenance_for_save(self, extra_data: Optional[Dict]) -> Dict[str, Any]:
+        """The provenance block for an assistant row: what produced this reply.
+
+        Feedback on the reply flows back to these sources (memories, recipe,
+        rule), so a thumb teaches the thing that shaped the answer instead of
+        being filed against a line of text. Stable keys; missing facts are
+        simply absent.
+        """
+        prov = dict(getattr(self, "_prov", None) or {})
+        prov.setdefault("request_id", getattr(self, "_request_id", None))
+        prov.setdefault("tier", 2)
+        try:
+            bs = getattr(self, "_brain_state", None)
+            if bs is not None and getattr(bs, "persona_rule_id", None) is not None:
+                prov.setdefault("rule_id", bs.persona_rule_id)
+        except Exception:
+            pass
+        tools = []
+        for step in (extra_data or {}).get("steps") or []:
+            for tc in (step or {}).get("tool_calls") or []:
+                name = (tc or {}).get("tool_name") or (tc or {}).get("name")
+                if name and name not in tools:
+                    tools.append(name)
+        if tools:
+            prov["tools"] = tools
+        try:
+            from backend.services.agent_control_service import get_agent_control_service
+            prov.update(get_agent_control_service().drain_recipe_usage())
+        except Exception:
+            pass
+        return prov
+
     def _save_message(self, session_id: str, role: str, content: str,
-                      extra_data: Optional[Dict] = None):
-        """Save a message to the database (thread-safe with app context)."""
+                      extra_data: Optional[Dict] = None) -> Optional[int]:
+        """Save a message to the database (thread-safe with app context).
+
+        Assistant rows carry their provenance and announce their id with
+        `chat:message_saved`, which is how the client learns which row a
+        thumb refers to (chat:complete fires before the row exists).
+        Returns the new row id, or None when the save failed.
+        """
         if role == "assistant":
             content = self._strip_remote_image_urls(content)
+            try:
+                extra_data = dict(extra_data or {})
+                extra_data["provenance"] = self._provenance_for_save(extra_data)
+            except Exception:
+                pass
+        new_id = None
         try:
             from flask import has_app_context
             from backend.models import LLMSession, LLMMessage, db
@@ -5269,6 +5354,7 @@ You are a private, local AI assistant running on the user's own hardware. There 
                 )
                 db.session.add(msg)
                 db.session.commit()
+                new_id = msg.id
                 logger.debug(f"Saved {role} message to session {session_id}")
             finally:
                 if ctx:
@@ -5280,6 +5366,10 @@ You are a private, local AI assistant running on the user's own hardware. There 
                 db.session.rollback()
             except Exception:
                 pass
+        if new_id is not None and role == "assistant":
+            emit_message_saved(getattr(self, "_emit_fn", None), session_id,
+                               getattr(self, "_request_id", None), new_id, role)
+        return new_id
 
     def _maybe_summarize_session(self, session_id: str, keep_recent: int = 24, chunk_size: int = 24):
         """Persist a compact summary for older messages in active chat sessions."""

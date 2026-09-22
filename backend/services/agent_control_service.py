@@ -415,6 +415,10 @@ class AgentControlService:
         # label, reasoning} shape. unified_chat_engine drains this when saving
         # the assistant message so the trail survives a page refresh.
         self._thinking_steps_buffer: List[Dict[str, Any]] = []
+        # What execute_task ran this turn: recipe hits, fallbacks and plain
+        # tasks. Drained into the reply's provenance at save time, the same
+        # way the thinking trail is, so feedback can reach the recipe.
+        self._recipe_usage_buffer: List[Dict[str, Any]] = []
 
     def _emit_thinking(self, iteration: int, label: str, reasoning: str) -> None:
         """Stream a per-step reasoning blob to the chat. No-ops when emit_fn unset
@@ -451,6 +455,25 @@ class AgentControlService:
             logger.debug(f"[EMIT-HANDOFF][ACS_EMIT] chat:thinking(source=agent_loop) emitted for iter={iteration}")
         except Exception as e:
             logger.debug(f"_emit_thinking failed (non-fatal): {e}")
+
+    def note_recipe_usage(self, task: str, name: Optional[str] = None, fallback: bool = False) -> None:
+        try:
+            self._recipe_usage_buffer.append({"task": task, "name": name, "fallback": bool(fallback)})
+        except Exception:
+            pass
+
+    def drain_recipe_usage(self) -> Dict[str, Any]:
+        """Return {"recipe": last recipe used or None, "agent_tasks": [...]} and clear."""
+        entries = list(self._recipe_usage_buffer)
+        self._recipe_usage_buffer.clear()
+        out: Dict[str, Any] = {}
+        tasks = [e["task"] for e in entries if e.get("task")]
+        if tasks:
+            out["agent_tasks"] = tasks
+        recipes = [e for e in entries if e.get("name")]
+        out["recipe"] = ({"name": recipes[-1]["name"], "fallback": recipes[-1]["fallback"]}
+                         if recipes else None)
+        return out
 
     def drain_thinking_steps(self) -> List[Dict[str, Any]]:
         """Return the accumulated thinking steps and clear the buffer.
@@ -707,14 +730,19 @@ class AgentControlService:
         # Check for recipe match — skip see-think-act loop for known patterns
         recipe_result = self._try_recipe(task, screen)
         if recipe_result is not None:
+            _rname = (recipe_result.reason or "").replace("recipe:", "", 1).strip() or None
             if recipe_result.success:
+                self.note_recipe_usage(task, _rname, fallback=False)
                 with self._lock:
                     if self._active_task_id == task_id:
                         self._active = False
                 return finish(recipe_result)
             else:
+                self.note_recipe_usage(task, _rname, fallback=True)
                 self._action_history.extend(recipe_result.steps)
                 self._recipe_fallback_note = f"Tried recipe {recipe_result.reason} but it failed. Continuing manually."
+        elif not self._recipe_usage_buffer or self._recipe_usage_buffer[-1].get("task") != task:
+            self.note_recipe_usage(task)
 
         # Training mode: crank up limits so the agent keeps practicing
         max_iters = 1000 if training_mode else self.config.max_iterations
@@ -3524,6 +3552,7 @@ Reply ONLY with JSON:
             self._recipe_fallback_note = (
                 f"recipe_fallback:{name},proof_failed={proof_failed},failed_steps={len(failed_steps)}"
             )
+            self.note_recipe_usage(getattr(self, "_current_task", "") or "", name, fallback=True)
             self._action_history = action_steps
             # Tell the model what was just attempted so it pivots instead of
             # repeating the same recipe step blindly.

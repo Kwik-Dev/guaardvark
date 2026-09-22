@@ -24,6 +24,11 @@ If you have access to relevant documents for the query, use them to inform your 
 Otherwise, use web search to get current information."""
 
 
+# The rule id behind the persona most recently fetched, so a reply's provenance
+# can name the rule that shaped it (feedback blames sources, not prose).
+LAST_PERSONA_RULE_ID: Optional[int] = None
+
+
 def get_active_system_prompt(model_name: Optional[str] = None) -> Optional[str]:
     """The chat persona, or None when no active rule supplies one.
 
@@ -46,6 +51,8 @@ def get_active_system_prompt(model_name: Optional[str] = None) -> Optional[str]:
         text, _rule_id = rule_utils.get_active_system_prompt(
             GLOBAL_DEFAULT_SYSTEM_PROMPT_RULE_NAME, db.session, model_name
         )
+        global LAST_PERSONA_RULE_ID
+        LAST_PERSONA_RULE_ID = _rule_id if text else None
         return text or None
     except Exception as e:  # noqa: BLE001 - a missing persona must never break chat
         logger.debug("No active system prompt: %s", e)

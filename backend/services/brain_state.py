@@ -442,9 +442,11 @@ class BrainState:
         """Pre-render system prompt prefix templates (live blocks filled at request time)."""
 
         persona = ""
+        self.persona_rule_id = None
         try:
-            from backend.utils.chat_utils import get_active_system_prompt
-            persona = get_active_system_prompt() or ""
+            from backend.utils import chat_utils
+            persona = chat_utils.get_active_system_prompt() or ""
+            self.persona_rule_id = chat_utils.LAST_PERSONA_RULE_ID if persona else None
         except Exception:
             pass
 
