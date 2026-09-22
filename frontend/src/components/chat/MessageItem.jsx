@@ -2,7 +2,7 @@
 // Version 1.1: Renders a single message bubble with appropriate styling.
 // Added support for agent loop messages with step-by-step visualization.
 /* eslint-env browser */
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import PropTypes from "prop-types";
 import { Box, Paper, Avatar, CardMedia, Chip, CircularProgress, Typography } from "@mui/material";
 import ReactMarkdown from "react-markdown";
@@ -138,27 +138,61 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
     }
   }, [message.content]);
 
+  // What the last thumb taught, shown for a moment under the action bar.
+  const [taughtNote, setTaughtNote] = useState("");
+  const taughtTimerRef = useRef(null);
+  useEffect(() => () => { if (taughtTimerRef.current) clearTimeout(taughtTimerRef.current); }, []);
+  // Re-sync the icon if the persisted stamp changes under us (history reload).
+  useEffect(() => {
+    const v = message?.extra_data?.feedback;
+    if (v === "up" || v === "down") setFeedback(v);
+  }, [message?.extra_data?.feedback]);
+
+  // The database row this reply became: from history (`id` is the row id) or
+  // from chat:message_saved (`message_id`). A thumb names it; the backend
+  // resolves by request_id when the row is not known yet.
+  const dbMessageId = message.message_id ?? (typeof message.id === "number" ? message.id : null);
+
   const handleFeedback = useCallback(async (positive) => {
     const newVal = positive ? "up" : "down";
-    if (feedback === newVal) { setFeedback(null); return; }
-    setFeedback(newVal);
+    // Clicking the lit thumb withdraws the verdict; the backend reverses
+    // what it taught.
+    const verdict = feedback === newVal ? "none" : newVal;
+    const previous = feedback;
+    setFeedback(verdict === "none" ? null : verdict);
     try {
       const content = typeof message.content === "string" ? message.content : "";
-      await fetch(`${BASE_URL}/agent-control/feedback`, {
+      const res = await fetch(`${BASE_URL}/agent-control/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          positive,
+          verdict,
+          kind: "response",
+          message_id: dbMessageId,
+          request_id: message.request_id || null,
           task: content.slice(0, 200),
           session_id: effectiveSessionId,
           type: "response",
           lesson_id: activeLessonId || undefined,
+          // The why channel: wired through the API and storage now; the
+          // input that fills these arrives with the dedicated feature.
+          why_text: null,
+          why_tags: [],
         }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.success === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      const labels = (data?.taught || []).map((t) => t?.label).filter(Boolean);
+      if (labels.length) {
+        setTaughtNote(labels.join(" · "));
+        if (taughtTimerRef.current) clearTimeout(taughtTimerRef.current);
+        taughtTimerRef.current = setTimeout(() => setTaughtNote(""), 5000);
+      }
     } catch (err) {
       console.error("Feedback failed:", err);
+      setFeedback(previous);
     }
-  }, [feedback, message.content, effectiveSessionId, activeLessonId]);
+  }, [feedback, message.content, message.request_id, dbMessageId, effectiveSessionId, activeLessonId]);
 
   const openLightbox = useCallback((url, name, images, index) => {
     setLightbox({ url, name, images: images || [{ url, name }], index: index || 0 });
@@ -634,6 +668,9 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
                     durationMs={tc.duration_ms}
                     isPending={false}
                     sessionId={effectiveSessionId}
+                    messageId={dbMessageId}
+                    requestId={message.request_id || null}
+                    cardKey={`${stepIdx}.${tcIdx}`}
                   />
                 ))}
               </Box>
@@ -726,8 +763,9 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
             Response reached the output limit.
           </Typography>
         )}
-        {/* Feedback + narrate for assistant messages */}
-        {!isUser && message.content && typeof message.content === 'string' && message.content.length > 10 && (
+        {/* Feedback + narrate for assistant replies (not system/command rows) */}
+        {message.role === "assistant" && !isCommand && !isProgress && message.content && typeof message.content === 'string' && message.content.length > 10 && (
+          <>
           <Box sx={{ mt: 0.5, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 0.25 }}>
             {message.toolCalls && message.toolCalls.some(tc => tc.tool_name === "search_memory") && (
               <Tooltip title="Recalled from memory">
@@ -779,6 +817,12 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate }
             </Tooltip>
             {showNarrate && <NarrateButton text={message.content} voice={selectedVoice} size="small" />}
           </Box>
+          {taughtNote && (
+            <Typography variant="caption" sx={{ display: "block", textAlign: "right", fontSize: "0.65rem", color: "text.secondary", mt: 0.25 }}>
+              {taughtNote}
+            </Typography>
+          )}
+          </>
         )}
         {/* Source badge for Uncle Claude / Family / Self-Improvement responses */}
         {message.badge && (
@@ -848,6 +892,8 @@ MessageItem.propTypes = {
     truncated: PropTypes.bool,
     synthesized: PropTypes.bool,
     extra_data: PropTypes.object,
+    message_id: PropTypes.number,
+    request_id: PropTypes.string,
   }).isRequired,
   sessionId: PropTypes.string,
   onOrchestratorUpdate: PropTypes.func,

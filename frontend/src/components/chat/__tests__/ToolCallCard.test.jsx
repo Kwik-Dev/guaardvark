@@ -110,3 +110,42 @@ describe("ToolCallCard approval variants", () => {
     expect(onApproval).toHaveBeenCalledWith(false);
   });
 });
+
+describe("ToolCallCard feedback", () => {
+  const mount = (props) =>
+    render(
+      <ThemeProvider theme={createTheme()}>
+        <ToolCallCard
+          toolName="agent_task_execute"
+          params={{ task: "open youtube" }}
+          result={{ success: true, output: "done" }}
+          durationMs={1200}
+          isPending={false}
+          sessionId="sess-1"
+          messageId={42}
+          requestId="req-1"
+          cardKey="0.0"
+          {...props}
+        />
+      </ThemeProvider>
+    );
+
+  it("names the reply and withdraws on a second click", async () => {
+    const calls = [];
+    global.fetch = vi.fn(async (url, init) => {
+      calls.push(JSON.parse(init.body));
+      return { ok: true, status: 201, json: async () => ({ success: true, taught: [{ kind: "recipe_stat", label: "recipe x: 1 up / 0 down" }] }) };
+    });
+    mount();
+    fireEvent.click(screen.getByText("Did this work?").parentElement.querySelector("button"));
+    fireEvent.click(screen.getByText("Did this work?").parentElement.querySelector("button"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls[0]).toMatchObject({
+      verdict: "up", kind: "tool:agent_task_execute@0.0", type: "tool_action",
+      message_id: 42, request_id: "req-1", session_id: "sess-1", tool_name: "agent_task_execute",
+      task: "open youtube", why_text: null, why_tags: [],
+    });
+    expect(calls[1].verdict).toBe("none");
+    expect(await screen.findByText("recipe x: 1 up / 0 down")).toBeTruthy();
+  });
+});
