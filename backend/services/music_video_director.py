@@ -417,12 +417,11 @@ def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int
         {"role": "user", "content": user},
     ]
 
-    # ── OpenAI-compatible provider (cloud/remote model the chat bot uses) ──
+    # ── OpenAI-compatible provider (only with explicit cloud consent) ──
     try:
-        from backend.services import openai_provider
-        if openai_provider.available():
-            from backend.config import OPENAI_DEFAULT_MODEL
-            resp = openai_provider.chat(model=OPENAI_DEFAULT_MODEL, messages=messages, stream=False)
+        from backend.services import llm_provider, openai_provider
+        if llm_provider.is_openai_active():
+            resp = openai_provider.chat(model=llm_provider.get_openai_model(), messages=messages, stream=False)
             content = (resp.get("message", {}) or {}).get("content", "") or ""
             if content.strip():
                 return _parse_full_director_output(content, batch_len), content
