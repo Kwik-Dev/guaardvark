@@ -237,6 +237,7 @@ class LoopTest(unittest.TestCase):
         self.assertIsNotNone(s.click_target("dot")["correction"])
         self.assertIsNone(s.click_target("dot")["correction"])
         self.assertEqual(s._last_correction_skip, "session_cap(12)")
+        self.assertEqual(mock_archive.return_value.record.call_args.kwargs["correction_skip"], "session_cap(12)")
 
     def test_drift_is_clamped(self, _sleep, mock_archive):
         # Anchor at the centre of the screen: |v| = 0 so the bound is the eye's own noise.

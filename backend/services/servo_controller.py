@@ -286,6 +286,7 @@ class ServoController:
         """
         start = time.time()
         correction: Optional[CorrectionOutcome] = None
+        self._last_correction_skip = ""
 
         # 1. SEE — capture + vision-model coordinate estimate
         screenshot, _ = self.screen.capture()
@@ -565,6 +566,8 @@ class ServoController:
             metadata["truth"] = truth
         if corr_summary is not None:
             metadata["correction"] = corr_summary
+        else:
+            metadata["correction_skip"] = self._last_correction_skip
         metadata["attempt"] = attempt
         if self.collector:
             try:
@@ -606,6 +609,7 @@ class ServoController:
                 inference_ms=self._last_inference_ms,
                 truth=truth,
                 correction=corr_summary,
+                correction_skip="" if corr_summary else self._last_correction_skip,
             )
         except Exception as e:
             logger.debug(f"Archive record failed (non-fatal): {e}")

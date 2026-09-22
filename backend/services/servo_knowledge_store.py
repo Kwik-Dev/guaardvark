@@ -427,6 +427,7 @@ class ServoArchive:
         inference_ms: int = 0,
         truth: Optional[Dict[str, Any]] = None,
         correction: Optional[Dict[str, Any]] = None,
+        correction_skip: str = "",
     ):
         """Record a servo interaction to the universal archive."""
         entry = {
@@ -477,6 +478,10 @@ class ServoArchive:
         # why it stopped). ADDITIVE. With truth present both |estimate - truth|
         # and |final - truth| are computable per row, which is the shadow
         # measurement the default mode is decided from.
+        if correction_skip:
+            # Why the loop did not arm on this click (eye_accurate(13px<=24px),
+            # mode_off, session_cap, ...). Proves the gate reads the store.
+            entry["correction_skip"] = correction_skip
         if correction:
             entry["correction"] = correction
             tx, ty = (truth or {}).get("target_cx"), (truth or {}).get("target_cy")
