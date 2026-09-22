@@ -268,6 +268,30 @@ def ensure_lora_in_comfyui(lora_path: str) -> bool:
         return False
 
 
+# Engine list is a live /object_info query (a large payload). Cache it briefly so
+# a per-model listing does not fan out one probe per row, and so a down ComfyUI
+# does not cost a timeout per row. Short enough that starting/stopping the plugin
+# is picked up within a few seconds. Set the TTL to 0 to disable caching.
+_ENGINE_CACHE_TTL_SECONDS = float(
+    os.environ.get("GUAARDVARK_COMFYUI_ENGINE_CACHE_TTL", "5")
+)
+_ENGINE_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+
+def _engine_cache_get(comfy_url: str) -> list[str] | None:
+    if _ENGINE_CACHE_TTL_SECONDS <= 0:
+        return None
+    cached = _ENGINE_CACHE.get(comfy_url)
+    if cached is not None and (time.monotonic() - cached[0]) < _ENGINE_CACHE_TTL_SECONDS:
+        return list(cached[1])
+    return None
+
+
+def _engine_cache_put(comfy_url: str, engines: list[str]) -> None:
+    if _ENGINE_CACHE_TTL_SECONDS > 0:
+        _ENGINE_CACHE[comfy_url] = (time.monotonic(), list(engines))
+
+
 class ComfyUIImageGenerator:
     """Implements the storyboard ImageGenerator protocol with real LoRA support.
 
@@ -304,13 +328,22 @@ class ComfyUIImageGenerator:
         Queries the running server's ``/object_info`` — the authoritative source
         for where the live models are (an external Comfy Desktop install, not the
         bundled plugin dir). Returns engine tags like ``['zimage', 'flux-dev']``.
+
+        The result is cached for a few seconds (see ``_ENGINE_CACHE_TTL_SECONDS``)
+        so callers that must not block — and per-model listings — do not issue a
+        probe each time. An unreachable server caches an empty list for the same
+        TTL, so a down ComfyUI does not cost a timeout per model.
         """
+        cached = _engine_cache_get(self.comfy_url)
+        if cached is not None:
+            return cached
         try:
             resp = requests.get(f"{self.comfy_url}/object_info", timeout=5)
             resp.raise_for_status()
             info = resp.json()
         except Exception as e:
             logger.warning("ComfyUI object_info probe failed: %s", e)
+            _engine_cache_put(self.comfy_url, [])
             return []
 
         def _choices(node: str, key: str) -> list[str]:
@@ -340,6 +373,7 @@ class ComfyUIImageGenerator:
         if (FLUX_UNET in all_unet and FLUX_T5 in dual
                 and FLUX_CLIP in dual and FLUX_VAE in vae):
             engines.append("flux-schnell")
+        _engine_cache_put(self.comfy_url, engines)
         return engines
 
     # ── workflow ──────────────────────────────────────────────────────

@@ -73,9 +73,10 @@ def _resolve_cast_still_route(subject, lora_paths: list[str] | None = None) -> d
         resolve_inference_for_loras,
         subject_base_model_id,
     )
-    # Single source of truth for the Z-Image→ComfyUI opt-in flag (shared with
-    # character_still_pipeline and batch_image_generator).
-    from backend.services.character_still_pipeline import _zimage_via_comfyui_enabled
+    # Single source of truth for the Z-Image→ComfyUI opt-in flag — the same
+    # function character_still_pipeline and batch_image_generator delegate to.
+    from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+    _zimage_via_comfyui_enabled = zimage_via_comfyui_enabled
 
     lora_paths = [p for p in (lora_paths or []) if p]
     if lora_paths:

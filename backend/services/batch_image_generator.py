@@ -751,8 +751,9 @@ class BatchImageGenerator:
     # offline diffusers pipeline, so no separate model download is needed.
     @staticmethod
     def _zimage_via_comfyui_enabled() -> bool:
-        _v = os.environ.get("GUAARDVARK_ZIMAGE_USE_COMFYUI", "").strip().lower()
-        return _v in ("1", "true", "yes", "on")
+        from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+
+        return zimage_via_comfyui_enabled()
 
     @staticmethod
     def _is_zimage_model(model_key: str | None) -> bool:

@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 Source = Literal["chat", "cli", "batch", "discord", "video", "smoke", "agent"]
 
 
+def zimage_via_comfyui_enabled() -> bool:
+    """True when Z-Image stills render through ComfyUI instead of the offline
+    Diffusers pipeline (``GUAARDVARK_ZIMAGE_USE_COMFYUI`` truthy).
+
+    Single source of truth: ``character_still_pipeline``,
+    ``character_generation_tasks`` and ``batch_image_generator`` all delegate
+    here, so renaming the flag updates every routing site at once. The offline
+    Z-Image path is CUDA-only; on Apple Silicon (MPS) the ComfyUI workflow is the
+    only working Z-Image path, so this routes those stills there.
+    """
+    _v = os.environ.get("GUAARDVARK_ZIMAGE_USE_COMFYUI", "").strip().lower()
+    return _v in ("1", "true", "yes", "on")
+
+
 @dataclass
 class StillResult:
     success: bool
@@ -126,19 +140,33 @@ def run_stills_pipeline(
     if not cleaned:
         return [StillResult(success=False, error="No valid prompts after sanitize")]
 
+    # "comfyui" / "comfy" is a generic selector: the actual engine (Z-Image,
+    # FLUX-dev, FLUX-schnell) is chosen from the live ComfyUI. Resolve it once
+    # here so family defaults (steps / canvas / prompt style) come from the
+    # engine's real family instead of a static "comfyui" row, which cannot carry
+    # the right step count for all three (9 steps is fine for Z-Image Turbo but
+    # badly under-resolves FLUX-dev, whose family default is 28). Explicit caller
+    # values still win inside resolve_stills_defaults.
+    comfy_choice: tuple[str, str] | None = None
+    family_model = model
+    if (model or "").strip().lower() in ("comfyui", "comfy"):
+        comfy_choice = _comfyui_backend_choice()
+        if comfy_choice is not None:
+            family_model = _COMFYUI_ENGINE_FAMILY.get(comfy_choice[0], "comfyui")
+
     enhance_mode = resolve_enhance_mode(
         enhance=enhance,
         director=director,
         auto_enhance=auto_enhance,
         verbatim=verbatim,
-        model=model,
+        model=family_model,
     )
 
     # Director rewrite (batch-level director already applied: pass enhance=none)
     if enhance_mode == "director":
         cleaned = apply_enhance_to_prompts(
             cleaned, enhance_mode="director", style=style, extra_guidance=extra_guidance,
-            model=model,
+            model=family_model,
         )
         # After director, offline stuffing would double-rewrite — use none for auto_enhance
         req_auto_enhance = False
@@ -148,7 +176,7 @@ def run_stills_pipeline(
         effective_mode = enhance_mode
 
     defaults = resolve_stills_defaults(
-        model,
+        family_model,
         width=width,
         height=height,
         steps=steps,
@@ -179,6 +207,7 @@ def run_stills_pipeline(
                 prompt=prompt_text,
                 negative=neg,
                 model=model_id,
+                comfy_choice=comfy_choice,
                 width=w,
                 height=h,
                 steps=st,
@@ -218,6 +247,7 @@ def _generate_one(
     prompt: str,
     negative: str,
     model: str,
+    comfy_choice: tuple[str, str] | None = None,
     width: int,
     height: int,
     steps: int,
@@ -259,7 +289,10 @@ def _generate_one(
             seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
         )
     if mid in ("comfyui", "comfy"):
-        choice = _comfyui_backend_choice()
+        # run_stills_pipeline resolves the engine once and hands it down so the
+        # dispatched engine cannot disagree with the family defaults it used.
+        # Fall back to a live probe for any caller that skipped that façade.
+        choice = comfy_choice if comfy_choice is not None else _comfyui_backend_choice()
         if choice is None:
             return StillResult(
                 success=False,
@@ -279,7 +312,8 @@ def _generate_one(
             )
         return _generate_comfy_flux(
             prompt=prompt, negative=negative, model=f"comfyui ({engine})",
-            width=width, height=height, steps=steps, guidance=guidance,
+            width=width, height=height, steps=steps, steps_explicit=steps_explicit,
+            guidance=guidance,
             seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
             comfy_model=comfy_model,
         )
@@ -514,6 +548,15 @@ def _generate_comfy_flux(
             steps=steps,
             guidance=guidance,
         )
+
+
+# Map a ComfyUI engine tag (from _comfyui_backend_choice) to its stills family
+# so the generic "comfyui" selector can inherit that family's defaults.
+_COMFYUI_ENGINE_FAMILY = {
+    "zimage": "zimage",
+    "flux-dev": "flux",
+    "flux-schnell": "flux",
+}
 
 
 def _comfyui_backend_choice() -> tuple[str, str] | None:

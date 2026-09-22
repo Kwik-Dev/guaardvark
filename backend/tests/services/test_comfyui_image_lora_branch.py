@@ -117,3 +117,58 @@ def test_zimage_without_loras_has_no_lora_node(monkeypatch):
     assert "LoraLoader" not in types
     # UNet still feeds AuraFlow sampling directly.
     assert wf["sampling"]["inputs"]["model"] == ["unet", 0]
+
+
+# ── /object_info engine probe is cached ───────────────────────────────────────
+# _is_model_downloaded -> _comfyui_assets_present hits the live engine list, and
+# get_available_models calls it per model. Cache the list so a listing does not
+# fan out one probe per row, and a down ComfyUI does not cost a timeout per row.
+
+class _FakeResp:
+    status_code = 200
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {}
+
+
+def test_engine_list_cached_between_calls(monkeypatch):
+    from backend.services import comfyui_image_generator as cig
+
+    calls = {"n": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["n"] += 1
+        return _FakeResp()
+
+    monkeypatch.setattr(cig.requests, "get", fake_get)
+    monkeypatch.setattr(cig, "_ENGINE_CACHE_TTL_SECONDS", 5.0)
+    monkeypatch.setattr(cig, "_ENGINE_CACHE", {})
+
+    gen = cig.ComfyUIImageGenerator(comfy_url="http://engine-cache.test")
+    gen.comfyui_installed_engines()
+    gen.comfyui_installed_engines()
+
+    assert calls["n"] == 1
+
+
+def test_unreachable_engine_probe_cached_empty(monkeypatch):
+    from backend.services import comfyui_image_generator as cig
+
+    calls = {"n": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["n"] += 1
+        raise cig.requests.exceptions.RequestException("down")
+
+    monkeypatch.setattr(cig.requests, "get", fake_get)
+    monkeypatch.setattr(cig, "_ENGINE_CACHE_TTL_SECONDS", 5.0)
+    monkeypatch.setattr(cig, "_ENGINE_CACHE", {})
+
+    gen = cig.ComfyUIImageGenerator(comfy_url="http://engine-down.test")
+    assert gen.comfyui_installed_engines() == []
+    assert gen.comfyui_installed_engines() == []
+
+    assert calls["n"] == 1

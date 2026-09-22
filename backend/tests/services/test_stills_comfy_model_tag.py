@@ -1,9 +1,10 @@
-"""The generic ``comfyui`` selector must not silently change stock FLUX routing.
+"""Stock FLUX routing follows the caller's tag; the ``comfyui`` selector does too.
 
-``_generate_comfy_flux`` used to hard-code ``model="flux"`` in the ComfyUI call,
-so a stock FLUX still rendered on the schnell GGUF branch regardless of the
-requested model id. The fix keeps that default and lets only the explicit
-``comfyui`` backend selector pass a resolved engine tag.
+Upstream #218 made ``_generate_comfy_flux`` pass the caller's model tag through
+(``flux-dev`` reaches the FLUX-dev graph, plain ``flux`` the schnell GGUF branch).
+The generic ``comfyui`` backend selector resolves an engine from the live server
+and passes it as ``comfy_model``, so dispatch matches the family defaults it was
+resolved from without reverting the stock behaviour.
 """
 from pathlib import Path
 
@@ -39,12 +40,64 @@ def _run(monkeypatch, tmp_path, *, model, comfy_model=None):
     return _RecordingGen.last["model"]
 
 
-def test_stock_flux_keeps_historic_flux_tag(monkeypatch, tmp_path):
-    # A request for flux-dev must still render on the schnell branch as before.
-    assert _run(monkeypatch, tmp_path, model="flux-dev") == "flux"
+def test_stock_flux_passes_caller_tag(monkeypatch, tmp_path):
+    # Upstream #218: the caller's tag picks the graph, so flux-dev must reach the
+    # FLUX-dev graph rather than the schnell GGUF branch.
+    assert _run(monkeypatch, tmp_path, model="flux-dev") == "flux-dev"
+    assert _run(monkeypatch, tmp_path, model="flux") == "flux"
 
 
 def test_comfyui_selector_passes_resolved_engine_tag(monkeypatch, tmp_path):
     assert _run(
         monkeypatch, tmp_path, model="comfyui (flux-dev)", comfy_model="flux-dev"
     ) == "flux-dev"
+
+
+# ── step resolution for the generic comfyui selector ──────────────────────────
+# A static "comfyui" family row cannot carry the right step count for all three
+# engines: 9 steps is Z-Image Turbo's recipe but badly under-resolves FLUX-dev
+# (~28). run_stills_pipeline resolves the engine first and inherits that engine's
+# real family defaults; a caller-set step count still wins.
+
+def _capture(monkeypatch, attr):
+    seen = {}
+
+    def fake(**kwargs):
+        seen.update(kwargs)
+        return sp.StillResult(success=True, steps=kwargs["steps"])
+
+    monkeypatch.setattr(sp, attr, fake)
+    return seen
+
+
+def test_comfyui_selector_flux_dev_uses_flux_steps(monkeypatch):
+    seen = _capture(monkeypatch, "_generate_comfy_flux")
+    monkeypatch.setattr(sp, "_comfyui_backend_choice", lambda: ("flux-dev", "flux-dev"))
+
+    sp.run_stills_pipeline(["a lighthouse in fog"], model="comfyui", verbatim=True, output="none")
+
+    assert seen["steps"] == 28
+    assert seen["comfy_model"] == "flux-dev"
+    assert seen["steps_explicit"] is False
+
+
+def test_comfyui_selector_zimage_uses_zimage_steps(monkeypatch):
+    seen = _capture(monkeypatch, "_generate_comfy_zimage")
+    monkeypatch.setattr(sp, "_comfyui_backend_choice", lambda: ("zimage", "zimage"))
+
+    sp.run_stills_pipeline(["a lighthouse in fog"], model="comfyui", verbatim=True, output="none")
+
+    assert seen["steps"] == 9
+
+
+def test_comfyui_selector_explicit_steps_win(monkeypatch):
+    seen = _capture(monkeypatch, "_generate_comfy_flux")
+    monkeypatch.setattr(sp, "_comfyui_backend_choice", lambda: ("flux-dev", "flux-dev"))
+
+    sp.run_stills_pipeline(
+        ["a lighthouse in fog"], model="comfyui", steps=12, steps_explicit=True,
+        verbatim=True, output="none",
+    )
+
+    assert seen["steps"] == 12
+    assert seen["steps_explicit"] is True

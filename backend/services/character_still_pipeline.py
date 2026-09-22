@@ -32,16 +32,15 @@ CharacterSource = Literal[
 
 
 def _zimage_via_comfyui_enabled() -> bool:
-    """True when Z-Image stills should render through ComfyUI instead of the
-    offline Diffusers pipeline (GUAARDVARK_ZIMAGE_USE_COMFYUI=1).
+    """Z-Image stills route through ComfyUI (``GUAARDVARK_ZIMAGE_USE_COMFYUI``).
 
-    The offline Z-Image generator is CUDA-only; on Apple Silicon (MPS) the only
-    working Z-Image path is the ComfyUI workflow, so this flag routes Cast stills
-    there. Mirrors batch_image_generator._zimage_via_comfyui_enabled.
+    Thin alias for ``stills_pipeline.zimage_via_comfyui_enabled`` — the single
+    source of truth shared with ``character_generation_tasks`` and
+    ``batch_image_generator``, so the flag is parsed in exactly one place.
     """
-    import os
-    _v = os.environ.get("GUAARDVARK_ZIMAGE_USE_COMFYUI", "").strip().lower()
-    return _v in ("1", "true", "yes", "on")
+    from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+
+    return zimage_via_comfyui_enabled()
 
 
 def _subjects_from_ids(subject_ids: Sequence[int] | None) -> list:
