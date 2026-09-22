@@ -124,3 +124,49 @@ class CalibrationIdentityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DialectTest(unittest.TestCase):
+    """The request dialect is part of the convention, and the parser reads all of them."""
+
+    def _servo(self, **cfg_over):
+        from backend.services.servo_controller import ServoController
+        screen = MagicMock(); screen.screen_size.return_value = (SCREEN, SCREEN)
+        az = MagicMock(); az.default_model = "test-model"
+        return ServoController(screen, az, vision_config=_cfg(**cfg_over))
+
+    def test_google_box2d_prompt_is_the_historical_string_verbatim(self):
+        prompt, budget = self._servo()._anchor_request("red dot A")
+        self.assertEqual(prompt, (
+            "Detect the red dot A. Reply with ONLY a JSON list "
+            '[{"box_2d": [y1, x1, y2, x2], "label": "red dot A"}] '
+            "with coordinates normalized to 1000. If the target is not visible, "
+            "reply with an empty list []."))
+        self.assertEqual(budget, 128)
+
+    def test_point_object_normalised(self):
+        s = self._servo(internal_width=1000)
+        self.assertEqual(s._parse_detection_response('{"x": 500, "y": 250}'), (500, 250))
+        self.assertEqual(s._last_parse_path, "point_obj_normalized")
+
+    def test_point_object_absolute_scales_from_the_image_sent(self):
+        s = self._servo(internal_width=0)
+        # a half-size image: 250 px there is 500 px on screen
+        self.assertEqual(s._parse_detection_response('{"x": 250, "y": 125}', image_size=(500, 500)), (500, 250))
+        self.assertEqual(s._last_parse_path, "point_obj")
+
+    def test_bbox_absolute_on_the_screen_image_is_identity(self):
+        s = self._servo(internal_width=0, coord_order="xy")
+        got = s._parse_detection_response('[{"bbox_2d": [835, 267, 875, 307], "label": "t"}]',
+                                          image_size=(SCREEN, SCREEN))
+        self.assertEqual(got, (855, 287))
+
+    def test_min_num_predict_from_the_convention_raises_the_budget(self):
+        from backend.services.model_capability_resolver import CoordConvention
+        s = self._servo()
+        s._coords = CoordConvention(order="xy", grid=None, normalised=False, source="family",
+                                    confidence=0.5, style="qwen_bbox2d_abs", min_num_predict=1024)
+        s._vision_config["coord_style"] = "qwen_bbox2d_abs"
+        prompt, budget = s._anchor_request("t")
+        self.assertIn("bbox_2d", prompt)
+        self.assertEqual(budget, 1024)

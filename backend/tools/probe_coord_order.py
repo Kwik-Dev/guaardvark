@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
-"""Measure which axis order a vision model actually points in.
+"""Measure how a vision model points: which dialect it answers, which axis order.
 
-The servo asks every model for ``box_2d: [y1, x1, y2, x2]`` normalised to 1000.
-Whether a given model obeys that is not knowable from its name, its family, or
-anything Ollama reports — it is an empirical fact about the model, and the only
-honest way to get it is to ask the model to point at something whose position we
-already know and see which reading of its answer is correct.
+Whether a model obeys a request for ``box_2d: [y1,x1,y2,x2]`` normalised to 1000
+is not knowable from its name, its family, or anything Ollama reports. Nor is
+whether it will answer that request at all: ministral-3:14b replies "[]" to it
+and answers a plain point request. So the probe asks in every dialect the
+system knows (family default first), in every axis order that dialect allows,
+against targets whose positions are known, and keeps what works.
 
 Guessing is worse than it sounds. A transposed answer does not fail loudly: it
-puts the click at a plausible-looking wrong place, mirrored across the diagonal.
-The system then reports a successful click on the wrong thing.
+lands a plausible click on the wrong thing, mirrored across the diagonal, and
+reports success. The discriminator is brutally simple on a board with targets
+off the diagonal: the wrong order costs hundreds of pixels, the right one tens.
 
-The discriminator is brutally simple. On a board with targets spread off the
-diagonal, the wrong axis order costs hundreds of pixels while the right one
-costs tens. There is no ambiguous middle.
-
-Writes the winner to data/training/model_coord_probe.json, which the capability
-resolver reads. Machine-local, like the servo calibration it sits beside.
+Records into data/training/servo_calibration.json (the one measurement store):
+the `coords` section (winning style/order, and every dialect tried) and, from
+the winning run, the `accuracy` section. Failures are recorded too — "this
+model returns nothing usable in any dialect" is expensive to learn and is
+exactly what the resolver needs to refuse a click.
 
 Usage:
     GUAARDVARK_MODE=test backend/venv/bin/python -m backend.tools.probe_coord_order \
-        --models qwen3-vl:8b-thinking-q8_0 --frames <bench>/manifest.json
+        --models ministral-3:14b --frames <bench>/manifest.json
+    ... --migrate-legacy      # move the old model_coord_probe.json into the store
 """
 from __future__ import annotations
 
@@ -31,100 +33,192 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-STORE = Path(__file__).resolve().parents[2] / "data" / "training" / "model_coord_probe.json"
-# How much better the winner must be before we believe it rather than record
-# "unknown". A transposition on a 1000px board costs hundreds of pixels; asking
-# for a 1.6x margin means a genuinely ambiguous result stays ambiguous instead
-# of being resolved by noise.
+LEGACY_STORE = Path(__file__).resolve().parents[2] / "data" / "training" / "model_coord_probe.json"
+BENCH_ROOT = Path(__file__).resolve().parents[2] / "data" / "training" / "eye_bench"
+# A two-order dialect must separate its orders by this factor before we believe
+# it; a transposition on a 1000px board costs hundreds of pixels, so a genuinely
+# ambiguous result stays ambiguous rather than being resolved by noise.
 MIN_RATIO = 1.6
+# Single-order dialects have no transposition to guard against. They pass on a
+# usability bound instead: a pointer that is consistently ~140px off has a
+# known convention with poor accuracy, and exposing that is the accuracy
+# section's job, not the coords section's.
+USABLE_FRACTION = 0.25
 
 
-def probe(model: str, manifest: str, grid: int = 1000, max_targets: int = 20) -> dict:
-    from backend.tools.eye_bakeoff import load_manifest, eval_frames, MODE_OVERLAYS
-
-    size, frames = load_manifest(manifest)
-    # A subset is plenty: the effect being measured is a factor of several, not
-    # a few percent, and each target costs an inference.
-    trimmed, n = [], 0
+def _trim(frames, max_targets):
+    out, n = [], 0
     for fr in frames:
         keep = []
         for t in fr["targets"]:
             if n >= max_targets:
                 break
-            keep.append(t)
-            n += 1
+            keep.append(t); n += 1
         if keep:
-            trimmed.append({"image": fr["image"], "targets": keep})
+            out.append({"image": fr["image"], "targets": keep})
         if n >= max_targets:
             break
+    return out
 
-    out = {}
-    for order in ("yx", "xy"):
-        overlay = dict(MODE_OVERLAYS["anchor"])
-        overlay.update({"coord_order": order, "internal_width": grid})
-        r = eval_frames(model, size, trimmed, overlay)
-        rows = [x for x in r["targets"] if x.get("err_x") is not None]
-        out[order] = {
-            "n": len(rows),
-            "median_dist": st.median([x["dist"] for x in rows]) if rows else None,
-            "median_x": st.median([abs(x["err_x"]) for x in rows]) if rows else None,
-            "median_y": st.median([abs(x["err_y"]) for x in rows]) if rows else None,
-        }
-        d = out[order]
-        print(f"  {model:44s} order={order}  n={d['n']:3d}  "
-              f"median dist={d['median_dist']}  |X|={d['median_x']}  |Y|={d['median_y']}")
 
-    a, b = out["yx"]["median_dist"], out["xy"]["median_dist"]
-    if not a or not b:
-        verdict, conf, why = None, 0.0, "no parseable answers in one or both orders"
-    elif a <= b / MIN_RATIO:
-        verdict, conf, why = "yx", 0.9, f"yx {a:.0f}px vs xy {b:.0f}px"
-    elif b <= a / MIN_RATIO:
-        verdict, conf, why = "xy", 0.9, f"xy {b:.0f}px vs yx {a:.0f}px"
-    else:
-        verdict, conf, why = None, 0.0, (
-            f"inconclusive: yx {a:.0f}px vs xy {b:.0f}px, under the {MIN_RATIO}x margin")
-    print(f"  -> {model}: {verdict or 'UNKNOWN'}  ({why})")
-    return {"order": verdict, "grid": grid, "normalised": True, "confidence": conf,
-            "reason": why, "measured": out,
-            "probed_at": datetime.now().isoformat(timespec="seconds"),
-            "board": Path(manifest).parent.name}
+def _run(model, size, frames, style, order, min_num_predict):
+    from backend.tools.eye_bakeoff import eval_frames, MODE_OVERLAYS
+    from backend.services.model_capability_data import style_overlay
+    overlay = dict(MODE_OVERLAYS["anchor"])
+    overlay.update(style_overlay(style, order))
+    overlay["min_num_predict"] = min_num_predict
+    r = eval_frames(model, size, frames, overlay)
+    rows = [x for x in r["targets"] if x.get("err_x") is not None]
+    return {
+        "style": style, "order": order, "n": len(rows),
+        "median_dist": round(st.median([x["dist"] for x in rows]), 1) if rows else None,
+        "median_x": round(st.median([abs(x["err_x"]) for x in rows]), 1) if rows else None,
+        "median_y": round(st.median([abs(x["err_y"]) for x in rows]), 1) if rows else None,
+        "hit_rate": r["score"]["all"].get("hit_rate") if rows else None,
+    }
+
+
+def probe(model: str, manifest: str, max_targets: int = 12,
+          styles: Optional[list] = None) -> dict:
+    from backend.tools.eye_bakeoff import load_manifest
+    from backend.services.model_capability_data import COORD_STYLES
+    from backend.services.model_capability_resolver import coords_for
+
+    size, frames = load_manifest(manifest)
+    frames = _trim(frames, max_targets)
+    total = sum(len(f["targets"]) for f in frames)
+    need = max(4, total // 2)
+    bound = USABLE_FRACTION * max(size)
+
+    conv = coords_for(model, tuple(size))
+    fam_style = conv.style
+    budget = int(getattr(conv, "min_num_predict", 128) or 128)
+    order_of_styles = styles or ([fam_style] + [s for s in COORD_STYLES if s != fam_style])
+
+    tried = []
+    verdicts = []   # (median_dist, style, order, record)
+    for style in order_of_styles:
+        spec = COORD_STYLES[style]
+        results = {}
+        for order in spec["orders"]:
+            rec = _run(model, size, frames, style, order, budget)
+            tried.append(rec)
+            results[order] = rec
+            print(f"  {model:40s} {style:16s} order={order}  n={rec['n']:3d}  "
+                  f"dist={rec['median_dist']}  |X|={rec['median_x']}  |Y|={rec['median_y']}")
+        ok = {o: r for o, r in results.items() if r["n"] >= need and r["median_dist"] is not None}
+        if not ok:
+            continue
+        if len(spec["orders"]) > 1:
+            if len(ok) == 1:
+                o, r = next(iter(ok.items()))
+                verdicts.append((r["median_dist"], style, o, r))
+            else:
+                (o1, r1), (o2, r2) = sorted(ok.items(), key=lambda kv: kv[1]["median_dist"])[:2]
+                if r1["median_dist"] <= r2["median_dist"] / MIN_RATIO:
+                    verdicts.append((r1["median_dist"], style, o1, r1))
+                else:
+                    print(f"    {style}: inconclusive ({o1} {r1['median_dist']}px vs {o2} {r2['median_dist']}px)")
+        else:
+            o, r = next(iter(ok.items()))
+            if r["median_dist"] <= bound:
+                verdicts.append((r["median_dist"], style, o, r))
+            else:
+                print(f"    {style}: answers, but {r['median_dist']}px is past the {bound:.0f}px usability bound")
+
+    stamp = datetime.now().isoformat(timespec="seconds")
+    board = Path(manifest).parent.name
+    if not verdicts:
+        print(f"  -> {model}: UNUSABLE for pointing in {len(order_of_styles)} dialect(s)")
+        return {"coords": {"style": None, "order": None, "grid": None, "confidence": 0.0,
+                           "reason": "no dialect produced a usable answer",
+                           "tried": tried, "probed_at": stamp, "board": board},
+                "accuracy": None, "size": size}
+    verdicts.sort(key=lambda v: v[0])
+    best_d, best_style, best_order, best = verdicts[0]
+    # A tie within the margin keeps the family default: both are right, prefer
+    # the dialect already declared for the family.
+    for d, sty, o, r in verdicts:
+        if sty == fam_style and d <= best_d * MIN_RATIO:
+            best_d, best_style, best_order, best = d, sty, o, r
+            break
+    grid = COORD_STYLES[best_style]["grid"]
+    print(f"  -> {model}: {best_style} / {best_order}  ({best_d}px)")
+    return {
+        "coords": {"style": best_style, "order": best_order, "grid": grid,
+                   "normalised": bool(grid), "confidence": 0.9,
+                   "min_num_predict": budget,
+                   "reason": f"{best_style}/{best_order} {best_d}px", "tried": tried,
+                   "probed_at": stamp, "board": board},
+        "accuracy": {"median_px": best["median_dist"], "median_x": best["median_x"],
+                     "median_y": best["median_y"], "hit_rate": best["hit_rate"],
+                     "n": best["n"], "mode": "anchor", "style": best_style,
+                     "board": board, "measured_at": stamp},
+        "size": size,
+    }
+
+
+def migrate_legacy() -> int:
+    from backend.services.servo_knowledge_store import record_measurement
+    try:
+        legacy = json.loads(LEGACY_STORE.read_text())
+    except Exception:
+        print(f"no legacy file at {LEGACY_STORE}")
+        return 0
+    moved = 0
+    for tag, rec in legacy.items():
+        board = rec.get("board")
+        man = BENCH_ROOT / (board or "") / "manifest.json"
+        if not board or not man.exists():
+            print(f"  skip {tag}: board manifest missing ({man}); not guessing a resolution")
+            continue
+        w, h = json.loads(man.read_text()).get("display") or (None, None)
+        if not w:
+            print(f"  skip {tag}: manifest has no display size")
+            continue
+        measured = rec.get("measured") or {}
+        tried = [{"style": "google_box2d", "order": o, **{k: v for k, v in m.items()}}
+                 for o, m in measured.items()]
+        coords = {"style": "google_box2d" if rec.get("order") else None,
+                  "order": rec.get("order"), "grid": rec.get("grid", 1000),
+                  "normalised": bool(rec.get("order")), "confidence": rec.get("confidence", 0.9),
+                  "reason": rec.get("reason", ""), "tried": tried,
+                  "probed_at": rec.get("probed_at", ""), "board": board, "source": "legacy_probe"}
+        record_measurement(tag, int(w), int(h), "coords", coords)
+        print(f"  moved {tag} -> {tag}@{w}x{h}")
+        moved += 1
+    print(f"{moved} entr{'y' if moved == 1 else 'ies'} migrated; {LEGACY_STORE.name} left in place for one release")
+    return 0
 
 
 def main(argv: Optional[list] = None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", required=True)
-    ap.add_argument("--frames", required=True)
-    ap.add_argument("--grid", type=int, default=1000)
-    ap.add_argument("--max-targets", type=int, default=20)
+    ap.add_argument("--models", default="")
+    ap.add_argument("--frames", default="")
+    ap.add_argument("--max-targets", type=int, default=12)
+    ap.add_argument("--styles", default="", help="comma-separated subset of COORD_STYLES")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--migrate-legacy", action="store_true")
     args = ap.parse_args(argv)
 
-    try:
-        store = json.loads(STORE.read_text())
-    except Exception:
-        store = {}
+    if args.migrate_legacy:
+        return migrate_legacy()
+    if not args.models or not args.frames:
+        ap.error("--models and --frames are required unless --migrate-legacy")
 
+    from backend.services.servo_knowledge_store import record_measurement
+    styles = [s.strip() for s in args.styles.split(",") if s.strip()] or None
     for m in [x.strip() for x in args.models.split(",") if x.strip()]:
-        res = probe(m, args.frames, args.grid, args.max_targets)
-        # A failure is stored too. "This model returns nothing parseable when
-        # asked to point" is expensive to discover and worth exactly as much as
-        # a success — it is the difference between a model the agent can drive
-        # and one it cannot, and the resolver needs to know which.
-        store[m] = res
-        if res["order"] is None:
-            print(f"  recorded {m} as UNUSABLE for pointing: {res['reason']}")
+        res = probe(m, args.frames, args.max_targets, styles)
+        if args.dry_run:
+            continue
+        w, h = res["size"]
+        record_measurement(m, int(w), int(h), "coords", res["coords"])
+        if res["accuracy"]:
+            record_measurement(m, int(w), int(h), "accuracy", res["accuracy"])
+        print(f"  recorded {m}@{w}x{h}")
     if args.dry_run:
         print("\ndry-run: nothing written")
-        return 0
-    STORE.parent.mkdir(parents=True, exist_ok=True)
-    STORE.write_text(json.dumps(store, indent=2))
-    print(f"\nwrote {STORE}")
-    try:
-        from backend.services.model_capability_resolver import invalidate
-        invalidate()
-    except Exception:
-        pass
     return 0
 
 

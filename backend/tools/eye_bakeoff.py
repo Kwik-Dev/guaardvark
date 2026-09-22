@@ -310,6 +310,11 @@ def _servo_for(model: str, size, overlay: dict):
     return ServoController(_FakeScreen(*size), analyzer, vision_config=cfg)
 
 
+def sighted_models() -> list:
+    from backend.services.model_capability_resolver import _installed, sees_natively
+    return [m for m in _installed() if sees_natively(m)]
+
+
 def eval_model(model: str, image: Image.Image, truth: list, overlay: dict = None) -> dict:
     """Synthetic single-image path. Kept for the default bake-off and its tests."""
     frames = [{"image": image,
@@ -388,6 +393,13 @@ def main(argv: Optional[list] = None):
     ap.add_argument("--grid", type=int, default=0,
                     help="force the normalisation denominator (0 = use the config)")
     ap.add_argument("--out", default="")
+    ap.add_argument("--all-vision", action="store_true",
+                    help="every installed model that Ollama says can see")
+    ap.add_argument("--best-dialect", action="store_true",
+                    help="probe an unmeasured model's dialect first, then run in it")
+    ap.add_argument("--record", action="store_true",
+                    help="write each anchor-mode score into the measurement store")
+    ap.add_argument("--max-targets", type=int, default=12, help="for --best-dialect probing")
     args = ap.parse_args(argv)
 
     if args.derive_truth:
@@ -411,7 +423,10 @@ def main(argv: Optional[list] = None):
         return
 
     modes = args.mode or DEFAULT_MODES
-    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    models = sighted_models() if args.all_vision else \
+        [m.strip() for m in args.models.split(",") if m.strip()]
+    if args.all_vision:
+        print(f"sighted models per Ollama: {', '.join(models)}")
 
     if args.frames:
         size, frames = load_manifest(args.frames)
@@ -433,6 +448,26 @@ def main(argv: Optional[list] = None):
         for mode in modes:
             print(f"\n===== {m}  [{mode}] =====")
             overlay = dict(MODE_OVERLAYS[mode])
+            if args.best_dialect and args.frames:
+                from backend.services.model_capability_resolver import (
+                    coords_for, MEASURED_CONFIDENCE, invalidate)
+                from backend.services.model_capability_data import style_overlay
+                conv = coords_for(m, tuple(size))
+                if conv.confidence < MEASURED_CONFIDENCE or conv.order is None:
+                    from backend.tools.probe_coord_order import probe
+                    from backend.services.servo_knowledge_store import record_measurement
+                    print(f"  probing {m}'s dialect first (convention was {conv.source})")
+                    res = probe(m, args.frames, args.max_targets)
+                    record_measurement(m, size[0], size[1], "coords", res["coords"])
+                    if res["accuracy"]:
+                        record_measurement(m, size[0], size[1], "accuracy", res["accuracy"])
+                    invalidate(m)
+                    conv = coords_for(m, tuple(size))
+                if conv.order is None:
+                    print(f"  {m}: no usable dialect — skipped")
+                    continue
+                overlay.update(style_overlay(conv.style, conv.order))
+                overlay["min_num_predict"] = conv.min_num_predict
             if args.coord_order:
                 overlay["coord_order"] = args.coord_order
             if args.grid:
@@ -440,6 +475,19 @@ def main(argv: Optional[list] = None):
             r = eval_frames(m, size, frames, overlay, hit_radius)
             r["mode"] = mode
             r["coord_order"] = overlay.get("coord_order", "(config)")
+            r["style"] = overlay.get("coord_style", "google_box2d")
+            if args.record and mode == "anchor" and args.frames:
+                from backend.services.servo_knowledge_store import record_measurement
+                sc = r["score"]["clean"] if r["score"]["clean"].get("n") else r["score"]["all"]
+                if sc.get("n"):
+                    record_measurement(m, size[0], size[1], "accuracy", {
+                        "median_px": sc["dist_median"], "median_x": sc["x"]["med_abs"],
+                        "median_y": sc["y"]["med_abs"], "hit_rate": sc["hit_rate"], "n": sc["n"],
+                        "mode": mode, "style": r["style"],
+                        "board": os.path.basename(os.path.dirname(os.path.abspath(args.frames))),
+                        "measured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    })
+                    print(f"  recorded accuracy for {m}: {sc['dist_median']}px over {sc['n']}")
             for row in r["targets"]:
                 if row.get("err_x") is None:
                     print(f"  {row['target']:16s} FAIL {row.get('reason')}")

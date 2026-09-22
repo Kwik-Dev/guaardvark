@@ -110,12 +110,16 @@ class ServoController:
                 if conv.order:
                     self._vision_config = dict(self._vision_config)
                     self._vision_config["coord_order"] = conv.order
-                    if conv.grid:
-                        self._vision_config.setdefault("internal_width", conv.grid)
+                    # Assign, never setdefault: a grid of None means absolute
+                    # pixels, and 0 is how the parser is told that. setdefault
+                    # would let the text-only default's 1000 leak through and
+                    # divide raw pixels by a thousand.
+                    self._vision_config["internal_width"] = conv.grid or 0
+                    self._vision_config.setdefault("coord_style", conv.style)
                     logger.info(
-                        "Servo coordinate convention for %s: %s/%s (%s, confidence %.2f)",
-                        getattr(analyzer, "default_model", "?"), conv.order, conv.grid,
-                        conv.source, conv.confidence,
+                        "Servo coordinate convention for %s: %s %s/%s (%s, confidence %.2f)",
+                        getattr(analyzer, "default_model", "?"), conv.style, conv.order,
+                        conv.grid, conv.source, conv.confidence,
                     )
                 else:
                     logger.warning(
@@ -589,6 +593,22 @@ class ServoController:
 
         return None
 
+    def _anchor_request(self, target: str):
+        """(prompt, num_predict) for the anchor pass, from the eye's dialect.
+
+        Token budget comes from the convention too. A thinking-variant model
+        that ignores Ollama's think:false spends its budget thinking first;
+        128 tokens produces an empty answer and looks like "cannot point".
+        """
+        from backend.services.model_capability_data import COORD_STYLES, DEFAULT_STYLE
+        style = self._vision_config.get("coord_style") or DEFAULT_STYLE
+        template = COORD_STYLES.get(style, COORD_STYLES[DEFAULT_STYLE])["prompt"]
+        budget = 128
+        if self._coords is not None:
+            budget = max(budget, int(getattr(self._coords, "min_num_predict", 128) or 128))
+        budget = max(budget, int(self._vision_config.get("min_num_predict", 0) or 0))
+        return template.format(target=target), budget
+
     def _anchor_result(self, anchor_coords, result1, parse_path: str = "anchor_only"):
         """Return the anchor pass's own answer, offset-corrected and clamped.
 
@@ -664,14 +684,15 @@ class ServoController:
             )
             return None
 
-        prompt_pass1 = (
-            f"Detect the {target}. Reply with ONLY a JSON list "
-            f'[{{"box_2d": [y1, x1, y2, x2], "label": "{target}"}}] '
-            f"with coordinates normalized to 1000. If the target is not visible, "
-            f"reply with an empty list []."
-        )
+        # The request dialect is part of the convention. Asking every model in
+        # Google's box_2d form made models that answer only in their own form
+        # look unable to point at all; ministral-3 says "[]" to this request
+        # and answers a plain point request at ~140px. The default style's
+        # prompt is the historical string verbatim, so gemma4's path is
+        # byte-identical (a test pins that).
+        prompt_pass1, num_predict1 = self._anchor_request(target)
         result1 = self.analyzer.analyze_fullsize(
-            screenshot, prompt=prompt_pass1, num_predict=128, temperature=0.1
+            screenshot, prompt=prompt_pass1, num_predict=num_predict1, temperature=0.1
         )
         if not result1.success or not result1.description:
             # Vision Ollama call itself failed (timeout, network, model
@@ -689,7 +710,7 @@ class ServoController:
         self._last_raw_response = f"anchor: {result1.description}"
 
         # Parse Anchor (accepts point or box, but box is better for ROI)
-        anchor_coords = self._parse_detection_response(result1.description)
+        anchor_coords = self._parse_detection_response(result1.description, image_size=screenshot.size)
         if anchor_coords is None:
             anchor_coords = self._parse_coordinates(result1.description)
 
@@ -838,12 +859,14 @@ class ServoController:
             return {"on_target": False, "direction": "down", "distance": "small"}
         return self._parse_correction(result.description)
 
-    def _parse_detection_response(self, text: str) -> Optional[Tuple[int, int]]:
-        """Parse detection response — handles both point and box_2d formats.
+    def _parse_detection_response(self, text: str,
+                                  image_size: Optional[Tuple[int, int]] = None) -> Optional[Tuple[int, int]]:
+        """Parse a pointing answer: {"x","y"} object, "point" list, or box.
 
-        box_2d coordinates are normalized to the model's internal grid:
-          Gemma4: 1000 (confirmed by Google docs)
-        The divisor comes from vision_config["internal_width"].
+        internal_width > 0 means the numbers are normalised to that grid.
+        internal_width == 0 means absolute pixels OF THE IMAGE THE MODEL SAW;
+        when that image is not the screen (a crop, a resize) pass image_size so
+        the answer is scaled back into screen space rather than trusted raw.
         """
         try:
             text = text.strip()
@@ -900,13 +923,36 @@ class ServoController:
             # "xy" → [x1, y1, x2, y2]; "yx" → [y1, x1, y2, x2]. Default is
             # xy for back-compat. Gemma4 explicitly sets "yx".
             coord_order = (self._vision_config or {}).get("coord_order", "xy")
+            grid = int(self._vision_config.get("internal_width", 1000)) if self._vision_config else 1000
+            iw, ih = image_size if image_size else (self.screen_w, self.screen_h)
+
+            def _abs_to_screen(px: float, py: float) -> Tuple[int, int]:
+                # Absolute pixels of the image sent. Identity when that image
+                # is the screen; otherwise scale into screen space.
+                sx = self.screen_w / float(iw or self.screen_w)
+                sy = self.screen_h / float(ih or self.screen_h)
+                return int(px * sx), int(py * sy)
+
+            # Format 0: {"x": .., "y": ..} object — the plain point dialect.
+            # Must run before the legacy _parse_coordinates fallback, which
+            # accepts the same shape and returns raw floats with no grid
+            # handling.
+            if "x" in entry and "y" in entry and not entry.get("box_2d") and not entry.get("bbox_2d"):
+                px, py = float(entry["x"]), float(entry["y"])
+                if grid > 0:
+                    px, py = int((px / grid) * self.screen_w), int((py / grid) * self.screen_h)
+                    self._last_parse_path = "point_obj_normalized"
+                else:
+                    px, py = _abs_to_screen(px, py)
+                    self._last_parse_path = "point_obj"
+                logger.info(f"Servo: point object ({entry['x']},{entry['y']}) grid={grid} → ({px},{py})")
+                return (px, py)
 
             # Format 1: "point" — always [x, y], all models.
             point = entry.get("point")
             if point and len(point) == 2:
                 px, py = int(point[0]), int(point[1])
-                grid = self._vision_config.get("internal_width", 1000) if self._vision_config else 1000
-                if 0 <= px <= grid and 0 <= py <= grid and (px > self.screen_w or py > self.screen_h):
+                if grid > 0 and 0 <= px <= grid and 0 <= py <= grid and (px > self.screen_w or py > self.screen_h):
                     px = int((px / grid) * self.screen_w)
                     py = int((py / grid) * self.screen_h)
                     self._last_parse_path = "point_normalized"
@@ -927,13 +973,11 @@ class ServoController:
                 else:
                     x1, y1, x2, y2 = (int(c) for c in box)
 
-                grid = self._vision_config.get("internal_width", 1000) if self._vision_config else 1000
                 if grid > 0:
                     cx = int(((x1 + x2) / 2 / grid) * self.screen_w)
                     cy = int(((y1 + y2) / 2 / grid) * self.screen_h)
                 else:
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
+                    cx, cy = _abs_to_screen((x1 + x2) / 2, (y1 + y2) / 2)
                 
                 if x1 == 0 and x2 == 0 and y1 == 0 and y2 == 0:
                     logger.warning(f"Servo: box [0,0,0,0] received (ignoring as null detection)")
