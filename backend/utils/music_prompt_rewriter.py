@@ -24,9 +24,9 @@ from typing import Optional, TypedDict
 
 import requests
 
-from backend.config import OLLAMA_BASE_URL, OPENAI_DEFAULT_MODEL
-from backend.utils.ollama_resource_manager import think_payload
+from backend.config import OLLAMA_BASE_URL
 from backend.services import openai_provider
+from backend.utils.ollama_resource_manager import think_payload
 from backend.utils.llm_service import get_saved_active_model_name
 
 logger = logging.getLogger(__name__)
@@ -125,16 +125,17 @@ def rewrite_music_prompt(
         {"role": "user", "content": user_msg},
     ]
 
-    # Prefer the OpenAI-compatible chat provider — the same one the chat bot
-    # and Film Crew use (driven by GUAARDVARK_OPENAI_BASE_URL /
-    # GUAARDVARK_OPENAI_MODEL). This makes "Polish & Preview" work even when the
-    # local Ollama instance is down or not installed. Local Ollama remains the
-    # fallback.
+    # Prefer the OpenAI-compatible chat provider — but only when the operator has
+    # consented to cloud (master switch on + OpenAI active). GUAARDVARK_OPENAI_BASE_URL
+    # alone is capability, not consent, so a configured-but-unconsented endpoint
+    # stays local. Local Ollama remains the fallback.
     content: str | None = None
     try:
-        if openai_provider.available():
+        from backend.services import llm_provider
+        if llm_provider.is_openai_active():
+            openai_model = llm_provider.get_openai_model()
             resp = openai_provider.chat(
-                model=OPENAI_DEFAULT_MODEL,
+                model=openai_model,
                 messages=messages,
                 stream=False,
                 options={"temperature": 0.3},  # Low — consistent tag output, not creative drift
@@ -143,7 +144,7 @@ def rewrite_music_prompt(
             if content.strip():
                 logger.info(
                     "Music prompt rewrite — using OpenAI-compatible provider (model=%s)",
-                    OPENAI_DEFAULT_MODEL,
+                    openai_model,
                 )
     except Exception as e:  # noqa: BLE001 — provider failure shouldn't sink the rewrite
         logger.warning(
