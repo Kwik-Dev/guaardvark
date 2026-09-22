@@ -64,18 +64,26 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
             import re
             import requests
 
-            pearls = (
+            all_pearls = (
                 ToolFeedback.query
-                .filter_by(lesson_id=lesson_id, positive=True)
+                .filter_by(lesson_id=lesson_id)
+                .filter(ToolFeedback.retracted_at.is_(None))
                 .order_by(ToolFeedback.created_at.asc())
                 .all()
             )
+            pearls = [p for p in all_pearls if p.positive]
+            # A thumbs-down inside the lesson is a step to avoid, and the
+            # reason, when given, is the most useful text of all.
+            negatives = [p for p in all_pearls if not p.positive]
             pearl_tasks = [(p.task or "").strip() for p in pearls if p.task]
+            negative_tasks = [((p.why_text or "").strip() or (p.task or "").strip()) for p in negatives]
+            negative_tasks = [t for t in negative_tasks if t]
             if not pearl_tasks:
                 logger.info(f"[LESSON-DISTILL] lesson {lesson_id[:12]}: no pearls to distill")
                 return None
 
             pearl_lines = [f"{i+1}. {t[:200]}" for i, t in enumerate(pearl_tasks)]
+            negative_lines = [f"{i+1}. {t[:200]}" for i, t in enumerate(negative_tasks)]
 
             # Recent conversation context for the lesson's session
             convo_lines: list[str] = []
@@ -135,8 +143,12 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
                 "  'click the Send button below the comment box'). NEVER include pixel "
                 "  coordinates like 'x=92' or '(640, 660)' — the agent's vision model finds "
                 "  targets fresh on each frame, so coordinates rot the moment a layout shifts.\n\n"
+                "- Things that went wrong (below) become steps whose text starts with 'Avoid:' "
+                "  and say what not to do.\n\n"
                 "=== Positive pearls (in order) ===\n"
                 + "\n".join(pearl_lines)
+                + ("\n\n=== Things that went wrong (thumbs-down) ===\n" + "\n".join(negative_lines)
+                   if negative_lines else "")
                 + "\n\n=== Recent conversation ===\n"
                 + ("\n".join(convo_lines) if convo_lines else "(no prior turns loaded)")
                 + "\n\nJSON:"
@@ -188,6 +200,9 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
                     "steps": [
                         {"order": i + 1, "text": (t[:200] or f"Step {i+1}")}
                         for i, t in enumerate(pearl_tasks)
+                    ] + [
+                        {"order": len(pearl_tasks) + i + 1, "text": f"Avoid: {t[:190]}"}
+                        for i, t in enumerate(negative_tasks)
                     ],
                     "parameters": [],
                 }
@@ -206,7 +221,10 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
                 else:
                     continue
                 if text:
-                    steps.append({"order": order, "text": text})
+                    step = {"order": order, "text": text}
+                    if text.lower().startswith("avoid:"):
+                        step["kind"] = "avoid"
+                    steps.append(step)
 
             if not steps:
                 logger.warning(f"[LESSON-DISTILL] empty steps after parse for {lesson_id[:12]}")

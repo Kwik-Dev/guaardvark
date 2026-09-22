@@ -419,3 +419,28 @@ class TestDistillPearls:
         """No ToolFeedback rows for this lesson → no distillation attempt."""
         out = _distill_lesson_pearls(app, "empty-lesson", "s")
         assert out is None
+
+
+def test_negative_pearls_become_avoid_steps_and_retracted_ones_are_ignored(app):
+    """A thumbs-down inside a lesson teaches what not to do; a withdrawn thumb teaches nothing."""
+    from datetime import datetime
+    db.session.add_all([
+        ToolFeedback(session_id="sess-n", lesson_id="les-n", tool_name="t", task="click Subscribe", positive=True),
+        ToolFeedback(session_id="sess-n", lesson_id="les-n", tool_name="t", task="click the ad banner", positive=False,
+                     why_text="that was an advert, not the video"),
+        ToolFeedback(session_id="sess-n", lesson_id="les-n", tool_name="t", task="retracted thing", positive=False,
+                     retracted_at=datetime.now()),
+    ])
+    db.session.commit()
+    captured = {}
+    def fake_post(url, json=None, timeout=None):
+        captured["prompt"] = json["prompt"]
+        r = MagicMock(); r.raise_for_status = lambda: None; r.json = lambda: {"response": "not json"}
+        return r
+    with patch("requests.post", side_effect=fake_post):
+        out = _distill_lesson_pearls(app, "les-n", "sess-n")
+    assert "Things that went wrong" in captured["prompt"] and "that was an advert" in captured["prompt"]
+    assert "retracted thing" not in captured["prompt"]
+    texts = [s["text"] for s in out["steps"]]
+    assert texts == ["click Subscribe", "Avoid: that was an advert, not the video"]
+    assert out["steps"][1].get("kind") == "avoid"

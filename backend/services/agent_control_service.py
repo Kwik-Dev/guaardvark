@@ -731,6 +731,12 @@ class AgentControlService:
         recipe_result = self._try_recipe(task, screen)
         if recipe_result is not None:
             _rname = (recipe_result.reason or "").replace("recipe:", "", 1).strip() or None
+            if _rname:
+                try:
+                    from backend.services import recipe_stats
+                    recipe_stats.touch_run(_rname, fallback=not recipe_result.success)
+                except Exception:
+                    pass
             if recipe_result.success:
                 self.note_recipe_usage(task, _rname, fallback=False)
                 with self._lock:
@@ -2881,6 +2887,15 @@ Reply ONLY with JSON:
             cls._recipe_cache = {}
             return {}
 
+    @staticmethod
+    def _recipe_disabled(name: str) -> bool:
+        """Feedback can switch a recipe off (data/agent/recipe_stats.json)."""
+        try:
+            from backend.services import recipe_stats
+            return recipe_stats.is_disabled(name)
+        except Exception:
+            return False
+
     @classmethod
     def _load_recipe_index(cls) -> str:
         """Render the recipe library as a one-line-per-recipe index for the
@@ -2893,11 +2908,21 @@ Reply ONLY with JSON:
         recipes = cls._load_recipes()
         if not recipes:
             return ""
+        # Disabled recipes are not advertised (the matcher will not run them);
+        # provisional ones, auto-induced and not yet confirmed, say so.
+        try:
+            from backend.services import recipe_stats
+            stats = recipe_stats.load()
+        except Exception:
+            stats = {}
         lines = []
         for name, recipe in recipes.items():
             desc = (recipe.get("description") or "").strip()
-            if desc:
-                lines.append(f"- {name}: {desc}")
+            st = stats.get(name) or {}
+            if not desc or st.get("disabled"):
+                continue
+            suffix = " (provisional)" if st.get("provisional") else ""
+            lines.append(f"- {name}: {desc}{suffix}")
         return "\n".join(lines)
 
     # Generic UI words that carry no page-identity — a match on these alone must
@@ -3231,6 +3256,9 @@ Reply ONLY with JSON:
 
         recipes = self._load_recipes()
         for recipe_name, recipe in recipes.items():
+            if self._recipe_disabled(recipe_name):
+                logger.info(f"[AGENT][RECIPE] Skipping '{recipe_name}' — disabled by feedback")
+                continue
             for pattern in recipe.get("triggers", []):
                 match = re.search(pattern, task_effective, re.IGNORECASE)
                 if match:
@@ -3553,6 +3581,11 @@ Reply ONLY with JSON:
                 f"recipe_fallback:{name},proof_failed={proof_failed},failed_steps={len(failed_steps)}"
             )
             self.note_recipe_usage(getattr(self, "_current_task", "") or "", name, fallback=True)
+            try:
+                from backend.services import recipe_stats
+                recipe_stats.touch_run(name, fallback=True)
+            except Exception:
+                pass
             self._action_history = action_steps
             # Tell the model what was just attempted so it pivots instead of
             # repeating the same recipe step blindly.

@@ -72,6 +72,8 @@ data/training/servo_logs/
 data/training/servo_calibration.json
 data/training/eye_bench/
 data/training/model_coord_probe.json
+# Per-recipe run/verdict counters written by feedback; machine state.
+data/agent/recipe_stats.json
 data/training/knowledge/servo_archive*.jsonl
 data/training/knowledge/*.pre_purge
 data/training/knowledge/feedback.jsonl

@@ -782,9 +782,14 @@ def _get_memories_for_context_inner(
     # Group by category. lesson_summary stays as its own bucket (source-based);
     # everything else groups by type so each lands under a framing header
     # tailored to how strictly the model should treat it.
-    groups = {"fact": [], "note": [], "preference": [], "lesson_summary": [], "other": []}
+    groups = {"fact": [], "note": [], "preference": [], "lesson_summary": [], "other": [],
+              "correction": [], "keep": []}
     for m in memories:
-        if m.source == "lesson_summary" or m.type in ("lesson", "lesson_summary"):
+        if m.source == "learned_from_feedback":
+            # What the user's thumbs taught, rendered last under their own
+            # framing (see below) rather than as an operating note.
+            groups["keep" if "keep" in normalize_tags(m.tags) else "correction"].append(m)
+        elif m.source == "lesson_summary" or m.type in ("lesson", "lesson_summary"):
             groups["lesson_summary"].append(m)
         elif m.type in groups:
             groups[m.type].append(m)
@@ -891,6 +896,17 @@ def _get_memories_for_context_inner(
         if other_body:
             sections.append("\n".join(["Other saved memories:"] + other_body))
 
+    # Feedback last: corrections say what not to repeat, confirmations what
+    # to keep doing. Absent on a fresh install, so stock prompts are unchanged.
+    if groups["correction"]:
+        body = _render_plain(groups["correction"], 240)
+        if body:
+            sections.append("\n".join(["Corrections from your feedback (do not repeat these):"] + body))
+    if groups["keep"]:
+        body = _render_plain(groups["keep"], 240)
+        if body:
+            sections.append("\n".join(["Confirmed by your feedback (keep doing this):"] + body))
+
     if not sections:
         return ""
     return "\n\n".join(sections)
@@ -959,9 +975,8 @@ def _get_lessons_for_agent_prompt_inner(
         seen_ids = {r.id for r in rows}
         rows.extend(r for r in belief_rows if r.id not in seen_ids)
 
-    if not rows:
-        return ""
-
+    # No early return on empty rows: the corrections block below can still
+    # have something to say, and the final check covers the all-empty case.
     sections = []
     total = 0
     for row in rows:
@@ -993,6 +1008,32 @@ def _get_lessons_for_agent_prompt_inner(
             break
         sections.append(block)
         total += len(block) + 2
+
+    # Corrections from the user's thumbs, appended after the lessons and
+    # within the same budget. Empty on a fresh install.
+    try:
+        fb_rows = _query_memories(
+            sources=["learned_from_feedback"],
+            limit=4,
+            session_id=session_id,
+            project_id=project_id,
+            workspace_root=workspace_root,
+        )
+    except Exception:
+        fb_rows = []
+    fb_lines = []
+    for r in fb_rows:
+        content = (r.content or "").strip()
+        if not content:
+            continue
+        tag = "keep" if "keep" in normalize_tags(r.tags) else "avoid"
+        line = f"- ({tag}) {content[:240]}"
+        if total + len(line) > max_chars:
+            break
+        fb_lines.append(line)
+        total += len(line) + 1
+    if fb_lines:
+        sections.append("### Corrections from feedback\n" + "\n".join(fb_lines))
 
     if not sections:
         return ""

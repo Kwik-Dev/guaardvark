@@ -497,17 +497,17 @@ _STRONG_POSITIVE_PHRASES = _re_module.compile(
 )
 
 
-def _detect_strong_positive(comment: str, session_id: str = None) -> bool:
+def _detect_strong_positive(why_text: str, session_id: str = None) -> bool:
     """Did the user express enthusiastic approval, not just a routine 👍?
 
-    Looks in the feedback comment first (cheap); falls back to the most recent
+    Looks in the feedback why_text first (cheap); falls back to the most recent
     user message in the session (one DB hit, capped). Both are scanned for
     strong-positive phrases. Either match returns True.
 
     Errors are non-fatal — strong-positive is an enhancement, not a correctness
     requirement. If we can't tell, we treat the feedback as routine.
     """
-    if comment and _STRONG_POSITIVE_PHRASES.search(comment):
+    if why_text and _STRONG_POSITIVE_PHRASES.search(why_text):
         return True
     if not session_id:
         return False
@@ -528,35 +528,35 @@ def _detect_strong_positive(comment: str, session_id: str = None) -> bool:
 
 
 def _induce_candidate_recipe(app, session_id: str, feedback_task: str, strong_positive: bool = False):
-    """Background thread: when the user thumbs-up's a successful task that
-    wasn't part of a bracketed lesson, induce a recipes.json-shaped entry
-    capturing what made it work, so the same task pattern auto-executes
-    deterministically next time.
+    """Background thread: a thumbs-up on a verified screen task induces a
+    recipe from the run, so the same task pattern executes deterministically
+    next time.
 
-    strong_positive=True bumps the saved candidate's importance from 0.7 to
-    0.9 and tags it so the next-session recall layer surfaces it ahead of
-    routine candidates. The thumbs-up gave us the signal "this worked"; the
-    strong-positive phrase gives us "this worked exceptionally."
+    Policy (operator decision 2026-09-22): the induced recipe is written to
+    recipes.json immediately and marked PROVISIONAL in recipe_stats.json. A
+    thumbs-down on any later run that executed it disables it (the matcher
+    skips disabled recipes; an un-thumb re-enables). Two clean thumbs-up on
+    later runs graduate it. An AgentMemory row (source="candidate_recipe")
+    keeps the audit trail; GET /candidate-recipes lists those rows and
+    POST /candidate-recipes/<id>/promote re-installs one that was removed.
 
-    This is the AWM (Agent Workflow Memory, ICML 2025) pattern, adapted to
-    Guaardvark: positive feedback + matching last successful run = candidate
-    recipe. Output goes to AgentMemory with source='candidate_recipe' for
-    user review; never auto-promoted to recipes.json. Promotion is a
-    deliberate action via /api/candidate-recipes/<id>/promote.
+    strong_positive=True (a strong phrase in the why-text or the last user
+    message) bumps the audit row's importance from 0.7 to 0.9 and lets the
+    run through even when the loop's own verifier did not confirm it.
 
     Safety gates:
     - Only induces if the agent's _last_result.task == feedback.task
       (avoids inducing from stale state when the user thumbs-up's an old run).
     - Only induces when the run's final action was VERIFIED (servo region-DPC
-      or semantic vision verify saw the expected effect). success=True alone
-      is not enough — phantom successes (the agent declared "done" but
-      nothing actually changed on screen) would teach the wrong path. See
-      response_2026-05-19 §C. AgentResult.verified is populated by the
+      or semantic vision verify saw the expected effect), unless
+      strong_positive. success=True alone is not enough — phantom successes
+      (the agent declared "done" but nothing actually changed on screen)
+      would teach the wrong path. AgentResult.verified is populated by the
       finish() wrapper in execute_task from the last step's verifier result.
-    - Skips if action_history is empty or has only one trivial step.
+    - Skips if action_history is empty.
     - Hard rules in the prompt: vision-actionable target_descriptions,
-      short labels (≤4 words), no pixel coordinates. Per
-      data/agent/LEARNING_PRINCIPLES.md.
+      short labels (<=6 words, what the validator enforces), no pixel
+      coordinates. Per data/agent/LEARNING_PRINCIPLES.md.
     """
     if not app or not session_id or not feedback_task:
         return
@@ -752,7 +752,12 @@ def _induce_candidate_recipe(app, session_id: str, feedback_task: str, strong_po
                     with tmp_path.open("w") as f:
                         _json.dump(recipes, f, indent=2, ensure_ascii=False)
                     tmp_path.replace(recipes_path)
-                    logger.info(f"[INDUCE] Auto-promoted recipe '{recipe_name}' to recipes.json")
+                    logger.info(f"[INDUCE] Auto-promoted recipe '{recipe_name}' to recipes.json (provisional)")
+                    try:
+                        from backend.services import recipe_stats
+                        recipe_stats.set_provisional(recipe_name, True)
+                    except Exception as st_err:
+                        logger.debug(f"[INDUCE] recipe_stats provisional mark skipped: {st_err}")
                     
                     # Force cache reload
                     try:
@@ -1162,12 +1167,10 @@ def capture_raw():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-# ---------------------------------------------------------------------------
-# Candidate recipes — Phase 3 (Agent Workflow Memory)
-#
-# After a successful task that wasn't part of a bracketed lesson, the
-# inducer (above) drops a recipes.json-shaped JSON into AgentMemory with
-# source="candidate_recipe". These two endpoints surface that queue:
+# Candidate recipes: the AgentMemory audit rows written when a thumbs-up
+# induced a recipe. Induced recipes are installed at once as provisional (see
+# _induce_candidate_recipe); these endpoints list the rows and re-install one
+# that was removed. Rejection reuses the existing DELETE /api/memory/<id>.
 #   GET  /api/agent-control/candidate-recipes        — list pending
 #   POST /api/agent-control/candidate-recipes/<id>/promote
 #                                                    — merge into recipes.json
