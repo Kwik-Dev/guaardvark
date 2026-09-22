@@ -554,6 +554,34 @@ class ServoController:
 
         return None
 
+    def _anchor_result(self, anchor_coords, result1, parse_path: str = "anchor_only"):
+        """Return the anchor pass's own answer, offset-corrected and clamped.
+
+        Single exit for every path that decides the refinement is not worth
+        trusting: refinement disabled, refinement unparseable, or refinement
+        rejected by the agreement gate. `parse_path` lands in the servo archive
+        so which of those happened is answerable from the log alone.
+        """
+        raw_x, raw_y = anchor_coords
+        ox = self._vision_config.get("offset_x", 0)
+        oy = self._vision_config.get("offset_y", 0)
+        raw_x += ox
+        raw_y += oy
+
+        self._last_raw_coords = (raw_x, raw_y)
+        self._last_parse_path = parse_path
+        self._last_detection_source = "vision"
+        self._last_inference_ms = getattr(result1, "inference_ms", 0)
+
+        x = max(0, min(self.screen_w - 1, int(raw_x)))
+        y = max(0, min(self.screen_h - TASKBAR_H - 1, int(raw_y)))
+
+        logger.info(
+            f"Servo coords ({parse_path}): ({x}, {y}) (offset {ox},{oy}) "
+            f"model={getattr(self.analyzer, 'default_model', '?')}"
+        )
+        return (x, y)
+
     def _estimate_coordinates(self, screenshot: Image.Image, target: str) -> Optional[Tuple[int, int]]:
         """Find where the target is on screen using a Two-Pass Zoom-In pipeline.
 
@@ -587,6 +615,7 @@ class ServoController:
         # Reset raw-response telemetry so a failed run doesn't inherit the
         # previous target's model output in the servo log.
         self._last_raw_response = ""
+        self._last_parse_path = ""
         prompt_pass1 = (
             f"Detect the {target}. Reply with ONLY a JSON list "
             f'[{{"box_2d": [y1, x1, y2, x2], "label": "{target}"}}] '
@@ -651,6 +680,15 @@ class ServoController:
             # The fallback path below reuses anchor_coords — keep it corrected too.
             anchor_coords = (cal_ax, cal_ay)
 
+        # The second pass is opt-in. It is off by default because it measured as a
+        # net loss (see REFLEXES["refine_enabled"] for the numbers and the
+        # re-enable criterion). An explicit vision_config value still wins, which
+        # is what lets eye_bakeoff compare both configurations in one run.
+        _cfg_refine = self._vision_config.get("disable_refine")
+        refine_on = (not _cfg_refine) if _cfg_refine is not None else bool(get_reflex("refine_enabled", False))
+        if not refine_on:
+            return self._anchor_result(anchor_coords, result1, "anchor_only_refine_disabled")
+
         # --- PASS 2: REFINEMENT PASS (ZOOM-IN) ---
         # Extract a localized crop centered on the anchor (widened when the
         # calibration shift was large — see ambiguity note above)
@@ -695,6 +733,26 @@ class ServoController:
                 # lx/1000 * actual_crop_width + left_offset
                 gx = int((lx / 1000.0) * (right - left) + left)
                 gy = int((ly / 1000.0) * (bottom - top) + top)
+
+                # The crop is built centred on the anchor, so a refine y sitting at
+                # the crop's vertical centre is restating the anchor, not measuring
+                # anything. Take the anchor's y verbatim and let the gate below
+                # judge x on its own merits.
+                if abs(ly - 500.0) <= get_reflex("refine_y_echo_band", 20):
+                    gy = ay
+                    self._last_parse_path = "zoom_refinement_y_echo"
+
+                # Agreement gate: a refinement that wants to move the click further
+                # than the anchor has ever been wrong is not a correction.
+                cax, cay = anchor_coords
+                _gate = get_reflex("refine_max_disagreement_px", 40)
+                if max(abs(gx - cax), abs(gy - cay)) > _gate:
+                    logger.info(
+                        f"Servo: refine ({gx},{gy}) disagrees with anchor ({cax},{cay}) "
+                        f"by more than {_gate}px — keeping the anchor"
+                    )
+                    return self._anchor_result(anchor_coords, result1, "anchor_refine_rejected")
+
                 
                 # Phase 1.4: Apply global calibration offsets
                 ox = self._vision_config.get("offset_x", 0)
@@ -703,7 +761,11 @@ class ServoController:
                 gy += oy
                 
                 self._last_raw_coords = (gx, gy)
-                self._last_parse_path = "zoom_refinement"
+                # Keep the y-echo tag if it was set above — it records that the
+                # refinement contributed x only, which is the difference between
+                # "the second pass agreed" and "the second pass said nothing".
+                if self._last_parse_path != "zoom_refinement_y_echo":
+                    self._last_parse_path = "zoom_refinement"
                 self._last_detection_source = "vision"
                 self._last_inference_ms = getattr(result1, "inference_ms", 0) + getattr(result2, "inference_ms", 0)
                 
@@ -714,24 +776,7 @@ class ServoController:
                 logger.info(f"Servo Zoom-In: anchor ({ax},{ay}) -> refined ({gx},{gy}) (offset {ox},{oy}) -> final ({x},{y})")
                 return (x, y)
 
-        # Fallback to anchor if refinement fails
-        raw_x, raw_y = anchor_coords
-        ox = self._vision_config.get("offset_x", 0)
-        oy = self._vision_config.get("offset_y", 0)
-        raw_x += ox
-        raw_y += oy
-        
-        self._last_raw_coords = (raw_x, raw_y)
-        self._last_parse_path = "anchor_only"
-        self._last_detection_source = "vision"
-        self._last_inference_ms = getattr(result1, "inference_ms", 0)
-        
-        # Clamp to screen bounds
-        x = max(0, min(self.screen_w - 1, int(raw_x)))
-        y = max(0, min(self.screen_h - TASKBAR_H - 1, int(raw_y)))
-        
-        logger.info(f"Servo coords (anchor fallback): ({x}, {y}) (offset {ox},{oy}) model={getattr(self.analyzer, 'default_model', '?')}")
-        return (x, y)
+        return self._anchor_result(anchor_coords, result1, "anchor_only")
 
 
     def _check_on_target(self, screenshot: Image.Image, target: str) -> Dict[str, Any]:

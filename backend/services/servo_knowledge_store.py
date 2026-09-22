@@ -54,6 +54,56 @@ REFLEXES = {
         "model": "universal",
         "notes": "Global pixel diff threshold. Lower = more sensitive.",
     },
+
+    # ---- Second-pass zoom refinement (servo_controller._estimate_coordinates) ----
+    # These three live here, next to the thing they constrain, rather than as an
+    # `if` at the call site — a per-family conditional in one function is how the
+    # next model gets missed.
+    "refine_enabled": {
+        "value": False,
+        "source": "servo_20260921_222821 blind-calibration session, n=15, gemma4:e4b @1000x1000",
+        "confidence": 0.4,
+        "model": "universal",
+        "notes": (
+            "Second zoom-in pass over a crop around the anchor. OFF because it is a net "
+            "loss on the only data we have: median absolute X error went 6.0px (anchor "
+            "alone) to 54.2px (after refine), median distance 91.7px to 93.4px, and the "
+            "refined click was worse than the anchor on 10 of 15 attempts. It is not a "
+            "framing problem — the target was fully inside the crop in 15 of 15, so a "
+            "wider crop does not fix it. Re-enable only when eye_bakeoff --mode "
+            "pipeline,full beats --mode anchor,calibrated on BOTH median |X| and median "
+            "distance, on frames the threshold was not tuned against."
+        ),
+    },
+    "refine_max_disagreement_px": {
+        "value": 40,
+        "source": "servo_20260921_222821: anchor |X| error spanned -7 to +8.5px on the 11 "
+                  "uncontaminated clicks; +38.5px was the worst case, and only on the "
+                  "target the page had poisoned with its own red click markers",
+        "confidence": 0.4,
+        "model": "universal",
+        "notes": (
+            "Discard a refined point that disagrees with the calibration-corrected anchor "
+            "by more than this in EITHER axis, and keep the anchor. A refine asking for a "
+            "larger X correction than that is asserting an anchor error never once observed "
+            "on this display. Loosening it puts the damage straight back: at 60 the gate "
+            "keeps 9 of 15 and median |X| returns to 37px."
+        ),
+    },
+    "refine_y_echo_band": {
+        "value": 20,
+        "source": "servo_20260921_222821: refine returned y of exactly 499 or 500 on 9 of 15 "
+                  "crops, and the crop's centre y equalled the anchor's y in 15 of 15 "
+                  "(edge clamping never fired)",
+        "confidence": 0.5,
+        "model": "universal",
+        "notes": (
+            "Half-width, in the refine's own normalised-to-1000 space, around the crop's "
+            "vertical centre. The crop is built centred on the anchor, so a refine y inside "
+            "this band restates the anchor rather than measuring anything — keep the "
+            "anchor's y and let the gate judge x on its own."
+        ),
+    },
 }
 
 
