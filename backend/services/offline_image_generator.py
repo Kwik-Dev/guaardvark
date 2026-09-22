@@ -538,12 +538,13 @@ class OfflineImageGenerator:
 
         Queries the live server's /object_info (authoritative about model locations
         — works for an external Comfy Desktop install, not just the bundled dir).
+        That query is cached for a few seconds inside the generator, so per-model
+        callers (``get_available_models`` with ``probe_remote=False``) do not issue
+        a network probe per row; an unreachable server reads as absent.
         """
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
             gen = ComfyUIImageGenerator()
-            if not gen._available():
-                return False
             return bool(gen.comfyui_installed_engines())
         except Exception:
             return False
