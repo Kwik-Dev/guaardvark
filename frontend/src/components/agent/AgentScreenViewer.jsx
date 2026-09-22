@@ -28,8 +28,12 @@ import {
 
 const API_BASE = '/api';
 const STORAGE_KEY = 'guaardvark_agent_screen_state';
+// The agent display is 1024x1024 (agent_control_service falls back to that
+// when xdotool cannot report it), so the card's screen area is square and the
+// card height follows its width. `h` is kept in saved state for older entries
+// but the rendered height is always derived from `w`.
 const DEFAULT_WIDTH = 380;
-const DEFAULT_HEIGHT = 250;
+const DEFAULT_HEIGHT = DEFAULT_WIDTH;
 const DOUBLE_CLICK_MS = 400;
 
 function loadState() {
@@ -258,12 +262,12 @@ export default function AgentScreenViewer({ open, onClose }) {
   useEffect(() => {
     if (!isResizing) return;
     const onMove = (e) => {
+      // Square card: the larger of the two drag deltas drives both sides so a
+      // diagonal, horizontal or vertical drag all resize it evenly.
       const dw = e.clientX - resizeStart.x;
       const dh = e.clientY - resizeStart.y;
-      setSize({
-        w: Math.max(200, resizeStart.w + dw),
-        h: Math.max(120, resizeStart.h + dh),
-      });
+      const w = Math.max(200, resizeStart.w + Math.max(dw, dh));
+      setSize({ w, h: w });
     };
     const onUp = () => setIsResizing(false);
     window.addEventListener('mousemove', onMove);
@@ -415,7 +419,7 @@ export default function AgentScreenViewer({ open, onClose }) {
       {/* Screen */}
       {!collapsed && (
         <Box sx={{ position: 'relative', bgcolor: '#000' }}>
-          <Box sx={{ aspectRatio: '16 / 9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Box sx={{ aspectRatio: '1 / 1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             {isInPopup ? (
               <Typography variant="caption" color="grey.600">In popup</Typography>
             ) : imageSrc ? (
