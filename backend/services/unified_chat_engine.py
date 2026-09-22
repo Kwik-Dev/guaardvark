@@ -2072,6 +2072,13 @@ class UnifiedChatEngine:
                 tool_list=tool_list,
                 is_voice_message=getattr(self, "_is_voice_message", False),
             )
+            # The brain state built the memory block; take the ids it used so
+            # feedback on this reply can reach those memories.
+            try:
+                from backend.api.memory_api import pop_last_selected_ids
+                self._prov_note("memory_ids", pop_last_selected_ids())
+            except Exception:
+                pass
         else:
             rules_persona = self._load_rules(model_name)
             system_prompt = self._build_system_prompt(
