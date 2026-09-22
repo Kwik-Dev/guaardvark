@@ -28,9 +28,9 @@ import {
 
 const API_BASE = '/api';
 const STORAGE_KEY = 'guaardvark_agent_screen_state';
-// The agent display is 1024x1024 (agent_control_service falls back to that
-// when xdotool cannot report it), so the card's screen area is square and the
-// card height follows its width. `h` is kept in saved state for older entries
+// The agent display is square (1000x1000 by default, GUAARDVARK_AGENT_RESOLUTION
+// in start_agent_display.sh), so the card's screen area is square and the card
+// height follows its width. `h` is kept in saved state for older entries
 // but the rendered height is always derived from `w`.
 const DEFAULT_WIDTH = 380;
 const DEFAULT_HEIGHT = DEFAULT_WIDTH;
