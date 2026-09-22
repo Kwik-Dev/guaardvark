@@ -65,14 +65,22 @@ REFLEXES = {
         "confidence": 0.4,
         "model": "universal",
         "notes": (
-            "Second zoom-in pass over a crop around the anchor. OFF because it is a net "
-            "loss on the only data we have: median absolute X error went 6.0px (anchor "
-            "alone) to 54.2px (after refine), median distance 91.7px to 93.4px, and the "
-            "refined click was worse than the anchor on 10 of 15 attempts. It is not a "
-            "framing problem — the target was fully inside the crop in 15 of 15, so a "
-            "wider crop does not fix it. Re-enable only when eye_bakeoff --mode "
-            "pipeline,full beats --mode anchor,calibrated on BOTH median |X| and median "
-            "distance, on frames the threshold was not tuned against."
+            "Second zoom-in pass over a crop around the anchor. OFF, measured on two "
+            "boards.\n"
+            "  Fixed five-dot board (2026-09-21, 15 clicks): catastrophic. Median "
+            "absolute X error 6.0px anchor-alone to 54.2px after refine, worse than the "
+            "anchor on 10 of 15. Not a framing problem — the target was fully inside the "
+            "crop in 15 of 15, so a wider crop does not fix it.\n"
+            "  Jittered board, 40 fresh positions (2026-09-22): roughly neutral. With "
+            "calibration on, median distance 45.4px without refine against 49.9px with "
+            "it, at double the inference cost. Hit rate slightly favours refine, median "
+            "error does not.\n"
+            "  The pattern across both: refine hurts most when the anchor is already "
+            "good and has room to help only when the anchor is poor. That is a bad trade "
+            "for a pass you cannot condition on knowing which case you are in.\n"
+            "  Re-enable only when eye_bakeoff --mode pipeline,full beats --mode "
+            "anchor,calibrated on BOTH median |X| and median distance, on frames the "
+            "threshold was not tuned against. As of 2026-09-22 it loses on both."
         ),
     },
     "refine_max_disagreement_px": {
