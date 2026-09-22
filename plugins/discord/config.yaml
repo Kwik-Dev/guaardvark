@@ -26,11 +26,17 @@ rate_limits:
 
 voice:
   enabled: true
-  router_url: "http://localhost:8081"  # pi-omni voice router (whisper.cpp + Kokoro)
+  # STT/TTS backend. "guaardvark" (default) uses Guaardvark's own Audio Foundry;
+  # "pi-omni" routes through an external OpenAI-compatible voice router
+  # (whisper.cpp + Kokoro at router_url), falling back to Guaardvark when that
+  # router is unreachable.
+  backend: "guaardvark"
+  router_url: "http://localhost:8081"  # only used when backend: pi-omni
   silence_threshold_ms: 1500
   max_listen_duration_s: 30
-  tts_voice: "af_heart"  # Kokoro voice (NOT Piper "ryan")
-  join_greeting: "Joined and ready. I'm Guaardvark. Go ahead and speak."  # spoken welcome on /voice join (empty = silent)
+  tts_voice: "ryan"  # Guaardvark/Piper voice
+  router_tts_voice: "af_heart"  # pi-omni/Kokoro voice
+  join_greeting: ""  # spoken welcome on /voice join (empty = silent)
   interrupt_on_speech: true  # barge-in not implemented yet (reserved)
   min_utterance_ms: 400  # discard blips shorter than this (coughs, key clicks)
 
