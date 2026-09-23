@@ -24,6 +24,7 @@ START_TIME=$(date +%s)
 TOTAL_STEPS=11
 
 FAST_START=0
+FORCE_CLEAN=0
 TEST_MODE=0
 VOICE_CHECK=1
 VOICE_AVAILABLE=1
@@ -52,6 +53,8 @@ for arg in "$@"; do
       echo "Options:"
       echo "  --fast              Reuse the venv and node_modules as they are: no package installs,"
       echo "                     no frontend build, no preflight import check (FAST_START=1)"
+      echo "  --clean             Clear Python bytecode and rebuild the frontend even if the"
+      echo "                     code is unchanged since the last launch"
       echo "  --test              Run with comprehensive health diagnostics"
       echo "  --no-voice          Skip voice API health check"
       echo "  --parallel          Run checks in parallel"
@@ -74,6 +77,7 @@ for arg in "$@"; do
       exit 0
       ;;
     --fast) FAST_START=1 ;;
+    --clean) FORCE_CLEAN=1 ;;
     --external-ollama) EXTERNAL_OLLAMA_FLAG=1 ;;
     --test) TEST_MODE=1 ;;
     --no-voice) VOICE_CHECK=0; VOICE_FLAG_GIVEN=1 ;;
@@ -396,6 +400,21 @@ install_network_up() {
     [ "${GUAARDVARK_OFFLINE:-0}" = "1" ] && return 1
     [ -n "${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}" ] && return 0
     host_resolves "$1"
+}
+
+# Fingerprint of the checkout: HEAD, uncommitted edits to tracked files, and the
+# contents of untracked source files. Extra arguments are mixed in (lockfile,
+# build-time env). Prints nothing outside a git checkout, so callers fall back to
+# always clearing/rebuilding there.
+code_fingerprint() {
+    git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+    {
+        git -C "$SCRIPT_DIR" rev-parse HEAD
+        git -C "$SCRIPT_DIR" diff HEAD --binary -- . ':(exclude)docs/local-workspace-only'
+        git -C "$SCRIPT_DIR" ls-files -z --others --exclude-standard -- backend plugins cli scripts frontend/src \
+            | (cd "$SCRIPT_DIR" && xargs -0 -r sha256sum)
+        printf '%s\n' "$@"
+    } 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
 host_resolves() {
@@ -2482,10 +2501,19 @@ cd "$BACKEND_DIR" || { vader_error "Failed to cd to $BACKEND_DIR"; exit 1; }
 
 # Clear stale Python bytecode cache (prevents import errors after file sync)
 # Scan entire project (not just backend/) — scripts/, plugins/, cli/ also have Python
-PYCACHE_COUNT=$(find "$GUAARDVARK_ROOT" -path "*/venv" -prune -o -path "*/node_modules" -prune -o -type d -name "__pycache__" -print 2>/dev/null | wc -l)
-if [ "$PYCACHE_COUNT" -gt 0 ]; then
-    find "$GUAARDVARK_ROOT" -path "*/venv" -prune -o -path "*/node_modules" -prune -o -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
-    vader_info "Cleared $PYCACHE_COUNT __pycache__ directories"
+# Only when the code changed since the last launch (or --clean): an unchanged
+# checkout keeps its bytecode, which saves recompiling on every boot.
+PYCACHE_FP="$(code_fingerprint)"
+PYCACHE_STAMP="$VENV_DIR/.guaardvark_pycache_fp"
+if [ "$FORCE_CLEAN" -eq 0 ] && [ -n "$PYCACHE_FP" ] && [ "$(cat "$PYCACHE_STAMP" 2>/dev/null)" = "$PYCACHE_FP" ]; then
+    vader_info "Code unchanged since last launch — keeping the Python bytecode cache"
+else
+    PYCACHE_COUNT=$(find "$GUAARDVARK_ROOT" -path "*/venv*" -prune -o -path "*/.venv" -prune -o -path "*/node_modules" -prune -o -type d -name "__pycache__" -print 2>/dev/null | wc -l)
+    if [ "$PYCACHE_COUNT" -gt 0 ]; then
+        find "$GUAARDVARK_ROOT" -path "*/venv*" -prune -o -path "*/.venv" -prune -o -path "*/node_modules" -prune -o -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+        vader_info "Cleared $PYCACHE_COUNT __pycache__ directories"
+    fi
+    [ -n "$PYCACHE_FP" ] && [ -d "$VENV_DIR" ] && printf '%s\n' "$PYCACHE_FP" > "$PYCACHE_STAMP"
 fi
 
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
@@ -2966,9 +2994,18 @@ else
     fi
 fi
 
-vader_info "Building frontend (production) before serving..."
-if (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$FRONTEND_LOG_FILE" 2>&1); then
+# The dev server below serves src/ directly; this build proves the code still
+# compiles and keeps a last-good dist. Skip it when neither the code, the
+# lockfile nor the build-time VITE_* env changed since the last good build.
+FRONTEND_BUILD_STAMP="$FRONTEND_DIR/dist/.build_fp"
+FRONTEND_FP="$(code_fingerprint "$(sha256sum "$FRONTEND_DIR/package-lock.json" 2>/dev/null)" "$(env | grep '^VITE_' | sort)")"
+if [ "$FORCE_CLEAN" -eq 0 ] && [ -n "$FRONTEND_FP" ] && [ -f "$FRONTEND_DIR/dist/index.html" ] \
+   && [ "$(cat "$FRONTEND_BUILD_STAMP" 2>/dev/null)" = "$FRONTEND_FP" ]; then
+    vader_info "Frontend unchanged since the last good build — skipping the build"
+elif vader_info "Building frontend (production) before serving..." \
+   && (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$FRONTEND_LOG_FILE" 2>&1); then
     vader_success "Frontend build complete"
+    [ -n "$FRONTEND_FP" ] && printf '%s\n' "$FRONTEND_FP" > "$FRONTEND_BUILD_STAMP"
 elif [ -f "$FRONTEND_DIR/dist/index.html" ]; then
     vader_error "Frontend build FAILED — serving the LAST-GOOD (stale) dist. Code is NOT current. Fix the build; see $FRONTEND_LOG_FILE"
 else
