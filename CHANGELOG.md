@@ -1,6 +1,41 @@
 # Changelog
 
-## Unreleased
+## 2.9.1 — Local-only chat, feedback that teaches, and a start that works offline
+
+- **Chat is local-only again.** The dormant Mistral cloud provider, the `cloud_models_enabled`
+  switch behind it and the `/api/llm/*` endpoints are removed. The switch was off by default and
+  no page rendered it, but the routes were live and unauthenticated, so an install with
+  `MISTRAL_API_KEY` in its environment could be pointed at Mistral by any client that reached the
+  API. Local Mistral-family models served by Ollama are unaffected. Hosted models reach Guaardvark
+  through the MCP server or the opt-in Uncle Claude escalation, neither of which changes chat routing.
+- **`./start.sh` starts offline.** A requirements or lockfile change since the last install no
+  longer makes a working environment count as broken: with no route to the package index the
+  backend starts on the installed packages, and the frontend keeps its `node_modules` instead of
+  letting `npm ci` delete them. The next start with a connection applies the update.
+  `GUAARDVARK_OFFLINE=1` forces the offline path.
+- **Faster launches when nothing changed.** Python bytecode is cleared and the frontend rebuilt
+  only when a fingerprint of the checkout (commit, uncommitted edits, untracked sources, lockfile,
+  build-time `VITE_*` env) changed since the last launch; `./start.sh --clean` forces both. The
+  clear no longer reaches environments named `venv-*` or `.venv`, so Audio Foundry's music
+  environment keeps its library bytecode between launches.
+- **Thumbs teach, and can be taken back.** Every assistant reply records its provenance (request
+  id, tier, model, persona rule, the memories and retrieval sources its prompt used, the recipe a
+  screen task ran, tools). A thumb names its reply by message id; it adjusts the confidence of
+  those memories, counts against the recipe, and records corrections and lessons; a second click
+  withdraws the verdict and reverses what it taught. The caption under the reply says what it
+  taught. Tool cards carry their own thumbs.
+- **Any model can drive the screen.** One resolver answers what a model can do by asking Ollama,
+  not by matching names (10 of the 23 models on the reference box had at least one detector wrong).
+  The user's active model is the brain; when it cannot see, the resolver lends the most accurate
+  measured eye. Each eye's axis order is measured on a known board instead of assumed, calibration
+  and accuracy live in one store, and eyes are ranked by measured accuracy. A correction loop,
+  armed only when the eye's measured accuracy is coarser than the target, re-checks the estimate
+  with a marker before clicking. Offline benchmarking, truth-labelled frame capture and a
+  calibration page back the measurements.
+- **Agent desktop.** Firefox launches on the virtual display with the snap build and its private
+  bus; the floating card is square and chat bubbles have a half-opaque background.
+- **Dependencies.** beautifulsoup4 4.15.0, Flask-Migrate 4.1.0, mss >= 10.2.0, anthropic >= 1.7.0,
+  lucide-react 1.47.0.
 
 - **ComfyUI and the GPU, seven truths.** The plugin's health probe proves the process on :8188 is
   ours (a stranger's ComfyUI on the port used to read as "running" while every Wan batch failed).
