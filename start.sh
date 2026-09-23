@@ -389,6 +389,15 @@ fi
 
 # host_resolves NAME: does the system resolver answer for NAME? `getent` is glibc
 # only; macOS has none, so without the fallbacks every Mac start reported broken DNS.
+# True when package installs can reach their index. GUAARDVARK_OFFLINE=1 forces
+# "no" (Flight Mode, or a known outage). Behind a proxy, local DNS is the wrong
+# probe (see ensure_backend_python_environment), so a proxy counts as reachable.
+install_network_up() {
+    [ "${GUAARDVARK_OFFLINE:-0}" = "1" ] && return 1
+    [ -n "${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}" ] && return 0
+    host_resolves "$1"
+}
+
 host_resolves() {
     if command_exists getent; then
         timeout 5 getent hosts "$1" >/dev/null 2>&1
@@ -1207,6 +1216,9 @@ except Exception:
 # Can we SKIP the bootstrap? Functional AND provably complete. Use this only for
 # the skip decision, never to verify a bootstrap that just ran.
 backend_venv_healthy() {
+    # Set when the only fault is a requirements change since the last bootstrap:
+    # the venv works, it is just behind. Offline, that venv still starts.
+    VENV_REQS_STALE=0
     backend_venv_functional || return 1
 
     # The import probe only names packages from requirements-base.txt. If
@@ -1227,7 +1239,10 @@ backend_venv_healthy() {
     recorded="$(awk -F: '/^reqs:/ {print $2; exit}' "$BOOTSTRAP_STAMP" 2>/dev/null || true)"
     if [ -n "$recorded" ]; then
         current="$(venv_reqs_fingerprint)"
-        [ "$recorded" = "$current" ] || return 1
+        if [ "$recorded" != "$current" ]; then
+            VENV_REQS_STALE=1
+            return 1
+        fi
     fi
     return 0
 }
@@ -1380,6 +1395,14 @@ ensure_backend_python_environment() {
         needed=1
     elif ! backend_venv_healthy; then
         needed=1
+    fi
+
+    # A working venv whose requirements changed is updated when the network is
+    # there; without it, start on what is installed rather than refuse to start.
+    if [ "$needed" -eq 1 ] && [ "${VENV_REQS_STALE:-0}" -eq 1 ] && ! install_network_up pypi.org; then
+        vader_warn "Requirements changed since the last install, but the package index is unreachable."
+        vader_info "Starting on the installed packages; the next ./start.sh with a network connection updates them."
+        return 0
     fi
 
     if [ "$needed" -eq 1 ]; then
@@ -1573,6 +1596,13 @@ ensure_frontend_deps() {
     # Run npm ci (lockfile-strict, same strategy as scripts/dep_reconciler/reconcilers/frontend.py)
     # only when truly needed: missing node_modules, or lockfile newer than our stamp.
     if [ ! -d "$nm" ] || [ ! -f "$stamp" ] || [ "$lock" -nt "$stamp" 2>/dev/null ]; then
+        # npm ci deletes node_modules before downloading, so offline it would
+        # leave the UI with nothing. Keep the installed tree until the registry
+        # is reachable; the stamp stays old, so the next online start updates it.
+        if [ -d "$nm" ] && ! install_network_up registry.npmjs.org; then
+            vader_warn "Frontend lockfile changed, but the npm registry is unreachable — keeping the installed node_modules."
+            return 0
+        fi
         vader_info "Ensuring frontend dependencies (using npm ci for lockfile safety)..."
         if (cd "$FRONTEND_DIR" && npm ci >> "$SETUP_LOG" 2>&1); then
             touch "$stamp" 2>/dev/null || true
@@ -1879,10 +1909,18 @@ source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv"; exit
 # This is the key part of the strong fix: after creation (or if broken) we now ensure
 # the venv actually has the packages via ensure_backend_python_environment.
 if ! ensure_backend_python_environment; then
+  if [ "${VENV_REQS_STALE:-0}" -eq 1 ] && backend_venv_functional; then
+    # The update failed part-way (network dropped mid-download), but the
+    # previous install still imports. Start on it; the stamp is unchanged, so
+    # the next ./start.sh retries the update.
+    vader_warn "Dependency update did not finish; starting on the previously installed packages."
+    source "$VENV_DIR/bin/activate" || { vader_error "Failed to activate venv"; exit 1; }
+  else
     vader_error "Python bootstrap failed. Cannot continue."
     # ensure_... already deactivated on its error path
     cd "$SCRIPT_DIR"
     exit 1
+  fi
 fi
 
 # The ensure function manages its own activate/deactivate when it performs work.
