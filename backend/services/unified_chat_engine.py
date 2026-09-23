@@ -4086,22 +4086,7 @@ class UnifiedChatEngine:
                 emit_fn("chat:token", {"content": text, "session_id": session_id})
             return text, 0, 0
 
-        # Provider dispatch: route generation to Mistral's API when the user has
-        # selected it (runtime toggle), else stay on local Ollama. The streaming
-        # loop below is provider-agnostic because mistral_provider.chat() yields
-        # chunks in the same shape ollama.chat() does.
-        from backend.services import llm_provider as _llm_provider
-        _use_mistral = _llm_provider.is_mistral_active()
-
         model_name = getattr(self.llm, "model", "gemma4:e4b")
-        # Provider dispatch: when the master cloud toggle is on AND a cloud
-        # provider is selected, route generation to its API. The streaming loop
-        # below is provider-agnostic — mistral_provider.chat() yields chunks in
-        # the same shape ollama.chat() does.
-        from backend.services import llm_provider as _llm_provider
-        _use_cloud = _llm_provider.is_mistral_active()
-        if _use_cloud:
-            model_name = _llm_provider.get_mistral_model()
 
         # Prioritize LLM load via orchestrator. This helps prevent image/video
         # jobs from evicting the chat model mid-analysis (the cause of the
@@ -4132,7 +4117,7 @@ class UnifiedChatEngine:
         # One predicate for the whole product: name patterns, then Ollama's
         # capabilities list, so a model the pattern list has not met still counts.
         from backend.utils.ollama_resource_manager import model_supports_thinking
-        is_thinking_model = (not _use_cloud) and model_supports_thinking(model_name)
+        is_thinking_model = model_supports_thinking(model_name)
         think_on = is_thinking_model and bool(getattr(self, "_think", False))
 
         # Track <think>...</think> blocks in the content stream so we can
@@ -4247,41 +4232,29 @@ class UnifiedChatEngine:
             # gated additionally on model 'tools' capability — see _run_chat). When
             # active we pass Ollama's native tools=[...] schema; the model returns
             # structured tool_calls in message.tool_calls rather than inline XML.
-            # Native tool-calling applies to the local Ollama path only; a cloud
-            # provider streams text and tool-calls ride the XML path (see
-            # mistral_provider docstring), so it's disabled when cloud is active.
-            _native_active = (not _use_cloud) and bool(getattr(self, "_native_toolcalls_active", False))
+            _native_active = bool(getattr(self, "_native_toolcalls_active", False))
             _native_schema = getattr(self, "_native_tools_schema", None)
             if _native_active:
                 # Reset the per-call native tool-call sink so a prior iteration's
                 # calls never leak into this one.
                 self._native_pending_tool_calls = None
 
-            if _use_cloud:
-                from backend.services import mistral_provider
-                stream = mistral_provider.chat(
-                    model=model_name,
-                    messages=call_messages,
-                    stream=True,
-                    options=opts,
-                )
-            else:
-                from backend.config import get_chat_keep_alive
-                _chat_kwargs = dict(
-                    model=model_name,
-                    messages=call_messages,
-                    stream=True,
-                    options=opts,
-                    keep_alive=get_chat_keep_alive(),  # don't re-pin the model 24h on every chat burst (VRAM squat)
-                )
-                if _native_active and _native_schema:
-                    _chat_kwargs["tools"] = _native_schema
-                # Honor the per-chat/global thinking toggle (resolved in _run_chat).
-                # Only thinking-capable models accept `think`; passing it to others can
-                # error, so gate on is_thinking_model. Default-off keeps chat snappy.
-                if is_thinking_model and getattr(self, "_think", None) is not None:
-                    _chat_kwargs["think"] = bool(self._think)
-                stream = ollama.chat(**_chat_kwargs)
+            from backend.config import get_chat_keep_alive
+            _chat_kwargs = dict(
+                model=model_name,
+                messages=call_messages,
+                stream=True,
+                options=opts,
+                keep_alive=get_chat_keep_alive(),  # don't re-pin the model 24h on every chat burst (VRAM squat)
+            )
+            if _native_active and _native_schema:
+                _chat_kwargs["tools"] = _native_schema
+            # Honor the per-chat/global thinking toggle (resolved in _run_chat).
+            # Only thinking-capable models accept `think`; passing it to others can
+            # error, so gate on is_thinking_model. Default-off keeps chat snappy.
+            if is_thinking_model and getattr(self, "_think", None) is not None:
+                _chat_kwargs["think"] = bool(self._think)
+            stream = ollama.chat(**_chat_kwargs)
 
             # XML filter: stream tokens to client until <tool_call is detected,
             # then suppress further emission (tool calls are announced separately).
@@ -4402,7 +4375,7 @@ class UnifiedChatEngine:
             # say so plainly if that still yields nothing. The reasoning text is
             # never promoted to content.
             if (
-                not content and thinking and not _use_cloud
+                not content and thinking
                 and not _native_tool_calls_acc and not is_aborted(session_id)
             ):
                 logger.info(
