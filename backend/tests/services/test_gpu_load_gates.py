@@ -182,6 +182,12 @@ class _SW:
 
 def _patch_load(monkeypatch, *, ram_avail_gb, swap_used_gb=0.0, load1=1.0, vram_free_gb=None):
     import backend.services.system_load_gate as slg
+    # The gate's two hard limits are env-overridable knobs, read at call time, and
+    # tests load the developer's .env — so an operator who raised a cap (which the
+    # macOS docs tell them to do for swap) would silently change what these tests
+    # assert. Clear both so every case here exercises the documented defaults.
+    monkeypatch.delenv("GUAARDVARK_SWAP_HARD_MAX_GB", raising=False)
+    monkeypatch.delenv("GUAARDVARK_RAM_HARD_MIN_GB", raising=False)
     monkeypatch.setattr(slg.psutil, "virtual_memory", lambda: _VM(ram_avail_gb))
     monkeypatch.setattr(slg.psutil, "swap_memory", lambda: _SW(swap_used_gb))
     monkeypatch.setattr(slg.os, "getloadavg", lambda: (load1, load1, load1))
@@ -210,6 +216,23 @@ def test_load_gate_blocks_on_swap(monkeypatch):
     g = GlobalLoadGate()
     with pytest.raises(LoadGateTimeout):
         g.admit(JobWeight(ram_gb=1.0), timeout=0.0)
+
+
+def test_swap_cap_is_env_overridable(monkeypatch):
+    """The swap hard cap is a knob, not a constant.
+
+    macOS holds swap "sticky" — it does not release it promptly after apps
+    close — so a fixed 8 GB cap can permanently block legitimate work on a
+    healthy Mac; operators raise it with GUAARDVARK_SWAP_HARD_MAX_GB. Pins both
+    halves: the default blocks, the override admits.
+    """
+    from backend.services.system_load_gate import GlobalLoadGate, JobWeight, LoadGateTimeout
+    _patch_load(monkeypatch, ram_avail_gb=40.0, swap_used_gb=10.0)
+    with pytest.raises(LoadGateTimeout):
+        GlobalLoadGate().admit(JobWeight(ram_gb=1.0), timeout=0.0)
+
+    monkeypatch.setenv("GUAARDVARK_SWAP_HARD_MAX_GB", "16")
+    GlobalLoadGate().admit(JobWeight(ram_gb=1.0), timeout=0.0)  # 10 GB < the 16 GB cap
 
 
 def test_load_gate_reserved_ram_accounting(monkeypatch):
