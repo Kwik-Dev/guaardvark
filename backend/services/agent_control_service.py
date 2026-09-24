@@ -1610,9 +1610,16 @@ class AgentControlService:
                                         "click the page body once to give it keyboard focus, then retry."
                                     )
                             else:
-                                result["verified"] = True
-                                logger.debug(f"[AGENT][STEP {iteration+1}][VERIFY] Screen changed after "
-                                             f"{decision.action.action_type} (delta={pixel_diff:.2f})")
+                                # type and scroll reach here only past their change
+                                # thresholds. A hotkey reaches here whatever it did,
+                                # so it is verified only if the screen moved: a Home
+                                # on a page already at the top is not progress, and
+                                # counting it as one reset the stall guard.
+                                result["verified"] = (decision.action.action_type != "hotkey"
+                                                      or pixel_diff >= 0.01)
+                                logger.debug(f"[AGENT][STEP {iteration+1}][VERIFY] "
+                                             f"{decision.action.action_type} delta={pixel_diff:.2f} "
+                                             f"verified={result['verified']}")
 
                     status_icon = "OK" if not failed else "FAIL"
                     detail_len = len(decision.action.text or "")
