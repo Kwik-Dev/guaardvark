@@ -15,7 +15,24 @@ import pytest
 os.environ.setdefault("GUAARDVARK_MODE", "test")
 os.environ["GUAARDVARK_MCP_ENABLED"] = "true"
 
-pytest.importorskip("mcp")
+def _import_mcp_sdk():
+    """Import the installed `mcp` SDK, not backend/mcp (Guaardvark's own MCP
+    server), which shadows it when backend/ is on sys.path, as the backend
+    test conftest arranges. Same approach as backend/mcp/tests/conftest.py."""
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    loaded = sys.modules.get("mcp")
+    if loaded is not None and (getattr(loaded, "__file__", "") or "").startswith(backend_dir + os.sep):
+        for name in [m for m in sys.modules if m == "mcp" or m.startswith("mcp.")]:
+            del sys.modules[name]
+    saved = list(sys.path)
+    try:
+        sys.path = [p for p in sys.path if os.path.abspath(p or ".") != backend_dir]
+        return pytest.importorskip("mcp.client.stdio")
+    finally:
+        sys.path = saved
+
+
+_import_mcp_sdk()
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "mcp_echo_server.py")
 

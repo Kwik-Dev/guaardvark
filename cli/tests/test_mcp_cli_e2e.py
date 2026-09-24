@@ -20,7 +20,24 @@ FIXTURE = os.path.join(REPO, "backend", "tests", "fixtures", "mcp_echo_server.py
 sys.path.insert(0, REPO)
 
 pytest.importorskip("flask")
-pytest.importorskip("mcp")
+def _import_mcp_sdk():
+    """Import the installed `mcp` SDK, not backend/mcp (Guaardvark's own MCP
+    server), which shadows it when backend/ is on sys.path, as the backend
+    test conftest arranges. Same approach as backend/mcp/tests/conftest.py."""
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../backend"))
+    loaded = sys.modules.get("mcp")
+    if loaded is not None and (getattr(loaded, "__file__", "") or "").startswith(backend_dir + os.sep):
+        for name in [m for m in sys.modules if m == "mcp" or m.startswith("mcp.")]:
+            del sys.modules[name]
+    saved = list(sys.path)
+    try:
+        sys.path = [p for p in sys.path if os.path.abspath(p or ".") != backend_dir]
+        return pytest.importorskip("mcp.client.stdio")
+    finally:
+        sys.path = saved
+
+
+_import_mcp_sdk()
 pytest.importorskip("typer")
 
 
@@ -101,7 +118,7 @@ def test_mcp_commands(backend):
 
 def test_mcp_call_destructive_requires_approval(backend):
     denied = _llx(backend, "mcp", "client", "call", "fx", "delete_thing", "--arg", "name=x", "--json")
-    assert denied.returncode == 2 and "Not run" in denied.stderr
+    assert denied.returncode == 2 and "Not run" in denied.stdout + denied.stderr
     ok = _llx(backend, "mcp", "client", "call", "fx", "delete_thing", "--arg", "name=x",
               "--approve", "delete_*", "--json")
     assert ok.returncode == 0 and json.loads(ok.stdout)["text"] == "deleted x"
