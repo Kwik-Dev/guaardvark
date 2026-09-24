@@ -2598,16 +2598,62 @@ class AgentControlService:
         "Full toolbox awareness (SkillOpt-style skills + tools): You have access to a large agent toolbox (code, web search/scrape, media/music, batch generation, memory/lessons, general tools, and screen control via these recipes/skills). In /agent mode with capable models (Gemma4+), use natural language to invoke any -- e.g. describe a general task to trigger tool calling, or screen task to use recipes + actions here. Recipes (skills) are optimized deterministic shortcuts for common screen patterns (triggers match natural language); the system auto-matches and executes them for reliability. For full list or self-introspection, call agent_status. Skills/recipes + self-knowledge are external (like SkillOpt .md artifacts) and can be auto-tuned from trajectories without changing model weights. Prioritize matching/using recipes for screen reliability; fall back to structured actions or general tools (use action=\"tool\", tool_name=..., tool_params=...) as needed. Cross-model: these skills make even smaller models effective at complex multi-step work."
     )
 
+    _CLICK_FAMILY = ("click", "right_click", "double_click")
+
     @staticmethod
     def _history_block(history, n: int) -> str:
+        """Every step of this task, oldest first, with step and click counts.
+
+        The model needs the whole task, not a window onto it: shown only its
+        last three steps, a five-target task cycled through the first four
+        targets until the timeout, each time "forgetting" the one that had
+        just scrolled out of view (2026-09-23 dots run). ``n`` is the cap the
+        caller declares (``config.max_iterations``); only training mode, whose
+        history can reach a thousand steps, ever truncates, and the header
+        says so.
+        """
         if not history:
             return ""
+        clicks = sum(1 for h in history
+                     if h.action.action_type in AgentControlService._CLICK_FAMILY)
+        header = f"Done (steps: {len(history)}, click attempts: {clicks}"
+        if len(history) > n:
+            header += f"; showing last {n}"
+        header += "):"
         steps = []
         for h in history[-n:]:
             status = "FAIL" if h.failed else "OK"
             desc = h.action.text or h.action.target_description or str(h.action.keys or "")
             steps.append(f"  {h.action.action_type}: {desc} [{status}]")
-        return "Done:\n" + "\n".join(steps) + "\n"
+        return header + "\n" + "\n".join(steps) + "\n"
+
+    @staticmethod
+    def _repeat_block(history) -> str:
+        """One line when a target already clicked [OK] was clicked [OK] again.
+
+        Catches the non-consecutive repeat (A, B, C, D, A) that neither the
+        pivot block nor the loop breaker can see: both look only at adjacent
+        identical actions. Informational rather than a prohibition, because
+        some tasks legitimately re-click a target ("next page" three times).
+        Keyed on the normalised target string, so a target the model renames
+        between steps is not counted; the full Done list still shows both.
+        """
+        counts: Dict[str, int] = {}
+        names: Dict[str, str] = {}
+        for h in history:
+            if h.failed or h.action.action_type not in AgentControlService._CLICK_FAMILY:
+                continue
+            key = (h.action.target_description or "").strip().lower()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            names.setdefault(key, h.action.target_description.strip())
+        repeats = [f'"{names[k]}" x{c}' for k, c in counts.items() if c >= 2]
+        if not repeats:
+            return ""
+        return ("Already clicked [OK] more than once: " + ", ".join(repeats)
+                + ". Every target marked [OK] above is done; if the task wants each "
+                  "target once, pick one NOT in the Done list, or say done.\n")
 
     @staticmethod
     def _pivot_block(history) -> str:
@@ -2695,12 +2741,16 @@ class AgentControlService:
         """Build a compact prompt for unified vision+decision models.
 
         Shorter prompts = better detection accuracy. Only include what the model
-        needs to pick the next action. Assembled from the shared blocks above;
-        the output is pinned byte-for-byte by tests/fixtures/unified_prompt_golden.txt.
+        needs to pick the next action, and that includes every step it has
+        already taken this task: a three-step window made a five-target task
+        cycle through the first four targets until the timeout (2026-09-23).
+        Assembled from the shared blocks above; the output is pinned
+        byte-for-byte by tests/fixtures/unified_prompt_golden.txt.
         """
         # This prompt asks for success_proof; the done-guard keys on that fact.
         self._proof_contract = True
-        done_lines = self._history_block(history, 3)
+        done_lines = self._history_block(history, self.config.max_iterations)
+        repeat_block = "" if training_mode else self._repeat_block(history)
         pivot_block = self._pivot_block(history)
         desktop_state = AgentControlService._get_desktop_state()
         training_override = self._training_override(training_mode)
@@ -2718,7 +2768,7 @@ class AgentControlService:
 
 {desktop_state}
 {world_block}
-{dom_grounding_block}{world_observed_block}{failure_block}{done_lines}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
+{dom_grounding_block}{world_observed_block}{failure_block}{done_lines}{repeat_block}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
 
 {self._STATE_MANAGEMENT}
 
@@ -4732,7 +4782,8 @@ Reply ONLY with JSON:
         # This prompt asks for success_proof; the done-guard keys on that fact.
         self._proof_contract = True
         mouse_only = getattr(self, '_mouse_only', False)
-        done_lines = self._history_block(history, 5)
+        done_lines = self._history_block(history, self.config.max_iterations)
+        repeat_block = "" if training_mode else self._repeat_block(history)
         pivot_block = self._pivot_block(history)
         desktop_state = self._get_desktop_state()
         training_override = self._training_override(training_mode)
@@ -4760,7 +4811,7 @@ Task: {task}
 
 Screen (as described by the vision model): {scene}
 
-{dom_grounding_block}{world_observed_block}{done_lines}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
+{dom_grounding_block}{world_observed_block}{done_lines}{repeat_block}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
 
 {rules}
 

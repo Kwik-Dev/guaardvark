@@ -58,3 +58,22 @@ def test_full_knowledge_is_a_superset_of_compact():
     compact = A._build_persistent_knowledge_system()
     full = A._build_persistent_knowledge_system(task="open youtube", full=True)
     assert full.startswith(compact)
+
+
+def test_split_prompt_carries_the_same_task_memory():
+    """The non-consecutive repeat (A, B, C, D, A) reaches a blind brain too."""
+    from unittest.mock import patch
+    from backend.services.agent_control_service import AgentControlService, ActionStep, AgentAction
+    svc = _svc()
+    hist = [ActionStep(iteration=i, action=AgentAction(action_type="click", target_description=t))
+            for i, t in enumerate(("red dot A", "blue dot B", "green dot C", "orange dot D", "red dot A"), 1)]
+    with patch.object(AgentControlService, "_get_desktop_state", staticmethod(lambda display=None: "Desktop: fixture")), \
+         patch.object(AgentControlService, "_format_dom_grounding_for_prompt", lambda self: ""):
+        unified = svc._build_unified_prompt("click each dot", hist, training_mode=False)
+        svc._pending_world_observed = "WORLD_OBSERVED: fixture"
+        split = svc._build_decision_prompt("click each dot", "five dots", hist, training_mode=False)
+    done = svc._history_block(hist, svc.config.max_iterations)
+    assert done.startswith("Done (steps: 5, click attempts: 5):")
+    assert done in unified and done in split
+    note = 'Already clicked [OK] more than once: "red dot A" x2'
+    assert note in unified and note in split
