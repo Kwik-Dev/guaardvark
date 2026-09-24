@@ -2314,30 +2314,19 @@ class AgentControlService:
                          .order_by(AgentTaskStep.iteration.asc(), AgentTaskStep.created_at.asc())
                          .all())
                 when = run.started_at.strftime("%Y-%m-%d %H:%M") if run.started_at else "earlier"
-                # The done guard records its own checks as wait_until_visible
-                # rows; they are not actions the model took, so a replayable
-                # trace leaves them out.
+                # Counts only, never the steps. Shown the previous run's steps
+                # as a trace ("click red dot A, click blue dot B, ..., done"),
+                # gemma4:12b read it as a script and, having finished A-E,
+                # started again from A until the timeout (2026-09-23 20:43,
+                # run 242cd07c). The done guard's own wait_until_visible rows
+                # are not actions the model took, so they are not counted.
                 acted = [st for st in steps if st.action_type not in ("wait_until_visible", "done")]
                 if run.success:
-                    parts = [f"{st.action_type} {st.target or st.text or ('+'.join(st.keys) if st.keys else '')}".strip()
-                             for st in acted[:12]]
-                    if len(acted) > 12:
-                        parts.append(f"... {len(acted) - 12} more")
-                    parts.append("done")
-                    return (f"Last attempt at this exact task ({when}) succeeded in "
-                            f"{len(acted) + 1} steps: " + ", ".join(parts) + ".")
-                counts: Dict[str, int] = {}
-                names: Dict[str, str] = {}
-                for st in steps:
-                    if st.action_type in self._CLICK_FAMILY and st.target:
-                        k = st.target.strip().lower()
-                        counts[k] = counts.get(k, 0) + 1
-                        names.setdefault(k, st.target.strip())
-                clicked = ", ".join(f"{names[k]} x{c}" if c > 1 else names[k]
-                                    for k, c in list(counts.items())[:12])
-                tail = f"; targets clicked: {clicked}" if clicked else ""
-                return (f"Last attempt at this exact task ({when}) ended \"{run.reason}\" after "
-                        f"{len(acted)} steps{tail}. Do not repeat that pattern.")
+                    return (f"This exact task succeeded before ({when}, {len(acted)} actions). "
+                            f"The Done list below is THIS attempt only; say done once it shows the work.")
+                return (f"The last attempt at this exact task ({when}) ended \"{run.reason}\" after "
+                        f"{len(acted)} actions without finishing. The Done list below is THIS attempt "
+                        f"only; do not redo work it already shows.")
         except Exception as e:
             logger.debug(f"[AGENT][EPISODE] prior-run lookup skipped: {e}")
             return ""

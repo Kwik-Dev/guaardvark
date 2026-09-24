@@ -120,17 +120,26 @@ def test_prior_run_note_after_a_failure_names_the_targets(app):
                                   success=False, reason="timeout"),
                           task_id="t", task="click each dot")
     note = svc._prior_run_note_for("Click each dot")
-    assert note.startswith("Last attempt at this exact task (")
-    assert 'ended "timeout" after 4 steps' in note
-    assert "red dot A x2, blue dot B x2" in note
-    assert note.endswith("Do not repeat that pattern.")
+    assert note.startswith("The last attempt at this exact task (")
+    assert 'ended "timeout" after 4 actions without finishing' in note
+    assert "red dot A" not in note, "never list targets: the model reads a list as a script"
+    assert note.endswith("The Done list below is THIS attempt only; do not redo work it already shows.")
 
 
-def test_prior_run_note_after_a_success_lists_the_steps(app):
+def test_prior_run_note_after_a_success_counts_but_never_lists_the_steps(app):
+    """Live 2026-09-23 20:43: a listed trace was replayed as a script after the
+    task was already complete. Counts only."""
+    from backend.services.agent_control_service import ActionStep, AgentAction
     svc = _svc()
-    svc._persist_task_run(_result(["red dot A", "blue dot B"]), task_id="t", task="click each dot")
+    res = _result(["red dot A", "blue dot B"])
+    res.steps.append(ActionStep(iteration=2, action=AgentAction(action_type="wait_until_visible",
+                                                                 target_description="proof"), failed=True))
+    svc._persist_task_run(res, task_id="t", task="click each dot")
     note = svc._prior_run_note_for("click each dot")
-    assert "succeeded in 3 steps: click red dot A, click blue dot B, done." in note
+    assert note.startswith("This exact task succeeded before (")
+    assert "2 actions" in note
+    assert "red dot A" not in note and "click" not in note.split("succeeded before")[1].split("actions")[0]
+    assert "THIS attempt only" in note
 
 
 def test_prior_run_note_is_empty_without_a_run(app):
