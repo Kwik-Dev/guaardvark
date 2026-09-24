@@ -104,14 +104,18 @@ REFLEXES = {
     # below carry what they were measured against; change them with a new
     # measurement, not a hunch.
     "correction_mode": {
-        "value": "shadow",
-        "source": "operator decision 2026-09-22: shadow for one measurement cycle, "
-                  "then decide the default from the archive numbers",
+        "value": "auto",
+        "source": "operator decision 2026-09-24 (was shadow since 2026-09-22): on for eyes "
+                  "measured to judge well, shadow for unmeasured ones. Measured with "
+                  "eye_bakeoff --mode corrected on 30 trainer targets: gemma4:e4b 5-7 hits "
+                  "on its estimate alone, 16 with the loop applied",
         "confidence": 0.5,
         "model": "universal",
         "notes": (
             "off: never probe. shadow: run the loop, log estimate/final/drift, click "
-            "the ESTIMATE. on: click the FINAL. Precedence: vision_config "
+            "the ESTIMATE. on: click the FINAL. auto: on when the eye's measured judge "
+            "rate meets EYE_JUDGE_MIN_BOTH_RATE, shadow when unmeasured (an eye measured "
+            "below it is never armed). Precedence: vision_config "
             "correction_mode > env GUAARDVARK_SERVO_CORRECTION > this value. The "
             "shadow pass criterion (plan 2026-09-22): median |final-truth| on Y at "
             "most 0.7 of |estimate-truth|, X no worse than estimate+5px, unparseable "

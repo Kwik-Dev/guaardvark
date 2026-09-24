@@ -37,7 +37,7 @@ DIRECTION_MAP = {
 
 TASKBAR_H = 30  # tint2 taskbar at the bottom — never click here
 
-CORRECTION_MODES = ("off", "shadow", "on")
+CORRECTION_MODES = ("off", "shadow", "on", "auto")
 CORRECTION_ENV = "GUAARDVARK_SERVO_CORRECTION"
 PROBE_RING = (220, 30, 30)   # the correction probe's marker: red, unlike the cursor reticle
 PROBE_MARKER_PX = 48
@@ -119,6 +119,13 @@ class ServoController:
         # environment, then the reflex. "explicit" is what lets a training
         # (single_attempt) run exercise the loop when it asks for it.
         self.correction_mode, self._correction_explicit = self._resolve_correction_mode(vision_config or {})
+        if self.correction_mode == "auto":
+            # On for an eye measured to judge well, where it roughly doubled
+            # hits; shadow for an unmeasured one, whose judging is unknown and
+            # whose shadow rows are the evidence for measuring it.
+            from backend.services.model_capability_data import EYE_JUDGE_MIN_BOTH_RATE
+            good = self.eye_judge_rate is not None and self.eye_judge_rate >= EYE_JUDGE_MIN_BOTH_RATE
+            self.correction_mode = "on" if good else "shadow"
         self._corrections_armed_this_session = 0
         self._last_correction_skip = ""
         # Optional TrainerTruthProbe (trainer_truth_probe.py) — attached by the

@@ -46,7 +46,7 @@ def _screen(size=(1000, 1000)):
     return s
 
 
-def _servo(responses, mode=None, accuracy=None, explicit_env=None, reflex_mode="shadow", screen=None):
+def _servo(responses, mode=None, accuracy=None, explicit_env=None, reflex_mode="shadow", screen=None, judge=None):
     cfg = {"coord_order": "yx", "internal_width": 1000, "coord_style": "google_box2d"}
     if mode is not None:
         cfg["correction_mode"] = mode
@@ -64,7 +64,7 @@ def _servo(responses, mode=None, accuracy=None, explicit_env=None, reflex_mode="
         if not explicit_env:
             os.environ.pop("GUAARDVARK_SERVO_CORRECTION", None)
         servo = ServoController(screen or _screen(), _analyzer(responses), vision_config=cfg,
-                                eye_accuracy_px=accuracy)
+                                eye_accuracy_px=accuracy, eye_judge_rate=judge)
     return servo
 
 
@@ -235,6 +235,22 @@ class LoopTest(unittest.TestCase):
         r = s.click_target("dot")
         self.assertEqual(r["correction"]["stop_reason"], "converged")
         self.assertGreater(r["correction"]["steps"], 5)
+
+    def test_auto_is_on_for_a_measured_good_judge(self, _sleep, mock_archive):
+        s = _servo([ANCHOR], reflex_mode="auto", accuracy=54.0, judge=1.0)
+        self.assertEqual(s.correction_mode, "on")
+
+    def test_auto_is_shadow_for_an_unmeasured_judge(self, _sleep, mock_archive):
+        s = _servo([ANCHOR], reflex_mode="auto", accuracy=54.0)
+        self.assertEqual(s.correction_mode, "shadow")
+
+    def test_an_explicit_mode_beats_auto(self, _sleep, mock_archive):
+        s = _servo([ANCHOR], mode="shadow", reflex_mode="auto", accuracy=54.0, judge=1.0)
+        self.assertEqual(s.correction_mode, "shadow")
+
+    def test_the_shipped_default_is_auto(self, _sleep, mock_archive):
+        from backend.services.servo_knowledge_store import get_reflex
+        self.assertEqual(get_reflex("correction_mode"), "auto")
 
     def test_an_eye_that_judges_poorly_is_not_armed(self, _sleep, mock_archive):
         s = _servo([ANCHOR, '{"visible": true, "dx": "right", "dy": "below"}'], mode="on", accuracy=240.0)
