@@ -36,6 +36,7 @@ class TestAgentControlConfig(unittest.TestCase):
         self.assertEqual(config.grid_rows, 8)
         self.assertEqual(config.vision_model, "gemma4:e4b")
         self.assertEqual(config.max_consecutive_failures, 5)
+        self.assertFalse(config.prior_run_note_enabled, "the look-back line is opt-in until measured")
 
 
 class TestAgentModeState(unittest.TestCase):

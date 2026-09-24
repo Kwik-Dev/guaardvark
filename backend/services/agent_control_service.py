@@ -111,6 +111,12 @@ class AgentControlConfig:
     vision_model: str = "gemma4:e4b"
     escalation_model: str = "gemma4:e4b"
     escalation_threshold: int = 3  # failures before escalating
+    # Put one line about the last run of the same task text in the decision
+    # prompt. Off: in four live dots runs on 2026-09-23 the line was present
+    # in both runs that failed and its effect could not be separated from the
+    # done guard's rejections, so the episode record ships and the prompt
+    # line waits for evidence. The record itself is always written.
+    prior_run_note_enabled: bool = False
 
 
 @dataclass
@@ -768,8 +774,11 @@ class AgentControlService:
             self.note_recipe_usage(task)
 
         # The agent looks back: one line about the last run of this exact task,
-        # from the episode table. Empty when there is none.
-        self._prior_run_note = self._prior_run_note_for(task)
+        # from the episode table. Empty when there is none, or when the line is
+        # switched off (the default; see AgentControlConfig.prior_run_note_enabled).
+        self._prior_run_note = (
+            self._prior_run_note_for(task) if self.config.prior_run_note_enabled else ""
+        )
 
         # Training mode: crank up limits so the agent keeps practicing
         max_iters = 1000 if training_mode else self.config.max_iterations

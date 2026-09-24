@@ -174,3 +174,16 @@ def test_routes_list_and_read_runs(app, client):
     assert one["run"]["task"] == "second"
     assert [s["target"] for s in one["run"]["steps"]] == ["b", "c"]
     assert client.get("/api/agent-control/runs/nope").status_code == 404
+
+
+def test_the_look_back_line_is_off_by_default_and_the_record_still_written(app):
+    """The flag gates only the prompt line; every task is recorded regardless."""
+    from backend.services.agent_control_service import AgentControlService
+    svc = _svc()
+    svc._persist_task_run(_result(["a"]), task_id="t", task="click a")
+    assert svc._prior_run_note_for("click a") != ""
+    assert svc.config.prior_run_note_enabled is False
+    note = svc._prior_run_note_for("click a") if svc.config.prior_run_note_enabled else ""
+    assert note == ""
+    assert AgentTaskRun.query.count() == 1
+
