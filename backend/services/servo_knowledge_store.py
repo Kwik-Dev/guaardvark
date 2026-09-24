@@ -133,6 +133,15 @@ REFLEXES = {
         "model": "universal",
         "notes": "Probes per click after probe 0 (the estimate itself).",
     },
+    "correction_max_steps_cap": {
+        "value": 10,
+        "source": "2026-09-24: a 600px seed box needs ~10 side calls to reach the 24px "
+                  "target at the 0.725 per-step keep; measured probe cost 0.2-0.5s",
+        "confidence": 0.5,
+        "model": "universal",
+        "notes": "Upper bound on probes per click once the budget is sized from the "
+                 "search box; correction_max_steps is the floor.",
+    },
     "correction_deadline_s": {
         "value": 4.0,
         "source": "gemma4:e4b anchor inference 0.6-1.2s per call on this box, 2026-09-22",

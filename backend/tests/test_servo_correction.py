@@ -77,6 +77,14 @@ class ParseJudgmentTest(unittest.TestCase):
         self.assertEqual(p('{"visible": true, "dx": "left", "dy": "same"}'), {"visible": True, "dx": "left", "dy": "same"})
         self.assertEqual(p('Sure: {"visible": false}'), {"visible": False, "dx": None, "dy": None})
 
+    def test_swapped_fields_are_read_by_the_words(self):
+        # gemma4:e2b puts the vertical word in dx and the horizontal in dy.
+        p = ServoController._parse_relative_judgment
+        self.assertEqual(p('{"visible": true, "dx": "below", "dy": "right"}'),
+                         {"visible": True, "dx": "right", "dy": "below"})
+        self.assertEqual(p('{"visible": true, "dx": "above", "dy": "same"}'),
+                         {"visible": True, "dx": "same", "dy": "above"})
+
     def test_anything_else_is_none_never_a_default(self):
         p = ServoController._parse_relative_judgment
         for text in ("", "down", '{"dx": "left", "dy": "same"}', '{"visible": "yes", "dx": "left", "dy": "same"}',
@@ -86,8 +94,10 @@ class ParseJudgmentTest(unittest.TestCase):
 
 
 class BoxTest(unittest.TestCase):
-    def test_same_collapses_to_the_target_width(self):
-        self.assertEqual(ServoController._update_axis(0, 200, 100, "same", 0.55, 24), (88, 112))
+    def test_same_collapses_to_twice_the_target_width(self):
+        # An eye's "same" means within about a target's width, so the centre
+        # must stay inside the box for a later call to reach it.
+        self.assertEqual(ServoController._update_axis(0, 200, 100, "same", 0.55, 24), (76, 124))
 
     def test_a_side_call_keeps_part_of_the_discarded_half(self):
         lo, hi = ServoController._update_axis(0, 200, 100, "left", 0.55, 24)
@@ -218,11 +228,37 @@ class LoopTest(unittest.TestCase):
         r = s.click_target("dot")
         self.assertEqual(r["correction"]["stop_reason"], "oscillating_x")
 
-    def test_step_budget_stops(self, _sleep, mock_archive):
+    def test_the_budget_is_sized_to_narrow_the_box(self, _sleep, mock_archive):
+        # One direction every time: the box shrinks until it is target-sized,
+        # which four fixed steps could not reach from a coarse eye's box.
         s = _servo([ANCHOR, '{"visible": true, "dx": "right", "dy": "below"}'], mode="shadow", accuracy=54.0)
         r = s.click_target("dot")
+        self.assertEqual(r["correction"]["stop_reason"], "converged")
+        self.assertGreater(r["correction"]["steps"], 5)
+
+    def test_the_cap_bounds_the_budget(self, _sleep, mock_archive):
+        s = _servo([ANCHOR, '{"visible": true, "dx": "right", "dy": "below"}'], mode="shadow", accuracy=54.0)
+        real = __import__("backend.services.servo_knowledge_store", fromlist=["get_reflex"]).get_reflex
+        cap = lambda name, default=None: 2 if name == "correction_max_steps_cap" else real(name, default)
+        with patch("backend.services.servo_controller.get_reflex", side_effect=cap):
+            r = s.click_target("dot")
         self.assertEqual(r["correction"]["stop_reason"], "max_steps")
-        self.assertEqual(r["correction"]["steps"], 5)   # probe 0 + 4
+        self.assertEqual(r["correction"]["steps"], 3)   # probe 0 + 2
+
+    def test_not_visible_looks_once_across_the_screen(self, _sleep, mock_archive):
+        s = _servo([ANCHOR, '{"visible": false}', '{"visible": true, "dx": "same", "dy": "same"}',
+                    '{"visible": true, "dx": "same", "dy": "same"}'], mode="shadow", accuracy=54.0)
+        r = s.click_target("dot")
+        self.assertEqual(r["correction"]["stop_reason"], "on_target")
+        self.assertFalse(r["correction"]["steps"] == 1)
+
+    def test_a_wide_view_same_is_asked_again_close_up(self, _sleep, mock_archive):
+        # A 300px eye seeds a box too wide for a close look; its first "same"
+        # narrows the box and only the close-up "same" ends the search.
+        s = _servo([ANCHOR, '{"visible": true, "dx": "same", "dy": "same"}'], mode="shadow", accuracy=300.0)
+        r = s.click_target("dot")
+        self.assertEqual(r["correction"]["stop_reason"], "on_target")
+        self.assertEqual(r["correction"]["steps"], 2)
 
     def test_a_probe_that_cannot_finish_is_not_started(self, _sleep, mock_archive):
         s = _servo([ANCHOR, '{"visible": true, "dx": "right", "dy": "below"}'], mode="shadow", accuracy=54.0)
