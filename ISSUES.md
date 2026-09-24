@@ -439,8 +439,7 @@ currently applies Z-Image LoRAs.
 ToDo 
 
 1. Train a LoRA first (via the Z-Image trainer I ported to MPS), which would drop a  .
-safetensors  into  data/training/loras/ , then copy it into  /Users/ymmtny/ComfyUI-
-Shared/models/loras/ .
+safetensors  into  data/training/loras/ , then copy it into  ~/ComfyUI-Shared/models/loras/ .
 2. Or download any public Z-Image-compatible LoRA from CivitAI/HuggingFace and place it in
 the ComfyUI  loras/  directory.
 

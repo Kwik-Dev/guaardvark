@@ -21,7 +21,8 @@ load_dotenv(".env")
 
 from backend.services.comfyui_video_generator import Wan22I2VGenerator
 
-IMAGE = "/Users/ymmtny/GitHub/guaardvark/data/outputs/storyboards/3/shot_1_1.png"
+# Derived from the repo root so this works on any checkout (not one machine's path).
+IMAGE = str(_REPO_ROOT / "data/outputs/storyboards/3/shot_1_1.png")
 PROMPT = "WIDE: The forest swallows the path. Elara walks forward, leaves rustling."
 
 

@@ -151,7 +151,7 @@ ls backend/services/openai_provider.py
 grep -c "def is_openai_active" backend/services/llm_provider.py   # 1
 
 # 3. G1's own regression tests
-/Users/ymmtny/GitHub/guaardvark/backend/venv/bin/python -m pytest \
+~/GitHub/guaardvark/backend/venv/bin/python -m pytest \
   backend/tests/test_music_prompt_rewriter_consent.py \
   backend/tests/services/test_music3.py -q
 
@@ -203,7 +203,7 @@ Then open/repoint the PRs with base `pr/m5-llm-providers` (compare URLs):
   `git diff --name-only A..B > /tmp/x.txt && grep -n ... /tmp/x.txt`. A piped
   `... | grep -c` gave a false "0" earlier and nearly caused a wrong decision.
 - **Never run `git merge` in parallel** in a worktree.
-- `gitbutler/workspace` (the main checkout, `/Users/ymmtny/GitHub/guaardvark`) is
+- `gitbutler/workspace` (the main checkout, `~/GitHub/guaardvark`) is
   managed by **`but`** — use `but` for workspace commits; use plain `git` inside
   the `/private/tmp/pr*` worktrees.
 - The workspace already has the fixes applied (`voice-openai-routing`,

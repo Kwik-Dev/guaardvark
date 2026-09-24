@@ -231,7 +231,7 @@ When set, plain Z-Image generation (and music-video / cast **keyframe stills**) 
 **Two ComfyUI installs on one box.** `./start.sh` launches the **bundled plugin** server (`plugins/comfyui/ComfyUI`, port 8188). A separate **Comfy Desktop** install may also exist (`~/ComfyUI-Installs`, with shared models in `~/ComfyUI-Shared/models/`) that already has the Z-Image files. To make guaardvark use the Comfy Desktop models **without running the Desktop app**, drop an `extra_model_paths.yaml` into `plugins/comfyui/ComfyUI/` that bridges the shared tree, e.g.:
 ```yaml
 comfy-desktop:
-    base_path: /Users/ymmtny/ComfyUI-Shared
+    base_path: ~/ComfyUI-Shared
     checkpoints: models/checkpoints/
     loras: models/loras/
     vae: models/vae/
@@ -246,7 +246,7 @@ comfy-desktop:
 ```
 then restart ComfyUI (`bash plugins/comfyui/scripts/stop.sh` + `bash plugins/comfyui/scripts/start.sh`). After restart, `ComfyUIImageGenerator.comfyui_installed_engines()` should report `['zimage']` and a Z-Image generation should succeed instead of 400-ing.
 
-**Where guaardvark installs models.** The **Manage Video Models** installer and install checks write into `COMFYUI_DIR/models`. Point that root at the shared tree by setting `GUAARDVARK_COMFYUI_DIR` in `.env`, e.g. `GUAARDVARK_COMFYUI_DIR=/Users/ymmtny/ComfyUI-Shared`, so downloads land in `~/ComfyUI-Shared/models` and guaardvark + Comfy Desktop share the same weights (no duplication). Restart the backend to pick it up. The bundled server still serves those files via `extra_model_paths.yaml`, so both keep working.
+**Where guaardvark installs models.** The **Manage Video Models** installer and install checks write into `COMFYUI_DIR/models`. Point that root at the shared tree by setting `GUAARDVARK_COMFYUI_DIR` in `.env`, e.g. `GUAARDVARK_COMFYUI_DIR=~/ComfyUI-Shared`, so downloads land in `~/ComfyUI-Shared/models` and guaardvark + Comfy Desktop share the same weights (no duplication). Restart the backend to pick it up. The bundled server still serves those files via `extra_model_paths.yaml`, so both keep working.
 
 **Music-video / Film `i2v_model`: MPS-friendly vs 14B.** On Apple Silicon (MPS — no NVIDIA CUDA), the **Wan 2.2 A14B** (`wan22-14b`, `wan22-14b-i2v`) is heavy: a two-expert MoE (HighNoise + LowNoise, ~22GB) built for 16GB CUDA cards, and on MPS it CPU-offload-thrashes / is very slow. Prefer a lighter single-piece model on MPS:
 - **`wan22-5b`** — Wan 2.2 TI2V-5B (fp16, ~9.5GB / ~11GB VRAM), one model, no MoE/CPU offload, native 1280×704@24fps. **Recommended MPS default.** Pulls `wan22-vae` + `wan-umt5` automatically.

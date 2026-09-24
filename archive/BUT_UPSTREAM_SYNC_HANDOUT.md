@@ -3,7 +3,7 @@
 **Paste this to start the next session:**
 > Read `BUT_UPSTREAM_SYNC_HANDOUT.md` and do the real sync of the GitButler workspace with `upstream/main`. Follow the plan and the safety rules in that file.
 
-Repo: `/Users/ymmtny/GitHub/guaardvark` · Tool: `but 0.22.0` · Date of this handout: 2026-09-18
+Repo: `~/GitHub/guaardvark` · Tool: `but 0.22.0` · Date of this handout: 2026-09-18
 
 ---
 
@@ -44,7 +44,7 @@ The worst conflict was `frontend/src/pages/SettingsPage.jsx` — a **2,237-line*
 
 ### Step 0 — snapshot & clean
 ```bash
-cd /Users/ymmtny/GitHub/guaardvark
+cd ~/GitHub/guaardvark
 but oplog snapshot -m "pre-sync"        # record the SHA
 git status --short                       # note untracked files upstream also has
 ```
