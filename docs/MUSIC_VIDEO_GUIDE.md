@@ -156,6 +156,7 @@ PGPASSWORD=guaardvark psql -h localhost -U guaardvark -d guaardvark -t -A -c \
 - `docs/GUAARDVARK_GUIDE.md` §7 — ComfyUI shared-models setup, MPS-friendly vs 14B, `HF_HUB_DISABLE_XET`.
 - `docs/CHARACTER_GENERATION.md` — Z-Image keyframes + LoRA identity.
 - `docs/GENERATION_DIAGRAM.md` — generation stack / model locations.
-- `ISSUES.md` — ComfyUI upgrade + known issues.
+- `KNOWN_BUGS.md` — known issues (incl. ComfyUI upgrade).
+- `FEATURES.md` — feature requests & future work.
 
 
