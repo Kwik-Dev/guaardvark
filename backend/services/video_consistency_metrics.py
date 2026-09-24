@@ -316,6 +316,6 @@ def score_smoke_vs_refs(ref_image_paths: list[str], smoke_path: str) -> Dict[str
     # cosine similarity is a poor identity measure here — the smoke image is a
     # neutral studio portrait while the training refs are varied scenes/lighting,
     # so the color histograms differ a lot even for the same character (scored
-    # ~0.08 vs the refs). See ISSUES.md. "size" is a rough but stable proxy.
+    # ~0.08 vs the refs). See KNOWN_BUGS.md. "size" is a rough but stable proxy.
     ident = score_identity_preservation(ref_image_paths, smoke_path, method="size")
     return {"stats": stats, "identity": ident}
