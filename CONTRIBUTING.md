@@ -312,8 +312,11 @@ apart silently, because nothing about a tag updates PyPI on its own.
 
 1. Bump `VERSION` — the package version follows automatically.
 2. Land everything on `main` and confirm CI is green.
-3. Tag it: `git tag v$(cat VERSION) && git push origin v$(cat VERSION)`.
-   The `release` workflow builds the package and publishes it to PyPI.
+3. Tag it, signed: `git tag -s -m "v$(cat VERSION)" v$(cat VERSION) && git push origin v$(cat VERSION)`.
+   The `release` workflow builds the package and publishes it to PyPI. The tag is
+   signed with the maintainer's SSH signing key, so GitHub shows it as Verified;
+   the GitHub release is then created from that tag (`gh release create --verify-tag`)
+   rather than letting GitHub make an unsigned one.
 4. Confirm what is actually live:
    `curl -s https://pypi.org/pypi/guaardvark/json | jq -r .info.version`
 5. Only then announce.
