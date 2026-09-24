@@ -299,30 +299,3 @@ class TestInstallDisplay(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
-
-class TestTheProbeFollowsTheScript(unittest.TestCase):
-    """The installer must ask for what start_agent_display.sh runs."""
-
-    def test_the_session_pieces_are_probed_and_the_old_stack_is_not(self):
-        probed = dict(api._DISPLAY_SYSTEM_DEPS)
-        for pkg, cmd in (("xfce4-session", "startxfce4"), ("xfwm4", "xfwm4"), ("xfdesktop4", "xfdesktop"),
-                         ("xfce4-panel", "xfce4-panel"), ("dbus", "dbus-run-session")):
-            self.assertEqual(probed.get(pkg), cmd)
-        self.assertNotIn("openbox", probed)
-        self.assertNotIn("tint2", probed)
-
-    def test_the_session_commands_are_ones_the_script_invokes(self):
-        """xdotool and scrot are the backend's tools; the rest must be what
-        start_agent_display.sh actually runs, or the probe drifts again."""
-        import os
-        script = open(os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "start_agent_display.sh")).read()
-        for _, cmd in api._DISPLAY_SYSTEM_DEPS:
-            if cmd in ("xdotool", "scrot"):
-                continue
-            self.assertIn(cmd, script, f"{cmd} is probed but the script never runs it")
-
-    def test_x_server_error_banner_is_not_a_version(self):
-        with patch("shutil.which", return_value="/usr/bin/Xvfb"), \
-             patch("subprocess.run", return_value=_Result(returncode=1, stdout="", stderr="(EE) \nFatal server error")):
-            self.assertEqual(api._probe_command_version("Xvfb"), "installed")

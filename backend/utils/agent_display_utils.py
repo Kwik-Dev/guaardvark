@@ -36,21 +36,12 @@ def probe_display_socket(display_num: Optional[int] = None) -> bool:
     return os.path.exists(f"/tmp/.X11-unix/X{num}")
 
 
-def xvfb_process_pattern(display_num: Optional[str] = None) -> str:
-    """pgrep -f pattern for the Xvfb serving the agent display, anchored to
-    the command itself. The unanchored "Xvfb :99" matched any process whose
-    command line mentioned it (a shell running a pgrep for it, a log tail),
-    so start-display reported the display up when nothing was running
-    (2026-09-23)."""
-    num = display_num if display_num is not None else AGENT_DISPLAY.lstrip(":")
-    return rf"(^|/)Xvfb :{num}( |$)"
-
-
 def is_agent_display_active() -> bool:
     """Check if the Xvfb virtual display is running."""
+    display_num = AGENT_DISPLAY.lstrip(":")
     try:
         result = subprocess.run(
-            ["pgrep", "-f", xvfb_process_pattern()],
+            ["pgrep", "-f", f"Xvfb :{display_num}"],
             capture_output=True, text=True, timeout=5,
         )
         return result.returncode == 0

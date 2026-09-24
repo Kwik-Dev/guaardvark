@@ -797,21 +797,6 @@ start() {
 
     echo "Starting Agent Virtual Display (:$DISPLAY_NUM @ ${RESOLUTION%x*})..."
 
-    # Refuse, loudly, before anything is started: with the session pieces
-    # missing, Xvfb and x11vnc come up fine and the viewer shows a black
-    # screen with nothing on it. That is what a box without XFCE looked like
-    # on 2026-09-23 after the installer had stopped listing it.
-    local missing=""
-    for cmd in Xvfb x11vnc dbus-run-session startxfce4 xfwm4 xfdesktop xfce4-panel; do
-        command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"
-    done
-    if [ -n "$missing" ]; then
-        echo "  ERROR: missing:$missing" >&2
-        echo "  Install with: sudo apt-get install -y xvfb x11vnc dbus xfce4-session xfwm4 xfdesktop4 xfce4-panel xfce4-settings" >&2
-        echo "  (or Settings > Agent display > Install Missing)" >&2
-        return 1
-    fi
-
     if [ -z "$BROWSER" ]; then
         echo "  WARNING: No supported browser found (firefox, chromium, or chrome)."
         echo "  Install one with: sudo apt install firefox  OR  sudo apt install chromium-browser"

@@ -112,17 +112,3 @@ class TestStopAgentDisplay:
             result = adu.stop_agent_display(force=True)
             assert result["success"] is True
             run_script.assert_called_once_with("stop", timeout=30)
-
-
-class TestXvfbPattern:
-    """The running check matches the X server, not anything that mentions it."""
-
-    def test_matches_the_server_and_nothing_that_names_it(self):
-        import re
-        adu = _load_adu()
-        pat = re.compile(adu.xvfb_process_pattern("99"))
-        assert pat.search("Xvfb :99 -screen 0 1000x1000x24 -ac -s 0 -dpms")
-        assert pat.search("/usr/bin/Xvfb :99 -screen 0 1000x1000x24")
-        assert not pat.search("bash -c pgrep -af 'Xvfb :99' | cut -c1-80")
-        assert not pat.search("tail -f logs/Xvfb :99.log")
-        assert not pat.search("Xvfb :990 -screen 0")

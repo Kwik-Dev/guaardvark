@@ -1375,10 +1375,8 @@ def promote_candidate_recipe(memory_id: str):
 # Agent Display dependency detector + installer
 #
 # Mirrors voice_api's install-whisper pattern for the virtual display stack:
-# Xvfb, x11vnc, the XFCE session the script starts (session, window manager,
-# desktop, panel, settings) with the dbus it needs, xdotool, scrot, a browser,
-# the python `mss` module, the start_agent_display.sh script, and the live
-# :99 X socket.
+# Xvfb, x11vnc, openbox, tint2, xdotool, scrot, a browser, the python `mss`
+# module, the start_agent_display.sh script, and the live :99 X socket.
 #
 # GET  /api/agent-control/display-status  → per-component {installed, version}
 # POST /api/agent-control/install-display → apt-get + pip install everything
@@ -1386,21 +1384,11 @@ def promote_candidate_recipe(memory_id: str):
 # ---------------------------------------------------------------------------
 
 # What the script actually invokes. (apt_package, command_to_probe).
-# The list must follow start_agent_display.sh: until 2026-09-23 it still named
-# openbox and tint2, which the script had stopped using for XFCE, so a fresh
-# box passed "Install Missing" and then showed a black display with no
-# session on it (Xvfb and x11vnc up, startxfce4 absent). `dbus` provides
-# dbus-run-session on every supported Ubuntu (dbus-daemon on 24.04+ is a
-# dependency of it).
 _DISPLAY_SYSTEM_DEPS = [
     ("xvfb", "Xvfb"),
     ("x11vnc", "x11vnc"),
-    ("xfce4-session", "startxfce4"),
-    ("xfwm4", "xfwm4"),
-    ("xfdesktop4", "xfdesktop"),
-    ("xfce4-panel", "xfce4-panel"),
-    ("xfce4-settings", "xfsettingsd"),
-    ("dbus", "dbus-run-session"),
+    ("openbox", "openbox"),
+    ("tint2", "tint2"),
     ("xdotool", "xdotool"),
     ("scrot", "scrot"),
 ]
@@ -1426,9 +1414,8 @@ def _probe_command_version(cmd: str) -> str | None:
             )
             out = (r.stdout or r.stderr or "").strip().splitlines()
             first = out[0][:120] if out else ""
-            # Skip banners that are clearly an error message rather than a version
-            # ("(EE)" is the X server's error prefix: Xvfb prints one for --version).
-            if first and not first.lower().startswith(("unrecognized", "unknown option", "error", "usage:", "(ee)")):
+            # Skip banners that are clearly an error message rather than a version.
+            if first and not first.lower().startswith(("unrecognized", "unknown option", "error", "usage:")):
                 return first
         except Exception:
             continue
