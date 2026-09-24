@@ -119,3 +119,9 @@ def mcp_doctor():
 def mcp_list_tools():
     """Print tools the MCP server exposes."""
     raise typer.Exit(_run_mcp(["list-tools"]))
+
+
+# `llx mcp client ...`: the external MCP servers the agent itself uses.
+from llx.commands.mcp_client import mcp_client_app  # noqa: E402
+
+mcp_app.add_typer(mcp_client_app, name="client")

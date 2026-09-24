@@ -54,9 +54,10 @@ class MediaPlayTool(BaseTool):
             return _disabled_result()
 
         service = get_media_service()
-        query = kwargs.get("query", "").strip() if kwargs.get("query") else ""
+        # str(): parameters may arrive as non-strings (e.g. a song called "1999")
+        query = str(kwargs.get("query") or "").strip()
         shuffle = kwargs.get("shuffle", False)
-        directory = kwargs.get("directory", "").strip() if kwargs.get("directory") else ""
+        directory = str(kwargs.get("directory") or "").strip()
 
         if directory:
             result = service.launch_vlc(directory=directory, shuffle=shuffle)
@@ -105,7 +106,7 @@ class MediaControlTool(BaseTool):
             return _disabled_result()
 
         service = get_media_service()
-        action = kwargs.get("action", "").strip().lower()
+        action = str(kwargs.get("action") or "").strip().lower()
         player = kwargs.get("player")
 
         action_map = {
@@ -157,7 +158,9 @@ class MediaVolumeTool(BaseTool):
             return _disabled_result()
 
         service = get_media_service()
-        level = kwargs.get("level", "").strip() if kwargs.get("level") else ""
+        # level may be an int (50), including 0, or a word ("up", "mute")
+        raw_level = kwargs.get("level")
+        level = "" if raw_level is None else str(raw_level).strip()
 
         if not level:
             result = service.get_volume()

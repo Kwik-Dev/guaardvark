@@ -206,6 +206,10 @@ def status(
             metrics_data = client.get("/api/meta/metrics")
         except LlxError:
             metrics_data = {}
+        try:
+            mcp_data = client.get("/api/automation/mcp/status")
+        except LlxError:
+            mcp_data = {}
 
         if json_out or output.is_pipe():
             output.print_json(
@@ -216,6 +220,7 @@ def status(
                         "model": model_data,
                         "celery": celery_data,
                         "metrics": metrics_data,
+                        "mcp": mcp_data,
                     },
                 }
             )
@@ -248,7 +253,17 @@ def status(
         version = health_data.get("version", "?")
         ver_line = f"[llx.kv.key]Version:[/llx.kv.key] {version}"
 
-        content = "\n".join([server_line, model_line, celery_line, gpu_line, cpu_line, ver_line])
+        if mcp_data.get("mcp_enabled"):
+            mcp_ok = not mcp_data.get("errors") and not mcp_data.get("config_errors")
+            m_style = "llx.status.online" if mcp_ok else "llx.status.offline"
+            mcp_line = (f"[llx.kv.key]MCP:[/llx.kv.key]     {mcp_data.get('servers_connected', 0)}/"
+                        f"{mcp_data.get('servers_configured', 0)} servers, "
+                        f"{mcp_data.get('total_tools_available', 0)} tools"
+                        + ("" if mcp_ok else f"  [{m_style}]{ICON_OFFLINE} see: llx mcp client status[/{m_style}]"))
+        else:
+            mcp_line = "[llx.kv.key]MCP:[/llx.kv.key]     [llx.dim]disabled or unavailable[/llx.dim]"
+
+        content = "\n".join([server_line, model_line, celery_line, gpu_line, cpu_line, mcp_line, ver_line])
         console.print(make_panel(content, title="System Status"))
 
     except LlxConnectionError as e:

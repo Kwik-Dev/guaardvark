@@ -5,6 +5,7 @@ Provides tool definition, registry, and execution patterns for agent capabilitie
 """
 
 import inspect
+import threading
 import logging
 import difflib
 import json
@@ -95,7 +96,7 @@ class BaseTool:
     # tool whose whole point is the text it returns declares more.
     observation_chars: int = 500
     requires_confirmation: bool = False
-    required_context: List[str] = field(default_factory=list)  # e.g., ['project_id', 'user_id']
+    required_context: List[str] = []  # e.g., ['project_id', 'user_id'] (read-only; never mutate)
     
     def __init__(self):
         if not self.name:
@@ -174,6 +175,9 @@ class ToolRegistry:
     
     def __init__(self):
         self.tools: Dict[str, BaseTool] = {}
+        # Tools can be (un)registered at runtime (e.g. MCP servers connecting)
+        # while chat threads read the registry.
+        self._lock = threading.RLock()
         logger.info("Tool registry initialized")
     
     def register(self, tool: BaseTool):
@@ -181,17 +185,22 @@ class ToolRegistry:
         if not isinstance(tool, BaseTool):
             raise TypeError(f"Can only register BaseTool instances, got {type(tool)}")
         
-        if tool.name in self.tools:
-            logger.warning(f"Tool '{tool.name}' already registered, replacing...")
-        
-        self.tools[tool.name] = tool
+        with self._lock:
+            if tool.name in self.tools:
+                logger.warning(f"Tool '{tool.name}' already registered, replacing...")
+            tools = dict(self.tools)
+            tools[tool.name] = tool
+            self.tools = tools
         logger.info(f"Registered tool: {tool.name}")
     
     def unregister(self, tool_name: str):
         """Unregister a tool"""
-        if tool_name in self.tools:
-            del self.tools[tool_name]
-            logger.info(f"Unregistered tool: {tool_name}")
+        with self._lock:
+            if tool_name in self.tools:
+                tools = dict(self.tools)
+                del tools[tool_name]
+                self.tools = tools
+                logger.info(f"Unregistered tool: {tool_name}")
     
     def get_tool(self, name: str) -> Optional[BaseTool]:
         """Get a tool by name"""
@@ -592,7 +601,7 @@ class ToolRegistry:
                 success=False,
                 error=f"Tool '{tool_name}' validation failed - missing required parameters: {expected_params}. Received: {received_params}"
             )
-        
+
         try:
             logger.info(f"Executing tool: {tool_name}")
             
@@ -659,6 +668,88 @@ class ToolRegistry:
     
     def __repr__(self) -> str:
         return f"<ToolRegistry: {len(self.tools)} tools registered>"
+
+
+def _heuristic_coerce(v: str) -> Any:
+    low = v.lower().strip()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low in ("none", "null"):
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        try:
+            return float(v)
+        except ValueError:
+            return v
+
+
+def coerce_params_to_schema(params: Dict[str, Any], tool: Optional[BaseTool]) -> Dict[str, Any]:
+    """Coerce LLM-produced parameter values to the tool's declared types.
+
+    Text-based tool-call formats deliver every value as a string. Values are
+    converted only as their declared ``ToolParameter.type`` says: a ``string``
+    parameter such as ``query="2024"`` stays a string, ``dict``/``list``
+    parameters are JSON-decoded (a bare string becomes a one-item list), and
+    parameters the tool does not declare fall back to the old heuristics.
+    """
+    import json
+
+    if not params:
+        return {}
+    aliases = {"integer": "int", "boolean": "bool", "number": "float", "str": "string"}
+    schema = ({name: aliases.get(p.type, p.type) for name, p in (tool.parameters or {}).items()}
+              if tool else {})
+    out: Dict[str, Any] = {}
+    for key, value in params.items():
+        declared = schema.get(key)
+        if not isinstance(value, str):
+            if declared == "list" and value is not None and not isinstance(value, (list, tuple)):
+                value = [value]
+            out[key] = value
+            continue
+        text = value.strip()
+        low = text.lower()
+        if declared == "string":
+            out[key] = value
+        elif declared == "bool":
+            out[key] = low in ("true", "yes", "1", "on")
+        elif declared == "int":
+            try:
+                out[key] = int(text)
+            except ValueError:
+                try:
+                    out[key] = int(float(text))
+                except ValueError:
+                    out[key] = value
+        elif declared == "float":
+            try:
+                out[key] = float(text)
+            except ValueError:
+                out[key] = value
+        elif declared in ("dict", "list"):
+            decoded = None
+            if text[:1] in ("{", "["):
+                try:
+                    decoded = json.loads(text)
+                except json.JSONDecodeError:
+                    decoded = None
+            if decoded is not None:
+                out[key] = decoded
+            elif low in ("", "none", "null"):
+                out[key] = None
+            elif declared == "list":
+                out[key] = [value]
+            else:
+                out[key] = value
+        elif declared is None and schema:
+            out[key] = value  # unknown to a tool with a schema: pass through untouched
+        else:
+            out[key] = _heuristic_coerce(value)
+    return out
 
 
 # Global registry instance (like PYDANTIC_MODELS pattern)

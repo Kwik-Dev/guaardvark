@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fs": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/shared"],
+      "description": "Files in my shared folder",
+      "keywords": ["shared folder"],
+      "autoConnect": true,
+      "denyTools": ["move_file"]
+    }
+  }
+}

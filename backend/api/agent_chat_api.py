@@ -13,42 +13,40 @@ logger = logging.getLogger(__name__)
 # Create blueprint
 agent_chat_bp = Blueprint("agent_chat", __name__, url_prefix="/api/agent")
 
-# Global registry and executor (lazy initialization)
+# Global registry (lazy initialization). Executors are created per request:
+# AgentExecutor keeps per-run state (facts, tool history, guard) on the
+# instance, so sharing one across concurrent requests mixed their runs.
 _tool_registry = None
-_agent_executor = None
+MAX_ITERATIONS_LIMIT = 25
 
 
 def _initialize_agent_system():
-    """Initialize agent system on first use"""
-    global _tool_registry, _agent_executor
+    """Initialize the tool registry on first use"""
+    global _tool_registry
 
-    if _tool_registry is not None and _agent_executor is not None:
+    if _tool_registry is not None:
         return True
 
     try:
         from backend.tools.tool_registry_init import initialize_all_tools
-        from backend.services.agent_executor import AgentExecutor
-
-        # Get LLM
-        llm = current_app.config.get("LLAMA_INDEX_LLM")
-        if not llm:
-            logger.error("LLM not configured")
-            return False
 
         # Use global tool registry with ALL tools (browser, desktop, MCP, etc.)
         _tool_registry = initialize_all_tools()
-
         logger.info(f"Registered {len(_tool_registry)} tools for agent")
-
-        # Initialize executor
-        _agent_executor = AgentExecutor(_tool_registry, llm, max_iterations=10)
-        logger.info("Agent system initialized successfully")
-
         return True
 
     except Exception as e:
         logger.error(f"Failed to initialize agent system: {e}", exc_info=True)
         return False
+
+
+def _new_executor(max_iterations: int):
+    from backend.services.agent_executor import AgentExecutor
+
+    llm = current_app.config.get("LLAMA_INDEX_LLM")
+    if not llm:
+        raise RuntimeError("LLM not configured")
+    return AgentExecutor(_tool_registry, llm, max_iterations=max_iterations)
 
 
 @agent_chat_bp.route("/chat", methods=["POST"])
@@ -81,7 +79,10 @@ def agent_chat():
         data = request.get_json()
         message = data.get('message')
         session_id = data.get('session_id')
-        max_iterations = data.get('max_iterations', 10)
+        try:
+            max_iterations = max(1, min(int(data.get('max_iterations', 10)), MAX_ITERATIONS_LIMIT))
+        except (TypeError, ValueError):
+            return jsonify({"error": "'max_iterations' must be an integer"}), 400
         context = data.get('context', '')
         
         if not message:
@@ -93,6 +94,10 @@ def agent_chat():
         # Initialize agent system
         if not _initialize_agent_system():
             return jsonify({"error": "Agent system initialization failed"}), 500
+        try:
+            agent_executor = _new_executor(max_iterations)
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 500
         
         # Use system coordinator if available
         try:
@@ -105,7 +110,7 @@ def agent_chat():
                     return jsonify({"error": "Security validation failed"}), 403
                 
                 # Execute agent
-                result = _agent_executor.execute(
+                result = agent_executor.execute(
                     user_query=message,
                     session_context=context,
                     process_id=process_id
@@ -114,7 +119,7 @@ def agent_chat():
         except ImportError:
             # Run without coordinator
             logger.warning("System coordinator not available, running without it")
-            result = _agent_executor.execute(
+            result = agent_executor.execute(
                 user_query=message,
                 session_context=context
             )
@@ -203,7 +208,7 @@ def agent_health():
             return jsonify({
                 "status": "healthy",
                 "tools_registered": len(_tool_registry) if _tool_registry else 0,
-                "agent_ready": _agent_executor is not None
+                "agent_ready": _tool_registry is not None and bool(current_app.config.get("LLAMA_INDEX_LLM"))
             }), 200
         else:
             return jsonify({

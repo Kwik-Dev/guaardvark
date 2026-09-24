@@ -258,7 +258,12 @@ def execute_tool():
 
         # Execute tool
         logger.info(f"Executing tool '{tool_name}' with parameters: {list(parameters.keys())}")
-        result = registry.execute_tool(tool_name, **parameters)
+        # A person invoking a tool directly (Tools page / API, behind auth_guard)
+        # is the approval, so confirmation-gated tools run without a prompt.
+        from backend.services.tool_confirmation import trusted_caller
+
+        with trusted_caller("rest:tools_api"):
+            result = registry.execute_tool(tool_name, **parameters)
 
         return jsonify({
             "success": True,

@@ -79,6 +79,7 @@ import { useVoice } from "../contexts/VoiceContext";
 import * as apiService from "../api";
 import voiceService from "../api/voiceService";
 import { ragAutoresearchService } from "../api/ragAutoresearchService";
+import { getMcpStatus } from "../api/mcpService";
 import { NAV_CHROME } from "../config/navCatalog";
 
 const debugLog = (...args) => {
@@ -353,6 +354,7 @@ const SettingsPage = () => {
   const [clearMemoriesOpen, setClearMemoriesOpen] = useState(false);
   const [clearMemoriesBusy, setClearMemoriesBusy] = useState(false);
   const [memoryCount, setMemoryCount] = useState(null);
+  const [mcpStatus, setMcpStatus] = useState(null);
   const [musicDirectorySaved, setMusicDirectorySaved] = useState("");
   // "rules" clears rules the chat learned; "log" empties the behaviour log file.
   const [learningClear, setLearningClear] = useState(null);
@@ -2204,6 +2206,12 @@ const SettingsPage = () => {
     fetchMemoryCount();
   }, [fetchMemoryCount]);
 
+  useEffect(() => {
+    getMcpStatus()
+      .then(setMcpStatus)
+      .catch((err) => console.warn("Failed to read MCP status:", err));
+  }, []);
+
   const confirmClearLearning = async () => {
     setLearningBusy(true);
     try {
@@ -3144,6 +3152,21 @@ const SettingsPage = () => {
           />
           <ActionButton onClick={() => navigate("/agents/memory")}>
             Manage memory
+          </ActionButton>
+        </Line>
+      </Cluster>
+      <Cluster label="MCP servers" note="local programs that give the agent more tools">
+        <Line>
+          <StatusPill
+            tone={mcpStatus?.servers_connected > 0 ? "ok" : "neutral"}
+            label={
+              mcpStatus
+                ? `${mcpStatus.servers_connected}/${mcpStatus.servers_configured} connected`
+                : "checking"
+            }
+          />
+          <ActionButton onClick={() => navigate("/agents/mcp")}>
+            Manage MCP servers
           </ActionButton>
         </Line>
       </Cluster>

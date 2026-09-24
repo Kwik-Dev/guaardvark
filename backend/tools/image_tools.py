@@ -897,7 +897,7 @@ class AnimationGeneratorTool(BaseTool):
             if result.success:
                 output_lines = [
                     f"Animation generated successfully in {result.generation_time:.1f}s.",
-                    f"Frames: {result.frame_count} | FPS: request.fps",
+                    f"Frames: {result.frame_count} | FPS: {request.fps}",
                     f"Prompt: {prompt}",
                     f"Motion: {motion}",
                 ]

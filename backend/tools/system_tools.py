@@ -44,8 +44,59 @@ class SystemCommandTool(BaseTool):
         )
     }
     
+    # find(1) expressions that execute programs, delete or write files.
+    FIND_FORBIDDEN = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0",
+                      "-fprintf", "-fls"}
+    # Options whose next argument is a value, not a path.
+    VALUE_OPTIONS = {
+        "grep": {"-m", "--max-count", "-A", "-B", "-C", "--after-context", "--before-context",
+                 "--context", "--label", "--color", "--colour", "-d", "-D"},
+        "head": {"-n", "-c", "--lines", "--bytes"},
+        "tail": {"-n", "-c", "--lines", "--bytes"},
+        "ls": {"-I", "--ignore", "--hide", "-w", "--width", "-T", "--tabsize", "--sort", "--time-style"},
+    }
+    NO_PATH_COMMANDS = {"pwd", "whoami", "date", "echo"}
+
+    def _path_args(self, base_cmd, args):
+        """The args that name files or directories (checked for credential files)."""
+        paths, skip_next, pattern_seen = [], False, False
+        value_opts = self.VALUE_OPTIONS.get(base_cmd, set())
+        find_expr = False
+        for i, arg in enumerate(args):
+            if skip_next:
+                skip_next = False
+                continue
+            if base_cmd == "find":
+                if find_expr or arg.startswith("-") or arg in ("(", ")", "!", ","):
+                    find_expr = True  # everything after the first expression token is expression
+                    continue
+                paths.append(arg)
+                continue
+            if base_cmd == "grep":
+                if arg in ("-e", "--regexp"):
+                    pattern_seen, skip_next = True, True
+                    continue
+                if arg in ("-f", "--file"):
+                    pattern_seen = True
+                    if i + 1 < len(args):
+                        paths.append(args[i + 1])
+                    skip_next = True
+                    continue
+            if arg in value_opts:
+                skip_next = True
+                continue
+            if arg.startswith("-"):
+                continue
+            if base_cmd == "grep" and not pattern_seen:
+                pattern_seen = True  # first positional is the pattern
+                continue
+            paths.append(arg)
+        return paths
+
     def execute(self, **kwargs) -> ToolResult:
         """Execute the system command"""
+        from backend.utils.path_safety import is_sensitive
+
         command_str = kwargs.get("command", "")
         cwd = kwargs.get("cwd")
         
@@ -71,9 +122,28 @@ class SystemCommandTool(BaseTool):
                     success=False, 
                     error="Command chaining/piping/substitution is not allowed for security reasons."
                 )
+
+            if base_cmd == "find":
+                bad = [a for a in parts[1:] if a in self.FIND_FORBIDDEN or a.startswith("-fprint")]
+                if bad:
+                    return ToolResult(
+                        success=False,
+                        error=f"find actions that run programs or modify files are not allowed: {', '.join(bad)}",
+                    )
         except Exception as e:
             return ToolResult(success=False, error=f"Failed to parse command: {e}")
-            
+
+        if base_cmd not in self.NO_PATH_COMMANDS:
+            for path in self._path_args(base_cmd, parts[1:]):
+                if is_sensitive(path):
+                    return ToolResult(success=False, error=f"'{path}' may contain credentials and cannot be read")
+
+        if base_cmd == "grep":
+            # Recursive greps must not print secrets from credential files.
+            from backend.utils.path_safety import SENSITIVE_PATTERNS
+
+            parts = parts[:1] + [f"--exclude={p}" for p in SENSITIVE_PATTERNS] + ["--exclude-dir=.git"] + parts[1:]
+
         try:
             # Use project root as default CWD if available in context
             if not cwd and self._context:
