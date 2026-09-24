@@ -39,7 +39,14 @@ def ollama_available():
         return False
 
 
-requires_llm = pytest.mark.skipif(
+_skip_without_llm = pytest.mark.skipif(
     not ollama_available(),
     reason="Ollama not available or no models loaded"
 )
+
+
+def requires_llm(obj):
+    """A test that needs a live model: skipped without one, and marked
+    integration so a unit run (-m "not integration") leaves it out instead of
+    loading the machine's default model."""
+    return pytest.mark.integration(_skip_without_llm(obj))

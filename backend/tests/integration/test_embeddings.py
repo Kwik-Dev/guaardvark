@@ -13,6 +13,9 @@ import json
 import pytest
 from pathlib import Path
 
+# Real Ollama embeddings throughout.
+pytestmark = pytest.mark.integration
+
 try:
     from flask import Flask
     from backend.models import db, Document as DBDocument
