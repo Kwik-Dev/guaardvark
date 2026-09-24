@@ -187,3 +187,15 @@ def test_the_look_back_line_is_off_by_default_and_the_record_still_written(app):
     assert note == ""
     assert AgentTaskRun.query.count() == 1
 
+
+def test_no_app_context_in_test_mode_means_no_write_anywhere():
+    """A mocked loop test must never reach the real database through the fallback."""
+    import sys
+    svc = _svc()
+    res = _result(["a"])
+    assert os.environ.get("GUAARDVARK_MODE") == "test"
+    with patch.dict(sys.modules, {"backend.app": None}):
+        run_id = svc._persist_task_run(res, task_id="t", task="click a")
+        note = svc._prior_run_note_for("click a")
+    assert run_id == "" and res.run_id == "" and note == ""
+

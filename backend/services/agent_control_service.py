@@ -2253,10 +2253,19 @@ class AgentControlService:
             return {"unserialisable": str(type(value))}
 
     def _app_context(self):
+        """The caller's app context, or the real app's when there is none.
+
+        Never the real app's under GUAARDVARK_MODE=test: a mocked loop test
+        with no app context wrote three episodes into the live database on
+        2026-09-23 through this fallback. Tests that want the tables push
+        their own sqlite context; everything else skips the write.
+        """
         from flask import has_app_context
         from contextlib import nullcontext
         if has_app_context():
             return nullcontext()
+        if os.environ.get("GUAARDVARK_MODE") == "test":
+            raise RuntimeError("no app context in test mode; episode not written")
         from backend.app import app as _flask_app
         return _flask_app.app_context()
 
