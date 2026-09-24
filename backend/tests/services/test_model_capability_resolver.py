@@ -216,6 +216,94 @@ class EyesTest(unittest.TestCase):
         self.assertTrue(any("No vision-capable model" in b for b in p.blockers))
 
 
+class ShippedAccuracyTest(unittest.TestCase):
+    """A fresh clone ranks eyes on the shipped measurements, for the build measured."""
+
+    def setUp(self):
+        R.invalidate()
+
+    def _empty_store(self):
+        return patch("backend.services.servo_knowledge_store.load_model_measurements",
+                     return_value={"screen": None, "coords": None, "accuracy": None})
+
+    def test_a_fresh_clone_knows_the_stock_model_cannot_point(self):
+        with self._empty_store(), \
+             patch.object(R, "_installed_digests", return_value={"gemma4:e2b": "7fbdbf8f5e45aa"}):
+            self.assertEqual(R.accuracy_px("gemma4:e2b", (1000, 1000)), 255.0)
+
+    def test_a_different_build_of_the_same_tag_is_unmeasured(self):
+        with self._empty_store(), \
+             patch.object(R, "_installed_digests", return_value={"gemma4:e2b": "0123456789ab"}):
+            self.assertIsNone(R.accuracy_px("gemma4:e2b", (1000, 1000)))
+
+    def test_a_local_measurement_beats_the_shipped_one(self):
+        local = {"screen": "1000x1000", "coords": None, "accuracy": {"median_px": 12.0}}
+        with patch("backend.services.servo_knowledge_store.load_model_measurements", return_value=local), \
+             patch.object(R, "_installed_digests", return_value={"gemma4:e2b": "7fbdbf8f5e45"}):
+            self.assertEqual(R.accuracy_px("gemma4:e2b", (1000, 1000)), 12.0)
+
+
+class EyeBorrowTest(unittest.TestCase):
+    """A model that sees but cannot point keeps deciding; a good pointer looks."""
+
+    def setUp(self):
+        R.invalidate()
+
+    def _patches(self, acc, installed, sizes=None, budget=None):
+        sizes = sizes or {}
+        return (
+            patch.object(R, "_info", side_effect=lambda t: _info(["completion", "vision"],
+                                                                 size=sizes.get(t, 7000.0))),
+            patch.object(R, "_installed", return_value=list(installed)),
+            patch.object(R, "_resident", return_value=[]),
+            patch.object(R, "_vram_budget_mb", return_value=budget),
+            patch.object(R, "_measurements", side_effect=lambda t, s=None: {
+                "screen": "1000x1000" if t in acc else None, "coords": None,
+                "accuracy": {"median_px": acc[t]} if t in acc else None}),
+        )
+
+    def _run(self, tag, acc, installed, **kw):
+        ps = self._patches(acc, installed, **kw)
+        with ps[0], ps[1], ps[2], ps[3], ps[4], patch.dict("os.environ", {}, clear=False):
+            return R.better_eye_for(tag, (1000, 1000))
+
+    def test_the_stock_model_borrows_a_measured_pointer(self):
+        lend = self._run("gemma4:e2b", {"gemma4:e2b": 255.0, "gemma4:12b": 5.8},
+                         ["gemma4:e2b", "gemma4:12b"])
+        self.assertEqual(lend["tag"], "gemma4:12b")
+
+    def test_a_model_that_points_well_keeps_its_own_eyes(self):
+        self.assertIsNone(self._run("qwen3.5:9b", {"qwen3.5:9b": 14.4, "gemma4:12b": 5.8},
+                                    ["qwen3.5:9b", "gemma4:12b"]))
+
+    def test_an_unmeasured_model_is_not_second_guessed(self):
+        self.assertIsNone(self._run("gemma4:12b-64k", {"gemma4:12b": 5.8},
+                                    ["gemma4:12b-64k", "gemma4:12b"]))
+
+    def test_no_eye_under_the_bar_means_no_loan(self):
+        self.assertIsNone(self._run("gemma4:e2b", {"gemma4:e2b": 255.0, "gemma4:e4b": 48.8},
+                                    ["gemma4:e2b", "gemma4:e4b"]))
+
+    def test_within_a_band_the_smaller_eye_wins(self):
+        lend = self._run("gemma4:e2b",
+                         {"gemma4:e2b": 255.0, "gemma4:12b": 5.8, "qwen3.6:27b-q4_K_M": 2.2},
+                         ["gemma4:e2b", "gemma4:12b", "qwen3.6:27b-q4_K_M"],
+                         sizes={"gemma4:12b": 7200.0, "qwen3.6:27b-q4_K_M": 16600.0})
+        self.assertEqual(lend["tag"], "gemma4:12b")
+
+    def test_accuracy_band_outranks_size(self):
+        lend = self._run("gemma4:e2b",
+                         {"gemma4:e2b": 255.0, "gemma4:12b": 5.8, "qwen3.5:9b": 14.4},
+                         ["gemma4:e2b", "gemma4:12b", "qwen3.5:9b"],
+                         sizes={"gemma4:12b": 7200.0, "qwen3.5:9b": 6300.0})
+        self.assertEqual(lend["tag"], "gemma4:12b")
+
+    def test_the_switch_turns_it_off(self):
+        ps = self._patches({"gemma4:e2b": 255.0, "gemma4:12b": 5.8}, ["gemma4:e2b", "gemma4:12b"])
+        with ps[0], ps[1], ps[2], ps[3], ps[4], patch.dict("os.environ", {"GUAARDVARK_EYE_BORROW": "0"}):
+            self.assertIsNone(R.better_eye_for("gemma4:e2b", (1000, 1000)))
+
+
 class ResolveTest(unittest.TestCase):
     def setUp(self):
         R.invalidate()

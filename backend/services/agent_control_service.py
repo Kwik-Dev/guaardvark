@@ -3232,6 +3232,21 @@ Reply ONLY with JSON:
 
         pick = AgentControlService._get_unified_model(active=brain, screen=screen)
         if brain and pick == brain:
+            # Seeing is not pointing. A model measured to miss by more than a
+            # control's width keeps deciding, and a model measured to point
+            # well does the looking (the stock gemma4:e2b misses by a median
+            # 255px; gemma4:12b hits within 6).
+            try:
+                from backend.services.model_capability_resolver import better_eye_for
+                lend = better_eye_for(brain, screen)
+            except Exception:
+                lend = None
+            if lend and _drivable(lend["tag"]):
+                return BrainEye(
+                    brain, lend["tag"], False, "sibling_vlm",
+                    f"{brain} sees but points ~{lend['own_px']:.0f}px off; "
+                    f"{lend['tag']} points within ~{lend['eye_px']:.0f}px, so it looks",
+                )
             return BrainEye(brain, brain, True, "native", "model sees and points for itself")
         loaned = None
         if brain:
