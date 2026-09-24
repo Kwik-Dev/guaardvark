@@ -42,7 +42,8 @@ def _stream(engine, chat_impl, max_tokens=256, iteration=2):
         events.append((name, payload))
 
     with patch("ollama.chat", chat_impl), \
-            patch("backend.services.unified_chat_engine.is_aborted", return_value=False):
+            patch("backend.services.unified_chat_engine.is_aborted", return_value=False), \
+            patch("backend.services.llm_provider.is_mistral_active", return_value=False):
         result = engine._call_llm_streaming(
             [{"role": "user", "content": "write two sentences"}],
             emit, "sess-think", emit_tokens=True,
