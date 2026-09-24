@@ -177,7 +177,10 @@ def test_unreachable_engine_probe_cached_empty(monkeypatch):
 def test_zimage_loras_override_a_non_zimage_model(monkeypatch):
     # A Z-Image-format LoRA paired with a non-Z-Image model must be corrected to
     # the Z-Image graph (not refused, not dropped) so a trained identity applies.
+    # Requires the opt-in: without it the LoRA is never linked into ComfyUI.
     from backend.services import media_model_registry as mmr
+
+    monkeypatch.setenv("GUAARDVARK_ZIMAGE_USE_COMFYUI", "1")
 
     def fake_resolve(lora_paths):
         return {
@@ -202,3 +205,31 @@ def test_zimage_loras_override_a_non_zimage_model(monkeypatch):
     assert "ModelSamplingAuraFlow" in types
     assert "LoraLoaderModelOnly" in types, "the Z-Image LoRA must be applied model-only"
     assert wf["sampling"]["inputs"]["model"][0] == "lora_0"
+
+def test_zimage_loras_refuse_a_non_zimage_model_without_optin(monkeypatch):
+    # Without GUAARDVARK_ZIMAGE_USE_COMFYUI the LoRA is never linked into ComfyUI
+    # (ensure_lora_in_comfyui returns early), so the reroute is refused up front
+    # with a clear error instead of failing later inside ComfyUI.
+    from backend.services import media_model_registry as mmr
+
+    monkeypatch.delenv("GUAARDVARK_ZIMAGE_USE_COMFYUI", raising=False)
+
+    def fake_resolve(lora_paths):
+        return {
+            "base_model_id": "zimage-turbo",
+            "family": "zimage",
+            "inference_engine": "offline",
+            "comfy_model_tag": "zimage",
+            "offline_model_key": "zimage-turbo",
+            "lora_format": "zimage",
+            "profile": {"id": "zimage-turbo", "family": "zimage", "comfy_model_tag": "zimage"},
+        }
+
+    monkeypatch.setattr(mmr, "resolve_inference_for_loras", fake_resolve)
+    gen = ComfyUIImageGenerator(model="flux-schnell")
+    with pytest.raises(RuntimeError, match="GUAARDVARK_ZIMAGE_USE_COMFYUI=1"):
+        gen._build_workflow(
+            prompt="sage_harlow, cinematic portrait", negative="",
+            lora_names=["zimage_elara_v1.safetensors"], width=1024, height=1024,
+            seed=1, steps=9, cfg=1.0, model="flux-schnell",
+        )
