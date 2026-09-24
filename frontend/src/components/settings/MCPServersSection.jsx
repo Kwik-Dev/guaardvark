@@ -351,8 +351,8 @@ const MCPServersSection = () => {
                 tone={status.servers_connected > 0 ? "ok" : "neutral"}
                 label={`${status.servers_connected}/${status.servers_configured} connected`}
               />
-              <StatusPill label={`${status.total_tools_available} tools`} />
-              <StatusPill label={`${status.total_calls} calls`} />
+              <StatusPill label={`${status.total_tools_available} tool${status.total_tools_available === 1 ? "" : "s"}`} />
+              <StatusPill label={`${status.total_calls} call${status.total_calls === 1 ? "" : "s"}`} />
               {!status.sdk_available && <StatusPill tone="error" label="mcp package missing" />}
             </>
           ) : (
