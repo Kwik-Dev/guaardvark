@@ -445,3 +445,14 @@ class TestRestApi:
         assert bad.status_code == 400
         assert api.delete("/api/automation/mcp/servers/new1").status_code == 200
         assert api.get("/api/automation/mcp/servers/new1").status_code == 404
+
+
+def test_editable_definition_masks_secrets(mcp_service):
+    assert mcp_service.upsert_server("ed", {"command": "/usr/bin/node", "args": ["srv.js", "--port", "1"],
+                                            "env": {"TOKEN": "s3cret"}})["success"]
+    definition = mcp_service.get_server("ed")["server"]["definition"]
+    assert definition["command"] == "/usr/bin/node" and definition["args"] == ["srv.js", "--port", "1"]
+    assert definition["env"] == {"TOKEN": "***"}
+    # round-tripping the editable definition keeps the stored secret
+    assert mcp_service.upsert_server("ed", definition)["success"]
+    assert json.load(open(mcp_service.config_file))["mcpServers"]["ed"]["env"]["TOKEN"] == "s3cret"

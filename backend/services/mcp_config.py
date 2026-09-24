@@ -94,6 +94,17 @@ class MCPServerConfig:
             out[reverse.get(k, k)] = v
         return out
 
+    def to_editable(self) -> Dict[str, Any]:
+        """Full definition for the (auth-guarded) settings UI, secret values masked.
+
+        Keep secrets in ``env`` (or ``${VAR}`` references), not in ``args``:
+        args are shown here so the server can be edited.
+        """
+        d = self.to_json()
+        if "env" in d:
+            d["env"] = {k: "***" for k in d["env"]}
+        return d
+
     def to_public(self) -> Dict[str, Any]:
         """Redacted view for APIs / UI: env values hidden."""
         return {

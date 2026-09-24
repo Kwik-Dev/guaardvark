@@ -37,6 +37,7 @@ const RulesPage = lazy(() => import("./pages/RulesPage"));
 const ToolsPage = lazy(() => import("./pages/ToolsPage"));
 const AgentsPage = lazy(() => import("./pages/AgentsPage"));
 const AgentMemoryPage = lazy(() => import("./pages/AgentMemoryPage"));
+const MCPServersPage = lazy(() => import("./pages/MCPServersPage"));
 const WebsitesPage = lazy(() => import("./pages/WebsitesPage"));
 const WebsiteDetailPage = lazy(() => import("./pages/WebsiteDetailPage"));
 const FileGenerationPage = lazy(() => import("./pages/FileGenerationPage"));
@@ -475,6 +476,14 @@ const AppContainer = () => {
                         element={
                           <AppLayout>
                             <AgentMemoryPage />
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/agents/mcp"
+                        element={
+                          <AppLayout>
+                            <MCPServersPage />
                           </AppLayout>
                         }
                       />

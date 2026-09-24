@@ -842,6 +842,7 @@ class MCPClientService:
             "resource_templates": rt.resource_templates,
             "prompts": rt.prompts,
             "stderr_tail": self._stderr_tail(name) if rt.config.transport == "stdio" else "",
+            "definition": rt.config.to_editable(),
         })
         return {"success": True, "server": detail}
 
