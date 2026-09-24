@@ -82,6 +82,9 @@ MODE_OVERLAYS = {
     "pipeline":   {"disable_refine": False, "disable_calibration": True},
     "calibrated": {"disable_refine": True,  "disable_calibration": False},
     "full":       {"disable_refine": False, "disable_calibration": False},
+    # The anchor, then the correction loop applied, as a click with
+    # correction on would land. Scores the loop, not only the eye.
+    "corrected":  {"disable_refine": True,  "disable_calibration": True, "correction_mode": "on"},
 }
 DEFAULT_MODES = ["anchor", "pipeline"]
 
@@ -304,11 +307,15 @@ def score(rows: list, hit_radius: float) -> dict:
 def _servo_for(model: str, size, overlay: dict):
     from backend.utils.vision_analyzer import VisionAnalyzer
     from backend.services.servo_controller import ServoController
+    from backend.services.agent_control_service import _eye_accuracy_px
     analyzer = VisionAnalyzer()
     analyzer.default_model = model
     cfg = dict(BASE_VISION_CONFIG)
     cfg.update(overlay or {})
-    return ServoController(_FakeScreen(*size), analyzer, vision_config=cfg)
+    # The accuracy the agent's servo would be built with, so the correction
+    # loop sizes its search the same way here as in a live click.
+    return ServoController(_FakeScreen(*size), analyzer, vision_config=cfg,
+                           eye_accuracy_px=_eye_accuracy_px(model, *size))
 
 
 def sighted_models() -> list:
@@ -355,6 +362,12 @@ def eval_frames(model: str, size, frames: list, overlay: dict = None,
                             "reason": servo._last_failure_reason or "no_coords"})
                 rows.append(row)
                 continue
+            if (overlay or {}).get("correction_mode") == "on":
+                out = servo._correct_estimate(img, t["prompt"], coords, "bakeoff")
+                row["correction"] = {"estimate": list(coords), "stop": out.stop_reason,
+                                     "steps": len(out.steps), "ms": out.elapsed_ms,
+                                     "clamped": out.clamped}
+                coords = out.final
             ex, ey = coords[0] - t["cx"], coords[1] - t["cy"]
             row.update({"pred": list(coords), "err_x": ex, "err_y": ey,
                         "dist": round((ex * ex + ey * ey) ** 0.5, 1),

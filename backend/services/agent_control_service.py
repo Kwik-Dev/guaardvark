@@ -339,12 +339,13 @@ def _read_saved_active_model() -> str:
 
 
 def _eye_accuracy_px(eye_model: str, screen_w: int, screen_h: int):
-    """Measured median pointing error for this eye on this screen, or None."""
+    """Median pointing error for this eye: measured on this machine, else the
+    shipped measurement for the installed build, else None. The correction
+    loop sizes its search from it; read from the local store alone, a fresh
+    clone searched ±115px around an eye that misses by 255."""
     try:
-        from backend.services.servo_knowledge_store import load_model_measurements
-        acc = (load_model_measurements(eye_model, screen_w, screen_h) or {}).get("accuracy") or {}
-        v = acc.get("median_px")
-        return float(v) if v is not None else None
+        from backend.services.model_capability_resolver import accuracy_px
+        return accuracy_px(eye_model, (screen_w, screen_h))
     except Exception:
         return None
 
