@@ -78,7 +78,7 @@ The audio backends now support **both NVIDIA CUDA and Apple Silicon MPS** (the
 - **Music (ACE-Step):** works on CUDA and MPS (tested — generates a valid WAV).
 - **FX (stable-audio):** works on CUDA and MPS. On MPS the pipeline scheduler is
   swapped to `EDMDPMSolverMultistepScheduler` to avoid a `torchsde` recursion
-  bug (see `ISSUES.md`).
+  bug (see `KNOWN_BUGS.md`).
 
 To run music/FX on a CUDA machine instead, point `AUDIO_FOUNDRY_URL` at it (see
 "Running AudioFoundry on a different machine").
@@ -236,7 +236,7 @@ There are two different video features, and they differ:
 > audio layers (generated VO + generated music); there is no FX/extra-audio
 > track. The AudioFoundry FX endpoint (`/generate/fx`, `stable-audio-open-1.0`)
 > exists and works, but **no render path calls it** — it is an unused hook. See
-> `ISSUES.md` → “[OPEN] Film Crew editor has no audio-FX / custom-audio layer”.
+> `KNOWN_BUGS.md` → “[OPEN] Film Crew editor has no audio-FX / custom-audio layer”.
 
 **To use your own audio in a Film Crew render**, choose one of:
 
