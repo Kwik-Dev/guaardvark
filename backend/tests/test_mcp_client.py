@@ -362,3 +362,86 @@ class TestProxyTools:
         assert select_mcp_tools_for_message("run the fixture thing", proxied)  # configured keyword
         merged = merge_forced_tools(["web_search", "a", "b"], ["mcp__fx__add"], max_tools=3)
         assert merged[:2] == ["web_search", "mcp__fx__add"]
+
+
+# ---------------------------------------------------------------------------
+# REST API
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def api(mcp_service):
+    from flask import Flask
+
+    from backend.api.automation_api import automation_bp
+    from backend.utils.auth_guard import check_endpoint_auth
+
+    app = Flask(__name__)
+    app.register_blueprint(automation_bp)
+    app.before_request(check_endpoint_auth)
+    return app.test_client()
+
+
+class TestRestApi:
+    def test_config_writes_blocked_for_remote_hosts(self, api, monkeypatch):
+        monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+        remote = {"REMOTE_ADDR": "203.0.113.5"}
+        entry = {"command": "sh", "args": ["-c", "true"]}
+        assert api.put("/api/automation/mcp/servers/evil", json=entry, environ_base=remote).status_code == 403
+        assert api.delete("/api/automation/mcp/servers/fx", environ_base=remote).status_code == 403
+        assert api.post("/api/automation/mcp/reload-config", environ_base=remote).status_code == 403
+        # Reads stay open to the LAN UI (the views are redacted).
+        assert api.get("/api/automation/mcp/servers", environ_base=remote).status_code == 200
+
+    def test_config_writes_need_the_key_when_configured(self, api, monkeypatch):
+        monkeypatch.setenv("GUAARDVARK_API_KEY", "k1")
+        assert api.post("/api/automation/mcp/reload-config").status_code == 401
+        assert api.post("/api/automation/mcp/reload-config", headers={"X-API-Key": "k1"}).status_code == 200
+
+    def test_connect_list_execute_audit(self, api):
+        assert api.post("/api/automation/mcp/connect", json={"server": "fx"}).get_json()["success"]
+        tools = api.get("/api/automation/mcp/tools?server=fx").get_json()["tools"]
+        by_name = {t["name"]: t for t in tools}
+        assert by_name["delete_thing"]["policy"] == "confirm"
+        assert by_name["add"]["proxyName"] == "mcp__fx__add"
+        res = api.post("/api/automation/mcp/execute",
+                       json={"server": "fx", "tool": "delete_thing", "arguments": {"name": "z"}})
+        assert res.status_code == 200 and res.get_json()["text"] == "deleted z"
+        bad = api.post("/api/automation/mcp/execute", json={"server": "fx", "tool": "add", "arguments": []})
+        assert bad.status_code == 400
+        audit = api.get("/api/automation/mcp/audit-log?limit=5").get_json()["entries"]
+        assert audit[0]["tool"] == "delete_thing" and audit[0]["caller"] == "rest"
+
+    def test_remote_caller_cannot_run_gated_tools(self, api, monkeypatch):
+        monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+        remote = {"REMOTE_ADDR": "203.0.113.5"}
+        assert api.post("/api/automation/mcp/connect", json={"server": "fx"}).get_json()["success"]
+        gated = api.post("/api/automation/mcp/execute", environ_base=remote,
+                         json={"server": "fx", "tool": "delete_thing", "arguments": {"name": "z"}})
+        assert gated.get_json().get("requires_confirmation") is True
+        ok = api.post("/api/automation/mcp/execute", environ_base=remote,
+                      json={"server": "fx", "tool": "add", "arguments": {"a": 1, "b": 2}})
+        assert ok.get_json()["success"]
+
+    def test_unknown_server_404(self, api):
+        assert api.post("/api/automation/mcp/connect", json={"server": "nope"}).status_code == 404
+        assert api.get("/api/automation/mcp/servers/nope").status_code == 404
+
+    def test_resources_and_prompts(self, api):
+        api.post("/api/automation/mcp/connect", json={"server": "fx"})
+        res = api.post("/api/automation/mcp/resources/read", json={"server": "fx", "uri": "fixture://greeting"})
+        assert res.get_json()["text"] == "hello from fixture"
+        prompts = api.get("/api/automation/mcp/prompts?server=fx").get_json()["prompts"]["fx"]
+        assert prompts[0]["name"] == "greet"
+        got = api.post("/api/automation/mcp/prompts/get",
+                       json={"server": "fx", "name": "greet", "arguments": {"name": "Q"}})
+        assert "Q" in got.get_json()["messages"][0]["content"]["text"]
+
+    def test_server_crud(self, api):
+        put = api.put("/api/automation/mcp/servers/new1", json={"command": "node", "args": ["a.js"],
+                                                                 "autoConnect": True})
+        assert put.status_code == 200, put.get_json()
+        detail = api.get("/api/automation/mcp/servers/new1").get_json()["server"]
+        assert detail["auto_connect"] is True and detail["status"] == "disconnected"
+        bad = api.put("/api/automation/mcp/servers/new1", json={"transport": "http", "url": "nope"})
+        assert bad.status_code == 400
+        assert api.delete("/api/automation/mcp/servers/new1").status_code == 200
+        assert api.get("/api/automation/mcp/servers/new1").status_code == 404

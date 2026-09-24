@@ -70,6 +70,10 @@ SAFE_EXEMPT_PREFIXES = (
 # non-GET (create/cancel/delete/run) requires auth/localhost — same model as the
 # /api/memory hardening. Stops a random LAN host from wiping jobs/tasks/schedules.
 MUTATION_PROTECTED_PREFIXES = (
+    # Writing an MCP server entry names a program the backend will start, so
+    # config changes are never open to other hosts.
+    '/api/automation/mcp/servers/',
+    '/api/automation/mcp/reload-config',
     # Persists the product profile into .env.
     '/api/settings/profile',
     '/api/memory',

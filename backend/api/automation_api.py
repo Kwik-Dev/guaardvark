@@ -289,111 +289,184 @@ def send_notification():
 
 
 # ==================== MCP Endpoints ====================
+# Config writes (/mcp/servers/<name>, /mcp/reload-config) are always behind
+# auth_guard; the rest are when GUAARDVARK_PROTECT_TOOL_ENDPOINTS is on. A
+# caller on this machine (or holding the API key) calling /mcp/execute is the
+# approval for policy-gated tools; any other caller can run only the tools the
+# policy allows. Every call is still subject to denyTools and audited.
+
+
+def _caller_is_trusted() -> bool:
+    import hmac
+    import os
+
+    from backend.utils.auth_guard import _effective_client_ip, _is_localhost
+
+    api_key = os.environ.get("GUAARDVARK_API_KEY")
+    if api_key:
+        provided = request.headers.get("X-API-Key", "")
+        return bool(provided) and hmac.compare_digest(provided, api_key)
+    return _is_localhost(_effective_client_ip())
+
+def _mcp():
+    from backend.services.mcp_client_service import get_mcp_service
+    return get_mcp_service()
+
+
+def _mcp_response(result, ok_status=200):
+    if result.get("success"):
+        return jsonify(result), ok_status
+    error = (result.get("error") or "").lower()
+    status = 404 if error.startswith("unknown server") or "unknown tool" in error else 400
+    if "disabled" in error or "not installed" in error:
+        status = 503
+    return jsonify(result), status
+
+
+def _mcp_route(fn):
+    """Uniform error handling for MCP endpoints."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"MCP endpoint {request.path} failed: {e}", exc_info=True)
+            return jsonify({"success": False, "error": f"Internal error: {type(e).__name__}"}), 500
+
+    return wrapper
+
 
 @automation_bp.route("/mcp/status", methods=["GET"])
+@_mcp_route
 def get_mcp_status():
     """Get MCP client service status"""
-    try:
-        from backend.services.mcp_client_service import get_mcp_service
-        state = get_mcp_service().get_state()
-        return jsonify({"success": True, **state})
-    except Exception as e:
-        logger.error(f"Error getting MCP status: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    return jsonify({"success": True, **_mcp().get_state()})
 
 
 @automation_bp.route("/mcp/servers", methods=["GET"])
+@_mcp_route
 def list_mcp_servers():
-    """List configured MCP servers"""
-    try:
-        from backend.services.mcp_client_service import get_mcp_service
-        result = get_mcp_service().list_configured_servers()
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"Error listing MCP servers: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    """List configured MCP servers (secrets redacted)"""
+    return jsonify(_mcp().list_configured_servers())
+
+
+@automation_bp.route("/mcp/servers/<name>", methods=["GET"])
+@_mcp_route
+def get_mcp_server(name):
+    """Server detail: capabilities, tools with schemas and policy, stderr tail"""
+    return _mcp_response(_mcp().get_server(name))
+
+
+@automation_bp.route("/mcp/servers/<name>", methods=["PUT"])
+@_mcp_route
+def upsert_mcp_server(name):
+    """Create or replace a server in data/config/mcp_servers.json.
+
+    Body uses the mcpServers entry format. For env/headers, send "***" (or an
+    empty value) to keep a stored secret unchanged.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "JSON object body required"}), 400
+    return _mcp_response(_mcp().upsert_server(name, data))
+
+
+@automation_bp.route("/mcp/servers/<name>", methods=["DELETE"])
+@_mcp_route
+def delete_mcp_server(name):
+    """Remove a server from the config file (disconnecting it first)"""
+    return _mcp_response(_mcp().remove_server(name))
+
+
+@automation_bp.route("/mcp/reload-config", methods=["POST"])
+@_mcp_route
+def reload_mcp_config():
+    """Re-read config; servers whose definition changed are disconnected"""
+    return jsonify(_mcp().reload_config())
 
 
 @automation_bp.route("/mcp/connect", methods=["POST"])
+@_mcp_route
 def connect_mcp_server():
     """Connect to an MCP server"""
-    try:
-        from backend.services.mcp_client_service import get_mcp_service
-        
-        data = request.get_json() or {}
-        server_name = data.get("server")
-        
-        if not server_name:
-            return jsonify({"success": False, "error": "server name is required"}), 400
-        
-        service = get_mcp_service()
-        result = _run_async(service.connect_server(server_name))
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Error connecting to MCP server: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    server_name = (request.get_json(silent=True) or {}).get("server")
+    if not server_name:
+        return jsonify({"success": False, "error": "server name is required"}), 400
+    return _mcp_response(_mcp().connect(server_name))
 
 
 @automation_bp.route("/mcp/disconnect", methods=["POST"])
+@_mcp_route
 def disconnect_mcp_server():
     """Disconnect from an MCP server"""
-    try:
-        from backend.services.mcp_client_service import get_mcp_service
-        
-        data = request.get_json() or {}
-        server_name = data.get("server")
-        
-        if not server_name:
-            return jsonify({"success": False, "error": "server name is required"}), 400
-        
-        service = get_mcp_service()
-        result = _run_async(service.disconnect_server(server_name))
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Error disconnecting from MCP server: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    server_name = (request.get_json(silent=True) or {}).get("server")
+    if not server_name:
+        return jsonify({"success": False, "error": "server name is required"}), 400
+    return _mcp_response(_mcp().disconnect(server_name))
 
 
 @automation_bp.route("/mcp/tools", methods=["GET"])
+@_mcp_route
 def list_mcp_tools():
-    """List tools from MCP servers"""
-    try:
-        from backend.services.mcp_client_service import get_mcp_service
-        
-        server = request.args.get("server")
-        service = get_mcp_service()
-        result = _run_async(service.list_tools(server))
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Error listing MCP tools: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    """List tools from connected MCP servers, with policy"""
+    return _mcp_response(_mcp().list_tools(request.args.get("server") or None))
 
 
 @automation_bp.route("/mcp/execute", methods=["POST"])
+@_mcp_route
 def execute_mcp_tool():
-    """Execute a tool on an MCP server"""
-    try:
-        from backend.services.mcp_client_service import get_mcp_service
-        
-        data = request.get_json() or {}
-        server = data.get("server")
-        tool = data.get("tool")
-        arguments = data.get("arguments", {})
-        
-        if not server or not tool:
-            return jsonify({"success": False, "error": "server and tool are required"}), 400
-        
-        service = get_mcp_service()
-        result = _run_async(service.call_tool(server, tool, arguments))
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Error executing MCP tool: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    """Execute a tool on an MCP server; a trusted caller is the approving human."""
+    data = request.get_json(silent=True) or {}
+    server = data.get("server")
+    tool = data.get("tool")
+    arguments = data.get("arguments")
+    arguments = {} if arguments is None else arguments
+    if not server or not tool:
+        return jsonify({"success": False, "error": "server and tool are required"}), 400
+    if not isinstance(arguments, dict):
+        return jsonify({"success": False, "error": "arguments must be a JSON object"}), 400
+    caller = str(data.get("caller") or "rest")[:20]
+    result = _mcp().call_tool(server, tool, arguments, approved=_caller_is_trusted(), caller=caller)
+    return _mcp_response(result)
+
+
+@automation_bp.route("/mcp/resources", methods=["GET"])
+@_mcp_route
+def list_mcp_resources():
+    return _mcp_response(_mcp().list_resources(request.args.get("server") or None))
+
+
+@automation_bp.route("/mcp/resources/read", methods=["POST"])
+@_mcp_route
+def read_mcp_resource():
+    data = request.get_json(silent=True) or {}
+    if not data.get("server") or not data.get("uri"):
+        return jsonify({"success": False, "error": "server and uri are required"}), 400
+    return _mcp_response(_mcp().read_resource(data["server"], str(data["uri"]), caller="rest"))
+
+
+@automation_bp.route("/mcp/prompts", methods=["GET"])
+@_mcp_route
+def list_mcp_prompts():
+    return _mcp_response(_mcp().list_prompts(request.args.get("server") or None))
+
+
+@automation_bp.route("/mcp/prompts/get", methods=["POST"])
+@_mcp_route
+def get_mcp_prompt():
+    data = request.get_json(silent=True) or {}
+    args = data.get("arguments")
+    args = {} if args is None else args
+    if not data.get("server") or not data.get("name") or not isinstance(args, dict):
+        return jsonify({"success": False, "error": "server, name and an object of arguments are required"}), 400
+    return _mcp_response(_mcp().get_prompt(data["server"], data["name"], args))
+
+
+@automation_bp.route("/mcp/audit-log", methods=["GET"])
+@_mcp_route
+def get_mcp_audit_log():
+    limit = request.args.get("limit", 100, type=int)
+    entries = _mcp().get_audit_log(limit)
+    return jsonify({"success": True, "entries": entries, "count": len(entries)})
