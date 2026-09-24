@@ -33,6 +33,8 @@ flow, and safety systems) — read both.
   docs, tests, or scaffolding first.
 - When bugs are found during inspection or testing, write them to `KNOWN_BUGS.md`
   **before** attempting fixes, unless the user explicitly asks you to fix them.
+- When a feature request or future-work idea is found, add it to `FEATURES.md`
+  (bugs/known issues/limitations stay in `KNOWN_BUGS.md`).
 - Keep `KNOWLEDGE.md` updated with discoveries; don't let the same investigation be
   repeated.
 
@@ -56,4 +58,5 @@ flow, and safety systems) — read both.
 
 - Confirm the generated guidance still works on the repo after your edits.
 - Confirm doc split: big picture in `README.md`, agent details in `KNOWLEDGE.md`,
-  bugs in `KNOWN_BUGS.md`, rules here in `AGENT.md`.
+  bugs/known issues in `KNOWN_BUGS.md`, feature requests in `FEATURES.md`,
+  rules here in `AGENT.md`.
