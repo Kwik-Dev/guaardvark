@@ -27,6 +27,23 @@ https://github.com/user-attachments/assets/c6d9d18b-cfff-4ae2-8220-dc7f329fee5d
 [![GitHub issues](https://img.shields.io/github/issues/guaardvark/guaardvark)](https://github.com/guaardvark/guaardvark/issues)
 [![Sponsor](https://img.shields.io/badge/Sponsor-Guaardvark-ff69b4?logo=github-sponsors)](https://github.com/sponsors/guaardvark)
 
+> ### This is the `Kwik-Dev` fork
+>
+> A fork of [guaardvark/guaardvark](https://github.com/guaardvark/guaardvark) that **keeps the cloud chat
+> providers upstream removed.** In `001d960c` — *"remove(chat): cloud chat providers and the master cloud
+> switch"*, merged as `4fe7406a` — upstream deleted the Mistral provider, the provider-selection API, the
+> `cloud_models_enabled` switch and the OpenAI-compatible route, on the position that *"Uncle Claude and the
+> MCP server are the supported ways to bring a hosted model in."* This fork does not take that position.
+>
+> **Branches.** `main` here is a **pure mirror** of `upstream/main` (fast-forward only). The fork's mainline is
+> **`cloud-plus`** — upstream plus this fork's work. `keep-cloud-providers` carries the single commit that
+> reverts upstream's removal.
+>
+> **Behaviour.** Chat still runs on local Ollama by default, including embeddings and RAG. An operator can turn
+> the master cloud switch on and pick a provider — Mistral, or any OpenAI-compatible endpoint set with
+> `GUAARDVARK_OPENAI_BASE_URL` — in which case chat is served by that provider and nothing else leaves the box.
+> A configured endpoint alone is never consent: the switch and the provider selection both have to say yes.
+
 **The self-hosted AI studio.** Coding agents and 20-agent swarms in isolated git worktrees, screen agents with their own real desktop, self-tuning RAG, continuous voice chat — and a full media pipeline: video, image, full-song music, neural voice. One install, one GPU, everything on your machine. Your machine. Your data. Your rules.
 
 **Works with your coding agent.** Claude Code, Cursor, Codex, OpenClaw and Gemini CLI drive every flow above through the built-in MCP server and fifteen [agent skills](.agents/skills/README.md): "make a music video from this song", "film this script", "train a LoRA of this character", "swarm this refactor" — the agent queues the job on your GPU and polls it to the finished file.
