@@ -437,6 +437,8 @@ class AgentControlService:
         self._task_session_id: Optional[str] = None
         self._task_started_at: float = 0.0
         self._stall_steps: int = 0
+        # Total clicks the current task allows when it states a limit.
+        self._click_budget: Optional[int] = None
         # Circuit breaker: track coordinates of issued clicks to detect
         # infinite loops on non-responsive elements.
         self._click_history: List[Tuple[int, int]] = []
@@ -702,6 +704,7 @@ class AgentControlService:
             self._current_task = task
             self._current_iteration = 0
             self._action_history = []
+            self._click_budget = self._click_budget_from_task(task)
             self._recipe_fallback_note = ""
             self._prior_run_note = ""
             self._task_session_id = session_id
@@ -1009,14 +1012,7 @@ class AgentControlService:
                     # as advisory — the physical change was already observed by the fast path.
                     # This re-uses the exact "advisory" contract documented for slow expected_effect
                     # (1085) and recipe final proof (2846-2853). Also used for proof grounding below.
-                    has_recent_verified = False
-                    for st in reversed(self._action_history):
-                        if getattr(getattr(st, "action", None), "action_type", "") == "done":
-                            continue
-                        r = getattr(st, "result", {}) or {}
-                        if bool(r.get("verified")) or "verified" in str(r.get("post_action_effect", "")):
-                            has_recent_verified = True
-                            break
+                    has_recent_verified = self._task_has_verified_click(self._action_history)
 
                     # Guard: require a non-trivial success_proof — the model must
                     # echo the visible state that proves completion. Empty or
@@ -1103,14 +1099,7 @@ class AgentControlService:
                     # the real ground truth."). Prevents the reported symptom while
                     # preserving hard guards for black/zero-action/trivial cases.
                     # Only enforced for vision-capable models (same gate as above).
-                    has_recent_verified = False
-                    for st in reversed(self._action_history):
-                        if getattr(getattr(st, "action", None), "action_type", "") == "done":
-                            continue
-                        r = getattr(st, "result", {}) or {}
-                        if bool(r.get("verified")) or "verified" in str(r.get("post_action_effect", "")):
-                            has_recent_verified = True
-                            break
+                    has_recent_verified = self._task_has_verified_click(self._action_history)
 
                     if enforce_proof:
                         # Keep DONE strict on vision — a false-positive DOM match
@@ -1251,6 +1240,35 @@ class AgentControlService:
                     if not decision.action.target_description:
                         consecutive_failures += 1
                         continue
+
+                # A click past the task's own stated limit is never sent. The
+                # run ends instead: a task that says "5 click attempts total"
+                # was failed by a 6th click, whatever the screen shows after it.
+                if (self._click_budget is not None and not training_mode
+                        and decision.action.action_type in self._CLICK_FAMILY):
+                    used = sum(1 for s in self._action_history
+                               if s.action.action_type in self._CLICK_FAMILY)
+                    if used >= self._click_budget:
+                        logger.warning(
+                            f"[AGENT][STEP {iteration+1}][BUDGET] {used} of {self._click_budget} "
+                            f"clicks used; not sending a click on "
+                            f"{decision.action.target_description!r}, stopping"
+                        )
+                        self._emit_thinking(
+                            iteration=iteration + 1,
+                            label=f"click budget spent ({used}/{self._click_budget}) — stopping",
+                            reasoning=(
+                                f"The task allows {self._click_budget} clicks and all of them "
+                                f"have been used. The next click "
+                                f"('{decision.action.target_description}') was not sent."
+                            ),
+                        )
+                        return finish(AgentResult(
+                            success=False,
+                            reason=f"click_budget_spent: {used} of {self._click_budget} clicks used",
+                            steps=self._action_history,
+                            total_time_seconds=time.time() - start_time
+                        ))
 
                 if decision.action.action_type in ("click", "right_click"):
                     button = "right" if decision.action.action_type == "right_click" else "left"
@@ -2228,6 +2246,7 @@ class AgentControlService:
         ("max_failures", "max_failures"),
         ("loop_detected", "loop"),
         ("budget_exhausted", "budget"),
+        ("click_budget_spent", "budget"),
         ("error", "error"),
     )
 
@@ -2843,8 +2862,82 @@ class AgentControlService:
 
     _CLICK_FAMILY = ("click", "right_click", "double_click")
 
+    # Effects the click verifiers record when the click site did not change.
+    _NO_CHANGE_EFFECTS = ("not_observed", "no_visible_change")
+
+    _NO_CHANGE_LEGEND = (
+        "[NO CHANGE] = the click was sent but nothing changed where it landed; "
+        "it probably missed, so that target is not done yet.\n"
+    )
+
+    @classmethod
+    def _step_status(cls, step) -> str:
+        """The tag a history line carries: FAIL, NO CHANGE or OK.
+
+        A click whose site showed no change is not OK. Tagged [OK], five
+        missed dots read to the model as five hits, and it argued "done"
+        from its own log while the screen said otherwise (2026-09-23 trainer
+        runs, where every dot click was no_visible_change).
+        """
+        if step.failed:
+            return "FAIL"
+        effect = str((step.result or {}).get("post_action_effect") or "")
+        if step.action.action_type in cls._CLICK_FAMILY and effect in cls._NO_CHANGE_EFFECTS:
+            return "NO CHANGE"
+        return "OK"
+
+    @classmethod
+    def _task_has_verified_click(cls, history) -> bool:
+        """Did a click in this task change the screen where it landed.
+
+        Gates the advisory "done" that overrides a proof the verifier could
+        not see. Only clicks count: a hotkey is marked verified whatever the
+        screen does, so a pressed Home key used to turn a rejected "done"
+        into success after five clicks that changed nothing (2026-09-23).
+        ``history`` is the current task's, reset when each task starts.
+        """
+        for st in history:
+            if st.failed or st.action.action_type not in cls._CLICK_FAMILY:
+                continue
+            r = st.result or {}
+            if bool(r.get("verified")) or str(r.get("post_action_effect") or "") == "verified":
+                return True
+        return False
+
+    _NUMBER_WORDS = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+        "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15,
+        "twenty": 20,
+    }
+    _BUDGET_WORDS_RE = re.compile(
+        r"\b(?:budget|total|only|limit|max|maximum|at most|no more than|up to)\b")
+    _CLICK_COUNT_RE = re.compile(
+        r"\b(\d{1,3}|" + "|".join(_NUMBER_WORDS) + r")\s+(?:total\s+)?(?:mouse\s+)?"
+        r"click(?:s|\s+attempts?)?\b"
+        r"(?!\s+(?:attempts?\s+)?(?:per|each|for\s+each|on\s+each)\b)")
+
+    @classmethod
+    def _click_budget_from_task(cls, task: str) -> Optional[int]:
+        """The total number of clicks the task allows, when it states one.
+
+        "You have a budget of 5 click attempts total" and "You only have a
+        total of 5 click attempts" give 5. A per-target limit ("One click
+        attempt per dot") is not a total and gives nothing, and neither does
+        a count with no limiting word near it ("click 3 buttons").
+        """
+        for sentence in re.split(r"(?<=[.!?;\n])\s*", (task or "").lower()):
+            if not cls._BUDGET_WORDS_RE.search(sentence):
+                continue
+            m = cls._CLICK_COUNT_RE.search(sentence)
+            if m:
+                word = m.group(1)
+                n = int(word) if word.isdigit() else cls._NUMBER_WORDS[word]
+                if n > 0:
+                    return n
+        return None
+
     @staticmethod
-    def _history_block(history, n: int) -> str:
+    def _history_block(history, n: int, click_budget: Optional[int] = None) -> str:
         """Every step of this task, oldest first, with step and click counts.
 
         The model needs the whole task, not a window onto it: shown only its
@@ -2853,22 +2946,28 @@ class AgentControlService:
         just scrolled out of view (2026-09-23 dots run). ``n`` is the cap the
         caller declares (``config.max_iterations``); only training mode, whose
         history can reach a thousand steps, ever truncates, and the header
-        says so.
+        says so. ``click_budget`` is the task's own stated click limit, shown
+        beside the count so the model sees how many it has left.
         """
         if not history:
             return ""
         clicks = sum(1 for h in history
                      if h.action.action_type in AgentControlService._CLICK_FAMILY)
         header = f"Done (steps: {len(history)}, click attempts: {clicks}"
+        if click_budget is not None:
+            header += f" of {click_budget} allowed"
         if len(history) > n:
             header += f"; showing last {n}"
         header += "):"
         steps = []
         for h in history[-n:]:
-            status = "FAIL" if h.failed else "OK"
+            status = AgentControlService._step_status(h)
             desc = h.action.text or h.action.target_description or str(h.action.keys or "")
             steps.append(f"  {h.action.action_type}: {desc} [{status}]")
-        return header + "\n" + "\n".join(steps) + "\n"
+        legend = (AgentControlService._NO_CHANGE_LEGEND
+                  if any(AgentControlService._step_status(h) == "NO CHANGE" for h in history[-n:])
+                  else "")
+        return header + "\n" + "\n".join(steps) + "\n" + legend
 
     @classmethod
     def _step_progress(cls, step: ActionStep, prior: List[ActionStep]) -> bool:
@@ -3021,7 +3120,8 @@ class AgentControlService:
         """
         # This prompt asks for success_proof; the done-guard keys on that fact.
         self._proof_contract = True
-        done_lines = self._history_block(history, self.config.max_iterations)
+        done_lines = self._history_block(
+            history, self.config.max_iterations, getattr(self, "_click_budget", None))
         repeat_block = "" if training_mode else self._repeat_block(history)
         prior_block = self._prior_run_block()
         pivot_block = self._pivot_block(history)
@@ -4097,7 +4197,7 @@ Reply ONLY with JSON:
         )
         if history:
             last = history[-1]
-            status = "FAIL" if last.failed else "OK"
+            status = self._step_status(last)
             desc = last.action.target_description or last.action.text or ""
             prompt += f"\nLast: {last.action.action_type} {desc} [{status}]"
         return prompt
@@ -4110,7 +4210,7 @@ Reply ONLY with JSON:
             step = self._action_history[-1]
             detail = step.action.target_description or step.action.text or ""
             last_action = f"{step.action.action_type} {detail}".strip()
-            last_action_status = "FAIL" if step.failed else "OK"
+            last_action_status = self._step_status(step)
 
         dom_url = ""
         dom_title = ""
@@ -5054,7 +5154,8 @@ Reply ONLY with JSON:
         # This prompt asks for success_proof; the done-guard keys on that fact.
         self._proof_contract = True
         mouse_only = getattr(self, '_mouse_only', False)
-        done_lines = self._history_block(history, self.config.max_iterations)
+        done_lines = self._history_block(
+            history, self.config.max_iterations, getattr(self, "_click_budget", None))
         repeat_block = "" if training_mode else self._repeat_block(history)
         prior_block = self._prior_run_block()
         pivot_block = self._pivot_block(history)
