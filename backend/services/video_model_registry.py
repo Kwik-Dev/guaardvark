@@ -1608,6 +1608,51 @@ def _comfyui_reachable() -> bool:
     return False
 
 
+# Seconds to wait for ComfyUI to answer after an automatic start. The plugin
+# script returns once the process is up; the HTTP server follows within a few
+# seconds on a warm box (about 5 s observed 2026-09-24).
+COMFYUI_AUTOSTART_WAIT_S = 90
+
+
+def prepare_video_model(model_id: str) -> tuple[bool, str]:
+    """preflight_video_model, starting ComfyUI first when that is all that is missing.
+
+    Used by every place that queues a render (Video Gen batches, the
+    generate_video tool). The start goes through plugin_bridge's stage path
+    (no persisted preference, an explicit user-disable still wins, GPU
+    conflicts resolved there); GUAARDVARK_PLUGIN_AUTO_ORCHESTRATOR=0 turns it
+    off and the original "Start the ComfyUI plugin" error is returned.
+    """
+    ready, err = preflight_video_model(model_id)
+    if ready or "ComfyUI" not in (err or ""):
+        return ready, err
+    try:
+        from backend.services import plugin_bridge
+    except Exception:
+        return ready, err
+    if not plugin_bridge.auto_orchestrator_enabled():
+        return ready, err
+
+    logger.info("Video model %s needs ComfyUI; starting it", model_id)
+    try:
+        plugin_bridge.ensure_plugins_for_stage("video", "generating")
+    except plugin_bridge.PluginUnavailable as exc:
+        return False, f"{err} (Automatic start failed: {exc})"
+    except Exception as exc:  # noqa: BLE001 - report, never raise into a request
+        logger.warning("ComfyUI auto-start for %s failed: %s", model_id, exc)
+        return False, f"{err} (Automatic start failed: {exc})"
+
+    import time as _time
+    deadline = _time.time() + COMFYUI_AUTOSTART_WAIT_S
+    while not _comfyui_reachable() and _time.time() < deadline:
+        _time.sleep(1.0)
+    ready, err2 = preflight_video_model(model_id)
+    if ready:
+        logger.info("ComfyUI started for %s", model_id)
+        return True, ""
+    return False, err2 or err
+
+
 def preflight_video_model(model_id: str) -> tuple[bool, str]:
     """Return (ready, error_message). Blocks silent fallback to the wrong backend."""
     entry = VIDEO_MODEL_REGISTRY.get(model_id or "")

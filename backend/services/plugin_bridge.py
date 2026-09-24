@@ -73,6 +73,11 @@ ROUTE_PLUGIN_MAP: Dict[str, List[str]] = {
 # Used by ensure_plugins_for_stage (auto paths use persist_user_pref=False).
 # ROUTE_PLUGIN_MAP remains for nav/prepare (with sub-path phasing support).
 STAGE_PLUGIN_REQUIREMENTS: dict[str, dict[str, list[str]]] = {
+    # A single clip or batch from Video Gen, the MCP generate_video tool or chat.
+    # Models that run inside ComfyUI need it up before the job is queued.
+    "video": {
+        "generating": ["comfyui"],
+    },
     "music-video": {
         "analyzing": ["video_editor", "ollama"],      # Director for per-cut unique prompts
         "storyboard": ["comfyui"],                     # Pre-approval thumbnails (flux/SDXL + LoRA)

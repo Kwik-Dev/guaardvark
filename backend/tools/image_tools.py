@@ -1251,9 +1251,9 @@ class VideoGeneratorTool(BaseTool):
                     model_id, duration_frames, num_inference_steps, wait_for_result, prompt[:100])
         try:
             from backend.services.batch_video_generator import get_batch_video_generator
-            from backend.services.video_model_registry import preflight_video_model
+            from backend.services.video_model_registry import prepare_video_model
 
-            ready, preflight_err = preflight_video_model(model_id)
+            ready, preflight_err = prepare_video_model(model_id)
             if not ready:
                 return ToolResult(success=False, error=f"Video model not ready: {preflight_err}")
 
