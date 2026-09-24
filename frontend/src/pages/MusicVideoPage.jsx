@@ -650,38 +650,40 @@ const MusicVideoPage = () => {
   }, []);
 
 
-            // Load the OpenAI-compatible model(s) from .env (GUAARDVARK_OPENAI_MODEL via
-            // GUAARDVARK_OPENAI_BASE_URL) so the Director dropdown offers the .env-configured
-            // cloud model the backend Director already prefers when available. Best-effort /
-            // silent: when it isn't configured the dropdown shows local Ollama only.
+  // Load the OpenAI-compatible model(s) from .env (GUAARDVARK_OPENAI_MODEL via
+  // GUAARDVARK_OPENAI_BASE_URL) so the Director dropdown offers the .env-configured
+  // cloud model. Gated on the cloud switch: this PR's Director still calls Ollama,
+  // so a cloud model id offered as a Director model would be handed to Ollama as a
+  // local model name. Best-effort / silent.
   useEffect(() => {
     let mounted = true;
     (async () => {
-        try {
-          const state = await getLlmProvider();
-          if (!mounted) return;
-          const providers = Array.isArray(state?.providers) ? state.providers : [];
-          const openai = providers.find((x) => x?.id === "openai");
-          if (!openai?.available) return;
+      try {
+        const state = await getLlmProvider();
+        if (!mounted) return;
+        if (!state?.cloud_active) return;
+        const providers = Array.isArray(state?.providers) ? state.providers : [];
+        const openai = providers.find((x) => x?.id === "openai");
+        if (!openai?.available) return;
 
-                // Show the .env model first so the dropdown updates immediately; the
-                // optional remote catalogue (if any) only augments it.
-          const ids = new Set();
-          if (state?.openai_model) ids.add(String(state.openai_model).trim());
-          if (ids.size) setCloudModels(Array.from(ids));
-          try {
-            const cat = await getProviderModels("openai");
-            if (!mounted) return;
-            const merged = new Set(ids);
-             (Array.isArray(cat) ? cat : []).forEach((m) => {
-              const id = typeof m === "string" ? m : m?.id || m?.name;
-              if (id) merged.add(String(id).trim());
-              });
-            setCloudModels(Array.from(merged));
-            } catch { /* live catalogue fetch is best-effort; .env model already shown */ }
-        } catch {
-          /* provider endpoint missing / backend down — keep local Ollama only */
-        }
+        // Show the .env model first so the dropdown updates immediately; the
+        // optional remote catalogue (if any) only augments it.
+        const ids = new Set();
+        if (state?.openai_model) ids.add(String(state.openai_model).trim());
+        if (ids.size) setCloudModels(Array.from(ids));
+        try {
+          const cat = await getProviderModels("openai");
+          if (!mounted) return;
+          const merged = new Set(ids);
+          (Array.isArray(cat) ? cat : []).forEach((m) => {
+            const id = typeof m === "string" ? m : m?.id || m?.name;
+            if (id) merged.add(String(id).trim());
+          });
+          setCloudModels(Array.from(merged));
+        } catch { /* live catalogue fetch is best-effort; .env model already shown */ }
+      } catch {
+        /* provider endpoint missing / backend down — keep local Ollama only */
+      }
     })();
     return () => { mounted = false; };
   }, []);

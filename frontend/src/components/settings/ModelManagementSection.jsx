@@ -309,6 +309,16 @@ const ModelManagementSection = ({
       ? [{ name: providerState.openai_model, id: providerState.openai_model }]
       : [];
 
+  // Stock installs must not gain a cloud switch and a second chat-model picker.
+  // This section exists to configure a hosted provider, so it stays hidden until
+  // one is actually configured (its env key / base URL is present) or the master
+  // switch is already on (so it can still be turned off). Deciding the cloud UI
+  // for unconfigured installs is a separate change.
+  const anyCloudProviderConfigured = mistralAvailable || openaiAvailable;
+  if (!cloudEnabled && !anyCloudProviderConfigured) {
+    return null;
+  }
+
   return (
     <Paper elevation={3} sx={{ p: 2 }}>
       <Typography variant="h6" gutterBottom>
