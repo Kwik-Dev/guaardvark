@@ -136,9 +136,20 @@ ALLOWED_APPS = [
 if os.environ.get("GUAARDVARK_ALLOWED_APPS"):
     ALLOWED_APPS.extend(os.environ.get("GUAARDVARK_ALLOWED_APPS").split(":"))
 
+# MCP (Model Context Protocol) client. Server definitions live in
+# data/config/mcp_servers.json (see mcp_servers.json.example) and/or the
+# GUAARDVARK_MCP_SERVERS env var (same JSON shape).
 MCP_ENABLED = os.environ.get("GUAARDVARK_MCP_ENABLED", "true").lower() == "true"
 MCP_TIMEOUT = int(os.environ.get("GUAARDVARK_MCP_TIMEOUT", "30"))
-MCP_SERVERS_CONFIG = os.environ.get("GUAARDVARK_MCP_SERVERS", "{}")
+MCP_CONNECT_TIMEOUT = int(os.environ.get("GUAARDVARK_MCP_CONNECT_TIMEOUT", "30"))
+MCP_SERVERS_CONFIG = os.environ.get("GUAARDVARK_MCP_SERVERS", "")
+MCP_CONFIG_FILE = os.environ.get(
+    "GUAARDVARK_MCP_CONFIG_FILE",
+    str(GUAARDVARK_ROOT / "data" / "config" / "mcp_servers.json"),
+)
+MCP_MAX_OUTPUT_CHARS = int(os.environ.get("GUAARDVARK_MCP_MAX_OUTPUT_CHARS", "16000"))
+MCP_CONFIRM_TIMEOUT = int(os.environ.get("GUAARDVARK_MCP_CONFIRM_TIMEOUT", "120"))
+MCP_AUTOCONNECT = os.environ.get("GUAARDVARK_MCP_AUTOCONNECT", "true").lower() == "true"
 
 # Uncle Claude configuration
 CLAUDE_API_ENABLED = os.environ.get("GUAARDVARK_CLAUDE_API_ENABLED", "true").lower() == "true"

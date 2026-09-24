@@ -69,7 +69,7 @@ def _resolve_root(explicit: Optional[str], agent_context: Optional[Dict[str, Any
 def _hybrid_search(root: str, query: str, limit: int) -> Optional[str]:
     """Ask the zvec-grep MCP server; None when it is not there or refuses."""
     try:
-        from backend.services.mcp_client_service import MCP_ENABLED, get_mcp_service, run_mcp_async
+        from backend.services.mcp_client_service import MCP_ENABLED, get_mcp_service
     except Exception as exc:  # noqa: BLE001 - the fallback covers it
         logger.debug("code search: MCP client unavailable: %s", exc)
         return None
@@ -77,9 +77,10 @@ def _hybrid_search(root: str, query: str, limit: int) -> Optional[str]:
         return None
     try:
         service = get_mcp_service()
-        result = run_mcp_async(service.call_tool(
+        result = service.call_tool(
             MCP_SERVER, MCP_TOOL, {"root": root, "query": query, "limit": int(limit)},
-        ))
+            caller="code_search",
+        )
     except Exception as exc:  # noqa: BLE001
         logger.info("code search: hybrid call failed, using regex search: %s", exc)
         return None
