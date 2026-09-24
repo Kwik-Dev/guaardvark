@@ -25,6 +25,14 @@ PROTECTED_PREFIXES = (
     '/api/social-outreach/',
 )
 
+# Browser/desktop/MCP automation and direct tool execution can read files, run
+# commands and reach internal networks. Off by default because the Tools page
+# and automation panels are used from other devices on the LAN, which have no
+# API-key field; GUAARDVARK_PROTECT_TOOL_ENDPOINTS=true closes them to remote
+# hosts without the key.
+if os.environ.get("GUAARDVARK_PROTECT_TOOL_ENDPOINTS", "").strip().lower() in ("1", "true", "yes", "on"):
+    PROTECTED_PREFIXES = PROTECTED_PREFIXES + ('/api/automation/', '/api/tools/execute')
+
 # File APIs include both the document library and the live repository editor.
 # Keep read-only document browser GETs public for the local UI, but protect
 # server filesystem reads and every mutation-capable file route.

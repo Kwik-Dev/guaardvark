@@ -1231,7 +1231,34 @@ def _initialize_app_components(app):
             pass
     atexit.register(_unload_heavy_generators)
 
+    # MCP: keep first-class mcp__<server>__<tool> proxies in sync with server
+    # connections. The service stops its MCP child processes via atexit.
+    try:
+        from backend.tools.mcp_tools import install_proxy_sync
+        install_proxy_sync()
+    except Exception as e:
+        app.logger.warning(f"MCP proxy tool sync unavailable: {e}")
+
     return app
+
+
+def start_mcp_autoconnect(app):
+    """Connect MCP servers marked autoConnect, off the startup path."""
+    from backend import config as _cfg
+
+    if not (_cfg.MCP_ENABLED and _cfg.MCP_AUTOCONNECT):
+        return
+
+    def _run():
+        try:
+            from backend.services.mcp_client_service import get_mcp_service
+            result = get_mcp_service().autoconnect()
+            if result.get("results"):
+                app.logger.info(f"MCP autoconnect: {result['results']}")
+        except Exception as e:
+            app.logger.warning(f"MCP autoconnect failed: {e}")
+
+    threading.Thread(target=_run, name="mcp-autoconnect", daemon=True).start()
 
 app = create_app()
 
@@ -2664,6 +2691,10 @@ if __name__ == "__main__":
         f"Starting Flask+SocketIO server on {run_host}:{run_port} "
         f"(LLM timeout: {app.config.get('LLM_REQUEST_TIMEOUT', LLM_REQUEST_TIMEOUT)}s)"
     )
+    # With the debug reloader, only the serving child (WERKZEUG_RUN_MAIN=true)
+    # should spawn MCP server processes, not the file-watching parent.
+    if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        start_mcp_autoconnect(app)
     socketio.run(app, host=run_host, port=run_port, debug=app.debug,
                  allow_unsafe_werkzeug=True)
 else:

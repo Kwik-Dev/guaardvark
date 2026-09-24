@@ -364,51 +364,24 @@ def register_desktop_tools() -> List[str]:
 
 
 def register_mcp_tools() -> List[str]:
-    """Register MCP (Model Context Protocol) tools"""
+    """Register MCP (Model Context Protocol) meta-tools.
+
+    Per-server tools (mcp__<server>__<tool>) are registered dynamically by
+    backend.tools.mcp_tools.install_proxy_sync when servers connect.
+    """
     global _tool_categories
     registered = []
     category = "mcp"
 
     try:
-        from backend.tools.mcp_tools import (
-            MCPListServersTool,
-            MCPConnectTool,
-            MCPDisconnectTool,
-            MCPListToolsTool,
-            MCPExecuteTool,
-            MCPGetStateTool,
-        )
+        from backend.tools.mcp_tools import META_TOOL_CLASSES
 
-        register_tool(MCPListServersTool())
-        registered.append("mcp_list_servers")
-        _tool_categories["mcp_list_servers"] = category
-        logger.debug("Registered: MCPListServersTool")
-
-        register_tool(MCPConnectTool())
-        registered.append("mcp_connect")
-        _tool_categories["mcp_connect"] = category
-        logger.debug("Registered: MCPConnectTool")
-
-        register_tool(MCPDisconnectTool())
-        registered.append("mcp_disconnect")
-        _tool_categories["mcp_disconnect"] = category
-        logger.debug("Registered: MCPDisconnectTool")
-
-        register_tool(MCPListToolsTool())
-        registered.append("mcp_list_tools")
-        _tool_categories["mcp_list_tools"] = category
-        logger.debug("Registered: MCPListToolsTool")
-
-        register_tool(MCPExecuteTool())
-        registered.append("mcp_execute")
-        _tool_categories["mcp_execute"] = category
-        logger.debug("Registered: MCPExecuteTool")
-
-        register_tool(MCPGetStateTool())
-        registered.append("mcp_get_state")
-        _tool_categories["mcp_get_state"] = category
-        logger.debug("Registered: MCPGetStateTool")
-
+        for cls in META_TOOL_CLASSES:
+            tool = cls()
+            register_tool(tool)
+            registered.append(tool.name)
+            _tool_categories[tool.name] = category
+        logger.info(f"Registered MCP meta-tools: {', '.join(registered)}")
     except ImportError as e:
         logger.error(f"Failed to import MCP tools: {e}")
     except Exception as e:

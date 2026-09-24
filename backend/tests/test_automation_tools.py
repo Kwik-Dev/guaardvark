@@ -319,7 +319,9 @@ class TestToolRegistration(unittest.TestCase):
         
         self.assertIn("mcp_list_servers", registered)
         self.assertIn("mcp_execute", registered)
-        self.assertEqual(len(registered), 6)
+        self.assertIn("mcp_read_resource", registered)
+        self.assertIn("mcp_get_prompt", registered)
+        self.assertEqual(len(registered), 10)
 
 
 class TestAgentConfigurations(unittest.TestCase):

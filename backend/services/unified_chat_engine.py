@@ -416,7 +416,7 @@ OUTREACH_TOOLS = ["outreach_status", "outreach_list_queue", "outreach_draft_post
 # page holds every chat request until a person approves it.
 PUBLISH_TOOLS = ["request_publish"]
 # Populated dynamically when an MCP server connects — see
-# backend.services.mcp_native_proxy. Holds names like 'filesystem_list_directory'
+# backend.tools.mcp_tools.sync_proxy_tools. Holds names like 'mcp__fs__list_directory'
 # so the LLM can pick MCP tools by name without going through mcp_execute.
 # Mutated in place so the TOOL_CONTEXT_KEYWORDS reference below stays live.
 MCP_NATIVE_TOOLS: List[str] = []
@@ -586,9 +586,9 @@ TOOL_CONTEXT_KEYWORDS = {
     "file": (["bulk file", "rename files", "process all files", "watch file",
               "watch the file", "monitor file", "all files in", "every file in",
               "batch file"], FILE_TOOLS),
-    # MCP-native proxies (filesystem_list_directory, filesystem_read_text_file, …)
+    # MCP proxies (mcp__fs__list_directory, mcp__fs__read_text_file, …)
     # surface for natural file/dir queries without needing an MCP keyword. List
-    # is mutated by mcp_native_proxy on connect/disconnect; until any MCP server
+    # is mutated by mcp_tools.sync_proxy_tools on connect/disconnect; until any MCP server
     # is connected, this category is empty and contributes nothing.
     "mcp_native": (["list the files", "list files", "files in", "directory",
                     "read file", "read the file", "write file", "write to file",
@@ -1123,6 +1123,60 @@ def inject_chat_image_model(
     return out
 
 
+_MCP_WORD_RE = re.compile(r"(?<!\w)mcp(?!\w)", re.IGNORECASE)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def select_mcp_tools_for_message(message: str, registry, max_mcp_tools: int = 8) -> List[str]:
+    """MCP proxy tools the message explicitly points at.
+
+    Triggers: the word "mcp" or a leading "/mcp" (all connected servers), a
+    connected server's name, or one of its configured ``keywords``. Tools are
+    ranked by word overlap between the message and the tool name/description.
+    """
+    try:
+        from backend.services.mcp_client_service import get_mcp_service
+        from backend.tools.mcp_tools import get_proxy_tools_by_server
+    except Exception:
+        return []
+    proxies = get_proxy_tools_by_server()
+    if not proxies:
+        return []
+    msg = message.lower()
+    mentions_mcp = bool(_MCP_WORD_RE.search(msg)) or msg.lstrip().startswith("/mcp")
+    service = get_mcp_service()
+    wanted: List[str] = []
+    for server, names in proxies.items():
+        if not names:
+            continue
+        rt = service._runtimes.get(server)
+        keywords = [k.lower() for k in (rt.config.keywords if rt else [])]
+        named = re.search(rf"(?<!\w){re.escape(server.lower())}(?!\w)", msg) is not None
+        if mentions_mcp or named or any(k and k in msg for k in keywords):
+            wanted.extend(names)
+    if not wanted:
+        return []
+    msg_words = set(_WORD_RE.findall(msg))
+
+    def score(name: str) -> int:
+        tool = registry.get_tool(name)
+        text = f"{name} {getattr(tool, 'description', '')}".lower().replace("_", " ")
+        return len(msg_words & set(_WORD_RE.findall(text)))
+
+    wanted.sort(key=score, reverse=True)
+    return [n for n in wanted if registry.get_tool(n)][:max_mcp_tools]
+
+
+def merge_forced_tools(selected: List[str], forced: List[str], max_tools: int = 15) -> List[str]:
+    """Put explicitly requested tools right after the core tools, keeping the cap."""
+    if not forced:
+        return selected
+    core = [t for t in selected if t in CORE_TOOLS]
+    rest = [t for t in selected if t not in CORE_TOOLS and t not in forced]
+    merged = core + [t for t in forced if t not in core] + rest
+    return merged[:max(max_tools, len(core) + len(forced))]
+
+
 def build_concise_tool_list(registry, tool_names: List[str]) -> str:
     """Build a concise tool description list for the system prompt (~20 tokens per tool)."""
     lines = []
@@ -1157,6 +1211,7 @@ def build_mcp_inventory_for_prompt(selected_tools: List[str]) -> str:
         return ""
     try:
         from backend.services.mcp_client_service import MCPClientService, MCP_ENABLED
+        from backend.services.mcp_policy import sanitize_tool_name
         if not MCP_ENABLED:
             return ""
         service = MCPClientService.get_instance()
@@ -1170,7 +1225,7 @@ def build_mcp_inventory_for_prompt(selected_tools: List[str]) -> str:
     lines = [
         "",
         "Connected MCP servers — these are also exposed as native tools "
-        "(prefer the native form `<server>_<tool>` when possible; fall back "
+        "(prefer the native form `mcp__<server>__<tool>` when possible; fall back "
         "to mcp_execute(server, tool, arguments) only for tools you can't see "
         "by name in your tool list):",
     ]
@@ -1183,7 +1238,7 @@ def build_mcp_inventory_for_prompt(selected_tools: List[str]) -> str:
             schema = t.get("inputSchema") or {}
             required = schema.get("required") or []
             req_hint = f"  [args: {', '.join(required)}]" if required else ""
-            native_name = f"{srv_name}_{tname}"
+            native_name = sanitize_tool_name(srv_name, tname)
             lines.append(f"    - {tname}  (native: `{native_name}`){req_hint}: {desc}")
     return "\n".join(lines)
 
@@ -2033,6 +2088,16 @@ class UnifiedChatEngine:
                         merged.append(t)
                 selected_tools = merged
 
+            # MCP tools the message names (the word "mcp", a server name or one
+            # of its configured keywords) go in ahead of the rest.
+            try:
+                selected_tools = merge_forced_tools(
+                    selected_tools, select_mcp_tools_for_message(message, self.registry),
+                    max_tools=25,
+                )
+            except Exception as exc:
+                logger.debug(f"MCP tool selection skipped: {exc}")
+
             _screen_active = bool(options and options.get("agent_screen_active", False))
             if not _screen_active:
                 _SCREEN_ONLY_TOOLS = set(DESKTOP_TOOLS) | set(AGENT_CONTROL_TOOLS)
@@ -2521,11 +2586,16 @@ class UnifiedChatEngine:
                     approval_details.append(_approval_detail(tool, tool_name, params, tc.reasoning))
                     approval_pending.append((tool, params))
 
+            # Names a person said yes to this iteration, on the card or as a
+            # standing session/task approval. Only these may run tools that
+            # refuse without a human answer (see _exec_one).
+            human_approved = set(_pre)
             if approval_jobs and not is_aborted(session_id):
                 approved = self._await_tool_approval(
                     session_id, emit_fn, request_id, iteration, approval_details,
                 )
                 if approved:
+                    human_approved.update(approval_jobs)
                     for tool, params in approval_pending:
                         _record_approved_consent(tool, params, session_id)
 
@@ -2707,27 +2777,34 @@ class UnifiedChatEngine:
                     f"emit_fn_id={id(emit_fn)} iter={iteration}"
                 )
                 t0 = time.time()
+                # A tool that refuses without a human answer (an MCP tool the
+                # server policy gates) runs only if the person approved it.
+                import contextlib
+                from backend.services.tool_confirmation import trusted_caller
+                approval_mark = (trusted_caller("chat_approval") if t_name in human_approved
+                                 else contextlib.nullcontext())
                 try:
                     exec_params = inject_chat_image_model(t_name, dict(t_params or {}), options)
-                    res = self.registry.execute_tool(
-                        t_name,
-                        on_output=on_output,
-                        agent_context={
-                            "transport": "chat",
-                            "user_message": message,
-                            "message": message,
-                            "project_root": (
-                                (options.get("project_root") or options.get("projectRoot"))
-                                if isinstance(options, dict) else None
-                            ),
-                            "pending_image_prompt": _SESSION_PENDING_IMAGE_PROMPT.get(session_id),
-                            "direct_tool_params": (
-                                options.get("direct_tool_params")
-                                if isinstance(options, dict) else None
-                            ),
-                        },
-                        **exec_params,
-                    )
+                    with approval_mark:
+                        res = self.registry.execute_tool(
+                            t_name,
+                            on_output=on_output,
+                            agent_context={
+                                "transport": "chat",
+                                "user_message": message,
+                                "message": message,
+                                "project_root": (
+                                    (options.get("project_root") or options.get("projectRoot"))
+                                    if isinstance(options, dict) else None
+                                ),
+                                "pending_image_prompt": _SESSION_PENDING_IMAGE_PROMPT.get(session_id),
+                                "direct_tool_params": (
+                                    options.get("direct_tool_params")
+                                    if isinstance(options, dict) else None
+                                ),
+                            },
+                            **exec_params,
+                        )
                 except Exception as exc:
                     logger.error(
                         f"Tool '{t_name}' raised unexpected exception: {exc}",
@@ -5425,54 +5502,7 @@ You are a private, local AI assistant running on the user's own hardware. There 
 
     def _normalize_parameters(self, params: Dict[str, Any], tool_name: Optional[str] = None) -> Dict[str, Any]:
         """Normalize tool parameters - coerce string values using tool schema when available."""
-        if not params:
-            return {}
+        from backend.services.agent_tools import coerce_params_to_schema
 
-        # Get parameter schema from tool registry if available
-        schema = {}
-        if tool_name:
-            tool = self.registry.get_tool(tool_name)
-            if tool and tool.parameters:
-                schema = {p_name: p.type for p_name, p in tool.parameters.items()}
-
-        coerced = {}
-        for k, v in params.items():
-            if not isinstance(v, str):
-                coerced[k] = v
-                continue
-
-            declared_type = schema.get(k)
-            low = v.lower().strip()
-
-            # Schema-driven coercion
-            if declared_type == "bool":
-                coerced[k] = low in ("true", "yes", "1", "on")
-            elif declared_type == "int":
-                try:
-                    coerced[k] = int(v)
-                except ValueError:
-                    coerced[k] = v
-            elif declared_type == "float":
-                try:
-                    coerced[k] = float(v)
-                except ValueError:
-                    coerced[k] = v
-            elif declared_type == "string":
-                coerced[k] = v
-            else:
-                # Fallback: heuristic coercion (no schema or unknown type)
-                if low in ("true", "yes"):
-                    coerced[k] = True
-                elif low in ("false", "no"):
-                    coerced[k] = False
-                elif low in ("none", "null"):
-                    coerced[k] = None
-                else:
-                    try:
-                        coerced[k] = int(v)
-                    except ValueError:
-                        try:
-                            coerced[k] = float(v)
-                        except ValueError:
-                            coerced[k] = v
-        return coerced
+        tool = self.registry.get_tool(tool_name) if tool_name else None
+        return coerce_params_to_schema(params or {}, tool)

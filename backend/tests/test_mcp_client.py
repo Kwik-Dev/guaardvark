@@ -262,3 +262,103 @@ class TestLiveServer:
         time.sleep(0.5)
         out = subprocess.run(["pgrep", "-f", FIXTURE], capture_output=True, text=True)
         assert out.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# First-class proxy tools and chat tool selection
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def proxied(mcp_service):
+    from backend.services.agent_tools import get_tool_registry
+    from backend.tools import mcp_tools
+
+    from backend.tools.tool_registry_init import register_mcp_tools
+
+    register_mcp_tools()
+    mcp_tools.install_proxy_sync()
+    assert mcp_service.connect("fx")["success"]
+    yield get_tool_registry()
+    mcp_service.disconnect("fx")
+
+
+class TestProxyTools:
+    def test_proxies_registered_with_real_schema(self, proxied):
+        add = proxied.get_tool("mcp__fx__add")
+        assert add is not None
+        assert set(add.parameters) == {"a", "b"}
+        assert add.parameters["a"].type == "int" and add.parameters["a"].required
+        assert add.get_json_schema()["input_schema"]["required"] == ["a", "b"]
+        assert add.requires_confirmation is False
+        assert proxied.get_tool("mcp__fx__delete_thing").requires_confirmation is True
+
+    def test_proxy_executes_through_registry(self, proxied):
+        res = proxied.execute_tool("mcp__fx__add", a=2, b=3)
+        assert res.success
+        assert "[External MCP output from fx/add (ok)" in res.output and "\n5\n" in res.output
+
+    def test_destructive_proxy_needs_approval(self, proxied):
+        from backend.services.tool_confirmation import trusted_caller
+
+        tool = proxied.get_tool("mcp__fx__delete_thing")
+        assert tool.requires_approval is True  # raises the chat's approval card
+        assert proxied.get_tool("mcp__fx__add").requires_approval is False
+        denied = proxied.execute_tool("mcp__fx__delete_thing", name="a")
+        assert not denied.success and denied.metadata.get("requires_approval")
+        with trusted_caller("chat_approval"):
+            assert proxied.execute_tool("mcp__fx__delete_thing", name="a").success
+
+    def test_mcp_execute_cannot_sidestep_approval(self, proxied):
+        from backend.services.tool_confirmation import trusted_caller
+
+        with trusted_caller("chat_approval"):
+            res = proxied.execute_tool("mcp_execute", server="fx", tool="delete_thing",
+                                       arguments={"name": "b"})
+        assert not res.success and "mcp__fx__delete_thing" in res.error
+        ok = proxied.execute_tool("mcp_execute", server="fx", tool="add", arguments='{"a": 1, "b": 4}')
+        assert ok.success and "\n5\n" in ok.output  # JSON-string arguments are decoded
+
+    def test_denied_tools_not_exposed(self, mcp_service, monkeypatch):
+        from backend.services.agent_tools import get_tool_registry
+        from backend.tools import mcp_tools
+
+        mcp_tools.install_proxy_sync()
+        mcp_service._runtimes["fx"].config.deny_tools = ["delete_*"]
+        assert mcp_service.connect("fx")["success"]
+        reg = get_tool_registry()
+        assert reg.get_tool("mcp__fx__add") and reg.get_tool("mcp__fx__delete_thing") is None
+        res = mcp_service.call_tool("fx", "delete_thing", {"name": "x"}, approved=True)
+        assert not res["success"] and "blocked" in res["error"]
+
+    def test_proxies_removed_on_disconnect(self, proxied, mcp_service):
+        mcp_service.disconnect("fx")
+        assert proxied.get_tool("mcp__fx__add") is None
+
+    def test_list_changed_resyncs(self, proxied, mcp_service):
+        import asyncio
+
+        rt = mcp_service._runtimes["fx"]
+        rt.tools = [t for t in rt.tools if t["name"] != "add"]
+        mcp_service._notify("tools_changed", "fx")
+        assert proxied.get_tool("mcp__fx__add") is None
+        # a real notification triggers a catalog refresh + resync
+        handler = mcp_service._make_message_handler(rt)
+
+        class _N:
+            method = "notifications/tools/list_changed"
+
+        asyncio.run_coroutine_threadsafe(handler(_N()), mcp_service._loop).result(5)
+        deadline = time.time() + 5
+        while proxied.get_tool("mcp__fx__add") is None and time.time() < deadline:
+            time.sleep(0.05)
+        assert proxied.get_tool("mcp__fx__add") is not None
+
+    def test_chat_selection_finds_mcp_tools(self, proxied):
+        from backend.services.unified_chat_engine import merge_forced_tools, select_mcp_tools_for_message
+
+        assert select_mcp_tools_for_message("what's the weather", proxied) == []
+        picked = select_mcp_tools_for_message("use mcp to add 2 and 3", proxied)
+        assert picked and picked[0] == "mcp__fx__add"
+        assert "mcp__fx__echo" in select_mcp_tools_for_message("ask fx to echo hi", proxied)
+        assert select_mcp_tools_for_message("run the fixture thing", proxied)  # configured keyword
+        merged = merge_forced_tools(["web_search", "a", "b"], ["mcp__fx__add"], max_tools=3)
+        assert merged[:2] == ["web_search", "mcp__fx__add"]

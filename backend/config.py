@@ -148,7 +148,6 @@ MCP_CONFIG_FILE = os.environ.get(
     str(GUAARDVARK_ROOT / "data" / "config" / "mcp_servers.json"),
 )
 MCP_MAX_OUTPUT_CHARS = int(os.environ.get("GUAARDVARK_MCP_MAX_OUTPUT_CHARS", "16000"))
-MCP_CONFIRM_TIMEOUT = int(os.environ.get("GUAARDVARK_MCP_CONFIRM_TIMEOUT", "120"))
 MCP_AUTOCONNECT = os.environ.get("GUAARDVARK_MCP_AUTOCONNECT", "true").lower() == "true"
 
 # Uncle Claude configuration

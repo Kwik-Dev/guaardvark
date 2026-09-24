@@ -322,6 +322,23 @@ def parse_tool_calls_xml(llm_response: str) -> ToolCallResponse:
         )
 
 
+def _coerce_parameters_object(params: Any) -> Dict[str, Any]:
+    """Models sometimes emit parameters as a JSON *string*; decode it."""
+    import json
+
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, str):
+        try:
+            decoded = json.loads(params)
+            if isinstance(decoded, dict):
+                return decoded
+        except json.JSONDecodeError:
+            pass
+        return {"input": params} if params.strip() else {}
+    return {}
+
+
 def parse_tool_calls_json(llm_response: str) -> ToolCallResponse:
     """
     Parse JSON-formatted tool calls from LLM response.
@@ -362,9 +379,16 @@ def parse_tool_calls_json(llm_response: str) -> ToolCallResponse:
         tool_calls = []
         for tc in data.get('tool_calls', []):
             if isinstance(tc, dict):
+                # OpenAI style nests {"function": {"name", "arguments"}}
+                fn = tc.get('function') if isinstance(tc.get('function'), dict) else {}
+                params = next(
+                    (v for v in (tc.get('parameters'), tc.get('arguments'), tc.get('args'),
+                                 tc.get('input'), fn.get('arguments')) if v is not None),
+                    {},
+                )
                 tool_calls.append(ToolCall(
-                    tool_name=tc.get('tool_name', tc.get('tool', tc.get('name', ''))),
-                    parameters=tc.get('parameters', tc.get('args', {})),
+                    tool_name=tc.get('tool_name', tc.get('tool', tc.get('name', fn.get('name', '')))),
+                    parameters=_coerce_parameters_object(params),
                     reasoning=tc.get('reasoning')
                 ))
 

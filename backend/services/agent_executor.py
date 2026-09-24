@@ -674,7 +674,7 @@ What tool do you need to call next?"""
             logger.info(f"Executing tool: {tool_call.tool_name}")
 
             # Normalize parameters - handle nested parameter/value format
-            normalized_params = self._normalize_tool_parameters(tool_call.parameters)
+            normalized_params = self._normalize_tool_parameters(tool_call.parameters, tool_call.tool_name)
             logger.debug(f"Tool {tool_call.tool_name} parameters: {normalized_params}")
 
             log_tool_call("agent_executor", tool_call.tool_name, normalized_params,
@@ -1321,7 +1321,7 @@ If the answer needs correction, respond with: CORRECTED: [corrected answer using
             logger.error(f"LLM verification failed: {e}", exc_info=True)
             return (False, answer)
     
-    def _normalize_tool_parameters(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_tool_parameters(self, params: Dict[str, Any], tool_name: Optional[str] = None) -> Dict[str, Any]:
         """
         Normalize tool parameters to handle different LLM output formats.
         
@@ -1368,29 +1368,11 @@ If the answer needs correction, respond with: CORRECTED: [corrected answer using
         # Already in direct format or unknown format
         result = params if isinstance(params, dict) else {}
 
-        # Coerce string values to proper types (LLM outputs XML text as strings)
-        coerced = {}
-        for k, v in result.items():
-            if isinstance(v, str):
-                low = v.lower().strip()
-                if low == 'true':
-                    coerced[k] = True
-                elif low == 'false':
-                    coerced[k] = False
-                elif low == 'none' or low == 'null':
-                    coerced[k] = None
-                else:
-                    # Try int/float coercion
-                    try:
-                        coerced[k] = int(v)
-                    except ValueError:
-                        try:
-                            coerced[k] = float(v)
-                        except ValueError:
-                            coerced[k] = v
-            else:
-                coerced[k] = v
-        return coerced
+        # Coerce string values (text tool-call formats) using the tool's schema
+        from backend.services.agent_tools import coerce_params_to_schema
+
+        tool = self.tool_registry.get_tool(tool_name) if tool_name else None
+        return coerce_params_to_schema(result, tool)
     
     def _summarize_steps(self, steps: List[AgentStep]) -> str:
         """Summarize agent steps into a coherent response"""

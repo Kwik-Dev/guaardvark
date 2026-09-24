@@ -87,13 +87,26 @@ def _sdk_timeout(seconds: float):
     return float(seconds)
 
 
-def _client_version() -> str:
-    try:
-        from backend.app import __version__  # noqa: WPS433 (lazy, avoid import cycle)
+_CLIENT_VERSION: Optional[str] = None
 
-        return str(__version__)
-    except Exception:
-        return "unknown"
+
+def _client_version() -> str:
+    """Backend version from backend/app.py, read as text: importing the app
+    module would boot the whole Flask application."""
+    global _CLIENT_VERSION
+    if _CLIENT_VERSION is None:
+        import re
+
+        _CLIENT_VERSION = "unknown"
+        try:
+            app_py = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")
+            with open(app_py, encoding="utf-8") as f:
+                m = re.search(r'^__version__\s*=\s*["\']([^"\']+)', f.read(), re.MULTILINE)
+            if m:
+                _CLIENT_VERSION = m.group(1)
+        except OSError:
+            pass
+    return _CLIENT_VERSION
 
 
 def _dump(model: Any) -> Any:

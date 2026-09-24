@@ -14,6 +14,16 @@ _capability_cache: Dict[str, Dict[str, Any]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 
+
+def _connected_mcp_servers():
+    """Names of connected MCP servers (empty if MCP is unavailable)."""
+    try:
+        from backend.services.mcp_client_service import get_mcp_service
+
+        return get_mcp_service().get_state().get("connected_servers", [])
+    except Exception:
+        return []
+
 def _get_cache_key(model_name: str, web_search_enabled: bool, rag_enabled: bool, tools: List[str]) -> str:
     """Generate a cache key for capability prompt section"""
     tools_str = ",".join(sorted(tools)) if tools else ""
@@ -134,6 +144,10 @@ def get_capability_context(
 
         for cat, cat_tools in by_category.items():
             label = category_labels.get(cat, cat)
+            if cat == "mcp":
+                connected = _connected_mcp_servers()
+                if connected:
+                    label += f" via connected servers {', '.join(connected)}"
             # Include brief descriptions for clarity
             tool_names = [t.get("name", "") for t in cat_tools[:3]]
             desc = f"{label} ({len(cat_tools)} tools: {', '.join(tool_names)}"
@@ -149,7 +163,7 @@ def get_capability_context(
         # Fallback: categorize tools by name pattern
         browser_tools = [t for t in tools if 'browser' in t.lower()]
         desktop_tools = [t for t in tools if any(x in t.lower() for x in ['file_', 'app_', 'gui_', 'clipboard', 'notification'])]
-        mcp_tools = [t for t in tools if 'mcp' in t.lower()]
+        mcp_tools = [t for t in tools if t.lower().startswith('mcp_')]
         other_tools = [t for t in tools if t not in browser_tools + desktop_tools + mcp_tools]
 
         tool_descriptions = []
