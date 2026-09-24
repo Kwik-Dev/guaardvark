@@ -70,7 +70,7 @@ The Audio Studio loads **Chatterbox** via `chatterbox.tts.ChatterboxTTS` and doe
 - The **Kokoro** fallback uses English voice IDs.
 
 To add Japanese/non-English, the backend would need to load
-`ChatterboxMultilingualTTS` and pass a `language_id` (see `ISSUES.md` for how
+`ChatterboxMultilingualTTS` and pass a `language_id` (see `FEATURES.md` for how
 audio features are tracked).
 
 ---
