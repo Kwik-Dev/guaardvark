@@ -93,16 +93,34 @@ _service_lock = threading.Lock()
 
 @dataclass
 class AgentControlConfig:
-    """Configuration for the agent control loop."""
-    max_iterations: int = 15
+    """Configuration for the agent control loop.
+
+    The loop stops when progress stops (``max_stall_steps``); the step and
+    time caps are the safety floor under that, not the normal exit. Until
+    2026-09-23 they were the only exit: every task got 15 steps and 120 s
+    whatever it needed, so a task with more than a dozen targets could never
+    finish, and the loop had no way to notice it was going nowhere before
+    the clock ran out.
+    """
+    # Hard ceiling on steps. Measured 2026-09-23 on the dots task at ~9.3 s a
+    # step with the servo's precision probes armed and ~7 s without; the
+    # timeout below is sized to it. It is also the cap on the Done list the
+    # model is shown (one line per step).
+    max_iterations: int = 40
     # Bumped from 3 → 5 so transient screen states (mid-load page, brief
     # black between window switches, vision model spitting bad JSON once)
     # don't kill the loop. The failure counter still resets on every successful
     # action, so this only matters for genuinely-stuck sequences.
     max_consecutive_failures: int = 5
-    # Must exceed worst-case iterations: a few vision calls at ~20s each plus
-    # actions already pass 60s on a healthy run
-    task_timeout_seconds: int = 120
+    # Outer safety floor: 40 steps × ~9 s plus the done guard's 10 s waits.
+    task_timeout_seconds: int = 480
+    # Consecutive successful steps that made no progress (no target the task
+    # had not clicked yet, and no verified screen change) before the loop
+    # stops as stalled_no_progress. Failed steps have their own guard
+    # (max_consecutive_failures) and do not count here. 4: the 2026-09-23
+    # dots runs cycled A-B-C-D and A-B-C-D-E in whole rounds; 3 would fire
+    # inside one legitimate "open menu, scroll, scroll" sequence.
+    max_stall_steps: int = 4
     action_timeout_seconds: int = 60
     verify_actions: bool = True
     grid_cols: int = 8
@@ -418,6 +436,7 @@ class AgentControlService:
         self._prior_run_note: str = ""
         self._task_session_id: Optional[str] = None
         self._task_started_at: float = 0.0
+        self._stall_steps: int = 0
         # Circuit breaker: track coordinates of issued clicks to detect
         # infinite loops on non-responsive elements.
         self._click_history: List[Tuple[int, int]] = []
@@ -782,30 +801,28 @@ class AgentControlService:
 
         # Training mode: crank up limits so the agent keeps practicing
         max_iters = 1000 if training_mode else self.config.max_iterations
+        if max_steps is not None:
+            # An explicit cap from the caller still wins (legacy int form).
+            max_iters = min(max_iters, max(1, int(max_steps)))
         effective_budget = budget
-        if effective_budget is None and max_steps is not None:
-            # Back-compat: synthesize a minimal budget from the legacy int
-            effective_budget = StepBudget(total=max(1, int(max_steps)))
-
         if effective_budget is not None:
-            max_iters = min(max_iters, max(1, effective_budget.remaining))
-            # Charge the entry into this ACS loop (counts against the inherited cross-tier budget)
+            # The cross-tier budget caps escalations between chat tiers; a
+            # screen task is one entry against it, not one charge per step.
+            # Charging per step (and capping the loop at what was left) made
+            # the chat path stop a task at 12 steps whatever it needed.
+            if effective_budget.remaining <= 0:
+                logger.warning("[AGENT] Cross-tier budget exhausted — not starting the loop")
+                return finish(AgentResult(
+                    success=False, reason="budget_exhausted",
+                    steps=self._action_history,
+                ))
             effective_budget.charge(1, 3, "entered ACS execute_task")
-        self._current_budget = effective_budget  # for prompt injection so the agent LLM can see its budget status live
+        self._current_budget = effective_budget
         task_timeout = 3600 if training_mode else self.config.task_timeout_seconds  # 1 hour for training
+        self._stall_steps = 0
 
         try:
             for iteration in range(max_iters):
-                # Budget enforcement inside the ACS loop for true cross-tier capping.
-                if effective_budget is not None:
-                    if effective_budget.remaining <= 0:
-                        logger.warning("[AGENT] Cross-tier budget exhausted — aborting loop")
-                        return finish(AgentResult(
-                            success=False, reason="budget_exhausted",
-                            steps=self._action_history,
-                        ))
-                    effective_budget.charge(1, 3, f"acs iteration {iteration}")
-
                 self._tick_strategy_cooldowns()
                 if task_ctx.killed or self._active_task_id != task_id:
                     return finish(AgentResult(
@@ -1719,6 +1736,20 @@ class AgentControlService:
                             steps=self._action_history,
                             total_time_seconds=time.time() - start_time
                         ))
+
+                # 5d. STALL — successful steps that change nothing and touch no
+                # new target. The loop breaker above only sees identical
+                # repeats; the A-B-C-D-A cycle of 2026-09-23 was never caught.
+                if self._note_progress(step, training_mode=training_mode):
+                    logger.warning(
+                        f"[AGENT][STALL] {self._stall_steps} successful steps with no new target "
+                        f"and no verified change; stopping as stalled_no_progress"
+                    )
+                    return finish(AgentResult(
+                        success=False, reason="stalled_no_progress",
+                        steps=self._action_history,
+                        total_time_seconds=time.time() - start_time
+                    ))
 
                 if failed:
                     consecutive_failures += 1
@@ -2830,6 +2861,40 @@ class AgentControlService:
             steps.append(f"  {h.action.action_type}: {desc} [{status}]")
         return header + "\n" + "\n".join(steps) + "\n"
 
+    @classmethod
+    def _step_progress(cls, step: ActionStep, prior: List[ActionStep]) -> bool:
+        """Did this step move the task: a verified screen change, or a click
+        on a target the task had not clicked [OK] before. Failed steps never
+        count as progress."""
+        if step.failed:
+            return False
+        r = step.result or {}
+        if bool(r.get("verified")) or str(r.get("post_action_effect") or "") == "verified":
+            return True
+        a = step.action
+        if a.action_type in cls._CLICK_FAMILY:
+            key = (a.target_description or "").strip().lower()
+            seen = {
+                (h.action.target_description or "").strip().lower()
+                for h in prior
+                if not h.failed and h.action.action_type in cls._CLICK_FAMILY
+            }
+            if key and key not in seen:
+                return True
+        return False
+
+    def _note_progress(self, step: ActionStep, training_mode: bool = False) -> bool:
+        """Update the stall counter with the step just recorded (the last entry
+        of _action_history). True when the loop should stop as stalled."""
+        if training_mode:
+            return False
+        prior = self._action_history[:-1] if self._action_history and self._action_history[-1] is step else list(self._action_history)
+        if self._step_progress(step, prior):
+            self._stall_steps = 0
+        elif not step.failed:
+            self._stall_steps += 1
+        return self._stall_steps >= self.config.max_stall_steps
+
     @staticmethod
     def _repeat_block(history) -> str:
         """One line when a target already clicked [OK] was clicked [OK] again.
@@ -2928,11 +2993,6 @@ class AgentControlService:
     def _chat_context_block(chat_context: str) -> str:
         return f"Recent conversation context:\n{chat_context}\n\n" if chat_context else ""
 
-    def _budget_block(self) -> str:
-        if getattr(self, '_current_budget', None) is None:
-            return ""
-        return self._current_budget.to_llm_summary() + " (cross-tier budget — be efficient with steps; this is visible to you for awareness.)\n\n"
-
     def _build_unified_prompt(
         self,
         task: str,
@@ -2966,9 +3026,8 @@ class AgentControlService:
             failure_block = failure_block + "\n\n"
         world_observed_block = self._consume_world_observed_block()
         chat_context_block = self._chat_context_block(chat_context)
-        budget_block = self._budget_block()
 
-        return f"""{pivot_block}{budget_block}{chat_context_block}Task: {task}
+        return f"""{pivot_block}{chat_context_block}Task: {task}
 
 {desktop_state}
 {world_block}
@@ -4998,7 +5057,6 @@ Reply ONLY with JSON:
         failures_block = self._format_failure_reports_for_prompt()
         world_observed_block = self._consume_world_observed_block()
         chat_context_block = self._chat_context_block(chat_context)
-        budget_block = self._budget_block()
 
         if mouse_only:
             rules = f"MOUSE ONLY. Actions: click, right_click, done.\n{self._STATE_MANAGEMENT}"
@@ -5007,7 +5065,7 @@ Reply ONLY with JSON:
             rules = f"One action per step. After typing a URL, press Return.\n{self._STATE_MANAGEMENT}"
             schema = self._SCHEMA_FULL
 
-        return f"""{pivot_block}{budget_block}{chat_context_block}{failures_block}---
+        return f"""{pivot_block}{chat_context_block}{failures_block}---
 
 Task: {task}
 

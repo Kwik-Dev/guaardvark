@@ -30,7 +30,10 @@ class TestAgentControlConfig(unittest.TestCase):
     def test_default_config(self):
         from backend.services.agent_control_service import AgentControlConfig
         config = AgentControlConfig()
-        self.assertEqual(config.max_iterations, 15)
+        # Ceilings, not the normal exit: the loop stops on the stall rule.
+        self.assertEqual(config.max_iterations, 40)
+        self.assertEqual(config.task_timeout_seconds, 480)
+        self.assertEqual(config.max_stall_steps, 4)
         self.assertEqual(config.verify_actions, True)
         self.assertEqual(config.grid_cols, 8)
         self.assertEqual(config.grid_rows, 8)
@@ -276,3 +279,77 @@ class TestTaskMemory(unittest.TestCase):
              patch.object(self.A, "_format_dom_grounding_for_prompt", lambda self: ""):
             p = svc._build_unified_prompt("t", hist)
         self.assertIn("showing last 4", p)
+
+
+def _stepped(target, ok=True, action_type="click", verified=False, effect=None):
+    from backend.services.agent_control_service import ActionStep, AgentAction
+    result = {"success": ok, "verified": verified}
+    if effect:
+        result["post_action_effect"] = effect
+    return ActionStep(action=AgentAction(action_type=action_type, target_description=target),
+                      result=result, failed=not ok)
+
+
+class TestStallRule(unittest.TestCase):
+    """The loop stops when progress stops, not at a fixed count.
+
+    Progress: a verified screen change, or a click on a target not yet clicked
+    [OK] this task. Failed steps have their own guard and do not count.
+    """
+
+    def setUp(self):
+        from backend.services.agent_control_service import AgentControlService
+        self.A = AgentControlService
+        self.svc = AgentControlService()
+
+    def _run(self, steps, training_mode=False):
+        """Feed steps through the loop's own counter; return the 1-based step
+        at which it says stop, or None."""
+        self.svc._action_history = []
+        self.svc._stall_steps = 0
+        for i, st in enumerate(steps, 1):
+            self.svc._action_history.append(st)
+            if self.svc._note_progress(st, training_mode=training_mode):
+                return i
+        return None
+
+    def test_progress_truth_table(self):
+        A = _stepped("red dot A")
+        self.assertTrue(self.A._step_progress(A, []))
+        self.assertFalse(self.A._step_progress(_stepped("red dot A"), [A]), "repeat, no change")
+        self.assertTrue(self.A._step_progress(_stepped("red dot A", verified=True), [A]), "repeat with a change")
+        self.assertTrue(self.A._step_progress(_stepped("red dot A", effect="verified"), [A]))
+        self.assertFalse(self.A._step_progress(_stepped("red dot A", ok=False), []), "failed never counts")
+        self.assertTrue(self.A._step_progress(_stepped("", action_type="type", verified=True), []))
+        self.assertFalse(self.A._step_progress(_stepped("", action_type="type"), []))
+        self.assertFalse(self.A._step_progress(_stepped("", action_type="wait"), []))
+        self.assertTrue(self.A._step_progress(_stepped("Red Dot A "), [_stepped("red dot a", ok=False)]),
+                        "a target only ever missed is still new")
+
+    def test_replays_the_2026_09_23_cycle_and_stops_at_step_nine(self):
+        # run 242cd07c: A B C D E, then A B C D E, A, B — all hits, none changed the screen.
+        steps = [_stepped(t) for t in ("A", "B", "C", "D", "E", "A", "B", "C", "D", "E", "A", "B")]
+        self.assertEqual(self._run(steps), 9)
+        self.assertEqual(self.svc._stall_steps, 4)
+
+    def test_five_new_targets_never_stall(self):
+        self.assertIsNone(self._run([_stepped(t) for t in "ABCDE"]))
+        self.assertEqual(self.svc._stall_steps, 0)
+
+    def test_a_verified_change_resets_the_counter(self):
+        steps = [_stepped("A"), _stepped("A"), _stepped("A"), _stepped("A", verified=True),
+                 _stepped("A"), _stepped("A"), _stepped("A")]
+        self.assertIsNone(self._run(steps))
+        self.assertEqual(self.svc._stall_steps, 3)
+
+    def test_failed_steps_do_not_count_toward_a_stall(self):
+        steps = [_stepped("A")] + [_stepped("B", ok=False)] * 6
+        self.assertIsNone(self._run(steps))
+
+    def test_training_mode_never_stalls(self):
+        self.assertIsNone(self._run([_stepped("colored circle")] * 20, training_mode=True))
+
+    def test_the_threshold_is_the_configured_one(self):
+        self.svc.config.max_stall_steps = 2
+        self.assertEqual(self._run([_stepped("A"), _stepped("A"), _stepped("A")]), 3)
+

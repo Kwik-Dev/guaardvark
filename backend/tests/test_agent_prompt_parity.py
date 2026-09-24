@@ -77,3 +77,19 @@ def test_split_prompt_carries_the_same_task_memory():
     assert done in unified and done in split
     note = 'Already clicked [OK] more than once: "red dot A" x2'
     assert note in unified and note in split
+
+
+def test_the_budget_line_is_gone_from_both_screen_prompts():
+    """The screen loop stops on its own stall rule; "[BUDGET: n/20 steps left]"
+    beside a task that states its own budget only misled the model."""
+    from unittest.mock import patch
+    from backend.services.agent_control_service import AgentControlService
+    from backend.services.step_budget import StepBudget
+    svc = _svc()
+    svc._current_budget = StepBudget(total=5)
+    with patch.object(AgentControlService, "_get_desktop_state", staticmethod(lambda display=None: "d")), \
+         patch.object(AgentControlService, "_format_dom_grounding_for_prompt", lambda self: ""):
+        unified = svc._build_unified_prompt("t", [])
+        split = svc._build_decision_prompt("t", "s", [])
+    assert "[BUDGET:" not in unified and "[BUDGET:" not in split
+

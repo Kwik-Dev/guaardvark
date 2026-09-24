@@ -624,7 +624,6 @@ class AgentBrain:
             # Pass the explicit budget (gemma direct counts against the cross-tier cap).
             if budget is None:
                 budget = StepBudget.from_total(self.TOTAL_STEP_CAP)
-            gemma_steps = min(budget.remaining, 12)
             budget.charge(1, 0, "gemma4 direct entry")  # count the direct path
             # actively query memory/entity for context (Phase 2.1)
             try:
@@ -635,8 +634,10 @@ class AgentBrain:
                 budget.charge(1, 0, "gemma context query")
             except Exception:
                 pass
-            # Include budget summary in chat_context so the ACS/Gemma loop (and its LLM) "sees" the budget status for awareness.
-            budget_aware_context = (history_str or "") + "\n" + budget.to_llm_summary() + " (cross-tier budget visible to you — be mindful of remaining steps in this agentic task.)"
+            # The screen loop stops on its own stall rule and ceilings; a
+            # "[BUDGET: n/20 steps left]" line beside a task that states its
+            # own budget only misled the model, so it no longer rides along.
+            screen_context = history_str or ""
             logger.debug(
                 f"[EMIT-HANDOFF][BRAIN_GEMMA] calling acs.execute_task DIRECT (bypasses agent_task_execute tool) "
                 f"with explicit emit_fn_id={id(emit_fn)} session={session_id}"
@@ -645,9 +646,8 @@ class AgentBrain:
                 task=message, 
                 screen=screen, 
                 emit_fn=emit_fn, 
-                chat_context=budget_aware_context,
-                max_steps=gemma_steps,
-                budget=budget,  # pass through for future ACS awareness
+                chat_context=screen_context,
+                budget=budget,
                 session_id=session_id,
             )
 
@@ -832,6 +832,7 @@ class AgentBrain:
             "timeout": "I ran out of time on that one — want me to retry?",
             "max_iterations": "I tried a few times and couldn't get there. Tell me more about what you wanted?",
             "max_failures": "I tried a few times and couldn't get there. Tell me more about what you wanted?",
+            "stalled_no_progress": "I kept acting but the screen stopped changing and I had no new target, so I stopped rather than loop. Tell me what to try next?",
             "killed": "Stopped that one.",
         }
         if r in mapping:
