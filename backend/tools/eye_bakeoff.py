@@ -53,9 +53,11 @@ DEFAULT_MODELS = [
     "qwen3-vl:8b",
 ]
 
-# Uniform box_2d-normalized-1000 convention (gemma4's working config) applied to
-# every candidate so the test is apples-to-apples. Models that use a different
-# convention will show high error → flagged as needing per-model calibration.
+# No coord_order here: the servo then resolves each model's measured convention
+# exactly as the agent does, so a score is the score the agent would get. A
+# hard-coded "yx" read every model in gemma4's order, and qwen3.6:27b, which
+# points within 2px, scored 118px with its axes swapped (2026-09-24). Pass
+# --coord-order to force one order across every model.
 #
 # disable_calibration defaults ON here so the bake-off measures the RAW eye and
 # gives the same answer on a box that happens to have a fit on disk as on one
@@ -69,7 +71,6 @@ BASE_VISION_CONFIG = {
     "offset_x": 0,
     "offset_y": 0,
     "native_pointing": True,
-    "coord_order": "yx",
     "source": "eye_bakeoff_uniform",
     "disable_calibration": True,
 }
@@ -360,8 +361,12 @@ def eval_frames(model: str, size, frames: list, overlay: dict = None,
                         "parse_path": getattr(servo, "_last_parse_path", "")})
             rows.append(row)
     hr = hit_radius if hit_radius is not None else (sum(radii) / len(radii) if radii else 22)
+    vc = getattr(servo, "_vision_config", None) or {}
     return {"model": model, "targets": rows, "score": score(rows, hr),
-            "hit_radius_px": round(hr, 1), "seconds": round(time.time() - t0, 1)}
+            "hit_radius_px": round(hr, 1), "seconds": round(time.time() - t0, 1),
+            # What the servo actually read with, forced or resolved.
+            "coord_order": vc.get("coord_order"),
+            "style": vc.get("coord_style") or "google_box2d"}
 
 
 def _print_axis(tag, s):
@@ -474,8 +479,6 @@ def main(argv: Optional[list] = None):
                 overlay["internal_width"] = args.grid
             r = eval_frames(m, size, frames, overlay, hit_radius)
             r["mode"] = mode
-            r["coord_order"] = overlay.get("coord_order", "(config)")
-            r["style"] = overlay.get("coord_style", "google_box2d")
             if args.record and mode == "anchor" and args.frames:
                 from backend.services.servo_knowledge_store import record_measurement
                 sc = r["score"]["clean"] if r["score"]["clean"].get("n") else r["score"]["all"]
