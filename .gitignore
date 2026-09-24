@@ -335,3 +335,5 @@ data/clients/
 docs/GUAARDVARK_GUIDE_SCREENSHOTS_jp.html
 docs/GUAARDVARK_GUIDE_SCREENSHOTS_jp-preview.html
 *.mp4
+CASE_STUDY_AI_AGENT_BRANCH_MERGE*
+*.mov
