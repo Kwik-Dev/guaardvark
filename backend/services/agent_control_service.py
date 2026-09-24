@@ -2878,9 +2878,13 @@ class AgentControlService:
     # Effects the click verifiers record when the click site did not change.
     _NO_CHANGE_EFFECTS = ("not_observed", "no_visible_change")
 
+    # Neutral on purpose. "It probably missed" sent a model that had hit all
+    # five trainer dots back for a sixth click: on that page a hit changes
+    # nothing at the dot, only the score in the header (2026-09-24 live run).
     _NO_CHANGE_LEGEND = (
-        "[NO CHANGE] = the click was sent but nothing changed where it landed; "
-        "it probably missed, so that target is not done yet.\n"
+        "[NO CHANGE] = the click was sent but nothing changed where it landed. That "
+        "is not proof of a miss: check the screen (a counter, a new page, a marker) "
+        "before clicking that target again.\n"
     )
 
     @classmethod
