@@ -185,6 +185,9 @@ class AgentResult:
     verified: bool = False
     # Carries the verification reason forward for logging / debugging.
     verified_reason: str = ""
+    # The agent_task_runs row this result was written to ("" when the write
+    # was skipped or failed). The episode record; see _persist_task_run.
+    run_id: str = ""
 
 
 @dataclass
@@ -404,6 +407,11 @@ class AgentControlService:
         # populated by _derive_session_expectations.
         self._session_expectations: Optional[List[Expectation]] = None
         self._recipe_fallback_note: str = ""
+        # One line about the last run of the same task text, or "". Set per
+        # task from the agent_task_runs table; rendered above the Done list.
+        self._prior_run_note: str = ""
+        self._task_session_id: Optional[str] = None
+        self._task_started_at: float = 0.0
         # Circuit breaker: track coordinates of issued clicks to detect
         # infinite loops on non-responsive elements.
         self._click_history: List[Tuple[int, int]] = []
@@ -549,7 +557,8 @@ class AgentControlService:
         last = None
         if self._last_result:
             last = {"success": self._last_result.success, "reason": self._last_result.reason,
-                     "steps": len(self._last_result.steps), "time": self._last_result.total_time_seconds}
+                     "steps": len(self._last_result.steps), "time": self._last_result.total_time_seconds,
+                     "run_id": self._last_result.run_id}
         return {
             "active": self._active,
             "ready": self._ready,
@@ -565,9 +574,14 @@ class AgentControlService:
 
     def execute_task(self, task: str, screen, mouse_only: bool = False, training_mode: bool = False,
                      emit_fn: Optional[Callable] = None, chat_context: str = "", max_steps: Optional[int] = None,
-                     budget: Optional[StepBudget] = None, correction_mode: Optional[str] = None) -> AgentResult:
+                     budget: Optional[StepBudget] = None, correction_mode: Optional[str] = None,
+                     session_id: Optional[str] = None) -> AgentResult:
         """
         Execute a task using the see-think-act loop.
+
+        session_id: the chat session that asked, when there is one; stored on the
+                task's episode row (agent_task_runs) so a run can be traced back to
+                the conversation.
 
         correction_mode: off | shadow | on for this task's servo, overriding the
                 environment and the reflex; None leaves that precedence alone. The
@@ -664,6 +678,9 @@ class AgentControlService:
             self._current_iteration = 0
             self._action_history = []
             self._recipe_fallback_note = ""
+            self._prior_run_note = ""
+            self._task_session_id = session_id
+            self._task_started_at = time.time()
             # Phase 4: session state is task-scoped. Re-parse the knowledge
             # files in case they were edited between runs; reset the log so
             # last task's contradictions don't bleed into this one's lessons.
@@ -749,6 +766,10 @@ class AgentControlService:
                 self._recipe_fallback_note = f"Tried recipe {recipe_result.reason} but it failed. Continuing manually."
         elif not self._recipe_usage_buffer or self._recipe_usage_buffer[-1].get("task") != task:
             self.note_recipe_usage(task)
+
+        # The agent looks back: one line about the last run of this exact task,
+        # from the episode table. Empty when there is none.
+        self._prior_run_note = self._prior_run_note_for(task)
 
         # Training mode: crank up limits so the agent keeps practicing
         max_iters = 1000 if training_mode else self.config.max_iterations
@@ -2089,6 +2110,10 @@ class AgentControlService:
                 self._write_session_lessons()
         except Exception as e:
             logger.debug(f"[AGENT][BELIEF] lesson-write skipped: {e}")
+        # The episode record. Same chokepoint, same contract: every exit path
+        # writes it, and a failed write never blocks task completion.
+        if owns_active_task:
+            self._persist_task_run(result, task_id=task_id, task=task)
         if not result.task:
             # Stamp the task so consumers (e.g. Phase 3 inducer) can match the
             # result against later feedback without depending on _current_task,
@@ -2140,6 +2165,181 @@ class AgentControlService:
                     logger.debug(f"Distillation dispatch skipped: {e}")
 
         return result
+
+    # ------------------------------------------------------------------
+    # Episodic memory: agent_task_runs / agent_task_steps
+    # ------------------------------------------------------------------
+    #
+    # Beliefs and lessons persisted long before the task did: the steps of a
+    # task lived in _action_history and were overwritten by the next task, so
+    # the agent could not look back at what it had done, in this task or the
+    # last one. Every exit path now writes one run row and one row per step.
+
+    _STOP_RULES = (
+        ("completed_with_repetition", "loop"),
+        ("completed (", "early_done"),
+        ("completed", "done"),
+        ("recipe", "recipe"),
+        ("stalled_no_progress", "stalled"),
+        ("max_iterations", "ceiling"),
+        ("timeout", "timeout"),
+        ("killed", "killed"),
+        ("superseded", "superseded"),
+        ("max_failures", "max_failures"),
+        ("loop_detected", "loop"),
+        ("budget_exhausted", "budget"),
+        ("error", "error"),
+    )
+
+    @classmethod
+    def _stop_rule_from_reason(cls, reason: str) -> str:
+        r = (reason or "").strip()
+        for prefix, rule in cls._STOP_RULES:
+            if r.startswith(prefix):
+                return rule
+        return "other"
+
+    @staticmethod
+    def _task_key(task: str) -> str:
+        import hashlib
+        normalised = " ".join((task or "").lower().split())
+        return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _json_safe(value):
+        try:
+            return json.loads(json.dumps(value, default=str))
+        except Exception:
+            return {"unserialisable": str(type(value))}
+
+    def _app_context(self):
+        from flask import has_app_context
+        from contextlib import nullcontext
+        if has_app_context():
+            return nullcontext()
+        from backend.app import app as _flask_app
+        return _flask_app.app_context()
+
+    def _persist_task_run(self, result: AgentResult, task_id: Optional[str], task: Optional[str]) -> str:
+        """Write the run and its steps. Returns the run id, or "" when skipped."""
+        try:
+            from datetime import datetime as _dt
+            from backend.models import db, AgentTaskRun, AgentTaskStep
+            task_text = task or result.task or self._current_task or ""
+            steps = list(result.steps or [])
+            started = self._task_started_at or (time.time() - (result.total_time_seconds or 0.0))
+            ended = time.time()
+            be = getattr(self, "_brain_eye", None)
+            if getattr(self, "_training_mode", False):
+                mode = "training"
+            elif self._task_session_id:
+                mode = "chat"
+            else:
+                mode = "api"
+            run = AgentTaskRun(
+                task=task_text,
+                task_key=self._task_key(task_text),
+                session_id=self._task_session_id,
+                brain=getattr(be, "brain", None),
+                eye=getattr(be, "eye", None),
+                unified=bool(getattr(be, "unified", True)),
+                mode=mode,
+                started_at=_dt.fromtimestamp(started),
+                ended_at=_dt.fromtimestamp(ended),
+                total_seconds=float(result.total_time_seconds or (ended - started)),
+                success=bool(result.success),
+                reason=(result.reason or "")[:128],
+                stop_rule=self._stop_rule_from_reason(result.reason),
+                verified=bool(result.verified),
+                steps_count=len(steps),
+                click_attempts=sum(1 for st in steps
+                                   if getattr(st.action, "action_type", "") in self._CLICK_FAMILY),
+            )
+            with self._app_context():
+                db.session.add(run)
+                db.session.flush()
+                for st in steps:
+                    a = st.action
+                    r = st.result or {}
+                    attempt = r.get("attempt")
+                    db.session.add(AgentTaskStep(
+                        run_id=run.id,
+                        iteration=int(st.iteration or 0),
+                        action_type=a.action_type,
+                        target=a.target_description or None,
+                        text=a.text or None,
+                        keys=list(a.keys) if a.keys else None,
+                        coordinates=list(a.coordinates) if a.coordinates else None,
+                        failed=bool(st.failed),
+                        verified=bool(r.get("verified", False)),
+                        post_action_effect=(str(r.get("post_action_effect") or "")[:64] or None),
+                        reason=(str(r.get("reason") or "")[:128] or None),
+                        reasoning=a.reasoning or None,
+                        expected_effect=a.expected_effect or None,
+                        success_proof=a.success_proof or None,
+                        scene_description=st.scene_description or None,
+                        servo_attempt=int(attempt) if isinstance(attempt, (int, float)) else None,
+                        result=self._json_safe(r),
+                        created_at=_dt.fromtimestamp(st.timestamp) if st.timestamp else None,
+                    ))
+                db.session.commit()
+                result.run_id = run.id
+                logger.info(f"[AGENT][EPISODE] run {run.id} written: {len(steps)} steps, {run.stop_rule}")
+                return run.id
+        except Exception as e:
+            logger.warning(f"[AGENT][EPISODE] run not written: {e}")
+            try:
+                from backend.models import db
+                db.session.rollback()
+            except Exception:
+                pass
+            return ""
+
+    def _prior_run_note_for(self, task: str, max_age_days: int = 30) -> str:
+        """One line about the most recent run of this exact task, or ""."""
+        try:
+            from datetime import datetime as _dt, timedelta
+            from backend.models import db, AgentTaskRun, AgentTaskStep
+            key = self._task_key(task)
+            with self._app_context():
+                run = (db.session.query(AgentTaskRun)
+                       .filter(AgentTaskRun.task_key == key,
+                               AgentTaskRun.ended_at >= _dt.now() - timedelta(days=max_age_days))
+                       .order_by(AgentTaskRun.ended_at.desc())
+                       .first())
+                if run is None:
+                    return ""
+                steps = (db.session.query(AgentTaskStep)
+                         .filter(AgentTaskStep.run_id == run.id)
+                         .order_by(AgentTaskStep.iteration.asc(), AgentTaskStep.created_at.asc())
+                         .all())
+                when = run.started_at.strftime("%Y-%m-%d %H:%M") if run.started_at else "earlier"
+                if run.success:
+                    parts = [f"{st.action_type} {st.target or st.text or ''}".strip() for st in steps[:12]]
+                    if len(steps) > 12:
+                        parts.append(f"... {len(steps) - 12} more")
+                    parts.append("done")
+                    return (f"Last attempt at this exact task ({when}) succeeded in "
+                            f"{len(steps) + 1} steps: " + ", ".join(parts) + ".")
+                counts: Dict[str, int] = {}
+                names: Dict[str, str] = {}
+                for st in steps:
+                    if st.action_type in self._CLICK_FAMILY and st.target:
+                        k = st.target.strip().lower()
+                        counts[k] = counts.get(k, 0) + 1
+                        names.setdefault(k, st.target.strip())
+                clicked = ", ".join(f"{names[k]} x{c}" if c > 1 else names[k]
+                                    for k, c in list(counts.items())[:12])
+                tail = f"; targets clicked: {clicked}" if clicked else ""
+                return (f"Last attempt at this exact task ({when}) ended \"{run.reason}\" after "
+                        f"{len(steps)} steps{tail}. Do not repeat that pattern.")
+        except Exception as e:
+            logger.debug(f"[AGENT][EPISODE] prior-run lookup skipped: {e}")
+            return ""
+
+    def _prior_run_block(self) -> str:
+        note = (getattr(self, "_prior_run_note", "") or "").strip()
+        return f"{note}\n" if note else ""
 
     def _enforce_window_boundaries(self, screen=None):
         """Clamp all windows to fit within the virtual display.
@@ -2751,6 +2951,7 @@ class AgentControlService:
         self._proof_contract = True
         done_lines = self._history_block(history, self.config.max_iterations)
         repeat_block = "" if training_mode else self._repeat_block(history)
+        prior_block = self._prior_run_block()
         pivot_block = self._pivot_block(history)
         desktop_state = AgentControlService._get_desktop_state()
         training_override = self._training_override(training_mode)
@@ -2768,7 +2969,7 @@ class AgentControlService:
 
 {desktop_state}
 {world_block}
-{dom_grounding_block}{world_observed_block}{failure_block}{done_lines}{repeat_block}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
+{dom_grounding_block}{world_observed_block}{failure_block}{prior_block}{done_lines}{repeat_block}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
 
 {self._STATE_MANAGEMENT}
 
@@ -4784,6 +4985,7 @@ Reply ONLY with JSON:
         mouse_only = getattr(self, '_mouse_only', False)
         done_lines = self._history_block(history, self.config.max_iterations)
         repeat_block = "" if training_mode else self._repeat_block(history)
+        prior_block = self._prior_run_block()
         pivot_block = self._pivot_block(history)
         desktop_state = self._get_desktop_state()
         training_override = self._training_override(training_mode)
@@ -4811,7 +5013,7 @@ Task: {task}
 
 Screen (as described by the vision model): {scene}
 
-{dom_grounding_block}{world_observed_block}{done_lines}{repeat_block}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
+{dom_grounding_block}{world_observed_block}{prior_block}{done_lines}{repeat_block}{training_override}Step {len(history) + 1}. ONE next action. After Act the system ALWAYS re-captures the screen (re-See) before your next Think. {confidence}
 
 {rules}
 

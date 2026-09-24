@@ -648,6 +648,7 @@ class AgentBrain:
                 chat_context=budget_aware_context,
                 max_steps=gemma_steps,
                 budget=budget,  # pass through for future ACS awareness
+                session_id=session_id,
             )
 
             # Narrate the outcome in Guaardvark's voice
