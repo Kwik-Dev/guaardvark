@@ -1593,8 +1593,9 @@ def create_code_release(name: str | None = None) -> str:
                 # Project documentation (selective — not personal docs/)
                 "CONTRIBUTING.md",
                 "CAPABILITIES.md",
-                "KNOWN_BUGS.md",
-                "README_zh.md",
+               "KNOWN_BUGS.md",
+               "FEATURES.md",
+               "README_zh.md",
                 "docs/ARCHITECTURE.md",
                 "docs/screenshots/",
                 "docker-compose.yml",
