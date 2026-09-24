@@ -239,7 +239,10 @@ def ensure_lora_in_comfyui(lora_path: str) -> bool:
     (``GUAARDVARK_ZIMAGE_USE_COMFYUI=1``). Returns True if the LoRA is present in
     ComfyUI's loras dir (linked now, or already there). Best-effort: never raises.
     """
-    if os.environ.get("GUAARDVARK_ZIMAGE_USE_COMFYUI", "").strip().lower() not in ("1", "true", "yes", "on"):
+    # Parse the flag in exactly one place (stills_pipeline owns the env var), so
+    # renaming it cannot leave this gate reading a dead name.
+    from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+    if not zimage_via_comfyui_enabled():
         return False
     p = Path(lora_path)
     if not p.exists():
@@ -392,6 +395,7 @@ class ComfyUIImageGenerator:
         # FLUX LoRAs use flux-dev; mismatched model tags are corrected to the
         # LoRA's family so identity is applied, not silently dropped.
         if lora_names:
+            info = None
             try:
                 from backend.services.media_model_registry import resolve_inference_for_loras
                 # Caller may pass basenames only; resolve_inference needs paths when possible.
@@ -400,6 +404,22 @@ class ComfyUIImageGenerator:
                 info = resolve_inference_for_loras(
                     [p if ("/" in p or p.endswith(".safetensors")) else p for p in lora_paths]
                 )
+            except Exception as e:
+                # Pre-registry LoRAs / basename-only: fall back to historic SDXL force
+                # when flux-schnell would drop LoRAs entirely.
+                logger.debug("LoRA base resolve failed (%s); using legacy flux→sdxl guard", e)
+                if "flux" in ml and "dev" not in ml:
+                    logger.warning(
+                        "Keyframe model=%r WITH %d LoRA(s); assuming SDXL legacy LoRAs — "
+                        "overriding to sdxl.",
+                        effective_model, len(lora_names),
+                    )
+                    effective_model = "sdxl"
+                    ml = "sdxl"
+            # Family correction runs OUTSIDE the resolve try/except so the deliberate
+            # Z-Image refusal below propagates instead of being swallowed by the
+            # legacy-SDXL fallback above.
+            if info is not None:
                 tag = info.get("comfy_model_tag") or "sdxl"
                 if info.get("family") == "sdxl" and ("flux" in ml or "zimage" in ml or "z-image" in ml):
                     logger.warning(
@@ -416,28 +436,29 @@ class ComfyUIImageGenerator:
                     effective_model = tag
                     ml = tag
                 elif info.get("family") == "zimage" and "zimage" not in ml and "z-image" not in ml:
-                    # Deliberate: a Z-Image LoRA paired with another engine is
-                    # corrected to the Z-Image graph instead of being refused
-                    # (the old RuntimeError path), so a trained identity is
-                    # applied rather than silently dropped.
+                    from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+                    if not zimage_via_comfyui_enabled():
+                        # Explicit refusal rather than a silent reroute: with the flag
+                        # off the LoRA is never linked into ComfyUI
+                        # (ensure_lora_in_comfyui returns early), so correcting to
+                        # zimage could only fail later inside ComfyUI with a less
+                        # clear error.
+                        raise RuntimeError(
+                            "Z-Image LoRA (base_model_id=%s) paired with model=%r needs "
+                            "GUAARDVARK_ZIMAGE_USE_COMFYUI=1 to render on the ComfyUI "
+                            "Z-Image graph; set the flag or use the offline Z-Image engine."
+                            % (info.get("base_model_id"), effective_model)
+                        )
+                    # Deliberate: with the opt-in on, a Z-Image LoRA paired with
+                    # another engine is corrected to the Z-Image graph instead of
+                    # being refused, so a trained identity is applied rather than
+                    # silently dropped.
                     logger.warning(
                         "LoRAs are Z-Image (base=%s) but model=%r — overriding to zimage so identity applies.",
                         info.get("base_model_id"), effective_model,
                     )
                     effective_model = "zimage"
                     ml = "zimage"
-            except Exception as e:
-                # Pre-registry LoRAs / basename-only: fall back to historic SDXL force
-                # when flux-schnell would drop LoRAs entirely.
-                logger.debug("LoRA base resolve failed (%s); using legacy flux→sdxl guard", e)
-                if "flux" in ml and "dev" not in ml:
-                    logger.warning(
-                        "Keyframe model=%r WITH %d LoRA(s); assuming SDXL legacy LoRAs — "
-                        "overriding to sdxl.",
-                        effective_model, len(lora_names),
-                    )
-                    effective_model = "sdxl"
-                    ml = "sdxl"
 
         if "flux" in ml and "dev" in ml:
             # FLUX-dev branch. As of the subject-16 fix this only fires for an

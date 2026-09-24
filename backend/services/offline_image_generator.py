@@ -549,6 +549,7 @@ class OfflineImageGenerator:
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
             from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+            gen = ComfyUIImageGenerator()
             engines = gen.comfyui_installed_engines()
             if not zimage_via_comfyui_enabled():
                 # The generic selector cannot use Z-Image without the opt-in flag,
