@@ -236,6 +236,19 @@ class LoopTest(unittest.TestCase):
         self.assertEqual(r["correction"]["stop_reason"], "converged")
         self.assertGreater(r["correction"]["steps"], 5)
 
+    def test_an_eye_that_judges_poorly_is_not_armed(self, _sleep, mock_archive):
+        s = _servo([ANCHOR, '{"visible": true, "dx": "right", "dy": "below"}'], mode="on", accuracy=240.0)
+        s.eye_judge_rate = 0.76
+        r = s.click_target("dot")
+        self.assertIsNone(r.get("correction"))
+        s.screen.click.assert_called_once_with(420, 420, button="left")
+
+    def test_an_eye_that_judges_well_is_armed(self, _sleep, mock_archive):
+        s = _servo([ANCHOR, '{"visible": true, "dx": "same", "dy": "same"}'], mode="on", accuracy=54.0)
+        s.eye_judge_rate = 1.0
+        r = s.click_target("dot")
+        self.assertEqual(r["correction"]["stop_reason"], "on_target")
+
     def test_the_cap_bounds_the_budget(self, _sleep, mock_archive):
         s = _servo([ANCHOR, '{"visible": true, "dx": "right", "dy": "below"}'], mode="shadow", accuracy=54.0)
         real = __import__("backend.services.servo_knowledge_store", fromlist=["get_reflex"]).get_reflex

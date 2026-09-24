@@ -236,6 +236,18 @@ class ShippedAccuracyTest(unittest.TestCase):
              patch.object(R, "_installed_digests", return_value={"gemma4:e2b": "0123456789ab"}):
             self.assertIsNone(R.accuracy_px("gemma4:e2b", (1000, 1000)))
 
+    def test_judge_rate_is_shipped_for_the_measured_build_and_local_wins(self):
+        empty = {"screen": None, "coords": None, "accuracy": None, "judge": None}
+        with patch("backend.services.servo_knowledge_store.load_model_measurements", return_value=empty), \
+             patch.object(R, "_installed_digests", return_value={"gemma4:e2b": "7fbdbf8f5e45"}):
+            self.assertEqual(R.judge_rate("gemma4:e2b"), 0.76)
+            self.assertFalse(R.judges_well("gemma4:e2b"))
+            self.assertIsNone(R.judges_well("never-measured:1b"))
+        local = dict(empty, judge={"both_rate": 0.96})
+        with patch("backend.services.servo_knowledge_store.load_model_measurements", return_value=local), \
+             patch.object(R, "_installed_digests", return_value={"gemma4:e2b": "7fbdbf8f5e45"}):
+            self.assertTrue(R.judges_well("gemma4:e2b"))
+
     def test_a_local_measurement_beats_the_shipped_one(self):
         local = {"screen": "1000x1000", "coords": None, "accuracy": {"median_px": 12.0}}
         with patch("backend.services.servo_knowledge_store.load_model_measurements", return_value=local), \

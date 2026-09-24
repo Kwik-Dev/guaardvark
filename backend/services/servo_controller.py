@@ -103,7 +103,8 @@ class ServoController:
     """
 
     def __init__(self, screen, analyzer, max_corrections: int = 4, collector=None,
-                 vision_config: Dict = None, eye_accuracy_px: Optional[float] = None):
+                 vision_config: Dict = None, eye_accuracy_px: Optional[float] = None,
+                 eye_judge_rate: Optional[float] = None):
         self.screen = screen
         self.analyzer = analyzer
         self.max_corrections = max_corrections
@@ -112,6 +113,8 @@ class ServoController:
         # measurement store; None when unmeasured. The correction loop arms on
         # it: an eye coarser than the target earns a second look.
         self.eye_accuracy_px = eye_accuracy_px
+        # How often this eye judges a marker's offset right (None: unmeasured).
+        self.eye_judge_rate = eye_judge_rate
         # Correction loop. Precedence: an explicit vision_config value, then the
         # environment, then the reflex. "explicit" is what lets a training
         # (single_attempt) run exercise the loop when it asks for it.
@@ -1002,6 +1005,12 @@ class ServoController:
             return False, "precision_off"
         if single_attempt and not self._correction_explicit:
             return False, "single_attempt"
+        if self.eye_judge_rate is not None:
+            from backend.services.model_capability_data import EYE_JUDGE_MIN_BOTH_RATE
+            if self.eye_judge_rate < EYE_JUDGE_MIN_BOTH_RATE:
+                # A loop steered by a judge that is often wrong spends probes
+                # and moves nothing closer (gemma4:e2b at 0.76).
+                return False, f"judge_unreliable({self.eye_judge_rate:.2f})"
         target_px = float(get_reflex("correction_target_px", 24))
         acc = self.eye_accuracy_px
         if precision is True:

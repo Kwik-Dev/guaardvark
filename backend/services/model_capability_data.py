@@ -187,6 +187,35 @@ SHIPPED_EYE_ACCURACY = {
                            "median_y": 1.0, "hit_rate": 0.93, "n": 30},
 }
 
+# How often each eye answers the correction loop's question right on both axes
+# (a red ring 60px left/right/above/below of a labelled dot, or on it; 25
+# probes on one trainer frame; eye_bakeoff --judge, 2026-09-24). Pointing and
+# judging are separate skills: gemma4:e4b misses dots by ~50px yet judges 25
+# of 25, which is why the loop can walk its clicks onto a target. Same
+# digest binding as the accuracy rows.
+SHIPPED_JUDGE_SOURCE = (
+    "eye_bakeoff --judge, 2026-09-24: 25 probes on one 1000x1000 vision trainer "
+    "frame (five labelled dots x five marker offsets), both axes right / probes."
+)
+SHIPPED_EYE_JUDGE = {
+    "gemma4:e2b": {"digest": "7fbdbf8f5e45", "both_rate": 0.76, "n": 25, "ms_median": 174},
+    "gemma4:e4b": {"digest": "c6eb396dbd59", "both_rate": 1.0, "n": 25, "ms_median": 259},
+    "gemma4:latest": {"digest": "c6eb396dbd59", "both_rate": 1.0, "n": 25, "ms_median": 259},
+    "gemma4:12b": {"digest": "4eb23ef187e2", "both_rate": 1.0, "n": 25, "ms_median": 461},
+    "qwen3.5:9b": {"digest": "6488c96fa5fa", "both_rate": 0.96, "n": 25, "ms_median": 492},
+    "qwen3.6:27b-q4_K_M": {"digest": "3a40c32f1450", "both_rate": 1.0, "n": 25, "ms_median": 2956},
+    "minicpm-v4.6:latest": {"digest": "e95583acac77", "both_rate": 0.2, "n": 25, "ms_median": 5137},
+    "moondream:latest": {"digest": "55fc3abd3867", "both_rate": 0.0, "n": 25, "ms_median": 1817},
+    "granite3.2-vision:latest": {"digest": "3be41a661804", "both_rate": 0.0, "n": 25, "ms_median": 553},
+    "llava-phi3:latest": {"digest": "c7edd7b87593", "both_rate": 0.0, "n": 25, "ms_median": 313},
+}
+
+# The correction loop runs only for an eye measured to judge at least this
+# well; an unmeasured eye still runs it. At 0.76 gemma4:e2b's loop left its
+# clicks where they were (median 237px before and after, 30 targets); at
+# 0.96-1.0 the loop roughly doubled hits for gemma4:e4b.
+EYE_JUDGE_MIN_BOTH_RATE = 0.9
+
 # When a model that can see points this badly, and an installed model points
 # well, the user's model keeps deciding and the good pointer does the looking
 # (split mode, the path a blind model already takes). Measured on the same

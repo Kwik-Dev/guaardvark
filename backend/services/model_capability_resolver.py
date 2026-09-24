@@ -37,10 +37,12 @@ from backend.services.model_capability_data import (
     EXTERNAL_MODEL_ROWS,
     EYE_BORROW_EYE_AT_MOST_PX,
     EYE_BORROW_NATIVE_WORSE_THAN_PX,
+    EYE_JUDGE_MIN_BOTH_RATE,
     FAMILY_COORD_DEFAULTS,
     SHIPPED_ACCURACY_SCREEN,
     SHIPPED_ACCURACY_SOURCE,
     SHIPPED_EYE_ACCURACY,
+    SHIPPED_EYE_JUDGE,
     name_looks_vision,
 )
 
@@ -226,6 +228,24 @@ def accuracy_px(tag: str, screen: Optional[Tuple[int, int]] = None) -> Optional[
     """Median pointing error for this model, measured here or shipped; None if unknown."""
     px = (_measurements(tag, screen).get("accuracy") or {}).get("median_px")
     return float(px) if px is not None else None
+
+
+def judge_rate(tag: str, screen: Optional[Tuple[int, int]] = None) -> Optional[float]:
+    """How often this eye judges a marker's offset right on both axes:
+    measured here, else shipped for the installed build, else None."""
+    local = (_measurements(tag, screen).get("judge") or {}).get("both_rate")
+    if local is not None:
+        return float(local)
+    row = SHIPPED_EYE_JUDGE.get(tag or "")
+    if row and str(_installed_digests().get(tag, "")).startswith(row["digest"]):
+        return float(row["both_rate"])
+    return None
+
+
+def judges_well(tag: str, screen: Optional[Tuple[int, int]] = None) -> Optional[bool]:
+    """True/False when the eye's judging is measured, None when it is not."""
+    rate = judge_rate(tag, screen)
+    return None if rate is None else rate >= EYE_JUDGE_MIN_BOTH_RATE
 
 
 def better_eye_for(tag: str, screen: Optional[Tuple[int, int]] = None) -> Optional[Dict[str, Any]]:

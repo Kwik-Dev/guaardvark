@@ -367,8 +367,13 @@ def build_servo(screen, eye_model: str, collector=None, config_overlay: Optional
     acc = cfg.pop("eye_accuracy_px", None)
     if acc is None:
         acc = _eye_accuracy_px(eye_model, w, h)
+    try:
+        from backend.services.model_capability_resolver import judge_rate
+        judge = judge_rate(eye_model, (w, h))
+    except Exception:
+        judge = None
     servo = ServoController(screen, analyzer, collector=collector, vision_config=cfg,
-                            eye_accuracy_px=acc)
+                            eye_accuracy_px=acc, eye_judge_rate=judge)
     return analyzer, servo
 
 

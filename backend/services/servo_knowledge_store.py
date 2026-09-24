@@ -846,7 +846,7 @@ def _load_calibration_file() -> Dict[str, Any]:
 # one of them — which is why a hand-written row outranked an eye four times more
 # accurate. Same file, same lock, same mtime cache; only the shape grows.
 _FIT_KEYS = ("model", "a_x", "b_x", "a_y", "b_y", "k", "cx", "cy", "elbow")
-_MEASUREMENT_SECTIONS = ("coords", "accuracy")
+_MEASUREMENT_SECTIONS = ("coords", "accuracy", "judge")
 
 
 def _has_fit(entry: Optional[Dict[str, Any]]) -> bool:
@@ -932,7 +932,7 @@ def save_servo_calibration(model: str, screen_w: int, screen_h: int, fit: Dict[s
 def record_measurement(model: str, screen_w: int, screen_h: int,
                        section: str, data: Dict[str, Any]) -> str:
     """Write one measurement section for model@WxH, leaving the fit and the other
-    section untouched. `section` is "coords" or "accuracy"."""
+    sections untouched. `section` is "coords", "accuracy" or "judge"."""
     if section not in _MEASUREMENT_SECTIONS:
         raise ValueError(f"unknown measurement section {section!r}; expected one of {_MEASUREMENT_SECTIONS}")
     key = _calibration_key(model, screen_w, screen_h)
@@ -969,7 +969,8 @@ def load_model_measurements(model: str, screen_w: Optional[int] = None,
     if screen_w and screen_h:
         entry = store.get(_calibration_key(model, screen_w, screen_h)) or {}
         return {"screen": f"{int(screen_w)}x{int(screen_h)}" if entry else None,
-                "coords": entry.get("coords"), "accuracy": entry.get("accuracy")}
+                "coords": entry.get("coords"), "accuracy": entry.get("accuracy"),
+                "judge": entry.get("judge")}
     prefix = f"{(model or 'unknown').strip()}@"
     best_key, best_stamp = None, ""
     for key, entry in store.items():
@@ -981,7 +982,7 @@ def load_model_measurements(model: str, screen_w: Optional[int] = None,
         if best_key is None or stamp > best_stamp:
             best_key, best_stamp = key, stamp
     if best_key is None:
-        return {"screen": None, "coords": None, "accuracy": None}
+        return {"screen": None, "coords": None, "accuracy": None, "judge": None}
     entry = store[best_key]
     return {"screen": best_key.split("@", 1)[1], "coords": entry.get("coords"),
-            "accuracy": entry.get("accuracy")}
+            "accuracy": entry.get("accuracy"), "judge": entry.get("judge")}
