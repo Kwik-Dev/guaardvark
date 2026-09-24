@@ -2314,13 +2314,18 @@ class AgentControlService:
                          .order_by(AgentTaskStep.iteration.asc(), AgentTaskStep.created_at.asc())
                          .all())
                 when = run.started_at.strftime("%Y-%m-%d %H:%M") if run.started_at else "earlier"
+                # The done guard records its own checks as wait_until_visible
+                # rows; they are not actions the model took, so a replayable
+                # trace leaves them out.
+                acted = [st for st in steps if st.action_type not in ("wait_until_visible", "done")]
                 if run.success:
-                    parts = [f"{st.action_type} {st.target or st.text or ''}".strip() for st in steps[:12]]
-                    if len(steps) > 12:
-                        parts.append(f"... {len(steps) - 12} more")
+                    parts = [f"{st.action_type} {st.target or st.text or ('+'.join(st.keys) if st.keys else '')}".strip()
+                             for st in acted[:12]]
+                    if len(acted) > 12:
+                        parts.append(f"... {len(acted) - 12} more")
                     parts.append("done")
                     return (f"Last attempt at this exact task ({when}) succeeded in "
-                            f"{len(steps) + 1} steps: " + ", ".join(parts) + ".")
+                            f"{len(acted) + 1} steps: " + ", ".join(parts) + ".")
                 counts: Dict[str, int] = {}
                 names: Dict[str, str] = {}
                 for st in steps:
@@ -2332,7 +2337,7 @@ class AgentControlService:
                                     for k, c in list(counts.items())[:12])
                 tail = f"; targets clicked: {clicked}" if clicked else ""
                 return (f"Last attempt at this exact task ({when}) ended \"{run.reason}\" after "
-                        f"{len(steps)} steps{tail}. Do not repeat that pattern.")
+                        f"{len(acted)} steps{tail}. Do not repeat that pattern.")
         except Exception as e:
             logger.debug(f"[AGENT][EPISODE] prior-run lookup skipped: {e}")
             return ""
