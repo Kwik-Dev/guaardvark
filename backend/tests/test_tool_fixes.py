@@ -141,3 +141,46 @@ def test_observation_metadata_is_compacted():
     res = ToolResult(success=True, output="ok", metadata={"screenshot": "A" * 500000, "url": "https://x"})
     text = format_tool_result_for_llm("browser_screenshot", res)
     assert len(text) < 1000 and "screenshot omitted" in text and "https://x" in text
+
+
+# ---- "Project folder only" (confine_tool_paths) ----------------------------------------
+@pytest.fixture
+def confined(monkeypatch):
+    from backend.utils import settings_utils
+
+    def _set(on):
+        monkeypatch.setattr(settings_utils, "_confine_tool_paths", on)
+    return _set
+
+
+def test_system_command_unconfined_by_default(syscmd, confined, tmp_path):
+    confined(False)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    outside.write_text("outside\n")
+    assert syscmd.execute(command=f"cat {outside}", cwd=str(tmp_path)).success
+
+
+@pytest.mark.parametrize("command,cwd", [
+    ("cat /etc/hostname", None),
+    ("cat ../x", "."),
+    ("ls", "/etc"),
+    ("grep -f /etc/hostname x", None),
+])
+def test_system_command_confined(syscmd, confined, command, cwd, tmp_path):
+    confined(True)
+    res = syscmd.execute(command=command, cwd=(str(tmp_path) if cwd == "." else cwd))
+    assert res.success is False and "outside" in res.error
+
+
+def test_system_command_confined_allows_project(syscmd, confined):
+    confined(True)
+    assert "hello" in syscmd.execute(command="cat notes.txt").output  # cwd defaults to the project
+
+
+def test_codegen_inputs_follow_the_setting(confined):
+    from backend.tools.code_tools import _confine_candidates
+
+    confined(False)
+    assert _confine_candidates(["/etc/hostname"]) == ["/etc/hostname"]
+    confined(True)
+    assert _confine_candidates(["/etc/hostname", ".env"]) == []

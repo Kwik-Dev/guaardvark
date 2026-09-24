@@ -15,6 +15,23 @@ from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 logger = logging.getLogger(__name__)
 
 
+def _confine_candidates(paths):
+    """With Settings → Agents → "Project folder only" on, keep only input files
+    inside the project, upload/data folders and GUAARDVARK_ALLOWED_PATHS, and
+    never credential files. Off: the paths are returned unchanged."""
+    from backend.utils.settings_utils import get_confine_tool_paths
+
+    if not get_confine_tool_paths():
+        return paths
+    from backend import config
+    from backend.utils.path_safety import is_sensitive, is_within
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    allowed = [root, getattr(config, "UPLOAD_DIR", ""), getattr(config, "STORAGE_DIR", "")]
+    allowed += list(getattr(config, "ALLOWED_AUTOMATION_PATHS", []))
+    return [p for p in paths if is_within(p, allowed, base=root) and not is_sensitive(p)]
+
+
 class CodeGeneratorTool(BaseTool):
     """
     Complete file analysis and code generation tool.
@@ -121,6 +138,7 @@ class CodeGeneratorTool(BaseTool):
             os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), filepath),
             os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", filepath),
         ]
+        possible_paths = _confine_candidates(possible_paths)
 
         for path in possible_paths:
             if os.path.exists(path):
@@ -358,6 +376,7 @@ class CodeAnalysisTool(BaseTool):
             os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), filepath),
             os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", filepath),
         ]
+        possible_paths = _confine_candidates(possible_paths)
 
         for path in possible_paths:
             if os.path.exists(path):

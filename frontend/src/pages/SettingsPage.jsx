@@ -355,6 +355,7 @@ const SettingsPage = () => {
   const [clearMemoriesBusy, setClearMemoriesBusy] = useState(false);
   const [memoryCount, setMemoryCount] = useState(null);
   const [mcpStatus, setMcpStatus] = useState(null);
+  const [confineToolPaths, setConfineToolPaths] = useState(false);
   const [musicDirectorySaved, setMusicDirectorySaved] = useState("");
   // "rules" clears rules the chat learned; "log" empties the behaviour log file.
   const [learningClear, setLearningClear] = useState(null);
@@ -2210,7 +2211,28 @@ const SettingsPage = () => {
     getMcpStatus()
       .then(setMcpStatus)
       .catch((err) => console.warn("Failed to read MCP status:", err));
+    apiService.getConfineToolPaths().then((result) => {
+      const on = result?.data?.confine_tool_paths ?? result?.confine_tool_paths;
+      if (typeof on === "boolean") setConfineToolPaths(on);
+    });
   }, []);
+
+  const handleConfineToolPathsToggle = async (next) => {
+    const previous = confineToolPaths;
+    setConfineToolPaths(next);
+    const result = await apiService.setConfineToolPaths(next);
+    if (result?.error) {
+      setConfineToolPaths(previous);
+      showMessage(`Could not save: ${result.error.message || result.error}. The setting was not changed.`, "error");
+      return;
+    }
+    showMessage(
+      next
+        ? "File tools now stay inside the project folder."
+        : "File tools can read outside the project folder again.",
+      "info",
+    );
+  };
 
   const confirmClearLearning = async () => {
     setLearningBusy(true);
@@ -3153,6 +3175,16 @@ const SettingsPage = () => {
           <ActionButton onClick={() => navigate("/agents/memory")}>
             Manage memory
           </ActionButton>
+        </Line>
+      </Cluster>
+      <Cluster label="File access" note="where system_command and codegen may read">
+        <Line>
+          <SettingChip
+            label="Project folder only"
+            on={confineToolPaths}
+            onToggle={handleConfineToolPathsToggle}
+            tooltip="On: file tools read only inside the project, its data and uploads, and GUAARDVARK_ALLOWED_PATHS. Off: they can read anywhere this account can."
+          />
         </Line>
       </Cluster>
       <Cluster label="MCP servers" note="local programs that give the agent more tools">

@@ -57,8 +57,15 @@ class SystemCommandTool(BaseTool):
     }
     NO_PATH_COMMANDS = {"pwd", "whoami", "date", "echo"}
 
+    @staticmethod
+    def _allowed_roots():
+        from backend import config
+
+        return [str(config.GUAARDVARK_ROOT)] + list(getattr(config, "ALLOWED_AUTOMATION_PATHS", []))
+
     def _path_args(self, base_cmd, args):
-        """The args that name files or directories (checked for credential files)."""
+        """The args that name files or directories (checked for credential files
+        and, when paths are confined, for containment)."""
         paths, skip_next, pattern_seen = [], False, False
         value_opts = self.VALUE_OPTIONS.get(base_cmd, set())
         find_expr = False
@@ -132,6 +139,28 @@ class SystemCommandTool(BaseTool):
                     )
         except Exception as e:
             return ToolResult(success=False, error=f"Failed to parse command: {e}")
+
+        from backend.utils.settings_utils import get_confine_tool_paths
+
+        if get_confine_tool_paths():
+            # Settings → Agents → "Project folder only": the working directory
+            # and every path argument stay inside the project and
+            # GUAARDVARK_ALLOWED_PATHS.
+            from backend import config
+            from backend.utils.path_safety import is_within
+
+            roots = self._allowed_roots()
+            cwd = cwd or str(config.GUAARDVARK_ROOT)
+            if not is_within(cwd, roots):
+                return ToolResult(success=False, error=f"cwd '{cwd}' is outside the allowed directories")
+            if base_cmd not in self.NO_PATH_COMMANDS:
+                for path in self._path_args(base_cmd, parts[1:]):
+                    if not is_within(path, roots, base=cwd):
+                        return ToolResult(
+                            success=False,
+                            error=(f"'{path}' is outside the project folder and GUAARDVARK_ALLOWED_PATHS "
+                                   f"(Settings → Agents → Project folder only is on)"),
+                        )
 
         if base_cmd not in self.NO_PATH_COMMANDS:
             for path in self._path_args(base_cmd, parts[1:]):

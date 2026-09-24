@@ -74,6 +74,8 @@ MUTATION_PROTECTED_PREFIXES = (
     # config changes are never open to other hosts.
     '/api/automation/mcp/servers/',
     '/api/automation/mcp/reload-config',
+    # Turning the project-folder limit off widens what tools may read.
+    '/api/settings/confine_tool_paths',
     # Persists the product profile into .env.
     '/api/settings/profile',
     '/api/memory',

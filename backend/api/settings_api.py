@@ -351,6 +351,23 @@ def set_advanced_debug():
     return success_response({"advanced_debug": enabled})
 
 
+@settings_bp.route("/confine_tool_paths", methods=["GET"])
+def get_confine_tool_paths_route():
+    from backend.utils.settings_utils import get_confine_tool_paths
+
+    return success_response({"confine_tool_paths": get_confine_tool_paths()})
+
+
+@settings_bp.route("/confine_tool_paths", methods=["POST"])
+def set_confine_tool_paths_route():
+    if not request.is_json:
+        return error_response("Request must be JSON")
+    from backend.utils.settings_utils import get_confine_tool_paths, set_confine_tool_paths
+
+    set_confine_tool_paths(bool(request.get_json().get("confine_tool_paths")))
+    return success_response({"confine_tool_paths": get_confine_tool_paths()})
+
+
 @settings_bp.route("/llm_debug", methods=["GET"])
 def get_llm_debug():
     enabled = False

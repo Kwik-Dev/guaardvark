@@ -1233,6 +1233,15 @@ def _initialize_app_components(app):
 
     # MCP: keep first-class mcp__<server>__<tool> proxies in sync with server
     # connections. The service stops its MCP child processes via atexit.
+    # Tools read the project-folder limit from threads without an app
+    # context; load it once here.
+    try:
+        with app.app_context():
+            from backend.utils.settings_utils import get_confine_tool_paths
+            get_confine_tool_paths()
+    except Exception as e:
+        app.logger.warning(f"Could not load the tool path limit setting: {e}")
+
     try:
         from backend.tools.mcp_tools import install_proxy_sync
         install_proxy_sync()
