@@ -2,9 +2,8 @@
 
 import React, { useState, useEffect } from "react";
 import { Button, CircularProgress, Typography, Box, Grid } from "@mui/material";
-import CollapsibleAlert from "../common/CollapsibleAlert";
-import AlertSnackbar from "../common/AlertSnackbar";
 import DashboardCardWrapper from "./DashboardCardWrapper";
+import CollapsibleAlertSnackbar from "../common/CollapsibleAlertSnackbar";
 
 const SystemStatusCard = React.forwardRef(
   ({ style, isMinimized, onToggleMinimize, cardColor, onCardColorChange, ...props }, ref) => {

@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { Box, Typography, useTheme } from "@mui/material";
-import CollapsibleAlert from "../common/CollapsibleAlert";
 import { useSnackbar } from "../common/SnackbarProvider";
 import * as apiService from "../../api";
-import AlertSnackbar from "../common/AlertSnackbar";
 import { METRICS_POLL_INTERVAL_MS } from "../../config";
+import CollapsibleAlertSnackbar from "../common/CollapsibleAlertSnackbar";
 
 const getBarColor = (val, isTemp = false) => {
   if (val === null || val === undefined || isNaN(val)) return "#6b7280";

@@ -56,9 +56,6 @@ import { formatTimestamp } from "../utils/fileTypeUtils";
 import PageLayout from "../components/layout/PageLayout";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 // Simplified ProjectActionModal (inline for edit) - assumes client selection is not part of this modal for now.
 const ProjectEditModal = ({
@@ -695,13 +692,13 @@ const ProjectDetailPage = () => {
         onClose={handleCloseFeedback}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <CollapsibleAlertSnackbar
+        <CollapsibleAlert
           onClose={handleCloseFeedback}
           severity={feedback.severity || "info"}
           sx={{ width: "100%" }}
         >
           {feedback.message}
-        </AlertSnackbar>
+        </CollapsibleAlert>
       </Snackbar>
 
       {project.description && (

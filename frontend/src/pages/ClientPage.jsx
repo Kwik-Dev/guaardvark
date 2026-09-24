@@ -51,9 +51,6 @@ const logger = {
     console.error(`[ClientPage ERROR] ${message}`, ...args),
 };
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 // Sorting functions
 import { getComparator, stableSort } from "../utils/sortUtils";
@@ -426,13 +423,13 @@ const ClientPage = () => {
           onClose={handleCloseFeedback}
           anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
         >
-          <CollapsibleAlertSnackbar
+          <CollapsibleAlert
             onClose={handleCloseFeedback}
             severity={feedback.severity || "info"}
             sx={{ width: "100%" }}
           >
             {feedback.message}
-          </AlertSnackbar>
+          </CollapsibleAlert>
         </Snackbar>
 
         {error && !isLoading && (

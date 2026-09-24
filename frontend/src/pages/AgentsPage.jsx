@@ -5,6 +5,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import PageLayout from "../components/layout/PageLayout";
+import CollapsibleAlertSnackbar from "../components/common/CollapsibleAlertSnackbar";
 import {
   Box,
   Typography,
@@ -37,7 +38,6 @@ import {
   CheckCircle,
   Error as ErrorIcon,
 } from "@mui/icons-material";
-import AlertSnackbar from "../components/common/AlertSnackbar";
 import EmptyState from "../components/common/EmptyState";
 import SmartToyOutlined from "@mui/icons-material/SmartToyOutlined";
 import { getAgents, toggleAgent, updateAgent, executeAgent } from "../api/agentsService";

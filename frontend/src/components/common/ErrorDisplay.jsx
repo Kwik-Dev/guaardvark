@@ -157,7 +157,7 @@ export const ErrorDisplay = ({
         </Stack>
       }
     >
-      <CollapsibleAlertTitle sx={{ mb: 1 }}>
+      <AlertTitle sx={{ mb: 1 }}>
         {severity === 'error' ? 'Error' : 
          severity === 'warning' ? 'Warning' : 
          'Information'}

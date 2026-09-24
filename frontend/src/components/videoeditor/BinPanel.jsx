@@ -3,7 +3,7 @@
 // supported; the bin owns its clips. Remove via the X on each tile.
 
 import React, { useRef } from "react";
-import { Box, Stack, Typography, LinearProgress, Alert, IconButton, Tooltip } from "@mui/material";
+import { Box, Stack, Typography, LinearProgress, IconButton, Tooltip } from "@mui/material";
 import CollapsibleAlert from "../common/CollapsibleAlert";
 import {
   VideoLibrary as VideoIcon,

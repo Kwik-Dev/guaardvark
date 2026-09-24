@@ -15,7 +15,7 @@ import {
   Tooltip,
   CircularProgress,
   Snackbar,
-  Alert as MuiAlert,
+  Alert as
   Tabs,
   Tab,
   LinearProgress,
@@ -71,9 +71,6 @@ import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 const LEARN_API = "/api/agent-control/learn";
 
@@ -1035,13 +1032,13 @@ const TrainingPage = () => {
         autoHideDuration={4000}
         onClose={handleCloseSnackbar}
       >
-        <CollapsibleAlertSnackbar
+        <CollapsibleAlert
           onClose={handleCloseSnackbar}
           severity={feedback.severity}
           sx={{ width: "100%" }}
         >
           {feedback.message}
-        </AlertSnackbar>
+        </CollapsibleAlert>
       </Snackbar>
     </PageLayout>
   );

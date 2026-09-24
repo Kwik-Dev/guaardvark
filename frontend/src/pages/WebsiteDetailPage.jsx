@@ -33,9 +33,6 @@ import CrawledPagesPanel from "../components/website/CrawledPagesPanel";
 import PageLayout from "../components/layout/PageLayout";
 import { useStatus } from "../contexts/StatusContext";
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 const formatDate = (iso) => {
   if (!iso) return "Never";
@@ -229,13 +226,13 @@ const WebsiteDetailPage = () => {
         onClose={handleCloseFeedback}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <CollapsibleAlertSnackbar
+        <CollapsibleAlert
           onClose={handleCloseFeedback}
           severity={feedback.severity || "info"}
           sx={{ width: "100%" }}
         >
           {feedback.message}
-        </AlertSnackbar>
+        </CollapsibleAlert>
       </Snackbar>
 
       {loading && (

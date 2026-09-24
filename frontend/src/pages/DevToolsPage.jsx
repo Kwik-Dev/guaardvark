@@ -2,6 +2,7 @@
 // v1.19.6 - Added progress jobs management and cleanup functionality
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { SOCKET_URL } from "../api/apiClient";
+import CollapsibleAlertSnackbar from "../components/common/CollapsibleAlertSnackbar";
 import {
   Box,
   Typography,
@@ -46,7 +47,6 @@ import {
 } from "../api";
 import { getProgressJobs, cleanupStuckJobs } from "../api/progressService";
 import { triggerReboot } from "../api/settingsService";
-import AlertSnackbar from "../components/common/AlertSnackbar";
 import DiagnosticsPanel from "../components/system/DiagnosticsPanel";
 import RAGDebugSection from "../components/settings/RAGDebugSection";
 import SystemMetricsBar from "../components/layout/SystemMetricsBar";

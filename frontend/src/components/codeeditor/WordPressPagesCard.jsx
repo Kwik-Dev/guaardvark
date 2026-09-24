@@ -43,9 +43,6 @@ import TrendingUpIcon from "@mui/icons-material/TrendingUp";
 import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
 import * as wordpressService from "../../api/wordpressService";
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 const ProcessStatusChip = ({ status }) => {
   const normalized = status?.toLowerCase() || 'pending';
@@ -961,7 +958,7 @@ const WordPressPagesCard = React.forwardRef(
             onClose={() => setFeedback({ ...feedback, open: false })}
             anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
           >
-            <CollapsibleAlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
+            <CollapsibleAlert severity={feedback.severity}>{feedback.message}</CollapsibleAlert>
           </Snackbar>
         </Box>
       </DashboardCardWrapper>

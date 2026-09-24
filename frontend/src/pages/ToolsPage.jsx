@@ -5,6 +5,7 @@
 
 import React, { useEffect, useState } from "react";
 import PageLayout from "../components/layout/PageLayout";
+import CollapsibleAlertSnackbar from "../components/common/CollapsibleAlertSnackbar";
 import {
   Box,
   Typography,
@@ -57,7 +58,6 @@ import {
   getToolSchemas,
   getToolCategories,
 } from "../api/toolsService";
-import AlertSnackbar from "../components/common/AlertSnackbar";
 import { useStatus } from "../contexts/StatusContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
 

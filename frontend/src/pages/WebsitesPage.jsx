@@ -51,9 +51,6 @@ import TravelExploreIcon from "@mui/icons-material/TravelExplore";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import IndexingDialog from "../components/modals/IndexingDialog";
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 // Sorting functions (similar to other pages)
 import { getComparator, stableSort } from "../utils/sortUtils";
@@ -388,13 +385,13 @@ const WebsitesPage = () => {
           onClose={handleCloseFeedback}
           anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
         >
-          <CollapsibleAlertSnackbar
+          <CollapsibleAlert
             onClose={handleCloseFeedback}
             severity={feedback.severity || "info"}
             sx={{ width: "100%" }}
           >
             {feedback.message}
-          </AlertSnackbar>
+          </CollapsibleAlert>
         </Snackbar>
 
         {error && (

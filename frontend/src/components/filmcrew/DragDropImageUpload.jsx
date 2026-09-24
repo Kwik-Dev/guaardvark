@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { formatUiError } from "../../utils/uiError";
 import {
-  Box, Typography, Chip, IconButton, CircularProgress, Alert,
+  Box, Typography, Chip, IconButton, CircularProgress,
   Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button,
 } from "@mui/material";
 import CollapsibleAlert from "../common/CollapsibleAlert";

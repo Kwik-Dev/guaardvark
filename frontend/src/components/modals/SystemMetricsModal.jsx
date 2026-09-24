@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
+import CollapsibleAlertSnackbar from "../common/CollapsibleAlertSnackbar";
 import {
   Box,
   Typography,
@@ -6,11 +7,9 @@ import {
   Paper,
   Divider,
 } from "@mui/material";
-import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
 import { useSnackbar } from "../common/SnackbarProvider";
 import * as apiService from "../../api";
-import AlertSnackbar from "../common/AlertSnackbar";
 import { METRICS_POLL_INTERVAL_MS } from "../../config";
 
 const MIN_WIDTH = 210;

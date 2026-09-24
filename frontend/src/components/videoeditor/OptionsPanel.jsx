@@ -12,7 +12,7 @@ import React from "react";
 import {
   Box, Stack, Typography, Chip, Slider, TextField, Button,
   Checkbox, FormControlLabel, FormControl, InputLabel, Select, MenuItem,
-  Divider, Switch, Alert,
+  Divider, Switch,
 } from "@mui/material";
 import CollapsibleAlert from "../common/CollapsibleAlert";
 import { Delete as DeleteIcon, Star as StarIcon } from "@mui/icons-material";

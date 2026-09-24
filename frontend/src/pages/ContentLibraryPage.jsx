@@ -9,7 +9,7 @@ import {
   Paper,
   IconButton,
   Chip,
-  Alert as MuiAlert,
+  Alert as
   Snackbar,
   Tooltip,
 } from '@mui/material';
@@ -31,9 +31,6 @@ import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 const _API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 const ContentLibraryPage = () => {
   const _theme = useTheme();
@@ -269,14 +266,14 @@ const ContentLibraryPage = () => {
           onClose={handleCloseFeedback}
           anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
         >
-          <CollapsibleAlertSnackbar
+          <CollapsibleAlert
             onClose={handleCloseFeedback}
             severity={feedback.severity || "info"}
             sx={{ width: "100%" }}
             variant="filled"
           >
             {feedback.message}
-          </AlertSnackbar>
+          </CollapsibleAlert>
         </Snackbar>
 
         {error && (

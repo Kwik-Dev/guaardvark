@@ -1608,7 +1608,7 @@ const MusicVideoPage = () => {
                         onChange={(e) => handleApprovalI2vChange(e.target.value)}
                         sx={{ minWidth: 260 }}
                       >
-                        {Object.entries(I2V_MODEL_OPTIONS).map(([key, cfg]) => (
+                        {Object.entries(i2vModelOptions).map(([key, cfg]) => (
                           <MenuItem key={key} value={key}>{cfg.label}</MenuItem>
                         ))}
                       </TextField>

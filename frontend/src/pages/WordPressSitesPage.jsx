@@ -7,7 +7,7 @@ import {
   Box,
   Typography,
   Button,
-  Alert as MuiAlert,
+  Alert as
   Grid,
   Card,
   CardActionArea,
@@ -38,9 +38,6 @@ import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 import { getComparator, stableSort } from "../utils/sortUtils";
 
@@ -290,9 +287,9 @@ function WordPressSitesPage() {
       activeModel={activeModel}
     >
       {error && (
-        <CollapsibleAlertSnackbar severity="error" sx={{ mb: 2 }}>
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
           {error}
-        </AlertSnackbar>
+        </CollapsibleAlert>
       )}
 
       {/* Card View */}
@@ -496,9 +493,9 @@ function WordPressSitesPage() {
           autoHideDuration={isTesting ? null : 3000}
           anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
         >
-          <CollapsibleAlertSnackbar severity={isTesting ? "info" : "success"}>
+          <CollapsibleAlert severity={isTesting ? "info" : "success"}>
             {isTesting ? "Testing connection..." : "Connection test completed"}
-          </AlertSnackbar>
+          </CollapsibleAlert>
         </Snackbar>
       )}
 
@@ -509,7 +506,7 @@ function WordPressSitesPage() {
         onClose={() => setFeedback({ ...feedback, open: false })}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <CollapsibleAlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
+        <CollapsibleAlert severity={feedback.severity}>{feedback.message}</CollapsibleAlert>
       </Snackbar>
     </PageLayout>
   );

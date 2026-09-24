@@ -61,9 +61,6 @@ import EntityContextMenu from "../components/common/EntityContextMenu";
 import EmptyState from "../components/common/EmptyState";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 // Sorting functions
 import { getComparator, stableSort } from "../utils/sortUtils";
@@ -394,14 +391,14 @@ function ProjectsPage() {
           autoHideDuration={6000}
           onClose={handleCloseFeedback}
         >
-          <CollapsibleAlertSnackbar
+          <CollapsibleAlert
             onClose={handleCloseFeedback}
             severity={feedback.severity}
             variant="filled"
             sx={{ width: "100%" }}
           >
             {feedback.message}
-          </AlertSnackbar>
+          </CollapsibleAlert>
         </Snackbar>
 
         {error && (

@@ -8,7 +8,7 @@ import {
   Typography,
   Button,
   CircularProgress,
-  Alert as MuiAlert,
+  Alert as
   Snackbar,
   IconButton,
   Paper,
@@ -50,9 +50,6 @@ import PageLayout from "../components/layout/PageLayout";
 import DOMPurify from "dompurify";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
-const AlertSnackbar = React.forwardRef(function Alert(props, ref) {
-  return <MuiAlert elevation={6} ref={ref} variant="filled" {...props} />;
-});
 
 const ProcessStatusChip = ({ status }) => {
   if (!status) return <Chip label="Pending" size="small" color="default" />;
@@ -916,7 +913,7 @@ function WordPressPagesPage() {
         onClose={() => setFeedback({ ...feedback, open: false })}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <CollapsibleAlertSnackbar severity={feedback.severity}>{feedback.message}</AlertSnackbar>
+        <CollapsibleAlert severity={feedback.severity}>{feedback.message}</CollapsibleAlert>
       </Snackbar>
     </PageLayout>
   );
