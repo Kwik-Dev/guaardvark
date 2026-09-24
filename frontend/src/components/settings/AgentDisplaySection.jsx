@@ -1,6 +1,6 @@
 // frontend/src/components/settings/AgentDisplaySection.jsx
 // Detector + installer for the Agent Vision Control virtual display stack
-// (Xvfb, x11vnc, openbox, tint2, xdotool, scrot, browser, python mss).
+// (Xvfb, x11vnc, the XFCE session pieces, dbus, xdotool, scrot, browser, python mss).
 //
 // Mirrors VoiceSettingsContent's Whisper installer — same alert + button shape.
 
@@ -28,8 +28,12 @@ import {
 const COMPONENT_LABELS = {
   Xvfb: 'Xvfb (virtual X server)',
   x11vnc: 'x11vnc (VNC bridge)',
-  openbox: 'Openbox (window manager)',
-  tint2: 'Tint2 (taskbar)',
+  startxfce4: 'XFCE session (startxfce4)',
+  xfwm4: 'xfwm4 (window manager)',
+  xfdesktop: 'xfdesktop (desktop and icons)',
+  'xfce4-panel': 'xfce4-panel (panel)',
+  xfsettingsd: 'xfsettingsd (settings daemon)',
+  'dbus-run-session': 'dbus-run-session (session bus)',
   xdotool: 'xdotool (input synthesis)',
   scrot: 'scrot (screen capture fallback)',
   browser: 'Browser (Firefox / Chromium)',
@@ -39,7 +43,8 @@ const COMPONENT_LABELS = {
 };
 
 const COMPONENT_ORDER = [
-  'Xvfb', 'x11vnc', 'openbox', 'tint2', 'xdotool', 'scrot',
+  'Xvfb', 'x11vnc', 'startxfce4', 'xfwm4', 'xfdesktop', 'xfce4-panel', 'xfsettingsd',
+  'dbus-run-session', 'xdotool', 'scrot',
   'browser', 'mss', 'start_script', 'display_running',
 ];
 
@@ -292,7 +297,7 @@ const AgentDisplaySection = ({ showMessage }) => {
             onClick={onStart}
             loading={controlAction === 'start'}
             disabled={controlAction !== null}
-            tooltip="Starts Xvfb, x11vnc, openbox and tint2 on :99. Can take up to a minute."
+            tooltip="Starts Xvfb, an XFCE session and x11vnc on :99. Can take up to a minute."
           >
             Start display
           </ActionButton>
