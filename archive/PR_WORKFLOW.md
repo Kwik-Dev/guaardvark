@@ -12,6 +12,40 @@ carry-over from earlier PRs.
 The old cumulative `pr/*` branches (each containing every prior PR) were deleted;
 this is the clean re-work.
 
+## Repo model (2026-09-24)
+
+Three things, deliberately separate:
+
+| Ref | Role |
+|-----|------|
+| `origin/main` | **Pure mirror of `upstream/main`.** Fast-forward only — it never receives fork work. |
+| `origin/cloud-plus` | **The fork's mainline.** Starts equal to `upstream/main` (0 divergence) and accumulates fork work as virtual branches are integrated. This is **GitButler's target branch** (`but config target origin/cloud-plus`) and the fork-internal branch that gets published. |
+| `origin/keep-cloud-providers` | The fork's one deliberate divergence, kept **as a branch, not baked into the base**: a single commit reverting `001d960c` (`remove(chat): cloud chat providers`, merged as `4fe7406a`). Merge it into `cloud-plus` when the fork's mainline should carry the cloud providers. |
+| `gitbutler/workspace` | Where work happens. The 44 applied branches are the fork's actual feature work. |
+
+**Why the divergence is a branch, not part of `cloud-plus`.** The workspace
+branches are already based on `upstream/main` and carry the cloud content *as
+additions*, so a base that also carries it duplicates that content. Measured: a
+test rebase of `feat/llm-providers` onto `cloud-plus + the revert` conflicted on
+**7 files** (including add/add on `ModelManagementSection.jsx`); onto plain
+`upstream/main` it is a **no-op with 0 conflicts**. So the base stays clean and
+the divergence arrives via branches.
+
+**Keeping current with upstream.** `cloud-plus` does **not** track upstream by
+itself — `but pull` rebases onto the *target* and never fetches upstream. A
+`main → cloud-plus` merge is needed every time upstream moves:
+
+```bash
+git fetch upstream
+git update-ref refs/heads/main upstream/main && git push origin upstream/main:refs/heads/main
+git -C /private/tmp/devwork merge main && git -C /private/tmp/devwork push origin cloud-plus
+but pull          # rebases the applied branches onto the updated origin/cloud-plus
+```
+
+Do it on a cadence — the smaller the gap, the smaller the conflict. Most upstream
+commits auto-merge; conflicts come back only when upstream touches the divergence
+set (the cloud-provider files it deleted, and the vision areas).
+
 ## Branch map
 
 | Snapshot | Head | Base | Contents | Pushed | PR |
@@ -32,9 +66,11 @@ this is the clean re-work.
 | `pr/g7-agent-config-docs` | `ce313c87` | `upstream/main` | Agent config + docs + gitignore rules | ✅ | ☐ |
 | `pr/filmcrew-live-progress` | `44112d3c` | `upstream/main` | Film Crew script templates + live progress (parked) | ✅ | ☐ |
 
-`upstream/main` is `5777713c` as of this update. M1/M2 are merged in PR (their
-branch refs still point at the pre-merge heads, hence the "ahead" count); M3's
-branch ref is the merged content.
+`upstream/main` is `75de413f` (release 2.9.1) as of 2026-09-24. M1/M2 are merged
+in PR (their branch refs still point at the pre-merge heads, hence the "ahead"
+count); M3's branch ref is the merged content. **Upstream removed the cloud chat
+providers on 2026-09-23** (`001d960c`, merged as `4fe7406a`: *"local-only chat,
+MCP is the cloud path"*) — which is why this fork now diverges at all.
 
 **G5 is stacked on M5** — `fix/vision-sync`, `chore/llm-providers-followup`, and
 `feat/filmcrew-openai-compatible` all depend on `openai_provider.py` /
@@ -83,14 +119,14 @@ MPS track.
 ## Current status
 
 M1 (#154), M2 (#182) and M3 (#183) are **merged** into `upstream/main`. M4 (#197)
-and M5 (#214) are **open** — both have had owner reviews and the review fixes have
-been pushed; M4 is based on current `upstream/main` (`5777713c`), M5 is behind it
-but `MERGEABLE` (not rebased). `pr/discord-voice` is pushed with no PR yet.
+is still **open** (review fixes pushed at `888c4951`). M5 (#214) was **closed
+unmerged** — upstream went the other way and deleted the cloud providers — and
+the M5/G1/G5 stack is **fork-only**: do not push it upstream and do not open PRs
+for it. `pr/discord-voice` is pushed with no PR yet.
 
 The remaining track snapshots (G1 → … → G7) are based on the current
-`upstream/main` (G1 and G5 on the re-based M5) and pushed to the fork. Submit them
-one at a time (G1 → … → G7) once M4/M5 land. M5/G1/G5 are **fork-only** (see the
-note above) — no PRs are planned for them.
+`upstream/main` (G1 and G5 on the re-based M5) and pushed to the fork. M5/G1/G5
+are fork-only (see above) — no PRs are planned for them.
 
 **M5 lands first** — G1 and G5 are stacked on `f135f774`. The user asked that #214
 not be rewritten for now, so the stack base stays on M5 even though it is behind
@@ -99,14 +135,28 @@ those were applied on the branch at `f135f774`); M5 and its two dependents now
 live in the Kwik-Dev fork only — do not push them upstream and do not open PRs
 for them.
 
-### `dev` integration branch
+### `dev` — deleted
 
-`dev` is the fork-internal integration branch: all track snapshots
-(M1 → M2 → M3 → M4 → M5 → G1 → … → G7) are merged into it in order. It was
-**re-based onto the new `upstream/main` (`4b9763ee`)** on 2026-09-11
-(`4c33bea7` → `c80c9416`, `git rebase --rebase-merges`) and force-pushed.
-`pr/filmcrew-live-progress` and `pr/ffmpeg-captions` are **not** merged into `dev`
-(parked).
+`dev` was the fork-internal integration branch (all track snapshots merged into it
+in order). It is **superseded by `cloud-plus`** and was deleted from the fork on
+2026-09-24; its last tip was `1283e484` if it ever needs recovering. A leftover
+local branch `dev-rebuild` may still exist in some checkouts.
+
+### Sync incidents (2026-09-24)
+
+- **The workspace lost the cloud files during a rebase onto the new
+  `upstream/main`.** GitButler's rebase conflict auto-resolution labels the *new
+  base* as "ours", so "files are auto-resolved using the ours side" silently took
+  upstream's deletion: `gitbutler/workspace` lost `llm_provider.py`,
+  `llm_provider_api.py`, `mistral_provider.py` and `ModelManagementSection.jsx`,
+  and the only signal was 9 `{conflicted}` commits. All 9 were resolved (7 keeping
+  the commit's side, 2 vision ones taking upstream's resolver implementation).
+  After any rebase, **verify the cloud files are present** in
+  `gitbutler/workspace`.
+- A `main → dev` merge was also done earlier the same day (`1283e484`), resolving
+the 10 conflicts by keeping the fork's side of the cloud files and taking
+upstream's `stills_pipeline.py` #218 change plus the fork's `comfy_model`
+precedence (`model_for_graph = comfy_model or model`).
 
 ### Fixes applied during integration
 
@@ -149,6 +199,17 @@ git diff --stat upstream/main..pr/<name>
 
 ## Gotchas (learned the hard way)
 
+- **GitButler's rebase conflict auto-resolution calls the NEW BASE "ours".**
+  During a rebase, "ours" is the branch being rebased *onto* — so when the target
+  deleted the files, "auto-resolved using the ours side" deleted them too (see
+  *Sync incidents* above). Resolve conflicted commits explicitly, keeping the
+  **commit's** side (GitButler labels it `Current commit`, i.e. the section after
+  the final `=======`), and verify the files afterwards.
+- **Changing the GitButler target needs every branch unapplied** — `but config
+  target` refuses otherwise (44 branches / 27 stacks here). GitButler.app can do
+  it with branches applied. The target lives in `.git/gitbutler/but.sqlite`
+  (`vb_branch_targets`), **not only** in git config — never "fix" it with
+  `git config`.
 - **Never run `git merge` in parallel.** Two concurrent merges in the same
   worktree corrupt the index. One merge at a time.
 - **Some `feat/*` branches are cumulative** (based on other features, e.g.
