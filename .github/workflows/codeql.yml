@@ -1,10 +1,12 @@
 name: CodeQL
 
+# Same branch set as ci.yml: cloud-plus is the fork's mainline, main is the
+# upstream mirror. (dev was the old integration branch and is deleted.)
 on:
   push:
-    branches: [main, dev]
+    branches: [main, cloud-plus]
   pull_request:
-    branches: [main, dev]
+    branches: [main, cloud-plus]
   schedule:
     - cron: "31 7 * * 1"
 

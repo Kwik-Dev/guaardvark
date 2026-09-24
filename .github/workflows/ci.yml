@@ -1,10 +1,14 @@
 name: CI
 
+# main is a pure mirror of upstream/main (fast-forward only), so a run on it
+# tests upstream's code. cloud-plus is the fork's mainline — the branch that
+# actually carries this fork's work — so CI has to run there or the fork ships
+# unchecked. (dev was the old integration branch and is deleted.)
 on:
   push:
-    branches: [main, dev]
+    branches: [main, cloud-plus]
   pull_request:
-    branches: [main, dev]
+    branches: [main, cloud-plus]
 
 jobs:
   cli:
