@@ -1540,7 +1540,7 @@ def initialize_llm_and_index_async():
             except Exception:
                 _ollama_enabled = True  # Fail-open — better to warm up than leave a real user without chat
 
-            if _ollama_enabled:
+            if _ollama_enabled and llm_service.is_local_ollama_llm(llm):
                 app.logger.info("[LLM-Init] Step 5/6: Warming up model...")
                 try:
                     model_name = getattr(llm, "model", "unknown")
@@ -1551,6 +1551,12 @@ def initialize_llm_and_index_async():
                     app.logger.info(f"[LLM-Init] Model warmup completed in {warmup_duration:.1f}s — ready for chat")
                 except Exception as e:
                     app.logger.error(f"[LLM-Init] Model warmup FAILED: {e} — first chat will be slow", exc_info=True)
+            elif not llm_service.is_local_ollama_llm(llm):
+                # A cloud-backed startup LLM must not be warmed up: that is a paid
+                # request with no purpose (nothing to load into local VRAM).
+                app.logger.info(
+                    "[LLM-Init] Step 5/6: Skipping model warmup — startup LLM is not local Ollama."
+                )
             else:
                 app.logger.info(
                     "[LLM-Init] Step 5/6: Skipping model warmup — Ollama plugin is disabled in user prefs. "

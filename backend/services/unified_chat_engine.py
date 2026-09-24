@@ -2333,17 +2333,27 @@ class UnifiedChatEngine:
                 else:
                     friendly_error = f"LLM error: {error_str}"
 
-                emit_fn("chat:error", {"error": friendly_error, "session_id": session_id})
-
                 # Smart escalation: the local LLM failed. If smart mode is on and an
                 # escalation provider is configured, answer via the provider instead.
                 # Pass the real history so the escalated answer keeps the conversation
                 # context (same as the empty-local-response branch below).
                 smart_resp = self._maybe_smart_escalate(message, history)
                 if smart_resp:
+                    # Save before emitting so the answer survives a reload and user
+                    # feedback can attach to this turn (it previously vanished from
+                    # history: the user message had no answer after a refresh).
+                    if persist:
+                        self._save_message(
+                            session_id, "assistant", smart_resp,
+                            extra_data={"escalated": True},
+                        )
+                        self._maybe_summarize_session(session_id)
+                    # Emit ONLY chat:complete. A chat:error immediately followed by
+                    # chat:complete reads as a failure that somehow also succeeded.
                     emit_fn("chat:complete", {
                         "response": smart_resp, "iterations": iteration,
                         "steps": steps, "session_id": session_id, "aborted": False,
+                        "escalated": True,
                     })
                     return {
                         "success": True, "response": smart_resp,
@@ -2351,6 +2361,7 @@ class UnifiedChatEngine:
                         "escalated": True,
                     }
 
+                emit_fn("chat:error", {"error": friendly_error, "session_id": session_id})
                 return {
                     "success": False, "error": friendly_error,
                     "request_id": request_id, "iterations": iteration
@@ -4097,21 +4108,22 @@ class UnifiedChatEngine:
                 emit_fn("chat:token", {"content": text, "session_id": session_id})
             return text, 0, 0
 
-        # Provider dispatch: route generation to Mistral's API when the user has
-        # selected it (runtime toggle), else stay on local Ollama. The streaming
-        # loop below is provider-agnostic because mistral_provider.chat() yields
-        # chunks in the same shape ollama.chat() does.
+        # Provider dispatch: route generation to the active cloud provider when
+        # the user has selected one (runtime toggle), else stay on local Ollama.
+        # The streaming loop below is provider-agnostic — mistral_provider /
+        # openai_provider .chat() yield chunks in the same shape ollama.chat() does.
         from backend.services import llm_provider as _llm_provider
         _active_provider = _llm_provider.get_active_provider()
         _use_cloud = _active_provider != _llm_provider.OLLAMA
 
-        model_name = getattr(self.llm, "model", "gemma4:e4b")
-        # Provider dispatch: when the master cloud toggle is on AND a cloud
-        # provider is selected, route generation to its API. The streaming loop
-        # below is provider-agnostic — mistral_provider/openai_provider.chat()
-        # yield chunks in the same shape ollama.chat() does.
         if _use_cloud:
             model_name = _llm_provider.get_active_cloud_model()
+        else:
+            # The local path needs a name Ollama actually has. ``self.llm.model``
+            # is only trustworthy when the instance is a local Ollama client — it
+            # may be a cloud LLM built while the switch was on (e.g. "gpt-4o-mini").
+            from backend.utils.llm_service import local_chat_model_name
+            model_name = local_chat_model_name(self.llm)
 
         # Prioritize LLM load via orchestrator. This helps prevent image/video
         # jobs from evicting the chat model mid-analysis (the cause of the
