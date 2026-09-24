@@ -143,12 +143,11 @@ class DesktopAutomationService:
         logger.log(log_level, f"Desktop operation: {operation} - {'success' if success else 'failed'}")
     
     def _check_path_allowed(self, path: str) -> bool:
-        abs_path = os.path.abspath(os.path.expanduser(path))
-        for allowed in ALLOWED_PATHS:
-            allowed_abs = os.path.abspath(os.path.expanduser(allowed))
-            if abs_path.startswith(allowed_abs):
-                return True
-        return False
+        # realpath + component comparison: "/tmpX" is not inside "/tmp", and a
+        # symlink inside an allowed directory must not lead outside it.
+        from backend.utils.path_safety import is_within
+
+        return is_within(path, ALLOWED_PATHS)
     
     def _check_app_allowed(self, app: str) -> bool:
         app_name = os.path.basename(app).lower()

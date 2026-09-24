@@ -164,6 +164,7 @@ class MCPListToolsTool(BaseTool):
 
 
 class MCPExecuteTool(BaseTool):
+    observation_chars = 4000
     name = "mcp_execute"
     description = ("Execute a tool on an MCP server by name. Prefer calling the "
                    "mcp__<server>__<tool> tools directly.")
@@ -238,6 +239,7 @@ class MCPListResourcesTool(BaseTool):
 
 
 class MCPReadResourceTool(BaseTool):
+    observation_chars = 4000
     name = "mcp_read_resource"
     description = "Read a resource from an MCP server by URI (see mcp_list_resources)."
     parameters = {
@@ -323,6 +325,7 @@ class MCPProxyTool(BaseTool):
 
     name = "mcp_proxy"  # overwritten per instance
     description = "MCP tool"
+    observation_chars = 4000  # MCP results (file contents, query rows) are the answer
 
     def __init__(self, server: str, tool_def: Dict[str, Any], decision: mcp_policy.PolicyDecision,
                  server_description: str = ""):

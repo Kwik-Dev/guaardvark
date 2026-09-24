@@ -12,10 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class ExecutePythonTool(BaseTool):
-    """Execute Python code safely (wraps existing code_execution_api)"""
+    """Execute Python code (python3 subprocess with a timeout; NOT sandboxed)"""
     
     name = "execute_python"
-    description = "Execute Python code safely in an isolated environment and return the output"
+    description = ("Run Python code on this machine and return the output (30s timeout, not sandboxed; "
+                   "the user is asked to approve each run)")
     is_dangerous = True
     requires_approval = True
     parameters = {

@@ -305,6 +305,16 @@ def execute_agent():
                 "error": f"Agent '{agent.id}' is disabled"
             }), 400
 
+        # Orchestrator agents delegate through the OrchestratorService (their
+        # "delegate_task" tool is not a registry tool), as agent_router does.
+        from backend.services.agent_config import AgentType
+        if agent.agent_type == AgentType.ORCHESTRATOR:
+            return jsonify({
+                "success": False,
+                "error": (f"Agent '{agent.id}' is an orchestrator; run it through "
+                          f"/api/orchestrator or the chat instead of /execute"),
+            }), 400
+
         # Get tool registry
         tool_registry = _get_tool_registry()
         if not tool_registry:
