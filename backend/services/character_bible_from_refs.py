@@ -138,10 +138,15 @@ def _default_consensus_llm(*, system: str, user: str, model: str = None) -> str:
     ]
     try:
         from backend.services import llm_provider
-        if llm_provider.is_openai_active():
+        # DB-backed consent read: fails closed to LOCAL without an app context (see
+        # llm_provider.app_context_if_needed). Cast-bible generation runs on worker threads.
+        with llm_provider.app_context_if_needed():
+            _cloud_active = llm_provider.is_openai_active()
+            _cloud_model = llm_provider.get_openai_model() if _cloud_active else ""
+        if _cloud_active:
             from backend.services import openai_provider
             resp = openai_provider.chat(
-                model=model or llm_provider.get_openai_model(),
+                model=model or _cloud_model,
                 messages=messages,
                 stream=False,
                 options={

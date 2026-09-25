@@ -116,99 +116,15 @@ The 42 applied branches are organized into two tracks — a **macOS track** (App
 
 ---
 
-## `.env` variables
+## `.env` variables — the Mac-critical two
 
-Guaardvark reads its configuration from the repo-root `.env` file. The variables below are the ones that matter for this RTX-on-Mac setup (grouped by concern). Paths resolve through `backend/config.py`; secrets and `DATABASE_URL` come from `.env`.
+The full `.env` variable reference (core/runtime, cloud routing, ComfyUI, RunPod,
+whisper, GPU/memory, MCP, Ollama tuning, storage dirs) now lives in
+[`CLOUD_PLUS_FEATURES.md`](../CLOUD_PLUS_FEATURES.md), section "`.env` variables".
+Only the two that decide whether GPU work can start on a Mac are repeated here — both
+are opt-in:
 
-### Core / runtime
-| Variable | Purpose |
-|----------|---------|
-| `GUAARDVARK_ROOT` | Repo root anchor; all storage/log/backup paths derive from it. |
-| `GUAARDVARK_MODE` | Runtime mode: `default` or `test`. |
-| `DATABASE_URL` | Postgres connection string (default `postgresql://guaardvark:guaardvark@localhost:5432/guaardvark`). |
-| `REDIS_URL` | Redis connection for Celery / sockets. |
-| `SECRET_KEY` | Flask session/secret key. |
-| `FLASK_PORT` / `VITE_PORT` | Backend (default 5055) and frontend (default 5173) ports. |
+- **`GUAARDVARK_COMFYUI_DIR`** — the **shared model home** `~/ComfyUI-Shared`. The value is passed through `os.path.expanduser`, so the `~/ComfyUI-Shared` form resolves; models you already have then show up as installed instead of "missing", and the backend registry and the ComfyUI downloader both read it, so no second copy is downloaded for this Mac.
+- **`GUAARDVARK_ZIMAGE_USE_COMFYUI`** — opt-in (`1`/`true`/`yes`/`on`). The offline Z-Image path is CUDA-only, so on Apple Silicon this routes Z-Image through ComfyUI instead. With it off, a refusal that names system RAM ("GlobalLoadGate blocked: system RAM too low") is the offline path declaring its 21 GB footprint; turning it on declares VRAM only, which is the way through.
 
-### LLM / cloud routing (the memory strategy)
-| Variable | Purpose |
-|----------|---------|
-| `GUAARDVARK_DEFAULT_LLM` | Default chat model. |
-| `GUAARDVARK_OPENAI_API_KEY` / `GUAARDVARK_OPENAI_BASE_URL` / `GUAARDVARK_OPENAI_MODEL` | OpenAI-compatible provider — used to point the chat brain at **ollama-cloud `deepseek-v4`** so no large LLM is held in local memory. The endpoint is always explicit: **`GUAARDVARK_OPENAI_BASE_URL` is required** (there is no implicit `api.openai.com` default). The key is optional (local vLLM / Ollama need none), and a bare `OPENAI_API_KEY` (exported for another tool) is deliberately ignored. Configuring these is only the **capability** — the operator must also turn on the master cloud switch and select the provider in Settings, or every `get_default_llm` / `get_llm_for_startup` / `get_llm_instance` call stays local. The endpoint + model in use are logged at INFO. |
-| `GUAARDVARK_MISTRAL_API_KEY` / `GUAARDVARK_MISTRAL_MODEL` / `GUAARDVARK_MISTRAL_BASE_URL` | Optional Mistral provider (multi-provider escalation). |
-| `OLLAMA_BASE_URL` | Ollama endpoint used by **vision analysis** (`VisionAnalyzer`), embeddings, and the local-chat fallback. Shared — changing it moves all three. |
-| `OLLAMA_API_KEY` | Bearer token for a remote/cloud Ollama endpoint. Read by the `ollama` client (chat, consensus, local branches) — **not** by `VisionAnalyzer`'s raw HTTP calls. |
-| `GUAARDVARK_EMBEDDING_MODEL` | Embedding model for RAG. |
-| `GUAARDVARK_CLAUDE_API_ENABLED` / `GUAARDVARK_CLAUDE_MODEL` / `GUAARDVARK_CLAUDE_MAX_TOKENS` / `GUAARDVARK_CLAUDE_TOKEN_BUDGET` / `GUAARDVARK_CLAUDE_ESCALATION_MODE` | Optional "Uncle Claude" guardian / escalation. |
-| `GUAARDVARK_ESCALATION_PROVIDER` / `_BASE_URL` / `_API_KEY` / `_MODEL` | Escalation provider for `smart`/`always` modes: `auto`, `anthropic`, or **any OpenAI-compatible endpoint**. `_BASE_URL` is what selects the OpenAI-compatible path; legacy `ANTHROPIC_API_KEY` + `GUAARDVARK_CLAUDE_MODEL` still resolve to Anthropic. |
-
-### ComfyUI / image generation
-| Variable | Purpose |
-|----------|---------|
-| `GUAARDVARK_COMFYUI_DIR` | ComfyUI **shared model home** (e.g. `~/ComfyUI-Shared`). Lets Guaardvark reuse models already in ComfyUI instead of its own `data/models/stable_diffusion`. |
-| `GUAARDVARK_COMFYUI_URL` | ComfyUI endpoint (default `http://127.0.0.1:8188`). |
-| `GUAARDVARK_COMFYUI_VENV` | ComfyUI virtualenv path. |
-| `GUAARDVARK_COMFYUI_IDLE_TIMEOUT` | Idle timeout before ComfyUI is freed. |
-| `GUAARDVARK_COMFYUI_ENGINE_CACHE_TTL` | Seconds to cache the live `/object_info` engine list (default `5`, `0` disables). Keeps per-model listings and a down ComfyUI from probing once per row. |
-| `GUAARDVARK_COMFYUI_LORAS_DIR` | Path to the running ComfyUI's `models/loras` (checked first); where trained Cast LoRAs are symlinked so `LoraLoaderModelOnly` can resolve them by basename. |
-| `COMFYUI_OUTPUT_DIR` | ComfyUI output directory. |
-| `GUAARDVARK_ZIMAGE_USE_COMFYUI` | Opt-in flag (`1`/`true`/`yes`/`on`) that routes Z-Image through ComfyUI instead of the CUDA-only offline Diffusers path. Required on Apple Silicon. Off by default. |
-| `GUAARDVARK_ZIMAGE_UNET` / `_CLIP` / `_CLIP_TYPE` / `_VAE` | Z-Image ComfyUI graph assets (defaults `z_image_turbo_bf16.safetensors`, `qwen_3_4b.safetensors`, `lumina2`, `ae.safetensors`). Must exist in the reachable ComfyUI. |
-| `GUAARDVARK_ZIMAGE_SAMPLER` / `_SCHEDULER` | Z-Image sampler/scheduler (defaults `res_multistep` / `simple`). |
-| `GUAARDVARK_ZIMAGE_SHIFT` | `ModelSamplingAuraFlow` flow-matching shift (default `3`, from the working Z-Image Turbo workflow). |
-| `GUAARDVARK_ZIMAGE_CFG` | CFG used when the requested guidance is below 1.0 (default `1.0`); ComfyUI's KSampler needs a real cfg, unlike the offline CFG-free path. |
-
-### RunPod / LoRA training (offloaded to cloud GPU)
-| Variable | Purpose |
-|----------|---------|
-| `GUAARDVARK_RUNPOD_API_KEY` | RunPod API key for the remote LoRA trainer. |
-| `GUAARDVARK_RUNPOD_ENDPOINT_ID` | RunPod serverless endpoint id. |
-| `GUAARDVARK_RUNPOD_MAX_JOB_SECONDS` | Hard ceiling for a training job. |
-| `GUAARDVARK_RUNPOD_POLL_INTERVAL` | Poll interval while waiting on a job. |
-| `GUAARDVARK_RUNPOD_OUTPUT_BUCKET` | S3/R2 bucket for training artifacts. |
-
-### Whisper / audio (STT + TTS)
-| Variable | Purpose |
-|----------|---------|
-| `GUAARDVARK_USE_WHISPER_SERVER` | Opt-in flag (`1`) to route STT through an external `whisper.cpp` server instead of the bundled build. |
-| `GUAARDVARK_START_VOICE_STACK` | Opt-in flag (`1`) that lets the Discord plugin's start/stop scripts bring up / shut down the external pi-omni voice stack (whisper + Kokoro + router on `8081`). Off by default; only used when `voice.backend: "pi-omni"`. |
-| `GUAARDVARK_WHISPER_SERVER_BIN` | Path to the `whisper-server` binary (defaults to `command -v whisper-server`). |
-| `GUAARDVARK_WHISPER_SERVER_MODEL` | Path to the whisper model (e.g. `ggml-base.bin`). |
-| `GUAARDVARK_WHISPER_SERVER_PORT` | Server port (default `5800`). |
-| `GUAARDVARK_WHISPER_SERVER_URL` | Server URL the backend posts to (default `http://127.0.0.1:5800`). |
-| `WHISPER_DIR` / `WHISPER_BUILD_DIR` / `WHISPER_CLI` | Whisper install/build paths and CLI (bundled build). |
-
-### Video
-| Variable | Purpose |
-|----------|---------|
-| `GUAARDVARK_VIDEO_BACKEND` | Video backend — `ffmpeg` for the lightweight pic-to-video path (vs an AI model). |
-
-### GPU / memory management
-| Variable | Purpose |
-|----------|---------|
-| `GUAARDVARK_GPU_IDLE_TIMEOUT` | Idle timeout before a GPU model is evicted. |
-| `GUAARDVARK_GPU_EVICTION_GRACE` | Grace period before eviction. |
-| `GUAARDVARK_GPU_QUALITY_TIER` | Quality tier (e.g. `balanced`). |
-| `GUAARDVARK_SWAP_HARD_MAX_GB` | Raise the swap hard-block threshold (default `8` GB) — macOS holds swap "sticky" and a fixed cap can block legitimate work on a healthy Mac. |
-| `GUAARDVARK_CHAT_KEEP_ALIVE_CPU` / `GUAARDVARK_CHAT_KEEP_ALIVE_GPU` | Keep-alive for the chat model on CPU vs GPU. |
-| `GUAARDVARK_EMBED_KEEP_ALIVE_CPU` / `GUAARDVARK_EMBED_KEEP_ALIVE_GPU` | Keep-alive for the embedding model. |
-
-### MCP
-| Variable | Purpose |
-|----------|---------|
-| `GUAARDVARK_MCP_ENABLED` | Enable the MCP server. |
-| `GUAARDVARK_MCP_SERVERS` | MCP server config. |
-| `GUAARDVARK_MCP_TIMEOUT` | MCP timeout. |
-
-### Ollama tuning (when a local model is used)
-| Variable | Purpose |
-|----------|---------|
-| `OLLAMA_KEEP_ALIVE` | How long a model stays loaded. |
-| `OLLAMA_MAX_LOADED_MODELS` | Max models resident at once (memory control). |
-| `OLLAMA_NUM_CTX` | Context window. |
-| `OLLAMA_NUM_PARALLEL` | Parallel requests. |
-| `OLLAMA_KV_CACHE_TYPE` | KV cache quantization (memory control). |
-| `OLLAMA_FLASH_ATTENTION` | Flash attention on/off. |
-
-### Storage directories (all derived from `GUAARDVARK_ROOT`)
-`GUAARDVARK_STORAGE_DIR`, `GUAARDVARK_OUTPUT_DIR`, `GUAARDVARK_UPLOAD_DIR`, `GUAARDVARK_CACHE_DIR`, `GUAARDVARK_LOG_DIR`, `GUAARDVARK_BACKUP_DIR`, `GUAARDVARK_CONTEXT_DIR` — override where data, outputs, uploads, cache, logs, backups, and context live.
+A Mac that holds swap "sticky" may also want `GUAARDVARK_SWAP_HARD_MAX_GB` raised (default `8` GB) so a fixed cap can't block legitimate work on a healthy Mac — see the GPU / memory group in the full reference.

@@ -1216,13 +1216,24 @@ class ComfyUIImageGenerator:
         if not prompt_id:
             raise RuntimeError("ComfyUI did not accept the image workflow")
 
-        outputs = self._wait(prompt_id)
-        if outputs is None:
-            raise RuntimeError(f"ComfyUI image generation timed out (prompt {prompt_id})")
+        try:
+            outputs = self._wait(prompt_id)
+            if outputs is None:
+                raise RuntimeError(f"ComfyUI image generation timed out (prompt {prompt_id})")
 
-        result = self._fetch_first_image(outputs, output_path)
-        if result is None:
-            raise RuntimeError(f"ComfyUI produced no image for prompt {prompt_id}")
+            result = self._fetch_first_image(outputs, output_path)
+            if result is None:
+                raise RuntimeError(f"ComfyUI produced no image for prompt {prompt_id}")
+        finally:
+            # ComfyUI keeps the weights it just used resident, and on unified memory
+            # (Apple Silicon) there is no separate VRAM to offload them into — so a
+            # 24 GB Z-Image/FLUX outlives the render and the RAM gate can then refuse
+            # the NEXT job over it. Arm the idle unload; it fires only once ComfyUI's
+            # queue has been empty for GUAARDVARK_COMFYUI_MODEL_FREE_DELAY_S, so a
+            # batch still unloads exactly once, after its last image. In `finally`
+            # because a timed-out render has the same weights loaded. Never raises.
+            from backend.services.gpu_resource_policy import schedule_free_comfyui_vram
+            schedule_free_comfyui_vram()
 
         self.last_steps = next(
             node["inputs"]["steps"] for node in workflow.values()

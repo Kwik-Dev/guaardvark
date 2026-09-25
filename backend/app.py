@@ -1644,7 +1644,21 @@ def initialize_llm_and_index_async():
             except Exception:
                 _ollama_enabled = True  # Fail-open — better to warm up than leave a real user without chat
 
-            if _ollama_enabled and llm_service.is_local_ollama_llm(llm):
+            # A cloud chat provider makes the warm-up pointless AND harmful. The startup
+            # LLM comes from get_llm_for_startup(), which is deliberately local-only, so
+            # is_local_ollama_llm(llm) below is always True and the "not local Ollama"
+            # branch can never fire. Without this check a cloud-default install still loads
+            # the local chat model (~16 GB on a 48 GB Mac) at boot — the resident that then
+            # makes the offline image family's 21 GB unadmittable (issue #2).
+            try:
+                from backend.services import llm_provider
+                with llm_provider.app_context_if_needed():
+                    _cloud_chat = bool(llm_provider.cloud_active())
+            except Exception as _e:
+                _cloud_chat = False
+                app.logger.debug(f"[LLM-Init] cloud consent check failed ({_e}); warming locally")
+
+            if _ollama_enabled and llm_service.is_local_ollama_llm(llm) and not _cloud_chat:
                 app.logger.info("[LLM-Init] Step 5/6: Warming up model...")
                 try:
                     model_name = getattr(llm, "model", "unknown")
@@ -1655,6 +1669,11 @@ def initialize_llm_and_index_async():
                     app.logger.info(f"[LLM-Init] Model warmup completed in {warmup_duration:.1f}s — ready for chat")
                 except Exception as e:
                     app.logger.error(f"[LLM-Init] Model warmup FAILED: {e} — first chat will be slow", exc_info=True)
+            elif _cloud_chat:
+                app.logger.info(
+                    "[LLM-Init] Step 5/6: Skipping model warmup — a cloud provider is the "
+                    "active chat model (no local model to load)."
+                )
             elif not llm_service.is_local_ollama_llm(llm):
                 # A cloud-backed startup LLM must not be warmed up: that is a paid
                 # request with no purpose (nothing to load into local VRAM).

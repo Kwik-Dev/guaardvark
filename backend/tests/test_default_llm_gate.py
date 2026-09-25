@@ -151,6 +151,14 @@ def test_worker_without_db_context_stays_local(monkeypatch):
     # A Celery/worker call with no Flask app context: the setting read degrades
     # to unset, so cloud_models_enabled() is False and the gate must stay local
     # even though the endpoint is configured in the environment.
+    #
+    # The env default is cleared on purpose. This test is about the MISSING DB READ, and
+    # a deployment that pins GUAARDVARK_CLOUD_MODELS_ENABLED (cloud-plus) legitimately gets
+    # a different answer there. config.py load_dotenv's .env into os.environ, so without
+    # these two lines adding that var to .env would silently turn this into an
+    # env-override test while still appearing to cover the no-context path.
+    monkeypatch.delenv("GUAARDVARK_CLOUD_MODELS_ENABLED", raising=False)
+    monkeypatch.delenv("GUAARDVARK_LLM_PROVIDER", raising=False)
     monkeypatch.setenv("GUAARDVARK_OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(llm_provider, "_get_setting", lambda key: None)
@@ -158,3 +166,96 @@ def test_worker_without_db_context_stays_local(monkeypatch):
     assert llm_provider.cloud_models_enabled() is False
     assert llm_provider.get_active_provider() == llm_provider.OLLAMA
     assert llm_service._active_cloud_llm() is None
+
+
+# --- the env default (a deployment that IS cloud, e.g. cloud-plus) -----------
+#
+# The DB settings are the operator's runtime toggles. These env vars are the
+# deployment's stated intent, so they win — and they survive a fresh clone or a DB
+# reset, which a two-row DB state does not. They remain an explicit opt-in: consent is
+# never INFERRED from GUAARDVARK_OPENAI_BASE_URL, which only supplies an endpoint.
+
+def test_cloud_env_default_enables_the_master_switch_with_no_db_row(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "true")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: None)
+
+    assert llm_provider.cloud_models_enabled() is True
+    assert llm_provider.cloud_models_env_forced() is True
+
+
+def test_cloud_env_default_overrides_a_stored_false(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "1")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: "false")
+
+    assert llm_provider.cloud_models_enabled() is True
+    assert llm_provider.cloud_models_env_forced() is True
+
+
+def test_cloud_env_can_pin_the_switch_off_over_a_stored_true(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "false")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: "true")
+
+    assert llm_provider.cloud_models_enabled() is False
+
+
+def test_unparseable_cloud_env_falls_through_to_the_db(monkeypatch):
+    # A typo must not read as "local only" — that would look like a deliberate choice.
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "maybe")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: "true")
+
+    assert llm_provider.cloud_models_enabled() is True
+    assert llm_provider.cloud_models_env_forced() is False
+
+
+def test_provider_env_pins_the_active_provider_over_the_db(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "true")
+    monkeypatch.setenv("GUAARDVARK_LLM_PROVIDER", "openai")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: "ollama")  # DB says local
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://endpoint.invalid/v1")
+
+    assert llm_provider.get_active_provider() == llm_provider.OPENAI
+
+
+def test_provider_env_can_pin_local_over_a_stored_cloud_choice(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "true")
+    monkeypatch.setenv("GUAARDVARK_LLM_PROVIDER", "ollama")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: "openai")
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://endpoint.invalid/v1")
+
+    assert llm_provider.get_active_provider() == llm_provider.OLLAMA
+
+
+def test_provider_env_still_degrades_when_the_endpoint_is_missing(monkeypatch):
+    # Consent says cloud, but there is no endpoint to call: the gate must not wedge chat
+    # into a dead provider.
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "true")
+    monkeypatch.setenv("GUAARDVARK_LLM_PROVIDER", "openai")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: None)
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "")
+
+    assert llm_provider.get_active_provider() == llm_provider.OLLAMA
+
+
+def test_unknown_provider_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "true")
+    monkeypatch.setenv("GUAARDVARK_LLM_PROVIDER", "not-a-provider")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: "ollama")
+
+    assert llm_provider.get_active_provider() == llm_provider.OLLAMA
+
+
+def test_provider_state_reports_the_env_forced_flags(monkeypatch):
+    # The settings page shows the toggle as forced instead of as a value the gate ignores.
+    monkeypatch.setenv("GUAARDVARK_CLOUD_MODELS_ENABLED", "true")
+    monkeypatch.setenv("GUAARDVARK_LLM_PROVIDER", "openai")
+    monkeypatch.setattr(llm_provider, "_get_setting", lambda key: None)
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://endpoint.invalid/v1")
+
+    state = llm_provider.provider_state()
+
+    assert state["cloud_models_enabled"] is True
+    assert state["cloud_models_env_forced"] is True
+    assert state["cloud_models_env_var"] == "GUAARDVARK_CLOUD_MODELS_ENABLED"
+    assert state["provider_env_forced"] is True
+    assert state["provider_env_var"] == "GUAARDVARK_LLM_PROVIDER"
+    assert state["provider"] == llm_provider.OPENAI

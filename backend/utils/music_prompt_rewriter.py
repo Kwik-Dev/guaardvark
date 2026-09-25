@@ -132,8 +132,12 @@ def rewrite_music_prompt(
     content: str | None = None
     try:
         from backend.services import llm_provider
-        if llm_provider.is_openai_active():
-            openai_model = llm_provider.get_openai_model()
+        # DB-backed consent read: fails closed to LOCAL without an app context (see
+        # llm_provider.app_context_if_needed). Music generation runs on worker threads.
+        with llm_provider.app_context_if_needed():
+            _cloud_active = llm_provider.is_openai_active()
+            openai_model = llm_provider.get_openai_model() if _cloud_active else ""
+        if _cloud_active:
             resp = openai_provider.chat(
                 model=openai_model,
                 messages=messages,
