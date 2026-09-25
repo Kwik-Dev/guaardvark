@@ -54,6 +54,28 @@ def _free(port):
     return False
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_model_home(monkeypatch):
+    """Keep these cases off the developer's .env.
+
+    backend/tests/conftest.py imports the backend, whose config calls
+    load_dotenv(): a real .env with GUAARDVARK_COMFYUI_DIR set reaches
+    os.environ, so the "no video models" cases pass here and fail in CI (which
+    has no .env) — or the reverse. Every case passes its own ``environ``; these
+    two are the ones the guard would otherwise read on its own.
+    """
+    for name in ("GUAARDVARK_COMFYUI_DIR", "GUAARDVARK_PROFILE_PLUGIN_DEFAULTS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _shared(tmp_path, *, leaf="unet", name="expert.gguf"):
+    """A model home OUTSIDE the checkout, as GUAARDVARK_COMFYUI_DIR points at."""
+    base = tmp_path / "shared" / "models" / leaf / "Wan2.2" / "HighNoise"
+    base.mkdir(parents=True)
+    (base / name).write_bytes(b"w")
+    return tmp_path / "shared"
+
+
 def test_restores_a_plugin_that_was_running_with_models(tmp_path):
     start, reason = should_start_comfyui(_checkout(tmp_path), probe=_free)
     assert start is True
@@ -63,6 +85,63 @@ def test_restores_a_plugin_that_was_running_with_models(tmp_path):
 def test_never_on_a_fresh_install_without_video_models(tmp_path):
     start, reason = should_start_comfyui(_checkout(tmp_path, models=False), probe=_free)
     assert start is False and "no video models" in reason
+
+
+# ── a shared model home (weights outside the checkout) ───────────────────
+# The plugin tree is empty scaffolding on a Comfy Desktop install, so probing it
+# alone answered "no video models are installed yet" forever and start.sh never
+# auto-started ComfyUI. Two documented routes hand the server the real tree.
+
+def test_shared_model_home_counts_via_the_env_var(tmp_path):
+    root = _checkout(tmp_path, models=False)
+    without = should_start_comfyui(root, environ={}, probe=_free)
+    with_env = should_start_comfyui(
+        root, environ={"GUAARDVARK_COMFYUI_DIR": str(_shared(tmp_path))}, probe=_free)
+    assert without[0] is False and "no video models" in without[1]
+    assert with_env[0] is True and with_env[1] == (
+        "it was running before the last stop and video models are installed")
+
+
+def test_shared_model_home_counts_via_extra_model_paths(tmp_path):
+    root = _checkout(tmp_path, models=False)
+    comfy = root / "plugins" / "comfyui" / "ComfyUI"
+    comfy.mkdir(parents=True, exist_ok=True)
+    (comfy / "extra_model_paths.yaml").write_text(
+        "# bridge the shared tree\n"
+        "comfy-desktop:\n"
+        f"    base_path: {_shared(tmp_path)}\n"
+        "    unet: models/unet/\n")
+    start, reason = should_start_comfyui(root, environ={}, probe=_free)
+    assert start is True and "video models are installed" in reason
+
+
+def test_a_lora_is_not_a_video_model(tmp_path):
+    """Only the folders ComfyUI serves video from count; a stray .safetensors in
+    loras/ must not read as "a video model is installed"."""
+    root = _checkout(tmp_path, models=False)
+    start, reason = should_start_comfyui(
+        root, environ={"GUAARDVARK_COMFYUI_DIR": str(_shared(tmp_path, leaf="loras"))}, probe=_free)
+    assert start is False and "no video models" in reason
+
+
+def test_an_interrupted_download_is_not_a_video_model(tmp_path):
+    """HuggingFace partials live under unet/.cache — .incomplete carries no model
+    extension in its own name, and must not satisfy the guard."""
+    root = _checkout(tmp_path, models=False)
+    stale = root / "plugins" / "comfyui" / "ComfyUI" / "models" / "unet" / ".cache" / "huggingface"
+    stale.mkdir(parents=True)
+    (stale / "Fawps-DAs5.163e9e5a.8340d9f5.incomplete").write_bytes(b"w")
+    (stale / "Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf.lock").write_bytes(b"")
+    start, reason = should_start_comfyui(root, environ={}, probe=_free)
+    assert start is False and "no video models" in reason
+
+
+def test_a_missing_shared_home_falls_back_to_the_plugin_tree(tmp_path):
+    """The env var pointing somewhere empty must not disable a working checkout."""
+    root = _checkout(tmp_path)  # plugin tree has a real .gguf
+    start, reason = should_start_comfyui(
+        root, environ={"GUAARDVARK_COMFYUI_DIR": str(tmp_path / "nope")}, probe=_free)
+    assert start is True and "video models are installed" in reason
 
 
 def test_not_running_before_and_no_auto_start_stays_down(tmp_path):
