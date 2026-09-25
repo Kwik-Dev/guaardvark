@@ -1,5 +1,28 @@
 # Guaardvark Code Release
 
+> **This is the `Kwik-Dev` fork — read this before you install.**
+>
+> The commands below are upstream's, and they clone `guaardvark/guaardvark` on `main`, which is
+> **not** this branch: upstream `main` here is a pure mirror with the cloud chat providers removed.
+> On this fork, install `cloud-plus`:
+>
+> ```bash
+> GUAARDVARK_REPO_URL=https://github.com/Kwik-Dev/guaardvark.git \
+> GUAARDVARK_BRANCH=cloud-plus \
+> curl -fsSL https://raw.githubusercontent.com/Kwik-Dev/guaardvark/cloud-plus/install.sh | bash
+> ```
+>
+> or clone it directly, for full history:
+>
+> ```bash
+> git clone -b cloud-plus https://github.com/Kwik-Dev/guaardvark.git && cd guaardvark
+> ./start.sh
+> ```
+>
+> Everything else on this page — prerequisites, Python 3.12, the macOS notes, plugin ports,
+> troubleshooting — applies unchanged. Fork details, the installer's traps, and the cloud opt-in:
+> [docs/CLOUD_PLUS.md](docs/CLOUD_PLUS.md).
+
 ## Backup Information
 - **Date:** (filled by Code Release)
 - **Type:** Code Release (no data — database and files are created fresh on first run)
