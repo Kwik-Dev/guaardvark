@@ -36,9 +36,10 @@ jobs:
           branch: cla-signatures
           # Every identity this project's own commits are authored under, or
           # our pull requests are held for a signature the owner grants anyway:
-          # albenze is the maintainer's second login, claude the one commits
-          # attributed to the assistant resolve to.
-          allowlist: guaardvark,albenze,claude,dependabot[bot],*[bot]
+          # albenze is the maintainer's second login, kwiksher the one this
+          # fork's own commits and pull requests are authored under, claude the
+          # one commits attributed to the assistant resolve to.
+          allowlist: guaardvark,albenze,kwiksher,claude,dependabot[bot],*[bot]
           custom-notsigned-prcomment: >-
             Thanks for the pull request. Before it can be merged, please read the
             [Contributor License Agreement](https://github.com/guaardvark/guaardvark/blob/main/CLA.md)
