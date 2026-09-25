@@ -696,7 +696,7 @@ The Guaardvark engine is open source (MIT) and built in public; paid layers and 
 ### 2. Run it (≈ two commands)
 
 ```bash
-git clone https://github.com/guaardvark/guaardvark.git && cd guaardvark
+git clone -b cloud-plus https://github.com/Kwik-Dev/guaardvark.git && cd guaardvark
 ./start.sh
 ```
 
