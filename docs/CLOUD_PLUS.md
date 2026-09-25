@@ -43,6 +43,59 @@ backend, Vite, Redis, Postgres and the plugin set. Platform-specific setup, prer
 Docker alternative live in [INSTALL.md](../INSTALL.md) — this page only covers the fork's own
 pieces.
 
+### The installer works, but it defaults to upstream
+
+`install.sh` (and `setup.sh`, a five-line alias that execs `start.sh`) is byte-identical to
+upstream's and is not fork-aware. Run as documented it clones **upstream `main`** — the branch with
+the cloud providers deleted. Its own defaults are the reason:
+
+```bash
+# install.sh, first lines — NOT what a fork user wants
+REPO_URL="${GUAARDVARK_REPO_URL:-https://github.com/guaardvark/guaardvark.git}"
+BRANCH="${GUAARDVARK_BRANCH:-main}"
+```
+
+Point it at the fork with both overrides. Export them in the shell the pipe runs in, so the `bash`
+reading the script inherits them:
+
+```bash
+GUAARDVARK_REPO_URL=https://github.com/Kwik-Dev/guaardvark.git \
+GUAARDVARK_BRANCH=cloud-plus \
+curl -fsSL https://raw.githubusercontent.com/Kwik-Dev/guaardvark/cloud-plus/install.sh | bash
+```
+
+It clones to `~/guaardvark` (override with `GUAARDVARK_HOME=/path`), then hands off to `start.sh`.
+`GUAARDVARK_NO_START=1` clones without launching. The re-run guard accepts this checkout, because
+`Kwik-Dev/guaardvark` matches its `*guaardvark*` origin glob.
+
+Three things to know before choosing the installer over the plain clone above:
+
+- **It never switches branch.** `$BRANCH` is applied on a fresh clone only; a re-run does
+  `git pull --ff-only` on whatever checkout is already there. A user who installed upstream `main`
+  first stays on `main` — the exact wrong branch — no matter how many times the installer is re-run.
+  Move it by hand: `git -C ~/guaardvark fetch origin && git -C ~/guaardvark checkout cloud-plus`,
+  then `./start.sh`.
+- **It shallow-clones** (`--depth 1`), so the `upstream/main..cloud-plus` commands in
+  [CLOUD_PLUS_FEATURES.md](../CLOUD_PLUS_FEATURES.md) and in section 4 below have no history to read.
+  The plain `git clone` above has full history.
+- **It warns on macOS** that "Guaardvark's installer targets Linux; other platforms are unsupported".
+  The warning is cosmetic — `start.sh` supports Apple Silicon (see the macOS section of
+  [INSTALL.md](../INSTALL.md)), and CI runs a macOS install + boot job on every push.
+
+### Fork defaults: `.env.cloud`
+
+`start.sh` generates a bare `.env` (adding `SECRET_KEY`, and `FLASK_PORT=5055` on macOS). The
+fork's defaults — the cloud chat endpoint and its consent pair, the memory gates, the ComfyUI
+opt-ins — live in the committed sample:
+
+```bash
+cp .env.cloud .env      # placeholders only; fill in the values you need
+```
+
+`start.sh` does not copy it for you. Copy it rather than editing it, and never put a real
+credential into the tracked `.env.cloud`. The variables it carries are itemized in
+[CLOUD_PLUS_FEATURES.md](../CLOUD_PLUS_FEATURES.md) section 10.
+
 **Ports.** Default backend port is `5000`; on macOS `start.sh` writes `FLASK_PORT=5055` because
 AirPlay Receiver owns `5000`. The UI is Vite on `5173`. Set `FLASK_PORT` in `.env` to choose
 another one; everything else follows it.
