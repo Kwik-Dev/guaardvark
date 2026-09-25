@@ -312,8 +312,14 @@ Two failure shapes worth recognising:
   VRAM): 17.1 GB available, need 21.0 GB + 4.8 GB floor"*. The declared footprint is the offline
   Z-Image family's 21 GB; the floor is 10 % of total RAM. A resident chat model of comparable size
   (a warm-up model is often 17 GB) is enough to make the offline path unadmittable — and
-  `auto_enhance`, which is **on by default**, wakes exactly that model in the same request. The
-  ComfyUI route declares VRAM only, so `GUAARDVARK_ZIMAGE_USE_COMFYUI=1` is the way through.
+  `auto_enhance`, which is **on by default**, wakes exactly that model in the same request.
+
+  **Fixed for cloud-chat installs.** The prompt rewrite now goes to the consented provider, so no
+  local chat model is woken for it. Before that fix the enhancer ran on Ollama whatever Settings
+  said, because the consent gate needs a Flask app context that batch and Celery threads do not
+  have — which is why turning `auto_enhance` off was the only thing that helped. If chat runs
+  locally, or you are on an older checkout, the ComfyUI route is still the way through: it declares
+  VRAM only, so `GUAARDVARK_ZIMAGE_USE_COMFYUI=1` sidesteps the footprint entirely.
 - **"No installed video model is ready for this card"** while the models are plainly on disk. The
   registry resolves model paths under `GUAARDVARK_COMFYUI_DIR/models`; without that setting it
   looks only inside `plugins/comfyui/ComfyUI/models/`, which on a Comfy Desktop install is empty
