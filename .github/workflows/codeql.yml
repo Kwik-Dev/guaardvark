@@ -11,8 +11,54 @@ on:
     - cron: "31 7 * * 1"
 
 jobs:
+  # A documentation-only change cannot break code, so CodeQL on one analyzed Python and
+  # TypeScript that never changed — roughly four minutes across two runners, on every
+  # docs pull request and again on every push to a branch. Same detector as ci.yml,
+  # with one addition: the scheduled scan is not a change, and must always run.
+  changes:
+    name: Detect non-documentation changes (CodeQL)
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The base commit is not in a depth-1 checkout, and the diff against it
+          # is the whole point of this job.
+          fetch-depth: 0
+
+      - name: Did any file outside the documentation set change?
+        id: diff
+        run: |
+          # The weekly scan is the only CodeQL run that does not correspond to a
+          # change, so it is the one run that must never be skipped: a quiet
+          # Monday-morning scan is the point of it.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            range="${base}...HEAD"
+          else
+            # New branch, force-push, or a base this clone does not have.
+            range="HEAD~1...HEAD"
+          fi
+          echo "Comparing $range"
+          git diff --name-only "$range" || true
+          # Documentation is *.md and docs/ — nothing else. A workflow, a config file
+          # or an extension-less file like LICENSE counts as code, so those pulls run
+          # the full analysis rather than being waved through.
+          if git diff --name-only "$range" | grep -qvE '\.md$|^docs/'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   analyze:
     name: Analyze (${{ matrix.language }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
       security-events: write
