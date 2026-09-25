@@ -52,6 +52,9 @@ https://github.com/user-attachments/assets/c6d9d18b-cfff-4ae2-8220-dc7f329fee5d
 > cleanly; conflicts come back only where upstream touches the divergence — the cloud-provider files it
 > deleted. (If you maintain `cloud-plus` with GitButler, note that changing its target branch requires every
 > branch unapplied; the GitButler app can do that, the CLI refuses.)
+>
+> **Getting started on the branch:** [docs/CLOUD_PLUS.md](docs/CLOUD_PLUS.md) — clone and first run,
+> turning the cloud layer on, syncing upstream, the GitButler land workflow, and the gotchas.
 
 **The self-hosted AI studio.** Coding agents and 20-agent swarms in isolated git worktrees, screen agents with their own real desktop, self-tuning RAG, continuous voice chat — and a full media pipeline: video, image, full-song music, neural voice. One install, one GPU, everything on your machine. Your machine. Your data. Your rules.
 
