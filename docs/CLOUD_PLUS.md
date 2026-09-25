@@ -199,7 +199,12 @@ but land fix/<thing> --whole-stack --yes
 ### Run these before landing
 
 ```bash
-bash scripts/check_portable.sh                       # CI gate: no absolute home paths / hosts
+# CI gate: no absolute home paths / machine-specific hosts.
+# The default mode scans **tracked** files only (git ls-files), so a brand-new file
+# passes locally and fails in CI — as happened to this very file. Check the staged
+# set before you land; the script's own header says the same.
+bash scripts/check_portable.sh --staged
+
 cd frontend && npm run lint && npm run build         # CI gate: frontend
 ```
 
@@ -291,9 +296,11 @@ Two environment settings decide whether GPU work can start on a Mac; both are do
 
 ```ini
 # Share one model tree with ComfyUI Desktop instead of downloading a second copy.
-# The model registry AND the ComfyUI downloader read <dir>/models, so models you
+# Must be an ABSOLUTE path: the value is read straight from the environment and is
+# never passed through expanduser, so `~/ComfyUI-Shared` does not resolve. The
+# model registry AND the ComfyUI downloader read <dir>/models, so models you
 # already have show up as installed instead of as "missing".
-GUAARDVARK_COMFYUI_DIR=/Users/you/ComfyUI-Shared
+GUAARDVARK_COMFYUI_DIR=/path/to/ComfyUI-Shared
 
 # Apple Silicon: route Z-Image through ComfyUI instead of the offline path.
 GUAARDVARK_ZIMAGE_USE_COMFYUI=1
