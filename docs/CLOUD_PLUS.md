@@ -285,6 +285,26 @@ Lint & Build, Backend Validation (static quality gate + portability + syntax), B
 smoke), CLI Tests, macOS install + platform smoke, macOS boot. The macOS jobs are what catch
 Apple-Silicon-only breakage.
 
+**A documentation-only pull request skips five of those jobs.** A `changes` job diffs the pull against
+its base; when every changed path is `*.md` or under `docs/`, the code-executing jobs report
+**skipped** instead of running — a skipped check there is the system working, not a failure. `Backend
+Validation` always runs, deliberately: it is the one job with something to say about a `.md` file,
+since `check_portable.sh` reads every tracked file for absolute home paths and secret shapes (it is
+what caught one in this very document). Documentation means `*.md` and `docs/` and nothing else — a
+workflow, a config file or `LICENSE` counts as code and runs the lot.
+
+**To skip CI by hand, put `[skip ci]` in the commit message** (`[ci skip]`, `[no ci]`,
+`[skip actions]`, or a `skip-checks: true` trailer also work). It is per-commit and reads the HEAD
+commit of a pull request, which makes it the flag for a spike rather than for docs: it skips the whole
+workflow, portability gate included, and it will not skip `cla.yml`, which runs on
+`pull_request_target`.
+
+Neither skip blocks a merge today — `cloud-plus` has no rulesets and reports `protected=false`, so
+nothing is *required*. The two are not quite the same shape, though: a docs-only pull request still
+*runs* ci.yml and reports those five jobs as skipped, so the run itself succeeds, whereas the commit
+marker stops the run happening at all and those check names never report. If protection is ever
+enabled, that second form stays *Pending* and blocks until you push a commit without the marker.
+
 ---
 
 ## 6. Long-running processes
