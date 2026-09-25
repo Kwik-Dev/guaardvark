@@ -419,9 +419,13 @@ class OfflineImageGenerator:
             from backend.services.user_image_models import user_files_present, user_sentinel
             sentinel = model_id if model_id in self.user_files else self.available_models.get(model_id, user_sentinel(model_id))
             return user_files_present(self, sentinel)
+        # Sentinel ids — the generic ComfyUI backend has no HF snapshot; its
+        # assets are the running ComfyUI's.
+        mid = (model_id or "").lower()
+        if mid in ("comfyui", "comfy:comfyui"):
+            return self._comfyui_assets_present()
         # Comfy-only catalog keys: the video-registry install plan is the source of
         # truth (flux-dev, qwen-image-edit, …), not a diffusers snapshot.
-        mid = (model_id or "").lower()
         catalog_key = mid.split(":", 1)[1] if mid.startswith("comfy:") else None
         if catalog_key or mid in getattr(self, "comfy_only_models", set()) or mid == "flux-dev" or mid.endswith("flux-dev") or "flux1-dev" in mid:
             try:
