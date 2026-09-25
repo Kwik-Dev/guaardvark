@@ -293,6 +293,15 @@ since `check_portable.sh` reads every tracked file for absolute home paths and s
 what caught one in this very document). Documentation means `*.md` and `docs/` and nothing else — a
 workflow, a config file or `LICENSE` counts as code and runs the lot.
 
+**`codeql.yml` runs the same detector too.** Its job is named `Detect non-documentation changes
+(CodeQL)` so it is not confused with `ci.yml`'s in the checks list. It matters more here than in
+`ci.yml`: CodeQL analyzes Python and TypeScript, and a docs-only change moves neither — two runners
+and roughly four minutes, on every docs pull request and again on every push to a branch. The
+weekly `schedule` scan is the one exception: it is not a change, so the detector forces
+`code=true` and the scan always runs. As in `ci.yml`, a skipped `analyze` reports **skipped**
+rather than not reporting at all, so if CodeQL is ever made a required check the pull request is
+not left *Pending* forever.
+
 **To skip CI by hand, put `[skip ci]` in the commit message** (`[ci skip]`, `[no ci]`,
 `[skip actions]`, or a `skip-checks: true` trailer also work). It is per-commit and reads the HEAD
 commit of a pull request, which makes it the flag for a spike rather than for docs: it skips the whole
