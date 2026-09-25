@@ -65,8 +65,16 @@ https://github.com/user-attachments/assets/c6d9d18b-cfff-4ae2-8220-dc7f329fee5d
 **Install** (one command, then open the Studio):
 
 ```bash
-curl -fsSL https://guaardvark.com/install.sh | bash
+GUAARDVARK_REPO_URL=https://github.com/Kwik-Dev/guaardvark.git \
+GUAARDVARK_BRANCH=cloud-plus \
+curl -fsSL https://raw.githubusercontent.com/Kwik-Dev/guaardvark/cloud-plus/install.sh | bash
 ```
+
+> **Those two variables are not optional on this fork.** `install.sh` defaults to
+> `guaardvark/guaardvark` on `main` — upstream, *not* this branch — so the one-liner
+> upstream documents installs the code with the cloud providers deleted. Clone-and-run,
+> the installer's traps, and the macOS notes:
+> [docs/CLOUD_PLUS.md → Get it running](docs/CLOUD_PLUS.md#2-get-it-running).
 
 **Add it to Claude Code** (two lines, no clone):
 
@@ -451,13 +459,15 @@ The sections above cover the experience and differentiators. The rest of this RE
 > installs: use a 3.12 interpreter only.
 
 ```bash
-curl -fsSL https://guaardvark.com/install.sh | bash
+GUAARDVARK_REPO_URL=https://github.com/Kwik-Dev/guaardvark.git \
+GUAARDVARK_BRANCH=cloud-plus \
+curl -fsSL https://raw.githubusercontent.com/Kwik-Dev/guaardvark/cloud-plus/install.sh | bash
 ```
 
-This clones to `~/guaardvark` (override with `GUAARDVARK_HOME=/path`) and launches `./start.sh`. Re-running it updates an existing install. Prefer doing it by hand? Same thing:
+This clones to `~/guaardvark` (override with `GUAARDVARK_HOME=/path`) and launches `./start.sh`. Re-running it updates an existing install — but it never switches branch, so a checkout that started on upstream `main` stays there. Prefer doing it by hand? Clone the fork directly:
 
 ```bash
-git clone https://github.com/guaardvark/guaardvark.git
+git clone -b cloud-plus https://github.com/Kwik-Dev/guaardvark.git
 cd guaardvark
 ./start.sh
 ```
