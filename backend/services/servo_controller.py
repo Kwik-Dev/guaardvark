@@ -9,6 +9,7 @@ Every interaction can be recorded by a TrainingDataCollector for self-supervised
 """
 
 import json
+import math
 import logging
 import os
 import time
@@ -36,7 +37,7 @@ DIRECTION_MAP = {
 
 TASKBAR_H = 30  # tint2 taskbar at the bottom — never click here
 
-CORRECTION_MODES = ("off", "shadow", "on")
+CORRECTION_MODES = ("off", "shadow", "on", "auto")
 CORRECTION_ENV = "GUAARDVARK_SERVO_CORRECTION"
 PROBE_RING = (220, 30, 30)   # the correction probe's marker: red, unlike the cursor reticle
 PROBE_MARKER_PX = 48
@@ -102,7 +103,8 @@ class ServoController:
     """
 
     def __init__(self, screen, analyzer, max_corrections: int = 4, collector=None,
-                 vision_config: Dict = None, eye_accuracy_px: Optional[float] = None):
+                 vision_config: Dict = None, eye_accuracy_px: Optional[float] = None,
+                 eye_judge_rate: Optional[float] = None):
         self.screen = screen
         self.analyzer = analyzer
         self.max_corrections = max_corrections
@@ -111,10 +113,19 @@ class ServoController:
         # measurement store; None when unmeasured. The correction loop arms on
         # it: an eye coarser than the target earns a second look.
         self.eye_accuracy_px = eye_accuracy_px
+        # How often this eye judges a marker's offset right (None: unmeasured).
+        self.eye_judge_rate = eye_judge_rate
         # Correction loop. Precedence: an explicit vision_config value, then the
         # environment, then the reflex. "explicit" is what lets a training
         # (single_attempt) run exercise the loop when it asks for it.
         self.correction_mode, self._correction_explicit = self._resolve_correction_mode(vision_config or {})
+        if self.correction_mode == "auto":
+            # On for an eye measured to judge well, where it roughly doubled
+            # hits; shadow for an unmeasured one, whose judging is unknown and
+            # whose shadow rows are the evidence for measuring it.
+            from backend.services.model_capability_data import EYE_JUDGE_MIN_BOTH_RATE
+            good = self.eye_judge_rate is not None and self.eye_judge_rate >= EYE_JUDGE_MIN_BOTH_RATE
+            self.correction_mode = "on" if good else "shadow"
         self._corrections_armed_this_session = 0
         self._last_correction_skip = ""
         # Optional TrainerTruthProbe (trainer_truth_probe.py) — attached by the
@@ -1001,6 +1012,12 @@ class ServoController:
             return False, "precision_off"
         if single_attempt and not self._correction_explicit:
             return False, "single_attempt"
+        if self.eye_judge_rate is not None:
+            from backend.services.model_capability_data import EYE_JUDGE_MIN_BOTH_RATE
+            if self.eye_judge_rate < EYE_JUDGE_MIN_BOTH_RATE:
+                # A loop steered by a judge that is often wrong spends probes
+                # and moves nothing closer (gemma4:e2b at 0.76).
+                return False, f"judge_unreliable({self.eye_judge_rate:.2f})"
         target_px = float(get_reflex("correction_target_px", 24))
         acc = self.eye_accuracy_px
         if precision is True:
@@ -1051,7 +1068,11 @@ class ServoController:
         """`same` collapses the axis to the target width; a side call cuts at
         the probe and keeps (1 − keep) of the discarded half."""
         if call == "same":
-            return probe - target_px / 2.0, probe + target_px / 2.0
+            # An eye's "same" means within about a target's width, not on its
+            # centre (gemma4:e4b said "same" 18px off a 26px dot). Collapsing
+            # to exactly the target width left the true centre outside the
+            # box, where no later call could reach it.
+            return probe - target_px, probe + target_px
         slack = max(0.0, 1.0 - keep)
         if call in ("left", "above"):
             return lo, probe + slack * max(0.0, hi - probe)
@@ -1079,9 +1100,16 @@ class ServoController:
             return {"visible": False, "dx": None, "dy": None}
         dx = str(obj.get("dx", "")).strip().lower()
         dy = str(obj.get("dy", "")).strip().lower()
-        if dx not in ("left", "right", "same") or dy not in ("above", "below", "same"):
-            return None
-        return {"visible": True, "dx": dx, "dy": dy}
+        horizontal, vertical = ("left", "right", "same"), ("above", "below", "same")
+        if dx in horizontal and dy in vertical:
+            return {"visible": True, "dx": dx, "dy": dy}
+        # The words name their own axis. gemma4:e2b answers with the fields
+        # swapped ("dx": "below", "dy": "right") on most probes; the meaning
+        # is not in doubt, so read it. Anything outside the vocabulary is
+        # still refused.
+        if dy in horizontal and dx in vertical:
+            return {"visible": True, "dx": dy, "dy": dx}
+        return None
 
     def _probe_relative(self, screenshot: Image.Image, target: str, probe: Tuple[int, int],
                         box: List[float]) -> Tuple[Optional[Dict[str, Any]], str, int]:
@@ -1090,12 +1118,29 @@ class ServoController:
         from backend.utils.cursor_overlay import composite_bullseye
         px, py = int(probe[0]), int(probe[1])
         marked = composite_bullseye(screenshot, (px, py), size=PROBE_MARKER_PX, ring=PROBE_RING)
-        span = max(box[2] - box[0], box[3] - box[1])
-        half = int(min(PROBE_CROP_MAX, max(PROBE_CROP_MIN, span + 80)) // 2)
-        left = max(0, min(self.screen_w - 2 * half, px - half))
-        top = max(0, min(self.screen_h - 2 * half, py - half))
-        crop = marked.crop((left, top, left + 2 * half, top + 2 * half))
-        crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
+        # The crop covers the whole search box and the marker, so a target the
+        # box still allows is in view. A fixed 600px cap hid targets from eyes
+        # that miss by more than 300px and ended the loop on "not visible".
+        # Small crops are enlarged 2x for the eye; a large one is sent as is.
+        margin = 40
+        left = min(box[0], px) - margin
+        right = max(box[2], px) + margin
+        top = min(box[1], py) - margin
+        bottom = max(box[3], py) + margin
+        for lo_name in ("x", "y"):
+            lo, hi = (left, right) if lo_name == "x" else (top, bottom)
+            if hi - lo < PROBE_CROP_MIN:
+                centre = px if lo_name == "x" else py
+                lo, hi = centre - PROBE_CROP_MIN / 2, centre + PROBE_CROP_MIN / 2
+            if lo_name == "x":
+                left, right = lo, hi
+            else:
+                top, bottom = lo, hi
+        left, top = int(max(0, left)), int(max(0, top))
+        right, bottom = int(min(self.screen_w, right)), int(min(self.screen_h, bottom))
+        crop = marked.crop((left, top, right, bottom))
+        if max(crop.width, crop.height) <= PROBE_CROP_MAX:
+            crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
         prompt = (
             f"A red ring marker is drawn on this image. Is the {target} visible in this image, "
             f"and where is it relative to the CENTRE of the red marker?\n"
@@ -1122,6 +1167,13 @@ class ServoController:
         max_steps = int(get_reflex("correction_max_steps", self.max_corrections))
         deadline_s = float(get_reflex("correction_deadline_s", 4.0))
         box = self._seed_box(estimate)
+        # Enough steps to narrow this box to the target: a side call keeps about
+        # 0.725 of the axis, so a fixed four could not take a coarse eye's
+        # 600px box below ~160px. The cap bounds the cost.
+        span0 = max(box[2] - box[0], box[3] - box[1], target_px)
+        need = int(math.ceil(math.log(target_px / span0) / math.log(0.5 + 0.5 * (1.0 - keep)))) + 1
+        max_steps = min(int(get_reflex("correction_max_steps_cap", 10)), max(max_steps, need))
+        widened = False
         t_start = time.monotonic()
         last_probe_s: Optional[float] = None
         judged = False
@@ -1136,6 +1188,11 @@ class ServoController:
                 stop = "deadline"
                 break
             probe = estimate if step == 0 else (int(round((box[0] + box[2]) / 2)), int(round((box[1] + box[3]) / 2)))
+            # Whether this look is close up: only a zoomed view can tell a ring
+            # 50px off a 26px dot from one on it. A wide view's "same" narrows
+            # the box and is asked again close up rather than ending the search.
+            zoomed = max(box[2] - box[0], box[3] - box[1], abs(probe[0] - (box[0] + box[2]) / 2) * 2,
+                         abs(probe[1] - (box[1] + box[3]) / 2) * 2) + 80 <= PROBE_CROP_MAX
             judgment, raw, ms = self._probe_relative(screenshot, target, probe, box)
             last_probe_s = ms / 1000.0
             rec: Dict[str, Any] = {"probe": [int(probe[0]), int(probe[1])], "ms": ms, "raw": raw[:120]}
@@ -1148,6 +1205,14 @@ class ServoController:
             if not judgment["visible"]:
                 rec.update({"visible": False, "dx": None, "dy": None, "direction": ""})
                 out.steps.append(rec)
+                full = [0.0, 0.0, self.screen_w - 1.0, self.screen_h - TASKBAR_H - 1.0]
+                if not widened and box != full:
+                    # Not in view is not proof the target is absent: the eye's
+                    # first guess can sit outside the box it seeds. Look once
+                    # across the whole screen from the same probe.
+                    widened = True
+                    box = full
+                    continue
                 stop = "not_visible"
                 break
             judged = True
@@ -1174,7 +1239,7 @@ class ServoController:
                 if calls_y and self._direction_reversed(calls_y[-1], dy_name):
                     reversals["y"] += 1
                 calls_y.append(dy_name)
-            if dx == "same" and dy == "same":
+            if dx == "same" and dy == "same" and zoomed:
                 stop = "on_target"
                 break
             if (box[2] - box[0]) <= target_px and (box[3] - box[1]) <= target_px:

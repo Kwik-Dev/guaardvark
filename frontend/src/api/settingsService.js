@@ -635,6 +635,30 @@ export const triggerReboot = async () => {
   }
 };
 
+export const getConfineToolPaths = async () => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/confine_tool_paths`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("settingsService: Error getting tool path limit:", err.message);
+    return { error: err.message };
+  }
+};
+
+export const setConfineToolPaths = async (enabled) => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/confine_tool_paths`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confine_tool_paths: !!enabled }),
+    });
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("settingsService: Error setting tool path limit:", err.message);
+    return { error: err.message };
+  }
+};
+
 export const getLlmDebug = async () => {
   try {
     const response = await fetch(`${BASE_URL}/settings/llm_debug`);

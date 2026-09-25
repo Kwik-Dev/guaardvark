@@ -104,14 +104,18 @@ REFLEXES = {
     # below carry what they were measured against; change them with a new
     # measurement, not a hunch.
     "correction_mode": {
-        "value": "shadow",
-        "source": "operator decision 2026-09-22: shadow for one measurement cycle, "
-                  "then decide the default from the archive numbers",
+        "value": "auto",
+        "source": "operator decision 2026-09-24 (was shadow since 2026-09-22): on for eyes "
+                  "measured to judge well, shadow for unmeasured ones. Measured with "
+                  "eye_bakeoff --mode corrected on 30 trainer targets: gemma4:e4b 5-7 hits "
+                  "on its estimate alone, 16 with the loop applied",
         "confidence": 0.5,
         "model": "universal",
         "notes": (
             "off: never probe. shadow: run the loop, log estimate/final/drift, click "
-            "the ESTIMATE. on: click the FINAL. Precedence: vision_config "
+            "the ESTIMATE. on: click the FINAL. auto: on when the eye's measured judge "
+            "rate meets EYE_JUDGE_MIN_BOTH_RATE, shadow when unmeasured (an eye measured "
+            "below it is never armed). Precedence: vision_config "
             "correction_mode > env GUAARDVARK_SERVO_CORRECTION > this value. The "
             "shadow pass criterion (plan 2026-09-22): median |final-truth| on Y at "
             "most 0.7 of |estimate-truth|, X no worse than estimate+5px, unparseable "
@@ -132,6 +136,15 @@ REFLEXES = {
         "confidence": 0.5,
         "model": "universal",
         "notes": "Probes per click after probe 0 (the estimate itself).",
+    },
+    "correction_max_steps_cap": {
+        "value": 10,
+        "source": "2026-09-24: a 600px seed box needs ~10 side calls to reach the 24px "
+                  "target at the 0.725 per-step keep; measured probe cost 0.2-0.5s",
+        "confidence": 0.5,
+        "model": "universal",
+        "notes": "Upper bound on probes per click once the budget is sized from the "
+                 "search box; correction_max_steps is the floor.",
     },
     "correction_deadline_s": {
         "value": 4.0,
@@ -842,7 +855,7 @@ def _load_calibration_file() -> Dict[str, Any]:
 # one of them — which is why a hand-written row outranked an eye four times more
 # accurate. Same file, same lock, same mtime cache; only the shape grows.
 _FIT_KEYS = ("model", "a_x", "b_x", "a_y", "b_y", "k", "cx", "cy", "elbow")
-_MEASUREMENT_SECTIONS = ("coords", "accuracy")
+_MEASUREMENT_SECTIONS = ("coords", "accuracy", "judge")
 
 
 def _has_fit(entry: Optional[Dict[str, Any]]) -> bool:
@@ -928,7 +941,7 @@ def save_servo_calibration(model: str, screen_w: int, screen_h: int, fit: Dict[s
 def record_measurement(model: str, screen_w: int, screen_h: int,
                        section: str, data: Dict[str, Any]) -> str:
     """Write one measurement section for model@WxH, leaving the fit and the other
-    section untouched. `section` is "coords" or "accuracy"."""
+    sections untouched. `section` is "coords", "accuracy" or "judge"."""
     if section not in _MEASUREMENT_SECTIONS:
         raise ValueError(f"unknown measurement section {section!r}; expected one of {_MEASUREMENT_SECTIONS}")
     key = _calibration_key(model, screen_w, screen_h)
@@ -965,7 +978,8 @@ def load_model_measurements(model: str, screen_w: Optional[int] = None,
     if screen_w and screen_h:
         entry = store.get(_calibration_key(model, screen_w, screen_h)) or {}
         return {"screen": f"{int(screen_w)}x{int(screen_h)}" if entry else None,
-                "coords": entry.get("coords"), "accuracy": entry.get("accuracy")}
+                "coords": entry.get("coords"), "accuracy": entry.get("accuracy"),
+                "judge": entry.get("judge")}
     prefix = f"{(model or 'unknown').strip()}@"
     best_key, best_stamp = None, ""
     for key, entry in store.items():
@@ -977,7 +991,7 @@ def load_model_measurements(model: str, screen_w: Optional[int] = None,
         if best_key is None or stamp > best_stamp:
             best_key, best_stamp = key, stamp
     if best_key is None:
-        return {"screen": None, "coords": None, "accuracy": None}
+        return {"screen": None, "coords": None, "accuracy": None, "judge": None}
     entry = store[best_key]
     return {"screen": best_key.split("@", 1)[1], "coords": entry.get("coords"),
-            "accuracy": entry.get("accuracy")}
+            "accuracy": entry.get("accuracy"), "judge": entry.get("judge")}

@@ -322,6 +322,23 @@ def parse_tool_calls_xml(llm_response: str) -> ToolCallResponse:
         )
 
 
+def _coerce_parameters_object(params: Any) -> Dict[str, Any]:
+    """Models sometimes emit parameters as a JSON *string*; decode it."""
+    import json
+
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, str):
+        try:
+            decoded = json.loads(params)
+            if isinstance(decoded, dict):
+                return decoded
+        except json.JSONDecodeError:
+            pass
+        return {"input": params} if params.strip() else {}
+    return {}
+
+
 def parse_tool_calls_json(llm_response: str) -> ToolCallResponse:
     """
     Parse JSON-formatted tool calls from LLM response.
@@ -362,9 +379,16 @@ def parse_tool_calls_json(llm_response: str) -> ToolCallResponse:
         tool_calls = []
         for tc in data.get('tool_calls', []):
             if isinstance(tc, dict):
+                # OpenAI style nests {"function": {"name", "arguments"}}
+                fn = tc.get('function') if isinstance(tc.get('function'), dict) else {}
+                params = next(
+                    (v for v in (tc.get('parameters'), tc.get('arguments'), tc.get('args'),
+                                 tc.get('input'), fn.get('arguments')) if v is not None),
+                    {},
+                )
                 tool_calls.append(ToolCall(
-                    tool_name=tc.get('tool_name', tc.get('tool', tc.get('name', ''))),
-                    parameters=tc.get('parameters', tc.get('args', {})),
+                    tool_name=tc.get('tool_name', tc.get('tool', tc.get('name', fn.get('name', '')))),
+                    parameters=_coerce_parameters_object(params),
                     reasoning=tc.get('reasoning')
                 ))
 
@@ -399,6 +423,46 @@ def relativize_local_paths(text: str) -> str:
         pass
     return text
 
+
+_MAX_METADATA_VALUE_CHARS = 300
+_MAX_METADATA_CHARS = 2000
+_MAX_OUTPUT_CHARS = 12000
+_BULKY_METADATA_KEYS = {"screenshot", "image", "image_base64", "base64", "data", "html", "content",
+                        "raw", "result"}
+
+
+def _compact_metadata(metadata: Any) -> Any:
+    """Metadata is for the UI and logs; keep only small values for the LLM.
+
+    Browser tools put full screenshots (base64) and page HTML in metadata,
+    which used to be serialised straight into the prompt.
+    """
+    import json
+
+    if not isinstance(metadata, dict):
+        return metadata
+    compact = {}
+    for key, value in metadata.items():
+        if key in _BULKY_METADATA_KEYS and isinstance(value, (str, bytes, dict, list)):
+            compact[key] = f"[{key} omitted]"
+        elif isinstance(value, str) and len(value) > _MAX_METADATA_VALUE_CHARS:
+            compact[key] = value[:_MAX_METADATA_VALUE_CHARS] + f"...[{len(value)} chars]"
+        elif isinstance(value, (dict, list)):
+            text = json.dumps(value, default=str)
+            compact[key] = value if len(text) <= _MAX_METADATA_VALUE_CHARS else f"[{type(value).__name__}, {len(text)} chars omitted]"
+        else:
+            compact[key] = value
+    if len(json.dumps(compact, default=str)) > _MAX_METADATA_CHARS:
+        return {k: v for k, v in list(compact.items())[:10]}
+    return compact
+
+
+def _cap(text: str) -> str:
+    if len(text) > _MAX_OUTPUT_CHARS:
+        return text[:_MAX_OUTPUT_CHARS] + f"\n...[truncated {len(text) - _MAX_OUTPUT_CHARS} chars]"
+    return text
+
+
 def format_tool_result_for_llm(tool_name: str, result, format: str = 'json') -> str:
     """
     Format tool result for LLM observation.
@@ -423,13 +487,13 @@ def format_tool_result_for_llm(tool_name: str, result, format: str = 'json') -> 
                 output_str = re.sub(r'/api/\S+', '[image delivered to user]', output_str)
                 output_str = re.sub(r'/home/\S+', '', output_str)
                 output_str = re.sub(r'gen_\w+\.png', '', output_str)
-            obs["output"] = relativize_local_paths(output_str)
+            obs["output"] = _cap(relativize_local_paths(output_str))
             # Don't pass metadata with URLs/paths to the LLM
             if result.metadata and tool_name not in ("generate_image", "generate_animation"):
-                obs["metadata"] = result.metadata
+                obs["metadata"] = _compact_metadata(result.metadata)
         else:
-            obs["error"] = result.error
-        return json.dumps(obs)
+            obs["error"] = _cap(str(result.error))
+        return json.dumps(obs, default=str)
 
     # Legacy XML format (kept for unified_chat_engine)
     if result.success:
@@ -441,9 +505,9 @@ def format_tool_result_for_llm(tool_name: str, result, format: str = 'json') -> 
             out_text = re.sub(r'/api/\S+', '[image delivered to user]', out_text)
             out_text = re.sub(r'/home/\S+', '', out_text)
             out_text = re.sub(r'gen_\w+\.png', '', out_text)
-        output += f"Output:\n{out_text}\n"
+        output += f"Output:\n{_cap(out_text)}\n"
         if result.metadata and tool_name not in ("generate_image", "generate_animation"):
-            output += f"\nMetadata: {result.metadata}\n"
+            output += f"\nMetadata: {_compact_metadata(result.metadata)}\n"
         output += "</observation>"
     else:
         output = f"<observation tool='{tool_name}'>\n"

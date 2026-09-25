@@ -141,7 +141,7 @@ def fake_gen(monkeypatch):
         lambda: gen,
     )
     monkeypatch.setattr(
-        "backend.api.batch_video_generation_api.preflight_video_model",
+        "backend.api.batch_video_generation_api.prepare_video_model",
         lambda model_id: (True, ""),
     )
     monkeypatch.setattr(
@@ -265,7 +265,7 @@ def test_retry_creates_new_batch(client, fake_gen):
 
 def test_preflight_failure_blocks_enqueue(client, monkeypatch, fake_gen):
     monkeypatch.setattr(
-        "backend.api.batch_video_generation_api.preflight_video_model",
+        "backend.api.batch_video_generation_api.prepare_video_model",
         lambda model_id: (False, "Wan requires ComfyUI. Start the ComfyUI plugin, then retry."),
     )
     resp = client.post(

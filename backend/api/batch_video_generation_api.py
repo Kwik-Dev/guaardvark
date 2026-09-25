@@ -28,7 +28,7 @@ from backend.services.video_model_registry import (
     VIDEO_MODEL_REGISTRY,
     DEFAULT_T2V_MODEL,
     DEFAULT_I2V_MODEL,
-    preflight_video_model,
+    prepare_video_model,
     classify_hf_download_error,
     model_capabilities,
     tier_defaults_for,
@@ -183,7 +183,7 @@ def generate_text_to_video_batch():
         model_id, resolve_err = _resolve_request_model(data, "t2v")
         if resolve_err:
             return error_response(resolve_err, 400)
-        ready, preflight_err = preflight_video_model(model_id)
+        ready, preflight_err = prepare_video_model(model_id)
         if not ready:
             return error_response(preflight_err, 400)
         # Per-prompt guides (audio or image anchors) on models that declare
@@ -280,7 +280,7 @@ def generate_image_to_video_batch():
         model_id, resolve_err = _resolve_request_model(data, "i2v")
         if resolve_err:
             return error_response(resolve_err, 400)
-        ready, preflight_err = preflight_video_model(model_id)
+        ready, preflight_err = prepare_video_model(model_id)
         if not ready:
             return error_response(preflight_err, 400)
         clip = _clip_params(data, model_id)

@@ -1,6 +1,8 @@
 import logging
 import os
 
+from typing import Optional
+
 from flask import current_app, has_app_context
 
 try:
@@ -128,6 +130,7 @@ ENV_VAR_MAP = {
     "media_stills_model": "GUAARDVARK_STILLS_MODEL",
     "media_cast_train_base": "GUAARDVARK_CAST_TRAIN_BASE",
     "media_max_quality_model": "GUAARDVARK_MAX_QUALITY_MODEL",
+    "confine_tool_paths": "GUAARDVARK_CONFINE_TOOL_PATHS",
 }
 
 _BOOL_TRUTHY = {"true", "1", "yes"}
@@ -223,3 +226,23 @@ def save_setting(key: str, value: str):
             db.session.rollback()
         except Exception:
             pass
+
+
+# Tools read this from worker threads that have no app context, so the value
+# is kept for the process: loaded at startup, updated when the setting is saved.
+_confine_tool_paths: Optional[bool] = None
+
+
+def get_confine_tool_paths() -> bool:
+    """True when file-reading tools (system_command, codegen) are limited to the
+    project folder and GUAARDVARK_ALLOWED_PATHS. Off by default."""
+    global _confine_tool_paths
+    if has_app_context() or _confine_tool_paths is None:
+        _confine_tool_paths = bool(get_setting("confine_tool_paths", default=False, cast=bool))
+    return _confine_tool_paths
+
+
+def set_confine_tool_paths(enabled: bool) -> None:
+    global _confine_tool_paths
+    save_setting("confine_tool_paths", "true" if enabled else "false")
+    _confine_tool_paths = bool(enabled)

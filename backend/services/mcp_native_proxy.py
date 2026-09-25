@@ -78,16 +78,12 @@ def _make_proxy_class(server: str, mcp_tool: Dict[str, Any]) -> type:
         description = mcp_description[:300]
 
         def execute(self, **kwargs: Any) -> ToolResult:
-            from backend.services.mcp_client_service import (
-                MCP_ENABLED,
-                get_mcp_service,
-                run_mcp_async,
-            )
+            from backend.services.mcp_client_service import MCP_ENABLED, get_mcp_service
             if not MCP_ENABLED:
                 return ToolResult(success=False, error="MCP is disabled")
             try:
                 service = get_mcp_service()
-                result = run_mcp_async(service.call_tool(_server, _mcp_name, kwargs))
+                result = service.call_tool(_server, _mcp_name, kwargs)
             except Exception as exc:
                 return ToolResult(
                     success=False,

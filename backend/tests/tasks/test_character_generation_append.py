@@ -34,6 +34,17 @@ class _FakeGate:
         yield
 
 
+@contextmanager
+def _fake_gpu_session(*a, **k):
+    yield
+
+
+def _fake_render(*, output_path, **k):
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path).write_bytes(b"\x89PNG\r\n\x1a\n")  # tiny stub
+    return output_path
+
+
 class _FakeImageGen:
     def __init__(self, *a, **k):
         pass
@@ -60,6 +71,13 @@ def _wire_mocks(monkeypatch, tmp_path, n_shots):
     monkeypatch.setattr("backend.services.job_operation_gate.get_gate", lambda: _FakeGate())
     monkeypatch.setattr(
         "backend.services.plugin_bridge.ensure_plugins_for_stage", lambda *a, **k: None)
+    # The product default renders through Diffusers inside gpu_session, which
+    # evicts Ollama and frees ComfyUI on the real card. Unmocked, this test
+    # unloaded the developer's models and asked for an 11 GB pipeline.
+    monkeypatch.setattr("backend.services.gpu_resource_policy.gpu_session", _fake_gpu_session)
+    monkeypatch.setattr(
+        "backend.services.offline_image_generator.get_image_generator", lambda *a, **k: object())
+    monkeypatch.setattr(cg, "_render_cast_still", _fake_render)
     # Redirect sample images into tmp so the test never touches repo data/.
     monkeypatch.setattr(cg, "_sample_output_dir",
                         lambda sid: Path(tmp_path) / str(sid))

@@ -35,6 +35,38 @@ def get_status():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@agent_control_bp.route("/runs", methods=["GET"])
+def list_task_runs():
+    """The agent's episodes, newest first: one row per screen task (no steps)."""
+    try:
+        from backend.models import AgentTaskRun
+        limit = max(1, min(int(request.args.get("limit", 20)), 200))
+        rows = (AgentTaskRun.query.order_by(AgentTaskRun.ended_at.desc())
+                .limit(limit).all())
+        return jsonify({"success": True, "runs": [r.to_dict() for r in rows]})
+    except Exception as e:
+        logger.error(f"Error listing task runs: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@agent_control_bp.route("/runs/<run_id>", methods=["GET"])
+def get_task_run(run_id):
+    """One episode with its steps in order."""
+    try:
+        from backend.models import db, AgentTaskRun, AgentTaskStep
+        run = db.session.get(AgentTaskRun, run_id)
+        if run is None:
+            return jsonify({"success": False, "error": "run not found"}), 404
+        steps = (AgentTaskStep.query.filter_by(run_id=run.id)
+                 .order_by(AgentTaskStep.iteration.asc(), AgentTaskStep.created_at.asc()).all())
+        payload = run.to_dict()
+        payload["steps"] = [s.to_dict() for s in steps]
+        return jsonify({"success": True, "run": payload})
+    except Exception as e:
+        logger.error(f"Error reading task run {run_id}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @agent_control_bp.route("/kill", methods=["POST"])
 def kill():
     """Emergency stop — immediately halt all agent operations."""
@@ -69,13 +101,14 @@ def execute_task():
 
         mouse_only = data.get("mouse_only", False)
         training_mode = data.get("training_mode", False)
-        # Servo correction loop for this task only (off | shadow | on); absent
-        # means the environment/reflex precedence decides.
+        # Servo correction loop for this task only (off | shadow | on | auto);
+        # absent means the environment/reflex precedence decides.
         correction_mode = data.get("correction_mode")
         if correction_mode is not None:
             correction_mode = str(correction_mode).strip().lower()
-            if correction_mode not in ("off", "shadow", "on"):
-                return jsonify({"success": False, "error": "correction_mode must be off, shadow or on"}), 400
+            if correction_mode not in ("off", "shadow", "on", "auto"):
+                return jsonify({"success": False,
+                                "error": "correction_mode must be off, shadow, on or auto"}), 400
 
         # Capture the Flask app so the worker thread can push an app context.
         # Without this, anything inside execute_task that touches db.session

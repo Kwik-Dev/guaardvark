@@ -53,9 +53,11 @@ DEFAULT_MODELS = [
     "qwen3-vl:8b",
 ]
 
-# Uniform box_2d-normalized-1000 convention (gemma4's working config) applied to
-# every candidate so the test is apples-to-apples. Models that use a different
-# convention will show high error → flagged as needing per-model calibration.
+# No coord_order here: the servo then resolves each model's measured convention
+# exactly as the agent does, so a score is the score the agent would get. A
+# hard-coded "yx" read every model in gemma4's order, and qwen3.6:27b, which
+# points within 2px, scored 118px with its axes swapped (2026-09-24). Pass
+# --coord-order to force one order across every model.
 #
 # disable_calibration defaults ON here so the bake-off measures the RAW eye and
 # gives the same answer on a box that happens to have a fit on disk as on one
@@ -69,7 +71,6 @@ BASE_VISION_CONFIG = {
     "offset_x": 0,
     "offset_y": 0,
     "native_pointing": True,
-    "coord_order": "yx",
     "source": "eye_bakeoff_uniform",
     "disable_calibration": True,
 }
@@ -81,6 +82,9 @@ MODE_OVERLAYS = {
     "pipeline":   {"disable_refine": False, "disable_calibration": True},
     "calibrated": {"disable_refine": True,  "disable_calibration": False},
     "full":       {"disable_refine": False, "disable_calibration": False},
+    # The anchor, then the correction loop applied, as a click with
+    # correction on would land. Scores the loop, not only the eye.
+    "corrected":  {"disable_refine": True,  "disable_calibration": True, "correction_mode": "on"},
 }
 DEFAULT_MODES = ["anchor", "pipeline"]
 
@@ -303,11 +307,15 @@ def score(rows: list, hit_radius: float) -> dict:
 def _servo_for(model: str, size, overlay: dict):
     from backend.utils.vision_analyzer import VisionAnalyzer
     from backend.services.servo_controller import ServoController
+    from backend.services.agent_control_service import _eye_accuracy_px
     analyzer = VisionAnalyzer()
     analyzer.default_model = model
     cfg = dict(BASE_VISION_CONFIG)
     cfg.update(overlay or {})
-    return ServoController(_FakeScreen(*size), analyzer, vision_config=cfg)
+    # The accuracy the agent's servo would be built with, so the correction
+    # loop sizes its search the same way here as in a live click.
+    return ServoController(_FakeScreen(*size), analyzer, vision_config=cfg,
+                           eye_accuracy_px=_eye_accuracy_px(model, *size))
 
 
 def sighted_models() -> list:
@@ -354,14 +362,62 @@ def eval_frames(model: str, size, frames: list, overlay: dict = None,
                             "reason": servo._last_failure_reason or "no_coords"})
                 rows.append(row)
                 continue
+            if (overlay or {}).get("correction_mode") == "on":
+                out = servo._correct_estimate(img, t["prompt"], coords, "bakeoff")
+                row["correction"] = {"estimate": list(coords), "stop": out.stop_reason,
+                                     "steps": len(out.steps), "ms": out.elapsed_ms,
+                                     "clamped": out.clamped}
+                coords = out.final
             ex, ey = coords[0] - t["cx"], coords[1] - t["cy"]
             row.update({"pred": list(coords), "err_x": ex, "err_y": ey,
                         "dist": round((ex * ex + ey * ey) ** 0.5, 1),
                         "parse_path": getattr(servo, "_last_parse_path", "")})
             rows.append(row)
     hr = hit_radius if hit_radius is not None else (sum(radii) / len(radii) if radii else 22)
+    vc = getattr(servo, "_vision_config", None) or {}
     return {"model": model, "targets": rows, "score": score(rows, hr),
-            "hit_radius_px": round(hr, 1), "seconds": round(time.time() - t0, 1)}
+            "hit_radius_px": round(hr, 1), "seconds": round(time.time() - t0, 1),
+            # What the servo actually read with, forced or resolved.
+            "coord_order": vc.get("coord_order"),
+            "style": vc.get("coord_style") or "google_box2d"}
+
+
+# The correction loop's own question, asked with the marker at known offsets:
+# (offset, the dx the eye should answer, the dy it should answer).
+JUDGE_CASES = [((60, 0), "left", "same"), ((-60, 0), "right", "same"),
+               ((0, 60), "same", "above"), ((0, -60), "same", "below"), ((0, 0), "same", "same")]
+
+
+def judge_frames(model: str, size, frames: list, max_frames: int = 1) -> dict:
+    """How well this eye judges where a target sits relative to a marker.
+
+    Pointing and judging are separate skills: gemma4:e4b misses dots by 50px
+    and answers this question 25 times out of 25, which is what makes the
+    correction loop worth running for it. Uses the servo's own probe
+    (_probe_relative) so the score is the loop's, not a paraphrase of it.
+    """
+    servo = _servo_for(model, size, {"disable_calibration": True})
+    n = usable = dx_ok = dy_ok = both = 0
+    times = []
+    for fr in frames[:max_frames]:
+        img = fr["image"] if isinstance(fr["image"], Image.Image) else Image.open(fr["image"])
+        img = img.convert("RGB")
+        for t in fr["targets"]:
+            for (ox, oy), want_dx, want_dy in JUDGE_CASES:
+                p = (t["cx"] + ox, t["cy"] + oy)
+                box = [p[0] - 100, p[1] - 100, p[0] + 100, p[1] + 100]
+                j, _raw, ms = servo._probe_relative(img, t["prompt"], p, box)
+                n += 1
+                times.append(ms)
+                if not j or not j.get("visible"):
+                    continue
+                usable += 1
+                dx_ok += j["dx"] == want_dx
+                dy_ok += j["dy"] == want_dy
+                both += j["dx"] == want_dx and j["dy"] == want_dy
+    return {"n": n, "usable": usable, "dx_right": dx_ok, "dy_right": dy_ok, "both_right": both,
+            "both_rate": round(both / n, 3) if n else None,
+            "ms_median": int(_st.median(times)) if times else None}
 
 
 def _print_axis(tag, s):
@@ -400,6 +456,9 @@ def main(argv: Optional[list] = None):
     ap.add_argument("--record", action="store_true",
                     help="write each anchor-mode score into the measurement store")
     ap.add_argument("--max-targets", type=int, default=12, help="for --best-dialect probing")
+    ap.add_argument("--judge", action="store_true",
+                    help="measure how well each model judges a marker's offset (the correction "
+                         "loop's question) on the first frame, instead of pointing")
     args = ap.parse_args(argv)
 
     if args.derive_truth:
@@ -427,6 +486,27 @@ def main(argv: Optional[list] = None):
         [m.strip() for m in args.models.split(",") if m.strip()]
     if args.all_vision:
         print(f"sighted models per Ollama: {', '.join(models)}")
+
+    if args.judge:
+        if not args.frames:
+            raise SystemExit("--judge needs --frames (a manifest with known target centres)")
+        size, frames = load_manifest(args.frames)
+        out = {}
+        for m in models:
+            j = judge_frames(m, size, frames)
+            out[m] = j
+            print(f"  {m:32s} both right {j['both_right']}/{j['n']}  dx {j['dx_right']}  "
+                  f"dy {j['dy_right']}  usable {j['usable']}  {j['ms_median']}ms")
+            if args.record:
+                from backend.services.servo_knowledge_store import record_measurement
+                record_measurement(m, size[0], size[1], "judge", dict(
+                    j, board=os.path.basename(os.path.dirname(os.path.abspath(args.frames))),
+                    measured_at=time.strftime("%Y-%m-%dT%H:%M:%S")))
+                print(f"  recorded judge for {m}")
+        if args.out:
+            with open(args.out, "w") as f:
+                json.dump(out, f, indent=2)
+        return
 
     if args.frames:
         size, frames = load_manifest(args.frames)
@@ -474,8 +554,6 @@ def main(argv: Optional[list] = None):
                 overlay["internal_width"] = args.grid
             r = eval_frames(m, size, frames, overlay, hit_radius)
             r["mode"] = mode
-            r["coord_order"] = overlay.get("coord_order", "(config)")
-            r["style"] = overlay.get("coord_style", "google_box2d")
             if args.record and mode == "anchor" and args.frames:
                 from backend.services.servo_knowledge_store import record_measurement
                 sc = r["score"]["clean"] if r["score"]["clean"].get("n") else r["score"]["all"]

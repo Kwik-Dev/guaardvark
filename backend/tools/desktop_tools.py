@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
@@ -21,8 +22,8 @@ class FileWatchTool(BaseTool):
         "path": ToolParameter(
             name="path",
             type="string",
-            required=True,
-            description="Path to file or directory to watch"
+            required=False,
+            description="Path to file or directory to watch (required when action='start')"
         ),
         "events": ToolParameter(
             name="events",
@@ -444,6 +445,20 @@ class GUITypeTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+def _normalize_hotkey(keys):
+    """Accept ['ctrl', 'c'], 'ctrl+c', 'ctrl, c' or ['ctrl+c'] (LLMs send all of these).
+
+    Unpacking a plain string used to press each *character* ('c','t','r','l',...).
+    """
+    if keys is None:
+        return []
+    items = [keys] if isinstance(keys, str) else list(keys)
+    out = []
+    for item in items:
+        out.extend(k.strip().lower() for k in re.split(r"[+,\s]+", str(item)) if k.strip())
+    return out
+
+
 class GUIHotkeyTool(BaseTool):
     
     name = "gui_hotkey"
@@ -464,7 +479,7 @@ class GUIHotkeyTool(BaseTool):
                 error="GUI automation disabled. Set GUAARDVARK_GUI_AUTOMATION=true"
             )
         
-        keys = kwargs.get("keys")
+        keys = _normalize_hotkey(kwargs.get("keys"))
         
         if not keys:
             return ToolResult(success=False, error="keys list is required")

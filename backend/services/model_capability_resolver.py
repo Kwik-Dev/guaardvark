@@ -35,7 +35,14 @@ from backend.services.model_capability_data import (
     COORD_STYLES,
     DEFAULT_STYLE,
     EXTERNAL_MODEL_ROWS,
+    EYE_BORROW_EYE_AT_MOST_PX,
+    EYE_BORROW_NATIVE_WORSE_THAN_PX,
+    EYE_JUDGE_MIN_BOTH_RATE,
     FAMILY_COORD_DEFAULTS,
+    SHIPPED_ACCURACY_SCREEN,
+    SHIPPED_ACCURACY_SOURCE,
+    SHIPPED_EYE_ACCURACY,
+    SHIPPED_EYE_JUDGE,
     name_looks_vision,
 )
 
@@ -166,13 +173,121 @@ def _load_probe_store() -> dict:
 
 
 def _measurements(tag: str, screen: Optional[Tuple[int, int]]) -> Dict[str, Any]:
-    """Thin seam over the calibration store so tests can patch one name."""
+    """Thin seam over the calibration store so tests can patch one name.
+
+    A model this machine never measured falls back to the accuracy shipped in
+    model_capability_data, when the installed build is the one measured.
+    """
     try:
         from backend.services.servo_knowledge_store import load_model_measurements
-        return load_model_measurements(tag, *(screen or (None, None)))
+        m = load_model_measurements(tag, *(screen or (None, None)))
     except Exception as e:  # noqa: BLE001
         logger.debug("measurement store unavailable for %r: %s", tag, e)
-        return {"screen": None, "coords": None, "accuracy": None}
+        m = {"screen": None, "coords": None, "accuracy": None}
+    if not m.get("accuracy"):
+        shipped = _shipped_accuracy(tag)
+        if shipped:
+            m = dict(m, accuracy=shipped, screen=SHIPPED_ACCURACY_SCREEN)
+    return m
+
+
+_digest_cache: Dict[str, Any] = {"at": 0.0, "digests": {}}
+
+
+def _installed_digests() -> Dict[str, str]:
+    """tag -> Ollama manifest digest, refreshed at most once a minute."""
+    now = time.time()
+    with _lock:
+        if now - _digest_cache["at"] < _CACHE_TTL:
+            return _digest_cache["digests"]
+    digests: Dict[str, str] = {}
+    try:
+        import requests
+        from backend.utils.ollama_resource_manager import get_ollama_base_url
+        r = requests.get(f"{get_ollama_base_url()}/api/tags", timeout=5)
+        if r.ok:
+            digests = {m["name"]: m.get("digest", "") for m in r.json().get("models", [])}
+    except Exception:
+        pass
+    with _lock:
+        _digest_cache.update(at=now, digests=digests)
+    return digests
+
+
+def _shipped_accuracy(tag: str) -> Optional[Dict[str, Any]]:
+    """The shipped accuracy row for this tag, only if the installed build matches."""
+    row = SHIPPED_EYE_ACCURACY.get(tag or "")
+    if not row:
+        return None
+    if not str(_installed_digests().get(tag, "")).startswith(row["digest"]):
+        return None
+    return dict(row, mode="anchor", source=SHIPPED_ACCURACY_SOURCE, shipped=True)
+
+
+def accuracy_px(tag: str, screen: Optional[Tuple[int, int]] = None) -> Optional[float]:
+    """Median pointing error for this model, measured here or shipped; None if unknown."""
+    px = (_measurements(tag, screen).get("accuracy") or {}).get("median_px")
+    return float(px) if px is not None else None
+
+
+def judge_rate(tag: str, screen: Optional[Tuple[int, int]] = None) -> Optional[float]:
+    """How often this eye judges a marker's offset right on both axes:
+    measured here, else shipped for the installed build, else None."""
+    local = (_measurements(tag, screen).get("judge") or {}).get("both_rate")
+    if local is not None:
+        return float(local)
+    row = SHIPPED_EYE_JUDGE.get(tag or "")
+    if row and str(_installed_digests().get(tag, "")).startswith(row["digest"]):
+        return float(row["both_rate"])
+    return None
+
+
+def judges_well(tag: str, screen: Optional[Tuple[int, int]] = None) -> Optional[bool]:
+    """True/False when the eye's judging is measured, None when it is not."""
+    rate = judge_rate(tag, screen)
+    return None if rate is None else rate >= EYE_JUDGE_MIN_BOTH_RATE
+
+
+def better_eye_for(tag: str, screen: Optional[Tuple[int, int]] = None) -> Optional[Dict[str, Any]]:
+    """An installed eye to lend a model that can see but cannot point.
+
+    None unless the model's measured error exceeds EYE_BORROW_NATIVE_WORSE_THAN_PX
+    and an installed model with a known convention measures at most
+    EYE_BORROW_EYE_AT_MOST_PX and at most half the model's own error. An eye
+    that will not fit beside the model in VRAM is never lent for this: the
+    model already sees, so the fallback is only worse aim, not blindness.
+    """
+    if os.environ.get("GUAARDVARK_EYE_BORROW", "1").strip() == "0":
+        return None
+    own = accuracy_px(tag, screen)
+    if own is None or own <= EYE_BORROW_NATIVE_WORSE_THAN_PX:
+        return None
+    candidates = [m for m in _installed()
+                  if m != tag and sees_natively(m) and coords_for(m, screen).order]
+    ranked = [r for r in rank_eyes(candidates, screen)
+              if r["fits"] is not False and r["accuracy_px"] is not None
+              and r["accuracy_px"] <= EYE_BORROW_EYE_AT_MOST_PX
+              and r["accuracy_px"] <= own / 2
+              and coords_for(r["tag"], screen).confidence >= MEASURED_CONFIDENCE]
+    if not ranked:
+        return None
+    # Accuracy in bands of half the bar, then memory, then size. Within a band
+    # another pixel buys nothing and a smaller eye buys speed: gemma4:12b
+    # answers in about a second, qwen3.6:27b in six, and both hit every dot.
+    # Across bands the hits differ (qwen3.5:9b at 14px hit 22 of 30 where
+    # gemma4:12b hit 30), so accuracy leads. Sitting beside the model in VRAM
+    # saves a model swap per step.
+    budget = _vram_budget_mb()
+    brain_mb = _size_mb(tag)
+    band = EYE_BORROW_EYE_AT_MOST_PX / 2
+
+    def _beside(r):
+        return budget is None or (r["size_mb"] + brain_mb) * 1.15 <= budget
+
+    ranked.sort(key=lambda r: (int(r["accuracy_px"] // band), 0 if _beside(r) else 1,
+                               r["size_mb"]))
+    best = ranked[0]
+    return {"tag": best["tag"], "eye_px": best["accuracy_px"], "own_px": own}
 
 
 def _conv_from_record(rec: Dict[str, Any], source: str) -> CoordConvention:

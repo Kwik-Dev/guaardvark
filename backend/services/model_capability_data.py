@@ -153,6 +153,79 @@ FAMILY_COORD_DEFAULTS = {
 # the correct default for something we know nothing about.
 EXTERNAL_MODEL_ROWS: dict = {}
 
+# ---------------------------------------------------------------------------
+# Pointing accuracy that ships with the code
+# ---------------------------------------------------------------------------
+# A fresh clone has no measurement store, so every eye was "unmeasured" and a
+# model that cannot point was trusted to. The stock chat model, gemma4:e2b,
+# lands clicks a median 255px from the target. These rows let a fresh clone
+# rank eyes on evidence. A local measurement for the same model always wins.
+#
+# Each row holds only for the exact build it was measured on: `digest` is the
+# prefix of the Ollama manifest digest from /api/tags, and a tag whose installed
+# digest differs (re-pulled, re-quantised, a Modelfile variant) is treated as
+# unmeasured rather than assumed to point the same.
+SHIPPED_ACCURACY_SCREEN = "1000x1000"
+SHIPPED_ACCURACY_SOURCE = (
+    "eye_bakeoff --mode anchor, 2026-09-24: 30 targets on two 1000x1000 vision "
+    "trainer boards (six frames of five labelled dots), each model read in its own "
+    "axis order, calibration off. Median distance from the dot centre; a hit is "
+    "within the dot's 26px radius."
+)
+SHIPPED_EYE_ACCURACY = {
+    "gemma4:e2b": {"digest": "7fbdbf8f5e45", "median_px": 255.0, "median_x": 34.0,
+                   "median_y": 254.0, "hit_rate": 0.07, "n": 30},
+    "gemma4:e4b": {"digest": "c6eb396dbd59", "median_px": 48.8, "median_x": 23.0,
+                   "median_y": 38.0, "hit_rate": 0.13, "n": 30},
+    "gemma4:latest": {"digest": "c6eb396dbd59", "median_px": 48.8, "median_x": 23.0,
+                      "median_y": 38.0, "hit_rate": 0.13, "n": 30},
+    "gemma4:12b": {"digest": "4eb23ef187e2", "median_px": 5.8, "median_x": 3.0,
+                   "median_y": 4.0, "hit_rate": 1.0, "n": 30},
+    "qwen3.5:9b": {"digest": "6488c96fa5fa", "median_px": 14.4, "median_x": 7.0,
+                   "median_y": 8.0, "hit_rate": 0.73, "n": 30},
+    "qwen3.6:27b-q4_K_M": {"digest": "3a40c32f1450", "median_px": 2.2, "median_x": 1.0,
+                           "median_y": 1.0, "hit_rate": 0.93, "n": 30},
+}
+
+# How often each eye answers the correction loop's question right on both axes
+# (a red ring 60px left/right/above/below of a labelled dot, or on it; 25
+# probes on one trainer frame; eye_bakeoff --judge, 2026-09-24). Pointing and
+# judging are separate skills: gemma4:e4b misses dots by ~50px yet judges 25
+# of 25, which is why the loop can walk its clicks onto a target. Same
+# digest binding as the accuracy rows.
+SHIPPED_JUDGE_SOURCE = (
+    "eye_bakeoff --judge, 2026-09-24: 25 probes on one 1000x1000 vision trainer "
+    "frame (five labelled dots x five marker offsets), both axes right / probes."
+)
+SHIPPED_EYE_JUDGE = {
+    "gemma4:e2b": {"digest": "7fbdbf8f5e45", "both_rate": 0.76, "n": 25, "ms_median": 174},
+    "gemma4:e4b": {"digest": "c6eb396dbd59", "both_rate": 1.0, "n": 25, "ms_median": 259},
+    "gemma4:latest": {"digest": "c6eb396dbd59", "both_rate": 1.0, "n": 25, "ms_median": 259},
+    "gemma4:12b": {"digest": "4eb23ef187e2", "both_rate": 1.0, "n": 25, "ms_median": 461},
+    "qwen3.5:9b": {"digest": "6488c96fa5fa", "both_rate": 0.96, "n": 25, "ms_median": 492},
+    "qwen3.6:27b-q4_K_M": {"digest": "3a40c32f1450", "both_rate": 1.0, "n": 25, "ms_median": 2956},
+    "minicpm-v4.6:latest": {"digest": "e95583acac77", "both_rate": 0.2, "n": 25, "ms_median": 5137},
+    "moondream:latest": {"digest": "55fc3abd3867", "both_rate": 0.0, "n": 25, "ms_median": 1817},
+    "granite3.2-vision:latest": {"digest": "3be41a661804", "both_rate": 0.0, "n": 25, "ms_median": 553},
+    "llava-phi3:latest": {"digest": "c7edd7b87593", "both_rate": 0.0, "n": 25, "ms_median": 313},
+}
+
+# The correction loop runs only for an eye measured to judge at least this
+# well; an unmeasured eye still runs it. At 0.76 gemma4:e2b's loop left its
+# clicks where they were (median 237px before and after, 30 targets); at
+# 0.96-1.0 the loop roughly doubled hits for gemma4:e4b.
+EYE_JUDGE_MIN_BOTH_RATE = 0.9
+
+# When a model that can see points this badly, and an installed model points
+# well, the user's model keeps deciding and the good pointer does the looking
+# (split mode, the path a blind model already takes). Measured on the same
+# boards: at 49px gemma4:e4b hit 4 of 30 dots, at 14px qwen3.5:9b hit 22, so
+# 40px is where a model stops being able to press a typical control. 24px is
+# the vision trainer's dot diameter, the bar an eye must clear to be lent.
+# GUAARDVARK_EYE_BORROW=0 keeps every sighted model looking for itself.
+EYE_BORROW_NATIVE_WORSE_THAN_PX = 40.0
+EYE_BORROW_EYE_AT_MOST_PX = 24.0
+
 
 def name_looks_vision(tag: str) -> bool:
     """Degraded-mode guess. See VISION_NAME_FALLBACK for why this is last."""

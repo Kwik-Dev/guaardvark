@@ -37,7 +37,7 @@ Interactive elements on this page:
 
 WORLD_OBSERVED: 3 elements (fixture)
 
-Done:
+Done (steps: 3, click attempts: 1):
   click: Firefox icon [OK]
   scroll:  [FAIL]
   scroll:  [FAIL]
