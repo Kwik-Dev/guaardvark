@@ -11,8 +11,47 @@ on:
     branches: [main, cloud-plus]
 
 jobs:
+  # A documentation-only change cannot break code, but it CAN break the portability
+  # gate — which is why the gate's own job below is deliberately NOT gated here.
+  # Without this, every docs-only pull request spent two macOS runners proving that
+  # editing a .md file did not break them.
+  changes:
+    name: Detect non-documentation changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The base commit is not in a depth-1 checkout, and the diff against it is
+          # the whole point of this job.
+          fetch-depth: 0
+
+      - name: Did any file outside the documentation set change?
+        id: diff
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            range="${base}...HEAD"
+          else
+            # New branch, force-push, or a base this clone does not have.
+            range="HEAD~1...HEAD"
+          fi
+          echo "Comparing $range"
+          git diff --name-only "$range" || true
+          # Documentation is *.md and docs/ — nothing else. A workflow, a config file
+          # or an extension-less file like LICENSE counts as code, so those pulls run
+          # the full suite rather than being waved through.
+          if git diff --name-only "$range" | grep -qvE '\.md$|^docs/'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   cli:
     name: CLI Tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -30,6 +69,8 @@ jobs:
 
   frontend:
     name: Frontend Lint & Build
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -105,6 +146,8 @@ jobs:
 
   macos:
     name: macOS (Apple Silicon) install + platform smoke
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     timeout-minutes: 40
 
@@ -176,6 +219,8 @@ jobs:
 
   macos-boot:
     name: macOS (Apple Silicon) boot
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     timeout-minutes: 90
 
@@ -290,6 +335,8 @@ jobs:
 
   backend-tests:
     name: Backend Tests (CPU smoke)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
