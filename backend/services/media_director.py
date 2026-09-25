@@ -45,6 +45,62 @@ DEFAULT_DIRECTOR_MODEL = DIRECTOR_MODEL
 # Batching for large N (same rationale).
 DIRECTOR_BATCH_SIZE = 12  # Slightly smaller for image plans (richer per-shot often)
 
+
+# Issue #2: every local director call here wakes the chat model (16 GB on a 48 GB Mac)
+# in the SAME request that then needs the offline image family's 21 GB, so the RAM gate
+# refuses the very render it just made impossible. With cloud consent the rewrite stops
+# costing the render its budget. The consent contract is identical to the other routed
+# call sites (music_prompt_rewriter, character_bible_from_refs,
+# music_video_director._director_chat, production_swarm): master switch AND an active
+# OpenAI-compatible provider — a configured GUAARDVARK_OPENAI_BASE_URL alone is
+# capability, not consent.
+def _cloud_director_chat(
+    messages: List[Dict[str, Any]],
+    *,
+    temperature: float = 0.2,
+    num_predict: int = 2000,
+) -> Optional[str]:
+    """One director chat call on the consented cloud provider; None to stay local.
+
+    Returns raw content so each caller keeps its own parser (the enrich contract returns
+    {"prompts": [...]}, the storyboard adds "treatment", the edit rewrite "instruction").
+
+    The consent read sits inside ``app_context_if_needed()`` because this module is
+    reached from ``BatchImageGenerator._queue_worker`` — a bare thread with no app
+    context, where the gate's DB read fails and reports "no consent" silently. Without
+    that push this branch would never fire on the batch path it exists to fix.
+    """
+    model = None
+    try:
+        from backend.services import llm_provider
+        with llm_provider.app_context_if_needed():
+            if not llm_provider.is_openai_active():
+                return None
+            model = llm_provider.get_openai_model()
+        from backend.services import openai_provider
+        resp = openai_provider.chat(
+            model=model,
+            messages=messages,
+            stream=False,
+            options={
+                "temperature": temperature,
+                # Reasoning models (deepseek-v4-flash:cloud) spend tokens before emitting
+                # the JSON, so a small budget returns empty content — see
+                # character_bible_from_refs for the same measurement.
+                "num_predict": int(num_predict),
+                "response_format": {"type": "json_object"},
+            },
+        )
+        content = ((resp or {}).get("message") or {}).get("content") or ""
+        if content.strip():
+            log.info("media_director: cloud rewrite via %s", model)
+            return content
+        log.warning("media_director: cloud rewrite (%s) returned empty content", model)
+    except Exception as e:  # noqa: BLE001 — cloud failure falls back to the local chain
+        log.warning("media_director: cloud rewrite (%s) failed: %s; using local Ollama", model, e)
+    return None
+
+
 # Image "storyboard" contract: one concept -> N connected visual prompts.
 _SYSTEM_STORYBOARD_IMAGE = """You are a visual director for still image generation.
 Given ONE high-level concept and N, produce N distinct but visually coherent image prompts that feel like a series or storyboard.
@@ -239,6 +295,23 @@ def enhance_prompts(
         opts["num_predict"] = max(int(opts.get("num_predict", 0)), min(4096, 320 * n + 256))
     else:
         system = _SYSTEM_ENHANCE_IMAGE
+    # Cloud first when the operator consented (issue #2 — see _cloud_director_chat).
+    _cloud = _cloud_director_chat(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        num_predict=int(opts.get("num_predict") or 2000),
+    )
+    if _cloud:
+        out = _parse_image_prompts(_cloud, n)
+        if len(out) == n:
+            log.info("media_director.enhance_prompts: %d prompt(s) rewritten by cloud provider", n)
+            return [p.strip() for p in out]
+        log.warning(
+            "media_director.enhance_prompts: cloud parsed %d/%d prompts; using the local chain",
+            len(out), n,
+        )
     # The active chat model goes first; a model that errors or hands back the wrong
     # number of prompts is skipped for the next family on the ladder (gemma, qwen, ...).
     for resolved in _director_candidates(model or DEFAULT_DIRECTOR_MODEL)[:3]:
@@ -292,6 +365,23 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
         log.info("media_director: verbatim prompts ON — using edit instruction as-is (no Kontext rewrite)")
         return instruction
     resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)
+    # Cloud first when the operator consented (issue #2 — see _cloud_director_chat).
+    try:
+        import json as _cjson
+        _cloud = _cloud_director_chat(
+            [
+                {"role": "system", "content": _SYSTEM_REFINE_EDIT},
+                {"role": "user", "content": f"User edit request: {instr}"},
+            ],
+            num_predict=int(_options(1, sampling).get("num_predict") or 512),
+        )
+        if _cloud:
+            _refined = (_cjson.loads(_cloud).get("instruction") or "").strip()
+            if _refined:
+                return _refined
+            log.warning("media_director.refine_edit_instruction (cloud) returned empty; using local")
+    except Exception as e:  # noqa: BLE001 — parse/route failure falls through to local
+        log.warning("media_director.refine_edit_instruction (cloud) unusable (%s); using local", e)
     try:
         import ollama
         from backend.utils.ollama_resource_manager import think_payload
@@ -339,6 +429,26 @@ def storyboard_from_concept(
         f"CONCEPT: {concept}\nN={n}\nSTYLE: {style or '(none)'}{style_c}{guidance}\n\n"
         "TASK: Return ONLY the JSON with optional 'treatment' and exactly N 'prompts'."
     )
+    # Cloud first when the operator consented (issue #2 — see _cloud_director_chat).
+    _cloud = _cloud_director_chat(
+        [
+            {"role": "system", "content": _SYSTEM_STORYBOARD_IMAGE},
+            {"role": "user", "content": user},
+        ],
+        num_predict=int(_options(n, sampling).get("num_predict") or 2000),
+    )
+    if _cloud:
+        data = _parse_storyboard_output(_cloud, n)
+        prompts = data.get("prompts") or []
+        if len(prompts) != n:
+            prompts = _ensure_image_distinct(prompts or [], concept, n, style)
+        if prompts:
+            log.info(
+                "media_director.storyboard_from_concept: %d prompt(s) via cloud provider",
+                len(prompts),
+            )
+            return {"treatment": data.get("treatment"), "prompts": prompts[:n]}
+        log.warning("media_director.storyboard_from_concept: cloud returned no prompts; using local")
     try:
         # Use a direct chat wrapper for storyboard (rich)
         import ollama

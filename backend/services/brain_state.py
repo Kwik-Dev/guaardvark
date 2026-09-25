@@ -388,7 +388,14 @@ class BrainState:
         # [LLM-Init] step 5. Without this gate, Ollama would still load the
         # model into VRAM at boot even with the plugin toggled off, because
         # this warmup runs independently of [LLM-Init].
-        if self.health.llm_available and self._ollama_user_enabled():
+        #
+        # Also skipped when a cloud provider is the active chat model: that is a
+        # local load with nothing to serve (issue #2).
+        if self.health.llm_available and self._cloud_chat_active():
+            self._skip_warmup(
+                "a cloud provider is the active chat model (no local model to load)."
+            )
+        elif self.health.llm_available and self._ollama_user_enabled():
             self._start_warmup()
         elif self.health.llm_available:
             logger.info(
@@ -659,6 +666,32 @@ class BrainState:
             pass
         return True
 
+    @staticmethod
+    def _cloud_chat_active() -> bool:
+        """True when a consented cloud provider is the active chat model.
+
+        The warm-up below is a LOCAL Ollama call by construction: ``self.llm`` comes from
+        ``get_default_llm()``, which is deliberately local-only, so with cloud chat active
+        it would load the local model anyway. On a 48 GB Mac that resident is ~16 GB —
+        enough on its own to make the offline image family's 21 GB unadmittable in the
+        same request (issue #2). Nothing needs warming for a cloud call.
+
+        Unknown consent keeps today's behaviour (warm locally) rather than silently
+        turning the warm-up off.
+        """
+        try:
+            from backend.services import llm_provider
+            with llm_provider.app_context_if_needed():
+                return bool(llm_provider.cloud_active())
+        except Exception as e:  # noqa: BLE001 - never let provider logic break init
+            logger.debug("BrainState: cloud consent check failed (%s); warming locally", e)
+            return False
+
+    def _skip_warmup(self, reason: str) -> None:
+        """Mark the brain ready without loading a local model, and record why."""
+        logger.info("BrainState: skipping warm-up — %s", reason)
+        self.health.warm_up_status = WarmUpStatus.READY
+
     def _start_warmup(self):
         """Send a throwaway prompt to force model into VRAM."""
         self.health.warm_up_status = WarmUpStatus.WARMING
@@ -742,8 +775,12 @@ class BrainState:
         except Exception as e:
             logger.error(f"Reflex refresh failed: {e}")
 
-        # Warm up new model (respect Ollama plugin toggle)
-        if self.health.llm_available and self._ollama_user_enabled():
+        # Warm up new model (respect Ollama plugin toggle / cloud chat provider)
+        if self.health.llm_available and self._cloud_chat_active():
+            self._skip_warmup(
+                "a cloud provider is the active chat model (no local model to load)."
+            )
+        elif self.health.llm_available and self._ollama_user_enabled():
             self._start_warmup()
         elif self.health.llm_available:
             self.health.warm_up_status = WarmUpStatus.READY
