@@ -94,9 +94,15 @@ def _default_ollama_llm(*, system: str, user: str, model: str = "gemma4:e4b") ->
     # only capability; falling back to the local Ollama model otherwise.
     try:
         from backend.services import llm_provider, openai_provider
-        if llm_provider.is_openai_active():
+        # Celery worker thread: the DB-backed consent read fails closed to LOCAL without an
+        # app context (see llm_provider.app_context_if_needed), which silently disabled the
+        # cloud route for every Film Crew agent.
+        with llm_provider.app_context_if_needed():
+            _cloud_active = llm_provider.is_openai_active()
+            _cloud_model = llm_provider.get_openai_model() if _cloud_active else ""
+        if _cloud_active:
             resp = openai_provider.chat(
-                model=llm_provider.get_openai_model(),
+                model=_cloud_model,
                 messages=messages,
                 stream=False,
             )

@@ -420,8 +420,14 @@ def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int
     # ── OpenAI-compatible provider (only with explicit cloud consent) ──
     try:
         from backend.services import llm_provider, openai_provider
-        if llm_provider.is_openai_active():
-            resp = openai_provider.chat(model=llm_provider.get_openai_model(), messages=messages, stream=False)
+        # The consent read is DB-backed and fails closed to LOCAL when there is no app
+        # context (see llm_provider.app_context_if_needed). Music-video work runs on
+        # Celery worker threads, so without this the cloud branch below never fired.
+        with llm_provider.app_context_if_needed():
+            _cloud_active = llm_provider.is_openai_active()
+            _cloud_model = llm_provider.get_openai_model() if _cloud_active else ""
+        if _cloud_active:
+            resp = openai_provider.chat(model=_cloud_model, messages=messages, stream=False)
             content = (resp.get("message", {}) or {}).get("content", "") or ""
             if content.strip():
                 return _parse_full_director_output(content, batch_len), content

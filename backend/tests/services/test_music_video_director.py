@@ -28,6 +28,18 @@ def _stub_model_list(monkeypatch):
     # Keep _resolve_model hermetic — never hit the real ollama daemon in unit tests.
     import ollama
     monkeypatch.setattr(ollama, "list", lambda: {"models": [_OllamaModelObj("gemma4:e4b")]})
+    # These tests exercise the LOCAL director contract (see _fake_chat's `think is False`),
+    # and a unit test must never reach a network endpoint. Consent is whatever the operator
+    # stored in the DB, and _director_chat now honours it (issue #2): without this stub the
+    # cloud branch fires and makes real HTTP calls to GUAARDVARK_OPENAI_BASE_URL. They used
+    # to pass only because the consent read failed closed to LOCAL off the request path.
+    from backend.services import llm_provider
+    monkeypatch.setattr(llm_provider, "is_openai_active", lambda: False)
+    # Consent is forced local above, so there is nothing to read from the DB — skip the
+    # context push too, which would otherwise import backend.app (boots the whole app)
+    # just to be told the same thing.
+    from contextlib import nullcontext
+    monkeypatch.setattr(llm_provider, "app_context_if_needed", nullcontext)
 
 
 def _plan(n):
