@@ -296,11 +296,11 @@ Two environment settings decide whether GPU work can start on a Mac; both are do
 
 ```ini
 # Share one model tree with ComfyUI Desktop instead of downloading a second copy.
-# Must be an ABSOLUTE path: the value is read straight from the environment and is
-# never passed through expanduser, so `~/ComfyUI-Shared` does not resolve. The
-# model registry AND the ComfyUI downloader read <dir>/models, so models you
-# already have show up as installed instead of as "missing".
-GUAARDVARK_COMFYUI_DIR=/path/to/ComfyUI-Shared
+# Absolute, or a ~/ path — the value is passed through os.path.expanduser, so the
+# ~/ComfyUI-Shared form the Mac docs use does resolve. The model registry AND the
+# ComfyUI downloader read <dir>/models, so models you already have show up as
+# installed instead of as "missing".
+GUAARDVARK_COMFYUI_DIR=~/ComfyUI-Shared
 
 # Apple Silicon: route Z-Image through ComfyUI instead of the offline path.
 GUAARDVARK_ZIMAGE_USE_COMFYUI=1

@@ -8,6 +8,7 @@ answering later joins the persisted running set, so the next boot knows.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -142,6 +143,38 @@ def test_a_missing_shared_home_falls_back_to_the_plugin_tree(tmp_path):
     start, reason = should_start_comfyui(
         root, environ={"GUAARDVARK_COMFYUI_DIR": str(tmp_path / "nope")}, probe=_free)
     assert start is True and "video models are installed" in reason
+
+
+# ── the setting itself (backend/config.py) ───────────────────────────────
+# MACOS.md, GUAARDVARK_GUIDE.md, GENERATION_DIAGRAM.md and MUSIC_VIDEO_GUIDE.md
+# all document this as ~/ComfyUI-Shared. config.py reads the var once at import,
+# so this is a subprocess: reloading config in-session would hand a second copy
+# of the module to every test that runs after this one.
+
+def test_comfyui_dir_expands_a_tilde():
+    out = subprocess.run(
+        [sys.executable, "-c", "from backend import config; print(config.COMFYUI_DIR)"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "GUAARDVARK_ROOT": str(ROOT),
+             "GUAARDVARK_COMFYUI_DIR": "~/ComfyUI-Shared"},
+    )
+    assert out.stdout.strip() == str(Path.home() / "ComfyUI-Shared")
+
+
+def test_comfyui_dir_leaves_an_absolute_path_alone():
+    out = subprocess.run(
+        [sys.executable, "-c", "from backend import config; print(config.COMFYUI_DIR)"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "GUAARDVARK_ROOT": str(ROOT),
+             "GUAARDVARK_COMFYUI_DIR": "/srv/comfyui-shared"},
+    )
+    assert out.stdout.strip() == "/srv/comfyui-shared"
 
 
 def test_not_running_before_and_no_auto_start_stays_down(tmp_path):

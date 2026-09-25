@@ -77,7 +77,14 @@ def _comfyui_default_url() -> str:
     return "http://localhost:8188"
 
 COMFYUI_URL = os.environ.get("GUAARDVARK_COMFYUI_URL") or _comfyui_default_url()
-COMFYUI_DIR = os.environ.get("GUAARDVARK_COMFYUI_DIR", os.path.join(GUAARDVARK_ROOT, "plugins", "comfyui", "ComfyUI"))
+# expanduser: docs/MACOS.md, docs/GUAARDVARK_GUIDE.md, docs/GENERATION_DIAGRAM.md and
+# docs/MUSIC_VIDEO_GUIDE.md all document this as ~/ComfyUI-Shared, and a literal
+# "~" that never resolves silently falls back to the plugin tree — which reads as
+# "the models are missing" when they are sitting in the shared home. Absolute
+# paths are unaffected.
+COMFYUI_DIR = os.path.expanduser(
+    os.environ.get("GUAARDVARK_COMFYUI_DIR", os.path.join(GUAARDVARK_ROOT, "plugins", "comfyui", "ComfyUI"))
+)
 COMFYUI_VENV = os.environ.get("GUAARDVARK_COMFYUI_VENV", os.path.join(GUAARDVARK_ROOT, "backend", "venv"))
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", os.path.join(OUTPUT_DIR, "video"))
 VIDEO_GENERATION_BACKEND = os.environ.get("GUAARDVARK_VIDEO_BACKEND", "auto")  # "comfyui" | "offline" | "auto"
