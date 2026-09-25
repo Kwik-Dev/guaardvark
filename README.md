@@ -43,6 +43,15 @@ https://github.com/user-attachments/assets/c6d9d18b-cfff-4ae2-8220-dc7f329fee5d
 > the master cloud switch on and pick a provider — Mistral, or any OpenAI-compatible endpoint set with
 > `GUAARDVARK_OPENAI_BASE_URL` — in which case chat is served by that provider and nothing else leaves the box.
 > A configured endpoint alone is never consent: the switch and the provider selection both have to say yes.
+>
+> **Staying current with upstream.** `cloud-plus` does not track upstream by itself — a rebase pulls from the
+> configured target and never fetches upstream — so upstream's changes arrive only when they are merged in.
+> The routine is: mirror `upstream/main` onto `main` (`git fetch upstream`, then
+> `git update-ref refs/heads/main upstream/main && git push origin upstream/main:refs/heads/main`), merge `main`
+> into `cloud-plus`, then rebase the applied branches onto the updated target. Most upstream commits merge
+> cleanly; conflicts come back only where upstream touches the divergence — the cloud-provider files it
+> deleted. (If you maintain `cloud-plus` with GitButler, note that changing its target branch requires every
+> branch unapplied; the GitButler app can do that, the CLI refuses.)
 
 **The self-hosted AI studio.** Coding agents and 20-agent swarms in isolated git worktrees, screen agents with their own real desktop, self-tuning RAG, continuous voice chat — and a full media pipeline: video, image, full-song music, neural voice. One install, one GPU, everything on your machine. Your machine. Your data. Your rules.
 
