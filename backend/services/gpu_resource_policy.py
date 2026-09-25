@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Iterator, Optional
@@ -75,6 +76,100 @@ def free_comfyui_vram(*, timeout: float = 15.0) -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("comfyui /free failed (non-fatal): %s", e)
         return False
+
+
+# --- ComfyUI idle model unload --------------------------------------------------
+
+# ComfyUI keeps whatever it just rendered resident. On a Mac there is no separate
+# VRAM to offload to — ``--disable-smart-memory`` moves weights within the SAME
+# unified memory — so a 24 GB Z-Image/FLUX stays held after the render, and the
+# RAM side of admission can then refuse the NEXT job over memory the last one left
+# behind. /free is the only thing that returns it, and calling it per render is
+# the wrong shape: a 10-image batch would unload and reload the weights between
+# every single image. So unload on IDLE — each render re-arms the timer, and it
+# only fires once nothing is left in ComfyUI's queue.
+#
+# Independent of who launched ComfyUI: a Comfy Desktop install on the same port
+# never received the plugin's ``--disable-smart-memory --cache-none``, and this is
+# the only reclaim that reaches it. (Neither flag would help on unified memory
+# anyway — there is no cheaper pool to offload into.)
+_COMFY_FREE_DELAY_S = 120.0
+_comfy_free_timer = None
+_comfy_free_lock = threading.Lock()
+
+
+def comfyui_model_free_delay_s() -> float:
+    """Idle seconds before ComfyUI's models are unloaded; 0 disables the unload.
+
+    Override with ``GUAARDVARK_COMFYUI_MODEL_FREE_DELAY_S``. Long enough that the
+    gap between images in a batch does not thrash the weights, short enough that
+    the memory is back while the operator is still at the machine. Distinct from
+    ``GUAARDVARK_COMFYUI_IDLE_TIMEOUT``, which STOPS the server after 30 min and
+    is only wired into the video router.
+    """
+    raw = os.environ.get("GUAARDVARK_COMFYUI_MODEL_FREE_DELAY_S", "").strip()
+    if not raw:
+        return _COMFY_FREE_DELAY_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        log.warning("Ignoring non-numeric GUAARDVARK_COMFYUI_MODEL_FREE_DELAY_S=%r", raw)
+        return _COMFY_FREE_DELAY_S
+
+
+def comfyui_queue_busy(*, timeout: float = 5.0) -> Optional[bool]:
+    """True/False from ComfyUI's /queue; None when the server is unreachable.
+
+    The guard that makes an unload safe: /free evicts for EVERY client, and this
+    host may be mid-render for Celery, the stills pipeline, a sibling install or
+    the Desktop app. Same check the video router makes before stopping ComfyUI.
+    """
+    try:
+        import requests
+        data = requests.get(f"{COMFYUI_URL}/queue", timeout=timeout).json()
+    except Exception as e:  # noqa: BLE001 - a failed probe must free nothing
+        log.debug("comfyui /queue probe failed (%s)", e)
+        return None
+    return bool((data or {}).get("queue_running") or (data or {}).get("queue_pending"))
+
+
+def _free_comfyui_when_idle() -> None:
+    """Timer body: unload ComfyUI's models if it is genuinely idle."""
+    busy = comfyui_queue_busy()
+    if busy is None:
+        return  # unreachable: nothing to unload
+    if busy:
+        log.info("ComfyUI model unload deferred — its queue is not empty")
+        schedule_free_comfyui_vram()
+        return
+    log.info(
+        "ComfyUI idle for %.0fs — unloading its resident models",
+        comfyui_model_free_delay_s(),
+    )
+    free_comfyui_vram()
+
+
+def schedule_free_comfyui_vram(delay_s: Optional[float] = None) -> None:
+    """(Re)arm the idle model unload. Never raises.
+
+    Called after a ComfyUI render. Re-arming cancels the pending timer, so a whole
+    batch produces exactly one unload — after its last image.
+    """
+    global _comfy_free_timer
+    try:
+        if delay_s is None:
+            delay_s = comfyui_model_free_delay_s()
+        if delay_s <= 0:
+            return
+        with _comfy_free_lock:
+            if _comfy_free_timer is not None:
+                _comfy_free_timer.cancel()
+            timer = threading.Timer(float(delay_s), _free_comfyui_when_idle)
+            timer.daemon = True
+            _comfy_free_timer = timer
+            timer.start()
+    except Exception as e:  # noqa: BLE001 - reclaim must never fail a render
+        log.warning("could not schedule the ComfyUI idle model unload: %s", e)
 
 
 def evict_ollama_models() -> bool:
