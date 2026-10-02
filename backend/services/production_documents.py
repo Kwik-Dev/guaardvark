@@ -2,12 +2,23 @@
 so they surface in DocumentsPage and ImagesPage automatically.
 
 Folder layout: project_<id>/productions/<prod_id>/<category>/
+
+The same layout is mirrored on disk under UPLOAD_DIR, and ``Document.path`` is
+stored relative to UPLOAD_DIR. Renders arrive as absolute paths inside a
+temp directory (``tempfile.mkdtemp`` in production_swarm_tasks), which cannot be
+served by the document resolver's UPLOAD_BASE join and would vanish when the
+OS reclaims the temp directory.
 """
 from __future__ import annotations
 
+import logging
+import shutil
 from pathlib import Path
 
 from backend.models import db, Production, Folder, Document
+from backend.utils.path_guard import contained
+
+logger = logging.getLogger(__name__)
 
 
 VALID_CATEGORIES = {"storyboard", "clips", "audio", "final", "timeline"}
@@ -55,12 +66,31 @@ def register_production_output(
         path=f"{prod_folder.path}/{category}",
     )
 
+    # Store a portable, durable path. The bytes are moved under UPLOAD_DIR into
+    # the folder we just created, and ``path`` is recorded relative to
+    # UPLOAD_DIR so the document resolver's canonical join finds it. An absolute
+    # temp path would 404 there, and would break outright once the temp
+    # directory is reclaimed.
+    from backend.config import UPLOAD_DIR
+
+    upload_base = Path(UPLOAD_DIR)
+    dest_dir = contained(upload_base, upload_base / leaf.path)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / Path(file_path).name
+
     p = Path(file_path)
-    size = p.stat().st_size if p.exists() else 0
+    if p.exists() and p.resolve() != dest.resolve():
+        try:
+            shutil.move(str(p), str(dest))
+        except OSError:
+            # A temp dir on another filesystem cannot be renamed across devices.
+            shutil.copy2(str(p), str(dest))
+
+    size = dest.stat().st_size if dest.exists() else 0
 
     doc = Document(
-        filename=p.name,
-        path=str(p),
+        filename=dest.name,
+        path=str(dest.relative_to(upload_base)),
         folder_id=leaf.id,
         size=size,
     )
