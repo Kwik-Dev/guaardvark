@@ -430,9 +430,15 @@ def test_run_editor_renders_and_advances_to_complete(app, production):
     db.session.refresh(production)
     assert production.current_stage == "complete"
 
-    doc = Document.query.filter_by(path="/tmp/final.mp4").first()
+    # The editor's absolute temp path is not what gets stored: the render output
+    # is moved under UPLOAD_DIR and recorded relative to it, mirroring the
+    # {project_<id>|orphan}/productions/<id>/final folder tree. An absolute temp
+    # path would 404 through the resolver's UPLOAD_BASE join and would be lost
+    # when the OS reclaimed the render temp directory.
+    doc = Document.query.filter_by(filename="final.mp4").first()
     assert doc is not None
-    assert doc.path == "/tmp/final.mp4"
+    assert not doc.path.startswith("/")
+    assert doc.path.endswith(f"/productions/{production.id}/final/final.mp4")
 
 
 def test_run_editor_resolves_voice_and_lora_from_cast(app, production):
