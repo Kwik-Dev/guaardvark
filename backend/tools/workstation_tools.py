@@ -50,6 +50,10 @@ _LOG_WRITERS: Dict[str, str] = {
     "preflight.log": "start.sh",
     "dep_reconciler.log": "start.sh",
     "celery.log": "start.sh",
+    # Fork-only: our start.sh runs an MCP smoke test and writes the client config
+    # snippets, so a setup failure lands here alongside the other start logs.
+    # Upstream has no mcp.log, so this line is deliberately fork-local.
+    "mcp.log": "start.sh",
     "celery_main.log": "start_celery.sh",
     "celery_training.log": "start_celery.sh",
     "celery_beat.log": "start_celery.sh",
