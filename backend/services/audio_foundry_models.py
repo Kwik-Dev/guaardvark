@@ -1,14 +1,24 @@
 """Audio Foundry weights: what is on this machine, and the install path.
 
-Generation must never fetch from Hugging Face. This module is the catalog the
-Audio Studio modal reads, plus the explicit snapshot_download Install flow.
-Flask owns both so listing and download work when the sidecar is stopped.
+Generation must never fetch anything: the sidecar runs with the Hugging Face
+client offline and refuses a missing file with an Install hint. This module is
+the catalog the Audio Studio modal reads, plus the explicit Install flow
+(snapshot_download, and for Kokoro the spaCy English model pip-installed into
+the plugin venv). Flask owns both so listing and download work when the
+sidecar is stopped, and so the downloads run in this process, which is online,
+rather than in the offline sidecar.
+
+"Installed" means every file generation reads is present, not one probe file:
+a Kokoro cache holding the weights but only some voice packs used to show as
+installed while the missing voices were fetched mid-generation.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -18,6 +28,15 @@ logger = logging.getLogger(__name__)
 
 _DOWNLOAD_STALL_SECONDS = 180
 _HF_XET_ENV = "HF_HUB_DISABLE_XET"
+_PIP_TIMEOUT_SECONDS = 600
+
+# Two roots that coincide on a real install but mean different things. The
+# voice catalog is tracked source shipped in the same checkout as this module,
+# so it is always read from there. PLUGIN_DIR is where the plugin's venv lives
+# (untracked, created on this machine at first start); only venv lookups and
+# pip use it.
+PLUGIN_SOURCE_DIR = Path(__file__).resolve().parents[2] / "plugins" / "audio_foundry"
+PLUGIN_DIR = PLUGIN_SOURCE_DIR
 
 # MiniMax Music 3 lives in the video registry (ComfyUI/models). One Install
 # click here forwards to that downloader so Audio Studio is self-contained.
@@ -36,6 +55,11 @@ AUDIO_FOUNDRY_MODELS: List[Dict[str, Any]] = [
         "group": "voice",
         "hf_repo": "ResembleAI/chatterbox",
         "probe_file": "t3_cfg.safetensors",
+        # What ChatterboxBackend.load() requires; the same five Install fetches.
+        "required_files": [
+            "ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors",
+            "tokenizer.json", "conds.pt",
+        ],
         "allow_patterns": [
             "ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors",
             "tokenizer.json", "conds.pt",
@@ -46,10 +70,19 @@ AUDIO_FOUNDRY_MODELS: List[Dict[str, Any]] = [
     {
         "id": "kokoro",
         "name": "Kokoro-82M",
-        "description": "Fast built-in voices (fallback when Chatterbox is off). 360 MB.",
+        "description": (
+            "Fast built-in voices (fallback when Chatterbox is off): weights, voice "
+            "packs and spaCy's English model. About 375 MB."
+        ),
         "group": "voice",
         "hf_repo": "hexgrad/Kokoro-82M",
         "probe_file": "config.json",
+        # Required files and the spaCy model come from the plugin's voice list,
+        # so a voice added there is part of "installed" and of the Install.
+        "voice_catalog": "backends/kokoro_voices.json",
+        # The repo snapshot only (weights 327 MB, voice packs 0.5 MB each):
+        # progress is measured against the Hugging Face cache. The spaCy model
+        # (15 MB installed) goes into the plugin venv afterwards.
         "size_gb": 0.36,
         "gated": False,
     },
@@ -60,6 +93,13 @@ AUDIO_FOUNDRY_MODELS: List[Dict[str, Any]] = [
         "group": "music",
         "hf_repo": "ACE-Step/ACE-Step-v1-3.5B",
         "probe_file": "ace_step_transformer/config.json",
+        # What ACEStepPipeline.load_checkpoint reads: its four model folders
+        # (config and weights each, plus the umt5 tokenizer), listed in the
+        # plugin file the ACE-Step daemon checks too. From the snapshot a full
+        # Install left in the cache (revision 82cd0d7b, read 2026-09-30); the
+        # other repo files are the README, .gitattributes and a root config
+        # the loader never opens. Install stays a full snapshot_download.
+        "required_files_catalog": "backends/acestep_files.json",
         "size_gb": 8.3,
         "gated": False,
     },
@@ -126,6 +166,142 @@ def is_hub_cached(repo_id: str, probe_file: str) -> bool:
     return is_cached(repo_id, probe_file)
 
 
+def load_voice_catalog(relpath: str) -> Dict[str, Any]:
+    """A JSON list shipped with the plugin (e.g. backends/kokoro_voices.json,
+    backends/acestep_files.json)."""
+    with (PLUGIN_SOURCE_DIR / relpath).open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+_voice_consent_module = None
+
+
+def voice_consent():
+    """The plugin's voice-consent rules (plugins/audio_foundry/backends/voice_consent.py).
+
+    Loaded from the checkout by path, like the voice catalog, so the backend
+    proxy and the plugin that clones decide consent with the same code. The
+    module is standard-library only.
+    """
+    global _voice_consent_module
+    if _voice_consent_module is None:
+        import importlib.util
+        import sys
+
+        name = "guaardvark_audio_foundry_voice_consent"
+        spec = importlib.util.spec_from_file_location(
+            name, PLUGIN_SOURCE_DIR / "backends" / "voice_consent.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        _voice_consent_module = module
+    return _voice_consent_module
+
+
+def kokoro_catalog() -> Dict[str, Any]:
+    entry = next(e for e in AUDIO_FOUNDRY_MODELS if e["id"] == "kokoro")
+    return load_voice_catalog(entry["voice_catalog"])
+
+
+def kokoro_voice_ids() -> List[str]:
+    """Voice ids the sidecar accepts for Kokoro, in catalog order."""
+    return [v["id"] for g in kokoro_catalog()["groups"] for v in g["voices"]]
+
+
+def kokoro_voice_groups() -> List[Dict[str, Any]]:
+    """The catalog's groups with each voice marked ``installed`` when its voice
+    pack is in the local Hugging Face cache: the Kokoro part of the plugin's
+    GET /voices, for when the plugin is not running."""
+    cat = kokoro_catalog()
+    return [
+        {
+            "label": group["label"],
+            "voices": [
+                {**voice,
+                 "installed": is_hub_cached(cat["hf_repo"], cat["voice_file"].format(voice=voice["id"]))}
+                for voice in group["voices"]
+            ],
+        }
+        for group in cat["groups"]
+    ]
+
+
+def kokoro_voice_choices(installed_only: bool = True) -> List[Dict[str, str]]:
+    """The Kokoro voices as ``{id, label, group}``, for a caller choosing one.
+
+    With ``installed_only`` only voices whose pack is on this machine are
+    listed: Audio Foundry refuses a voice that is not installed rather than
+    download it mid-generation.
+    """
+    cat = kokoro_catalog()
+    choices = []
+    for group in cat["groups"]:
+        for voice in group["voices"]:
+            if installed_only and not is_hub_cached(
+                    cat["hf_repo"], cat["voice_file"].format(voice=voice["id"])):
+                continue
+            choices.append({"id": voice["id"], "label": voice["label"], "group": group["label"]})
+    return choices
+
+
+def required_hub_files(entry: Dict[str, Any]) -> List[str]:
+    """Every file of ``entry['hf_repo']`` that generation reads."""
+    if entry.get("required_files_catalog"):
+        return list(load_voice_catalog(entry["required_files_catalog"])["files"])
+    if entry.get("voice_catalog"):
+        cat = load_voice_catalog(entry["voice_catalog"])
+        voices = [v["id"] for g in cat["groups"] for v in g["voices"]]
+        return [cat["config_file"], cat["weights_file"]] + [
+            cat["voice_file"].format(voice=v) for v in voices
+        ]
+    return list(entry.get("required_files") or [entry["probe_file"]])
+
+
+def missing_hub_files(entry: Dict[str, Any]) -> List[str]:
+    return [f for f in required_hub_files(entry) if not is_hub_cached(entry["hf_repo"], f)]
+
+
+def plugin_venv_python() -> Optional[Path]:
+    """The Audio Foundry venv interpreter, or None before the plugin's first start."""
+    for rel in ("venv/bin/python", "venv/Scripts/python.exe"):
+        candidate = PLUGIN_DIR / rel
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def venv_has_package(package: str) -> Optional[bool]:
+    """Whether the plugin venv has ``package`` installed; None when there is no venv.
+
+    Looks for the package's .dist-info, which is what importlib.metadata (and
+    so spaCy's is_package, and the sidecar's own check) finds.
+    """
+    venv = PLUGIN_DIR / "venv"
+    if plugin_venv_python() is None:
+        return None
+    site_dirs = list(venv.glob("lib/python*/site-packages")) + list(venv.glob("Lib/site-packages"))
+    name = package.replace("-", "_")
+    return any(any(d.glob(f"{name}-*.dist-info")) for d in site_dirs)
+
+
+def required_venv_packages(entry: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Python packages generation needs in the plugin venv: {package, wheel}."""
+    if not entry.get("voice_catalog"):
+        return []
+    g2p = load_voice_catalog(entry["voice_catalog"]).get("english_g2p")
+    return [{"package": g2p["package"], "wheel": g2p["wheel"]}] if g2p else []
+
+
+def missing_venv_packages(entry: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Required packages the plugin venv lacks.
+
+    Before the plugin's first start there is no venv to check or install into,
+    so nothing is reported missing; once it exists, a missing package makes
+    the model show as not installed and Install adds it.
+    """
+    return [p for p in required_venv_packages(entry) if venv_has_package(p["package"]) is False]
+
+
 def hf_token_present() -> bool:
     from backend.services.user_model_families import hf_token_present as _present
     return _present()
@@ -180,7 +356,8 @@ def _minimax_row() -> Dict[str, Any]:
 
 
 def _hub_row(entry: Dict[str, Any]) -> Dict[str, Any]:
-    installed = is_hub_cached(entry["hf_repo"], entry["probe_file"])
+    missing = missing_hub_files(entry) + [p["package"] for p in missing_venv_packages(entry)]
+    installed = not missing
     return {
         "id": entry["id"],
         "name": entry["name"],
@@ -193,7 +370,7 @@ def _hub_row(entry: Dict[str, Any]) -> Dict[str, Any]:
         "terms_url": entry.get("terms_url"),
         "installed": installed,
         "delegate": None,
-        "missing_files": [] if installed else [entry["probe_file"]],
+        "missing_files": missing,
     }
 
 
@@ -282,7 +459,7 @@ def start_download(model_id: str) -> tuple:
             ),
         }, 400
 
-    if is_hub_cached(hub_entry["hf_repo"], hub_entry["probe_file"]):
+    if not missing_hub_files(hub_entry) and not missing_venv_packages(hub_entry):
         return {
             "success": True,
             "already_installed": True,
@@ -307,7 +484,7 @@ def start_download(model_id: str) -> tuple:
         })
 
     threading.Thread(
-        target=_run_snapshot_download,
+        target=_run_install,
         args=(hub_entry, epoch),
         daemon=True,
         name=f"audio-foundry-dl-{model_id}",
@@ -348,7 +525,36 @@ def _start_minimax_download() -> tuple:
     return {"success": True, "status": "started", "id": MINIMAX_MUSIC3_ID}, 200
 
 
-def _run_snapshot_download(entry: Dict[str, Any], epoch: int) -> None:
+class VenvInstallFailed(RuntimeError):
+    """pip could not add a package to the plugin venv (not a Hugging Face error)."""
+
+
+def pip_install_into_plugin_venv(wheel: str) -> None:
+    """``pip install --no-deps <wheel>`` with the plugin venv's interpreter.
+
+    --no-deps: the wheel is a data package, and a resolver pass here could
+    move torch or diffusers off the versions start.sh settled on. The wheel
+    URL carries its sha256, which pip checks.
+    """
+    python = plugin_venv_python()
+    if python is None:
+        raise VenvInstallFailed(
+            "Audio Foundry has no venv yet; start the plugin once, then Install again"
+        )
+    try:
+        proc = subprocess.run(
+            [str(python), "-m", "pip", "install", "--no-deps", "--disable-pip-version-check", wheel],
+            capture_output=True, text=True, timeout=_PIP_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise VenvInstallFailed(f"pip could not run in the Audio Foundry venv: {e}") from e
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip()[-400:]
+        raise VenvInstallFailed(f"pip could not install {wheel.split('#', 1)[0]}: {tail}")
+
+
+def _run_install(entry: Dict[str, Any], epoch: int) -> None:
+    """Install thread: the repo snapshot when files are missing, then venv packages."""
     os.environ.setdefault(_HF_XET_ENV, "1")
     repo_id = entry["hf_repo"]
     dest = _hf_repo_cache_dir(repo_id)
@@ -413,20 +619,35 @@ def _run_snapshot_download(entry: Dict[str, Any], epoch: int) -> None:
     monitor = threading.Thread(target=_monitor, daemon=True)
     monitor.start()
     try:
-        from huggingface_hub import snapshot_download
-
         _update(status="downloading")
-        snapshot_download(
-            repo_id=repo_id,
-            allow_patterns=entry.get("allow_patterns"),
-            ignore_patterns=entry.get("ignore_patterns"),
-        )
-        if not is_hub_cached(repo_id, entry["probe_file"]):
+        if missing_hub_files(entry):
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=entry.get("allow_patterns"),
+                ignore_patterns=entry.get("ignore_patterns"),
+            )
+        still_missing = missing_hub_files(entry)
+        if still_missing:
             raise RuntimeError(
-                f"Download of {entry['id']} finished but {entry['probe_file']} is still missing"
+                f"Download of {entry['id']} finished but {still_missing[0]} is still missing"
             )
         if stalled.is_set():
             return
+        # The monitor watches the HF cache only. Stop it here so a quiet pip
+        # run is not reported as a stall, and so a late progress tick cannot
+        # overwrite the final "completed".
+        stop_monitor.set()
+        monitor.join(timeout=2)
+        for pkg in missing_venv_packages(entry):
+            _update(status="downloading", progress=99)
+            pip_install_into_plugin_venv(pkg["wheel"])
+        leftover = missing_venv_packages(entry)
+        if leftover:
+            raise VenvInstallFailed(
+                f"pip finished but {leftover[0]['package']} is still not in the Audio Foundry venv"
+            )
         _update(
             progress=100,
             downloaded_gb=float(entry["size_gb"]),
@@ -440,7 +661,8 @@ def _run_snapshot_download(entry: Dict[str, Any], epoch: int) -> None:
             from backend.services.video_model_registry import classify_hf_download_error
             _update(
                 status="failed",
-                error=classify_hf_download_error(e, repo_id=last_repo),
+                error=(str(e) if isinstance(e, VenvInstallFailed)
+                       else classify_hf_download_error(e, repo_id=last_repo)),
                 progress=0,
                 is_downloading=False,
             )

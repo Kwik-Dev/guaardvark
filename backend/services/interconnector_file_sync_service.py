@@ -88,6 +88,7 @@ class InterconnectorFileSyncService:
             "backend/app.py",
             "backend/celery_app.py",
             "backend/celery_beat_gates.py",
+            "backend/celery_dispatch.py",
             "backend/celery_tasks_isolated.py",
             "backend/config.py",
             "backend/cuda_config.py",

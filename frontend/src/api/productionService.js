@@ -204,4 +204,22 @@ const productionService = {
   cancelTrainSubject,
 };
 
+// Import a LoRA checkpoint trained OUTSIDE Guaardvark (Ostris AI-Toolkit,
+// kohya, diffusers/PEFT) and attach it to a Subject. baseModelId is
+// 'zimage-turbo' or 'flux-dev'; triggerWord is the token the LoRA was
+// trained on. Returns { subject } on success, throws on validation failure
+// (mismatched base model, unsupported layout, oversized file).
+export const importSubjectLora = async (id, { file, baseModelId, triggerWord }) => {
+  const fd = new FormData();
+  fd.append("lora_file", file);
+  fd.append("base_model_id", baseModelId);
+  fd.append("trigger_word", triggerWord);
+  const response = await axios.post(
+    `${API_BASE}/cast-library/subjects/${id}/import-lora`,
+    fd,
+    { headers: { "Content-Type": "multipart/form-data" } },
+  );
+  return response.data;
+};
+
 export default productionService;

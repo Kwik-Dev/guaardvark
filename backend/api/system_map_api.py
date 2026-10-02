@@ -1,9 +1,11 @@
 """HTTP surface for the system_mapper SystemMap.
 
 Frontend (`/system-map` route) hits this endpoint to fetch the JSON the
-constellation canvas renders. The map computation costs ~3 seconds on a
-cold cache; we serve a disk-cached snapshot and only re-run when the cache
-ages out (or the caller passes ?refresh=1).
+constellation canvas renders. The map computation takes seconds on a clean
+checkout and minutes on a very large one; we serve a disk-cached snapshot and
+only re-run when the cache ages out (or the caller passes ?refresh=1). The
+map_codebase tool reads the same cache through read_cached/compute_and_cache
+and computes in the background instead of blocking.
 
 Endpoint
 --------
@@ -93,6 +95,51 @@ def _resolve_root(root_arg: str | None):
     return root, None
 
 
+def read_cached(root: Path):
+    """(payload, age_seconds) for the last map written for root, whatever its
+    age, or (None, None) when there is none or it cannot be read."""
+    cache_file = _cache_path_for(root)
+    try:
+        age = time.time() - cache_file.stat().st_mtime
+        return json.loads(cache_file.read_text()), age
+    except FileNotFoundError:
+        return None, None
+    except Exception as exc:
+        logger.warning(f"Cache read failed for {cache_file}: {exc}")
+        return None, None
+
+
+def compute_and_cache(root: Path) -> dict:
+    """Map root now, write the disk cache, and return the payload with its
+    ``_cache`` note. Raises when the map cannot be computed."""
+    from backend.services.system_mapper import codebase_map
+    t0 = time.time()
+    smap = codebase_map(root)
+    elapsed = time.time() - t0
+    logger.info(f"Generated system map for {root} in {elapsed:.2f}s "
+                f"({smap.file_count} files, {len(smap.findings)} findings)")
+
+    payload = smap.to_dict()
+    cache_file = _cache_path_for(root)
+    # Written aside and renamed, so a reader never sees half a file.
+    tmp = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, cache_file)
+    except Exception as exc:
+        logger.warning(f"Failed to write cache {cache_file}: {exc}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    payload["_cache"] = {
+        "hit": False,
+        "computed_in_seconds": round(elapsed, 2),
+        "ttl_seconds": CACHE_TTL_SECONDS,
+    }
+    return payload
+
+
 def _load_or_compute(root: Path, refresh: bool):
     """Return (payload_dict, None) or (None, (json_error, status)). Serves the
     disk-cached snapshot unless stale or refresh=1."""
@@ -110,27 +157,10 @@ def _load_or_compute(root: Path, refresh: bool):
             logger.warning(f"Cache read failed for {cache_file}: {exc}; re-computing")
 
     try:
-        from backend.services.system_mapper import codebase_map
-        t0 = time.time()
-        smap = codebase_map(root)
-        elapsed = time.time() - t0
-        logger.info(f"Generated system map for {root} in {elapsed:.2f}s "
-                    f"({smap.file_count} files, {len(smap.findings)} findings)")
+        return compute_and_cache(root), None
     except Exception as exc:
         logger.exception("system map computation failed")
         return None, (jsonify({"success": False, "error": f"map failed: {exc}"}), 500)
-
-    payload = smap.to_dict()
-    try:
-        cache_file.write_text(json.dumps(payload))
-    except Exception as exc:
-        logger.warning(f"Failed to write cache {cache_file}: {exc}")
-    payload["_cache"] = {
-        "hit": False,
-        "computed_in_seconds": round(elapsed, 2),
-        "ttl_seconds": CACHE_TTL_SECONDS,
-    }
-    return payload, None
 
 
 @system_map_bp.route("/snapshot", methods=["GET"])

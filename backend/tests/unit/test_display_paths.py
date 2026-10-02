@@ -50,3 +50,27 @@ def test_a_symlink_inside_the_checkout_stays_relative(monkeypatch, tmp_path):
     _fake_home(monkeypatch, home)
 
     assert dp.display_path(bin_dir / "python") == "backend/venv/bin/python"
+
+
+def test_tool_params_for_the_chat_card_lose_the_checkout_and_home(monkeypatch, tmp_path):
+    home = tmp_path / "home" / "someone"
+    root = home / "checkout"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("GUAARDVARK_ROOT", str(root))
+    _fake_home(monkeypatch, home)
+
+    params = {
+        "prompt": "a person in a greenhouse",
+        "image": f"{root}/data/outputs/edit_inputs/edit_src_1.png",
+        "extra": [f"{home}/Pictures/me.png", 3],
+        "steps": 20,
+    }
+    shown = dp.display_params(params)
+    assert shown == {
+        "prompt": "a person in a greenhouse",
+        "image": "./data/outputs/edit_inputs/edit_src_1.png",
+        "extra": ["~/Pictures/me.png", 3],
+        "steps": 20,
+    }
+    # The tool still runs with the real values.
+    assert params["image"].startswith(str(root))

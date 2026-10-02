@@ -6,6 +6,9 @@ LLM agent context, human readers) can iterate.
 """
 from __future__ import annotations
 
+import fnmatch
+import os
+import subprocess
 import time
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -127,9 +130,117 @@ DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset({
 })
 
 
-def is_excluded(path: Path, extra_excludes: frozenset[str] = frozenset()) -> bool:
-    excludes = DEFAULT_EXCLUDE_DIRS | extra_excludes
-    return any(part in excludes for part in path.parts)
+def is_excluded(
+    path: Path,
+    extra_excludes: frozenset[str] = frozenset(),
+    root: Path | None = None,
+) -> bool:
+    """True when a folder on ``path`` has an excluded name.
+
+    With ``root``, only the parts below ``root`` are tested, so a checkout that
+    itself sits under a folder named data, build or env is still mapped.
+    Without it every part of ``path`` is tested, which suits a path that is
+    already relative to the mapped root.
+    """
+    return _has_excluded_part(path, DEFAULT_EXCLUDE_DIRS | extra_excludes, root)
+
+
+def _has_excluded_part(path: Path, excludes: frozenset[str], root: Path | None) -> bool:
+    parts = path.parts
+    if root is not None:
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            pass
+    return any(part in excludes for part in parts)
+
+
+# How long the mapper waits for git to list a checkout before it walks the tree
+# itself. Measured 2026-09-30 on one workstation: `git ls-files --cached
+# --others --exclude-standard` answers in 0.004 s for a checkout of 2,235
+# tracked files that also holds about 49,000 ignored .py files (scratch folders
+# and worktree copies). 30 s is the limit the code tools use for the same
+# listing (llama_code_tools._source_files); it is only reached on a stalled disk.
+GIT_LIST_TIMEOUT_S = 30.0
+
+# Set by git for hooks and by callers that point it at another repository.
+# Left in place they would make the listing describe that repository.
+_GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+
+
+def _git_listed_files(start: Path) -> list[str] | None:
+    """Paths below ``start``, relative to it, as git sees them: tracked files
+    plus untracked files it does not ignore. None when ``start`` is not inside
+    a git work tree, git is not installed or refuses the repository, or the
+    listing does not finish in GIT_LIST_TIMEOUT_S."""
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_ENV}
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(start), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            capture_output=True, timeout=GIT_LIST_TIMEOUT_S, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [os.fsdecode(entry) for entry in proc.stdout.split(b"\0") if entry]
+
+
+def _walked_files(start: Path, exclude_dirs: frozenset[str]) -> list[Path]:
+    """Every file below ``start``, not descending into folders named in
+    ``exclude_dirs`` or into symlinked folders."""
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(start):
+        dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
+        found.extend(Path(dirpath, name) for name in filenames)
+    return found
+
+
+def source_files(
+    root: Path,
+    extra_excludes: frozenset[str] = frozenset(),
+    *,
+    pattern: str = "*",
+    under: Path | None = None,
+    exclude_dirs: frozenset[str] | None = None,
+) -> list[Path]:
+    """The files the mapper surveys, as sorted absolute paths.
+
+    The one place the analyzers get their file lists from. ``pattern`` is a
+    glob on the file name ("*.py", "plugin.json"); ``under`` narrows the
+    listing to a folder inside ``root``.
+
+    Inside a git work tree the listing is git's: tracked files plus untracked
+    files git does not ignore. Ignored local data (scratch folders, worktree
+    copies, virtualenvs) is therefore not mapped, a nested repository is not
+    entered, and a root that git ignores maps as empty. Anywhere else, or when
+    git cannot be asked, the tree is walked.
+
+    Either way a file is left out when a folder or file name on its path below
+    ``root`` is in DEFAULT_EXCLUDE_DIRS or ``extra_excludes``. ``exclude_dirs``
+    replaces that set for an analyzer with its own rule.
+    """
+    start = under if under is not None else root
+    excludes = (DEFAULT_EXCLUDE_DIRS | extra_excludes) if exclude_dirs is None else exclude_dirs
+    listed = _git_listed_files(start)
+    if listed is None:
+        candidates = _walked_files(start, excludes)
+    else:
+        # A trailing slash marks a nested repository.
+        candidates = [start / rel for rel in listed if not rel.endswith("/")]
+
+    found: list[Path] = []
+    for path in candidates:
+        if not fnmatch.fnmatchcase(path.name, pattern):
+            continue
+        if _has_excluded_part(path, excludes, root):
+            continue
+        # git also lists tracked files deleted from the working tree, and a
+        # symlink to a folder as one entry.
+        if listed is not None and not path.is_file():
+            continue
+        found.append(path)
+    return sorted(found)
 
 
 def filter_findings(

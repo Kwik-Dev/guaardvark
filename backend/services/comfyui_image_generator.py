@@ -10,8 +10,8 @@ is what the SVD I2V step animates, carrying identity into video.
 Model loading uses DiffusersLoader against ComfyUI/models/diffusers/sdxl-base-1.0
 (a symlink to the diffusers-format SDXL we already have on disk), so no
 single-file checkpoint conversion is needed. Trained LoRAs are referenced by
-basename because data/training/loras is registered as a ComfyUI loras search
-path via extra_model_paths.yaml.
+basename because STORAGE_DIR/training/loras is on ComfyUI's LoRA search path
+(plugins/comfyui/guaardvark_model_paths.yaml, passed at launch).
 """
 from __future__ import annotations
 
@@ -159,7 +159,9 @@ try:
         is_model_installed as _is_model_installed,
         comfyui_models_dir as _comfy_models_dir,
     )
-    KONTEXT_UNET = _VMR.get("flux-kontext-dev", {}).get("hf_filename", "flux1-kontext-dev-Q6_K.gguf")
+    _KONTEXT = _VMR.get("flux-kontext-dev") or {}
+    KONTEXT_UNET = _KONTEXT.get("hf_filename", "flux1-kontext-dev-Q6_K.gguf")
+    KONTEXT_DEFAULT_STEPS = int(_KONTEXT.get("default_steps") or 28)
     _QWEN_EDIT = _VMR.get("qwen-image-edit") or {}
     QWEN_EDIT_UNET = ((_QWEN_EDIT.get("files") or [{}])[0].get("dst")
                       or "qwen_image_edit_2509_fp8_e4m3fn.safetensors")
@@ -177,6 +179,7 @@ try:
     PULID_IDENTITY_DEFAULTS.update(_PULID.get("identity_defaults") or {})
 except Exception:  # pragma: no cover - registry import is environment-specific
     KONTEXT_UNET = "flux1-kontext-dev-Q6_K.gguf"
+    KONTEXT_DEFAULT_STEPS = 28
     QWEN_EDIT_UNET = "qwen_image_edit_2509_fp8_e4m3fn.safetensors"
     QWEN_EDIT_MIN_STEPS = 20
     QWEN_EDIT_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
@@ -206,6 +209,113 @@ def _registry_vram(model_id: str, default: int = 12000) -> int:
         return int(vram_mb_for_model(model_id, default=default))
     except Exception:  # noqa: BLE001 — registry import is environment-specific
         return default
+def _comfyui_loras_dir() -> Optional[Path]:
+    """Locate the running ComfyUI's ``models/loras`` directory (best-effort).
+
+    ``GUAARDVARK_COMFYUI_LORAS_DIR`` wins when set (the operator knows where the
+    running ComfyUI keeps its loras). Otherwise the configured ``COMFYUI_DIR`` and
+    the bundled plugin copy are probed, and the first that exists wins.
+    """
+    candidates: list[Path] = []
+    env_dir = os.environ.get("GUAARDVARK_COMFYUI_LORAS_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+    try:
+        from backend.config import COMFYUI_DIR
+        candidates.append(Path(COMFYUI_DIR) / "models" / "loras")
+    except Exception:
+        pass
+    candidates.append(
+        Path(__file__).resolve().parents[3] / "plugins" / "comfyui" / "ComfyUI" / "models" / "loras"
+    )
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def ensure_lora_in_comfyui(lora_path: str) -> bool:
+    """Symlink a trained LoRA into ComfyUI's ``models/loras`` so a
+    ``LoraLoaderModelOnly`` node can resolve it by basename.
+
+    Only acts when Z-Image is routed through ComfyUI
+    (``GUAARDVARK_ZIMAGE_USE_COMFYUI=1``). Returns True if the LoRA is present in
+    ComfyUI's loras dir (linked now, or already there). Best-effort: never raises.
+    """
+    # Parse the flag in exactly one place (stills_pipeline owns the env var), so
+    # renaming it cannot leave this gate reading a dead name.
+    from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+    if not zimage_via_comfyui_enabled():
+        return False
+    p = Path(lora_path)
+    if not p.exists():
+        return False
+    loras_dir = _comfyui_loras_dir()
+    if loras_dir is None:
+        logger.warning("ensure_lora_in_comfyui: could not locate ComfyUI loras dir for %s", p.name)
+        return False
+    target = loras_dir / p.name
+    if target.is_symlink() and not target.exists():
+        # Dangling symlink (target moved or removed): a broken link reads as
+        # absent to ``exists()``, so heal it instead of failing to link below.
+        try:
+            target.unlink()
+        except OSError as e:
+            logger.warning("Could not remove dangling LoRA link %s: %s", target, e)
+            return False
+    if target.exists():
+        return True
+    try:
+        target.symlink_to(p.resolve())
+        logger.info("Linked LoRA %s into ComfyUI loras dir %s", p.name, loras_dir)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not link LoRA %s into ComfyUI: %s", p.name, e)
+        return False
+
+
+# Engine list is a live /object_info query (a large payload). Cache it briefly so
+# a per-model listing does not fan out one probe per row, and so a down ComfyUI
+# does not cost a timeout per row. Short enough that starting/stopping the plugin
+# is picked up within a few seconds. Set the TTL to 0 to disable caching.
+_ENGINE_CACHE_TTL_SECONDS = float(
+    os.environ.get("GUAARDVARK_COMFYUI_ENGINE_CACHE_TTL", "5")
+)
+_ENGINE_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+
+def _engine_cache_get(comfy_url: str) -> list[str] | None:
+    if _ENGINE_CACHE_TTL_SECONDS <= 0:
+        return None
+    cached = _ENGINE_CACHE.get(comfy_url)
+    if cached is not None and (time.monotonic() - cached[0]) < _ENGINE_CACHE_TTL_SECONDS:
+        return list(cached[1])
+    return None
+
+
+def _engine_cache_put(comfy_url: str, engines: list[str]) -> None:
+    if _ENGINE_CACHE_TTL_SECONDS > 0:
+        _ENGINE_CACHE[comfy_url] = (time.monotonic(), list(engines))
+
+
+
+def edit_steps(steps, *, default: int, floor: int = 0, label: str = "") -> tuple:
+    """Sampling steps for an edit graph: ``(steps, notice)``.
+
+    No count given renders the model's ``default``; a count that is given is
+    used as given. Where the model's registry entry declares a ``floor``, a
+    count below it is raised to the floor and ``notice`` says so.
+    """
+    try:
+        asked = int(steps or 0)
+    except (TypeError, ValueError):
+        asked = 0
+    if asked <= 0:
+        return max(int(default), int(floor)), None
+    if asked >= floor:
+        return asked, None
+    return int(floor), f"{label} needs at least {floor} steps; raised {asked} to {floor}."
+
 
 
 def _comfyui_loras_dir() -> Optional[Path]:
@@ -381,6 +491,22 @@ class ComfyUIImageGenerator:
         _engine_cache_put(self.comfy_url, engines)
         return engines
 
+    def _require_up(self, down_message: str) -> None:
+        """Raise ``down_message`` unless ComfyUI answers.
+
+        With GUAARDVARK_JOB_SERVICE_START on, ComfyUI is started first through
+        the image stage; the reason a start did not help is added to the error.
+        """
+        if self._available():
+            return
+        from backend.services.plugin_bridge import job_service_start_enabled, start_for_job
+        if not job_service_start_enabled():
+            raise RuntimeError(down_message)
+        ok, why = start_for_job("image", "generating", is_up=self._available)
+        if not ok:
+            raise RuntimeError(f"{down_message} ({why})")
+
+
     # ── workflow ──────────────────────────────────────────────────────
     def _build_workflow(
         self, *, prompt: str, negative: str, lora_names: list[str],
@@ -463,13 +589,10 @@ class ComfyUIImageGenerator:
                     ml = "zimage"
 
         if "flux" in ml and "dev" in ml:
-            # FLUX-dev branch. As of the subject-16 fix this only fires for an
-            # explicit flux-dev model with NO LoRAs (plain flux-dev stills) — the
-            # capability guard above re-routes every LoRA request to the SDXL
-            # branch because this app's character LoRAs are SDXL. The LoraLoaderModelOnly
-            # chain below is retained for a FUTURE flux trainer; a flux-format LoRA
-            # would need to bypass the guard (e.g. a model tag like "flux-dev-loras")
-            # to reach it. Model-only chain: FLUX character LoRAs don't train the
+            # FLUX-dev branch: plain flux-dev stills, and LoRAs whose sidecar names
+            # a FLUX base (the capability guard above retags a non-FLUX model
+            # request to flux-dev for them; SDXL LoRAs go to the SDXL branch).
+            # Model-only chain: FLUX character LoRAs don't train the
             # text encoder (SimpleTuner "text encoder was not trained"), so clip is
             # left untouched and the trigger word in the prompt does the identity work.
             # Dev UNET/T5 come from the FLUX_DEV_* module constants (override via
@@ -889,13 +1012,25 @@ class ComfyUIImageGenerator:
         neg_inputs = dict(pos_inputs)
         neg_inputs["prompt"] = ""
         wf["neg"] = {"class_type": "TextEncodeQwenImageEditPlus", "inputs": neg_inputs}
+        latent = ["encode", 0]
+        if "pad" in wf:
+            # Outpaint. The edit model copies what its reference image shows, so a
+            # padded reference came back with its grey bars unfilled (and a full
+            # regenerate could erase the subject). The reference is the original
+            # picture; the padded canvas is sampled only where the pad mask is set.
+            wf["scale_ref"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": ["load1", 0]}}
+            wf["pos"]["inputs"]["image1"] = ["scale_ref", 0]
+            wf["neg"]["inputs"]["image1"] = ["scale_ref", 0]
+            wf["outpaint_mask"] = {"class_type": "SetLatentNoiseMask",
+                                   "inputs": {"samples": ["encode", 0], "mask": ["pad", 1]}}
+            latent = ["outpaint_mask", 0]
         wf["sampler"] = {
             "class_type": "KSampler",
             "inputs": {
                 "seed": seed, "steps": n, "cfg": cfg,
                 "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0,
                 "model": ["shift", 0], "positive": ["pos", 0],
-                "negative": ["neg", 0], "latent_image": ["encode", 0],
+                "negative": ["neg", 0], "latent_image": latent,
             },
         }
         wf["vae"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae_loader", 0]}}
@@ -969,13 +1104,31 @@ class ComfyUIImageGenerator:
             "save": {"class_type": "SaveImage", "inputs": {"filename_prefix": "identity-pulid", "images": ["vae", 0]}},
         }
 
-    def _run_edit_graph(self, workflow: dict, output_path: str, *, job: str, vram_mb: int, timeout: int) -> str:
-        from backend.services.gpu_resource_policy import gpu_session
+    @staticmethod
+    def _edit_gpu_session(op_id: str, gpu_wait: dict | None, **session_kwargs):
+        """The GPU claim for an edit: refuse when busy, or wait when the caller asks.
+
+        ``gpu_wait`` is ``{"wait_s", "on_wait", "should_stop"}``; chat passes it so
+        a second edit queues behind the first instead of failing.
+        """
+        from backend.services.gpu_resource_policy import gpu_session, gpu_session_when_free
         from backend.services.job_types import JobKind
+        if gpu_wait and gpu_wait.get("wait_s"):
+            return gpu_session_when_free(
+                JobKind.VIDEO_RENDER, op_id,
+                wait_s=gpu_wait["wait_s"],
+                on_wait=gpu_wait.get("on_wait"),
+                should_stop=gpu_wait.get("should_stop"),
+                **session_kwargs,
+            )
+        return gpu_session(JobKind.VIDEO_RENDER, op_id, on_busy="raise", **session_kwargs)
+
+    def _run_edit_graph(self, workflow: dict, output_path: str, *, job: str, vram_mb: int, timeout: int,
+                        gpu_wait: dict | None = None) -> str:
         import uuid as _uuid
-        with gpu_session(
-            JobKind.VIDEO_RENDER, f"{job}_{_uuid.uuid4().hex[:8]}",
-            on_busy="raise", evict_ollama=True, free_comfyui=True,
+        with self._edit_gpu_session(
+            f"{job}_{_uuid.uuid4().hex[:8]}", gpu_wait,
+            evict_ollama=True, free_comfyui=True,
             vram_estimate_mb=vram_mb, require_fit=True, cross_process=True,
         ):
             prompt_id = self._queue(workflow)
@@ -991,13 +1144,15 @@ class ComfyUIImageGenerator:
 
     def edit_image_qwen(
         self, *, image_paths: list[str], instruction: str, output_path: str,
-        steps: int = 20, cfg: float = 2.5, seed: int = 42, pad: dict | None = None,
+        steps: int | None = None, cfg: float = 2.5, seed: int = 42, pad: dict | None = None,
+        gpu_wait: dict | None = None,
     ) -> str:
-        if not self._available():
-            raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url} — cannot edit image")
+        """Instruction edit on Qwen-Image-Edit. ``steps`` below the registry floor is
+        raised to it; ``last_steps`` and ``last_steps_notice`` say what was rendered."""
         if not self.qwen_edit_installed():
             from backend.services.image_editing_packs import missing_message
             raise RuntimeError(missing_message("edit_image"))
+        self._require_up(f"ComfyUI not reachable at {self.comfy_url} — cannot edit image")
         names = []
         for p in image_paths:
             if not p or not os.path.exists(p):
@@ -1006,13 +1161,15 @@ class ComfyUIImageGenerator:
             if not name:
                 raise RuntimeError("Failed to upload the source image to ComfyUI")
             names.append(name)
+        self.last_steps, self.last_steps_notice = edit_steps(
+            steps, floor=QWEN_EDIT_MIN_STEPS, default=QWEN_EDIT_MIN_STEPS, label="Qwen-Image-Edit")
         workflow = self._build_qwen_edit_workflow(
             src_names=names, instruction=instruction,
-            steps=steps, cfg=cfg, seed=seed, pad=pad,
+            steps=self.last_steps, cfg=cfg, seed=seed, pad=pad,
         )
         result = self._run_edit_graph(
             workflow, output_path, job="chat_qwen_edit",
-            vram_mb=_registry_vram("qwen-image-edit"), timeout=600,
+            vram_mb=_registry_vram("qwen-image-edit"), timeout=600, gpu_wait=gpu_wait,
         )
         logger.info("Qwen-Image-Edit complete: %s", result)
         return result
@@ -1022,17 +1179,17 @@ class ComfyUIImageGenerator:
         width: int = 768, height: int = 1024, steps: int = 20, seed: int = 42,
         weight: float | None = None, start_at: float | None = None, end_at: float | None = None,
         unet_dtype: str | None = None, node_variant: str | None = "pulid_flux",
+        gpu_wait: dict | None = None,
     ) -> str:
         weight = _identity_default('weight', weight)
         start_at = _identity_default('start_at', start_at)
         end_at = _identity_default('end_at', end_at)
-        if not self._available():
-            raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url}")
         if not os.path.exists(image_path):
             raise RuntimeError(f"Source image not found: {image_path}")
         if not self.pulid_installed():
             from backend.services.image_editing_packs import missing_message
             raise RuntimeError(missing_message("generate_identity"))
+        self._require_up(f"ComfyUI not reachable at {self.comfy_url}")
         src_name = self._upload_image_to_comfyui(image_path)
         if not src_name:
             raise RuntimeError("Failed to upload the face reference to ComfyUI")
@@ -1044,7 +1201,7 @@ class ComfyUIImageGenerator:
         )
         result = self._run_edit_graph(
             workflow, output_path, job="chat_pulid",
-            vram_mb=_registry_vram("pulid-flux"), timeout=600,
+            vram_mb=_registry_vram("pulid-flux"), timeout=600, gpu_wait=gpu_wait,
         )
         logger.info("PuLID-FLUX identity generate complete: %s", result)
         return result
@@ -1077,17 +1234,18 @@ class ComfyUIImageGenerator:
         }
 
     def edit_image(self, *, image_path: str, instruction: str, output_path: str,
-                   steps: int = 28, guidance: float = 2.5, seed: int = 42) -> str:
+                   steps: int | None = None, guidance: float = 2.5, seed: int = 42,
+                   gpu_wait: dict | None = None) -> str:
         """Instruction-guided edit of an existing image via FLUX.1 Kontext [dev].
         Honest failure if ComfyUI is down or the Kontext model isn't installed —
-        never returns a fake/unedited image. Default 28 steps (Kontext is under-rendered
-        at 20); guidance ~2.5 (do not exceed ~3.5 — over-bakes/identity-drift; cfg stays 1.0).
+        never returns a fake/unedited image. No step count renders the registry entry's
+        default_steps (Kontext is under-rendered at 20); a count that is given is used as
+        given. ``last_steps`` says what was rendered.
+        Guidance ~2.5 (do not exceed ~3.5 — over-bakes/identity-drift; cfg stays 1.0).
 
         Holds the GPU for the whole edit (exclusivity + evict Ollama + free ComfyUI UNDER
         the held lease) so the ~11GB Kontext load can't OOM against a resident chat model
         or a concurrent render — enforced HERE so no caller can bypass it."""
-        if not self._available():
-            raise RuntimeError(f"ComfyUI not reachable at {self.comfy_url} — cannot edit image")
         if not os.path.exists(image_path):
             raise RuntimeError(f"Source image not found: {image_path}")
         if not self._kontext_installed():
@@ -1096,18 +1254,18 @@ class ComfyUIImageGenerator:
                 f"ComfyUI/models/unet/{KONTEXT_UNET}). Image editing is unavailable "
                 f"until that model finishes downloading."
             )
-        from backend.services.gpu_resource_policy import gpu_session
-        from backend.services.job_types import JobKind
+        self._require_up(f"ComfyUI not reachable at {self.comfy_url} — cannot edit image")
+        self.last_steps, self.last_steps_notice = edit_steps(steps, default=KONTEXT_DEFAULT_STEPS)
         import uuid as _uuid
-        with gpu_session(JobKind.VIDEO_RENDER, f"chat_edit_{_uuid.uuid4().hex[:8]}",
-                         on_busy="raise", evict_ollama=True, free_comfyui=True,
-                         vram_estimate_mb=11000, require_fit=True, cross_process=True):
+        with self._edit_gpu_session(f"chat_edit_{_uuid.uuid4().hex[:8]}", gpu_wait,
+                                    evict_ollama=True, free_comfyui=True,
+                                    vram_estimate_mb=11000, require_fit=True, cross_process=True):
             src_name = self._upload_image_to_comfyui(image_path)
             if not src_name:
                 raise RuntimeError("Failed to upload the source image to ComfyUI")
             workflow = self._build_kontext_workflow(
                 src_image_name=src_name, instruction=instruction,
-                steps=max(int(steps), 1), guidance=guidance, seed=seed,
+                steps=self.last_steps, guidance=guidance, seed=seed,
             )
             prompt_id = self._queue(workflow)
             if not prompt_id:
@@ -1139,7 +1297,7 @@ class ComfyUIImageGenerator:
         except Exception:
             pass
         try:
-            # Comfy registers extra_model_paths; probe a likely loras/ subdir next to ComfyUI.
+            # ComfyUI's own loras/ folder, the other place a LoRA name can resolve.
             # This is read-only best-effort; the actual LoraLoader inside Comfy will
             # resolve by basename anyway.
             search_dirs.append(Path(__file__).resolve().parents[3] / "plugins" / "comfyui" / "ComfyUI" / "models" / "loras")
@@ -1173,14 +1331,13 @@ class ComfyUIImageGenerator:
         steps_explicit: bool = False,
         model: str | None = None,  # e.g. keyframe_model from MV settings ("flux-schnell", "sdxl"...)
     ) -> str:
-        if not self._available():
-            raise RuntimeError(
-                f"ComfyUI not reachable at {self.comfy_url} — cannot generate storyboard image"
-            )
+        self._require_up(
+            f"ComfyUI not reachable at {self.comfy_url} — cannot generate storyboard image"
+        )
 
         effective_model = model or self.model
         # ComfyUI resolves LoRAs by basename within its loras search paths;
-        # data/training/loras is registered via extra_model_paths.yaml.
+        # STORAGE_DIR/training/loras is added by plugins/comfyui/guaardvark_model_paths.yaml.
         lora_paths = [p for p in (loras or []) if p]
         lora_names = [os.path.basename(p) for p in lora_paths]
         # Full paths for media_model_registry sidecar lookup in _build_workflow.

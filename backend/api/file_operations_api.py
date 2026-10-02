@@ -61,6 +61,32 @@ def _guard_mutation_path(path):
         raise GuardedCodeError(reason, "PROTECTED_FILE", 403)
     return resolved, relative_path
 
+def _inbound_refusal(changes, subject, payload):
+    """Ask the inbound guard about a code-editor file operation.
+
+    Returns (refusal_response, verdict). The editor is a person typing, so only
+    a block refuses here; holds are recorded for the review list. A blocked
+    operation is kept with its payload, so approving it there carries it out.
+    """
+    from backend.services import inbound_guard_service as guard
+
+    if not guard.is_on():
+        return None, None
+    try:
+        verdict = guard.check_and_gate(changes, source="code_editor", subject=subject, payload=payload)
+    except guard.InboundRefused as refused:
+        body = {"error": str(refused), "code": refused.code, "scan_id": refused.scan_id}
+        return (jsonify(body), 409 if refused.held else 403), None
+    return None, verdict
+
+
+def _inbound_landed(paths, subject, verdict):
+    if verdict is not None:
+        from backend.services import inbound_guard_service as guard
+
+        guard.landed(paths, source="code_editor", subject=subject, verdict=verdict)
+
+
 @file_ops_bp.route("/read", methods=["POST"])
 def read_file():
     """Read file content"""
@@ -164,7 +190,7 @@ def write_file():
             if not resolved_path.exists():
                 return jsonify({"error": "File not found"}), 404
             old_content = resolved_path.read_text(encoding='utf-8')
-            apply_exact_replacement(str(resolved_path), old_content, content)
+            apply_exact_replacement(str(resolved_path), old_content, content, origin="code_editor")
         except GuardedCodeError as e:
             return jsonify({"error": str(e), "code": e.code}), e.status_code
 
@@ -201,12 +227,25 @@ def create_file():
         if resolved_path.exists():
             return jsonify({"error": "File already exists"}), 409
 
+        from backend.services import inbound_guard_service as guard
+
+        subject = f"create {_relative_path}"
+        refusal, verdict = (None, None)
+        if guard.is_on():
+            refusal, verdict = _inbound_refusal(
+                [guard.change_for_file(resolved_path, None, content)], subject,
+                {"kind": "write_file", "path": _relative_path, "content": content},
+            )
+        if refusal:
+            return refusal
+
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
 
         # Create file
         with open(resolved_path, 'w', encoding='utf-8') as f:
             f.write(content)
+        _inbound_landed([str(resolved_path)], subject, verdict)
 
         return jsonify({
             "success": True,
@@ -235,8 +274,24 @@ def delete_file():
         if not os.path.exists(resolved_path):
             return jsonify({"error": "File not found"}), 404
 
+        from backend.services import inbound_guard_service as guard
+
+        subject = f"delete {_relative_path}"
+        refusal, verdict = (None, None)
+        if guard.is_on():
+            old_text = None
+            if is_allowed_file(resolved_path) and os.path.getsize(resolved_path) <= MAX_FILE_SIZE:
+                old_text = Path(resolved_path).read_text(encoding="utf-8", errors="replace")
+            refusal, verdict = _inbound_refusal(
+                [guard.change_for_file(resolved_path, old_text or "", None)], subject,
+                {"kind": "delete_file", "path": _relative_path},
+            )
+        if refusal:
+            return refusal
+
         # Delete file
         os.remove(resolved_path)
+        _inbound_landed([str(resolved_path)], subject, verdict)
 
         return jsonify({
             "success": True,
@@ -347,8 +402,21 @@ def rename_file():
         if os.path.exists(resolved_new):
             return jsonify({"error": "Target already exists"}), 409
 
+        from backend.services import inbound_guard_service as guard
+
+        subject = f"rename {_old_rel} -> {_new_rel}"
+        refusal, verdict = (None, None)
+        if guard.is_on():
+            moved = guard.engine().Change(path=_new_rel, status="R", old_path=_old_rel, new_mode="100644")
+            refusal, verdict = _inbound_refusal(
+                [moved], subject, {"kind": "rename_file", "path": _old_rel, "new_path": _new_rel},
+            )
+        if refusal:
+            return refusal
+
         # Rename file or directory
         os.rename(resolved_old, resolved_new)
+        _inbound_landed([str(resolved_old), str(resolved_new)], subject, verdict)
 
         return jsonify({
             "success": True,

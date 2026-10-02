@@ -362,35 +362,130 @@ jobs:
           source backend/venv/bin/activate
           python -m pytest --timeout=900 -q \
             backend/tests/test_profiles.py \
+            backend/tests/test_plugin_health_non_json.py \
+            backend/tests/test_demo_steps_keep_coordinates.py \
+            backend/tests/test_cast_training_settings_keep_identity.py \
+            backend/tests/test_celery_dispatch.py \
+            backend/tests/test_generate_status_route.py \
+            backend/tests/test_security_check_route.py \
+            backend/tests/test_cors_policy.py \
+            backend/tests/test_cross_site_guard.py \
+            backend/tests/test_sidecar_host_check.py \
+            backend/tests/test_host_check.py \
+            backend/tests/test_get_requests_change_nothing.py \
+            backend/tests/test_reboot_log_server.py \
+            backend/tests/test_backend_http_api_key.py \
+            backend/tests/test_screenshot_links.py \
+            backend/tests/test_auth_api.py \
+            backend/tests/test_tool_endpoint_protection.py \
+            backend/tests/test_system_mapper_git_listing.py \
+            backend/tests/utils/test_path_safety_sensitive_names.py \
             backend/tests/test_extensions_loader.py \
+            backend/tests/test_knowledge_tools_no_section.py \
+            backend/tests/test_generate_file_modify_guard.py \
+            backend/tests/test_workstation_mcp_paths.py \
+            backend/tests/test_system_mapper_relative_excludes.py \
+            backend/tests/test_map_codebase_background.py \
             extensions/_template/tests \
             backend/tests/api/test_batch_image_path_safety.py \
+            backend/tests/api/test_cast_library_import_lora.py \
+            backend/tests/services/test_cast_lora_selection.py \
+            backend/tests/test_search_code_budget_and_globs.py \
+            backend/tests/test_search_codebase_scope.py \
             backend/tests/api/test_chat_export_api.py \
+            backend/tests/test_voice_clip_withdraw_delete.py \
+            backend/tests/test_chatterbox_stock_voice.py \
+            backend/tests/test_music_video_song_library.py \
+            backend/tests/test_video_pipeline_tools_start.py \
+            backend/tests/test_acestep_install_complete.py \
+            backend/tests/test_audio_status_plugin_stopped.py \
+            backend/tests/test_mcp_generate_speech_jobs.py \
+            backend/tests/test_voice_routing_consistency.py \
+            backend/tests/test_voice_clone_consent.py \
+            backend/tests/services/test_audio_foundry_offline.py \
+            backend/tests/test_mcp_generate_speech_voices.py \
             backend/tests/test_audit_batch2_security.py \
+            backend/tests/utils/test_media_inputs.py \
+            backend/tests/test_mcp_media_tools.py \
+            backend/tests/services/test_animation_model_choice.py \
             backend/tests/services/test_connections_safety.py \
             backend/tests/services/test_resource_hardening.py \
             backend/tests/services/test_gpu_resource_policy.py \
             backend/tests/services/test_gpu_pipeline_pin.py \
+            backend/tests/services/test_media_player_service.py \
+            backend/tests/test_social_outreach/test_reject_stops_post.py \
+            backend/tests/test_social_outreach/test_posters_ask_before_submit.py \
+            backend/tests/test_social_outreach/test_share_draft_posts.py \
+            backend/tests/test_outreach_tools_mcp.py \
+            backend/tests/utils/test_secret_redaction.py \
+            backend/tests/test_read_logs.py \
+            backend/tests/api/test_swarm_status_errors.py \
             backend/tests/services/test_gpu_hard_fit.py \
             backend/tests/services/test_gpu_load_gates.py \
             backend/tests/services/test_gpu_session_wraps_generation.py \
             backend/tests/services/test_video_vram_wait.py \
+            backend/tests/test_mcp_tool_jobs.py \
             backend/tests/api/test_batch_video_lifecycle.py \
+            backend/tests/services/test_background_removal_device.py \
+            backend/tests/unit/test_video_status_progress.py \
+            backend/tests/api/test_batch_image_unknown_model.py \
+            backend/tests/unit/test_video_tool_profile_steps.py \
+            backend/tests/services/test_edit_backend_refusals.py \
+            backend/tests/services/test_edit_step_floor.py \
             backend/tests/services/test_offline_image_unload_hooks.py \
             backend/tests/services/test_offline_image_oom_ladder.py \
             backend/tests/services/test_offline_image_vae_tiling.py \
             backend/tests/services/test_image_resolution_limits.py \
             backend/tests/services/test_image_prompt_sanitize.py \
             backend/tests/services/test_media_model_registry.py \
+            backend/tests/test_search_result_scores.py \
+            backend/tests/test_knowledge_tools_same_name.py \
+            backend/tests/test_vector_table_lookup.py \
+            backend/tests/test_csv_quote_repair.py \
+            backend/tests/test_generation_reply_validation.py \
+            backend/tests/services/test_image_render_limits.py \
             backend/tests/services/test_model_availability.py \
             backend/tests/services/test_video_dimension_limits.py \
             backend/tests/services/test_video_model_preflight.py \
+            backend/tests/services/test_job_service_start.py \
+            backend/tests/services/test_model_capabilities.py \
+            backend/tests/unit/test_web_access_generation_gates.py \
+            backend/tests/unit/test_web_research_guards.py \
+            backend/tests/unit/test_web_search_public_only.py \
+            backend/tests/unit/test_web_search_sitemap.py \
+            backend/tests/unit/test_process_file_failure_reasons.py \
+            backend/tests/unit/test_process_file_upload_paths.py \
+            backend/tests/unit/test_web_search_sources.py \
+            backend/tests/unit/test_web_fetch_limits.py \
+            backend/tests/unit/test_web_fetch_charset.py \
+            backend/tests/unit/test_url_guard_idn_and_ipv4_forms.py \
+            backend/tests/utils/test_inline_reasoning.py \
+            backend/tests/test_thinking_channel.py \
+            backend/tests/test_mcp_chat_approval_e2e.py \
+            backend/tests/test_plugin_kill_own_install.py \
+            backend/tests/services/test_workflow_contract_*.py \
+            backend/tests/services/test_video_render_limits.py \
+            backend/tests/test_mcp_server_config.py \
+            backend/tests/test_mcp_installer_idempotent.py \
+            backend/tests/services/test_video_prompt_defaults.py \
+            backend/tests/services/test_video_quality_gate.py \
+            backend/tests/services/test_render_error_kinds.py \
+            backend/tests/services/test_gpu_crash_safety.py \
+            backend/tests/services/test_video_smoke_script.py \
             backend/tests/services/test_music_video_service.py \
+            backend/tests/test_code_tools_codegen.py \
+            backend/tests/test_code_tools_reading.py \
             backend/tests/services/test_music_video_director.py \
+            backend/tests/services/test_pipeline_stage_prep.py \
             backend/tests/unit/test_plugin_state_store.py \
             backend/tests/unit/test_plugin_core_exemption.py \
             backend/tests/unit/test_plugin_local_overrides.py \
             backend/tests/unit/test_boot_autostart.py \
             backend/tests/integration/test_plugins_system.py \
             backend/tests/unit/test_unified_progress_system.py \
-            backend/tests/test_interconnector_exclude.py
+            backend/tests/test_interconnector_exclude.py \
+            backend/tests/unit/test_public_only_session_env.py \
+            backend/tests/unit/test_web_search_routing.py \
+            backend/tests/test_mcp_output_scope.py \
+            backend/tests/test_outputs_download_protection.py \
+            backend/tests/test_api_outputs_record_refusal.py

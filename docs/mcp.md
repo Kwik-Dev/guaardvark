@@ -53,6 +53,14 @@ define a server. Other settings (`backend/config.py`): `GUAARDVARK_MCP_ENABLED`,
 `GUAARDVARK_MCP_MAX_OUTPUT_CHARS` (how much tool output reaches the model,
 default 16000), `GUAARDVARK_MCP_AUTOCONNECT`, `GUAARDVARK_MCP_CONFIG_FILE`.
 
+These are the client's settings. Guaardvark's own MCP server
+(`python -m backend.mcp`, the one other agents connect to) loads the same
+`.env` and has its own names: `GUAARDVARK_MCP_SERVER_ENABLED` switches it off,
+and `GUAARDVARK_MCP_SERVER_TIMEOUT` is its per-call ceiling (default 120 s).
+`GUAARDVARK_MCP_ENABLED=false` does not stop the server. The server does read
+`GUAARDVARK_MCP_TIMEOUT` when `GUAARDVARK_MCP_SERVER_TIMEOUT` is unset, so set
+both when the two should differ.
+
 **Secrets.** Put secrets in `env`, preferably as `${VAR}` references, never in
 `args`: the MCP Servers page and `GET /api/automation/mcp/servers/<name>` show
 `args` and never show `env` values.
@@ -115,7 +123,7 @@ terminal (`--json`, pipes) it refuses unless the tool matches
 | `POST /reload-config` | Re-read the config file (localhost or API key only) |
 | `POST /connect`, `POST /disconnect` | `{server}` |
 | `GET /tools?server=` | Tools with their policy |
-| `POST /execute` | `{server, tool, arguments}`; a caller on this machine or with the API key approves confirm tools, anyone else can run only allow tools |
+| `POST /execute` | `{server, tool, arguments}`; a caller on this machine or with the API key approves confirm tools. Where the opt-out below lets other callers in, they can run only allow tools |
 | `GET /resources`, `POST /resources/read` | Resources |
 | `GET /prompts`, `POST /prompts/get` | Prompts |
 | `GET /audit-log` | Recent calls |
@@ -124,9 +132,15 @@ terminal (`--json`, pipes) it refuses unless the tool matches
 
 - Config writes start programs, so `PUT/DELETE /servers/<name>` and
   `/reload-config` always need a local caller or the `X-API-Key` header.
-- `GUAARDVARK_PROTECT_TOOL_ENDPOINTS=true` puts all of `/api/automation/` and
-  `/api/tools/execute` behind the same rule. It is off by default because the
-  Tools page and automation panels are used from other devices on the LAN.
+- All of `/api/automation/`, `/api/tools/execute` and `/api/tools/jobs/` are
+  behind the same rule. A browser on another device uses them once it is
+  signed in with this install's API key in Settings → API key; until then the MCP
+  Servers page and the Tools page say so and link there. A browser on the
+  Guaardvark machine itself is a local caller. Once `GUAARDVARK_API_KEY` is
+  set, every caller needs the key, that browser included.
+- `GUAARDVARK_PROTECT_TOOL_ENDPOINTS=false` in `.env` (then restart the
+  backend) opens those routes to every host that can reach the backend. Config
+  writes stay closed.
 - Server processes get a minimal environment: `PATH`, `HOME`, locale,
   proxy/CA settings, Node/Python basics, plus their own `env`. `DATABASE_URL`,
   API keys, tokens and Redis/Celery URLs are withheld.

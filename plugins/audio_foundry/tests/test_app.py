@@ -21,7 +21,8 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 from service.app import app  # noqa: E402
 
-client = TestClient(app)
+# An address the service's Host check answers.
+client = TestClient(app, base_url="http://127.0.0.1:8206")
 
 
 def test_health_returns_ok():
@@ -29,6 +30,12 @@ def test_health_returns_ok():
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
     assert r.json()["service"] == "audio_foundry"
+
+
+def test_a_page_rebound_to_this_machine_is_refused():
+    r = client.post("/evict/voice", headers={"Host": "evil.example:8206"})
+    assert r.status_code == 421
+    assert r.json()["code"] == "host_not_allowed"
 
 
 def test_status_reports_three_unwired_backends():

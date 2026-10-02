@@ -1,12 +1,12 @@
 // frontend/src/pages/StickyNotesPage.jsx
-// Sticky notes board — Google Keep-like experience
-// Titles, right-click context menu, search, pin-to-top, auto-save with indicator
-// Drag, resize, color change, minimize (double-click header), layout modes, z-index layering
+// Sticky notes board. Double-click a title to rename it. Close parks the note in
+// the closed-notes drawer. Minimize hides the body and keeps its HTML.
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Box,
   Alert as MuiAlert,
+  Badge,
   Paper,
   Typography,
   Tooltip,
@@ -45,15 +45,19 @@ import {
   PushPin,
   PushPinOutlined,
   ContentCopy,
+  ContentPaste,
+  SelectAll,
   Delete,
   Edit as EditIcon,
   Search as SearchIcon,
   CloudDone,
   CloudOff,
+  History as HistoryIcon,
 } from "@mui/icons-material";
 
 import { useNavigate } from "react-router-dom";
 import PageLayout from "../components/layout/PageLayout";
+import ClosedNotesDrawer from "../components/notes/ClosedNotesDrawer";
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
@@ -115,6 +119,8 @@ const StickyNote = React.memo(
     isMinimized,
     isPinned,
     onToggleMinimize,
+    onClose,
+    onTitleChange,
     onColorChange,
     onContentChange,
     _onDeleteRequest,
@@ -125,16 +131,30 @@ const StickyNote = React.memo(
   }) => {
     const colorInputRef = useRef(null);
     const contentRef = useRef(null);
+    const contentPropRef = useRef(content);
+    const titleCancelRef = useRef(false);
     const [lastClickTime, setLastClickTime] = useState(0);
     const [clickCount, setClickCount] = useState(0);
     const clickTimeoutRef = useRef(null);
+    const [editingTitle, setEditingTitle] = useState(false);
+    const [titleDraft, setTitleDraft] = useState(title || "");
+    contentPropRef.current = content;
 
-    // Populate contentEditable on mount only
+    // Keep the editor mounted across minimize. Write props into an empty node
+    // (first mount, or a remount after collapsed layout) and follow external
+    // updates only while the caret is not in the note.
     useEffect(() => {
-      if (contentRef.current && content !== undefined) {
-        contentRef.current.innerHTML = content;
-      }
-    }, []);
+      const el = contentRef.current;
+      if (!el) return;
+      const next = content || "";
+      // Skip while equal so typing does not reset the caret. Undo and reopen
+      // change `content` from outside and must rewrite the editor.
+      if (el.innerHTML !== next) el.innerHTML = next;
+    }, [content]);
+
+    useEffect(() => {
+      if (!editingTitle) setTitleDraft(title || "");
+    }, [title, editingTitle]);
 
     useEffect(() => {
       return () => {
@@ -169,17 +189,31 @@ const StickyNote = React.memo(
       [lastClickTime, clickCount, onToggleMinimize],
     );
 
-    const handleInput = useCallback(() => {
-      if (contentRef.current) {
-        onContentChange(contentRef.current.innerHTML);
-      }
+    // Ignore a disconnected node, and ignore an unfocused editor that just
+    // became empty while state still holds text. That is the minimize wipe.
+    // A focused editor may clear the note on purpose.
+    const publishContent = useCallback(() => {
+      const el = contentRef.current;
+      if (!el || !el.isConnected) return;
+      const html = el.innerHTML;
+      const stored = contentPropRef.current || "";
+      const focused = document.activeElement === el;
+      if (!html && stored && !focused) return;
+      if (html === stored) return;
+      onContentChange(html);
     }, [onContentChange]);
 
-    const handleBlur = useCallback(() => {
-      if (contentRef.current) {
-        onContentChange(contentRef.current.innerHTML);
-      }
-    }, [onContentChange]);
+    const commitTitle = useCallback(() => {
+      setEditingTitle(false);
+      const next = titleDraft;
+      if (next !== (title || "")) onTitleChange(next);
+    }, [titleDraft, title, onTitleChange]);
+
+    const cancelTitle = useCallback(() => {
+      titleCancelRef.current = true;
+      setTitleDraft(title || "");
+      setEditingTitle(false);
+    }, [title]);
 
 
     const dividerColor = "rgba(255,255,255,0.08)";
@@ -212,7 +246,8 @@ const StickyNote = React.memo(
           sx={{
             display: "flex",
             alignItems: "center",
-            px: 1,
+            pl: 1,
+            pr: 2,
             minHeight: "40px",
             cursor: "grab",
             userSelect: "none",
@@ -228,23 +263,71 @@ const StickyNote = React.memo(
             <PushPin sx={{ fontSize: 14, color: textColor, opacity: 0.5, mr: 0.5 }} />
           )}
 
-          {/* Title — display only, rename via right-click menu */}
-          <Typography
-            sx={{
-              flex: 1,
-              fontWeight: 600,
-              fontSize: "0.77rem",
-              color: textColor,
-              overflow: "hidden",
-              whiteSpace: "nowrap",
-              textOverflow: "ellipsis",
-              pointerEvents: "none",
-              opacity: title ? 1 : 0.3,
-              fontStyle: title ? "normal" : "italic",
-            }}
-          >
-            {title || "Untitled"}
-          </Typography>
+          {/* Title fills the bar; only the text itself renames. The empty
+              stretch of the bar still drags and double-clicks to minimize. */}
+          <Box sx={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center" }}>
+            {editingTitle ? (
+              <InputBase
+                autoFocus
+                className="non-draggable"
+                value={titleDraft}
+                placeholder="Untitled"
+                onMouseDown={(e) => e.stopPropagation()}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={() => {
+                  if (titleCancelRef.current) {
+                    titleCancelRef.current = false;
+                    return;
+                  }
+                  commitTitle();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    e.currentTarget.blur();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    cancelTitle();
+                  }
+                }}
+                onFocus={(e) => e.target.select()}
+                sx={{
+                  flex: 1,
+                  fontSize: "0.77rem",
+                  fontWeight: 600,
+                  color: textColor,
+                  "& input": { p: 0, color: "inherit", userSelect: "text" },
+                }}
+              />
+            ) : (
+              <Typography
+                className="non-draggable"
+                data-note-title=""
+                onMouseDown={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setTitleDraft(title || "");
+                  setEditingTitle(true);
+                }}
+                sx={{
+                  maxWidth: "100%",
+                  fontWeight: 600,
+                  fontSize: "0.77rem",
+                  color: textColor,
+                  overflow: "hidden",
+                  whiteSpace: "nowrap",
+                  textOverflow: "ellipsis",
+                  cursor: "text",
+                  opacity: title ? 1 : 0.3,
+                  fontStyle: title ? "normal" : "italic",
+                }}
+              >
+                {title || "Untitled"}
+              </Typography>
+            )}
+          </Box>
 
           {/* Color picker dot — matches DashboardCardWrapper (8x8) */}
           <Box sx={{ position: "relative", ml: 0.5 }}>
@@ -293,12 +376,14 @@ const StickyNote = React.memo(
             />
           </Box>
 
-          {/* Close button — minimizes the note (delete via right-click menu) */}
+          {/* Close parks the note. The button sits clear of the corner resize handle. */}
           <Tooltip title="Close">
             <IconButton
+              aria-label="Close note"
+              onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
-                onToggleMinimize();
+                onClose();
               }}
               className="non-draggable"
               size="small"
@@ -317,9 +402,15 @@ const StickyNote = React.memo(
           </Tooltip>
         </Box>
 
-        {/* ── Content area (hidden when minimized) ─────────────────── */}
-        {!isMinimized && (
-          <>
+        {/* Body stays mounted while minimized so its HTML is not discarded. */}
+        <Box
+          sx={{
+            display: isMinimized ? "none" : "flex",
+            flexDirection: "column",
+            flexGrow: 1,
+            minHeight: 0,
+          }}
+        >
             {/* Formatting toolbar */}
             <Box
               sx={{
@@ -384,12 +475,15 @@ const StickyNote = React.memo(
               ref={(el) => {
                 contentRef.current = el;
                 if (noteRef) noteRef(el);
+                if (el && !el.innerHTML && contentPropRef.current) {
+                  el.innerHTML = contentPropRef.current;
+                }
               }}
               className="note-content non-draggable"
               contentEditable
               suppressContentEditableWarning
-              onBlur={handleBlur}
-              onInput={handleInput}
+              onBlur={publishContent}
+              onInput={publishContent}
               sx={{
                 flexGrow: 1,
                 p: 1,
@@ -411,8 +505,7 @@ const StickyNote = React.memo(
                 },
               }}
             />
-          </>
-        )}
+        </Box>
       </Paper>
     );
   },
@@ -449,16 +542,19 @@ const StickyNotesPage = () => {
   const [maxZIndex, setMaxZIndex] = useState(0);
   const [layoutMode, setLayoutMode] = useState("normal");
   const [pinnedNotes, setPinnedNotes] = useState({});
+  const [closedNotes, setClosedNotes] = useState({});
+  const [closedDrawerOpen, setClosedDrawerOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [contextMenu, setContextMenu] = useState(null);
   const [desktopMenu, setDesktopMenu] = useState(null);
   const [saveIndicator, setSaveIndicator] = useState(null);
-  const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { noteId, source }
   const [renameTarget, setRenameTarget] = useState(null); // { noteId, title }
   const gridContainerRef = useRef(null);
   const [gridWidth, setGridWidth] = useState(dashboardWidth);
   const isTogglingRef = useRef(false);
   const noteRefs = useRef({});
+  const editRangeRef = useRef(null);
   const saveTimeoutRef = useRef(null);
 
   // Undo history (CTRL+Z)
@@ -470,6 +566,7 @@ const StickyNotesPage = () => {
   const noteColorsRef = useRef(noteColors);
   const minimizedCardsRef = useRef(minimizedCards);
   const pinnedNotesRef = useRef(pinnedNotes);
+  const closedNotesRef = useRef(closedNotes);
   const layoutModeRef = useRef(layoutMode);
   const layoutRef = useRef(null);
   // Sync refs immediately (not via useEffect which is async)
@@ -477,6 +574,7 @@ const StickyNotesPage = () => {
   noteColorsRef.current = noteColors;
   minimizedCardsRef.current = minimizedCards;
   pinnedNotesRef.current = pinnedNotes;
+  closedNotesRef.current = closedNotes;
   layoutModeRef.current = layoutMode;
 
   // ── Grid width tracking ──────────────────────────────────────────────────
@@ -605,6 +703,9 @@ const StickyNotesPage = () => {
           if (saved.pinnedNotes && typeof saved.pinnedNotes === "object") {
             setPinnedNotes(saved.pinnedNotes);
           }
+          if (saved.closedNotes && typeof saved.closedNotes === "object") {
+            setClosedNotes(saved.closedNotes);
+          }
 
           const noteIds = Object.keys(saved.notes || {});
           if (Array.isArray(saved.layout) && saved.layout.length > 0) {
@@ -660,7 +761,7 @@ const StickyNotesPage = () => {
   // ── Persistence ──────────────────────────────────────────────────────────
 
   const saveState = useCallback(
-    async (newLayout, newNoteColors, newMinimizedCards, newLayoutMode, newNotes, newPinnedNotes) => {
+    async (newLayout, newNoteColors, newMinimizedCards, newLayoutMode, newNotes, newPinnedNotes, newClosedNotes) => {
       setSaveIndicator("saving");
       try {
         const body = {
@@ -669,6 +770,7 @@ const StickyNotesPage = () => {
           noteColors: newNoteColors || noteColorsRef.current,
           minimizedCards: newMinimizedCards || minimizedCardsRef.current,
           pinnedNotes: newPinnedNotes || pinnedNotesRef.current,
+          closedNotes: newClosedNotes === undefined ? closedNotesRef.current : newClosedNotes,
           layoutMode:
             newLayoutMode !== undefined ? newLayoutMode : layoutModeRef.current,
           lastSaved: new Date().toISOString(),
@@ -703,12 +805,39 @@ const StickyNotesPage = () => {
     [saveState],
   );
 
+  const cancelDebouncedSave = useCallback(() => {
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+  }, []);
+
+  // Read the live editor before minimize/close. A pending debounce must not
+  // write an older copy back after the note has been parked.
+  const flushNoteDom = useCallback((noteId) => {
+    const current = notesRef.current;
+    const note = current[noteId];
+    if (!note) return current;
+    const el = noteRefs.current[noteId];
+    if (!el || !el.isConnected) return current;
+    const html = el.innerHTML;
+    if (!html && note.content && document.activeElement !== el) return current;
+    if ((note.content || "") === html) return current;
+    const newNotes = { ...current, [noteId]: { ...note, content: html } };
+    notesRef.current = newNotes;
+    setNotes(newNotes);
+    return newNotes;
+  }, []);
+
   // Push state snapshot for undo
   const pushUndo = useCallback(() => {
     const snapshot = JSON.stringify({
       notes: notesRef.current,
       noteColors: noteColorsRef.current,
-      layout: layoutRef.current,
+      layout: normalLayoutRef.current || layoutRef.current,
+      closedNotes: closedNotesRef.current,
+      pinnedNotes: pinnedNotesRef.current,
+      minimizedCards: minimizedCardsRef.current,
     });
     undoStackRef.current.push(snapshot);
     if (undoStackRef.current.length > MAX_UNDO) undoStackRef.current.shift();
@@ -718,10 +847,39 @@ const StickyNotesPage = () => {
   const handleUndo = useCallback(() => {
     if (undoStackRef.current.length === 0) return;
     const snapshot = JSON.parse(undoStackRef.current.pop());
-    if (snapshot.notes) setNotes(snapshot.notes);
-    if (snapshot.noteColors) setNoteColors(snapshot.noteColors);
-    if (snapshot.layout) setLayout(snapshot.layout);
-    saveState(snapshot.layout, snapshot.noteColors, null, undefined, snapshot.notes);
+    if (snapshot.notes) {
+      notesRef.current = snapshot.notes;
+      setNotes(snapshot.notes);
+    }
+    if (snapshot.noteColors) {
+      noteColorsRef.current = snapshot.noteColors;
+      setNoteColors(snapshot.noteColors);
+    }
+    if (snapshot.layout) {
+      normalLayoutRef.current = snapshot.layout;
+      setLayout(snapshot.layout);
+    }
+    if (snapshot.closedNotes) {
+      closedNotesRef.current = snapshot.closedNotes;
+      setClosedNotes(snapshot.closedNotes);
+    }
+    if (snapshot.pinnedNotes) {
+      pinnedNotesRef.current = snapshot.pinnedNotes;
+      setPinnedNotes(snapshot.pinnedNotes);
+    }
+    if (snapshot.minimizedCards) {
+      minimizedCardsRef.current = snapshot.minimizedCards;
+      setMinimizedCards(snapshot.minimizedCards);
+    }
+    saveState(
+      snapshot.layout,
+      snapshot.noteColors,
+      snapshot.minimizedCards,
+      undefined,
+      snapshot.notes,
+      snapshot.pinnedNotes,
+      snapshot.closedNotes,
+    );
   }, [saveState]);
 
   // Global keyboard shortcuts
@@ -796,14 +954,18 @@ const StickyNotesPage = () => {
 
   const handleToggleMinimize = useCallback(
     (noteId) => {
-      if (layoutMode !== "normal") return;
+      if (layoutModeRef.current !== "normal") return;
+      cancelDebouncedSave();
+      const liveNotes = flushNoteDom(noteId);
       isTogglingRef.current = true;
 
-      const newMin = { ...minimizedCards, [noteId]: !minimizedCards[noteId] };
+      const prevMin = minimizedCardsRef.current;
+      const newMin = { ...prevMin, [noteId]: !prevMin[noteId] };
+      minimizedCardsRef.current = newMin;
       setMinimizedCards(newMin);
 
       const newOrig = { ...originalDimensions };
-      const adjusted = layout.map((item) => {
+      const adjusted = (layoutRef.current || []).map((item) => {
         if (item.i === noteId) {
           if (newMin[noteId]) {
             newOrig[noteId] = { w: item.w, h: item.h };
@@ -821,13 +983,14 @@ const StickyNotesPage = () => {
 
       setOriginalDimensions(newOrig);
       setLayout(adjusted);
+      layoutRef.current = adjusted;
       normalLayoutRef.current = adjusted;
-      saveState(adjusted, noteColors, newMin);
+      saveState(adjusted, noteColorsRef.current, newMin, undefined, liveNotes);
       requestAnimationFrame(() => {
         isTogglingRef.current = false;
       });
     },
-    [minimizedCards, layout, noteColors, saveState, cardMinGridH, originalDimensions, layoutMode],
+    [saveState, cardMinGridH, originalDimensions, cancelDebouncedSave, flushNoteDom],
   );
 
   const handleCardClick = useCallback(
@@ -866,17 +1029,30 @@ const StickyNotesPage = () => {
     saveState(newLayout, newColors, minimizedCards, undefined, newNotes);
   }, [notes, noteColors, layout, minimizedCards, makeLayoutItem, saveState]);
 
-  // Delete note
+  // Delete note from the board or from the closed list.
   const handleDeleteNote = useCallback(
-    (noteId) => {
-      const { [noteId]: _, ...rest } = notes;
-      const { [noteId]: __, ...restColors } = noteColors;
-      const { [noteId]: ___, ...restMin } = minimizedCards;
-      const { [noteId]: ____, ...restPinned } = pinnedNotes;
-      const newLayout = (normalLayoutRef.current || layout).filter(
+    (noteId, source = "open") => {
+      cancelDebouncedSave();
+      pushUndo();
+      if (source === "closed") {
+        const { [noteId]: _removed, ...restClosed } = closedNotesRef.current;
+        closedNotesRef.current = restClosed;
+        setClosedNotes(restClosed);
+        saveState(null, null, null, undefined, undefined, undefined, restClosed);
+        return;
+      }
+      const { [noteId]: _, ...rest } = notesRef.current;
+      const { [noteId]: __, ...restColors } = noteColorsRef.current;
+      const { [noteId]: ___, ...restMin } = minimizedCardsRef.current;
+      const { [noteId]: ____, ...restPinned } = pinnedNotesRef.current;
+      const newLayout = (normalLayoutRef.current || layoutRef.current || []).filter(
         (i) => i.i !== noteId,
       );
       normalLayoutRef.current = newLayout;
+      notesRef.current = rest;
+      noteColorsRef.current = restColors;
+      minimizedCardsRef.current = restMin;
+      pinnedNotesRef.current = restPinned;
       setNotes(rest);
       setNoteColors(restColors);
       setMinimizedCards(restMin);
@@ -884,15 +1060,110 @@ const StickyNotesPage = () => {
       setLayout(newLayout);
       saveState(newLayout, restColors, restMin, undefined, rest, restPinned);
     },
-    [notes, noteColors, minimizedCards, pinnedNotes, layout, saveState],
+    [saveState, pushUndo, cancelDebouncedSave],
+  );
+
+  // Park an open note. The text moves with it into closedNotes.
+  const handleCloseNote = useCallback(
+    (noteId) => {
+      cancelDebouncedSave();
+      const liveNotes = flushNoteDom(noteId);
+      const note = liveNotes[noteId];
+      if (!note) return;
+      pushUndo();
+      const { [noteId]: _removed, ...rest } = liveNotes;
+      const { [noteId]: _color, ...restColors } = noteColorsRef.current;
+      const { [noteId]: _min, ...restMin } = minimizedCardsRef.current;
+      const { [noteId]: _pin, ...restPinned } = pinnedNotesRef.current;
+      const newLayout = (normalLayoutRef.current || layoutRef.current || []).filter(
+        (i) => i.i !== noteId,
+      );
+      const closed = {
+        title: note.title || "",
+        content: note.content || "",
+        color: noteColorsRef.current[noteId] || NOTE_COLORS[0],
+        pinned: !!pinnedNotesRef.current[noteId],
+        closedAt: new Date().toISOString(),
+      };
+      const nextClosed = { ...closedNotesRef.current, [noteId]: closed };
+      normalLayoutRef.current = newLayout;
+      layoutRef.current = newLayout;
+      notesRef.current = rest;
+      noteColorsRef.current = restColors;
+      minimizedCardsRef.current = restMin;
+      pinnedNotesRef.current = restPinned;
+      closedNotesRef.current = nextClosed;
+      setNotes(rest);
+      setNoteColors(restColors);
+      setMinimizedCards(restMin);
+      setPinnedNotes(restPinned);
+      setClosedNotes(nextClosed);
+      if (layoutModeRef.current === "normal") setLayout(newLayout);
+      saveState(newLayout, restColors, restMin, undefined, rest, restPinned, nextClosed);
+    },
+    [saveState, pushUndo, cancelDebouncedSave, flushNoteDom],
+  );
+
+  const handleReopenNote = useCallback(
+    (noteId) => {
+      cancelDebouncedSave();
+      const closed = closedNotesRef.current[noteId];
+      if (!closed) return;
+      pushUndo();
+      const { [noteId]: _removed, ...restClosed } = closedNotesRef.current;
+      const newNotes = {
+        ...notesRef.current,
+        [noteId]: { title: closed.title || "", content: closed.content || "" },
+      };
+      const newColors = {
+        ...noteColorsRef.current,
+        [noteId]: closed.color || NOTE_COLORS[0],
+      };
+      const newPinned = closed.pinned
+        ? { ...pinnedNotesRef.current, [noteId]: true }
+        : pinnedNotesRef.current;
+      const item = makeLayoutItem(noteId, Object.keys(notesRef.current).length);
+      const newLayout = [...(normalLayoutRef.current || layoutRef.current || []), item];
+      normalLayoutRef.current = newLayout;
+      notesRef.current = newNotes;
+      noteColorsRef.current = newColors;
+      pinnedNotesRef.current = newPinned;
+      closedNotesRef.current = restClosed;
+      setNotes(newNotes);
+      setNoteColors(newColors);
+      setPinnedNotes(newPinned);
+      setClosedNotes(restClosed);
+      if (layoutModeRef.current === "normal") {
+        layoutRef.current = newLayout;
+        setLayout(newLayout);
+      }
+      saveState(
+        newLayout,
+        newColors,
+        minimizedCardsRef.current,
+        undefined,
+        newNotes,
+        newPinned,
+        restClosed,
+      );
+      setClosedDrawerOpen(false);
+    },
+    [saveState, pushUndo, cancelDebouncedSave, makeLayoutItem],
   );
 
   // Content change (debounced save) — use ref to avoid stale closure
   const handleNoteContentChange = useCallback(
     (noteId, content) => {
-      pushUndo();
       const current = notesRef.current;
-      const newNotes = { ...current, [noteId]: { ...current[noteId], content } };
+      const note = current[noteId];
+      if (!note || (note.content || "") === content) return;
+      if (!content && note.content) {
+        const el = noteRefs.current[noteId];
+        if (!el || !el.isConnected || document.activeElement !== el) return;
+      }
+      pushUndo();
+      const newNotes = { ...current, [noteId]: { ...note, content } };
+      notesRef.current = newNotes;
       setNotes(newNotes);
       debouncedSave(newNotes);
     },
@@ -902,9 +1173,12 @@ const StickyNotesPage = () => {
   // Title change (debounced save) — use ref to avoid stale closure
   const handleNoteTitleChange = useCallback(
     (noteId, title) => {
-      pushUndo();
       const current = notesRef.current;
-      const newNotes = { ...current, [noteId]: { ...current[noteId], title } };
+      const note = current[noteId];
+      if (!note || (note.title || "") === title) return;
+      pushUndo();
+      const newNotes = { ...current, [noteId]: { ...note, title } };
+      notesRef.current = newNotes;
       setNotes(newNotes);
       debouncedSave(newNotes);
     },
@@ -961,11 +1235,82 @@ const StickyNotesPage = () => {
     }
   }, []);
 
+  const selectNoteContents = useCallback((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }, []);
+
+  const handleSelectAllNote = useCallback((noteId) => {
+    setContextMenu(null);
+    requestAnimationFrame(() => {
+      const el = noteRefs.current[noteId];
+      if (!el) return;
+      el.focus();
+      selectNoteContents(el);
+    });
+  }, [selectNoteContents]);
+
+  const handleCopyNote = useCallback((noteId) => {
+    const el = noteRefs.current[noteId];
+    if (!el) return;
+    const sel = window.getSelection();
+    const hasSelection = Boolean(
+      sel && sel.rangeCount > 0 && !sel.isCollapsed && el.contains(sel.anchorNode),
+    );
+    if (!hasSelection) selectNoteContents(el);
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      const text = (hasSelection ? sel.toString() : el.innerText) || "";
+      navigator.clipboard.writeText(text).catch((err) => {
+        setLayoutError(`Could not copy: ${err?.message || "clipboard permission denied"}`);
+      });
+    }
+    setContextMenu(null);
+  }, [selectNoteContents]);
+
+  const handlePasteNote = useCallback(async (noteId) => {
+    const saved = editRangeRef.current;
+    let text;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (err) {
+      setContextMenu(null);
+      setLayoutError(`Could not paste: ${err?.message || "clipboard permission denied"}`);
+      return;
+    }
+    setContextMenu(null);
+    const el = noteRefs.current[noteId];
+    if (!el) return;
+    el.focus();
+    const sel = window.getSelection();
+    if (saved && el.contains(saved.startContainer)) {
+      sel.removeAllRanges();
+      sel.addRange(saved);
+    }
+    const inserted = document.execCommand("insertText", false, text);
+    if (!inserted && text) {
+      const range = sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+      if (range) {
+        range.deleteContents();
+        range.insertNode(document.createTextNode(text));
+        range.collapse(false);
+      } else {
+        el.appendChild(document.createTextNode(text));
+      }
+    }
+    handleNoteContentChange(noteId, el.innerHTML);
+  }, [handleNoteContentChange]);
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   const LayoutModeIcon = LAYOUT_MODE_ICONS[layoutMode];
   const _isCompact = layoutMode === "compact";
   const isCollapsed = layoutMode === "collapsed";
+  const deleteSource = deleteConfirm?.source === "closed" ? closedNotes : notes;
+  const deleteNoteTitle = (deleteConfirm && deleteSource[deleteConfirm.noteId]?.title) || "Untitled";
 
   if (!initialStateLoaded) {
     return (
@@ -1036,8 +1381,25 @@ const StickyNotesPage = () => {
 
           {/* Add note */}
           <Tooltip title="Add Note">
-            <IconButton onClick={handleAddNote} size="small" sx={{ ml: 1 }}>
+            <IconButton aria-label="Add note" onClick={handleAddNote} size="small" sx={{ ml: 1 }}>
               <Add fontSize="small" />
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title="Closed notes">
+            <IconButton
+              aria-label="Closed notes"
+              onClick={() => setClosedDrawerOpen(true)}
+              size="small"
+            >
+              <Badge
+                badgeContent={Object.keys(closedNotes).length}
+                color="primary"
+                invisible={Object.keys(closedNotes).length === 0}
+                sx={{ "& .MuiBadge-badge": { fontSize: "0.6rem", height: 16, minWidth: 16 } }}
+              >
+                <HistoryIcon fontSize="small" />
+              </Badge>
             </IconButton>
           </Tooltip>
 
@@ -1123,6 +1485,24 @@ const StickyNotesPage = () => {
                 opacity: 0.9,
               },
             },
+            // Global handles sit above the card. Keep the corner and the top/right
+            // strips off the title bar so Close and the title receive the click.
+            "& .react-resizable-handle-n": {
+              height: 8,
+              top: 0,
+              left: 12,
+              width: "calc(100% - 24px)",
+            },
+            "& .react-resizable-handle-e": {
+              width: 8,
+              top: 44,
+              right: 0,
+              height: "calc(100% - 44px)",
+            },
+            "& .react-resizable-handle-ne, & .react-resizable-handle-nw, & .react-resizable-handle-se, & .react-resizable-handle-sw": {
+              width: 12,
+              height: 12,
+            },
           }}
         >
           {(() => {
@@ -1179,7 +1559,16 @@ const StickyNotesPage = () => {
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      setContextMenu({ noteId, x: e.clientX, y: e.clientY });
+                      const contentEl = e.target.closest?.(".note-content");
+                      const inContent = Boolean(contentEl);
+                      editRangeRef.current = null;
+                      if (inContent) {
+                        const sel = window.getSelection();
+                        if (sel && sel.rangeCount > 0 && contentEl.contains(sel.anchorNode)) {
+                          editRangeRef.current = sel.getRangeAt(0).cloneRange();
+                        }
+                      }
+                      setContextMenu({ noteId, x: e.clientX, y: e.clientY, inContent });
                     }}
                   >
                     {isCollapsed ? (
@@ -1219,12 +1608,26 @@ const StickyNotesPage = () => {
                             textOverflow: "ellipsis",
                             color: textColor,
                             pointerEvents: "none",
+                            flex: 1,
                           }}
                         >
                           {note.title || (note.content
                             ? note.content.replace(/<[^>]*>/g, "").substring(0, 40) || "Empty note"
                             : "Empty note")}
                         </Typography>
+                        <IconButton
+                          aria-label="Close note"
+                          size="small"
+                          className="non-draggable"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCloseNote(noteId);
+                          }}
+                          sx={{ ml: 0.5, width: 20, height: 20, p: 0, color: textColor, opacity: 0.5 }}
+                        >
+                          <Close sx={{ fontSize: 16 }} />
+                        </IconButton>
                       </Paper>
                     ) : (
                       <StickyNote
@@ -1237,6 +1640,10 @@ const StickyNotesPage = () => {
                         isPinned={!!pinnedNotes[noteId]}
                         onToggleMinimize={() =>
                           handleToggleMinimize(noteId)
+                        }
+                        onClose={() => handleCloseNote(noteId)}
+                        onTitleChange={(nextTitle) =>
+                          handleNoteTitleChange(noteId, nextTitle)
                         }
                         onColorChange={(color) =>
                           handleNoteColorChange(noteId, color)
@@ -1270,6 +1677,23 @@ const StickyNotesPage = () => {
         anchorPosition={contextMenu ? { top: contextMenu.y, left: contextMenu.x } : undefined}
         slotProps={{ paper: { sx: { minWidth: 180, borderRadius: "6px" } } }}
       >
+        {contextMenu?.inContent && (
+          <>
+            <MenuItem onClick={() => contextMenu && handleCopyNote(contextMenu.noteId)}>
+              <ListItemIcon><ContentCopy fontSize="small" /></ListItemIcon>
+              <ListItemText>Copy</ListItemText>
+            </MenuItem>
+            <MenuItem onClick={() => contextMenu && handleSelectAllNote(contextMenu.noteId)}>
+              <ListItemIcon><SelectAll fontSize="small" /></ListItemIcon>
+              <ListItemText>Select all</ListItemText>
+            </MenuItem>
+            <MenuItem onClick={() => contextMenu && handlePasteNote(contextMenu.noteId)}>
+              <ListItemIcon><ContentPaste fontSize="small" /></ListItemIcon>
+              <ListItemText>Paste</ListItemText>
+            </MenuItem>
+            <Divider />
+          </>
+        )}
         {/* Color swatches */}
         <MenuItem disableRipple disableGutters sx={{ px: 1.5, py: 0.6 }}>
           <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap" }}>
@@ -1328,7 +1752,7 @@ const StickyNotesPage = () => {
         <Divider />
         <MenuItem
           onClick={() => {
-            if (contextMenu) setDeleteConfirm(contextMenu.noteId);
+            if (contextMenu) setDeleteConfirm({ noteId: contextMenu.noteId, source: "open" });
             setContextMenu(null);
           }}
           sx={{ color: "error.main" }}
@@ -1341,13 +1765,13 @@ const StickyNotesPage = () => {
       {/* ── Delete confirmation dialog ─────────────────────────────── */}
       <Dialog open={Boolean(deleteConfirm)} onClose={() => setDeleteConfirm(null)} maxWidth="xs">
         <DialogTitle sx={{ fontSize: "0.9rem" }}>
-          Delete this note? This cannot be undone.
+          {`Delete "${deleteNoteTitle}"? This cannot be undone.`}
         </DialogTitle>
         <DialogActions>
           <Button onClick={() => setDeleteConfirm(null)} size="small">Cancel</Button>
           <Button
             onClick={() => {
-              handleDeleteNote(deleteConfirm);
+              if (deleteConfirm) handleDeleteNote(deleteConfirm.noteId, deleteConfirm.source);
               setDeleteConfirm(null);
             }}
             color="error"
@@ -1426,6 +1850,14 @@ const StickyNotesPage = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <ClosedNotesDrawer
+        open={closedDrawerOpen}
+        onClose={() => setClosedDrawerOpen(false)}
+        closedNotes={closedNotes}
+        onReopen={handleReopenNote}
+        onDeleteRequest={(noteId) => setDeleteConfirm({ noteId, source: "closed" })}
+      />
     </PageLayout>
   );
 };

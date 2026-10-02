@@ -10,17 +10,17 @@ import torch
 if not torch.cuda.is_available():
     torch.cuda.is_available = lambda: False
 
-# Fix 11: Import AUTH_TOKEN from service.auth, not _auth_token from app
 from service.app import app
-from service.auth import AUTH_TOKEN
+from service.auth import auth_token
 
-AUTH_HEADER = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+AUTH_HEADER = {"Authorization": f"Bearer {auth_token()}"}
 
 
 @pytest.fixture(scope="module")
 def client():
-    """TestClient as context manager triggers lifespan events."""
-    with TestClient(app) as c:
+    """TestClient as context manager triggers lifespan events. The base URL
+    is an address the service's Host check answers."""
+    with TestClient(app, base_url="http://127.0.0.1:8202") as c:
         yield c
 
 
@@ -30,11 +30,18 @@ def test_health_endpoint(client):
     data = resp.json()
     assert "status" in data
     assert "gpu" in data
-    assert "auth_token" in data  # Fix 2 verification
+    # The backend relays /health to browsers; the token stays in its file.
+    assert "auth_token" not in data
+    assert auth_token() not in resp.text
+
+
+def test_a_rebound_name_is_refused(client):
+    resp = client.get("/health", headers={"Host": "evil.example:8202"})
+    assert resp.status_code == 421
 
 
 def test_models_endpoint(client):
-    resp = client.get("/models")
+    resp = client.get("/models", headers=AUTH_HEADER)
     assert resp.status_code == 200
     data = resp.json()
     assert "downloaded" in data
@@ -42,16 +49,28 @@ def test_models_endpoint(client):
 
 
 def test_config_endpoint(client):
-    resp = client.get("/config")
+    resp = client.get("/config", headers=AUTH_HEADER)
     assert resp.status_code == 200
     data = resp.json()
     assert "default_model" in data
 
 
 def test_jobs_endpoint_empty(client):
-    resp = client.get("/jobs")
+    resp = client.get("/jobs", headers=AUTH_HEADER)
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+@pytest.mark.parametrize("method, path", [
+    ("GET", "/models"), ("GET", "/config"), ("GET", "/jobs"), ("GET", "/jobs/x"),
+    ("POST", "/models/download"), ("PUT", "/config"), ("DELETE", "/jobs"),
+])
+def test_every_route_but_health_needs_the_token(client, method, path):
+    resp = client.request(method, path)
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == "Bearer"
+    wrong = client.request(method, path, headers={"Authorization": "Bearer wrong"})
+    assert wrong.status_code == 401
 
 
 def test_upscale_image_requires_auth(client):
@@ -75,7 +94,7 @@ def test_upscale_video_validates_input(client):
 
 
 def test_job_not_found(client):
-    resp = client.get("/jobs/nonexistent")
+    resp = client.get("/jobs/nonexistent", headers=AUTH_HEADER)
     assert resp.status_code == 404
 
 

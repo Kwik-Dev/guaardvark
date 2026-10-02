@@ -1,5 +1,6 @@
 """Chat command — conversation with the LLM."""
 
+import os
 import sys
 import uuid
 import time
@@ -259,7 +260,7 @@ def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | N
                     pass
 
         def on_complete(data):
-            pass
+            live_holder["complete"] = data
 
         def on_error(msg):
             response_parts.append(f"\n[ERROR] {msg}")
@@ -390,6 +391,15 @@ def _chat_streaming(session_id: str, message: str, no_rag: bool, server: str | N
                 console.print(
                     "\n[llx.error]No response after 5 minutes of silence — session aborted.[/llx.error]"
                 )
+
+            images = (live_holder.get("complete") or {}).get("generated_images")
+            if images:
+                try:
+                    from llx.media_preview import show_generated
+
+                    show_generated(images, client.server_url, console)
+                except Exception:
+                    pass
 
             elapsed = time.time() - start_time
             console.print(f"\n[llx.dim]Session: {session_id[:8]}  |  {elapsed:.1f}s[/llx.dim]")

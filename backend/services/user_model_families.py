@@ -11,6 +11,7 @@ import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 # Weight names the inspector will list. GGUF is a ComfyUI UNET, not a
 # diffusers snapshot, so it is in the union used for both domains.
@@ -177,10 +178,38 @@ UNWIRED_FAMILIES = (
         "index_classes": ("HiDreamImagePipeline",),
         "message": "HiDream is not wired yet — this product cannot load that architecture.",
     },
+    {
+        "id": "mochi",
+        "domain": "video",
+        "wired": False,
+        "label": "Mochi",
+        "tokens": ("mochi",),
+        "pipeline_tags": (),
+        "index_classes": ("MochiPipeline",),
+        "message": "Mochi is not wired yet — this product cannot load that architecture.",
+    },
+    {
+        "id": "ltx-video-0.9",
+        "domain": "video",
+        "wired": False,
+        "label": "LTX-Video 0.9",
+        # The 2B/13B LTXV checkpoints; LTX-2.x files are named ltx-2.3-… / ltx-2.5-….
+        "tokens": ("ltxv", "ltx-video", "ltx_video"),
+        "pipeline_tags": (),
+        "index_classes": (
+            "LTXPipeline", "LTXImageToVideoPipeline", "LTXConditionPipeline",
+            "LTXLatentUpsamplePipeline",
+        ),
+        "message": (
+            "LTX-Video 0.9 (the 2B/13B LTXV models) is not wired yet — "
+            "the Studio runs LTX-2.3 and LTX-2.5."
+        ),
+    },
 )
 
 # Video add clones a shipped generation id (like). Tokens pick the type; extra
-# tokens pick which shipped template. moe likes need a High + Low file.
+# tokens pick which shipped template, first match in order. moe likes need a
+# High + Low file. Video tokens match whole words (_has_tok), not substrings.
 VIDEO_FAMILIES = (
     {
         "id": "wan",
@@ -188,14 +217,17 @@ VIDEO_FAMILIES = (
         "wired": True,
         "label": "Wan",
         "roles": ("generation", "lora", "encoder"),
-        "tokens": ("wan", "t2v", "i2v", "ti2v"),
+        # t2v / i2v are not Wan's: Hunyuan and CogVideoX name their files the same way.
+        "tokens": ("wan",),
         "likes": {
             "generation": (
-                {"like": "wan22-14b-i2v", "any": ("i2v",), "moe": True},
                 {"like": "wan22-5b", "any": ("5b", "ti2v"), "moe": False},
+                {"like": "wan22-14b-i2v", "any": ("i2v",), "moe": True},
                 {"like": "wan22-14b", "any": ("14b", "wan"), "moe": True},
             ),
             "lora": (
+                # A LoRA trained on the 5B cannot load on the 14B experts.
+                {"like": "wan22-5b", "any": ("5b", "ti2v")},
                 {"like": "wan22-14b-i2v", "any": ("i2v",)},
                 {"like": "wan22-14b", "any": ("wan", "t2v", "14b")},
             ),
@@ -339,6 +371,9 @@ def parse_hf_url(url: str) -> dict:
     if not raw:
         raise ValueError("Paste a Hugging Face URL or org/repo.")
     raw = raw.split("?")[0].split("#")[0].rstrip("/")
+    # A URL copied from the browser escapes spaces and brackets in file names
+    # (%20, %28); the Hub API and hf_hub_download take the plain name.
+    raw = unquote(raw)
     raw = _HF_HOST.sub("", raw)
     if "://" in raw or raw.lower().startswith("www."):
         raise ValueError("Only Hugging Face URLs or org/repo ids are accepted.")
@@ -512,6 +547,81 @@ def _has_moe_pair(files: list, src: str | None) -> bool:
     return has_high and has_low
 
 
+def _has_tok(blob: str, tok: str) -> bool:
+    """tok as a word of its own: "i2v" is not in "ti2v", "wan" is in "wan2.2".
+
+    Used for family and template tokens, which are short and collide. Role hints
+    (lora, vae, t5xxl, ...) stay substrings: "AnimeLoRA" is still a LoRA.
+    """
+    return re.search(r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z])", blob) is not None
+
+
+def _hit(blob: str, toks, whole_words: bool) -> bool:
+    if whole_words:
+        return any(_has_tok(blob, t) for t in toks)
+    return any(t in blob for t in toks)
+
+
+# Parts of a pipeline that ship beside the model in a repo, by folder or by name.
+_COMPONENT_DIRS = (
+    "text_encoder", "text_encoders", "tokenizer", "vae", "image_encoder", "scheduler",
+    "clip", "clip_vision", "loras", "latent_upscale_models", "upscale_models", "embeddings",
+)
+_COMPONENT_NAME_HINTS = ("vae", "upscaler") + _ENCODER_HINTS
+
+
+def _is_component(name: str) -> bool:
+    low = name.lower()
+    if any(part in _COMPONENT_DIRS for part in low.split("/")[:-1]):
+        return True
+    return any(k in low for k in _COMPONENT_NAME_HINTS + _LORA_HINTS)
+
+
+def _role_names(files: list, src: str | None) -> list:
+    """The filenames the role is read from.
+
+    A pasted file is its own evidence. At a repo root it is the main weights
+    only: one LoRA or T5 file beside the model must not make the whole repo a
+    LoRA or an encoder.
+    """
+    if src:
+        return [src]
+    names = [f.get("src") or "" for f in files]
+    main = [n for n in names if n and not _is_component(n)]
+    return main or names
+
+
+def _shipped_generation_match(hf_repo: str, src: str | None) -> dict | None:
+    """The shipped generation entry this exact file belongs to, if any."""
+    if not src or not hf_repo:
+        return None
+    try:
+        from backend.services.video_model_registry import GENERATION_TYPES, VIDEO_MODEL_REGISTRY
+    except Exception:
+        return None
+    for mid, entry in VIDEO_MODEL_REGISTRY.items():
+        if mid.startswith("user-") or entry.get("type") not in GENERATION_TYPES:
+            continue
+        if (entry.get("hf_repo") or "") != hf_repo:
+            continue
+        srcs = [f.get("src") for f in (entry.get("files") or []) if isinstance(f, dict)]
+        if src in srcs:
+            return {
+                "family": entry["type"],
+                "label": entry.get("name") or mid,
+                "role": "generation",
+                "like": mid,
+                "wired": True,
+                "confidence": "high",
+                "reason": "shipped file",
+                "moe": len(srcs) == 2 and any("highnoise" in (x or "").lower() for x in srcs),
+                "engine": "comfy",
+                "shipped": True,
+                "score": 10,
+            }
+    return None
+
+
 def _guess_role(blob: str, domain: str) -> str:
     if any(k in blob for k in _LORA_HINTS):
         return "lora"
@@ -523,9 +633,9 @@ def _guess_role(blob: str, domain: str) -> str:
 def _pick_like(rules: tuple, blob: str) -> dict | None:
     for rule in rules:
         any_toks = rule.get("any") or ()
-        if not any_toks or any(t in blob for t in any_toks):
+        if not any_toks or _hit(blob, any_toks, whole_words=True):
             return rule
-    return rules[0] if rules else None
+    return None
 
 
 def match_families(
@@ -547,7 +657,7 @@ def match_families(
         if row["domain"] != domain:
             continue
         hit = (
-            any(t in blob for t in row["tokens"])
+            _hit(blob, row["tokens"], whole_words=domain == "video")
             or tag in {t.lower() for t in row.get("pipeline_tags") or ()}
             or (cls and cls in (row.get("index_classes") or ()))
         )
@@ -571,6 +681,9 @@ def match_families(
     if unwired:
         return unwired
 
+    if domain == "video":
+        names = _role_names(files, src)
+        blob = " ".join(names + [hf_repo or ""]).lower()
     role = _guess_role(blob, domain)
     matches = []
 
@@ -649,17 +762,22 @@ def match_families(
 
     elif domain == "video":
         moe_pair = _has_moe_pair(files, src)
+        shipped = _shipped_generation_match(hf_repo, src)
+        if shipped:
+            matches.append(shipped)
         for row in VIDEO_FAMILIES:
             if role not in row["roles"]:
                 continue
-            type_hit = any(t in blob for t in row["tokens"])
+            type_hit = _hit(blob, row["tokens"], whole_words=True)
             rules = (row.get("likes") or {}).get(role) or ()
             picked = _pick_like(rules, blob) if (type_hit or rules) else None
             if not picked:
                 continue
             # Skip types that did not actually appear in the paste unless the
             # like-rule's tokens did (encoder hints often name the type).
-            if not type_hit and not any(t in blob for t in (picked.get("any") or ())):
+            if not type_hit and not _hit(blob, picked.get("any") or (), whole_words=True):
+                continue
+            if shipped and picked["like"] == shipped["like"]:
                 continue
             score = 3 if type_hit else 2
             matches.append({
@@ -679,7 +797,7 @@ def match_families(
                 "family": "wan",
                 "label": "Wan",
                 "role": "generation",
-                "like": "wan22-14b-i2v" if "i2v" in blob else "wan22-14b",
+                "like": "wan22-14b-i2v" if _has_tok(blob, "i2v") else "wan22-14b",
                 "wired": True,
                 "confidence": "high",
                 "reason": "HighNoise + LowNoise pair",
@@ -687,6 +805,21 @@ def match_families(
                 "engine": "comfy",
                 "score": 4,
             })
+
+        if not matches and cls and has_model_index:
+            # A diffusers pipeline no wired family claimed: refuse it by name
+            # rather than leave the person to pick a template that cannot load it.
+            return [{
+                "family": None,
+                "label": cls,
+                "role": "generation",
+                "like": None,
+                "wired": False,
+                "confidence": "high",
+                "reason": f"{cls} is not a video architecture this product can load yet.",
+                "moe": False,
+                "engine": None,
+            }]
 
     matches.sort(key=lambda m: -int(m.get("score") or 0))
     for m in matches:

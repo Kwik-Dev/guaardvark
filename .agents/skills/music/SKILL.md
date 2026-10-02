@@ -14,6 +14,10 @@ ACE-Step takes ~10 GB VRAM; the orchestrator evicts other models while it runs.
 
 ## A song
 
+Over MCP, call `generate_music` (`style`, optional `lyrics`, `seconds` up to 240,
+`instrumental`, `seed`); it returns a `job_id` for `get_generation_status`, which reports the
+file and a download link when the song is done. Without MCP, or for `negative_prompt`, use REST:
+
 ```bash
 curl -s -X POST $B/api/audio-foundry/generate/music -H 'Content-Type: application/json' -d '{
   "style_prompt": "indie folk, fingerpicked acoustic guitar, warm male vocal, 96 bpm, intimate",

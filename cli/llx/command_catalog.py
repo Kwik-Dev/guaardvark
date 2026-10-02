@@ -87,7 +87,7 @@ COMMAND_TREE: dict[str, list[str]] = OrderedDict(
         ("gpu", ["status", "release"]),
         ("mcp", ["config", "install", "doctor", "list-tools", "client"]),
         ("audio", ["tts", "play", "music", "sfx", "voices"]),
-        ("swarm", ["list", "run", "status", "logs"]),
+        ("swarm", ["list", "run", "templates", "status", "logs"]),
         ("lessons", ["begin", "end", "list"]),
         # Multi-modal / REPL-only
         ("imagine", []),

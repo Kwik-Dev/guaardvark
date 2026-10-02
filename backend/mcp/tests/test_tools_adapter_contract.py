@@ -94,6 +94,17 @@ def test_every_exposed_tool_declares_read_only():
     assert undeclared == []
 
 
+
+def test_every_published_list_says_what_it_holds():
+    """Gemini rejects a whole request when one array parameter has no `items`."""
+    from backend.mcp.server import _ensure_tools_initialized
+    _ensure_tools_initialized()
+    bare = [f"{tool.name}.{name}"
+            for _base, tool in tools_adapter.collect_exposed_tools(MCPConfig())
+            for name, prop in tool.input_schema.get("properties", {}).items()
+            if prop.get("type") == "array" and "items" not in prop]
+    assert bare == []
+
 # ── validation and exposure ───────────────────────────────────────────────────
 
 class _Recording(BaseTool):
@@ -251,4 +262,4 @@ def test_timeout_messages_do_not_advise_resubmitting_a_write():
     keyed = tools_adapter._timeout_message("generate_video", 120, key="k9")
     assert "'k9'" in keyed and "will not start a second one" in keyed
     read = tools_adapter._timeout_message("search_code", 120, read_only=True)
-    assert "safe" in read
+    assert "safe" in read and "starts a second one behind it" in read

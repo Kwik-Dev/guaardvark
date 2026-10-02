@@ -172,7 +172,7 @@ def tick_recon_reddit(self) -> dict:
 def tick_recon_youtube(self) -> dict:
     """Beat tick — Recon agent scouts YouTube via web_search for candidates.
 
-    Read-only: pulls a DDG result page filtered to site:youtube.com, writes
+    Read-only: pulls a web search result page filtered to site:youtube.com, writes
     status="candidate" rows for video URLs. Never drafts, never posts. Safe
     to run on cron — same kill-switch gate as the reddit recon. Disabled by
     default in celery_app.py beat schedule.
@@ -258,8 +258,8 @@ def tick_process_approved_drafts(self) -> dict:
         return {"processed": 0, "reason": "kill_switch_off"}
 
     def _run():
-        from backend.models import SocialOutreachLog, db
-        from backend.services.social_outreach import kill_switch
+        from backend.models import SocialOutreachLog
+        from backend.services.social_outreach import kill_switch, transitions
         from backend.services.social_outreach.reddit_outreach import post_comment_via_servo as reddit_post_comment, record_post_via_backend
         from backend.services.social_outreach.youtube_outreach import (
             post_youtube_comment_via_servo,
@@ -289,7 +289,18 @@ def tick_process_approved_drafts(self) -> dict:
             
         processed = 0
         skipped_cadence = 0
+        skipped_not_approved = 0
+        withdrawn = 0
         posted_platforms: set[str] = set()
+
+        def _give_up(row_id: int, reason: str) -> None:
+            # A row rejected while the poster was working stays rejected.
+            nonlocal withdrawn
+            if reason == transitions.WITHDRAWN_BEFORE_SUBMIT:
+                withdrawn += 1
+                logger.info("process-approved: row %s was withdrawn before submit", row_id)
+            transitions.abort_in_flight(row_id, f"servo: {reason}")
+
         for row in rows:
             platform = (row.platform or "").strip().lower()
             if platform in posted_platforms:
@@ -308,13 +319,17 @@ def tick_process_approved_drafts(self) -> dict:
 
             # Claim the row up-front so a mid-flight failure (servo crash,
             # record-post HTTP blip) doesn't leave it as "approved" and trigger
-            # a double-post on the next 60s tick. Stamp claim time into
-            # abort_reason so the stuck-processing reaper can age rows
-            # (SocialOutreachLog has no updated_at column).
-            from datetime import datetime, timezone
-            row.status = "processing"
-            row.abort_reason = f"processing_since:{datetime.now(timezone.utc).isoformat()}"
-            db.session.commit()
+            # a double-post on the next 60s tick. The claim only succeeds if
+            # the row is still approved: `rows` was read before the earlier
+            # rows in this batch drove a browser for minutes, and a draft
+            # rejected in that time must not be picked up.
+            if not transitions.claim(row.id):
+                skipped_not_approved += 1
+                continue
+            # Each poster calls this immediately before it publishes. It moves
+            # the row processing -> submitting, and refuses if the row was
+            # rejected after the claim.
+            before_submit = transitions.submit_gate(row.id)
 
             if row.action == "comment":
                 # Pipeline (Phase 2) writes UTM-tagged copy into posted_text; legacy
@@ -328,13 +343,18 @@ def tick_process_approved_drafts(self) -> dict:
                 # the general NL agent loop — no per-platform code, driven by the
                 # grounded eye. "Adding a platform" is now "be logged into it".
                 if row.platform == "reddit":
-                    success, reason = reddit_post_comment(row.target_url, comment_text)
+                    success, reason = reddit_post_comment(
+                        row.target_url, comment_text, before_submit=before_submit,
+                    )
                 elif row.platform == "youtube":
-                    success, reason = post_youtube_comment_via_servo(row.target_url, comment_text, row.task_id)
+                    success, reason = post_youtube_comment_via_servo(
+                        row.target_url, comment_text, row.task_id, before_submit=before_submit,
+                    )
                 else:
                     from backend.services.social_outreach.general_poster import post_via_agent_loop
                     success, reason = post_via_agent_loop(
                         platform, row.target_url, comment_text, action="comment",
+                        before_submit=before_submit,
                     )
 
                 if success:
@@ -345,8 +365,7 @@ def tick_process_approved_drafts(self) -> dict:
                     processed += 1
                     posted_platforms.add(platform)
                 else:
-                    from backend.services.social_outreach.audit import mark_draft_aborted
-                    mark_draft_aborted(row.id, f"servo: {reason}")
+                    _give_up(row.id, reason)
             elif row.action == "reply" and row.platform == "youtube":
                 # ContentAgent writes a JSON envelope to draft_text for
                 # replies because mark_drafted_from_candidate overwrites
@@ -373,11 +392,11 @@ def tick_process_approved_drafts(self) -> dict:
                 except (json.JSONDecodeError, AttributeError, TypeError) as e:
                     logger.warning("reply envelope parse failed for row %s: %s", row.id, e)
                 if not anchor_hint or not reply_text:
-                    from backend.services.social_outreach.audit import mark_draft_aborted
-                    mark_draft_aborted(row.id, "reply_missing_anchor_or_text")
+                    transitions.abort_in_flight(row.id, "reply_missing_anchor_or_text")
                     continue
                 success, reason = post_youtube_reply_via_servo(
                     row.target_url, anchor_hint, reply_text, row.task_id,
+                    before_submit=before_submit,
                 )
                 if success:
                     record_post_via_backend(
@@ -391,8 +410,7 @@ def tick_process_approved_drafts(self) -> dict:
                     # "processing" forever. The user can re-approve via UI to
                     # retry — far better UX than the original "human deals
                     # with it" comment that left rows in limbo.
-                    from backend.services.social_outreach.audit import mark_draft_aborted
-                    mark_draft_aborted(row.id, f"servo: {reason}")
+                    _give_up(row.id, reason)
             elif row.action == "share":
                 from backend.services.social_outreach.persona import SITE_URL
                 payload = {}
@@ -414,7 +432,9 @@ def tick_process_approved_drafts(self) -> dict:
                 link_url = (payload.get("link_url") or "").strip() or SITE_URL
                 
                 if subreddit and title:
-                    success, reason = _submit_post_via_servo(subreddit, title, link_url)
+                    success, reason = _submit_post_via_servo(
+                        subreddit, title, link_url, before_submit=before_submit,
+                    )
                     if success:
                         try:
                             requests.post(
@@ -436,52 +456,44 @@ def tick_process_approved_drafts(self) -> dict:
                     else:
                         # Same recovery path as the comment branch — abort
                         # cleanly so the row isn't stranded at "processing".
-                        from backend.services.social_outreach.audit import mark_draft_aborted
-                        mark_draft_aborted(row.id, f"servo: {reason}")
+                        _give_up(row.id, reason)
                 else:
                     # Couldn't even attempt — sub or title missing. Mark
                     # aborted with a clear reason so the user can fix the row.
-                    from backend.services.social_outreach.audit import mark_draft_aborted
-                    mark_draft_aborted(row.id, "share row missing subreddit or title")
+                    transitions.abort_in_flight(row.id, "share row missing subreddit or title")
         return {
             "processed": processed,
             "skipped_cadence": skipped_cadence,
+            "skipped_not_approved": skipped_not_approved,
+            "withdrawn": withdrawn,
             "posted_platforms": sorted(posted_platforms),
         }
     return _with_app_context(_run)
 
 
-# How long a row may sit at status=processing before we abort it (worker kill).
+# How long a row may sit at status=processing or submitting before we abort it
+# (worker kill).
 _STUCK_PROCESSING_SECONDS = 30 * 60
 
 
 @shared_task(name="social_outreach.tick_reap_stuck_processing", bind=True)
 def tick_reap_stuck_processing(self) -> dict:
-    """Abort outreach rows stuck in 'processing' after a worker crash."""
+    """Abort outreach rows stuck in 'processing' or 'submitting' after a worker crash."""
     def _run():
         from datetime import datetime, timedelta, timezone
         from backend.models import SocialOutreachLog
-        from backend.services.social_outreach.audit import mark_draft_aborted
+        from backend.services.social_outreach import transitions
 
         now = datetime.now(timezone.utc)
         rows = (
             SocialOutreachLog.query
-            .filter(SocialOutreachLog.status == "processing")
+            .filter(SocialOutreachLog.status.in_(tuple(transitions.ABORT_FROM)))
             .limit(50)
             .all()
         )
-        reaped = 0
+        stuck = []
         for row in rows:
-            claimed_at = None
-            reason = row.abort_reason or ""
-            if reason.startswith("processing_since:"):
-                stamp = reason.split(":", 1)[1]
-                try:
-                    claimed_at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                    if claimed_at.tzinfo is None:
-                        claimed_at = claimed_at.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    claimed_at = None
+            claimed_at = transitions.in_flight_since(row.abort_reason)
             # Fallback: age by created_at if claim stamp missing (legacy rows).
             if claimed_at is None:
                 created = row.created_at
@@ -493,8 +505,17 @@ def tick_reap_stuck_processing(self) -> dict:
                     claimed_at = created
             if now - claimed_at < timedelta(seconds=_STUCK_PROCESSING_SECONDS):
                 continue
-            mark_draft_aborted(row.id, "stuck_processing_reaped")
-            reaped += 1
+            stuck.append((row.id, row.status))
+        reaped = 0
+        for row_id, status in stuck:
+            # A row that died while submitting may have been published; the
+            # reason says so, so nobody re-drafts the same post blind.
+            reason = (
+                "stuck_submitting_reaped: the post may have gone out, check the target"
+                if status == "submitting" else "stuck_processing_reaped"
+            )
+            if transitions.abort_in_flight(row_id, reason):
+                reaped += 1
         return {"reaped": reaped}
 
     return _with_app_context(_run)

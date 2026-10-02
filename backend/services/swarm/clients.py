@@ -38,6 +38,30 @@ def _service_up(base_url: str, timeout: float = 2.0) -> bool:
         return False
 
 
+def _builtin_voice(voice: str | None) -> str | None:
+    """``voice`` when it is one of Audio Foundry's built-in (Kokoro) voices, else None.
+
+    A Cast member's voice_id is free text (typed on the Cast page, or picked by
+    the Casting Director). Audio Foundry refuses a voice id it does not offer,
+    and the Editor then renders the shot with no voiceover at all, so an id
+    that is not in the catalog is left out and the default voice speaks the
+    line; the log names the id.
+    """
+    voice = (voice or "").strip()
+    if not voice or voice == "default":
+        return None
+    try:
+        from backend.services.audio_foundry_models import kokoro_voice_ids
+        known = kokoro_voice_ids()
+    except Exception as e:  # noqa: BLE001 - the catalog ships in the checkout; never block a render on it
+        logger.warning("Kokoro voice catalog unreadable (%s); sending voice %r unchecked", e, voice)
+        return voice
+    if voice in known:
+        return voice
+    logger.warning("Voice %r is not an Audio Foundry voice; the default voice speaks this line", voice)
+    return None
+
+
 class AudioFoundryClient:
     """Implements the Editor's AudioFoundry protocol against the :8206 plugin.
 
@@ -72,8 +96,11 @@ class AudioFoundryClient:
     def tts(self, *, text: str, voice: str, output_path: str) -> str:
         payload = {"text": text, "backend": "auto", "output_format": "wav"}
         # The Editor passes a voice *id*; "default" means "let the backend choose".
-        if voice and voice != "default":
-            payload["voice_id"] = voice
+        # A built-in voice id makes Audio Foundry's auto mode speak it with
+        # Kokoro (plugins/audio_foundry/backends/voice_gen.py).
+        voice_id = _builtin_voice(voice)
+        if voice_id:
+            payload["voice_id"] = voice_id
         return self._generate("/generate/voice", payload, output_path)
 
     def generate_music(self, *, mood: str, duration_seconds: float, output_path: str) -> str:

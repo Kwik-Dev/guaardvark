@@ -35,6 +35,8 @@ import {
   reloadMcpConfig,
   saveMcpServer,
 } from "../../api/mcpService";
+import { onSessionChanged } from "../../api/apiAuth";
+import { ApiKeyRefusalAlert } from "../common/ApiKeyRefusalNotice";
 import { ActionButton, ConfirmActionDialog, SettingChip, StatusPill } from "./ui";
 
 const STATUS_TONE = {
@@ -83,6 +85,7 @@ const EMPTY_FORM = {
   command: "",
   args: "",
   env: "",
+  fixedArgs: "",
   autoConnect: false,
   description: "",
   keywords: "",
@@ -114,6 +117,7 @@ const ServerDialog = ({ open, initial, isEdit, onClose, onSaved }) => {
       command: form.command,
       args: form.args.split("\n").map((a) => a.trim()).filter(Boolean),
       env: parsePairs(form.env),
+      fixedArgs: parsePairs(form.fixedArgs),
       autoConnect: form.autoConnect,
       description: form.description,
       keywords: splitList(form.keywords),
@@ -149,6 +153,9 @@ const ServerDialog = ({ open, initial, isEdit, onClose, onSaved }) => {
           <TextField label="Environment (KEY=value per line)" size="small" multiline minRows={2}
             value={form.env} onChange={set("env")}
             helperText="Only these and safe basics (PATH, HOME, locale) reach the server; ${ENV_VAR} references work" />
+          <TextField label="Fixed tool arguments (name=value per line)" size="small" multiline minRows={2}
+            value={form.fixedArgs} onChange={set("fixedArgs")} placeholder="root=${GUAARDVARK_ROOT}"
+            helperText="Sent with every call to this server's tools that take that argument; the model never sees them" />
           <TextField label="Description" size="small" value={form.description} onChange={set("description")} />
           <TextField label="Chat keywords (comma separated)" size="small" value={form.keywords}
             onChange={set("keywords")} helperText="Messages containing these offer this server's tools to the model" />
@@ -256,6 +263,7 @@ const toForm = (name, d) => ({
   command: d.command || "",
   args: (d.args || []).join("\n"),
   env: Object.entries(d.env || {}).map(([k, v]) => `${k}=${v}`).join("\n"),
+  fixedArgs: Object.entries(d.fixedArgs || {}).map(([k, v]) => `${k}=${v}`).join("\n"),
   autoConnect: !!d.autoConnect,
   description: d.description || "",
   keywords: (d.keywords || []).join(", "),
@@ -277,6 +285,10 @@ const MCPServersSection = () => {
   const [dialog, setDialog] = useState({ open: false, initial: null, isEdit: false });
   const [removing, setRemoving] = useState(null);
   const [message, setMessage] = useState(null);
+  // Set when the backend refuses this browser (these routes answer the
+  // Guaardvark machine, or this install's API key): the advice to show in
+  // place of the page. Polling stops until this browser signs in or out.
+  const [refused, setRefused] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -284,9 +296,18 @@ const MCPServersSection = () => {
       setStatus(st);
       setServers(list.servers || []);
       setConfigErrors(list.config_errors || []);
+      setRefused(null);
     } catch (e) {
-      setMessage({ severity: "error", text: `Could not load MCP status: ${e.message}` });
+      if (e.authRefused) {
+        setRefused(e.message);
+      } else {
+        setMessage({ severity: "error", text: `Could not load MCP status: ${e.message}` });
+      }
     }
+  }, []);
+
+  useEffect(() => {
+    return onSessionChanged(() => setRefused(null));
   }, []);
 
   const refreshAudit = useCallback(async () => {
@@ -299,10 +320,11 @@ const MCPServersSection = () => {
   }, []);
 
   useEffect(() => {
+    if (refused) return undefined;
     refresh();
     const t = setInterval(refresh, 15000);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, refused]);
 
   useEffect(() => {
     if (showAudit) refreshAudit();
@@ -337,6 +359,9 @@ const MCPServersSection = () => {
     if (name) await withBusy(name, () => deleteMcpServer(name), `Removed ${name}`);
   };
 
+  if (refused) {
+    return <ApiKeyRefusalAlert message={refused} />;
+  }
   if (status && !status.mcp_enabled) {
     return <Alert severity="info">MCP is disabled. Set GUAARDVARK_MCP_ENABLED=true and restart.</Alert>;
   }

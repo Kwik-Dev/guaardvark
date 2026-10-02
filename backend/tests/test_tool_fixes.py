@@ -1,7 +1,6 @@
 """Regression tests for registry-wide tool fixes (MCP hardening, phase 6)."""
 
 import os
-import types
 
 import pytest
 
@@ -109,29 +108,42 @@ def test_file_watch_stop_needs_no_path():
 
 
 # ---- generation -------------------------------------------------------------------------
-def test_bulk_csv_sends_handler_keys_and_never_fakes_queued(monkeypatch, tmp_path):
+def test_bulk_csv_starts_the_studio_job_with_every_row(monkeypatch, tmp_path):
+    """The tool starts the Studio's bulk job and asks for exactly `quantity` rows.
+    The backend call is faked: running this test starts no job."""
     from backend import config
-    from backend.services import unified_file_generation as ufg
+    from backend.utils import backend_http
     from backend.tools.generation_tools import BulkCSVGeneratorTool
 
     monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
-    captured = {}
+    sent = {}
 
-    class FakeService:
-        def generate(self, request):
-            captured["request"] = request
-            return types.SimpleNamespace(success=False, error="generator offline", job_id=None, output_path=None)
+    def fake_request_json(method, path, payload=None, **kwargs):
+        sent.update(method=method, path=path, payload=payload)
+        return backend_http.BackendResponse(
+            status=200, body={"job_id": "bulk_gen_1_abc123", "output_filename": "out.csv"}, data=None)
 
-    monkeypatch.setattr(ufg, "UnifiedFileGenerationService", FakeService)
-    res = BulkCSVGeneratorTool().execute(filename="out.csv", quantity="25", topic="SEO", client="Acme")
-    req = captured["request"]
-    assert req.content_spec["topics"][0] == "SEO - Part 1" and len(req.content_spec["topics"]) == 25
-    assert req.content_spec["target_word_count"] == 600
-    assert req.context_variables["client"] == "Acme"
-    assert res.success is False and "generator offline" in res.error  # was: success=True, "queued"
+    monkeypatch.setattr(backend_http, "request_json", fake_request_json)
+    tool = BulkCSVGeneratorTool()
+    tool.set_context({"transport": "mcp"})
+    res = tool.execute(filename="out.csv", quantity="25", topic="SEO", client="Acme")
+    assert sent["method"] == "POST" and sent["path"] == "/api/bulk-generate/csv"
+    payload = sent["payload"]
+    assert payload["num_items"] == 25 and len(payload["topics"]) == 25
+    assert payload["topics"][0] == "SEO - Part 1" and payload["target_word_count"] == 600
+    assert payload["client"] == "Acme"
+    assert res.success and res.output["job_id"] == "bulk_gen_1_abc123"
+    assert res.output["status"] == "processing" and res.output["output_file"].endswith("/out.csv")
 
-    bad = BulkCSVGeneratorTool().execute(filename="../../etc/cron.d/x", quantity=1, topic="t")
-    assert bad.success is False and "Invalid filename" in bad.error
+    bad = tool.execute(filename="../../etc/cron.d/x", quantity=1, topic="t")
+    assert bad.success is False and "plain file name" in bad.error
+
+    def refusing(method, path, payload=None, **kwargs):
+        raise backend_http.BackendError("http", "Either topics list or num_items > 0 is required", status=400)
+
+    monkeypatch.setattr(backend_http, "request_json", refusing)
+    refused = tool.execute(filename="out.csv", quantity=2, topic="t")
+    assert refused.success is False and "num_items" in refused.error  # never a fake "started"
 
 
 # ---- LLM observation size ------------------------------------------------------------------

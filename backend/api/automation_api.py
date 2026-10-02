@@ -290,23 +290,17 @@ def send_notification():
 
 # ==================== MCP Endpoints ====================
 # Config writes (/mcp/servers/<name>, /mcp/reload-config) are always behind
-# auth_guard; the rest are when GUAARDVARK_PROTECT_TOOL_ENDPOINTS is on. A
-# caller on this machine (or holding the API key) calling /mcp/execute is the
-# approval for policy-gated tools; any other caller can run only the tools the
-# policy allows. Every call is still subject to denyTools and audited.
+# auth_guard; the rest are unless GUAARDVARK_PROTECT_TOOL_ENDPOINTS=false opens
+# them to other hosts. A caller on this machine (or holding the API key) calling
+# /mcp/execute is the approval for policy-gated tools; any other caller, which
+# only that opt-out lets through, can run only the tools the policy allows.
+# Every call is still subject to denyTools and audited.
 
 
 def _caller_is_trusted() -> bool:
-    import hmac
-    import os
+    from backend.utils.auth_guard import caller_is_authorized
 
-    from backend.utils.auth_guard import _effective_client_ip, _is_localhost
-
-    api_key = os.environ.get("GUAARDVARK_API_KEY")
-    if api_key:
-        provided = request.headers.get("X-API-Key", "")
-        return bool(provided) and hmac.compare_digest(provided, api_key)
-    return _is_localhost(_effective_client_ip())
+    return caller_is_authorized()
 
 def _mcp():
     from backend.services.mcp_client_service import get_mcp_service

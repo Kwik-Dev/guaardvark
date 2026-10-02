@@ -20,7 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from .core import Finding, FindingKind, Severity, is_excluded
+from .core import Finding, FindingKind, Severity, source_files
 
 
 # ── Backend route extraction ────────────────────────────────────────────────
@@ -39,10 +39,9 @@ def _backend_routes(root: Path, extra_excludes: frozenset[str]) -> list[dict]:
         return []
 
     out: list[dict] = []
-    for py in backend_dir.rglob("*.py"):
-        if is_excluded(py, extra_excludes):
-            continue
-        rel_str = str(py)
+    for py in source_files(root, extra_excludes, pattern="*.py", under=backend_dir):
+        # Relative to root, so a checkout under a folder named tests keeps its routes.
+        rel_str = "/" + py.relative_to(root).as_posix()
         if any(s in rel_str for s in ("/_archive/", "/backs/", "/tests/")) or \
            "_BACK" in py.name or "BACKUP" in py.name or py.name.startswith("test_"):
             continue  # don't conflate dead code, tests, or mocks with live routes
@@ -174,10 +173,8 @@ def _frontend_callers(root: Path, extra_excludes: frozenset[str]) -> list[dict]:
 
     base_url = _read_base_url_default(root)
     out: list[dict] = []
-    for jsf in fe.rglob("*"):
-        if not jsf.is_file() or jsf.suffix not in JS_EXTS:
-            continue
-        if is_excluded(jsf, extra_excludes):
+    for jsf in source_files(root, extra_excludes, under=fe):
+        if jsf.suffix not in JS_EXTS:
             continue
         try:
             text = jsf.read_text(encoding="utf-8", errors="ignore")

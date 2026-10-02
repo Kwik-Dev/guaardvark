@@ -27,7 +27,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .core import is_excluded
+from .core import source_files
 
 
 def _module_name(rel: Path) -> str:
@@ -57,9 +57,7 @@ def _celery_task_modules(root: Path, extra_excludes: frozenset[str]) -> set[str]
     it by task-name string, never via Python import from another of our modules.
     """
     reached: set[str] = set()
-    for py in root.rglob("*.py"):
-        if is_excluded(py, extra_excludes):
-            continue
+    for py in source_files(root, extra_excludes, pattern="*.py"):
         try:
             rel = py.relative_to(root)
         except ValueError:
@@ -98,9 +96,7 @@ def _blueprint_modules(root: Path, extra_excludes: frozenset[str]) -> set[str]:
     graph points at them, so they look dormant. They are not.
     """
     reached: set[str] = set()
-    for py in root.rglob("*.py"):
-        if is_excluded(py, extra_excludes):
-            continue
+    for py in source_files(root, extra_excludes, pattern="*.py"):
         try:
             rel = py.relative_to(root)
         except ValueError:
@@ -140,7 +136,8 @@ def _plugin_declared_modules(root: Path) -> set[str]:
     do, follow it so a plugin-only-reached handler isn't called dormant.
     """
     reached: set[str] = set()
-    for pj in root.rglob("plugin.json"):
+    # No folder is skipped by name here: a plugin.json counts wherever it sits.
+    for pj in source_files(root, pattern="plugin.json", exclude_dirs=frozenset()):
         try:
             data = json.loads(pj.read_text(encoding="utf-8", errors="ignore"))
         except Exception:
@@ -167,9 +164,7 @@ def _tool_modules(root: Path, extra_excludes: frozenset[str]) -> set[str]:
     tools_root = root / "backend" / "tools"
     if not tools_root.is_dir():
         return reached
-    for py in tools_root.rglob("*.py"):
-        if is_excluded(py, extra_excludes):
-            continue
+    for py in source_files(root, extra_excludes, pattern="*.py", under=tools_root):
         try:
             rel = py.relative_to(root)
         except ValueError:

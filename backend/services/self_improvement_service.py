@@ -871,7 +871,6 @@ class SelfImprovementService:
             try:
                 from backend.models import db, PendingFix
                 if not getattr(self, '_current_run_id', None):
-                    logger = logging.getLogger(__name__)
                     logger.info("PendingFix created without run_id (ad-hoc from _attempt_fix; per team audit)")
 
                 fix = PendingFix(
@@ -1012,12 +1011,31 @@ class SelfImprovementService:
 
         # Write atomically
         new_content = content[:start_idx + len(start_marker)] + new_section + content[end_idx:]
+
+        # This file is part of every agent prompt, so the inbound guard reads the
+        # lesson first. While enforcing, a held lesson waits in the review list.
+        from backend.services import inbound_guard_service as guard
+        verdict = None
+        if guard.is_on():
+            try:
+                verdict = guard.check_and_gate(
+                    [guard.change_for_file(sk_path, content, new_content)],
+                    source="self_knowledge",
+                    subject="distilled lesson for self_knowledge.md",
+                    payload={"kind": "write_file", "path": guard.relative(sk_path), "content": new_content},
+                )
+            except guard.InboundRefused as refused:
+                logger.warning(f"Distilled learning not written: {refused}")
+                return
+
         tmp_path = sk_path + ".tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(new_content)
             os.replace(tmp_path, sk_path)
             logger.info(f"Distilled learning appended to self_knowledge.md: {insight[:80]}...")
+            if verdict is not None:
+                guard.landed([sk_path], source="self_knowledge", subject="distilled lesson", verdict=verdict)
         except Exception as e:
             logger.error(f"Failed to write self_knowledge.md: {e}")
             try:

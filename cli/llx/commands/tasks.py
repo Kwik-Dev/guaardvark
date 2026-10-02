@@ -116,22 +116,22 @@ def tasks_info(
     output.set_json_mode(json_out)
     try:
         api_client = get_client(server)
-        data = api_client.get(f"/api/jobs/{task_id}/status")
-        result = data if isinstance(data, dict) else {}
+        job = api_client.get(f"/api/jobs/task:{task_id}")
+        meta = job.get("metadata") or {}
 
         if json_out or output.is_pipe():
-            output.print_json({"status": "success", "data": result})
+            output.print_json({"status": "success", "data": job})
             return
 
-        progress = result.get("progress", {})
+        pct = job.get("progress")
         output.print_kv({
-            "Task ID": result.get("task_id", task_id),
-            "Name": result.get("name", ""),
-            "Type": result.get("task_type", ""),
-            "Status": result.get("status", ""),
-            "Progress": f"{progress.get('percentage', 0)}%",
-            "Message": progress.get("message", "—"),
-            "Output": result.get("output_file", "—"),
+            "Task ID": task_id,
+            "Name": job.get("label", ""),
+            "Type": meta.get("task_type") or meta.get("type") or "",
+            "Status": job.get("status", ""),
+            "Progress": f"{pct:.0f}%" if isinstance(pct, (int, float)) else "—",
+            "Error": job.get("error_message") or "—",
+            "Output": meta.get("output_filename") or meta.get("output_file") or "—",
         }, title="Task Details")
 
     except LlxConnectionError as e:

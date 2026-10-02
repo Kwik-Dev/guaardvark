@@ -12,7 +12,7 @@ import json
 import logging
 import random
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
@@ -24,6 +24,7 @@ from backend.services.social_outreach.reddit_outreach import (
     backend_url,
     SERVO_SETTLE_SECONDS,
 )
+from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,13 @@ def _draft_share(subreddit: str, link_url: str, task_id: Optional[int]) -> Optio
         return None
 
 
-def _submit_post_via_servo(subreddit: str, title: str, link_url: str) -> tuple[bool, str]:
+def _submit_post_via_servo(
+    subreddit: str,
+    title: str,
+    link_url: str,
+    *,
+    before_submit: Optional[Callable[[], bool]] = None,
+) -> tuple[bool, str]:
     """
     Drive Firefox on :99 to submit a link post.
 
@@ -71,6 +78,10 @@ def _submit_post_via_servo(subreddit: str, title: str, link_url: str) -> tuple[b
 
     The agent's see-think-act loop figures out the clicks; we just hand it
     one task per stage.
+
+    ``before_submit`` is called once the text is typed and immediately before
+    the step that publishes; when it returns False nothing is published and
+    the reason is ``transitions.WITHDRAWN_BEFORE_SUBMIT``.
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
@@ -129,6 +140,8 @@ def _submit_post_via_servo(subreddit: str, title: str, link_url: str) -> tuple[b
     screen.type_text(title)
     _human_pause()
 
+    if before_submit is not None and not before_submit():
+        return False, WITHDRAWN_BEFORE_SUBMIT
     submit_task = (
         "On the open Reddit submit form, do this. "
         "1) Click the submit button. "

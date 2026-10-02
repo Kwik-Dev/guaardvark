@@ -1042,9 +1042,10 @@ def register_node():
         return error_response(f"Failed to register node: {str(e)}", 500)
 
 
-@interconnector_bp.route("/nodes/<node_id>/heartbeat", methods=["GET", "POST"])
+@interconnector_bp.route("/nodes/<node_id>/heartbeat", methods=["POST"])
 def node_heartbeat(node_id):
-    """Update heartbeat for a registered node."""
+    """Update heartbeat for a registered node. POST only: it writes the node's
+    row, and a GET can be sent by any page (an <img>) without asking first."""
     try:
         logger.debug(f"[SYNC] Heartbeat received for node: {node_id}")
         config = _get_config()
@@ -2239,7 +2240,14 @@ def pull_files():
                 exclude_patterns=exclude_patterns,
             )
         logger.debug(f"[SYNC] File pull: Scan complete, found {len(files_list)} files")
-        
+
+        # Only swept code leaves this machine: while the inbound guard enforces,
+        # files it holds stay here until someone approves them.
+        from backend.services import inbound_guard_watch
+        files_list, held_on_master = inbound_guard_watch.filter_for_sync(files_list)
+        if held_on_master:
+            logger.warning(f"[SYNC] File pull: inbound guard holds {len(held_on_master)} file(s): {held_on_master[:10]}")
+
         # Pre-send validation: filter out files missing content (prevents CLIENT crash)
         valid_files, invalid_files = file_sync_service.validate_files_batch(files_list)
         invalid_paths = [f.get("path", "?") for f in invalid_files]
@@ -2268,6 +2276,7 @@ def pull_files():
                 "timestamp": datetime.now().isoformat(),
                 "portable_env": portable_env,
                 "portable_env_keys": sorted(portable_env.keys()),
+                "held_on_master": held_on_master,
             },
             "Files retrieved for sync"
         )
@@ -3355,7 +3364,12 @@ def get_update_manifest():
         logger.info("[UPDATES] Scanning files for manifest...")
         file_sync_service = get_file_sync_service()
         files_list = file_sync_service.scan_files(include_content=False)
-        
+
+        # Files the inbound guard holds are left out of the manifest while it
+        # enforces, so a client never asks for them.
+        from backend.services import inbound_guard_watch
+        files_list, held_on_master = inbound_guard_watch.filter_for_sync(files_list)
+
         logger.info(f"[UPDATES] Manifest scan complete: {len(files_list)} files")
         
         # Verify hashes are present
@@ -3397,6 +3411,7 @@ def get_update_manifest():
             "count": len(files_list),
             "timestamp": latest_timestamp,
             "registry_file_count": registry_file_count,
+            "held_on_master": held_on_master,
         }, "Manifest retrieved")
         
     except Exception as e:

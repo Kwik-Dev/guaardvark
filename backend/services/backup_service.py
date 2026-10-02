@@ -2185,6 +2185,23 @@ def restore_backup(zip_file: str) -> Dict[str, int]:
 
             # Extract all files to the appropriate locations
             project_root = Path(config.GUAARDVARK_ROOT)
+
+            # A restore can write over this checkout's code, so the inbound guard
+            # reads those files first; while it enforces, a held restore stops here.
+            from backend.services import inbound_guard_service as inbound_guard
+            if inbound_guard.is_on():
+                staged = []
+                for member in zf.namelist():
+                    if member.endswith("/") or member == "guaardvark_backup.json":
+                        continue
+                    temp_file = _safe_extract(zf, member, tmp_path)
+                    if temp_file:
+                        staged.append((member, temp_file))
+                try:
+                    inbound_guard.guard_restore(staged, project_root)
+                except inbound_guard.InboundRefused as refused:
+                    raise ValueError(f"Restore refused: {refused}") from refused
+
             for member in zf.namelist():
                 if member.endswith("/") or member == "guaardvark_backup.json":
                     continue

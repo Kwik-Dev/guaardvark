@@ -12,6 +12,8 @@ four hook points without any core file naming it:
     migrations.py       ADD_COLUMNS = [(table, column, ddl)] + optional migrate(db)
     seed.py             seed(app) — idempotent; runs once per extension version
     profile.json        the distribution profile (see backend/profiles)
+    inbound_guard.py    register(registry) — add checks to the inbound guard and
+                        hear its verdicts (backend and Celery both load it)
     plugin/plugin.json  an optional sidecar service, discovered like plugins/
     frontend/index.jsx  routes, nav, themes… (frontend/src/extensions.js)
     tests/              collected by pytest (testpaths includes extensions/)
@@ -380,6 +382,47 @@ def register_tasks(exts: Iterable[Extension], celery_app) -> dict[str, list[str]
             celery_app.conf.beat_schedule = schedule
         result[ext.id] = modules
     return result
+
+
+# ─── inbound guard ───────────────────────────────────────────────────────────
+
+def register_inbound_guard(exts: Iterable[Extension]) -> dict[str, Optional[str]]:
+    """Call each ``inbound_guard.py``'s ``register(registry)``.
+
+    The registry lets an extension add findings to every inbound-guard scan
+    (``registry.scanner(name, fn)``, ``fn(changes, context) -> [Finding]``) and
+    hear every verdict and landed change (``registry.listener(name, fn)``).
+    Names are prefixed with the extension id. Called in the backend and in
+    each Celery worker, since both write code. Returns id -> error or None.
+    """
+    result: dict[str, Optional[str]] = {}
+    for ext in exts:
+        if not (ext.root / "inbound_guard.py").is_file():
+            continue
+        try:
+            _bind_package(ext)
+            module = importlib.import_module(f"{ext.package}.inbound_guard")
+            register = getattr(module, "register", None)
+            if not callable(register):
+                result[ext.id] = "inbound_guard.py has no register(registry)"
+                continue
+            register(_inbound_guard_registry(ext.id))
+            result[ext.id] = None
+        except Exception as e:
+            logger.error("extension %s: inbound guard registration failed: %s", ext.id, e, exc_info=True)
+            result[ext.id] = str(e)
+    return result
+
+
+def _inbound_guard_registry(ext_id: str) -> types.SimpleNamespace:
+    from backend.services import inbound_guard_service as guard
+
+    return types.SimpleNamespace(
+        scanner=lambda name, fn: guard.register_inbound_scanner(f"{ext_id}.{name}", fn),
+        listener=lambda name, fn: guard.register_inbound_listener(f"{ext_id}.{name}", fn),
+        Finding=guard.engine().Finding,
+        mode=guard.get_mode,
+    )
 
 
 # ─── plugins shipped by an extension ──────────────────────────────────────────

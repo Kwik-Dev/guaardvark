@@ -18,7 +18,9 @@ import {
   Close as CloseIcon,
 } from '@mui/icons-material';
 import { BASE_URL } from '../../api/apiClient';
+import { announceRefusal, authRefusalCode, describeAuthRefusal } from '../../api/apiAuth';
 import { getBackendHealth } from '../../api/devtoolsService';
+import { ApiKeyRefusalAlert } from '../common/ApiKeyRefusalNotice';
 import CollapsibleAlert from "../common/CollapsibleAlert";
 
 // Strip ANSI escape codes from terminal output
@@ -31,6 +33,8 @@ const RebootProgressModal = ({ open, onClose }) => {
   const [output, setOutput] = useState([]);
   const [status, setStatus] = useState('idle'); // idle | running | complete | error
   const [errorMessage, setErrorMessage] = useState(null);
+  // What to do when the backend refused this browser (no API key here).
+  const [refusal, setRefusal] = useState(null);
 
   const outputEndRef = useRef(null);
   const abortRef = useRef(null);
@@ -64,6 +68,7 @@ const RebootProgressModal = ({ open, onClose }) => {
       setOutput([]);
       setStatus('idle');
       setErrorMessage(null);
+      setRefusal(null);
       logOffsetRef.current = 0;
       logServerUrlRef.current = null;
       if (pollingRef.current) { clearTimeout(pollingRef.current); pollingRef.current = null; }
@@ -101,7 +106,19 @@ const RebootProgressModal = ({ open, onClose }) => {
         signal: abortRef.current.signal,
       });
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        const code = response.status === 401 || response.status === 403 ? authRefusalCode(body) : null;
+        if (code) {
+          // Nothing restarted. Say what to do, as other refused actions do.
+          const rejected = Boolean(body.credential_rejected);
+          announceRefusal({ code, rejected, url: response.url });
+          setRefusal(describeAuthRefusal(code, rejected));
+          setStatus('error');
+          return;
+        }
+        throw new Error(body?.error && typeof body.error === 'string' ? body.error : `HTTP ${response.status}`);
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -288,7 +305,7 @@ const RebootProgressModal = ({ open, onClose }) => {
 
     // Shutdown the log server (best-effort)
     if (logServerUrlRef.current) {
-      fetch(`${logServerUrlRef.current}/shutdown`).catch(() => {});
+      fetch(`${logServerUrlRef.current}/shutdown`, { method: 'POST' }).catch(() => {});
     }
 
     setTimeout(() => {
@@ -341,6 +358,10 @@ const RebootProgressModal = ({ open, onClose }) => {
           <CollapsibleAlert severity="error" sx={{ mb: 1.5 }}>
             {errorMessage}
           </CollapsibleAlert>
+        )}
+
+        {refusal && (
+          <ApiKeyRefusalAlert message={refusal} severity="warning" sx={{ mb: 1.5 }} onFollow={() => handleClose()} />
         )}
 
         {/* Terminal output */}

@@ -19,7 +19,11 @@ from typing import Dict, List, Any, Optional, Callable
 
 logger = logging.getLogger(__name__)
 
+from backend.utils.display_paths import display_params
 from backend.utils.text_cut import cut_on_whitespace
+from backend.utils.inline_reasoning import (
+    InlineReasoningStream, REASONING, RETRACT, VISIBLE, split_inline_reasoning,
+)
 from backend.utils.llm_debug_logger import (
     log_system_prompt, log_user_message, log_llm_response,
     log_tool_call, log_tool_result, log_guard_event, log_decision,
@@ -1028,12 +1032,29 @@ def parse_outpaint_pad(message: str) -> dict:
     return pad
 
 
+_IDENTITY_PLACE_RE = re.compile(
+    r"^(?:please\s+)?(?:can you\s+|could you\s+)?"
+    r"put this (?:person|face|guy|girl|man|woman) (in|into|on)\s+",
+    re.IGNORECASE,
+)
+
+
 def identity_prompt_from_message(message: str) -> str:
+    """The scene prompt for generate_identity.
+
+    "this person as a 1940s detective" names a subject already. "put this
+    person in a greenhouse" names only a place: without a subject FLUX draws
+    the greenhouse empty and the face reference has nobody to land on, so
+    that form keeps "a person" in front of the place."""
     text = (message or "").strip()
+    place = _IDENTITY_PLACE_RE.match(text)
+    if place:
+        rest = text[place.end():].strip(" .")
+        prep = "on" if place.group(1).lower() == "on" else "in"
+        return f"a person {prep} {rest}" if rest else text
     stripped = re.sub(
         r"^(?:please\s+)?(?:can you\s+|could you\s+)?"
-        r"(?:put this (?:person|face) (?:in|into|on)\s+|"
-        r"this (?:person|face|photo|picture) as\s+)",
+        r"this (?:person|face|photo|picture) as\s+",
         "",
         text,
         flags=re.IGNORECASE,
@@ -2260,7 +2281,8 @@ class UnifiedChatEngine:
         if provider_context:
             context_parts.append(f"Current context:\n{provider_context}")
         if rag_context and not hold_rag_for_code:
-            context_parts.append(f"Relevant context from knowledge base:\n{rag_context}")
+            from backend.services.chat_prompt_blocks import CHAT_KB_CONTEXT_HEADER
+            context_parts.append(f"{CHAT_KB_CONTEXT_HEADER}\n{rag_context}")
         # Vision pipeline context (if active). Ask the plugin manager first so
         # we skip a 2-second HTTP probe on every chat when the plugin is off.
         try:
@@ -2616,7 +2638,7 @@ class UnifiedChatEngine:
             for tc, tool_name, params in tool_jobs:
                 emit_fn("chat:tool_call", {
                     "tool": tool_name,
-                    "params": params,
+                    "params": display_params(params),
                     "iteration": iteration,
                     "reasoning": tc.reasoning,
                 })
@@ -3405,7 +3427,7 @@ class UnifiedChatEngine:
             _approval_responses.pop(session_id, None)
         payload: Dict[str, Any] = {
             "tools": approval_jobs,
-            "tool_details": approval_details,
+            "tool_details": display_params(approval_details),
             "iteration": iteration,
             "available_scopes": ["once", "session", "task"],
             "session_id": session_id,
@@ -3513,7 +3535,7 @@ class UnifiedChatEngine:
                     tool_name, params, detail, session_id, emit_fn, request_id,
                 )
 
-        emit_fn("chat:tool_call", {"tool": tool_name, "params": params, "iteration": 1})
+        emit_fn("chat:tool_call", {"tool": tool_name, "params": display_params(params), "iteration": 1})
         _t0 = time.time()
         try:
             result = self.registry.execute_tool(tool_name, **params)
@@ -3692,6 +3714,8 @@ class UnifiedChatEngine:
         except Exception:
             pass
         self._save_message(session_id, "assistant", response, extra_data=extra_data)
+        # The CLI calls this over HTTP with no socket to receive chat:image on,
+        # so the reply carries the files too.
         return {
             "success": result.success,
             "response": response,
@@ -3699,6 +3723,7 @@ class UnifiedChatEngine:
             "steps": [],
             "request_id": request_id,
             "session_id": session_id,
+            "generated_images": generated_images,
         }
 
     def _try_media_direct(self, message: str, session_id: str,
@@ -3725,7 +3750,7 @@ class UnifiedChatEngine:
             self._save_message(session_id, "user", message)
 
             # Execute the tool
-            emit_fn("chat:tool_call", {"tool": tool_name, "params": params, "iteration": 1})
+            emit_fn("chat:tool_call", {"tool": tool_name, "params": display_params(params), "iteration": 1})
             _t0 = time.time()
             try:
                 result = self.registry.execute_tool(tool_name, **params)
@@ -4296,9 +4321,19 @@ class UnifiedChatEngine:
         is_thinking_model = model_supports_thinking(model_name)
         think_on = is_thinking_model and bool(getattr(self, "_think", False))
 
-        # Track <think>...</think> blocks in the content stream so we can
-        # suppress them from being emitted as visible tokens.
-        in_think_block = False
+        # Reasoning written into the content stream goes to the reasoning
+        # channel, not the answer: anywhere, or ended by a lone closing tag, for
+        # a thinking model; only a block that opens the answer for any other
+        # (a model imported without Ollama's thinking support still writes
+        # <think>). think_buffer holds visible text that may open tool markup.
+        reasoning_tags = None
+        leading_only = not is_thinking_model
+        try:
+            from backend.services.model_capabilities import capabilities_for
+            reasoning_tags = capabilities_for(model_name, with_vision=False).reasoning_tags
+        except Exception as _tag_err:  # noqa: BLE001 - fall back to the default pairs
+            logger.debug(f"reasoning tag lookup failed for {model_name}: {_tag_err}")
+        inline_reasoning = InlineReasoningStream(reasoning_tags, leading_only=leading_only)
         think_buffer = ""
 
         # Reasoning (message.thinking) goes out on its own channel, batched;
@@ -4460,9 +4495,29 @@ class UnifiedChatEngine:
             xml_detected = False
             _native_tool_calls_acc = []  # collected message.tool_calls (native path)
 
+            def _route_inline_reasoning(events) -> List[str]:
+                """Send inline reasoning to the reasoning channel; return the visible pieces."""
+                nonlocal think_buffer
+                visible = []
+                for kind, piece in events:
+                    if kind == VISIBLE:
+                        visible.append(piece)
+                        continue
+                    accumulated_thinking.append(piece)
+                    reasoning_buf.append(piece)
+                    if kind == RETRACT:
+                        # Text already on screen was reasoning: clear the answer.
+                        visible.clear()
+                        think_buffer = ""
+                        _flush_reasoning(force=True)
+                        if emit_tokens:
+                            emit_fn("chat:token", {"content": "", "reset": True, "session_id": session_id})
+                _flush_reasoning()
+                return visible
+
             def _consume(chunks) -> None:
                 """Drain one Ollama stream into the accumulators, emitting visible tokens."""
-                nonlocal xml_detected, in_think_block, think_buffer
+                nonlocal xml_detected, think_buffer
                 nonlocal input_tokens, output_tokens, done_reason
                 for chunk in chunks:
                     if is_aborted(session_id):
@@ -4485,6 +4540,7 @@ class UnifiedChatEngine:
                         # complete when the answer starts.
                         _flush_reasoning(force=True)
                         accumulated.append(token)
+                        visible_pieces = _route_inline_reasoning(inline_reasoning.feed(token))
                         if emit_tokens and not xml_detected:
                             # Check if we've hit a tool_call tag in the accumulated text
                             # Use last 20 chunks to handle slow-chunk Ollama streams.
@@ -4499,44 +4555,15 @@ class UnifiedChatEngine:
                                 or "[tool_call" in _tail or "[tool]" in _tail
                             ):
                                 xml_detected = True
-                            else:
-                                # Filter out <think>...</think> blocks from content stream
-                                emit_token = token
-                                if is_thinking_model:
-                                    think_buffer += token
-                                    if not in_think_block:
-                                        if "<think>" in think_buffer:
-                                            # Emit anything before the <think> tag
-                                            before = think_buffer.split("<think>", 1)[0]
-                                            if before:
-                                                emit_fn("chat:token", {"content": before, "session_id": session_id})
-                                            in_think_block = True
-                                            think_buffer = think_buffer.split("<think>", 1)[1]
-                                            emit_token = None
-                                        elif len(think_buffer) > 20:
-                                            # No <think> tag detected: flush, but keep a
-                                            # trailing "[tool_" / "<tool" that may be the
-                                            # start of tool markup arriving token by token.
-                                            _head, think_buffer = _split_pending_tool_marker(think_buffer)
-                                            if _head:
-                                                emit_fn("chat:token", {"content": _head, "session_id": session_id})
-                                            emit_token = None
-                                        else:
-                                            # Still buffering, don't emit yet
-                                            emit_token = None
-                                    else:
-                                        # Inside <think> block — suppress output
-                                        if "</think>" in think_buffer:
-                                            # End of think block, emit anything after
-                                            after = think_buffer.split("</think>", 1)[1]
-                                            think_buffer = after if after else ""
-                                            in_think_block = False
-                                            if after:
-                                                emit_fn("chat:token", {"content": after, "session_id": session_id})
-                                                think_buffer = ""
-                                        emit_token = None
-                                if emit_token:
-                                    emit_fn("chat:token", {"content": emit_token, "session_id": session_id})
+                            elif is_thinking_model:
+                                # Keep a trailing "[tool_" / "<tool" that may be the
+                                # start of tool markup arriving token by token.
+                                think_buffer += "".join(visible_pieces)
+                                _head, think_buffer = _split_pending_tool_marker(think_buffer)
+                                if _head:
+                                    emit_fn("chat:token", {"content": _head, "session_id": session_id})
+                            elif visible_pieces:
+                                emit_fn("chat:token", {"content": "".join(visible_pieces), "session_id": session_id})
                     if thinking_token:
                         accumulated_thinking.append(thinking_token)
                         reasoning_buf.append(thinking_token)
@@ -4549,17 +4576,16 @@ class UnifiedChatEngine:
 
             def _visible_content() -> str:
                 nonlocal think_buffer
-                # Flush any remaining think_buffer (non-think text that was still
+                tail = _route_inline_reasoning(inline_reasoning.finish())
+                think_buffer += "".join(tail)
+                # Flush any remaining think_buffer (visible text that was still
                 # buffered). Not when tool markup was detected: the buffer then
                 # holds the opening characters of that markup ("[tool_").
-                if think_buffer and not in_think_block and emit_tokens and not xml_detected:
+                if think_buffer and emit_tokens and not xml_detected:
                     emit_fn("chat:token", {"content": think_buffer, "session_id": session_id})
                 think_buffer = ""
                 text = "".join(accumulated).strip()
-                # Strip <think>...</think> blocks from final content
-                if is_thinking_model:
-                    text = re.sub(r'<think>[\s\S]*?</think>\s*', '', text).strip()
-                return text
+                return split_inline_reasoning(text, reasoning_tags, leading_only=leading_only)[1]
 
             _consume(stream)
             content = _visible_content()
@@ -4589,7 +4615,7 @@ class UnifiedChatEngine:
                 )
                 accumulated.clear()
                 xml_detected = False
-                in_think_block = False
+                inline_reasoning = InlineReasoningStream(reasoning_tags, leading_only=leading_only)
                 think_buffer = ""
                 _consume(ollama.chat(**retry_kwargs))
                 content = _visible_content()
@@ -4645,10 +4671,10 @@ class UnifiedChatEngine:
                             output_tokens = chunk.get("eval_count", 0) or 0
                             done_reason = chunk.get("done_reason") or None
 
-                    content = "".join(accumulated).strip()
+                    inline, content = split_inline_reasoning("".join(accumulated), reasoning_tags)
+                    if inline:
+                        accumulated_thinking.append(inline)
                     thinking = "".join(accumulated_thinking).strip()
-                    # Strip <think>...</think> blocks from retry content
-                    content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
                     if not content and thinking:
                         logger.info(f"Sanitized retry returned reasoning only ({len(thinking)} chars)")
                         content = _REASONING_ONLY_FALLBACK_TEXT
@@ -4675,10 +4701,8 @@ class UnifiedChatEngine:
                     msg = resp.get("message", {}) if isinstance(resp, dict) else {}
                     text = (msg.get("content") or "").strip()
                     think = (msg.get("thinking") or "").strip()
-                    if is_thinking_model:
-                        text = re.sub(
-                            r'<think>[\s\S]*?</think>\s*', '', text
-                        ).strip()
+                    inline, text = split_inline_reasoning(text, reasoning_tags, leading_only=leading_only)
+                    think = "\n".join(p for p in (inline, think) if p)
                     if not text and think:
                         logger.info(f"Non-stream retry returned reasoning only ({len(think)} chars)")
                         text = _REASONING_ONLY_FALLBACK_TEXT
@@ -4762,8 +4786,11 @@ class UnifiedChatEngine:
                                 input_tokens = chunk.get("prompt_eval_count", 0) or 0
                                 output_tokens = chunk.get("eval_count", 0) or 0
                                 done_reason = chunk.get("done_reason") or None
-                        content = "".join(accumulated).strip()
-                        content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
+                        inline, content = split_inline_reasoning(
+                            "".join(accumulated), reasoning_tags, leading_only=leading_only,
+                        )
+                        if inline:
+                            accumulated_thinking.append(inline)
                         if _native_active:
                             self._native_pending_tool_calls = _native_tool_calls_acc or None
                         if content:
@@ -4997,9 +5024,13 @@ class UnifiedChatEngine:
             from backend.services.indexing_service import search_with_llamaindex
             project_id = getattr(self, '_project_id', None)
             results = search_with_llamaindex(query, project_id=project_id)
+            from backend.utils.reranker import drop_unrelated
+            results, dropped = drop_unrelated(results or [])
+            if dropped:
+                self._prov_note("rag_dropped_unrelated", dropped)
             chunks = []
             sources = []
-            for r in results or []:
+            for r in results:
                 source = r.get("metadata", {}).get("source_filename", "Unknown")
                 text = cut_on_whitespace(r.get("text", ""), 500)
                 chunks.append(f"[Source: {source}]\n{text}")

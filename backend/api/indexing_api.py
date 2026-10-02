@@ -7,6 +7,7 @@ import os
 
 from flask import Blueprint, current_app, jsonify, request
 
+from backend.celery_dispatch import TaskNotStarted, mark_progress_not_started
 from backend.utils.unified_progress_system import get_unified_progress, ProcessType
 from backend.utils.db_utils import ensure_db_session_cleanup
 
@@ -190,6 +191,12 @@ def trigger_document_indexing(document_id):
             logger.error(f"Failed to import Celery task: {e}")
             update_document_status(document.id, "ERROR", "Indexing service unavailable")
             return jsonify({"error": "Indexing service unavailable"}), 500
+        except TaskNotStarted as e:
+            # ERROR, not INDEXING: nothing is indexing it. Resume pending
+            # indexing re-queues ERROR documents once Redis is back.
+            update_document_status(document.id, "ERROR", str(e))
+            mark_progress_not_started(job_id, e)
+            return jsonify({"error": str(e), "code": e.code, "document_id": document.id}), 503
 
         return (
             jsonify(
@@ -226,6 +233,20 @@ def trigger_document_indexing(document_id):
             ),
             500,
         )
+
+
+def _queue_stopped(doc_id, job_id, dispatched, total, exc):
+    """Answer for a batch whose dispatch failed part-way: the documents queued
+    before it keep indexing; the one that failed is ERROR, since nothing is
+    indexing it, and Resume pending indexing re-queues it once Redis is back."""
+    update_document_status(doc_id, "ERROR", str(exc))
+    mark_progress_not_started(job_id, exc)
+    return jsonify({
+        "error": f"{dispatched} of {total} documents were queued, then indexing stopped: {exc}",
+        "code": exc.code,
+        "job_id": job_id,
+        "dispatched": dispatched,
+    }), 503
 
 
 def _get_all_document_ids_recursive(folder_id):
@@ -319,7 +340,10 @@ def trigger_bulk_indexing():
                     logger.debug(f"Hash check failed for doc {doc_id}, will re-index: {e}")
 
             update_document_status(doc.id, "INDEXING")
-            index_document_task.apply_async((doc.id, job_id), queue='indexing')
+            try:
+                index_document_task.apply_async((doc.id, job_id), queue='indexing')
+            except TaskNotStarted as e:
+                return _queue_stopped(doc.id, job_id, dispatched, len(all_doc_ids), e)
             dispatched += 1
 
         logger.info(f"Bulk indexing: dispatched {dispatched} tasks, skipped {skipped} unchanged, under job {job_id}")
@@ -440,7 +464,10 @@ def resume_pending_indexing():
             if not doc:
                 continue
             update_document_status(doc.id, "INDEXING")
-            index_document_task.apply_async((doc.id, job_id), queue='indexing')
+            try:
+                index_document_task.apply_async((doc.id, job_id), queue='indexing')
+            except TaskNotStarted as e:
+                return _queue_stopped(doc.id, job_id, dispatched, len(doc_ids), e)
             dispatched += 1
 
         logger.info(f"Resume pending: dispatched {dispatched} indexing tasks under job {job_id}")

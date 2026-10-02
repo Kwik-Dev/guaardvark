@@ -60,11 +60,20 @@ def _proxy_get(path: str, timeout: int = SWARM_TIMEOUT, params: dict | None = No
         resp = requests.get(
             f"{SWARM_URL}{path}", params=params, timeout=timeout, headers=_internal_headers()
         )
-        return resp.json(), resp.status_code
     except requests.ConnectionError:
         return {"error": "Swarm service not running"}, 503
+    except requests.Timeout:
+        # Running (the port accepted the connection) but not answering: a
+        # different fault from "not running", and reported as one.
+        return {"error": f"Swarm service did not answer within {timeout} s"}, 504
     except Exception as e:
         return {"error": str(e)}, 500
+    try:
+        return resp.json(), resp.status_code
+    except ValueError:
+        return {
+            "error": f"Swarm service answered HTTP {resp.status_code} with a body that is not JSON"
+        }, 502
 
 
 def _proxy_post(path: str, json_data: dict = None, timeout: int = SWARM_TIMEOUT):
@@ -95,13 +104,57 @@ def _extract_error(data: dict, fallback: str = "Request failed") -> str:
     return data.get("error", data.get("message", fallback))
 
 
+def _status_read_failed(data, status: int, fallback: str):
+    """The error response for a status read the sidecar did not answer properly.
+
+    The backend is a gateway here, so the sidecar's own failures are answered
+    as 502 (or 504 for a timeout) with the sidecar's message. Its 401/403 must
+    not be passed through: callers would read that as the backend refusing
+    them, when it is the sidecar refusing the backend's internal token.
+    """
+    message = _extract_error(data, fallback) if isinstance(data, dict) else fallback
+    if status == 504:
+        return error_response(message, 504, "SWARM_TIMEOUT")
+    if status in (401, 403):
+        return error_response(
+            f"Swarm service refused the backend's internal token (HTTP {status}): {message}",
+            502, "SWARM_ERROR",
+        )
+    if status >= 500:
+        return error_response(message, 502, "SWARM_ERROR")
+    return error_response(message, status, "SWARM_ERROR")
+
+
 # --- Health ---
+
+def _write_plan(markdown: str) -> str:
+    """Save a plan sent as text and return its path relative to the install root.
+    Plans go under data/outputs so they never dirty the checkout a self-code
+    swarm refuses to start on."""
+    import time
+    from backend.config import GUAARDVARK_ROOT
+
+    rel = Path("data") / "outputs" / "swarm_plans" / f"plan_{time.strftime('%Y%m%d_%H%M%S')}.md"
+    path = Path(GUAARDVARK_ROOT) / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown, encoding="utf-8")
+    return rel.as_posix()
+
+
+def _plan_from_prompt(prompt: str) -> str:
+    """A one-task plan for a swarm asked for in plain words: one agent, one worktree."""
+    title = " ".join(prompt.split())
+    title = title if len(title) <= 60 else title[:57].rstrip() + "..."
+    return f"# Swarm Plan: {title}\n\n## Task: {title}\n- depends_on: none\n\n{prompt.strip()}\n"
+
 
 @swarm_bp.route("/health", methods=["GET"])
 def health():
     data, status = _proxy_get("/health")
     if status == 503:
         return error_response("Swarm service not running", 503, "SWARM_OFFLINE")
+    if status >= 400:
+        return _status_read_failed(data, status, "Swarm health check failed")
     return success_response(data=data, message="Swarm service healthy")
 
 
@@ -110,6 +163,15 @@ def health():
 @swarm_bp.route("/launch", methods=["POST"])
 def launch():
     body = flask_request.get_json() or {}
+    # A plan can also arrive as text: the markdown itself, or a sentence that
+    # becomes a one-task plan. Either is saved and launched like a plan file.
+    markdown = str(body.pop("plan_markdown", "") or "")
+    prompt = str(body.pop("prompt", "") or body.pop("goal", "") or "").strip()
+    if not body.get("plan_path"):
+        if markdown.strip():
+            body["plan_path"] = _write_plan(markdown)
+        elif prompt:
+            body["plan_path"] = _write_plan(_plan_from_prompt(prompt))
 
     # Securely resolve target repository path.
     # If the request targets GUAARDVARK_ROOT (or defaults to it), we MUST treat it
@@ -157,6 +219,8 @@ def all_status():
     data, status = _proxy_get("/swarm/status")
     if status == 503:
         return success_response(data={"swarms": [], "count": 0}, message="Swarm service offline")
+    if status >= 400:
+        return _status_read_failed(data, status, "Swarm status unavailable")
     return success_response(data=data, message="Status retrieved")
 
 
@@ -167,6 +231,8 @@ def swarm_status(swarm_id):
         return error_response("Swarm not found", 404, "SWARM_NOT_FOUND")
     if status == 503:
         return error_response("Swarm service not running", 503, "SWARM_OFFLINE")
+    if status >= 400:
+        return _status_read_failed(data, status, "Swarm status unavailable")
     return success_response(data=data.get("data", data), message="Status retrieved")
 
 
@@ -191,10 +257,11 @@ def task_diff(swarm_id, task_id):
 
 @swarm_bp.route("/<swarm_id>/bus/state", methods=["GET", "POST"])
 def bus_state(swarm_id):
-    if flask_request.method == "GET":
-        data, status = _proxy_get(f"/swarm/{swarm_id}/bus/state")
-    else:
+    # Only an explicit POST writes: Flask also routes HEAD here.
+    if flask_request.method == "POST":
         data, status = _proxy_post(f"/swarm/{swarm_id}/bus/state", flask_request.get_json() or {})
+    else:
+        data, status = _proxy_get(f"/swarm/{swarm_id}/bus/state")
     if status >= 400:
         return error_response(_extract_error(data, "Bus state unavailable"), status)
     return success_response(data=data, message="Bus state updated" if flask_request.method == "POST" else "Bus state retrieved")

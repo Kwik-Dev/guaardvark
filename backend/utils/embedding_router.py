@@ -325,6 +325,18 @@ class EmbeddingRouter:
                 except Exception:
                     pass
 
+            # What Ollama reports for the model (<arch>.embedding_length),
+            # for one the table above does not list (mxbai-embed-large: 1024).
+            if self._embed_dim is None:
+                try:
+                    from backend.config import get_active_embedding_model
+                    from backend.services.model_capabilities import capabilities_for
+                    dim = capabilities_for(get_active_embedding_model(), with_vision=False).embedding_dim
+                    if dim > 0:
+                        self._embed_dim = dim
+                except Exception:
+                    pass
+
             if self._embed_dim is None:
                 self._embed_dim = 4096
         return self._embed_dim

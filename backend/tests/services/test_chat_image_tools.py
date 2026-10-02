@@ -70,6 +70,9 @@ def test_parse_outpaint_pad_named_side():
 
 def test_identity_prompt_strips_chrome():
     assert identity_prompt_from_message("this person as a 1940s detective") == "a 1940s detective"
+    # A place alone renders an empty scene; the subject stays in front of it.
+    assert (identity_prompt_from_message("Put this person into a sunlit greenhouse, same face.")
+            == "a person in a sunlit greenhouse, same face")
 
 
 def test_generate_identity_requires_a_consent_record(tmp_path, monkeypatch):
@@ -152,3 +155,35 @@ def test_named_image_direct_identity_not_edit():
         "put a cowboy hat on this person", "s", lambda *a: None, "r", {},
     )
     assert skipped is None
+
+
+# ── a busy GPU: chat waits, other callers are told at once ─────────────────
+
+def test_chat_turns_wait_for_the_gpu_and_others_do_not(monkeypatch):
+    from backend.services import agent_control_service as acs
+    from backend.tools import image_tools
+
+    acs.set_chat_stop_check(None)
+    assert image_tools._chat_gpu_wait() is None
+    try:
+        acs.set_chat_stop_check(lambda: False)
+        monkeypatch.setenv("GUAARDVARK_IMAGE_VRAM_WAIT_S", "120")
+        wait = image_tools._chat_gpu_wait()
+        assert wait["wait_s"] == 120.0 and wait["should_stop"]() is False
+    finally:
+        acs.set_chat_stop_check(None)
+
+
+def test_gpu_refusals_read_as_try_again():
+    from backend.services.gpu_resource_policy import GpuWaitStopped
+    from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
+    from backend.tools.image_tools import _gpu_refusal
+
+    busy = GpuBusyError("GPU is held by video_render:chat_qwen_edit_1234 — wait for completion")
+    # The chat engine keeps the edit for a later "try again" when it sees either phrase.
+    assert "try again" in _gpu_refusal(busy, None)
+    waited = _gpu_refusal(busy, {"wait_s": 600})
+    assert "10 minutes" in waited and "try again" in waited
+    assert "Stopped" in _gpu_refusal(GpuWaitStopped("stopped"), {"wait_s": 600})
+    assert _gpu_refusal(GpuCapacityError("does not fit"), {"wait_s": 600}) is None
+    assert _gpu_refusal(RuntimeError("other"), None) is None

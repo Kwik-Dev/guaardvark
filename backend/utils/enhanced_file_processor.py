@@ -14,6 +14,86 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+
+class FileProcessingError(Exception):
+    """A file of a supported type that could not be read. The message is the
+    reason, worded for the person who asked for the file."""
+
+
+_ZIP_MAGIC = b"PK\x03\x04"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+# The stream a password-protected .docx/.xlsx keeps its content in. Its name
+# sits in the OLE directory as UTF-16.
+_ENCRYPTED_STREAM = "EncryptedPackage".encode("utf-16-le")
+
+
+def container_kind(file_path: str) -> str:
+    """What the first bytes of a file say it is: "zip" (.docx, .xlsx, .xlsb),
+    "ole" (the old binary Office formats, and any password-protected Office
+    file), "empty", or "other"."""
+    with open(file_path, "rb") as f:
+        head = f.read(8)
+    if not head:
+        return "empty"
+    if head.startswith(_ZIP_MAGIC):
+        return "zip"
+    if head.startswith(_OLE_MAGIC):
+        return "ole"
+    return "other"
+
+
+def is_encrypted_office_file(file_path: str) -> bool:
+    """True for an OLE file that holds an encrypted .docx/.xlsx package."""
+    overlap = len(_ENCRYPTED_STREAM) - 1
+    tail = b""
+    with open(file_path, "rb") as f:
+        while True:
+            block = f.read(1024 * 1024)
+            if not block:
+                return False
+            if _ENCRYPTED_STREAM in tail + block:
+                return True
+            tail = block[-overlap:]
+
+
+def failure_reason(file_path: str, error: BaseException) -> str:
+    """Why reading ``file_path`` failed, from the error a format reader raised:
+    password-protected, an old binary format, damaged, or a missing package."""
+    suffix = Path(file_path).suffix.lower()
+    name = type(error).__name__
+    text = str(error).strip()
+    try:
+        kind = container_kind(file_path)
+    except OSError:
+        kind = "other"
+    if kind == "empty":
+        return "the file is empty (0 bytes)"
+
+    if suffix == ".pdf":
+        if name == "FileNotDecryptedError" or "not been decrypted" in text:
+            return "the PDF is password-protected; its text cannot be read without the password"
+        if name == "DependencyError":
+            return f"the PDF is encrypted and cannot be opened here: {text}"
+        if name in ("PdfReadError", "PdfStreamError", "EmptyFileError", "ParseError"):
+            return f"the PDF is damaged or incomplete ({text})"
+
+    if suffix in (".docx", ".doc"):
+        if kind == "ole":
+            if is_encrypted_office_file(file_path):
+                return "the document is password-protected; save a copy without the password to read it"
+            return "this is an old-format Word file (.doc); only .docx is read, so save it as .docx"
+        if kind != "zip" or name in ("BadZipFile", "PackageNotFoundError", "KeyError"):
+            # The reader's own message names the file's full path, so it is not repeated.
+            return "the file is not a readable .docx document; it is damaged or another format"
+
+    if suffix == ".xml" and name == "ParseError":
+        return f"the XML is not well-formed ({text})"
+
+    if isinstance(error, ImportError):
+        return text or "a package needed to read this format is not installed"
+    return f"{name}: {text}" if text else name
+
+
 class FileFormat(Enum):
     """Supported file formats for processing and generation"""
     CSV = "csv"
@@ -345,7 +425,8 @@ class XMLProcessor(FileProcessor):
             root = tree.getroot()
             
             # Extract text content
-            text_content = ET.tostring(root, encoding='unicode', method='text')
+            # One space between element texts, so words from adjacent elements stay apart.
+            text_content = " ".join(t.strip() for t in root.itertext() if t.strip())
             
             # Create structured representation
             structured_data = self._element_to_dict(root)
@@ -581,6 +662,7 @@ class ExcelProcessor(FileProcessor):
             
             # Extract structured data
             extraction_result = self.excel_extractor.extract_excel_content(file_path)
+            structured_data = None
             
             if extraction_result.get('success'):
                 structured_data = extraction_result.get('structured_data')
@@ -708,19 +790,25 @@ class EnhancedFileProcessor:
         format_type = self.detect_format(file_path)
         return format_type is not None and format_type in self.processors
     
-    def process_file(self, file_path: str) -> Optional[ProcessedContent]:
-        """Process a file and return structured content"""
+    def process_file(self, file_path: str, raise_errors: bool = False) -> Optional[ProcessedContent]:
+        """Process a file and return structured content.
+
+        Returns None when no processor handles the file's type. A file of a
+        supported type that cannot be read also gives None, which the indexing
+        pipeline takes as "use the legacy reader"; with ``raise_errors`` it
+        raises :class:`FileProcessingError` carrying the reason instead.
+        """
+        format_type = self.detect_format(file_path)
+        if not format_type or format_type not in self.processors:
+            logger.warning(f"No processor available for file: {file_path}")
+            return None
+
         try:
-            format_type = self.detect_format(file_path)
-            if not format_type or format_type not in self.processors:
-                logger.warning(f"No processor available for file: {file_path}")
-                return None
-            
-            processor = self.processors[format_type]
-            return processor.process(file_path)
-            
+            return self.processors[format_type].process(file_path)
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {e}")
+            if raise_errors:
+                raise FileProcessingError(failure_reason(file_path, e)) from e
             return None
     
     def generate_file(self, content: str, output_path: str, format_type: FileFormat, **kwargs) -> bool:

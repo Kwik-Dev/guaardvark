@@ -45,6 +45,16 @@ def set_chat_emit_fn(fn: Optional[Callable]) -> None:
     )
 
 
+def set_chat_stop_check(fn: Optional[Callable[[], bool]]) -> None:
+    """Stash a callable that says whether this chat turn was stopped, so a tool
+    that waits (for the GPU, say) can give up when the person presses Stop."""
+    _chat_emit_local.stop_check = fn
+
+
+def get_chat_stop_check() -> Optional[Callable[[], bool]]:
+    return getattr(_chat_emit_local, "stop_check", None)
+
+
 def get_chat_emit_fn() -> Optional[Callable]:
     fn = getattr(_chat_emit_local, "emit_fn", None)
     logger.debug(

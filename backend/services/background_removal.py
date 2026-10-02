@@ -35,6 +35,24 @@ MODELS = {
     },
 }
 PREFERENCE = ("bgremove-birefnet", "bgremove-u2net")
+
+# Cut-outs run on the CPU provider, whichever onnxruntime build is installed. A
+# CUDA session here would hold VRAM with no booking (gpu_resource_policy), next
+# to renders and a resident chat model that were sized without it.
+#
+# Measured 2026-09-30 on an 8-core / 16-thread desktop CPU: one 1024x1024 PNG, a
+# fresh process per run, onnxruntime 1.30.0 CPUExecutionProvider.
+#   bgremove-u2net     0.13 s to load the session; 0.10-0.15 s per cut-out after
+#                      that (resize, inference, alpha); 0.4-0.6 s for the whole
+#                      remove_background call, PNG read and write included
+#   bgremove-birefnet  not measured: the file was not installed on that machine
+# There is no GPU timing to set against these. On that machine the CUDA provider
+# onnxruntime-gpu 1.30.0 lists did not load (it needs CUDA 13, torch 2.6 brings
+# CUDA 12.4), and requirements.txt pins the CPU build, which has none. Before a
+# GPU path is added, record its timing and peak VRAM here and claim the card
+# through gpu_resource_policy.gpu_session, so it runs only when the card is free.
+PROVIDERS = ("CPUExecutionProvider",)
+
 _MEAN = (0.485, 0.456, 0.406)
 _STD = (0.229, 0.224, 0.225)
 
@@ -64,11 +82,15 @@ def installed_model() -> Optional[str]:
 
 
 def _providers() -> list:
-    import onnxruntime as ort
-    available = ort.get_available_providers()
-    if "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]
+    return list(PROVIDERS)
+
+
+def device_used(model_id: Optional[str] = None) -> str:
+    """'CPU' or 'GPU': what the loaded session for ``model_id`` runs on, read from
+    the session itself; before one is loaded, what ``PROVIDERS`` asks for."""
+    sess = _sessions.get(model_id or installed_model() or "")
+    provider = sess.get_providers()[0] if sess is not None else PROVIDERS[0]
+    return "CPU" if provider == "CPUExecutionProvider" else "GPU"
 
 
 def _session(model_id: str):

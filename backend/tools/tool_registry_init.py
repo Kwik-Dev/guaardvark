@@ -119,6 +119,13 @@ def register_code_tools() -> List[str]:
         _tool_categories["search_codebase"] = category
         logger.debug("Registered: SearchCodebaseTool")
 
+        from backend.tools.inbound_guard_tools import CheckInboundChangeTool
+
+        register_tool(CheckInboundChangeTool())
+        registered.append("check_inbound_change")
+        _tool_categories["check_inbound_change"] = category
+        logger.debug("Registered: CheckInboundChangeTool")
+
         from backend.tools.agent_tools.code_manipulation_tools import CODE_MANIPULATION_TOOLS
 
         for tool in CODE_MANIPULATION_TOOLS:
@@ -484,10 +491,20 @@ def register_rag_tools() -> List[str]:
 
 
 def register_media_tools() -> List[str]:
-    """Register media player control tools"""
+    """Register media player control tools.
+
+    Registered on Linux only: they use D-Bus MPRIS2, amixer and a Linux VLC, so
+    elsewhere chat and MCP clients would see four tools that can only refuse.
+    """
     global _tool_categories
     registered = []
     category = "media"
+
+    from backend.utils.platform import media_player_available, os_name
+    if not media_player_available():
+        logger.info("Media player tools not registered: they need Linux (D-Bus MPRIS2, amixer, "
+                    "VLC) and this machine runs %s", os_name())
+        return registered
 
     try:
         from backend.tools.media_tools import (
@@ -610,6 +627,30 @@ def register_image_tools() -> List[str]:
         except Exception as e:
             logger.warning("Failed to register %s: %s", _tool_name, e)
 
+    return registered
+
+
+def register_audio_tools() -> List[str]:
+    """Register music and speech for MCP clients.
+
+    Registered only in the MCP server process, so chat's tool choice is unchanged;
+    agents connected over MCP get the Audio Foundry that the Studio's Audio page uses.
+    """
+    from backend.utils.backend_http import in_mcp_process
+
+    registered = []
+    if not in_mcp_process():
+        return registered
+    for _cls_name, _tool_name in (("GenerateMusicTool", "generate_music"),
+                                  ("GenerateSpeechTool", "generate_speech")):
+        try:
+            from backend.tools import audio_tools as _audio_tools
+            register_tool(getattr(_audio_tools, _cls_name)())
+            registered.append(_tool_name)
+            _tool_categories[_tool_name] = "audio"
+            logger.debug("Registered: %s", _cls_name)
+        except Exception as e:
+            logger.warning("Failed to register %s: %s", _tool_name, e)
     return registered
 
 
@@ -812,6 +853,7 @@ def initialize_all_tools() -> ToolRegistry:
     _registered_tools.extend(register_rag_tools())
     _registered_tools.extend(register_media_tools())
     _registered_tools.extend(register_image_tools())
+    _registered_tools.extend(register_audio_tools())
     _registered_tools.extend(register_test_execution_tools())
     _registered_tools.extend(register_agent_control_tools())
     _registered_tools.extend(register_outreach_tools())

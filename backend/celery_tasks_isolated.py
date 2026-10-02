@@ -360,10 +360,14 @@ def index_document_task(document_id, process_id=None):
 
                     # Use the proper API to create the process
                     try:
+                        # Under the upload's id: a new id left the upload's job at
+                        # "start" forever, while every update below targeted an id
+                        # this worker did not have.
                         created_id = progress_system.create_process(
                             ProcessType.INDEXING,
                             f"Indexing document {document_id}",
-                            {"document_id": document_id, "process_id": process_id}
+                            {"document_id": document_id, "process_id": process_id},
+                            process_id=process_id,
                         )
                         logger.info(f"Successfully created process {process_id} in worker (created_id: {created_id})")
                     except Exception as create_error:

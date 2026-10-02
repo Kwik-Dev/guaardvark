@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import List
+
 import typer
+from typer.core import TyperGroup
 
 from llx.client import get_client, LlxError, LlxConnectionError
 from llx.global_opts import get_global_json, get_global_server
@@ -10,8 +13,20 @@ from llx.theme import make_console
 from llx import output
 
 console = make_console()
+class _OutreachGroup(TyperGroup):
+    """`outreach <sentence>` runs the natural-language intent; `outreach status`,
+    `queue` and `approve` stay subcommands. A plain optional argument on the group
+    would swallow the subcommand names, so a sentence is routed to a hidden one."""
+
+    def parse_args(self, ctx, args):
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
+            args = ["say", *args]
+        return super().parse_args(ctx, args)
+
+
 outreach_app = typer.Typer(
     name="outreach",
+    cls=_OutreachGroup,
     help="Social outreach — status, queue, approve, or natural-language scout/draft.",
     no_args_is_help=False,
 )
@@ -20,24 +35,31 @@ outreach_app = typer.Typer(
 @outreach_app.callback(invoke_without_command=True)
 def outreach_root(
     ctx: typer.Context,
-    text: str = typer.Argument(
-        None,
-        help='Natural language, e.g. "comment on youtube videos regarding Offline AI or ComfyUI"',
-    ),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """With freeform text, run intent. Without args, show status."""
+    """Say what to do in plain words, e.g. outreach "comment on youtube videos about offline AI".
+    Without arguments, show status."""
     if ctx.invoked_subcommand is not None:
         return
     server = server or get_global_server()
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
-    client = get_client(server)
+    _print_status(get_client(server), json_out)
 
-    if not text:
-        _print_status(client, json_out)
-        return
+
+@outreach_app.command("say", hidden=True)
+def outreach_say(
+    words: List[str] = typer.Argument(..., help="What to do, in plain words"),
+    server: str = typer.Option(None, "--server", "-s"),
+    json_out: bool = typer.Option(False, "--json", "-j"),
+):
+    """Run a natural-language outreach request."""
+    server = server or get_global_server()
+    json_out = json_out or get_global_json()
+    output.set_json_mode(json_out)
+    client = get_client(server)
+    text = " ".join(words)
 
     try:
         data = client.post(

@@ -1,12 +1,24 @@
 """Cast Library — CRUD over Subjects. Reusable across Productions."""
+import json
 import logging
 import os
+import re
+import struct
+import tempfile
 from pathlib import Path
 
 from flask import Blueprint, current_app, request, jsonify, send_file
 from werkzeug.utils import secure_filename
 
+from backend.config import STORAGE_DIR
+from backend.celery_dispatch import TaskNotStarted, mark_progress_not_started
 from backend.models import db, Subject, SubjectSample
+from backend.services.media_model_registry import (
+    ZIMAGE_TURBO,
+    FLUX_DEV,
+    get_profile,
+    write_lora_sidecar,
+)
 
 bp = Blueprint("cast_library_api", __name__, url_prefix="/api/cast-library")
 log = logging.getLogger(__name__)
@@ -259,8 +271,12 @@ def update_subject(subject_id):
             cfg["bible_manual_override"] = True
             s.training_settings_json = cfg
     if "training_settings" in body:
-        from backend.services.lora_training_settings import normalize_training_settings
-        s.training_settings_json = normalize_training_settings(body["training_settings"])
+        # Merge, not replace: the same JSON holds the identity flags and the
+        # smoke score (see merge_training_settings).
+        from backend.services.lora_training_settings import merge_training_settings
+        s.training_settings_json = merge_training_settings(
+            s.training_settings_json, body["training_settings"],
+        )
     db.session.commit()
     return jsonify(_serialize(s))
 
@@ -675,7 +691,11 @@ def dispatch_generate_samples(subject_id: int):
         f"Character reference sheet generation for subject {subject_id}",
         additional_data={"subject_id": subject_id, "operation": "generate_samples", "kind": "cast_character_gen", "use_trained_lora": use_lora, "append": append, "n": n},
     )
-    task = celery.send_task("character.generate_samples", args=[subject_id, job_id, use_lora, append, n])
+    try:
+        task = celery.send_task("character.generate_samples", args=[subject_id, job_id, use_lora, append, n])
+    except TaskNotStarted as e:
+        mark_progress_not_started(job_id, e)
+        raise
     # Persist celery id so /generate/cancel can revoke the worker without inspect.
     try:
         progress.update_process(
@@ -756,8 +776,12 @@ def dispatch_train(subject_id: int):
 
     body = request.get_json(silent=True) or {}
     if body.get("training_settings"):
-        from backend.services.lora_training_settings import normalize_training_settings
-        s.training_settings_json = normalize_training_settings(body["training_settings"])
+        # Merge, not replace: the same JSON holds bible_vision_grounded (without
+        # it every run re-syncs identity from the photos) and the smoke score.
+        from backend.services.lora_training_settings import merge_training_settings
+        s.training_settings_json = merge_training_settings(
+            s.training_settings_json, body["training_settings"],
+        )
 
     # Gate on media model registry: Z-Image/FLUX train backends land next;
     # only train_ready profiles (currently sdxl-legacy PEFT) may dispatch.
@@ -782,6 +806,10 @@ def dispatch_train(subject_id: int):
     merged = dict(s.training_settings_json or {})
     merged.update(train_cfg)
     s.training_settings_json = merged
+    # Into the transaction now: the refresh after the identity check below
+    # reloads the row, and would otherwise discard these settings whenever no
+    # sync ran (and so nothing committed them).
+    db.session.flush()
 
     # Vision-ground identity before captions/train when refs exist and ungrounded.
     refs = list(s.ref_image_paths or [])
@@ -889,10 +917,14 @@ def dispatch_regen_sample(subject_id: int, sample_id: int):
         f"Regen sample {sample_id} for cast subject {subject_id}",
         additional_data={"subject_id": subject_id, "sample_id": sample_id, "operation": "regen_sample", "kind": "cast_character_gen"},
     )
-    task = celery.send_task(
-        "character.regen_sample",
-        args=[sample_id, prompt_override, seed, job_id],
-    )
+    try:
+        task = celery.send_task(
+            "character.regen_sample",
+            args=[sample_id, prompt_override, seed, job_id],
+        )
+    except TaskNotStarted as e:
+        mark_progress_not_started(job_id, e)
+        raise
     try:
         progress.update_process(
             job_id, 1, "Queued for regen",
@@ -947,3 +979,257 @@ def approve_samples(subject_id: int):
         "updated": len(rows),
         "samples": [r.to_dict() for r in all_samples],
     })
+
+# ── Import LoRA ──────────────────────────────────────────────────────────
+# Accepts a LoRA checkpoint trained OUTSIDE Guaardvark (Ostris AI-Toolkit,
+# kohya, or diffusers/PEFT) and attaches it to a Subject, so Cast selector,
+# Film Crew casting and keyframe rendering pick it up like a native-trained
+# LoRA. Validated against the two families the product currently supports:
+# Z-Image Turbo (diffusers/PEFT: layers.<n>...lora_A/lora_B) and FLUX.1 Dev
+# (kohya: double_blocks/single_blocks...lora_down/lora_up[+alpha]).
+#
+# Issue: https://github.com/guaardvark/guaardvark/issues/245
+# Author: Caroline Zolet (Carol-zolet)
+
+_IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB — LoRA checkpoints, not images
+# Matches the trainer's own layout. A relative path here resolves against
+# the process cwd, not STORAGE_DIR — the Z-Image renderer then skips a
+# missing file with only a log line instead of failing loudly.
+_LORA_SUBDIR = Path("training") / "loras"
+
+# Z-Image (diffusers/PEFT) module path, after stripping a known prefix.
+_ZIMAGE_MODULE_RE = re.compile(
+    r"^(?:layers|context_refiner|noise_refiner)\.\d+\."
+    r"(?:attention\.to_(?:q|k|v|out\.0)|feed_forward\.w[123]|adaLN_modulation\.0)"
+)
+_ZIMAGE_PREFIXES = ("diffusion_model.", "transformer.")
+_ZIMAGE_SUFFIXES = (".lora_A.weight", ".lora_B.weight", ".lora_down.weight", ".lora_up.weight", ".alpha")
+
+# FLUX module path — kohya form keeps the lora_unet_ prefix baked into the
+# name (no dot after it), the dotted form doesn't.
+_FLUX_KOHYA_RE = re.compile(r"^lora_unet_(?:double|single)_blocks_\d+_")
+_FLUX_DOTTED_RE = re.compile(r"^diffusion_model\.(?:double|single)_blocks\.\d+\.")
+
+# SDXL — explicitly rejected even though it also uses a lora_unet_ prefix,
+# because its block names never match the FLUX pattern above.
+_SDXL_RE = re.compile(r"^lora_unet_(?:down|up|input|output|middle)_blocks|^lora_te")
+
+# Text-encoder keys ("lora_te1_"/"lora_te2_") appear both on true SDXL LoRAs
+# and on a FLUX LoRA that was also trained on its text encoder. Used only to
+# give the latter a more accurate rejection message — see
+# _flux_text_encoder_hint below. Not part of the accept/reject decision.
+_TEXT_ENCODER_RE = re.compile(r"^lora_te\d*_")
+
+
+def _read_safetensors_header(fileobj) -> dict:
+    """Read only the JSON header of a .safetensors file — no tensor data.
+    Format: 8-byte little-endian uint64 header length, then that many bytes
+    of JSON. Never touches the tensor bytes that follow."""
+    fileobj.seek(0)
+    length_bytes = fileobj.read(8)
+    if len(length_bytes) != 8:
+        raise ValueError("file too small to be a valid safetensors checkpoint")
+    (header_len,) = struct.unpack("<Q", length_bytes)
+    if header_len <= 0 or header_len > 50 * 1024 * 1024:
+        raise ValueError(f"implausible header length ({header_len} bytes) — not a LoRA checkpoint")
+    header_bytes = fileobj.read(header_len)
+    if len(header_bytes) != header_len:
+        raise ValueError("truncated safetensors header")
+    try:
+        return json.loads(header_bytes)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"header is not valid JSON: {e}") from e
+
+
+def _detect_lora_family(keys: list[str]) -> str | None:
+    """Return 'zimage-turbo', 'flux-dev', or None if the key layout matches
+    neither supported family (SDXL included).
+
+    Validated 2026-09-27 against real Ostris AI-Toolkit checkpoints:
+      - Z-Image Turbo: 480/480 keys matched (diffusers/PEFT layout)
+      - FLUX.1 Dev:    912/912 keys matched (kohya layout)
+    and independently confirmed by the maintainer running the same key
+    names through diffusers' load_lora_weights (Z-Image) and ComfyUI's
+    LoraLoaderModelOnly (FLUX) — both load every key with no warnings.
+
+    Known limitation: a FLUX LoRA that also trains the text encoder carries
+    lora_te1_* keys, which _SDXL_RE matches (it starts with "lora_te"). Today
+    that turns the whole file away as unrecognised/SDXL rather than accepting
+    it as FLUX with an ignored text-encoder component — see
+    test_import_rejects_flux_with_text_encoder_keys for the pinned behaviour.
+    """
+    tensor_keys = [k for k in keys if k != "__metadata__"]
+    if not tensor_keys:
+        return None
+
+    zimage_hits = 0
+    flux_hits = 0
+    sdxl_hits = 0
+
+    for key in tensor_keys:
+        if _SDXL_RE.match(key):
+            sdxl_hits += 1
+            continue
+
+        stripped = key
+        for prefix in _ZIMAGE_PREFIXES:
+            if key.startswith(prefix):
+                stripped = key[len(prefix):]
+                break
+        if key.endswith(_ZIMAGE_SUFFIXES) and _ZIMAGE_MODULE_RE.search(stripped):
+            zimage_hits += 1
+            continue
+
+        if _FLUX_KOHYA_RE.match(key) or _FLUX_DOTTED_RE.match(key):
+            flux_hits += 1
+            continue
+
+    total = len(tensor_keys)
+    if sdxl_hits > total * 0.5:
+        return None
+    if zimage_hits >= total * 0.9:
+        return ZIMAGE_TURBO
+    if flux_hits >= total * 0.9:
+        return FLUX_DEV
+    return None
+
+
+def _flux_text_encoder_hint(keys: list[str]) -> bool:
+    """True if a rejected file looks like a FLUX LoRA that also trained its
+    text encoder, rather than an actual SDXL checkpoint: its non-text-encoder
+    keys overwhelmingly match the FLUX U-Net block pattern, and only the
+    lora_te*_ keys triggered the SDXL rejection. Used solely to pick a more
+    accurate error message; it does not change what gets accepted."""
+    tensor_keys = [k for k in keys if k != "__metadata__"]
+    te_keys = [k for k in tensor_keys if _TEXT_ENCODER_RE.match(k)]
+    if not te_keys:
+        return False
+    other_keys = [k for k in tensor_keys if k not in te_keys]
+    if not other_keys:
+        return False
+    flux_hits = sum(
+        1 for k in other_keys
+        if _FLUX_KOHYA_RE.match(k) or _FLUX_DOTTED_RE.match(k)
+    )
+    return flux_hits >= len(other_keys) * 0.9
+
+
+@bp.post("/subjects/<int:subject_id>/import-lora")
+def import_subject_lora(subject_id):
+    """Attach an externally-trained LoRA (.safetensors) to a Subject.
+
+    Multipart fields:
+      lora_file      — required, the .safetensors checkpoint
+      base_model_id  — required, 'zimage-turbo' or 'flux-dev'
+      trigger_word   — required, the token the LoRA was trained on
+    """
+    request.max_content_length = _IMPORT_MAX_BYTES
+
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "subject not found"}), 404
+    if s.training_status == "training":
+        return jsonify({"error": "already_training", "subject_id": subject_id}), 409
+
+    f = request.files.get("lora_file")
+    if not f or not f.filename:
+        return jsonify({"error": "no file (expected multipart field 'lora_file')"}), 400
+
+    base_model_id = (request.form.get("base_model_id") or "").strip()
+    trigger_word = (request.form.get("trigger_word") or "").strip()
+    if not trigger_word:
+        return jsonify({"error": "trigger_word is required"}), 400
+
+    profile = get_profile(base_model_id)
+    if not profile or profile["id"] not in (ZIMAGE_TURBO, FLUX_DEV):
+        return jsonify({
+            "error": f"unsupported base_model_id {base_model_id!r}; "
+                     f"expected one of: {ZIMAGE_TURBO!r}, {FLUX_DEV!r}"
+        }), 400
+    base_model_id = profile["id"]
+
+    ext = Path(secure_filename(f.filename) or "").suffix.lower()
+    if ext != ".safetensors":
+        return jsonify({"error": f"expected a .safetensors file, got {ext!r}"}), 400
+
+    target_dir = Path(STORAGE_DIR) / _LORA_SUBDIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    # .partial (not .safetensors) so ComfyUI's recursive LoRA scan never lists a
+    # half-written upload, and mkstemp's own uniqueness rules out two uploads to
+    # the same member in one worker process colliding on a name.
+    tmp_fd, _tmp_name = tempfile.mkstemp(dir=target_dir, suffix=".partial")
+    os.close(tmp_fd)
+    tmp_path = Path(_tmp_name)
+
+    written = 0
+    oversized = False
+    write_error = None
+    try:
+        with open(tmp_path, "wb") as out:
+            while True:
+                chunk = f.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _IMPORT_MAX_BYTES:
+                    oversized = True
+                    break
+                out.write(chunk)
+    except OSError as e:
+        write_error = e
+
+    if oversized or write_error is not None:
+        tmp_path.unlink(missing_ok=True)
+        reason = f"file exceeds {_IMPORT_MAX_BYTES // (1024**3)}GB limit" if oversized else f"write failed: {write_error}"
+        return jsonify({"error": reason}), 400
+
+    try:
+        with open(tmp_path, "rb") as fh:
+            header = _read_safetensors_header(fh)
+    except ValueError as e:
+        tmp_path.unlink(missing_ok=True)
+        return jsonify({"error": f"invalid safetensors file: {e}"}), 400
+
+    detected_family = _detect_lora_family(list(header.keys()))
+    if detected_family is None:
+        tmp_path.unlink(missing_ok=True)
+        if _flux_text_encoder_hint(list(header.keys())):
+            return jsonify({
+                "error": "this looks like a FLUX LoRA that also trained its text "
+                         "encoder; only the U-Net/transformer weights are supported "
+                         "for import right now, the text-encoder part isn't yet"
+            }), 400
+        return jsonify({
+            "error": "key layout does not match any supported LoRA family "
+                     "(zimage-turbo or flux-dev); SDXL LoRAs are not supported"
+        }), 400
+    if detected_family != base_model_id:
+        tmp_path.unlink(missing_ok=True)
+        return jsonify({
+            "error": f"selected base_model_id {base_model_id!r} does not match "
+                     f"the detected key layout ({detected_family!r})"
+        }), 400
+
+    next_version = (s.lora_version or 0) + 1
+    final_path = target_dir / f"subject_{subject_id}_imported_v{next_version}.safetensors"
+    tmp_path.replace(final_path)
+
+    write_lora_sidecar(
+        final_path,
+        subject_id=s.id,
+        subject_name=s.name,
+        trigger_word=trigger_word,
+        base_model_id=base_model_id,
+        ref_count=0,
+        mock=False,
+        extra={"imported": True, "train_backend": None},
+    )
+
+    s.lora_path = str(final_path.resolve())
+    s.trigger_word = trigger_word
+    s.lora_version = next_version
+    s.training_status = "trained"
+    s.training_settings_json = dict(s.training_settings_json or {}, base_model_id=base_model_id, imported=True)
+    db.session.commit()
+
+    return jsonify({"subject": _serialize(s)})

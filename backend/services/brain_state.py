@@ -163,7 +163,7 @@ def _build_default_reflexes(tool_registry=None) -> List[ReflexAction]:
 
         def _extract_media_action(message: str, match: "re.Match") -> Dict:
             action = match.group(1).lower()
-            action_map = {"skip": "next", "prev": "previous"}
+            action_map = {"skip": "next", "prev": "previous", "resume": "play"}
             return {"action": action_map.get(action, action)}
 
         def _extract_play_query(message: str, match: "re.Match") -> Dict:
@@ -172,14 +172,15 @@ def _build_default_reflexes(tool_registry=None) -> List[ReflexAction]:
             return {"query": query} if query else {}
 
         def _extract_volume(message: str, match: "re.Match") -> Dict:
-            vol_match = re.search(r"(\d+)", message)
+            # ASCII digits only: \d also matches other scripts' digits.
+            vol_match = re.search(r"([0-9]+)", message)
             if vol_match:
                 return {"level": int(vol_match.group(1))}
-            for word, val in [("up", "up"), ("down", "down"),
-                              ("louder", "up"), ("quieter", "down"),
-                              ("softer", "down"), ("mute", "mute"),
-                              ("unmute", "unmute")]:
-                if word in message.lower():
+            # Whole words, so "unmute" is not read as "mute" nor "setup" as "up".
+            for word, val in [("unmute", "unmute"), ("mute", "mute"),
+                              ("up", "+10"), ("louder", "+10"),
+                              ("down", "-10"), ("quieter", "-10"), ("softer", "-10")]:
+                if re.search(rf"\b{word}\b", message.lower()):
                     return {"level": val}
             return {}
 
@@ -209,8 +210,8 @@ def _build_default_reflexes(tool_registry=None) -> List[ReflexAction]:
             reflexes.append(ReflexAction(
                 name="media_volume",
                 patterns=[
-                    _anchor_pattern(r"volume\s+(?:up|down|\d+)"),
-                    _anchor_pattern(r"(?:turn|set)\s+(?:the\s+)?volume(?:\s+\d+)?"),
+                    _anchor_pattern(r"volume\s+(?:up|down|[0-9]+)"),
+                    _anchor_pattern(r"(?:turn|set)\s+(?:the\s+)?volume(?:\s+[0-9]+)?"),
                     _anchor_pattern(r"(?:louder|quieter|softer)"),
                     _anchor_pattern(r"(?:mute|unmute)"),
                 ],

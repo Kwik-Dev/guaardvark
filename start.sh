@@ -104,6 +104,18 @@ if { [ -n "$CI" ] || [ -n "$CODEX_ENV" ]; } && [ "${GUAARDVARK_CI_BOOT:-0}" != 1
   exit 0
 fi
 
+# Run as root (sudo, or a root shell), the install lands under /root and leaves
+# the venv, node_modules and logs owned by root, so the next start as the normal
+# user cannot write them. The script asks for sudo itself for system packages.
+# Machines where root is the only account (some GPU cloud hosts and containers)
+# opt in with GUAARDVARK_ALLOW_ROOT=1.
+if [ "$(id -u)" = 0 ] && [ "${GUAARDVARK_ALLOW_ROOT:-0}" != 1 ]; then
+  vader_error "start.sh is running as root. Run it as your normal user: ./start.sh"
+  vader_info "It asks for your password itself when it needs to install system packages."
+  vader_info "If root is the only account on this machine: GUAARDVARK_ALLOW_ROOT=1 ./start.sh"
+  exit 1
+fi
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 # ── Single-instance guard (must run BEFORE any installing layer, including the
@@ -536,10 +548,14 @@ check_node_version() {
         return 1
     fi
     local ver
-    ver=$(node --version | sed 's/v//')
-    local major=${ver%%.*}
-    if [ "$major" -lt 20 ]; then
-        vader_error "Node.js >=20 required. Install via: sudo apt-get install -y nodejs"
+    ver=$(node --version 2>/dev/null)
+    if ! node_version_supported "$ver"; then
+        vader_error "Node.js $GUAARDVARK_NODE_FLOOR_TEXT required (found ${ver:-none}); the frontend build tool needs it."
+        if is_macos; then
+            vader_info "Upgrade with: brew upgrade node"
+        else
+            vader_info "Install Node.js 22 LTS from https://nodejs.org, then re-run."
+        fi
         return 1
     fi
 }
@@ -1612,9 +1628,20 @@ ensure_frontend_deps() {
         return 0
     fi
 
+    # The stamp records the Node version node_modules was installed with: npm
+    # picks optional native packages (rolldown's binding) for that version, so a
+    # different Node needs a fresh install. An empty stamp from before this was
+    # recorded is adopted as-is, unless this run replaced Node.
+    local cur_node stamp_node="" node_changed=0
+    cur_node=$(node --version 2>/dev/null)
+    [ -f "$stamp" ] && stamp_node=$(cat "$stamp" 2>/dev/null)
+    if [ "${GUAARDVARK_NODE_REPLACED:-0}" = 1 ] || { [ -n "$stamp_node" ] && [ "$stamp_node" != "$cur_node" ]; }; then
+        node_changed=1
+    fi
+
     # Run npm ci (lockfile-strict, same strategy as scripts/dep_reconciler/reconcilers/frontend.py)
-    # only when truly needed: missing node_modules, or lockfile newer than our stamp.
-    if [ ! -d "$nm" ] || [ ! -f "$stamp" ] || [ "$lock" -nt "$stamp" 2>/dev/null ]; then
+    # only when truly needed: missing node_modules, lockfile newer than our stamp, or a new Node.
+    if [ ! -d "$nm" ] || [ ! -f "$stamp" ] || [ "$lock" -nt "$stamp" 2>/dev/null ] || [ "$node_changed" -eq 1 ]; then
         # npm ci deletes node_modules before downloading, so offline it would
         # leave the UI with nothing. Keep the installed tree until the registry
         # is reachable; the stamp stays old, so the next online start updates it.
@@ -1624,17 +1651,21 @@ ensure_frontend_deps() {
         fi
         vader_info "Ensuring frontend dependencies (using npm ci for lockfile safety)..."
         if (cd "$FRONTEND_DIR" && npm ci >> "$SETUP_LOG" 2>&1); then
-            touch "$stamp" 2>/dev/null || true
+            printf '%s\n' "$cur_node" > "$stamp" 2>/dev/null || true
+            GUAARDVARK_NODE_REPLACED=0
             vader_success "Frontend node_modules ready"
         else
             vader_warn "npm ci failed — trying npm install (may touch package-lock.json)"
             if (cd "$FRONTEND_DIR" && npm install >> "$SETUP_LOG" 2>&1); then
-                touch "$stamp" 2>/dev/null || true
+                printf '%s\n' "$cur_node" > "$stamp" 2>/dev/null || true
+                GUAARDVARK_NODE_REPLACED=0
             else
                 vader_error "Frontend dependency installation failed. See $SETUP_LOG"
                 return 1
             fi
         fi
+    elif [ -z "$stamp_node" ]; then
+        printf '%s\n' "$cur_node" > "$stamp" 2>/dev/null || true
     fi
     return 0
 }
@@ -1757,7 +1788,7 @@ if [ "${GUAARDVARK_OS:-linux}" = linux ] && declare -F ensure_node_npm >/dev/nul
     rm -f "$CACHE_DIR/node_check" "$CACHE_DIR/npm_check" 2>/dev/null || true
 fi
 if ! check_with_cache "node_check" check_node_version; then
-    vader_error "Node.js 20+ required. Exiting."
+    vader_error "Node.js $GUAARDVARK_NODE_FLOOR_TEXT required. Exiting."
     exit 1
 fi
 if ! check_with_cache "npm_check" check_npm; then
@@ -2006,6 +2037,14 @@ if [ "$FAST_START" -ne 1 ]; then
         check_frontend_build
         BUILD_STATUS=$?
 
+        # A fresh clone has no node_modules yet: they are installed in step 8,
+        # and the frontend is built before it is served, so a build here can
+        # only fail.
+        if [ "$BUILD_STATUS" -ne 0 ] && [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+            vader_info "Frontend dependencies not installed yet - the build runs after they are."
+            BUILD_STATUS=3  # no case below: nothing to do here
+        fi
+
         case $BUILD_STATUS in
             0)
                 vader_info "Frontend build is up to date"
@@ -2013,8 +2052,11 @@ if [ "$FAST_START" -ne 1 ]; then
             1)
                 if [ "$AUTO_BUILD_FRONTEND" -eq 1 ]; then
                     vader_info "Frontend changes detected - rebuilding..."
-                    (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$SETUP_LOG" 2>&1)
-                    vader_success "Frontend rebuilt successfully"
+                    if (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$SETUP_LOG" 2>&1); then
+                        vader_success "Frontend rebuilt successfully"
+                    else
+                        vader_warn "Frontend rebuild failed. See $SETUP_LOG"
+                    fi
                 else
                     vader_warn "Frontend build is stale (src newer than dist). Run: (cd frontend && npm run build)"
                 fi
@@ -2022,8 +2064,11 @@ if [ "$FAST_START" -ne 1 ]; then
             2)
                 if [ "$AUTO_BUILD_FRONTEND" -eq 1 ]; then
                     vader_info "Frontend dist missing - building..."
-                    (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$SETUP_LOG" 2>&1)
-                    vader_success "Frontend built successfully"
+                    if (cd "$FRONTEND_DIR" && $NPM_CMD run build >> "$SETUP_LOG" 2>&1); then
+                        vader_success "Frontend built successfully"
+                    else
+                        vader_warn "Frontend build failed. See $SETUP_LOG"
+                    fi
                 else
                     vader_warn "Frontend dist missing. Run: (cd frontend && npm run build)"
                 fi

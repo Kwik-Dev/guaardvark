@@ -110,6 +110,7 @@ When generating content, use the appropriate tool based on the request scale and
             "edit_code",
             "list_code_files",
             "verify_change",
+            "check_inbound_change",
             "codegen",
             "analyze_code",
             "generate_file",
@@ -127,7 +128,9 @@ CORE CAPABILITIES:
 WORKFLOW FOR CODE MODIFICATIONS (ReACT Loop):
 1. UNDERSTAND: First search_code or read_code to understand the existing code
 2. PLAN: Think through what changes are needed
-3. EXECUTE: Use edit_code with the EXACT text to replace (must be unique in file)
+3. EXECUTE: Use edit_code with the EXACT text to replace (must be unique in file). For a change
+   that adds network calls, shell commands, dependencies or agent instructions, run
+   check_inbound_change on it first: a held or blocked edit waits for a person.
 4. VERIFY: Use verify_change to confirm the edit succeeded
 5. ITERATE: If verification fails, read the file again and try a different approach
 

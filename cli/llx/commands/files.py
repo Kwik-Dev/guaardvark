@@ -161,7 +161,7 @@ def files_delete(
 @files_app.command("mkdir")
 def files_mkdir(
     name: str = typer.Argument(..., help="Folder name"),
-    parent: int = typer.Option(None, "--parent", "-p", help="Parent folder ID"),
+    parent: str = typer.Option("", "--parent", "-p", help="Parent folder path, e.g. research/2026"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -171,7 +171,7 @@ def files_mkdir(
     output.set_json_mode(json_out)
     try:
         client = get_client(server)
-        data = client.post("/api/files/folder", json={"name": name, "parent_id": parent})
+        data = client.post("/api/files/folder", json={"name": name, "parent_path": parent or ""})
         result = data.get("data", data)
         if json_out or output.is_pipe():
             output.print_json({"status": "success", "data": result})

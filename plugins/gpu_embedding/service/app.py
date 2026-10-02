@@ -2,9 +2,12 @@
 Flask Application for GPU Embedding Service
 """
 
+import importlib.util
 import logging
+import sys
 import threading
 import time
+from pathlib import Path
 from flask import Flask, request, jsonify
 from typing import Dict, Any, List
 
@@ -20,8 +23,28 @@ from .health import get_health_status
 
 logger = logging.getLogger(__name__)
 
+_GUARD_MODULE = "guaardvark_sidecar_guard"
+
+
+def _load_guard():
+    """backend/utils/sidecar_guard.py, loaded by path: importing it through
+    the backend package would start the backend's Socket.IO and LLM stack."""
+    loaded = sys.modules.get(_GUARD_MODULE)
+    if loaded is not None:
+        return loaded
+    path = Path(__file__).resolve().parents[3] / "backend" / "utils" / "sidecar_guard.py"
+    spec = importlib.util.spec_from_file_location(_GUARD_MODULE, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[_GUARD_MODULE] = module
+    return module
+
+
 # Create Flask app
 app = Flask(__name__)
+# A request addressed to a name that is not this machine's (a page re-pointed
+# at 127.0.0.1) is refused before any route runs.
+app.wsgi_app = _load_guard().HostCheckMiddleware(app.wsgi_app)
 
 # Initialize configuration
 config = get_service_config()

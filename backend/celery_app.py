@@ -1,8 +1,13 @@
 import os
 import logging
 
-from celery import Celery
 from flask import Flask
+
+from backend.celery_dispatch import (
+    GuaardvarkCelery,
+    apply_sender_bounds,
+    restore_worker_result_retries,
+)
 
 # Under memory pressure the kernel must kill THIS worker, never the desktop
 # (2026-08-04 client box lockups). Early, before any heavy allocation.
@@ -50,7 +55,7 @@ def create_celery_app():
     broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
     result_backend = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 
-    celery_app = Celery(
+    celery_app = GuaardvarkCelery(
         __name__,
         broker=broker_url,
         backend=result_backend,
@@ -58,6 +63,8 @@ def create_celery_app():
 
     try:
         celery_app.conf.update(
+        # A worker reconnects to Redis for as long as it takes. Sending a task
+        # is bounded separately (apply_sender_bounds below).
         broker_connection_retry_on_startup=True,
         broker_connection_retry=True,
         broker_connection_max_retries=None,  # retry forever
@@ -254,6 +261,9 @@ def create_celery_app():
             task_default_exchange_type='direct',
             task_default_routing_key='default',
         )
+        # Sending a task fails within seconds when Redis is down instead of
+        # holding the caller (backend/celery_dispatch.py has the numbers).
+        apply_sender_bounds(celery_app.conf)
         logger.info("Celery configuration updated successfully")
     except Exception as e:
         logger.error(f"Error updating Celery configuration: {e}")
@@ -295,10 +305,13 @@ def create_celery_app():
 
     # A task that raises must not leave its progress entry parked at 0 %: mark it
     # errored with the exception text so the UI shows a failure, not a stall.
+    # Receivers here are local to create_celery_app, and Celery holds receivers
+    # weakly by default, so each is connected with weak=False or it is
+    # collected as soon as this function returns and never runs.
     try:
         from celery.signals import task_failure
 
-        @task_failure.connect
+        @task_failure.connect(weak=False)
         def _surface_task_failure(sender=None, task_id=None, exception=None, kwargs=None, **_ignored):
             try:
                 from backend.utils.progress_failure import mark_progress_failed
@@ -309,6 +322,17 @@ def create_celery_app():
     except Exception:  # noqa: BLE001
         pass
 
+    # A worker stores task results with Celery's own retries; the bound on
+    # sending is for the processes that wait on a send.
+    try:
+        from celery.signals import celeryd_init
+
+        @celeryd_init.connect(weak=False)
+        def _worker_result_retries(sender=None, conf=None, **_ignored):
+            restore_worker_result_retries(conf if conf is not None else celery_app.conf)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not register worker result-retry setup: {e}")
+
     # Flush the runtime-liveness buffer when a worker child recycles
     # (max_tasks_per_child=50) or the worker shuts down, so a recycling child
     # doesn't drop its buffered hits. Solo/concurrency=1 means count-based
@@ -316,7 +340,7 @@ def create_celery_app():
     try:
         from celery.signals import worker_process_shutdown
 
-        @worker_process_shutdown.connect
+        @worker_process_shutdown.connect(weak=False)
         def _flush_runtime_hits_on_shutdown(**_kwargs):
             try:
                 with minimal_app.app_context():
@@ -560,6 +584,8 @@ def create_celery_app():
         from backend import extensions as _ext
         for _ext_id, _mods in _ext.register_tasks(_ext.discover(), celery_app).items():
             logger.info("extension %s: %d task module(s) registered", _ext_id, len(_mods))
+        # Workers write code too (generated-code tasks, self-improvement).
+        _ext.register_inbound_guard(_ext.discover())
     except Exception as e:  # noqa: BLE001
         logger.error("Extension task registration failed: %s", e, exc_info=True)
 

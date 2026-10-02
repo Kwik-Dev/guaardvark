@@ -5,6 +5,7 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify, send_file
 
 from backend.models import db, Production, Project
+from backend.services.pipeline_service import dispatch_report
 from backend.services.production_service import ProductionService
 from backend.services.swarm.script_markup import effective_cast_required
 
@@ -118,19 +119,18 @@ def create():
     p = svc.create(name=name, script_text=script_text, project_id=project_id, settings=settings)
 
     # C1: advance to screenwriting and dispatch the agent so the pipeline
-    # actually starts. A dispatch failure is non-fatal — state still moved
-    # forward so the next boot's resume_all picks it up.
+    # actually starts. A dispatch failure is reported, not fatal: state still
+    # moved forward so the next boot's resume_all picks it up.
+    dispatch = {}
     if svc.advance_if_predecessor(p.id, expected_predecessor="draft"):
-        try:
-            svc.dispatch_agent(p.id, "screenwriter")
-        except Exception as e:
-            log.warning(f"Screenwriter dispatch failed for production {p.id}: {e}")
+        dispatch = dispatch_report(svc.try_dispatch(p.id, "screenwriter"))
         db.session.refresh(p)
 
     return jsonify({
         "id": p.id, "name": p.name,
         "status": p.status, "current_stage": p.current_stage,
         "project_id": p.project_id,
+        **dispatch,
     }), 201
 
 
@@ -242,19 +242,15 @@ def retry_production(prod_id):
     agent = STAGE_TO_AGENT.get(stage)
     dispatched = False
     if agent:
-        try:
-            svc = ProductionService(db.session)
-            svc.dispatch_agent(p.id, agent)
-            dispatched = True
-        except Exception as e:
-            log.warning("Retry dispatch failed for production %s: %s", prod_id, e)
+        warning = ProductionService(db.session).try_dispatch(p.id, agent)
+        if warning:
             return jsonify({
                 "id": p.id,
                 "status": p.status,
                 "current_stage": p.current_stage,
-                "dispatched": False,
-                "warning": str(e),
+                **dispatch_report(warning),
             }), 200
+        dispatched = True
 
     return jsonify({
         "id": p.id,
@@ -320,18 +316,28 @@ def cast_subject(prod_id, subject_id):
     # silently skipped on a stale status. Commit first, then dispatch.
     db.session.commit()
 
+    warning = None
     if needs_dispatch:
         try:
             training_job_id = _dispatch_lora_train(subj.id)
         except NotImplementedError:
             log.debug("LoRA train dispatch deferred (lora_trainer not yet wired)")
         except Exception as e:
+            # dispatch_lora_train has put the subject back to untrained.
+            from backend.celery_dispatch import TaskNotStarted
+
             log.warning(f"LoRA train dispatch failed for subject {subj.id}: {e}")
+            warning = (
+                f"LoRA training was not started: {e.why}. Start Redis (./start.sh starts it) and try again."
+                if isinstance(e, TaskNotStarted)
+                else f"LoRA training was not started: {e}"
+            )
 
     return jsonify({
         "subject_id": subj.id,
         "training_status": subj.training_status,
         "training_job_id": training_job_id,
+        **({"dispatched": False, "warning": warning} if warning else {}),
     })
 
 
@@ -386,12 +392,9 @@ def confirm_casting(prod_id):
         }), 400
 
     svc = ProductionService(db.session)
-    advanced = svc.advance_if_predecessor(prod_id, expected_predecessor="casting")
-    if advanced:
-        try:
-            svc.dispatch_agent(prod_id, "cinematographer")
-        except Exception as e:
-            log.warning(f"Cinematographer dispatch failed for production {prod_id}: {e}")
+    dispatch = {}
+    if svc.advance_if_predecessor(prod_id, expected_predecessor="casting"):
+        dispatch = dispatch_report(svc.try_dispatch(prod_id, "cinematographer"))
 
     db.session.refresh(prod)
     return jsonify({
@@ -399,6 +402,7 @@ def confirm_casting(prod_id):
         "current_stage": prod.current_stage,
         "status": prod.status,
         "subjects_confirmed": len(subjects),
+        **dispatch,
     })
 
 
@@ -417,17 +421,16 @@ def approve_storyboard(prod_id):
     db.session.commit()
 
     svc = ProductionService(db.session)
+    dispatch = {}
     if svc.advance_if_predecessor(prod_id, expected_predecessor="awaiting_approval"):
-        try:
-            svc.dispatch_agent(prod_id, "editor")
-        except Exception as e:
-            log.warning(f"Editor dispatch failed for production {prod_id}: {e}")
+        dispatch = dispatch_report(svc.try_dispatch(prod_id, "editor"))
 
     db.session.refresh(prod)
     return jsonify({
         "production_id": prod_id,
         "current_stage": prod.current_stage,
         "shots_approved": len(shots),
+        **dispatch,
     })
 
 
@@ -447,7 +450,9 @@ def regenerate_shot(prod_id, shot_id):
     db.session.commit()
 
     regen_job_id: str | None = None
+    warning: str | None = None
     from backend.celery_app import celery
+    from backend.celery_dispatch import TaskNotStarted
     try:
         if feedback:
             task = celery.send_task("production.regen_shot_plan", args=[shot_id, feedback])
@@ -458,11 +463,17 @@ def regenerate_shot(prod_id, shot_id):
         log.debug("Regen dispatch deferred (Celery task not yet wired)")
     except Exception as e:
         log.warning(f"Regen dispatch failed for shot {shot_id}: {e}")
+        warning = (
+            f"The shot was not regenerated: {e.why}. Start Redis (./start.sh starts it) and try again."
+            if isinstance(e, TaskNotStarted)
+            else f"The shot was not regenerated: {str(e) or type(e).__name__}."
+        )
 
     return jsonify({
         "shot_id": shot_id,
         "regen_count": shot.regen_count,
         "regen_job_id": regen_job_id,
+        **({"dispatched": False, "warning": warning} if warning else {}),
     })
 
 

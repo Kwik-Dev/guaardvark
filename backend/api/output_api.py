@@ -28,6 +28,31 @@ logger = logging.getLogger(__name__)
 TRACKING_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'outputs', 'tracking')
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'outputs')
 
+# Consent records (<image>.consent, backend/services/consent_records.py) can sit
+# beside an attachment in edit_inputs/ or an image in generated_images/, and
+# dot-files are runtime state. Neither is an output, so no route here serves
+# one, to any host. The name is checked as sent and as secure_filename cleans
+# it, since that drops trailing dots and underscores ('a.png.consent.' would
+# otherwise open 'a.png.consent').
+_REFUSED_SUFFIXES = ('.consent',)
+
+
+def _refused_name(name: str) -> bool:
+    for candidate in (name, secure_filename(name)):
+        folded = candidate.casefold()
+        if folded.startswith('.') or folded.endswith(_REFUSED_SUFFIXES):
+            return True
+    return False
+
+
+@output_bp.before_request
+def _refuse_records_and_dot_files():
+    view_args = request.view_args or {}
+    for key in ('image_name', 'filename'):
+        name = view_args.get(key)
+        if name and _refused_name(name):
+            abort(404)
+
 def get_tracking_files() -> List[Dict]:
     """Get list of all tracking JSON files with metadata."""
     if not os.path.exists(TRACKING_DIR):
@@ -347,18 +372,15 @@ def get_merged_csv(filename):
         # Convert merged active rows to CSV format
         csv_content = convert_merged_rows_to_csv(merged_active_rows)
         
-        # Create temporary CSV file
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8') as temp_file:
-            temp_file.write(csv_content)
-            temp_file_path = temp_file.name
-        
+        # Sent from memory: a file written for each download would be left behind.
+        import io
+
         # Generate download filename
         base_name = filename.replace('_tracking_', '_merged_').replace('.json', '.csv')
-        
+
         logger.info(f"Generated merged CSV with {len(merged_active_rows)} rows")
         return send_file(
-            temp_file_path,
+            io.BytesIO(csv_content.encode('utf-8')),
             as_attachment=True,
             download_name=base_name,
             mimetype='text/csv'

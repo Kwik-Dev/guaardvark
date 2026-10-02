@@ -54,3 +54,16 @@ def display_text(text: str) -> str:
         if base and base != "/":
             out = out.replace(base, repl)
     return out
+
+
+def display_params(value):
+    """A copy of tool parameters with every string passed through
+    ``display_text``, for the chat events and saved steps a person sees. The
+    tool itself runs with the real values."""
+    if isinstance(value, str):
+        return display_text(value)
+    if isinstance(value, dict):
+        return {k: display_params(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [display_params(v) for v in value]
+    return value

@@ -363,7 +363,7 @@ def _list_documents(monkeypatch, count_result, rows, limit=None):
 
 
 def test_list_documents_reports_an_unavailable_count_instead_of_the_page_length(monkeypatch):
-    rows = [("a.md", 4, 1, "docling"), ("b.md", 2, 1, "docling")]
+    rows = [("a.md", 4, 1, "docling", "11", None, 1), ("b.md", 2, 1, "docling", "12", None, 1)]
     res = _list_documents(monkeypatch, (None, "canceling statement due to timeout"), rows, limit=2)
 
     assert res.success
@@ -376,7 +376,7 @@ def test_list_documents_reports_an_unavailable_count_instead_of_the_page_length(
 
 
 def test_list_documents_reports_the_real_total_when_the_count_works(monkeypatch):
-    rows = [("a.md", 4, 1, "docling")]
+    rows = [("a.md", 4, 1, "docling", "11", None, 1)]
     res = _list_documents(monkeypatch, ([(37,)], None), rows, limit=1)
 
     assert "37 document(s) indexed" in res.output

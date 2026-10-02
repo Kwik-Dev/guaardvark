@@ -4,7 +4,7 @@
 # The pre-commit gate scans the diff; this is the only place the message itself
 # is checked before it travels with a push.
 #
-# Install: ln -sf ../../scripts/commit-msg "$(git rev-parse --git-common-dir)/hooks/commit-msg"
+# Install with scripts/install_hooks.sh.
 set -uo pipefail
 repo_root="$(git rev-parse --show-toplevel)" || exit 1
 exec "$repo_root/scripts/check_portable.sh" --message "$1"

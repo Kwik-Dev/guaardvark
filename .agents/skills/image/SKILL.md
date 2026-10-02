@@ -35,14 +35,27 @@ Read `setup` first if the backend or the `comfyui` plugin state is unknown.
 - A failed call carries the backend's reason (plugin off, out of memory, bad model). Read it
   and act on it; `inspect_gpu` and `GET /api/plugins/status` are the two checks that resolve most.
 
+## Photo edits over MCP run as jobs
+
+`edit_image`, `inpaint_image`, `outpaint_image` and `remove_background` answer at once over
+MCP with `... queued as job tooljob_...`: the work runs in the Guaardvark backend and keeps
+going if the client disconnects. Poll `get_generation_status(batch_id="tooljob_...")` every few
+seconds until `done` (it gives the file URL) or `failed` (it gives the error). Pass
+`wait_for_result: true` to wait up to 60 s (half the server's MCP timeout when that is
+shorter) for the result; a longer edit still comes back as the job id. A Qwen-Image-Edit takes
+about three minutes on a 16 GB card, and a job waits its turn while another render holds the GPU.
+
 ## Edit an existing image: MCP `edit_image`
 
 - `instruction` is the change ("put a cowboy hat on him", "make the shirt red"). The image the
   user just attached is used automatically; otherwise pass `image` as a path or URL.
-  Optional `reference_image_2` / `reference_image_3` (Qwen-Image-Edit only) for extra people or style.
-- `model` `auto` uses **Qwen-Image-Edit** when installed, else FLUX.1 Kontext, else img2img.
+  Optional `reference_image_2` / `reference_image_3` (Qwen-Image-Edit only) for extra people or
+  style; the call is refused when a reference cannot be read or the edit would run on another backend.
+- `model` `auto` uses **Qwen-Image-Edit** when installed, else FLUX.1 Kontext. With neither
+  installed the call is refused and names the pack; relay that instead of retrying.
   Override with `qwen-image-edit` or `kontext`. Install those packs from Manage Image Models →
   Image editing (`qwen-image-edit`, `flux-kontext-dev`) — do not Install unless the user asked.
+  Naming another downloaded image model runs a light img2img pass that keeps most of the picture.
 - Same canvas, same pose. For a brand-new picture use `generate_image`. For a **new scene
   that keeps a face** use `generate_identity`.
 
@@ -66,7 +79,8 @@ Read `setup` first if the backend or the `comfyui` plugin state is unknown.
 
 ## Inpaint / outpaint
 
-- `inpaint_image`: change or remove something ("remove the coffee cup"). Same backends as `edit_image`.
+- `inpaint_image`: change or remove something ("remove the coffee cup"). Runs on Qwen-Image-Edit
+  or FLUX.1 Kontext; refused when neither is installed.
 - `outpaint_image`: extend the canvas (`left`/`right`/`top`/`bottom` pixels) and fill. Prefers Qwen.
 
 ## Many images: REST batch

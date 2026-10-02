@@ -58,8 +58,9 @@ echo "Plugin dir: $PLUGIN_ROOT"
 echo "Service port: $SERVICE_PORT"
 echo "Log: $LOG_FILE"
 
-# Start uvicorn. /health hands out the bearer token, so the bind stays on
-# loopback unless GUAARDVARK_UPSCALING_HOST says otherwise.
+# Start uvicorn. The model, job and config reads are open and every caller is
+# the backend on this host, so the bind stays on loopback unless
+# GUAARDVARK_UPSCALING_HOST says otherwise.
 cd "$PLUGIN_ROOT"
 PYTHONPATH="$PLUGIN_ROOT:$PYTHONPATH" \
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \

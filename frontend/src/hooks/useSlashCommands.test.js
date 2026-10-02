@@ -140,3 +140,107 @@ describe('useSlashCommands mode switching', () => {
     );
   });
 });
+
+describe('/websearch runs in the backend', () => {
+  const SITEMAP = {
+    success: true,
+    url: 'https://site.example/sitemap.xml',
+    final_url: 'https://site.example/sitemap.xml',
+    type: 'urlset',
+    total: 3,
+    entries: [
+      { loc: 'https://site.example/', priority: '1.0' },
+      { loc: 'https://site.example/pricing', priority: '0.8', lastmod: '2026-09-01' },
+    ],
+    by_depth: { 0: 1, 1: 2 },
+    landing_pages: [{ loc: 'https://site.example/pricing', priority: '0.8' }],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetch();
+    useAppStore.setState({ sessionModes: {} });
+  });
+
+  function fetchedUrls() {
+    return global.fetch.mock.calls.map(([url]) => String(url));
+  }
+
+  it('sends a query to the web_search tool', async () => {
+    const { result, onSendMessage } = renderSlashHook();
+    await act(async () => {
+      await result.current.executeCommand('/websearch rust vs go');
+    });
+    expect(onSendMessage).toHaveBeenCalledWith('/websearch rust vs go', null, expect.objectContaining({
+      direct_tool: 'web_search',
+      direct_tool_params: { query: 'rust vs go' },
+    }));
+    expect(fetchedUrls().every((url) => url.startsWith('/api/'))).toBe(true);
+  });
+
+  it('audits one page with analyze_website for site:<address>', async () => {
+    const { result, onSendMessage } = renderSlashHook();
+    await act(async () => {
+      await result.current.executeCommand('/websearch site:example.com');
+    });
+    expect(onSendMessage).toHaveBeenCalledWith('/websearch site:example.com', null, expect.objectContaining({
+      direct_tool: 'analyze_website',
+      direct_tool_params: { url: 'example.com' },
+    }));
+  });
+
+  it('keeps site: with search words as a search', async () => {
+    const { result, onSendMessage } = renderSlashHook();
+    await act(async () => {
+      await result.current.executeCommand('/websearch site:example.com pricing plans');
+    });
+    expect(onSendMessage).toHaveBeenCalledWith(expect.any(String), null, expect.objectContaining({
+      direct_tool: 'web_search',
+      direct_tool_params: { query: 'site:example.com pricing plans' },
+    }));
+  });
+
+  it('asks the backend for a sitemap and reports it', async () => {
+    global.fetch.mockImplementation(async (url) => {
+      if (String(url) === '/api/web-search/sitemap') {
+        return { ok: true, status: 200, json: async () => ({ success: true, data: SITEMAP }) };
+      }
+      return jsonResponse({ data: { rules: [] } });
+    });
+    const { result, addMessage, onSendMessage } = renderSlashHook();
+    await act(async () => {
+      await result.current.executeCommand('/websearch sitemap:https://site.example/sitemap.xml');
+    });
+    expect(global.fetch).toHaveBeenCalledWith('/api/web-search/sitemap', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ url: 'https://site.example/sitemap.xml' }),
+    }));
+    expect(fetchedUrls().some((url) => url.includes('site.example'))).toBe(false);
+    expect(onSendMessage).not.toHaveBeenCalled();
+    const report = addMessage.mock.calls.map(([m]) => m.content).join('\n');
+    expect(report).toContain('3 page URLs.');
+    expect(report).toContain('depth 1: 2');
+    expect(report).toContain('https://site.example/pricing (priority 0.8)');
+  });
+
+  it('says why a sitemap was not read', async () => {
+    global.fetch.mockImplementation(async (url) => {
+      if (String(url) === '/api/web-search/sitemap') {
+        return {
+          ok: false,
+          status: 403,
+          json: async () => ({ success: false, message: 'Web access is disabled in system settings' }),
+        };
+      }
+      return jsonResponse({ data: { rules: [] } });
+    });
+    const { result, addMessage } = renderSlashHook();
+    await act(async () => {
+      await result.current.executeCommand('/websearch sitemap:site.example/sitemap.xml');
+    });
+    expect(addMessage).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'system',
+      content: 'Sitemap not read: Web access is disabled in system settings',
+    }));
+  });
+});

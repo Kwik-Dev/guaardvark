@@ -45,6 +45,13 @@ def _stub_image_inspect(monkeypatch, *, hf_repo, files, has_model_index=False, u
         }
 
     monkeypatch.setattr(uim, "preview_hf_url", fake)
+    _stub_lora_header(monkeypatch, None)
+
+
+def _stub_lora_header(monkeypatch, problem):
+    """The Z-Image LoRA add check reads the file header from the Hub; keep tests offline."""
+    from backend.services import zimage_lora_check
+    monkeypatch.setattr(zimage_lora_check, "hf_lora_problem", lambda *_a, **_k: problem)
 
 
 @pytest.fixture
@@ -176,6 +183,27 @@ def test_user_add_install_409_still_succeeds(client, monkeypatch):
             uim.remove_user_model(wrapper.image_generator, mid)
         except Exception:
             pass
+
+
+def test_user_add_refuses_zimage_lora_the_engine_cannot_load(client, monkeypatch, tmp_path):
+    _stub_image_inspect(
+        monkeypatch,
+        hf_repo="someone/zimage-lokr",
+        files=[{"src": "style.safetensors", "size": 4_000_000}],
+    )
+    _stub_lora_header(monkeypatch, "It is a LoKr adapter.")
+    body = {
+        "role": "lora",
+        "family": "zimage",
+        "hf_repo": "someone/zimage-lokr",
+        "files": [{"src": "style.safetensors"}],
+        "install": True,
+    }
+    payload = client.post("/api/batch-image/models/user", json=body).get_json()
+    assert payload["success"] is False
+    message = (payload.get("error") or {}).get("message") or ""
+    assert message == "style.safetensors can't be added as a Z-Image LoRA. It is a LoKr adapter."
+    assert not (tmp_path / "user_image_models.json").exists()
 
 
 def test_user_add_without_url_refuses_unwired(client, monkeypatch):

@@ -634,7 +634,8 @@ def manage_document(doc_id):
         )
         return jsonify({"error": "Document not found"}), 404
 
-    if request.method == "GET":
+    # HEAD is routed here with GET's rule and answers like it.
+    if request.method in ("GET", "HEAD"):
         logger.info(f"API: GET /api/docs/{doc_id}")
         document_with_relations = (
             db.session.query(DBDocument)

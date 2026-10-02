@@ -35,6 +35,7 @@ from backend.services.output_registration import register_file
 from backend.services.video_text_overlay import VideoOverlayError, add_text_to_video
 from backend.utils.response_utils import error_response, success_response
 from backend.celery_app import celery
+from backend.celery_dispatch import TaskNotStarted, mark_progress_not_started
 
 logger = logging.getLogger(__name__)
 
@@ -272,11 +273,15 @@ def render_timeline_endpoint():
         if backend_choice == "mlt"
         else "video_render_tasks.render_timeline_task"
     )
-    celery.send_task(
-        task_name,
-        args=(payload, str(output_path), job_id),
-        queue="default",
-    )
+    try:
+        celery.send_task(
+            task_name,
+            args=(payload, str(output_path), job_id),
+            queue="default",
+        )
+    except TaskNotStarted as e:
+        mark_progress_not_started(job_id, e)
+        return error_response(str(e), 503, e.code)
 
     return success_response(
         data={"job_id": job_id, "status": "pending"},

@@ -10,7 +10,7 @@ import time
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, NamedTuple, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -542,14 +542,19 @@ def _adaptive_alpha(query: str, base_alpha: float) -> float:
 
 
 def _mmr_rerank(results: list, top_k: int = 8, lambda_: float = 0.7) -> list:
-    """CPU-only MMR reranker over the already-retrieved top candidates. Balances relevance
-    against diversity (token-Jaccard overlap) to demote near-redundant chunks. Zero VRAM,
-    no model — safe on CPU/Pi. On any failure returns `results` as-is.
+    """CPU-only MMR over the top retrieval candidates: retrieval score against
+    token-Jaccard overlap, to demote near-redundant chunks. Zero VRAM, no model — safe
+    on CPU/Pi. On any failure returns `results` as-is.
 
-    Relevance is the cross-encoder score when one is present, else the retrieval score:
-    ranking on the weaker signal would silently undo the reranker that just ran."""
+    Candidates the cross-encoder scored are returned unchanged: its order is final. No
+    diversity reordering measured after it improved on that order (graded nDCG@5 and
+    alpha-nDCG@5, three embedding models), and min-max-normalised MMR put related
+    passages below unrelated ones. Near-copies are removed before the cross-encoder, by
+    deduplicate_chunks."""
     try:
         if not results or len(results) <= 2:
+            return results
+        if any(isinstance(r, dict) and r.get("rerank_score") is not None for r in results[:top_k]):
             return results
         import re as _re
         working = results[:top_k]
@@ -558,10 +563,7 @@ def _mmr_rerank(results: list, top_k: int = 8, lambda_: float = 0.7) -> list:
         def _rel_score(r):
             if not isinstance(r, dict):
                 return 0.0
-            v = r.get("rerank_score")
-            if v is None:
-                v = r.get("score", 0.0)
-            return float(v or 0.0)
+            return float(r.get("score", 0.0) or 0.0)
 
         scores = [_rel_score(r) for r in working]
         lo, hi = min(scores), max(scores)
@@ -672,6 +674,53 @@ def _persist_dir_for(project_id=None) -> str:
 
 
 _embed_dim_cache: Dict[str, int] = {}
+_embed_sync_gave_up: Optional[str] = None
+
+
+def _sync_embed_model(model: Optional[str] = None) -> None:
+    """Rebuild the embedding client when Settings chose a different model.
+
+    A Celery worker keeps the client it built when it started. After a switch in
+    Settings it would go on embedding with the old model into the old width's
+    table while chat searched the new one. The web server swaps its own client
+    in the switch route, so there this is a no-op.
+    """
+    global index, storage_context, _embed_sync_gave_up
+    try:
+        if model is None:
+            from backend.config import get_active_embedding_model
+            model = get_active_embedding_model()
+        if not model or model == _embed_sync_gave_up:
+            return
+        from llama_index.core import Settings as _LISettings
+        current = getattr(getattr(_LISettings, "embed_model", None), "model_name", None)
+        if current == model:
+            return
+        from backend.utils.llm_service import get_default_embed_model
+        client = get_default_embed_model()
+        if getattr(client, "model_name", None) != model:
+            _embed_sync_gave_up = model
+            logger.warning(
+                "Embedding client for %s came back as %s; keeping %s",
+                model, getattr(client, "model_name", None), current,
+            )
+            return
+        _LISettings.embed_model = client
+        index = None
+        storage_context = None
+        try:
+            from flask import current_app, has_app_context
+            if has_app_context():
+                current_app.config.pop("INDEX_CACHE", None)
+                current_app.config["LLAMA_INDEX_EMBED_MODEL"] = client
+        except Exception:
+            pass
+        logger.info(
+            "Embedding model is %s (this process had %s): client rebuilt, index handle reset",
+            model, current,
+        )
+    except Exception as e:
+        logger.warning("Could not bring the embedding client in line with %s: %s", model, e)
 
 
 def _active_embed_dim() -> Optional[int]:
@@ -694,13 +743,18 @@ def _active_embed_dim() -> Optional[int]:
         model = "unknown"
     if model in _embed_dim_cache:
         return _embed_dim_cache[model]
+    # Probe the client that will actually embed, and only once it is the chosen model;
+    # probing a stale client cached the old width under the new model's name.
+    if model != "unknown":
+        _sync_embed_model(model)
     try:
         from llama_index.core import Settings
         embed_model = getattr(Settings, "embed_model", None)
         if embed_model is None:
             return None
         dim = len(embed_model.get_query_embedding("dimension probe"))
-        _embed_dim_cache[model] = dim
+        if getattr(embed_model, "model_name", model) == model:
+            _embed_dim_cache[model] = dim
         logger.info("Embedding dimension for %s: %d", model, dim)
         return dim
     except Exception as e:
@@ -967,6 +1021,11 @@ def resolve_existing_vector_table(project_id=None, profile: Optional[str] = None
     The dimension is already encoded in the table name, so an existing table can
     simply be looked up. Falls back to the derived name when nothing is found, so
     a first-run caller still gets the table it is about to create.
+
+    This returns a name, not a finding: the derived name is not checked to
+    exist, and with the probe unavailable and several tables present it is the
+    first by name. A caller that reports what it read to a person should use
+    `locate_vector_table`, which says which of those conditions it met.
     """
     try:
         derived = _pg_table_name(project_id, profile)
@@ -978,26 +1037,7 @@ def resolve_existing_vector_table(project_id=None, profile: Optional[str] = None
         return None
 
     try:
-        from backend.services.index_profiles import projection_key
-        scope = projection_key(profile, project_id)
-    except Exception:
-        scope = str(project_id) if project_id else "global"
-    scope = re.sub(r"[^A-Za-z0-9_]", "_", scope)[:60]
-
-    try:
-        conn = _pg_connect()
-        try:
-            with conn.cursor() as cur:
-                # Escaped: `_` is a LIKE wildcard and the scope contains them.
-                cur.execute(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema='public' AND table_name LIKE %s ESCAPE '\\' "
-                    "ORDER BY table_name",
-                    ("data\\_guaardvark\\_" + scope.replace("_", "\\_") + "\\_%",),
-                )
-                rows = [r[0] for r in cur.fetchall()]
-        finally:
-            conn.close()
+        rows = _vector_table_names(_vector_scope(project_id, profile))
     except Exception as e:
         logger.debug("vector table discovery failed: %s", e)
         return None
@@ -1006,6 +1046,103 @@ def resolve_existing_vector_table(project_id=None, profile: Optional[str] = None
         return None
     # Strip the "data_" prefix the store adds, to match _pg_table_name's contract.
     return rows[0][len("data_"):] if rows[0].startswith("data_") else rows[0]
+
+
+def _vector_scope(project_id=None, profile: Optional[str] = None) -> str:
+    """The scope part of a vector table's name, as `_pg_table_name` spells it."""
+    try:
+        from backend.services.index_profiles import projection_key
+        scope = projection_key(profile, project_id)
+    except Exception:
+        scope = str(project_id) if project_id else "global"
+    return re.sub(r"[^A-Za-z0-9_]", "_", scope)[:60]
+
+
+def _vector_table_names(scope: str) -> List[str]:
+    """Names of the tables whose name starts with a scope's prefix, sorted.
+    Raises when the database cannot be asked."""
+    conn = _pg_connect()
+    try:
+        with conn.cursor() as cur:
+            # Escaped: `_` is a LIKE wildcard and the scope contains them.
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name LIKE %s ESCAPE '\\' "
+                "ORDER BY table_name",
+                ("data\\_guaardvark\\_" + scope.replace("_", "\\_") + "\\_%",),
+            )
+            return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+class VectorTable(NamedTuple):
+    """Where a scope's vectors are, or why that cannot be said."""
+    # Table name without the "data_" prefix; None when there is nothing to read.
+    table: Optional[str]
+    # None with a table, otherwise one of: not_pgvector, lookup_failed,
+    # no_index, no_index_for_model, embedding_unreachable.
+    reason: Optional[str] = None
+    # The condition in a sentence a person can act on.
+    detail: str = ""
+
+
+def locate_vector_table(project_id=None, profile: Optional[str] = None) -> VectorTable:
+    """The table that holds a scope's vectors, only if it exists and is the
+    current one; otherwise the reason it cannot be named.
+
+    A model change lands in a new table and leaves the old one behind, so a box
+    can hold several tables for one scope, and only the active model's width
+    says which is current. When that width cannot be probed (Ollama not
+    started) a single table is still unambiguous; several are not, and picking
+    one would read an index search does not use.
+    """
+    if _vector_backend() != "pgvector":
+        return VectorTable(None, "not_pgvector", "The vector store is not pgvector.")
+
+    scope = _test_table_prefix() + _vector_scope(project_id, profile)
+    try:
+        names = _vector_table_names(scope)
+    except Exception as e:
+        return VectorTable(None, "lookup_failed",
+                           f"The database could not be asked which knowledge indexes exist: {str(e)[:160]}")
+    # {dimension: name without "data_"}; a longer scope sharing this prefix is not ours.
+    existing: Dict[int, str] = {}
+    for name in names:
+        m = re.fullmatch(rf"data_(guaardvark_{re.escape(scope)}_(\d+))", name)
+        if m:
+            existing[int(m.group(2))] = m.group(1)
+    widths = ", ".join(str(d) for d in sorted(existing))
+
+    try:
+        derived = _pg_table_name(project_id, profile)
+    except Exception:
+        derived = None
+    if derived:
+        if derived in existing.values():
+            return VectorTable(derived)
+        try:
+            from backend.config import get_active_embedding_model
+            model = get_active_embedding_model()
+        except Exception:
+            model = "unknown"
+        detail = (f"No knowledge index exists yet for the active embedding model "
+                  f"({model}, {derived.rsplit('_', 1)[-1]} dimensions). Index documents with it first.")
+        if existing:
+            detail += (f" What exists was built with a different embedding model ({widths} "
+                       "dimensions) and is not read, because search does not use it.")
+        return VectorTable(None, "no_index_for_model", detail)
+
+    if not existing:
+        return VectorTable(None, "no_index", "No knowledge index found. Index some documents first.")
+    if len(existing) == 1:
+        return VectorTable(next(iter(existing.values())))
+    return VectorTable(
+        None, "embedding_unreachable",
+        f"The embedding model could not be reached, and {len(existing)} knowledge indexes exist "
+        f"({widths} dimensions), so the current one cannot be identified. Check that Ollama is "
+        "running (Guaardvark starts it) and try again, or pin the width with GUAARDVARK_EMBEDDING_DIM.",
+    )
 
 
 def drop_vector_store(project_id=None, profile: Optional[str] = None) -> Dict[str, Any]:
@@ -1292,6 +1429,8 @@ def get_or_create_index(project_id: Optional[str] = None):
     global index, storage_context
 
     from backend.config import INDEX_ROOT, PROJECT_INDEX_MODE
+
+    _sync_embed_model()
 
     index_mode = os.getenv("GUAARDVARK_PROJECT_INDEX_MODE", PROJECT_INDEX_MODE)
     index_root = os.getenv("GUAARDVARK_INDEX_ROOT", INDEX_ROOT)
@@ -2027,9 +2166,8 @@ def search_with_llamaindex(
         trace["dedup_removed"] = _pre_dedup - len(results)
 
         # Cross-encoder rerank: re-score query+passage together, which the bi-encoder
-        # and BM25 legs cannot do. Runs before MMR on purpose -- this decides what is
-        # relevant, MMR then decides what is diverse. Never raises; if it did not run,
-        # the trace says why.
+        # and BM25 legs cannot do. When it runs, its order is final. Never raises; if it
+        # did not run, the trace says why.
         try:
             from backend.utils.reranker import rerank as _ce_rerank
             if prof_params.get("rerank") is False:
@@ -2046,10 +2184,12 @@ def search_with_llamaindex(
         except Exception as e:
             trace["rerank"] = {"applied": False, "reason": f"import failed: {e}"}
 
-        # CPU-only MMR rerank of the top candidates (relevance × diversity). Zero VRAM.
-        # Env var is the operator's master allow; the tunable param decides per-query
-        # (defaults on, matching pre-layer behavior).
-        if (os.environ.get("GUAARDVARK_RERANK_ENABLED", "true").lower() == "true"
+        # CPU-only MMR (relevance x diversity), only when the cross-encoder did not order
+        # the candidates; see _mmr_rerank. Env var is the operator's master allow; the
+        # tunable param decides per query (defaults on).
+        _ce_ordered = bool((trace.get("rerank") or {}).get("applied"))
+        if (not _ce_ordered
+                and os.environ.get("GUAARDVARK_RERANK_ENABLED", "true").lower() == "true"
                 and overlay.get("reranking_enabled", True)):
             results = _mmr_rerank(results)
             trace["mmr_applied"] = True

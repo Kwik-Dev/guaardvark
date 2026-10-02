@@ -15,6 +15,7 @@ from backend.utils.entity_context_enhancer import EntityContextEnhancer
 from backend.services.entity_relationship_indexer import EntityRelationshipIndexer
 from backend.utils.context_manager import ContextManager
 from backend.api.web_search_api import extract_website_content
+from backend.utils.settings_utils import web_access_block_reason
 from backend.utils.xml_sitemap_handler import parse_sitemap
 from backend.services.indexing_service import get_or_create_index, query_index
 from backend.models import Client, Project, Document, db
@@ -192,15 +193,27 @@ class EnhancedContextCSVGenerator:
             return {"error": str(e)}
     
     async def _analyze_competitor_content(self, competitor_url: str) -> Dict[str, Any]:
-        """Analyze competitor website using web scraping capabilities"""
+        """Analyze competitor website using web scraping capabilities.
+
+        The page is read only with web access on in Settings (off by default),
+        the check the web tools make. With it off the analysis is skipped, not
+        failed: ``skipped`` says why and generation goes on without it.
+        """
         try:
             if not competitor_url:
                 return {"content": "", "keywords": [], "products": []}
-            
+
+            if web_access_block_reason("analyze a competitor's website"):
+                note = ("Competitor analysis was skipped because web access is off; generation "
+                        "goes on without it. Turn on web access in Settings to include it.")
+                logger.info(f"{note} ({competitor_url})")
+                return {"url": competitor_url, "content": "", "keywords": [], "products": [], "skipped": note}
+
             logger.info(f"Analyzing competitor: {competitor_url}")
             
-            # Extract website content
-            content_data = extract_website_content(competitor_url)
+            # The URL comes from the request or the task record, so it is
+            # fetched as fetch_url fetches: public addresses only.
+            content_data = extract_website_content(competitor_url, public_only=True)
             
             # Extract products/services from content
             products = self._extract_products_from_content(content_data.get("content", ""))
@@ -415,7 +428,8 @@ class EnhancedContextCSVGenerator:
                 "client_documents": len(context.client_documents),
                 "strategic_keywords": len(context.target_keywords)
             },
-            "generation_metadata": result
+            "generation_metadata": result,
+            "competitor_skipped": context.competitor_content.get("skipped"),
         }
     
     # Helper methods for content analysis and generation

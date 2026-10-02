@@ -19,6 +19,8 @@ const ProductionDetail = ({
   production,
   loading,
   error,
+  notice,
+  onDismissNotice,
   approving,
   onCastingConfirmed,
   onRegenerateShot,
@@ -64,6 +66,12 @@ const ProductionDetail = ({
   return (
     <Box sx={{ p: 3, height: '100%', overflowY: 'auto' }}>
       {error && <CollapsibleAlert severity="error" sx={{ mb: 2 }}>{error}</CollapsibleAlert>}
+      {notice && (
+        <CollapsibleAlert severity="warning" sx={{ mb: 2 }} onClose={onDismissNotice}>
+          {notice}
+        </CollapsibleAlert>
+      )}
+
       <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
         <Box>
           <Typography variant="h4" gutterBottom>{production.name}</Typography>

@@ -47,14 +47,38 @@ logging; the parent forwards it to logs/audio_foundry.log.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
+from pathlib import Path
 from typing import Any
 
 # Heavy imports are deferred to load() — keep daemon startup snappy so the
 # parent's spawn-and-ping handshake doesn't hang for 30 seconds.
 _pipeline: Any = None
 _torch = None
+
+# Every file ACEStepPipeline reads, shared with the Install probe
+# (backend/services/audio_foundry_models.py) and the parent process.
+_REQUIRED_FILES = Path(__file__).resolve().parents[1] / "backends" / "acestep_files.json"
+
+_INSTALL_HINT = (
+    "Open Audio Studio → Manage models and Install ACE-Step. "
+    "Generation never downloads on its own."
+)
+
+
+def _missing_files(snapshot_dir: str) -> list[str]:
+    """Required files absent from the snapshot folder (a symlink whose blob is
+    gone counts as absent).
+
+    snapshot_download(local_files_only=True) returns the folder whenever the
+    snapshot exists, complete or not, and ACEStepPipeline answers a missing
+    model folder by downloading the whole repo, which the offline Hub client
+    turns into an unrelated error mid-load.
+    """
+    files = json.loads(_REQUIRED_FILES.read_text(encoding="utf-8"))["files"]
+    return [f for f in files if not os.path.isfile(os.path.join(snapshot_dir, f))]
 
 
 def _eprint(msg: str) -> None:
@@ -117,10 +141,15 @@ def _do_load(model_id: str) -> dict[str, Any]:
     except Exception as e:
         return {
             "ok": False,
+            "error": f"ACE-Step weights are not on this machine. {_INSTALL_HINT} ({e})",
+        }
+    missing = _missing_files(local)
+    if missing:
+        return {
+            "ok": False,
             "error": (
-                "ACE-Step weights are not on this machine. "
-                "Open Audio Studio → Manage models and Install ACE-Step. "
-                f"({e})"
+                f"ACE-Step's download on this machine is incomplete (missing {missing[0]}). "
+                f"{_INSTALL_HINT}"
             ),
         }
 
@@ -132,20 +161,29 @@ def _do_load(model_id: str) -> dict[str, Any]:
             "error": f"acestep not installed in this venv. ImportError: {e}",
         }
 
+    # ACE-Step reads its dtype string as "bfloat16" or float32: any other value,
+    # "float16" included, loads the 3.5B model in float32 (about 14 GB, more than
+    # a 16 GB card has free). Half precision on CUDA is bf16 where the card
+    # supports it, else fp16 through ACE-Step's own ACE_PIPELINE_DTYPE override.
+    # On MPS ACE-Step picks its own dtype.
+    dtype_name = "bfloat16"
+    if dev == "cuda" and not torch.cuda.is_bf16_supported():
+        os.environ["ACE_PIPELINE_DTYPE"] = "float16"
     try:
         _pipeline = ACEStepPipeline(
             checkpoint_dir=local,
-            dtype="float16",
+            dtype=dtype_name,
         )
     except TypeError:
         # Older ACE-Step releases use a different constructor — be tolerant.
         _pipeline = ACEStepPipeline.from_pretrained(
             local,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16 if dtype_name == "bfloat16" else torch.float16,
             local_files_only=True,
         ).to(dev)
 
-    _eprint(f"[run_acestep] {model_id} loaded (fp16, {dev})")
+    loaded_dtype = str(getattr(_pipeline, "dtype", dtype_name)).replace("torch.", "")
+    _eprint(f"[run_acestep] {model_id} loaded ({loaded_dtype}, {dev})")
     return {"ok": True}
 
 

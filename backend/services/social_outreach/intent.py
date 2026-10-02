@@ -15,9 +15,8 @@ import re
 from typing import Any, Callable, Optional
 
 from backend.services import nl_control_plane
-from backend.services.social_outreach import kill_switch
+from backend.services.social_outreach import kill_switch, transitions
 from backend.services.social_outreach.job_service import queue_outreach_run
-from backend.services.social_outreach.transitions import can_approve, can_reject
 
 logger = logging.getLogger(__name__)
 
@@ -438,24 +437,23 @@ def _dispatch_approve(classification: dict[str, Any]) -> dict[str, Any]:
             "reason": "Approve needs a draft id (e.g. 'approve draft 42').",
         })
     try:
-        from backend.models import SocialOutreachLog, db
+        from backend.models import SocialOutreachLog
+        if not transitions.approve(int(draft_id)):
+            status = transitions.current_status(int(draft_id))
+            if status is None:
+                return _base(
+                    classification,
+                    ok=False,
+                    error=f"draft {draft_id} not found",
+                    message=f"Draft #{draft_id} not found.",
+                )
+            return _base(
+                classification,
+                ok=False,
+                error=f"cannot approve from status '{status}'",
+                message=f"Cannot approve #{draft_id} from status '{status}' (only from drafted).",
+            )
         row = SocialOutreachLog.query.get(int(draft_id))
-        if row is None:
-            return _base(
-                classification,
-                ok=False,
-                error=f"draft {draft_id} not found",
-                message=f"Draft #{draft_id} not found.",
-            )
-        if not can_approve(row.status):
-            return _base(
-                classification,
-                ok=False,
-                error=f"cannot approve from status '{row.status}'",
-                message=f"Cannot approve #{draft_id} from status '{row.status}' (only from drafted).",
-            )
-        row.status = "approved"
-        db.session.commit()
         return _base(
             classification,
             ok=True,
@@ -476,28 +474,31 @@ def _dispatch_reject(classification: dict[str, Any]) -> dict[str, Any]:
             "reason": "Reject needs a draft id (e.g. 'reject draft 42').",
         })
     try:
-        from backend.models import SocialOutreachLog, db
-        row = SocialOutreachLog.query.get(int(draft_id))
-        if row is None:
+        from backend.models import SocialOutreachLog
+        outcome = transitions.reject(int(draft_id))
+        if outcome.status is None:
             return _base(
                 classification,
                 ok=False,
                 error=f"draft {draft_id} not found",
                 message=f"Draft #{draft_id} not found.",
             )
-        if not can_reject(row.status):
+        if not outcome.rejected:
+            refusal = transitions.reject_refusal(outcome.status)
             return _base(
                 classification,
                 ok=False,
-                error=f"cannot reject from status '{row.status}'",
-                message=f"Cannot reject #{draft_id} from status '{row.status}'.",
+                error=refusal,
+                message=f"Draft #{draft_id} was not rejected: {refusal}.",
             )
-        row.status = "rejected"
-        db.session.commit()
+        row = SocialOutreachLog.query.get(int(draft_id))
+        message = f"Rejected draft #{draft_id}."
+        if outcome.status == "processing":
+            message += " It had been picked up for posting and was stopped before it was submitted."
         return _base(
             classification,
             ok=True,
-            message=f"Rejected draft #{draft_id}.",
+            message=message,
             draft={"id": row.id, "status": row.status, "platform": row.platform},
         )
     except Exception as e:

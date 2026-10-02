@@ -1,5 +1,7 @@
 """Image management commands — list, generate, delete."""
 
+from pathlib import Path
+
 import typer
 from llx.client import get_client, LlxError, LlxConnectionError
 from llx.global_opts import get_global_json, get_global_server
@@ -48,7 +50,9 @@ def images_list(
 
 @images_app.command("generate")
 def images_generate(
-    prompt: str = typer.Argument(..., help="Image description prompt"),
+    prompt: str = typer.Argument(None, help="Image description prompt"),
+    from_file: Path = typer.Option(None, "--from-file", "-f", exists=True, dir_okay=False,
+                                   help="Text file with one prompt per line; all go in one batch"),
     count: int = typer.Option(1, "--count", "-n", help="Number of images"),
     model: str = typer.Option(None, "--model", "-m", help="Model override"),
     server: str = typer.Option(None, "--server", "-s"),
@@ -60,8 +64,17 @@ def images_generate(
     output.set_json_mode(json_out)
     try:
         api_client = get_client(server)
+        if from_file:
+            prompts = [ln.strip() for ln in from_file.read_text(encoding="utf-8").splitlines()
+                       if ln.strip() and not ln.lstrip().startswith("#")]
+        elif prompt:
+            prompts = [prompt] * count
+        else:
+            output.print_error("Give a prompt, or --from-file with one prompt per line", code="USAGE")
+            raise typer.Exit(2)
+        count = len(prompts)
         body = {
-            "prompts": [prompt] * count,
+            "prompts": prompts,
             "batch_size": count,
         }
         if model:

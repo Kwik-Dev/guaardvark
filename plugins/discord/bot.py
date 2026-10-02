@@ -1,5 +1,6 @@
 """Guaardvark Discord Bot — entry point."""
 import asyncio
+import importlib.util
 import logging
 import os
 import re
@@ -29,6 +30,23 @@ if not logger.handlers:
     _fh = logging.FileHandler(os.path.join(log_dir, "discord_bot.log"))
     _fh.setFormatter(_fmt)
     logger.addHandler(_fh)
+
+
+_GUARD_MODULE = "guaardvark_sidecar_guard"
+
+
+def _load_guard():
+    """backend/utils/sidecar_guard.py, loaded by path: the bot runs outside
+    the backend package."""
+    loaded = sys.modules.get(_GUARD_MODULE)
+    if loaded is not None:
+        return loaded
+    path = Path(__file__).resolve().parents[2] / "backend" / "utils" / "sidecar_guard.py"
+    spec = importlib.util.spec_from_file_location(_GUARD_MODULE, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[_GUARD_MODULE] = module
+    return module
 
 
 def load_config(path: str = None) -> dict:
@@ -238,17 +256,23 @@ class GuaardvarkBot(commands.Bot):
                 logger.warning("Failed to save VIP greeted state: %s", e)
 
     async def _start_health_server(self):
-        """Start a lightweight HTTP health server on port 8200."""
+        """Start a lightweight HTTP health server on port 8200.
+
+        Its one caller is the plugin manager on this host, so it listens on
+        loopback (DISCORD_HEALTH_HOST overrides), and the backend's Host
+        check refuses a page whose name was re-pointed at 127.0.0.1.
+        """
         self._start_time = time.time()
-        app = web.Application()
+        app = web.Application(middlewares=[_load_guard().aiohttp_middleware()])
         app.router.add_get("/health", self._health_handler)
         runner = web.AppRunner(app)
         await runner.setup()
+        host = os.environ.get("DISCORD_HEALTH_HOST", "127.0.0.1")
         port = int(os.environ.get("DISCORD_HEALTH_PORT", "8200"))
         try:
-            site = web.TCPSite(runner, "0.0.0.0", port)
+            site = web.TCPSite(runner, host, port)
             await site.start()
-            logger.info("Health endpoint listening on port %d", port)
+            logger.info("Health endpoint listening on %s:%d", host, port)
         except OSError as e:
             logger.warning("Could not start health server on port %d: %s", port, e)
 

@@ -28,6 +28,15 @@ class _FakeClient:
             return {"data": {"id": 3, "name": "r1"}}
         return {"success": True}
 
+    def execute_tool(self, name: str, params: dict):
+        if name == "search_knowledge_base":
+            return {"success": True, "result": {"success": True, "metadata": {
+                "results": [{"text": "Renewal: 30 days notice.", "score": 0.7,
+                             "metadata": {"source_filename": "agreement.md"}}],
+                "retrieval": {"rerank": {"applied": True}},
+            }}}
+        return {"success": False, "error": f"unexpected tool {name}"}
+
     def get(self, endpoint: str, **params):
         if endpoint == "/api/tasks":
             return {"tasks": [{"id": 1, "name": "t1", "task_type": "code_task", "status": "queued", "progress": 0}]}
@@ -46,7 +55,10 @@ def test_search_json_envelope(monkeypatch):
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["status"] == "success"
-    assert "answer" in payload["data"]
+    # search returns ranked passages; `ask` is the command that answers.
+    assert payload["data"]["results"][0] == {
+        "source": "agreement.md", "page": None, "score": 0.7, "text": "Renewal: 30 days notice."}
+    assert payload["data"]["retrieval"]["rerank"]["applied"] is True
 
 
 def test_clients_list_json_envelope(monkeypatch):

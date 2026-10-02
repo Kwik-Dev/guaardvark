@@ -9,6 +9,8 @@ import os
 from datetime import datetime
 from typing import Dict, Any, Optional, Callable, List
 
+from backend.utils.settings_utils import web_access_block_reason
+
 from .base_handler import BaseTaskHandler, TaskResult, TaskResultStatus
 
 logger = logging.getLogger(__name__)
@@ -102,12 +104,17 @@ class WebResearchHandler(BaseTaskHandler):
         """
         Execute web research operations.
         Supports:
-        - search: Web search using DuckDuckGo
+        - search: Web search (the engine named in backend/utils/web_search_sources.py)
         - scrape: Scrape content from URLs
         - analyze_website: Deep analysis of a website
         - batch_scrape: Scrape multiple URLs
         - weather: Get weather information
         - combined_research: Search + scrape top results
+
+        Every type reaches the internet, so each needs web access on in
+        Settings, as the web_search tool does. Every page is fetched from a
+        public address only, whether its URL was given or came from a search
+        result, as fetch_url fetches.
         """
         started_at = datetime.now()
 
@@ -129,6 +136,16 @@ class WebResearchHandler(BaseTaskHandler):
                     status=TaskResultStatus.FAILED,
                     message=f"Unknown research type: {research_type}",
                     error_message=f"research_type must be one of: {', '.join(operations.keys())}",
+                    started_at=started_at,
+                    completed_at=datetime.now()
+                )
+
+            blocked = web_access_block_reason("run web research")
+            if blocked:
+                return TaskResult(
+                    status=TaskResultStatus.FAILED,
+                    message=blocked,
+                    error_message=blocked,
                     started_at=started_at,
                     completed_at=datetime.now()
                 )
@@ -275,7 +292,7 @@ class WebResearchHandler(BaseTaskHandler):
             progress_callback(30, "Fetching content...", None)
 
             # Try detailed scraper first
-            result = scrape_website(url)
+            result = scrape_website(url, public_only=True)
 
             progress_callback(80, "Processing content...", None)
 
@@ -339,7 +356,7 @@ class WebResearchHandler(BaseTaskHandler):
             progress_callback(20, "Fetching website data...", None)
 
             # Get basic scrape data
-            scrape_data = scrape_website(url)
+            scrape_data = scrape_website(url, public_only=True)
 
             progress_callback(50, "Analyzing structure...", None)
 
@@ -434,7 +451,7 @@ class WebResearchHandler(BaseTaskHandler):
                 })
 
                 try:
-                    result = scrape_website(url)
+                    result = scrape_website(url, public_only=True)
                     scraped_data = {
                         "url": url,
                         "success": True,
@@ -589,7 +606,10 @@ class WebResearchHandler(BaseTaskHandler):
                 query_result = {
                     "query": query,
                     "search_results": [],
-                    "scraped_content": []
+                    "scraped_content": [],
+                    # Results that were not read, with the reason (a refused
+                    # address says so), so a missing page is not a silent gap.
+                    "scrape_errors": []
                 }
 
                 # First, search
@@ -604,7 +624,7 @@ class WebResearchHandler(BaseTaskHandler):
                         url = sr.get("url", "")
                         if url:
                             try:
-                                scraped = scrape_website(url)
+                                scraped = scrape_website(url, public_only=True)
                                 query_result["scraped_content"].append({
                                     "url": url,
                                     "title": scraped.get("title", ""),
@@ -612,6 +632,7 @@ class WebResearchHandler(BaseTaskHandler):
                                 })
                             except Exception as e:
                                 logger.warning(f"Failed to scrape {url}: {e}")
+                                query_result["scrape_errors"].append({"url": url, "error": str(e)})
 
                 all_results.append(query_result)
 

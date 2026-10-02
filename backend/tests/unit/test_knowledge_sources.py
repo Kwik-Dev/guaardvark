@@ -162,3 +162,56 @@ def test_rag_clips_source_snippets_like_pgvector_chunks(engine, pgvector_results
     ks.register_knowledge_source("verbose", lambda q, k: [hit("Long", snippet="x" * 900)])
 
     assert engine._retrieve_rag_context("q") == "[Source: Long]\n" + "x" * 500
+
+
+def _scored(src, text, score):
+    return {"text": text, "metadata": {"source_filename": src}, "rerank_score": score}
+
+
+def test_passages_below_the_rerank_floor_are_not_attached(engine, pgvector_results, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_RAG_MIN_RERANK_SCORE", "0.3")
+    pgvector_results.extend([
+        _scored("garden_notes.txt", "water tomatoes twice a week", 0.00002),
+        _scored("bike_maintenance.txt", "lube the chain", 0.00001),
+    ])
+
+    assert engine._retrieve_rag_context("What is the capital of Australia?") == ""
+
+
+def test_related_passages_survive_the_floor(engine, pgvector_results, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_RAG_MIN_RERANK_SCORE", "0.3")
+    pgvector_results.extend([
+        _scored("garden_notes.txt", "water tomatoes twice a week", 0.84),
+        _scored("bike_maintenance.txt", "lube the chain", 0.00001),
+        {"text": "stake by week three", "metadata": {"source_filename": "garden_notes.txt"}, "score": 0.0},
+        {"text": "tyre pressure", "metadata": {"source_filename": "bike_maintenance.txt"}, "score": 0.0},
+    ])
+
+    assert engine._retrieve_rag_context("How often should I water the tomatoes?") == (
+        "[Source: garden_notes.txt]\nwater tomatoes twice a week\n\n"
+        "[Source: garden_notes.txt]\nstake by week three"
+    )
+
+
+def test_no_floor_without_reranker_scores(engine, pgvector_results, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_RAG_MIN_RERANK_SCORE", "0.3")
+    pgvector_results.append({"text": "quickstart spec", "metadata": {"source_filename": "spec.pdf"}})
+
+    assert engine._retrieve_rag_context("q") == "[Source: spec.pdf]\nquickstart spec"
+
+
+def test_floor_zero_turns_the_filter_off(engine, pgvector_results, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_RAG_MIN_RERANK_SCORE", "0")
+    pgvector_results.append(_scored("garden_notes.txt", "water tomatoes", 0.00002))
+
+    assert engine._retrieve_rag_context("q") == "[Source: garden_notes.txt]\nwater tomatoes"
+
+
+def test_measured_floor_applies_to_the_default_reranker(monkeypatch):
+    from backend.utils import reranker
+
+    monkeypatch.delenv("GUAARDVARK_RAG_MIN_RERANK_SCORE", raising=False)
+    monkeypatch.delenv("GUAARDVARK_RERANK_MODEL", raising=False)
+    assert reranker.relevance_floor() == reranker.RELEVANCE_FLOOR[reranker.DEFAULT_MODEL]
+    monkeypatch.setenv("GUAARDVARK_RERANK_MODEL", "some/unmeasured-reranker")
+    assert reranker.relevance_floor() is None

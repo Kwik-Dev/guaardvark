@@ -46,13 +46,24 @@ import useJobsGate from "../hooks/useJobsGate";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
 import { formatUiError } from "../utils/uiError";
+import { dispatchWarning } from "../api/taskQueue";
+import ChangedElsewhereNotice from "../components/common/ChangedElsewhereNotice";
+import useServerSyncedForm from "../hooks/useServerSyncedForm";
+import useUnsavedChangesGuard from "../hooks/useUnsavedChangesGuard";
 
 const POLL_MS = 5000;
 const DEFAULT_KEYFRAME_MODEL = "flux-schnell";
 
+// Plan form field for one cut's prompt.
+const CUT_PREFIX = "cut:";
+const cutKey = (index) => `${CUT_PREFIX}${index}`;
+
+const planFieldLabel = (key) => (key === "treatment" ? "The treatment" : `Cut #${key.slice(CUT_PREFIX.length)}`);
+
 // Local presentational + interactive component for the cut plan + Director prompts.
 // Keeps the main page component from exploding in size.
-function PlanViewer({ detail, busy, models = [], cloudModels = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, comfyReady = true, comfyDisabled = false, comfyInfo = null, gpuBlocked = false }) {
+// onDirtyChange(bool) tells the page whether the plan has unsaved edits.
+function PlanViewer({ detail, busy, models = [], cloudModels = [], onSavePlan, onRegeneratePlan, onGenerateStoryboards, onRegenStoryboard, onDirtyChange, comfyReady = true, comfyDisabled = false, comfyInfo = null, gpuBlocked = false }) {
   const cutPlan = detail.cut_plan || [];
   const clips = detail.clips || [];
   const isEditable = detail.current_stage === "awaiting_approval";
@@ -74,13 +85,9 @@ function PlanViewer({ detail, busy, models = [], cloudModels = [], onSavePlan, o
   const totalDuration = rows.length ? Math.max(...rows.map((r) => r.end || 0)) : 0;
   const sections = [...new Set(rows.map((r) => r.section))];
 
-  // Local editable state (only used while editable)
-  const [edits, setEdits] = useState({}); // { index: prompt }
-  const [treatmentEdit, setTreatmentEdit] = useState(detail.director_treatment || detail.director_storyline || "");
   const [storyboardVersions, setStoryboardVersions] = useState({}); // per-cut cache buster for thumbnails
   const [regenErrors, setRegenErrors] = useState({}); // per-cut last error for regen feedback
   const [guidance, setGuidance] = useState("");
-  const [regenMode, setRegenMode] = useState(detail.planning_mode || "narrative");
 
   const isLikelyEmbeddingModel = (m) => {
     if (!m) return false;
@@ -88,10 +95,55 @@ function PlanViewer({ detail, busy, models = [], cloudModels = [], onSavePlan, o
     return ["embed", "embedding", "bge", "nomic", "snowflake", "minilm"].some((k) => n.includes(k));
   };
 
-  const [directorModel, setDirectorModel] = useState(() => {
-    const m = detail.director_model || "gemma4:e4b";
-    return isLikelyEmbeddingModel(m) ? "gemma4:e4b" : m;
-  });
+  // The editable plan (treatment + one prompt per cut) and the Regenerate
+  // pickers follow the server copy field by field: the page's 5 s poll, a save
+  // from another tab or an agent's edit updates what the person has not
+  // touched and never overwrites an edit (utils/serverFormSync). A picker the
+  // person changed keeps their choice; its conflicts are not shown.
+  const serverPlan = {
+    treatment: detail.director_treatment || detail.director_storyline || "",
+    ...Object.fromEntries(rows.map((r) => [cutKey(r.index), r.prompt])),
+  };
+  const serverPickers = {
+    directorModel: isLikelyEmbeddingModel(detail.director_model) ? "gemma4:e4b" : detail.director_model || "gemma4:e4b",
+    regenMode: detail.planning_mode || "narrative",
+  };
+  const planForm = useServerSyncedForm(serverPlan);
+  const pickers = useServerSyncedForm(serverPickers);
+  const serverPlanKey = JSON.stringify(serverPlan);
+  const serverPickersKey = JSON.stringify(serverPickers);
+  const syncedVideoId = useRef(detail.id);
+  useEffect(() => {
+    // Another video, or a plan that can no longer be edited: start over from
+    // the server copy. Otherwise merge.
+    if (syncedVideoId.current !== detail.id || !isEditable) {
+      syncedVideoId.current = detail.id;
+      planForm.reset(serverPlan);
+      pickers.reset(serverPickers);
+      return;
+    }
+    planForm.syncFromServer(serverPlan);
+    pickers.syncFromServer(serverPickers);
+  }, [detail.id, isEditable, serverPlanKey, serverPickersKey]);
+
+  const treatmentEdit = planForm.values.treatment ?? "";
+  const setTreatmentEdit = (value) => planForm.setField("treatment", value);
+  const { regenMode, directorModel } = pickers.values;
+  const setRegenMode = (value) => pickers.setField("regenMode", value);
+  const setDirectorModel = (value) => pickers.setField("directorModel", value);
+
+  // A locked plan shows what was saved and used, never a leftover edit.
+  const getDisplayedPrompt = (row) =>
+    (isEditable ? planForm.values[cutKey(row.index)] ?? row.prompt : row.prompt);
+  const handlePromptChange = (idx, val) => planForm.setField(cutKey(idx), val);
+
+  const planDirty = isEditable && planForm.isDirty;
+  useUnsavedChangesGuard(planDirty);
+  useEffect(() => {
+    if (!onDirtyChange) return undefined;
+    onDirtyChange(planDirty);
+    return () => onDirtyChange(false);
+  }, [planDirty, onDirtyChange]);
 
   // Director-model options come from the installed models (embedding models filtered out).
   // Fall back to a small static list if the model API is unavailable. Always keep the default
@@ -129,8 +181,10 @@ function PlanViewer({ detail, busy, models = [], cloudModels = [], onSavePlan, o
     // This gives the user a "variations" effect without having to manually edit
     // the prompt text for the cut.
     const variation = Math.floor(Math.random() * 100000);
-    const currentRow = rows.find(r => r.index === index) || {};
-    const currentPrompt = currentRow.prompt || "";
+    const currentRow = rows.find(r => r.index === index);
+    // The cut's prompt as shown, unsaved edit included; the backend renders it
+    // without storing it.
+    const currentPrompt = currentRow ? getDisplayedPrompt(currentRow) : "";
 
     try {
       await onRegenStoryboard(index, { variation, prompt: currentPrompt });
@@ -147,36 +201,28 @@ function PlanViewer({ detail, busy, models = [], cloudModels = [], onSavePlan, o
     }
   };
 
-  // When the server detail changes (poll / refresh after save/regen), reset local edits
-  useEffect(() => {
-    setEdits({});
-    setTreatmentEdit(detail.director_treatment || detail.director_storyline || "");
-    const m = detail.director_model || "gemma4:e4b";
-    setDirectorModel(isLikelyEmbeddingModel(m) ? "gemma4:e4b" : m);
-    setRegenMode(detail.planning_mode || "narrative");
-  }, [detail.id, detail.current_stage, JSON.stringify(detail.clips?.map((c) => c.prompt)), detail.director_treatment, detail.director_storyline, detail.director_model, detail.planning_mode]);
+  const hasLocalEdits = planDirty;
 
-  const getDisplayedPrompt = (row) => (Object.prototype.hasOwnProperty.call(edits, row.index) ? edits[row.index] : row.prompt);
-
-  const handlePromptChange = (idx, val) => {
-    setEdits((prev) => ({ ...prev, [idx]: val }));
-  };
-
-  const hasLocalEdits = Object.keys(edits).length > 0 || treatmentEdit !== (detail.director_treatment || detail.director_storyline || "");
-
+  // Sends only what changed. Edits stay pending when the save fails.
   const handleSave = async () => {
-    if (!hasLocalEdits && treatmentEdit === (detail.director_treatment || detail.director_storyline || "")) return;
-    // Send prompt edits + the (possibly edited) treatment
-    const payload = { prompts: edits };
-    const currentTreatment = detail.director_treatment || detail.director_storyline || "";
-    if (treatmentEdit !== currentTreatment) {
-      payload.treatment = treatmentEdit;
-    }
-    await onSavePlan(payload);
-    setEdits({});
+    const changes = planForm.changes;
+    if (!Object.keys(changes).length) return;
+    const payload = { prompts: {} };
+    Object.entries(changes).forEach(([key, value]) => {
+      if (key === "treatment") payload.treatment = value;
+      else payload.prompts[key.slice(CUT_PREFIX.length)] = value;
+    });
+    const saved = await onSavePlan(payload);
+    if (saved !== false) planForm.markSaved(changes);
   };
 
   const handleRegen = async () => {
+    if (planForm.isDirty && !window.confirm(
+      "Regenerating rewrites the treatment and every cut's prompt. Discard your unsaved plan edits?",
+    )) {
+      return;
+    }
+    planForm.reset(serverPlan);
     await onRegeneratePlan(guidance, regenMode, directorModel);
     setGuidance("");
   };
@@ -264,9 +310,19 @@ function PlanViewer({ detail, busy, models = [], cloudModels = [], onSavePlan, o
           For very long songs (75+ cuts) the small local model often struggles — shorter guidance or a stronger pulled gemma helps.
         </CollapsibleAlert>
       )}
+      {isEditable && (
+        <ChangedElsewhereNotice
+          conflicts={planForm.conflicts}
+          labels={Object.fromEntries(Object.keys(planForm.conflicts).map((k) => [k, planFieldLabel(k)]))}
+          onReload={() => planForm.resolve("server")}
+          onKeep={() => planForm.resolve("mine")}
+          sx={{ mb: 1 }}
+        />
+      )}
       {hasLocalEdits && (
         <Typography variant="caption" color="info.main" sx={{ display: 'block', mb: 1 }}>
-          Treatment/arc edited — Generate Storyboards or per-cut Regen will use the updated visuals. (Bulk force-refresh available via API for existing stills.)
+          Unsaved plan edits — Save plan changes so Generate Storyboards and the video use them.
+          Regen this storyboard already uses the cut&apos;s edited prompt.
         </Typography>
       )}
 
@@ -496,7 +552,7 @@ function PlanViewer({ detail, busy, models = [], cloudModels = [], onSavePlan, o
               Save plan changes
             </Button>
             {hasLocalEdits && (
-              <Link component="button" variant="caption" onClick={() => setEdits({})}>
+              <Link component="button" variant="caption" onClick={() => planForm.reset(serverPlan)}>
                 discard local edits
               </Link>
             )}
@@ -622,6 +678,10 @@ const MusicVideoPage = () => {
   const { getProcessesByType, activeProcesses, getPreviewUrl } = useUnifiedProgress();
   const [videos, setVideos] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  // The open plan has edits not yet saved (reported by PlanViewer).
+  const [planDirty, setPlanDirty] = useState(false);
+  const confirmDropPlanEdits = (what) =>
+    !planDirty || window.confirm(`The plan has unsaved edits. ${what} without them?`);
   const [detail, setDetail] = useState(null);
 
   const [name, setName] = useState("");
@@ -630,6 +690,9 @@ const MusicVideoPage = () => {
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // A step the backend saved but could not queue ({dispatched: false,
+  // warning}); shown on the music video it belongs to.
+  const [notice, setNotice] = useState(null);
   const [pluginStatus, setPluginStatus] = useState(null); // {comfyui_reachable, ...} or {status:{comfyui:'stopped',...}} or {plugins:[...]} for storyboard guards
   const [models, setModels] = useState([]); // installed Ollama models for the director-model dropdown (embedding models filtered backend-side)
   const [cloudModels, setCloudModels] = useState([]); // OpenAI-compatible (.env) models for the director dropdown
@@ -923,6 +986,11 @@ const MusicVideoPage = () => {
     return live.reduce((a, b) => ((b.timestamp || 0) > (a.timestamp || 0) ? b : a));
   }, [detail, getProcessesByType, activeProcesses]);
 
+  const noteDispatch = (id, result) => {
+    const warning = dispatchWarning(result);
+    if (warning) setNotice({ id, text: warning });
+  };
+
   const handleCreate = async () => {
     setError(null);
     if (!name.trim() || !stylePrompt.trim() || !file) {
@@ -974,6 +1042,7 @@ const MusicVideoPage = () => {
       if (fileInputRef.current) fileInputRef.current.value = "";
       await refreshList();
       setSelectedId(mv.id);
+      noteDispatch(mv.id, mv);
     } catch (e) {
       setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to create music video.");
     } finally {
@@ -987,6 +1056,7 @@ const MusicVideoPage = () => {
     setError(null);
     try {
       const updated = await analyzeMusicVideo(detail.id);
+      noteDispatch(detail.id, updated);
       setDetail(updated);
       await refreshList();
     } catch (e) {
@@ -998,10 +1068,13 @@ const MusicVideoPage = () => {
 
   const handleApprove = async () => {
     if (!detail) return;
+    // Approving locks the plan, so unsaved edits could never be saved after.
+    if (!confirmDropPlanEdits("Approve and lock the plan")) return;
     setBusy(true);
     setError(null);
     try {
       const updated = await approveMusicVideo(detail.id);
+      noteDispatch(detail.id, updated);
       setDetail(updated);
       await refreshList();
     } catch (e) {
@@ -1364,7 +1437,10 @@ const MusicVideoPage = () => {
                 <Paper
                   key={v.id}
                   variant="outlined"
-                  onClick={() => setSelectedId(v.id)}
+                  onClick={() => {
+                    if (v.id !== selectedId && !confirmDropPlanEdits("Open another video")) return;
+                    setSelectedId(v.id);
+                  }}
                   sx={{
                     p: 1.25, cursor: "pointer",
                     borderColor: v.id === selectedId ? "primary.main" : "divider",
@@ -1426,7 +1502,8 @@ const MusicVideoPage = () => {
                         if (!window.confirm(msg)) return;
                         try {
                           setBusy(true);
-                          await replanMusicVideo(detail.id);
+                          const replanned = await replanMusicVideo(detail.id);
+                          noteDispatch(detail.id, replanned);
                           await refreshDetail(detail.id);
                         } catch (e) {
                           setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to re-plan");
@@ -1455,6 +1532,12 @@ const MusicVideoPage = () => {
                 {detail.style_prompt}
               </Typography>
               <Divider sx={{ mb: 2 }} />
+
+              {notice && notice.id === detail.id && (
+                <CollapsibleAlert severity="warning" sx={{ mb: 2 }} onClose={() => setNotice(null)}>
+                  {notice.text}
+                </CollapsibleAlert>
+              )}
 
               {needsAnalysis(detail) && !isAnalysisRunning(detail) && (
                 <Stack spacing={1.5} sx={{ mb: 2 }}>
@@ -1498,6 +1581,7 @@ const MusicVideoPage = () => {
                 <PlanViewer
                   detail={detail}
                   busy={busy}
+                  onDirtyChange={setPlanDirty}
                   gpuBlocked={gpuBusy}
                   models={models}
                   cloudModels={cloudModels}
@@ -1518,8 +1602,10 @@ const MusicVideoPage = () => {
                       }
                       await updateMusicVideoPlan(detail.id, payload);
                       await refreshDetail(detail.id);
+                      return true;
                     } catch (e) {
                       setError(formatUiError(e?.response?.data?.error) || e.message || "Failed to save plan edits");
+                      return false;
                     } finally {
                       setBusy(false);
                     }

@@ -250,7 +250,7 @@ def _handle_chat(state: dict, ctx: ContextSnapshot, message: str, raw_message: s
     else:
         # Full mode: streaming via Socket.IO
         context_block = build_cli_context(ctx.format_context_block(), memory)
-        renderer = ChatRenderer()
+        renderer = ChatRenderer(server_url=server)
         streamer = LlxStreamer(server)
         client = get_client(server)
         proj_root = memory.get("project_root") or state.get("cwd")

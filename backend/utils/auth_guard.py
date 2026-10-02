@@ -2,8 +2,15 @@
 """Lightweight endpoint protection for dangerous operations.
 
 When GUAARDVARK_API_KEY is set in the environment, protected endpoints
-require the key in the X-API-Key header. When unset, localhost requests
-pass freely but remote hosts are blocked from sensitive endpoints.
+require it from every host, this machine included: in the X-API-Key header
+(command-line clients, the MCP server, scripts), or as a browser signed in
+with it (the HttpOnly session cookie of backend/utils/api_session.py, which
+Settings → API key obtains). When unset, requests from this machine pass and
+other hosts are refused. /api/auth/ reports the state, signs browsers in and
+out, and manages the key.
+
+Agent screen captures (/api/tools/screenshots/) also answer a link signed by
+backend/utils/screenshot_urls.py, which is what chat's <img> tags carry.
 """
 
 import os
@@ -14,24 +21,81 @@ from flask import request, jsonify
 
 logger = logging.getLogger(__name__)
 
+API_KEY_ENV = "GUAARDVARK_API_KEY"
+API_KEY_HEADER = "X-API-Key"
+
 # Endpoints that always require protection (any method)
 PROTECTED_PREFIXES = (
+    # Creating, replacing and removing the API key itself.
+    '/api/auth/key',
     '/api/code-execution/',
     '/api/backups/restore',
     '/api/backups/create',
     '/api/self-code/',
+    # Restarting Guaardvark (stops every running job) and the restart log.
+    '/api/reboot',
     # Social outreach has kill switches, draft approval, and fetch-meta — none of
     # which should be reachable from another machine on the LAN without an API key.
     '/api/social-outreach/',
+    # Raw file download for everything under data/outputs, chat exports and
+    # screenshots included (backend/routes/download_route.py). Only MCP resource
+    # links point here, and those are local; the web UI loads outputs through
+    # /api/outputs, which stays open to LAN browsers.
+    '/outputs/',
 )
 
 # Browser/desktop/MCP automation and direct tool execution can read files, run
-# commands and reach internal networks. Off by default because the Tools page
-# and automation panels are used from other devices on the LAN, which have no
-# API-key field; GUAARDVARK_PROTECT_TOOL_ENDPOINTS=true closes them to remote
-# hosts without the key.
-if os.environ.get("GUAARDVARK_PROTECT_TOOL_ENDPOINTS", "").strip().lower() in ("1", "true", "yes", "on"):
-    PROTECTED_PREFIXES = PROTECTED_PREFIXES + ('/api/automation/', '/api/tools/execute')
+# commands and reach internal networks, and a call to /api/tools/execute skips
+# the confirmation prompts chat would show. Tool jobs hold the results of those
+# calls. These routes answer only this machine, or a caller that sends the API
+# key; a browser on another device is signed in once the key is entered in
+# Settings → API key.
+# GUAARDVARK_PROTECT_TOOL_ENDPOINTS=false (or 0, no, off) opens them to every
+# host that can reach the backend; any other value, or none, keeps them closed.
+# It is read per request, like GUAARDVARK_API_KEY.
+TOOL_ENDPOINTS_ENV = "GUAARDVARK_PROTECT_TOOL_ENDPOINTS"
+TOOL_ENDPOINT_PREFIXES = (
+    '/api/automation/',
+    '/api/tools/jobs/',
+)
+# Matched whole: GET /api/tools/execute_python is a tool's schema, not a call.
+TOOL_ENDPOINT_PATHS = (
+    '/api/tools/execute',
+)
+
+# The refusals. Each carries a code the web UI recognises (it then words the
+# advice for the page it is on and links to Settings → API key); the CLI shows
+# the text as it is, so the text says what to do in both places.
+# local_only: this install has no key and the caller is another host.
+# api_key_required: this install has a key and the caller did not send it.
+# credential_rejected in the body: the caller did send a key or a sign-in, and
+# it is not accepted now.
+LOCAL_ONLY_CODE = "local_only"
+API_KEY_CODE = "api_key_required"
+SCREENSHOT_LINK_CODE = "screenshot_link_invalid"
+LOCAL_ONLY_MESSAGE = (
+    "This action works only on the Guaardvark machine itself, because this "
+    "install has no API key yet. To use it from another device, create a key "
+    "in Settings → API key on the Guaardvark machine, then enter it on that "
+    "device; command-line and API clients send it in the X-API-Key header."
+)
+API_KEY_MESSAGE = (
+    "This action needs this install's API key. In the web UI, enter it in "
+    "Settings → API key; command-line and API clients send it in the "
+    "X-API-Key header (GUAARDVARK_API_KEY)."
+)
+# Says nothing about whether the file exists.
+SCREENSHOT_LINK_MESSAGE = (
+    "This screenshot link is not valid for this install. Open the screenshot "
+    "from the chat it appeared in."
+)
+SCREENSHOT_PREFIX = "/api/tools/screenshots/"
+
+
+def tool_endpoints_protected() -> bool:
+    """True unless GUAARDVARK_PROTECT_TOOL_ENDPOINTS opts out."""
+    return os.environ.get(TOOL_ENDPOINTS_ENV, "").strip().lower() not in ("0", "false", "no", "off")
+
 
 # File APIs include both the document library and the live repository editor.
 # Keep read-only document browser GETs public for the local UI, but protect
@@ -56,6 +120,15 @@ PROTECTED_DELETE_PREFIXES = (
     '/api/audio-foundry/jobs',
 )
 
+# Protected only on DELETE of the item itself, the id being the last path
+# segment. Deleting an imported voice clip removes a person's recording, like
+# the Cast Library deletes above. Withdrawing consent for a clip
+# (DELETE .../voice-clips/<id>/consent) stays as open as recording it
+# (POST .../consent and the import), so withdrawing is never harder than giving.
+PROTECTED_DELETE_ITEM_PREFIXES = (
+    '/api/audio-foundry/voice-clips/',
+)
+
 # Explicitly safe operations that are exempt from the host check even though they
 # live under an otherwise-protected prefix. /api/meta is shared by many blueprints
 # (jobs, index management, diagnostics) that MUST stay protected, but clearing
@@ -76,6 +149,8 @@ MUTATION_PROTECTED_PREFIXES = (
     '/api/automation/mcp/reload-config',
     # Turning the project-folder limit off widens what tools may read.
     '/api/settings/confine_tool_paths',
+    # Switching the inbound guard off, or approving a change it held, lets code in.
+    '/api/settings/inbound_guard',
     # Persists the product profile into .env.
     '/api/settings/profile',
     '/api/memory',
@@ -94,6 +169,13 @@ MUTATION_PROTECTED_PREFIXES = (
     # GPU control (stop Ollama, force-release leases, evict) and upscaling jobs.
     '/api/gpu',
     '/api/upscaling',
+)
+
+# Mutation-only protection for routes whose id sits mid-path: (prefix, suffix).
+# Importing a Cast LoRA writes a file of up to a few GB and replaces the member's
+# LoRA, so it is closed to other hosts; train/generate/upload-refs stay LAN-usable.
+MUTATION_PROTECTED_SUFFIXES = (
+    ('/api/cast-library/subjects/', '/import-lora'),
 )
 
 
@@ -183,6 +265,22 @@ def _effective_client_ip():
     return peer
 
 
+def _is_preflight_flask_answers() -> bool:
+    """An OPTIONS request that Flask answers itself, without running a view.
+
+    That is a browser's CORS preflight: it never carries a key or a cookie,
+    so refusing it only makes the browser drop the real request that would
+    carry them. Flask-CORS adds the CORS headers to Flask's answer for this
+    install's own origins only. An OPTIONS to a route whose view handles
+    OPTIONS itself is guarded like any other request.
+    """
+    if request.method != "OPTIONS":
+        return False
+    rule = request.url_rule
+    # No rule: Flask answers 404 or 405 and no view runs.
+    return rule is None or bool(getattr(rule, "provide_automatic_options", False))
+
+
 def _is_protected():
     """Check if the current request targets a protected endpoint."""
     path = request.path
@@ -192,6 +290,8 @@ def _is_protected():
     for prefix in PROTECTED_PREFIXES:
         if path.startswith(prefix):
             return True
+    if (path in TOOL_ENDPOINT_PATHS or path.startswith(TOOL_ENDPOINT_PREFIXES)) and tool_endpoints_protected():
+        return True
     for prefix in PROTECTED_FILE_PREFIXES:
         if path.startswith(prefix):
             return True
@@ -201,44 +301,141 @@ def _is_protected():
         for prefix in MUTATION_PROTECTED_PREFIXES:
             if path.startswith(prefix):
                 return True
+        for prefix, suffix in MUTATION_PROTECTED_SUFFIXES:
+            if path.startswith(prefix) and path.rstrip('/').endswith(suffix):
+                return True
     if request.method == 'DELETE':
         for prefix in PROTECTED_DELETE_PREFIXES:
             if path.startswith(prefix):
                 return True
+        for prefix in PROTECTED_DELETE_ITEM_PREFIXES:
+            if path.startswith(prefix) and '/' not in path[len(prefix):].strip('/'):
+                return True
     return False
+
+
+def configured_api_key() -> str:
+    """This install's API key as the running process has it, or ""."""
+    return (os.environ.get(API_KEY_ENV) or "").strip()
+
+
+def request_carries_valid_key() -> bool:
+    """True when a key is configured and the request sent that key."""
+    api_key = configured_api_key()
+    provided = request.headers.get(API_KEY_HEADER, "")
+    if not api_key or not provided:
+        return False
+    # Bytes, so a header with non-ASCII characters compares unequal instead of
+    # raising.
+    return hmac.compare_digest(provided.encode("utf-8"), api_key.encode("utf-8"))
+
+
+def request_is_from_this_machine() -> bool:
+    """True for the Guaardvark machine itself, through the local proxy or not."""
+    # The effective client IP, so a LAN device proxied through the local Vite
+    # preview is still treated as remote (the proxy makes request.remote_addr
+    # loopback otherwise).
+    return _is_localhost(_effective_client_ip())
+
+
+def request_has_valid_session() -> bool:
+    """True when a browser signed in with the current key sent its cookie."""
+    from backend.utils.api_session import VALID, session_state
+
+    return session_state() == VALID
+
+
+def credential_rejected() -> bool:
+    """True when the request carried a key or a sign-in that is not accepted
+    now (a wrong key, or a browser signed in with a key since replaced or
+    removed). The web UI words its advice differently for that case."""
+    from backend.utils.api_session import REJECTED, session_state
+
+    sent_key = bool(request.headers.get(API_KEY_HEADER)) and not request_carries_valid_key()
+    return sent_key or session_state() == REJECTED
+
+
+def caller_is_authorized() -> bool:
+    """The rule every protected route applies: the key (header or signed-in
+    browser) once one is configured, this machine until then."""
+    if configured_api_key():
+        return request_carries_valid_key() or request_has_valid_session()
+    return request_is_from_this_machine()
+
+
+def _screenshot_link_is_signed() -> bool:
+    from backend.utils.screenshot_urls import SIGNATURE_PARAM, signature_valid
+
+    rel_path = request.path[len(SCREENSHOT_PREFIX):]
+    return signature_valid(rel_path, request.args.get(SIGNATURE_PARAM))
+
+
+def protected_summary() -> list[str]:
+    """What needs this machine or the key, in words for the Settings page."""
+    items = []
+    if tool_endpoints_protected():
+        items += [
+            "Running tools directly (Tools page) and their jobs",
+            "Automation and MCP servers",
+        ]
+    else:
+        items.append("Changing the MCP server list")
+    items += [
+        "Code execution",
+        "Restarting Guaardvark",
+        "Creating, restoring and deleting backups",
+        "Editing files and browsing the server's folders",
+        "Reading Guaardvark's own source (self-code)",
+        "Social outreach",
+        "Changing tasks, jobs, schedules, memory and GPU state",
+        "Raw file downloads under /outputs/",
+        "Managing this API key",
+    ]
+    return items
+
+
+def _refusal(message: str, code: str, status: int):
+    return jsonify({"error": message, "code": code, "credential_rejected": credential_rejected()}), status
 
 
 def check_endpoint_auth():
     """Flask before_request hook: enforce auth on dangerous endpoints.
 
     Logic:
+    - An OPTIONS request Flask answers itself (a CORS preflight) → allow
+    - Agent screen captures: a link signed for that path passes, then the rule below
     - If endpoint is not protected → allow
     - If GUAARDVARK_API_KEY is set → require X-API-Key header (any host)
     - If GUAARDVARK_API_KEY is NOT set → allow localhost, block remote
     """
+    if _is_preflight_flask_answers():
+        return None
+
+    if request.path.startswith(SCREENSHOT_PREFIX):
+        if _screenshot_link_is_signed() or caller_is_authorized():
+            return None
+        logger.warning(
+            f"[AUTH] Refused unsigned screenshot link {request.path} from {_effective_client_ip()}"
+        )
+        # Refused before the route runs, so the answer is the same whether or
+        # not the file exists.
+        return _refusal(SCREENSHOT_LINK_MESSAGE, SCREENSHOT_LINK_CODE, 403)
+
     if not _is_protected():
         return None
 
-    api_key = os.environ.get('GUAARDVARK_API_KEY')
-
-    if not api_key:
-        # No key configured — localhost-only access. Use the effective client IP
-        # so a LAN device proxied through the local Vite preview is still treated
-        # as remote (the proxy makes request.remote_addr loopback otherwise).
-        client_ip = _effective_client_ip()
-        if _is_localhost(client_ip):
+    if not configured_api_key():
+        if request_is_from_this_machine():
             return None
         logger.warning(
-            f"[AUTH] Blocked remote access to {request.path} from {client_ip}"
+            f"[AUTH] Blocked remote access to {request.path} from {_effective_client_ip()}"
         )
-        return jsonify({"error": "Access denied from remote host"}), 403
+        return _refusal(LOCAL_ONLY_MESSAGE, LOCAL_ONLY_CODE, 403)
 
-    # API key is configured — require it
-    provided_key = request.headers.get('X-API-Key', '')
-    if provided_key and hmac.compare_digest(provided_key, api_key):
+    if request_carries_valid_key() or request_has_valid_session():
         return None
 
     logger.warning(
-        f"[AUTH] Invalid/missing API key for {request.path} from {request.remote_addr}"
+        f"[AUTH] Invalid/missing API key or sign-in for {request.path} from {request.remote_addr}"
     )
-    return jsonify({"error": "Invalid or missing API key"}), 401
+    return _refusal(API_KEY_MESSAGE, API_KEY_CODE, 401)

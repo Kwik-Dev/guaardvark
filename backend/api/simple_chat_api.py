@@ -89,9 +89,10 @@ def simple_chat():
         logger.error(f"Simple chat error: {e}")
         return error_response(f"Chat processing failed: {str(e)}", 500)
 
-@simple_chat_bp.route("/health", methods=["GET"])
+@simple_chat_bp.route("/health", methods=["POST"])
 def simple_chat_health():
-    """Health check for simple chat service"""
+    """Health check for simple chat service. POST only: it sends the model a
+    prompt, which a GET from any page (an <img>) could otherwise do."""
     try:
         llm = current_app.config.get("LLAMA_INDEX_LLM")
         if not llm:

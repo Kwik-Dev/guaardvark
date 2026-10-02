@@ -374,6 +374,16 @@ class RepositoryAnalysisService:
         return graph
 
     @staticmethod
+    def _store_repository_map(folder, repo_map: str) -> None:
+        try:
+            existing = json.loads(folder.repo_metadata) if folder.repo_metadata else {}
+            existing["repository_map"] = repo_map
+            folder.repo_metadata = json.dumps(existing)
+            db.session.commit()
+        except Exception as e:
+            logger.error(f"Failed to save repository map: {e}")
+
+    @staticmethod
     def generate_repository_map(folder_id: int, token_budget: int = 4096) -> str:
         """Generate a compressed, PageRank-ranked repository map.
 
@@ -402,6 +412,8 @@ class RepositoryAnalysisService:
                 file_symbols[doc.path] = symbols
 
         if not file_symbols:
+            # Stored empty, so readers can tell "nothing to map" from "not built yet".
+            RepositoryAnalysisService._store_repository_map(folder, "")
             return ""
 
         # Build a simple reference graph for PageRank
@@ -466,13 +478,7 @@ class RepositoryAnalysisService:
         repo_map = "\n".join(lines)
 
         # Store in folder metadata and index
-        try:
-            existing = json.loads(folder.repo_metadata) if folder.repo_metadata else {}
-            existing["repository_map"] = repo_map
-            folder.repo_metadata = json.dumps(existing)
-            db.session.commit()
-        except Exception as e:
-            logger.error(f"Failed to save repository map: {e}")
+        RepositoryAnalysisService._store_repository_map(folder, repo_map)
 
         try:
             add_text_to_index(

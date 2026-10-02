@@ -227,6 +227,81 @@ EYE_BORROW_NATIVE_WORSE_THAN_PX = 40.0
 EYE_BORROW_EYE_AT_MOST_PX = 24.0
 
 
+# ---------------------------------------------------------------------------
+# Name rules used by ollama_resource_manager
+# ---------------------------------------------------------------------------
+# Regexes over the lower-cased tag. Each decides something Ollama can answer
+# for itself; they cover a server that is not answering yet and unit tests
+# that never reach one. They are kept as they were: where they disagree with
+# Ollama or with each other, model_capabilities records both answers.
+#
+# Families that reason in Ollama's hidden ``thinking`` channel. A match wins
+# over /api/show (model_supports_thinking), so think:false is sent to these even
+# when Ollama does not list "thinking". What thinking cost when left on:
+#   * gemma4 12B, chat, 2026-09-06: 1,163 tokens / ~40 s for a 554-char reply
+#     against 183 tokens / ~10 s for an 858-char reply with thinking off.
+#   * gemma4 12B, summarisation (raptor_service): ~45x slower, shorter output.
+#   * qwen3.5 9B, structured extraction: 2-4k reasoning tokens per call, enough
+#     to blow a 120 s request timeout.
+THINKING_NAME_PATTERNS = [
+    r'deepseek-r1', r'thinking', r'gemma[\-_]?4', r'qwen3',
+]
+# A tag matching one of these is never a thinking model by name, whatever
+# THINKING_NAME_PATTERNS says: qwen3-embedding:4b matched r'qwen3' and was
+# counted as a thinker (Ollama lists it as embedding only, 2026-09-26).
+THINKING_NAME_EXCLUDE_PATTERNS = [
+    r'embed', r'rerank',
+]
+
+# is_vision_model's fallback when the capability resolver cannot be imported.
+VISION_NAME_PATTERNS = [
+    r'vl\b', r'vision', r'llava', r'moondream', r'bakllava',
+    r'minicpm-v', r'llama.*vision', r'granite.*vision', r'gemma.*vision',
+    # Gemma 4 integrates vision natively — match even without "vision" suffix
+    r'gemma[\-_]?4',
+]
+
+# Not a default text chat model (vision-only or embedding). Natively multimodal
+# chat models (Gemma 4) are left out on purpose.
+NON_TEXT_NAME_PATTERNS = [
+    r'vl\b', r'vision', r'llava', r'moondream', r'bakllava',
+    r'minicpm-v', r'llama.*vision', r'granite.*vision', r'gemma.*vision',
+    r'embed', r'retrieval', r'minilm',
+]
+
+# Tag pairs a model may write around reasoning in its answer text, matched
+# case-insensitively by backend/utils/inline_reasoning.py; what they enclose
+# goes to the Thinking card instead of the answer. The set is Open WebUI's
+# documented default (checked 2026-09-26). Seen live on this project's own
+# probes: <think> (lfm2.5, granite4.2 on Ollama 0.33.3). A model with its own
+# markers gets a ``reasoning_tags`` row below, which replaces this list for it.
+INLINE_REASONING_TAGS = (
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+    ("<reason>", "</reason>"),
+    ("<reasoning>", "</reasoning>"),
+    ("<thought>", "</thought>"),
+    ("<|begin_of_thought|>", "<|end_of_thought|>"),
+)
+
+# ---------------------------------------------------------------------------
+# Declared capability rows
+# ---------------------------------------------------------------------------
+# A row replaces what Ollama's /api/show reports for one tag, field by field.
+# Shipped rows are for a build whose /api/show is known to be wrong; there are
+# none. A machine adds its own in data/config/model_capabilities.json (gitignored,
+# like the rest of data/config), shaped {"<tag>": {"tools": false, ...}}; a local
+# row wins over a shipped one. ``reasoning_tags`` is a list of [open, close]
+# pairs, e.g. {"<tag>": {"reasoning_tags": [["<think>", "</think>"]]}}, and
+# replaces INLINE_REASONING_TAGS for that model. Vision is not overridable here:
+# it has its own authority order in model_capability_resolver (EXTERNAL_MODEL_ROWS).
+MODEL_CAPABILITY_ROWS: dict = {}
+OVERRIDABLE_FIELDS = (
+    "tools", "thinking", "completion", "embedding", "native_context", "embedding_dim",
+    "reasoning_tags",
+)
+
+
 def name_looks_vision(tag: str) -> bool:
     """Degraded-mode guess. See VISION_NAME_FALLBACK for why this is last."""
     if not tag:

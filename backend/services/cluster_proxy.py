@@ -215,7 +215,25 @@ class HttpProxyForwarder:
 
     def _sanitize_headers(self, incoming: dict, target, request) -> dict:
         import os
-        out = {k: v for k, v in incoming.items() if k.lower() not in HOP_BY_HOP_HEADERS}
+        # X-API-Key and the browser's sign-in cookie belong to this install;
+        # another node has its own key and gets target.api_key below.
+        # Origin and Sec-Fetch-* say how the browser reached this install,
+        # which already checked them (backend/utils/cross_site_guard.py); the
+        # next node gets a call between machines, which carries neither.
+        from backend.utils.api_session import strip_session_cookies
+
+        out = {}
+        for k, v in incoming.items():
+            name = k.lower()
+            if name in HOP_BY_HOP_HEADERS or name == "x-api-key":
+                continue
+            if name == "origin" or name.startswith("sec-fetch-"):
+                continue
+            if name == "cookie":
+                v = strip_session_cookies(v)
+                if not v:
+                    continue
+            out[k] = v
         out.pop("Host", None)  # let requests set it
         try:
             prev_hops = int(incoming.get("X-Guaardvark-Hops", "0"))

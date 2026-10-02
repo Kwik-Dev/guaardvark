@@ -6,8 +6,10 @@ Answers "why doesn't my agent see Guaardvark?" in one command:
   1. Server-side self-test — venv python, SDK version, tool registry,
      server construction, and a real stdio initialize/tools-list round-trip
      against a subprocess (exactly what an external client does).
-  2. Client-side scan — finds ``guaardvark`` entries in known agent config
-     files and flags dead paths (stale checkouts, deleted venvs).
+  2. Client-side scan — finds ``guaardvark`` entries in the config of every
+     client ``install`` can set up and flags dead paths (stale checkouts,
+     deleted venvs). A config that exists but cannot be parsed is named, since
+     its entry went unchecked.
   3. With ``--call``, real read-only tool calls through a fresh stdio server,
      one per tool family. A tool whose prerequisite is down (backend, plugin,
      media player) is reported as a warning, not a failure.
@@ -27,7 +29,15 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from backend.mcp.cli import _claude_desktop_config_path, _project_root, _python_executable
-from backend.mcp.installer import SERVER_NAME
+from backend.mcp.installer import (
+    SERVER_NAME,
+    _antigravity_config_path,
+    _claude_code_config_path,
+    _codex_config_path,
+    _grok_config_path,
+    _load_config_file,
+    _opencode_config_path,
+)
 
 _PASS = "PASS"
 _FAIL = "FAIL"
@@ -77,8 +87,16 @@ def _check_build() -> bool:
             _server, stats = build_server()
     except Exception as exc:
         return _report(_FAIL, "build_server()", f"{exc.__class__.__name__}: {exc}")
+    # The server's own figure is capped for its startup banner; the operator
+    # asking what an agent can read gets the full count.
+    try:
+        from backend.mcp.config import load_config
+        from backend.mcp.resources_adapter import count_resources
+        resources = str(count_resources(load_config()))
+    except Exception as exc:
+        resources = f"unknown ({exc.__class__.__name__}: {exc})"
     return _report(_PASS, "build_server()",
-                   f"{stats['tools']} tools, {stats['resources']} resources exposed")
+                   f"{stats['tools']} tools, {resources} resources exposed")
 
 
 async def _stdio_roundtrip(timeout: float = 60.0) -> tuple[bool, str]:
@@ -277,60 +295,63 @@ def _scan_mcp_servers_obj(obj: Any) -> Iterator[tuple[str, list[str]]]:
     command = entry.get("command", "")
     if isinstance(command, dict):  # zed shape: {"path": ..., "args": ...}
         yield str(command.get("path", "")), [str(a) for a in command.get("args", [])]
+    elif isinstance(command, list):  # opencode shape: [executable, *args]
+        yield str(command[0]) if command else "", [str(a) for a in command[1:]]
     else:
         yield str(command), [str(a) for a in entry.get("args", [])]
 
 
 def _client_config_sources() -> list[tuple[str, Path, list[str]]]:
-    """(label, file, json-keys-to-check). Keys are tried in order, first hit wins."""
+    """(label, file, tables-to-check) for every client ``install`` supports.
+    JSON and TOML files alike; a table maps server names to entries."""
     home = Path.home()
     return [
         ("cursor (user)", home / ".cursor/mcp.json", ["mcpServers"]),
         ("cursor (project)", _project_root() / ".cursor/mcp.json", ["mcpServers"]),
-        ("claude-code (user)", home / ".claude.json", ["mcpServers"]),
+        ("claude-code (user)", _claude_code_config_path(), ["mcpServers"]),
+        ("codex", _codex_config_path(), ["mcp_servers"]),
+        ("grok", _grok_config_path(), ["mcp_servers"]),
+        ("antigravity", _antigravity_config_path(), ["mcpServers"]),
+        ("opencode", _opencode_config_path(), ["mcp"]),
         ("claude-desktop", _claude_desktop_config_path(), ["mcpServers"]),
         ("zed", home / ".config/zed/settings.json", ["context_servers"]),
         ("gemini", home / ".gemini/settings.json", ["mcpServers"]),
     ]
 
 
-def _scan_json_clients() -> Iterator[tuple[str, str, list[str]]]:
-    """Yield (client_label, command, args) for each guaardvark entry found."""
-    for label, path, keys in _client_config_sources():
-        if not path.is_file():
+def _scan_clients() -> tuple[list[tuple[str, str, list[str]]], list[tuple[str, Path]]]:
+    """``(entries, unreadable)``: a (client_label, command, args) row for each
+    guaardvark entry found, and the configs that exist but could not be parsed."""
+    entries: list[tuple[str, str, list[str]]] = []
+    unreadable: list[tuple[str, Path]] = []
+    for label, path, tables in _client_config_sources():
+        if not path.is_file() or path.stat().st_size == 0:
             continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        data = _load_config_file(path)
+        if data is None:
+            unreadable.append((label, path))
             continue
-        if not isinstance(data, dict):
-            continue
-        for key in keys:
-            for command, args in _scan_mcp_servers_obj(data.get(key)):
-                yield label, command, args
+        for table in tables:
+            for command, args in _scan_mcp_servers_obj(data.get(table)):
+                entries.append((label, command, args))
         # claude-code also nests per-project server maps.
         for proj in (data.get("projects") or {}).values() if label.startswith("claude-code") else ():
             if isinstance(proj, dict):
                 for command, args in _scan_mcp_servers_obj(proj.get("mcpServers")):
-                    yield f"{label} project", command, args
-
-
-def _scan_grok() -> Iterator[tuple[str, str, list[str]]]:
-    path = Path.home() / ".grok/config.toml"
-    if not path.is_file():
-        return
-    try:
-        import tomllib
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return
-    entry = (data.get("mcp_servers") or {}).get(SERVER_NAME)
-    if isinstance(entry, dict):
-        yield "grok", str(entry.get("command", "")), [str(a) for a in entry.get("args", [])]
+                    entries.append((f"{label} project", command, args))
+    return entries, unreadable
 
 
 def _check_clients() -> bool:
-    found = list(_scan_json_clients()) + list(_scan_grok())
+    # Shown relative to the checkout and home: doctor output gets pasted into
+    # issues and shared on screen.
+    from backend.utils.display_paths import display_path, display_text
+
+    found, unreadable = _scan_clients()
+    for label, path in unreadable:
+        _report(_WARN, f"client: {label}",
+                f"could not parse {display_path(path)} (comments or invalid syntax); "
+                "its entry was not checked")
     if not found:
         _report(_WARN, "client configs",
                 f"no client has a '{SERVER_NAME}' entry — run: python -m backend.mcp install")
@@ -339,9 +360,6 @@ def _check_clients() -> bool:
     ok = True
     for label, command, args in found:
         problems = _entry_problems(command, args)
-        # Shown relative to the checkout and home: doctor output gets pasted into
-        # issues and shared on screen.
-        from backend.utils.display_paths import display_text
         if problems:
             ok = _report(_FAIL, f"client: {label}", display_text("; ".join(problems))) and ok
         else:

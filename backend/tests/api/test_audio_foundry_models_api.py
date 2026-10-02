@@ -35,6 +35,8 @@ def _minimax_stub(*, installed=False):
 def client(monkeypatch):
     afm.reset_download_state()
     monkeypatch.setattr(afm, "is_hub_cached", lambda repo, probe: False)
+    # No plugin venv to inspect, whatever the machine running the tests has.
+    monkeypatch.setattr(afm, "venv_has_package", lambda name: None)
     monkeypatch.setattr(
         afm,
         "plugin_snapshot",

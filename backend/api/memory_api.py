@@ -471,10 +471,12 @@ def clear_memories():
 
 @memory_bp.route("/recall-debug", methods=["GET", "POST"])
 def recall_debug():
-    """Return selected memory ids and scores for a recall query."""
+    """Return selected memory ids and scores for a recall query. Looking does
+    not count as recalling, so the rows it shows are left as they were."""
     data = request.get_json(silent=True) if request.method == "POST" else request.args
     data = data or {}
     memories = _query_memories(
+        count_access=False,
         limit=int(data.get("limit", 10)),
         query=data.get("query"),
         session_id=data.get("session_id"),
@@ -545,6 +547,8 @@ def _query_memories(
     include_global: bool = True,
     cli_working_memory: dict | None = None,
     raise_errors: bool = False,
+    include_always_on: bool = True,
+    count_access: bool = True,
 ):
     """Single source of truth for memory SELECT.
 
@@ -556,6 +560,14 @@ def _query_memories(
     Prompt builders keep the default and get an empty list when the query
     fails. A caller that reports results to a person passes raise_errors=True,
     so a failure is not shown as "no memories".
+
+    include_always_on adds up to three high-importance facts and notes even
+    when they do not match the query, which prompt recall wants and a search
+    that reports "matches" does not.
+
+    count_access records the returned rows as recalled (access_count and
+    last_accessed_at, which feed the "recalled before" rank reason). A
+    read-only search passes False.
     """
     try:
         q = db.session.query(AgentMemory)
@@ -647,7 +659,7 @@ def _query_memories(
             )
 
         always_on = []
-        if recall_query and not types:
+        if recall_query and not types and include_always_on:
             always_q = db.session.query(AgentMemory).filter(
                 AgentMemory.type.in_(["fact", "note"]),
                 AgentMemory.importance >= 0.85,
@@ -688,7 +700,7 @@ def _query_memories(
             if len(selected) >= limit:
                 break
 
-        if selected:
+        if selected and count_access:
             now = utcnow()
             for memory in selected:
                 memory.access_count = int(memory.access_count or 0) + 1

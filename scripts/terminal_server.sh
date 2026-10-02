@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # terminal_server.sh — Manage the ttyd web terminal with Vader theme
 # Usage: terminal_server.sh {start|stop|status|regenerate-credentials}
+#
+# The terminal is a writable login shell for this user, so:
+# - it listens on 127.0.0.1 only. GUAARDVARK_TERMINAL_INTERFACE (an address
+#   such as 0.0.0.0, or an interface name) opens it to the network on purpose;
+# - it asks for a username and password (HTTP basic auth). They are made per
+#   install, on the first start, from 16 random characters (user "gvk"), and
+#   kept in data/terminal/.terminal_auth, readable by this user only;
+#   regenerate-credentials makes new ones;
+# - ttyd's --check-origin refuses a websocket opened by a page from another
+#   origin, which a browser would otherwise let ride on the saved login.
 
 set -euo pipefail
 
@@ -11,6 +21,7 @@ AUTH_FILE="$PROJECT_ROOT/data/terminal/.terminal_auth"
 CSS_FILE="$PROJECT_ROOT/data/terminal/vader-terminal.css"
 LOG_FILE="$PROJECT_ROOT/logs/terminal.log"
 TERMINAL_PORT="${TERMINAL_PORT:-7682}"
+TERMINAL_INTERFACE="${GUAARDVARK_TERMINAL_INTERFACE:-127.0.0.1}"
 
 mkdir -p "$PROJECT_ROOT/pids" "$PROJECT_ROOT/data/terminal" "$PROJECT_ROOT/logs"
 
@@ -18,7 +29,8 @@ generate_credentials() {
     local user="gvk"
     local pass
     pass=$(openssl rand -base64 18 | tr -d '/+=' | head -c 16)
-    echo "${user}:${pass}" > "$AUTH_FILE"
+    # Created unreadable to others from the start, not chmod-ed afterwards.
+    (umask 077 && echo "${user}:${pass}" > "$AUTH_FILE")
     chmod 600 "$AUTH_FILE"
     echo "$pass"
 }
@@ -79,8 +91,9 @@ HTMLEOF
 
     nohup ttyd \
         --port "$TERMINAL_PORT" \
-        --interface 0.0.0.0 \
+        --interface "$TERMINAL_INTERFACE" \
         --credential "$creds" \
+        --check-origin \
         --writable \
         --max-clients 3 \
         --client-option fontSize=15 \

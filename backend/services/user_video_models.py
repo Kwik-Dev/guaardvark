@@ -111,6 +111,12 @@ def preview_hf_url(url: str) -> dict:
     wired = [m for m in matches if m.get("wired")]
     unwired = [m for m in matches if not m.get("wired")]
     top = (unwired or wired or [None])[0]
+    warnings = list(inspected.get("warnings") or [])
+    if top and top.get("shipped"):
+        warnings.append(
+            f"This file is the shipped model '{top['label']}'. "
+            "Install it from the model list instead of adding a copy."
+        )
     return {
         "hf_repo": inspected["hf_repo"],
         "revision": inspected.get("revision") or "main",
@@ -122,7 +128,7 @@ def preview_hf_url(url: str) -> dict:
         "token_present": inspected.get("token_present") or False,
         "pipeline_tag": inspected.get("pipeline_tag"),
         "index_class": inspected.get("index_class"),
-        "warnings": list(inspected.get("warnings") or []),
+        "warnings": warnings,
         "matches": matches,
         "suggested_role": (top or {}).get("role") if top and top.get("wired") else None,
         "suggested_like": (top or {}).get("like") if top and top.get("wired") else None,
@@ -344,7 +350,11 @@ def resolve_text_encoder(model_key: str, encoder_id: str | None) -> tuple[str | 
     if not filename:
         return None, f"{label} has no file."
     if not is_model_installed(eid):
-        return None, f"{label} is not installed. Open Manage Video Models to download it."
+        from backend.services.job_types import RenderErrorKind, RenderFailure
+        return None, RenderFailure(
+            RenderErrorKind.COMPANION_MISSING,
+            f"{label} is not installed. Open Manage Video Models to download it.",
+        )
     return filename, None
 
 

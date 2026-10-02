@@ -33,11 +33,30 @@ def _find_checkout() -> Path | None:
     for p in [curr, *curr.parents]:
         if (p / "start.sh").is_file():
             return p
+    return _installed_checkout()
+
+
+def _installed_checkout() -> Path | None:
+    """MCP clients launch `guaardvark mcp serve` from their own folder, so fall
+    back to the checkout this CLI is installed from, then to the install that
+    last ran start.sh."""
+    own = Path(__file__).resolve().parents[3]
+    if (own / "start.sh").is_file() and (own / "backend").is_dir():
+        return own
+    try:
+        import json
+
+        recorded = json.loads((Path.home() / ".guaardvark" / "runtime.json").read_text()).get("root")
+        if recorded and (Path(recorded) / "start.sh").is_file():
+            return Path(recorded).resolve()
+    except (OSError, ValueError):
+        pass
     return None
 
 
 _CHECKOUT_NOT_FOUND_MSG = (
-    "Guaardvark checkout not found (looked for start.sh via GUAARDVARK_ROOT or cwd); "
+    "Guaardvark checkout not found (looked for start.sh via GUAARDVARK_ROOT, the current folder, "
+    "this CLI's own checkout and ~/.guaardvark/runtime.json); "
     "a checkout is required (git clone https://github.com/guaardvark/guaardvark + ./start.sh).\n"
 )
 
@@ -96,23 +115,29 @@ def mcp_install(
         None,
         "--client",
         "-c",
-        help="Client to configure (repeatable). Default: every detected client.",
+        help="Client to configure (repeatable): cursor, claude-code, codex, grok, antigravity, "
+             "opencode, claude-desktop, zed, gemini. Default: every detected client.",
     ),
-    dry_run: bool = typer.Option(False, "--dry-run"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would change, change nothing"),
+    skills: bool = typer.Option(False, "--skills", help="Also link Guaardvark's agent skills for Claude Code"),
 ):
     """Write the Guaardvark MCP entry into agent client configs."""
     args = ["install"]
     if dry_run:
         args.append("--dry-run")
+    if skills:
+        args.append("--skills")
     for c in client or []:
         args.extend(["--client", c])
     raise typer.Exit(_run_mcp(args))
 
 
 @mcp_app.command("doctor")
-def mcp_doctor():
+def mcp_doctor(
+    call: bool = typer.Option(False, "--call", help="Also make a few read-only tool calls"),
+):
     """Diagnose MCP server + client config."""
-    raise typer.Exit(_run_mcp(["doctor"]))
+    raise typer.Exit(_run_mcp(["doctor", "--call"] if call else ["doctor"]))
 
 
 @mcp_app.command("list-tools")
@@ -121,7 +146,7 @@ def mcp_list_tools():
     raise typer.Exit(_run_mcp(["list-tools"]))
 
 
-# `llx mcp client ...`: the external MCP servers the agent itself uses.
+# `guaardvark mcp client ...`: the external MCP servers the agent itself uses.
 from llx.commands.mcp_client import mcp_client_app  # noqa: E402
 
 mcp_app.add_typer(mcp_client_app, name="client")

@@ -122,6 +122,26 @@ class TestConfig:
             assert leaked not in env
 
 
+    def test_fixed_args_round_trip(self):
+        from backend.services.mcp_config import parse_server
+
+        cfg = parse_server("zg", {"command": "zg", "fixedArgs": {"root": "${GUAARDVARK_ROOT}"}})
+        assert cfg.fixed_args == {"root": "${GUAARDVARK_ROOT}"}
+        assert cfg.to_json()["fixedArgs"] == {"root": "${GUAARDVARK_ROOT}"}
+        assert cfg.to_editable()["fixedArgs"] == {"root": "${GUAARDVARK_ROOT}"}
+        assert cfg.to_public()["fixed_arg_names"] == ["root"]
+        assert parse_server("zg", cfg.to_json()).fixed_args == cfg.fixed_args
+
+    def test_fixed_args_expand_the_checkout_root(self):
+        from backend import config
+        from backend.services.mcp_config import parse_server, resolve_fixed_args
+
+        cfg = parse_server("zg", {"command": "zg", "fixedArgs": {"root": "${GUAARDVARK_ROOT}",
+                                                                 "limit": "5"}})
+        assert resolve_fixed_args(cfg, {}) == {"root": str(config.GUAARDVARK_ROOT), "limit": "5"}
+        assert resolve_fixed_args(cfg, {"GUAARDVARK_ROOT": "/srv/other"})["root"] == "/srv/other"
+
+
 # ---------------------------------------------------------------------------
 # Policy / output hygiene
 # ---------------------------------------------------------------------------
@@ -346,6 +366,20 @@ class TestProxyTools:
         res = mcp_service.call_tool("fx", "delete_thing", {"name": "x"}, approved=True)
         assert not res["success"] and "blocked" in res["error"]
 
+    def test_fixed_args_are_hidden_from_the_model_and_sent(self, mcp_service):
+        from backend.services.agent_tools import get_tool_registry
+        from backend.tools import mcp_tools
+
+        mcp_tools.install_proxy_sync()
+        mcp_service._runtimes["fx"].config.fixed_args = {"b": "4"}
+        assert mcp_service.connect("fx")["success"]
+        add = get_tool_registry().get_tool("mcp__fx__add")
+        assert set(add.parameters) == {"a"}  # the model is asked for a only
+        res = get_tool_registry().execute_tool("mcp__fx__add", a=1)
+        assert res.success and "\n5\n" in res.output  # b arrived as the integer 4
+        res = get_tool_registry().execute_tool("mcp__fx__add", a=1, b=100)
+        assert res.success and "\n5\n" in res.output  # a model-sent value never wins
+
     def test_proxies_removed_on_disconnect(self, proxied, mcp_service):
         mcp_service.disconnect("fx")
         assert proxied.get_tool("mcp__fx__add") is None
@@ -400,13 +434,25 @@ def api(mcp_service):
 class TestRestApi:
     def test_config_writes_blocked_for_remote_hosts(self, api, monkeypatch):
         monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+        monkeypatch.delenv("GUAARDVARK_PROTECT_TOOL_ENDPOINTS", raising=False)
         remote = {"REMOTE_ADDR": "203.0.113.5"}
         entry = {"command": "sh", "args": ["-c", "true"]}
         assert api.put("/api/automation/mcp/servers/evil", json=entry, environ_base=remote).status_code == 403
         assert api.delete("/api/automation/mcp/servers/fx", environ_base=remote).status_code == 403
         assert api.post("/api/automation/mcp/reload-config", environ_base=remote).status_code == 403
-        # Reads stay open to the LAN UI (the views are redacted).
+        # Reads are closed to other hosts too, unless the install opts out.
+        assert api.get("/api/automation/mcp/servers", environ_base=remote).status_code == 403
+
+    def test_opting_out_reopens_reads_but_not_config_writes(self, api, monkeypatch):
+        monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+        monkeypatch.setenv("GUAARDVARK_PROTECT_TOOL_ENDPOINTS", "false")
+        remote = {"REMOTE_ADDR": "203.0.113.5"}
+        entry = {"command": "sh", "args": ["-c", "true"]}
+        # The views are redacted.
         assert api.get("/api/automation/mcp/servers", environ_base=remote).status_code == 200
+        assert api.put("/api/automation/mcp/servers/evil", json=entry, environ_base=remote).status_code == 403
+        assert api.delete("/api/automation/mcp/servers/fx", environ_base=remote).status_code == 403
+        assert api.post("/api/automation/mcp/reload-config", environ_base=remote).status_code == 403
 
     def test_config_writes_need_the_key_when_configured(self, api, monkeypatch):
         monkeypatch.setenv("GUAARDVARK_API_KEY", "k1")
@@ -429,8 +475,13 @@ class TestRestApi:
 
     def test_remote_caller_cannot_run_gated_tools(self, api, monkeypatch):
         monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+        monkeypatch.delenv("GUAARDVARK_PROTECT_TOOL_ENDPOINTS", raising=False)
         remote = {"REMOTE_ADDR": "203.0.113.5"}
         assert api.post("/api/automation/mcp/connect", json={"server": "fx"}).get_json()["success"]
+        call = {"server": "fx", "tool": "add", "arguments": {"a": 1, "b": 2}}
+        assert api.post("/api/automation/mcp/execute", environ_base=remote, json=call).status_code == 403
+        # An install that opens the route to other hosts still holds them to the policy.
+        monkeypatch.setenv("GUAARDVARK_PROTECT_TOOL_ENDPOINTS", "false")
         gated = api.post("/api/automation/mcp/execute", environ_base=remote,
                          json={"server": "fx", "tool": "delete_thing", "arguments": {"name": "z"}})
         assert gated.get_json().get("requires_confirmation") is True

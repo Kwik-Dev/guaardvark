@@ -70,8 +70,17 @@ def _render(query: str, results: List[Dict[str, Any]], trace: Dict[str, Any]) ->
         src = meta.get("source_filename") or meta.get("file_path") or "unknown source"
         page = meta.get("page_label")
         loc = f" p.{page}" if page else ""
+        # Two numbers with different meanings. When the cross-encoder ran, its
+        # relevance score is what the ranking starts from; the retrieval (fusion)
+        # score is from the step before and does not follow the order shown.
         score = r.get("score")
-        score_s = f" (score {score:.3f})" if isinstance(score, (int, float)) else ""
+        rerank = r.get("rerank_score")
+        shown = []
+        if isinstance(rerank, (int, float)):
+            shown.append(f"rerank {rerank:.3f}")
+        if isinstance(score, (int, float)):
+            shown.append(f"retrieval {score:.3f}" if shown else f"score {score:.3f}")
+        score_s = f" ({' · '.join(shown)})" if shown else ""
         text = (r.get("text") or "").strip()
         if len(text) > _CHUNK_CHARS:
             text = text[:_CHUNK_CHARS].rstrip() + f"… [+{len(r['text']) - _CHUNK_CHARS} chars]"
@@ -90,36 +99,50 @@ class KnowledgeSearchTool(BaseTool):
     name = "search_knowledge_base"
     read_only = True
     description = (
-        "Search the internal knowledge base for information about the project, architecture, "
-        "code repositories, or documents. Returns verbatim source passages with their filenames "
-        "and relevance scores, not a summary — cite the filenames in your answer."
+        "Search the user's indexed documents and code repositories (the local knowledge base) by "
+        "meaning and keywords. Returns the top passages (the configured number, 3 on a stock install, "
+        "up to 50 via top_k), each with its filename, page when known and its scores: 'rerank' (the "
+        "reranker's relevance score, which the ranking starts from, shown when it ran) and "
+        "'retrieval' (the earlier search score, which does not follow the order shown); passages "
+        "usually open with an index label, e.g. 'Document: <file>. Section: <path>.' for documents or "
+        "'[python] File: <path>.' for code, before the source text. Once corpus "
+        "summaries have been built, results can include LLM-written summaries named "
+        "'[corpus summary ...]': cite only real filenames. Results are ranked, not filtered, so an "
+        "off-topic question still gets the nearest passages; a header line flags degraded retrieval. "
+        "Needs the Guaardvark backend running. For Guaardvark's own source use search_codebase; for "
+        "saved facts, search_memory; to read a whole section, read_document_section."
     )
     parameters = {
         "query": ToolParameter(
             name="query",
             type="string",
-            description="The specific question or query to search for in the knowledge base.",
+            description="What to find, as a question or key terms in plain words; matched by meaning and, when keyword search is on, by exact terms too.",
             required=True
         ),
         "top_k": ToolParameter(
             name="top_k",
             type="int",
-            description="How many passages to return (1-50). Omit for the configured default.",
+            minimum=1,
+            maximum=50,
+            description="How many passages to return, 1-50. Omit for the configured default (3 on a stock install).",
             required=False
         ),
         "filter_type": ToolParameter(
             name="filter_type",
             type="string",
             description=(
-                "Optional filter on the indexed content type. Real values include "
-                "'document', 'text', and 'repository_summary'. Omit to search everything."
+                "Keep only passages with this content_type label. Labels are set per passage by a "
+                "heuristic, e.g. 'text', 'header', 'table', 'list' or 'code' for files, a language "
+                "name such as 'python' for code, and 'repository_summary' or 'repository_map' for "
+                "analysed repositories. One label can miss relevant passages; omit it to search "
+                "everything."
             ),
             required=False
         ),
         "project_id": ToolParameter(
             name="project_id",
             type="string",
-            description="Optional project ID to scope the search.",
+            description="Id of a Guaardvark project, e.g. '12', to search only its documents. Pass one only when the user gives it; no tool here lists projects.",
             required=False
         )
     }

@@ -30,13 +30,16 @@ class AnimationRequest:
     fps: int = 8
     output_format: str = "both"  # gif, mp4, both
     style: str = "realistic"
-    model: str = "sd-1.5"
+    # "auto": the image auto-router's pick among downloaded models that can run
+    # img2img, which every frame after the first needs.
+    model: str = "auto"
     use_vision_steering: bool = False
     loop: bool = True  # ping-pong for smooth loop
     seed: int = None
     negative_prompt: str = "blurry, low quality, distorted, deformed"
-    num_inference_steps: int = 20
-    guidance_scale: float = 7.5
+    # None: the resolved model family's defaults (stills_defaults).
+    num_inference_steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
 
 
 @dataclass
@@ -53,7 +56,7 @@ class AnimationResult:
 
 
 class AnimationGenerator:
-    """Generates frame-sequence animations using SD txt2img + img2img."""
+    """Generates frame-sequence animations: txt2img for frame 1, img2img for the rest."""
 
     def __init__(self):
         from backend.config import OUTPUT_DIR
@@ -75,6 +78,20 @@ class AnimationGenerator:
             if not generator.service_available:
                 result.error = "Image generation service not available"
                 return result
+
+            model, model_error = self._pick_model(generator, request)
+            if model_error:
+                result.error = model_error
+                return result
+            request.model = model
+            from backend.services.stills_defaults import resolve_stills_defaults
+            sampling = resolve_stills_defaults(
+                model, width=request.width, height=request.height,
+                steps=request.num_inference_steps, guidance=request.guidance_scale,
+                replace_legacy_sd_markers=False,
+            )
+            request.num_inference_steps = sampling["steps"]
+            request.guidance_scale = sampling["guidance"]
 
             # Validate frame count
             request.num_frames = max(2, min(request.num_frames, 24))
@@ -248,6 +265,34 @@ class AnimationGenerator:
 
         return result
 
+    @staticmethod
+    def _pick_model(generator, request: AnimationRequest) -> tuple[Optional[str], Optional[str]]:
+        """(catalog key, None) to render with, or (None, why not).
+
+        Every frame after the first is img2img, so the model must support it; a
+        named model that cannot is refused rather than rendering one still frame
+        over and over.
+        """
+        requested = (request.model or "").strip()
+        if requested and requested.lower() != "auto":
+            if generator.supports_img2img(requested):
+                return requested, None
+            return None, (
+                f"Image model '{requested}' cannot animate: frames after the first are made with "
+                "img2img, which Z-Image Turbo, SDXL and Stable Diffusion models support."
+            )
+        picked = generator._auto_select_model(request.prompt, request.style)
+        if picked and generator.supports_img2img(picked):
+            return picked, None
+        for key, model_id in generator.available_models.items():
+            if generator.supports_img2img(key) and generator._is_model_downloaded(model_id):
+                return key, None
+        return None, (
+            "No downloaded image model can animate: frames after the first are made with img2img, "
+            "which needs Z-Image Turbo, SDXL or a Stable Diffusion model. Download Z-Image Turbo "
+            "in Settings > Image Models."
+        )
+
     def _build_frame_prompt(
         self, base_prompt: str, motion_prompt: str, frame_idx: int, total_frames: int
     ) -> str:
@@ -316,9 +361,8 @@ class AnimationGenerator:
                     )
                     text = response.get("message", {}).get("content", "").strip()
                     if text and len(text) > 20:
-                        # Strip any thinking tags
-                        import re
-                        text = re.sub(r'<think>[\s\S]*?</think>\s*', '', text).strip()
+                        from backend.utils.inline_reasoning import split_inline_reasoning
+                        text = split_inline_reasoning(text)[1]
                         return text
                 except Exception:
                     continue

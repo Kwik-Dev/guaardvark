@@ -372,7 +372,15 @@ def set_env_value(key: str, value: Optional[str], root: Optional[Path] = None) -
             out[-1] += "\n"
         out.append(new_line)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("".join(out), encoding="utf-8")
+    # .env holds secrets (database URL, API key), so the temporary copy is
+    # private from its first byte; it then takes the mode the file had.
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("".join(out))
     try:
         os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o600)
     except OSError:

@@ -531,7 +531,16 @@ def resolve_user_loras(generator, model: str, adapters: list) -> tuple[list, flo
         if not user_files_present(generator, sentinel):
             return [], None, f"{label} is not installed. Open Manage Image Models to download it."
         uf = generator.user_files[sentinel]
-        paths.append(str(_user_dest_dir(generator, uf) / uf["files"][0]["dst"]))
+        path = _user_dest_dir(generator, uf) / uf["files"][0]["dst"]
+        if entry.get("family") == "zimage":
+            from backend.services.zimage_lora_check import lora_file_problem
+            problem = lora_file_problem(path)
+            if problem:
+                return [], None, (
+                    f"{label} can't be used on Z-Image. {problem} "
+                    "Remove it in Settings > Image (Manage Image Generation Models)."
+                )
+        paths.append(str(path))
         s = raw.get("strength") if isinstance(raw, dict) else None
         s = float(s if s is not None else entry.get("strength") or DEFAULT_LORA_STRENGTH)
         strength = s if strength is None else max(strength, s)

@@ -34,8 +34,20 @@ try:
     import xlrd
     xlrd_available = True
 except ImportError:
-    logger.info("xlrd not available - .xls files will use pandas engine")
+    logger.info("xlrd not available - .xls files cannot be read")
     xlrd_available = False
+
+# Import pyxlsb (optional, for binary .xlsb files)
+try:
+    import pyxlsb
+    pyxlsb_available = True
+except ImportError:
+    logger.info("pyxlsb not available - .xlsb files cannot be read")
+    pyxlsb_available = False
+
+# The formats openpyxl reads. It refuses .xls and .xlsb by their extension;
+# those go through pandas, which picks xlrd or pyxlsb from the file's content.
+OPENPYXL_SUFFIXES = {'.xlsx', '.xlsm'}
 
 @dataclass
 class WorksheetInfo:
@@ -129,9 +141,9 @@ class ExcelContentExtractor:
             'security': 0
         }
         
-        if not openpyxl_available:
+        if not openpyxl_available or Path(file_path).suffix.lower() not in OPENPYXL_SUFFIXES:
             return properties
-            
+
         try:
             workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=False)
             props = workbook.properties
@@ -153,73 +165,121 @@ class ExcelContentExtractor:
             
         return properties
     
+    def _unreadable_reason(self, file_path: str) -> Optional[str]:
+        """Why this workbook cannot be read, told from its first bytes and the
+        installed packages before any reader is tried; None when it can be."""
+        from backend.utils.enhanced_file_processor import container_kind, is_encrypted_office_file
+
+        suffix = Path(file_path).suffix.lower()
+        kind = container_kind(file_path)
+        if kind == "empty":
+            return "the file is empty (0 bytes)"
+        if kind == "ole":
+            # The old binary workbook format, or an encrypted package in the
+            # same kind of container.
+            if is_encrypted_office_file(file_path):
+                return "the workbook is password-protected; save a copy without the password to read it"
+            if not xlrd_available:
+                named = "" if suffix == ".xls" else f" (an old-format workbook despite its {suffix} name)"
+                return f"reading .xls workbooks{named} needs the xlrd package, which is not installed"
+            return None
+        if kind == "zip":
+            if suffix == ".xlsb" and not pyxlsb_available:
+                return "reading .xlsb workbooks needs the pyxlsb package, which is not installed"
+            return None
+        return (
+            f"the file is not an Excel workbook: its content is not the {suffix} format "
+            "(it is damaged, or another kind of file saved under this name)"
+        )
+
+    @staticmethod
+    def _failure_reason(error: BaseException) -> str:
+        """The reason a reader gave for not opening a workbook."""
+        name, text = type(error).__name__, str(error).strip()
+        if name in ("BadZipFile", "KeyError", "InvalidFileException"):
+            return f"the workbook is damaged or is not an Excel file ({text})"
+        if isinstance(error, ImportError):
+            return text
+        return f"the workbook could not be opened ({name}: {text})" if text else f"the workbook could not be opened ({name})"
+
     def _get_worksheet_info(self, file_path: str) -> List[WorksheetInfo]:
-        """Get information about all worksheets."""
+        """Get information about all worksheets. A workbook that cannot be
+        opened raises the reader's own error."""
+        from backend.utils.enhanced_file_processor import container_kind
+
         worksheets = []
-        
-        try:
-            if openpyxl_available:
-                # Use openpyxl for detailed worksheet info
-                workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-                
-                for idx, sheet_name in enumerate(workbook.sheetnames):
-                    sheet = workbook[sheet_name]
-                    
-                    # Count non-empty cells
-                    row_count = sheet.max_row if sheet.max_row else 0
-                    col_count = sheet.max_column if sheet.max_column else 0
-                    
-                    # Check if sheet has actual data (not just formatting)
-                    has_data = False
-                    if row_count > 0 and col_count > 0:
-                        for row in sheet.iter_rows(max_row=min(10, row_count), max_col=min(10, col_count)):
-                            if any(cell.value is not None for cell in row):
-                                has_data = True
-                                break
-                    
+        # An old-format workbook saved under an .xlsx name is left to pandas,
+        # which reads it by content.
+        use_openpyxl = (
+            openpyxl_available
+            and Path(file_path).suffix.lower() in OPENPYXL_SUFFIXES
+            and container_kind(file_path) == "zip"
+        )
+
+        if use_openpyxl:
+            # Use openpyxl for detailed worksheet info
+            workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+
+            for idx, sheet_name in enumerate(workbook.sheetnames):
+                sheet = workbook[sheet_name]
+
+                # Count non-empty cells
+                row_count = sheet.max_row if sheet.max_row else 0
+                col_count = sheet.max_column if sheet.max_column else 0
+
+                # Check if sheet has actual data (not just formatting)
+                has_data = False
+                if row_count > 0 and col_count > 0:
+                    for row in sheet.iter_rows(max_row=min(10, row_count), max_col=min(10, col_count)):
+                        if any(cell.value is not None for cell in row):
+                            has_data = True
+                            break
+
+                worksheet_info = WorksheetInfo(
+                    name=sheet_name,
+                    index=idx,
+                    row_count=row_count,
+                    column_count=col_count,
+                    has_data=has_data,
+                    visible=sheet.sheet_state == 'visible'
+                )
+                worksheets.append(worksheet_info)
+
+            workbook.close()
+
+        else:
+            # pandas picks the reader from the file's content: xlrd for .xls,
+            # pyxlsb for .xlsb, openpyxl for the rest.
+            excel_file = pd.ExcelFile(file_path)
+            sheet_error = None
+
+            for idx, sheet_name in enumerate(excel_file.sheet_names):
+                try:
+                    df = pd.read_excel(excel_file, sheet_name=sheet_name, nrows=0)  # Just headers
+                    col_count = len(df.columns)
+
+                    # Read a small sample to estimate rows
+                    df_sample = pd.read_excel(excel_file, sheet_name=sheet_name, nrows=1000)
+                    row_count = len(df_sample)
+                    has_data = not df_sample.empty
+
                     worksheet_info = WorksheetInfo(
                         name=sheet_name,
                         index=idx,
                         row_count=row_count,
                         column_count=col_count,
-                        has_data=has_data,
-                        visible=sheet.sheet_state == 'visible'
+                        has_data=has_data
                     )
                     worksheets.append(worksheet_info)
-                
-                workbook.close()
-                
-            else:
-                # Fallback to pandas for basic info
-                excel_file = pd.ExcelFile(file_path)
-                
-                for idx, sheet_name in enumerate(excel_file.sheet_names):
-                    try:
-                        df = pd.read_excel(excel_file, sheet_name=sheet_name, nrows=0)  # Just headers
-                        col_count = len(df.columns)
-                        
-                        # Read a small sample to estimate rows
-                        df_sample = pd.read_excel(excel_file, sheet_name=sheet_name, nrows=1000)
-                        row_count = len(df_sample)
-                        has_data = not df_sample.empty
-                        
-                        worksheet_info = WorksheetInfo(
-                            name=sheet_name,
-                            index=idx,
-                            row_count=row_count,
-                            column_count=col_count,
-                            has_data=has_data
-                        )
-                        worksheets.append(worksheet_info)
-                        
-                    except Exception as e:
-                        logger.warning(f"Failed to analyze worksheet {sheet_name}: {e}")
-                        
-                excel_file.close()
-                
-        except Exception as e:
-            logger.error(f"Failed to get worksheet info: {e}")
-            
+
+                except Exception as e:
+                    logger.warning(f"Failed to analyze worksheet {sheet_name}: {e}")
+                    sheet_error = e
+
+            excel_file.close()
+            if not worksheets and sheet_error is not None:
+                raise sheet_error
+
         return worksheets
     
     def _extract_sheet_content(self, file_path: str, sheet_name: str, max_rows: int = 10000) -> Dict[str, Any]:
@@ -270,8 +330,8 @@ class ExcelContentExtractor:
             
             content['text_content'] = "\n".join(text_lines)
             
-            # Extract formulas if openpyxl is available
-            if openpyxl_available:
+            # Extract formulas where openpyxl can open the file
+            if openpyxl_available and Path(file_path).suffix.lower() in OPENPYXL_SUFFIXES:
                 try:
                     workbook = openpyxl.load_workbook(file_path, data_only=False)
                     if sheet_name in workbook.sheetnames:
@@ -335,15 +395,28 @@ class ExcelContentExtractor:
             return result
         
         logger.info(f"Processing Excel file: {file_path} ({validation['file_size_mb']:.1f}MB)")
-        
+
+        try:
+            unreadable = self._unreadable_reason(file_path)
+        except OSError as e:
+            unreadable = f"the file could not be opened ({e})"
+        if unreadable:
+            result['error'] = unreadable
+            return result
+
         try:
             # Extract worksheet information
-            worksheets_info = self._get_worksheet_info(file_path)
-            
+            try:
+                worksheets_info = self._get_worksheet_info(file_path)
+            except Exception as e:
+                logger.error(f"Failed to get worksheet info: {e}")
+                result['error'] = self._failure_reason(e)
+                return result
+
             if not worksheets_info:
                 result['error'] = "No worksheets found in Excel file"
                 return result
-            
+
             # Limit processing to prevent performance issues
             sheets_to_process = worksheets_info[:self.max_sheets_to_process]
             
@@ -360,7 +433,17 @@ class ExcelContentExtractor:
                 
                 if sheet_content['text_content']:
                     all_text_content.append(sheet_content['text_content'])
-            
+                elif sheet_content.get('error'):
+                    all_text_content.append(
+                        f"Worksheet '{sheet_info.name}' could not be read: {sheet_content['error']}")
+
+            # Every sheet that holds data failed to read: that is a failed
+            # read, not a workbook with nothing in it.
+            sheet_errors = [sheet['error'] for sheet in worksheets_content if sheet.get('error')]
+            if worksheets_content and len(sheet_errors) == len(worksheets_content):
+                result['error'] = f"the worksheets could not be read ({sheet_errors[0]})"
+                return result
+
             # Extract workbook properties
             workbook_properties = self._extract_workbook_properties(file_path)
             
@@ -419,6 +502,7 @@ class ExcelContentExtractor:
             'pandas_available': pandas_available,
             'openpyxl_available': openpyxl_available,
             'xlrd_available': xlrd_available,
+            'pyxlsb_available': pyxlsb_available,
             'advanced_features': advanced_features,
             'supported_formats': list(self.supported_formats),
             'max_file_size_mb': self.max_file_size_mb,

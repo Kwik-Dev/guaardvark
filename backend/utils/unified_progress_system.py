@@ -728,6 +728,55 @@ class UnifiedProgressSystem:
         with self._lock:
             return self._active_processes.get(process_id)
     
+    def get_job_status(self, process_id: str) -> Optional[Dict[str, Any]]:
+        """One job's state by its id, or None when nothing knows it.
+
+        Live from this process's memory while it tracks the job; otherwise
+        from the metadata.json record the process running it writes under
+        OUTPUT_DIR/.progress_jobs, which is the only place a job running in
+        the Celery worker shows up here. Both go about a minute after the job
+        finishes (_cleanup_process). The id comes from a request, so the
+        record is only read from inside that directory.
+        """
+        event = self.get_process(process_id)
+        if event is not None:
+            status = event.status.value
+            return {
+                "job_id": process_id,
+                "status": status,
+                "progress": event.progress,
+                "message": event.message,
+                "process_type": event.process_type.value,
+                "is_complete": status in ("complete", "error", "cancelled"),
+                "updated_at": event.timestamp.isoformat(),
+                "additional_data": event.additional_data or {},
+                "source": "live",
+            }
+        if not self._output_dir:
+            return None
+        try:
+            metadata_file = contained(Path(str(self._output_dir)) / ".progress_jobs", process_id, "metadata.json")
+        except ValueError:
+            return None
+        try:
+            raw = metadata_file.read_text(encoding="utf-8")
+            record = json.loads(raw) if raw.strip() else None
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        return {
+            "job_id": process_id,
+            "status": record.get("status"),
+            "progress": record.get("progress"),
+            "message": record.get("message", ""),
+            "process_type": record.get("process_type"),
+            "is_complete": bool(record.get("is_complete")),
+            "updated_at": record.get("last_update_utc"),
+            "additional_data": record.get("additional_data") or {},
+            "source": "record",
+        }
+
     def get_process_history(self, process_id: str) -> List[ProgressEvent]:
         """Get history for a specific process"""
         with self._lock:

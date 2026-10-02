@@ -292,6 +292,7 @@ const VoiceChat = ({
 
           const onToken = (data) => {
             if (data.session_id !== sessionId) return;
+            if (data.reset) streamedResponseRef.current = '';
             streamedResponseRef.current += (data.content || '');
             setLastResponse(streamedResponseRef.current);
           };

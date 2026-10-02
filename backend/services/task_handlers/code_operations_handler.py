@@ -331,6 +331,9 @@ Return the code properly formatted for {language}."""
             if output_path and generated_code:
                 try:
                     progress_callback(80, f"Saving to {output_path}...", None)
+                    from backend.services import inbound_guard_service as inbound_guard
+                    inbound_guard.guard_file_write(output_path, generated_code, source="code_task",
+                                                   subject=f"generated code -> {output_path}")
                     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
                     with open(output_path, 'w', encoding='utf-8') as f:
                         f.write(generated_code)
@@ -819,6 +822,9 @@ Please provide:
             if output_path and test_code:
                 try:
                     progress_callback(80, f"Saving tests to {output_path}...", None)
+                    from backend.services import inbound_guard_service as inbound_guard
+                    inbound_guard.guard_file_write(output_path, test_code, source="code_task",
+                                                   subject=f"generated tests -> {output_path}")
                     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
                     with open(output_path, 'w', encoding='utf-8') as f:
                         f.write(test_code)

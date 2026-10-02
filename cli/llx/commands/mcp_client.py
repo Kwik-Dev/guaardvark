@@ -1,5 +1,5 @@
-"""`llx mcp client`: the external MCP servers the agent uses (connect, list and
-call tools, manage configuration). `llx mcp` itself covers Guaardvark as an
+"""`guaardvark mcp client`: the external MCP servers the agent uses (connect, list and
+call tools, manage configuration). `guaardvark mcp` itself covers Guaardvark as an
 MCP server for other agents."""
 
 import json
@@ -86,7 +86,7 @@ def mcp_servers(
         for err in data.get("config_errors", []):
             output.print_warning(f"config: {err}")
         if not rows:
-            console.print("[llx.dim]Add one with: llx mcp client add NAME --command npx --arg -y --arg <package>[/llx.dim]")
+            console.print("[llx.dim]Add one with: guaardvark mcp client add NAME --command npx --arg -y --arg <package>[/llx.dim]")
     except (LlxConnectionError, LlxError) as e:
         _fail(e)
 
@@ -188,7 +188,7 @@ def mcp_tools(
             for srv, tools in data.get("tools", {}).items():
                 rows.extend({**t, "_server": srv} for t in tools)
             if not rows:
-                output.print_warning("No connected servers. Try: llx mcp client connect NAME")
+                output.print_warning("No connected servers. Try: guaardvark mcp client connect NAME")
                 return
             output.print_table([{
                 "server": t["_server"],
@@ -361,7 +361,7 @@ def mcp_add(
 ):
     """Add or replace an MCP server in data/config/mcp_servers.json.
 
-    Example: llx mcp client add fs --command npx --arg -y
+    Example: guaardvark mcp client add fs --command npx --arg -y
     --arg @modelcontextprotocol/server-filesystem --arg ~/shared --auto-connect
     """
     try:

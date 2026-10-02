@@ -48,3 +48,22 @@ def test_moe_workflow_labels_high_and_low_noise():
     # silence unused
     assert bridge is not None
     assert captured == {}
+
+
+def test_finish_closes_the_job_the_bridge_reported_on(monkeypatch):
+    """A render that ended leaves its job complete (or error), not at 99%."""
+    import backend.services.comfyui_progress_bridge as bridge_mod
+
+    sent = []
+    monkeypatch.setattr(bridge_mod, "emit_progress_event", lambda **kw: sent.append(kw))
+    bridge = ComfyUIProgressBridge()
+    bridge._process_id, bridge._reported = "job-1", True
+    bridge.finish(True)
+    assert sent[-1]["status"] == "complete" and sent[-1]["progress"] == 100
+    bridge.finish(False)
+    assert sent[-1]["status"] == "error"
+
+
+def test_finish_writes_nothing_for_a_job_it_never_reported():
+    bridge = ComfyUIProgressBridge()
+    bridge.finish(True)  # no process id, no events: nothing to close, no error

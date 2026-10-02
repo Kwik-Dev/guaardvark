@@ -43,6 +43,12 @@ def test_parse_hf_url_variants():
     )
     assert branch["revision"] == "refs/heads/dev"
     assert branch["src"] == "weights/a.safetensors"
+    spaced = umf.parse_hf_url(
+        "https://huggingface.co/org/repo/blob/main/K2%20Style%20(v2).safetensors"
+    )
+    assert spaced["src"] == "K2 Style (v2).safetensors"
+    encoded_pr = umf.parse_hf_url("https://huggingface.co/org/repo/blob/refs%2Fpr%2F3/x.safetensors")
+    assert encoded_pr["revision"] == "refs/pr/3" and encoded_pr["src"] == "x.safetensors"
     assert umf.parse_hf_url("Comfy-Org/MiniMax-H3")["hf_repo"] == "Comfy-Org/MiniMax-H3"
     assert umf.hf_inspect_url("org/repo") == "https://huggingface.co/org/repo"
     assert umf.hf_inspect_url("org/repo", "v1.2") == "https://huggingface.co/org/repo/tree/v1.2"
@@ -170,3 +176,116 @@ def test_find_duplicate():
         catalog, hf_repo="x/y", revision="main",
         files=[{"src": "other.safetensors"}],
     ) is None
+
+
+# ── video: the Ep 19 findings (real Hugging Face listings, 2026-09-27) ──────
+
+_LTX_VIDEO_ROOT = [
+    "ltx-video-2b-v0.9.1.safetensors", "ltxv-13b-0.9.7-dev.safetensors",
+    "ltxv-13b-0.9.7-distilled-lora128.safetensors", "ltxv-2b-0.9.8-distilled.safetensors",
+    "ltxv-spatial-upscaler-0.9.8.safetensors", "text_encoder/model-00001-of-00004.safetensors",
+    "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+    "vae/diffusion_pytorch_model.safetensors",
+]
+_WAN_5B_NATIVE_ROOT = [
+    "Wan2.2_VAE.pth", "diffusion_pytorch_model-00001-of-00003.safetensors",
+    "diffusion_pytorch_model-00002-of-00003.safetensors",
+    "diffusion_pytorch_model-00003-of-00003.safetensors", "models_t5_umt5-xxl-enc-bf16.pth",
+]
+_MOCHI_ROOT = [
+    "decoder.safetensors", "dit.safetensors", "encoder.safetensors",
+    "text_encoder/model-00001-of-00002.safetensors",
+    "transformer/diffusion_pytorch_model-00001-of-00005.safetensors",
+    "vae/diffusion_pytorch_model.safetensors",
+]
+_WAN_I2V_MOE_ROOT = [
+    "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf",
+    "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf",
+    "VAE/Wan2.1_VAE.safetensors",
+]
+
+
+def _video(files=None, src=None, repo="", cls=None):
+    return umf.match_families(
+        domain="video", files=[{"src": f} for f in (files or [])], src=src, hf_repo=repo,
+        has_model_index=bool(cls), index_class=cls,
+    )
+
+
+def test_wan_5b_file_is_not_the_14b_moe():
+    m = _video(src="split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+               repo="Comfy-Org/Wan_2.2_ComfyUI_Repackaged")
+    assert (m[0]["role"], m[0]["like"], m[0]["moe"]) == ("generation", "wan22-5b", False)
+    assert m[0].get("shipped") is True
+
+
+def test_wan_5b_elsewhere_by_name_alone():
+    m = _video(src="Wan2.2-TI2V-5B-Q8_0.gguf", repo="someone/Wan2.2-TI2V-5B-GGUF")
+    assert (m[0]["like"], m[0]["moe"]) == ("wan22-5b", False)
+
+
+def test_wan_5b_native_repo_root_is_a_generation_model():
+    m = _video(_WAN_5B_NATIVE_ROOT, repo="Wan-AI/Wan2.2-TI2V-5B")
+    assert (m[0]["role"], m[0]["like"]) == ("generation", "wan22-5b")
+
+
+def test_ltx_video_09_is_refused_by_name():
+    m = _video(_LTX_VIDEO_ROOT, repo="Lightricks/LTX-Video", cls="LTXPipeline")
+    assert m[0]["wired"] is False and "LTX-Video 0.9" in m[0]["reason"]
+
+
+def test_mochi_is_refused_by_name():
+    root = _video(_MOCHI_ROOT, repo="genmo/mochi-1-preview", cls="MochiPipeline")
+    one = _video(src="split_files/diffusion_models/mochi_preview_bf16.safetensors",
+                 repo="Comfy-Org/mochi_preview_repackaged")
+    assert root[0]["wired"] is False and root[0]["label"] == "Mochi"
+    assert one[0]["wired"] is False and one[0]["label"] == "Mochi"
+
+
+def test_unknown_diffusers_video_pipeline_is_refused_by_class():
+    m = _video(["transformer/diffusion_pytorch_model.safetensors"], repo="lab/new-video-model",
+               cls="SomeNewVideoPipeline")
+    assert m[0]["wired"] is False and "SomeNewVideoPipeline" in m[0]["reason"]
+
+
+def test_wan_i2v_moe_repo_root_keeps_its_vae_out_of_the_role():
+    m = _video(_WAN_I2V_MOE_ROOT, repo="QuantStack/Wan2.2-I2V-A14B-GGUF")
+    assert (m[0]["role"], m[0]["like"], m[0]["moe"]) == ("generation", "wan22-14b-i2v", True)
+
+
+@pytest.mark.parametrize("src,repo,like", [
+    ("hunyuan-video-t2v-720p-Q8_0.gguf", "someone/hunyuan-mirror", "hunyuan-t2v"),
+    ("hunyuan-video-i2v-720p-Q8_0.gguf", "someone/hunyuan-mirror", "hunyuan-i2v"),
+    ("CogVideoX_1_5_5b_I2V_fp8.safetensors", "someone/cog-mirror", "cogvideox-5b-i2v"),
+    ("ltx-2.3-22b-dev-fp8.safetensors", "someone/ltx-mirror", "ltx23-distilled-fp8"),
+    ("ltx-2.5-22b-dev-int8.safetensors", "someone/ltx-mirror", "ltx25-distilled-int8"),
+    ("minimax_h3_fl2va_fp8.safetensors", "someone/h3-mirror", "minimax-h3-int8"),
+    ("split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+     "someone/wan-mirror", "wan22-14b"),
+])
+def test_other_families_are_not_filed_under_wan(src, repo, like):
+    m = _video(src=src, repo=repo)
+    assert m[0]["like"] == like
+
+
+def test_every_shipped_generation_file_maps_to_its_own_entry():
+    from backend.services.video_model_registry import GENERATION_TYPES, VIDEO_MODEL_REGISTRY
+
+    for mid, entry in VIDEO_MODEL_REGISTRY.items():
+        if mid.startswith("user-") or entry.get("type") not in GENERATION_TYPES:
+            continue
+        for f in entry.get("files") or []:
+            m = _video(src=f["src"], repo=entry["hf_repo"])
+            assert m and m[0]["like"] == mid, (mid, f["src"], m[:1])
+
+
+def test_wan_lora_stays_a_lora():
+    m = _video(src="split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+               repo="Comfy-Org/Wan_2.2_ComfyUI_Repackaged")
+    assert (m[0]["role"], m[0]["like"]) == ("lora", "wan22-14b-i2v")
+
+
+def test_wan_5b_lora_is_filed_under_the_5b():
+    m = _video(["HSToric_Color_Wan2.2_5B_LoRA.safetensors"],
+               repo="AlekseyCalvin/HSToric_Color_Wan2.2_5B_LoRA_BySilverAgePoets")
+    assert (m[0]["role"], m[0]["like"]) == ("lora", "wan22-5b")

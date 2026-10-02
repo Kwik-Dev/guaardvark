@@ -13,6 +13,7 @@ import time
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, abort
 from typing import Dict, Any, Optional
 from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
+from backend.utils.screenshot_urls import screenshot_url
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ def _extract_and_save_screenshots(result):
                 with open(filepath, "wb") as f:
                     f.write(base64.b64decode(image_b64))
 
-                url = f"/api/tools/screenshots/{filename}"
+                url = screenshot_url(filename)
                 screenshot_urls.append(url)
                 logger.info(f"Saved screenshot: {filepath} -> {url}")
     except Exception as e:
@@ -261,8 +262,12 @@ def execute_tool():
         # A person invoking a tool directly (Tools page / API, behind auth_guard)
         # is the approval, so confirmation-gated tools run without a prompt.
         from backend.services.tool_confirmation import trusted_caller
+        from backend.utils.backend_http import CALLER_TRANSPORT_FIELD, calls_for_mcp_client
 
-        with trusted_caller("rest:tools_api"):
+        # The MCP server forwards some tools here (run_tool_in_backend); they
+        # keep the input rules they have for MCP clients.
+        for_mcp = data.get(CALLER_TRANSPORT_FIELD) == "mcp"
+        with trusted_caller("rest:tools_api"), calls_for_mcp_client(for_mcp):
             result = registry.execute_tool(tool_name, **parameters)
 
         return jsonify({
@@ -276,6 +281,28 @@ def execute_tool():
             "success": False,
             "error": str(e)
         }), 500
+
+
+@tools_bp.route("/jobs/<job_id>", methods=["GET"])
+def tool_job_status(job_id: str):
+    """A tool job that an MCP call started (backend/services/tool_jobs.py).
+
+    ``?wait_s=N`` holds the answer until the job finishes or N seconds pass,
+    capped at tool_jobs.MAX_WAIT_S. An unknown id answers 404 with ``reason``
+    ``restarted`` (the job belonged to an earlier run of the backend) or
+    ``unknown``.
+    """
+    from backend.services import tool_jobs
+
+    try:
+        wait_s = float(request.args.get("wait_s") or 0)
+    except ValueError:
+        wait_s = 0.0
+    snapshot = tool_jobs.wait(job_id, wait_s) if wait_s > 0 else tool_jobs.get(job_id)
+    if snapshot is None:
+        reason, message = tool_jobs.missing(job_id)
+        return jsonify({"success": False, "error": message, "reason": reason, "job_id": job_id}), 404
+    return jsonify({"success": True, "data": snapshot})
 
 
 @tools_bp.route("/schemas", methods=["GET"])

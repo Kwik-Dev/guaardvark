@@ -17,6 +17,10 @@ def router():
     return SlashRouter(state)
 
 
+# What search_knowledge_base returns when nothing matches.
+_NO_PASSAGES = {"success": True, "result": {"success": True, "metadata": {"results": [], "retrieval": {}}}}
+
+
 class TestSimpleSlashArgs:
     def test_search_without_query_shows_usage(self, router):
         with patch("llx.commands.search.get_client") as mock_get:
@@ -26,12 +30,13 @@ class TestSimpleSlashArgs:
     def test_search_with_query_calls_api(self, router):
         with patch("llx.commands.search.get_client") as mock_get:
             mock_client = MagicMock()
-            mock_client.post.return_value = {"answer": "hi", "sources": []}
+            mock_client.execute_tool.return_value = _NO_PASSAGES
             mock_get.return_value = mock_client
             router.dispatch("/search hello world")
-            mock_client.post.assert_called_once()
-            payload = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1].get("json")
-            assert payload["query"] == "hello world"
+            mock_client.execute_tool.assert_called_once()
+            name, params = mock_client.execute_tool.call_args[0]
+            assert name == "search_knowledge_base"
+            assert params["query"] == "hello world"
 
     def test_local_coding_commands_do_not_crash(self, router):
         # Dispatch several new local commands; they should succeed or show usage without backend
@@ -43,13 +48,12 @@ class TestSimpleSlashArgs:
             "llx.commands.search.output.print_markdown"
         ), patch("llx.commands.search.console.print"):
             mock_client = MagicMock()
-            mock_client.post.return_value = {
-                "answer": "",
-                "sources": [{"source_document": "a", "score": 0.9}],
-            }
+            mock_client.execute_tool.return_value = _NO_PASSAGES
             mock_get.return_value = mock_client
             router.dispatch("/search guaardvark")
-            mock_client.post.assert_called_once()
+            mock_client.execute_tool.assert_called_once()
+            _name, params = mock_client.execute_tool.call_args[0]
+            assert params["top_k"] == 5
 
 
 class TestSubappSlashArgs:

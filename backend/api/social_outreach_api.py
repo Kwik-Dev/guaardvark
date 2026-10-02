@@ -12,7 +12,9 @@ GET  /api/social-outreach/queue               — drafted-but-not-posted entries
 POST /api/social-outreach/drafts              — create a draft manually from the UI
 PATCH /api/social-outreach/drafts/<id>        — save edits to a draft (status='drafted' only)
 POST /api/social-outreach/approve/<id>        — approve a queued draft (will be posted on next pass)
-POST /api/social-outreach/reject/<id>         — reject and mark won't-post
+POST /api/social-outreach/reject/<id>         — reject and mark won't-post (409 once the post is being submitted)
+POST /api/social-outreach/claim/<id>          — poster takes an approved draft (approved → processing)
+POST /api/social-outreach/submit/<id>         — poster is about to publish (processing → submitting); 409 means do not publish
 POST /api/social-outreach/draft-comment       — internal: draft a reply via the LLM, with grade
 POST /api/social-outreach/scout-url           — agent fetches OP + comments for a URL so the human doesn't paste them
 POST /api/social-outreach/run-pass            — fire a Reddit / self-share pass on demand instead of waiting for the cron
@@ -42,16 +44,7 @@ social_outreach_bp = Blueprint("social_outreach", __name__, url_prefix="/api/soc
 
 @social_outreach_bp.get("/status")
 def status():
-    return jsonify({
-        "enabled": kill_switch.is_enabled(),
-        "supervised": kill_switch.is_supervised(),
-        "caps": {
-            "min_gap_seconds": kill_switch.CADENCE_MIN_GAP_SECONDS,
-            "daily_cap": kill_switch.CADENCE_DAILY_CAP,
-            "servo_failure_abort_threshold": kill_switch.SERVO_FAILURE_ABORT_THRESHOLD,
-        },
-        "cadence": kill_switch.cadence_status(),
-    })
+    return jsonify(kill_switch.status_snapshot())
 
 
 @social_outreach_bp.post("/enable")
@@ -198,39 +191,58 @@ def update_draft(event_id: int):
 
 @social_outreach_bp.post("/approve/<int:event_id>")
 def approve(event_id: int):
-    from backend.models import SocialOutreachLog, db
-    from backend.services.social_outreach.transitions import can_approve
-    row = SocialOutreachLog.query.get(event_id)
-    if row is None:
-        return jsonify({"error": "not found"}), 404
-    if not can_approve(row.status):
-        return jsonify({
-            "error": f"cannot approve from status '{row.status}' (only from drafted)",
-        }), 409
+    from backend.models import SocialOutreachLog
+    from backend.services.social_outreach import transitions
 
     body = request.get_json(silent=True) or {}
-    if "draft_text" in body:
-        row.draft_text = body["draft_text"]
-
-    row.status = "approved"
-    db.session.commit()
-    return jsonify(row.to_dict())
+    if not transitions.approve(event_id, body.get("draft_text")):
+        status = transitions.current_status(event_id)
+        if status is None:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({
+            "error": f"cannot approve from status '{status}' (only from drafted)",
+        }), 409
+    return jsonify(SocialOutreachLog.query.get(event_id).to_dict())
 
 
 @social_outreach_bp.post("/reject/<int:event_id>")
 def reject(event_id: int):
-    from backend.models import SocialOutreachLog, db
-    from backend.services.social_outreach.transitions import can_reject
-    row = SocialOutreachLog.query.get(event_id)
-    if row is None:
+    """Reject a draft so it never posts.
+
+    A 200 is a guarantee: the row is rejected and no poster will publish it,
+    including a row a poster had already claimed (``rejected_from`` is then
+    "processing"). Once the publishing step has started the answer is 409 and
+    the row is left as it is.
+    """
+    from backend.models import SocialOutreachLog
+    from backend.services.social_outreach import transitions
+
+    outcome = transitions.reject(event_id)
+    if outcome.status is None:
         return jsonify({"error": "not found"}), 404
-    if not can_reject(row.status):
+    if not outcome.rejected:
         return jsonify({
-            "error": f"cannot reject from status '{row.status}'",
+            "error": transitions.reject_refusal(outcome.status),
+            "status": outcome.status,
         }), 409
-    row.status = "rejected"
-    db.session.commit()
-    return jsonify(row.to_dict())
+    row = SocialOutreachLog.query.get(event_id)
+    return jsonify({**row.to_dict(), "rejected_from": outcome.status})
+
+
+def _poster_step(event_id: int, step, verb: str, needs: str):
+    """Run a poster's transition (claim or submit) and answer for its route."""
+    from backend.models import SocialOutreachLog
+    from backend.services.social_outreach import transitions
+
+    if not step(event_id):
+        status = transitions.current_status(event_id)
+        if status is None:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({
+            "error": f"cannot {verb} from status '{status}' (only from {needs})",
+            "status": status,
+        }), 409
+    return jsonify(SocialOutreachLog.query.get(event_id).to_dict())
 
 
 @social_outreach_bp.post("/claim/<int:event_id>")
@@ -240,21 +252,21 @@ def claim(event_id: int):
     Used by the Discord cog (and any non-Celery dispatcher) so overlapping
     polls cannot double-post the same row.
     """
-    from datetime import datetime, timezone
-    from backend.models import SocialOutreachLog, db
-    from backend.services.social_outreach.transitions import can_claim
+    from backend.services.social_outreach import transitions
 
-    row = SocialOutreachLog.query.get(event_id)
-    if row is None:
-        return jsonify({"error": "not found"}), 404
-    if not can_claim(row.status):
-        return jsonify({
-            "error": f"cannot claim from status '{row.status}' (only from approved)",
-        }), 409
-    row.status = "processing"
-    row.abort_reason = f"processing_since:{datetime.now(timezone.utc).isoformat()}"
-    db.session.commit()
-    return jsonify(row.to_dict())
+    return _poster_step(event_id, transitions.claim, "claim", "approved")
+
+
+@social_outreach_bp.post("/submit/<int:event_id>")
+def begin_submit(event_id: int):
+    """Commit a claimed draft to being published (processing → submitting).
+
+    A poster outside the backend calls this immediately before it sends. A 409
+    means the draft was rejected after the claim and must not be sent.
+    """
+    from backend.services.social_outreach import transitions
+
+    return _poster_step(event_id, transitions.begin_submit, "submit", "processing")
 
 
 # --- Draft-comment endpoint (the LLM call site) --------------------------
@@ -849,12 +861,25 @@ def record_post():
     kill_switch.record_post(platform)
 
     if audit_id:
-        from backend.models import SocialOutreachLog, db
-        row = SocialOutreachLog.query.get(audit_id)
-        if row is not None:
-            row.status = "posted"
-            row.posted_text = posted_text
-            db.session.commit()
+        from backend.services.social_outreach import transitions
+
+        if not transitions.mark_posted(audit_id, posted_text):
+            status = transitions.current_status(audit_id)
+            if status == "rejected":
+                # Posters stop at transitions.begin_submit for a rejected
+                # row, so this is a poster that published without asking.
+                # The rejection stands; the text that went out is kept with
+                # it so the history shows both.
+                logger.error(
+                    "record-post: draft %s was published on %s although it is rejected",
+                    audit_id, platform,
+                )
+                transitions.note_posted_despite_rejection(audit_id, posted_text)
+                return jsonify({
+                    "ok": True,
+                    "status": "rejected",
+                    "warning": "this draft is rejected; its status was left as rejected",
+                })
     else:
         # No existing audit row to flip — this came from a code path that
         # didn't draft via /draft-comment, so log a fresh "post_recorded"

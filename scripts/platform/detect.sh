@@ -57,3 +57,29 @@ detect_platform() {
 
     export GUAARDVARK_OS GUAARDVARK_ARCH GUAARDVARK_ACCEL GUAARDVARK_IS_WSL GUAARDVARK_PLATFORM_BACKEND
 }
+
+# The frontend builds with Vite 8, whose bundler (rolldown) declares
+# node "^20.19.0 || >=22.12.0". npm skips an optional package whose engines
+# don't match, so on an older Node the install "succeeds" without rolldown's
+# native binding and `vite build` then fails with "Cannot find native binding".
+GUAARDVARK_NODE_FLOOR_TEXT="20.19+ or 22.12+"
+
+# node_version_supported [version] — 0 when the version (default: `node --version`)
+# satisfies ^20.19.0 || >=22.12.0. Pure check, no side effects.
+node_version_supported() {
+    local ver="${1:-$(node --version 2>/dev/null)}"
+    ver="${ver#v}"
+    local major minor
+    major="${ver%%.*}"
+    minor=0
+    case "$ver" in *.*) minor="${ver#*.}"; minor="${minor%%.*}" ;; esac
+    case "$major" in *[!0-9]*|"") return 1 ;; esac
+    case "$minor" in *[!0-9]*|"") return 1 ;; esac
+    if [ "$major" -eq 20 ]; then
+        [ "$minor" -ge 19 ]
+    elif [ "$major" -eq 22 ]; then
+        [ "$minor" -ge 12 ]
+    else
+        [ "$major" -gt 22 ]
+    fi
+}

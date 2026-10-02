@@ -1,13 +1,14 @@
 """Job management commands — list, status, watch, cancel."""
 
+import time
+
 import typer
-from rich.live import Live
 from rich.style import Style
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
 
 from llx.client import get_client, LlxError, LlxConnectionError
 from llx.global_opts import get_global_json, get_global_server
-from llx.streaming import LlxStreamer
+from llx.job_status import TERMINAL, read_job
 from llx.theme import make_console, BRAND, SUCCESS
 from llx import output
 
@@ -53,7 +54,7 @@ def jobs_list(
 
 @jobs_app.command("status")
 def jobs_status(
-    task_id: int = typer.Argument(..., help="Task/job ID"),
+    job_id: str = typer.Argument(..., help="Job ID as a command printed it (ImageBatch_…, VideoBatch_…, a task number, …)"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -62,22 +63,25 @@ def jobs_status(
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
     try:
-        client = get_client(server)
-        data = client.get(f"/api/jobs/{task_id}/status")
+        info = read_job(get_client(server), job_id)
 
         if json_out or output.is_pipe():
-            output.print_json({"status": "success", "data": data})
+            output.print_json({"status": "success", "data": {k: v for k, v in info.items() if k != "raw"}})
             return
 
-        progress = data.get("progress", {})
-        output.print_kv({
-            "Task ID": data.get("task_id", ""),
-            "Job ID": data.get("job_id", ""),
-            "Name": data.get("name", ""),
-            "Status": data.get("status", ""),
-            "Progress": f"{progress.get('percentage', 0)}%",
-            "Message": progress.get("message", "—"),
-        }, title="Job Status")
+        pct = info.get("percent")
+        rows = {
+            "Job ID": info["id"],
+            "Kind": info["kind"],
+            "Status": info["status"],
+            "Progress": f"{pct:.0f}%" if isinstance(pct, (int, float)) else "—",
+            "Message": info.get("message") or "—",
+        }
+        if info.get("error"):
+            rows["Error"] = info["error"]
+        for n, f in enumerate(info.get("files") or [], 1):
+            rows[f"File {n}"] = f
+        output.print_kv(rows, title="Job Status")
 
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")
@@ -90,13 +94,16 @@ def jobs_status(
 @jobs_app.command("watch")
 def jobs_watch(
     job_id: str = typer.Argument(..., help="Job ID to watch"),
+    interval: float = typer.Option(1.5, "--interval", "-i", help="Seconds between checks"),
+    timeout: float = typer.Option(0, "--timeout", help="Give up after this many seconds (0 = wait until it ends)"),
     server: str = typer.Option(None, "--server", "-s"),
 ):
-    """Live-watch job progress."""
+    """Live-watch job progress until it finishes."""
     server = server or get_global_server()
     try:
         client = get_client(server)
-        streamer = LlxStreamer(server_url=client.server_url)
+        info = read_job(client, job_id)
+        started = time.monotonic()
 
         with Progress(
             TextColumn("[llx.brand]{task.description}"),
@@ -105,28 +112,41 @@ def jobs_watch(
             TimeElapsedColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task(f"Job {job_id}", total=100)
+            task = progress.add_task(f"{info['kind']} {job_id}", total=100)
+            while True:
+                pct = info.get("percent")
+                label = info.get("message") or info["kind"]
+                if isinstance(pct, (int, float)):
+                    progress.update(task, completed=pct, description=label)
+                else:
+                    progress.update(task, description=label)
+                if info["status"] in TERMINAL:
+                    break
+                if timeout and time.monotonic() - started > timeout:
+                    break
+                time.sleep(max(0.2, interval))
+                info = read_job(client, job_id)
 
-            def on_progress(data):
-                pct = data.get("percentage", data.get("progress", 0))
-                msg = data.get("message", data.get("status", ""))
-                progress.update(task, completed=pct, description=msg or f"Job {job_id}")
-
-            def on_complete(data):
+            if info["status"] == "completed":
                 progress.update(task, completed=100, description="[llx.success]Complete[/llx.success]")
-                try:
-                    from llx.notify import notify
+            elif info["status"] in ("failed", "cancelled"):
+                progress.update(task, description=f"[llx.error]{info['status'].capitalize()}[/llx.error]")
 
-                    notify("Guaardvark", f"Job {job_id} complete")
-                except Exception:
-                    pass
+        if info["status"] == "completed":
+            for f in info.get("files") or []:
+                console.print(f"  [llx.accent]{f}[/llx.accent]")
+            try:
+                from llx.notify import notify
 
-            def on_error(msg):
-                progress.update(task, description=f"[llx.error]{msg}[/llx.error]")
-
-            streamer.watch_job(job_id, on_progress=on_progress, on_complete=on_complete, on_error=on_error)
-            streamer.wait(timeout=600)
-            streamer.disconnect()
+                notify("Guaardvark", f"Job {job_id} complete")
+            except Exception:
+                pass
+        elif info["status"] in ("failed", "cancelled"):
+            if info.get("error"):
+                output.print_error(str(info["error"]), code="JOB_FAILED")
+            raise typer.Exit(1)
+        else:
+            console.print(f"[llx.dim]Still {info['status']}; stopped watching after {timeout:.0f} s.[/llx.dim]")
 
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")

@@ -1,6 +1,7 @@
 from flask import Blueprint, request
 
 from backend.utils.response_utils import success_response, error_response
+from backend.utils.settings_utils import get_web_access
 
 command_bp = Blueprint("command_api", __name__, url_prefix="/api/command")
 
@@ -53,6 +54,13 @@ def websearch_command():
                 error_code="NO_QUERY",
             )
 
+        if not get_web_access():
+            return error_response(
+                "Web search is disabled in system settings",
+                status_code=403,
+                error_code="WEB_ACCESS_DISABLED",
+            )
+
         logger.info(f"/websearch command: '{query}'")
 
         # Import web search functionality
@@ -83,7 +91,8 @@ def websearch_command():
                         f"   {result.get('snippet', 'No description')}\n"
                         f"   URL: {result.get('url', 'N/A')}"
                     )
-                response_text = "Search results:\n\n" + "\n\n".join(snippets)
+                source = result_data.get("source") or "the search engine"
+                response_text = f"Search results from {source}:\n\n" + "\n\n".join(snippets)
             else:
                 response_text = result_data.get("snippet", str(result_data))
 
@@ -95,6 +104,18 @@ def websearch_command():
                     "result_type": result_type
                 },
                 message="Web search completed successfully"
+            )
+        elif (search_results.get("data") or {}).get("type") == "no_results":
+            # The engine answered and found nothing: an answer, not a failure.
+            message = search_results["data"]["message"]
+            return success_response(
+                data={
+                    "query": query,
+                    "response": message,
+                    "raw_results": search_results,
+                    "result_type": "no_results",
+                },
+                message=message,
             )
         else:
             error = search_results.get("error", "Unknown error")

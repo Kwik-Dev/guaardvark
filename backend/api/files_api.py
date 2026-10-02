@@ -17,6 +17,7 @@ from werkzeug.utils import secure_filename
 
 from sqlalchemy import func as sa_func
 
+from backend.celery_dispatch import TaskNotStarted
 from backend.config import GUAARDVARK_PROJECT_NAME
 from backend.models import Folder, Document as DBDocument, Client, Project, Website, db
 from backend.services.guarded_code_service import (
@@ -1929,6 +1930,13 @@ def start_bulk_import():
                 503,
                 "CELERY_NOT_AVAILABLE"
             )
+        except TaskNotStarted as e:
+            # Otherwise the job reads "processing" to every status poll.
+            job_data = get_job_status(job_id)
+            job_data["status"] = "error"
+            job_data["message"] = str(e)
+            set_job_status(job_id, job_data)
+            return error_response(str(e), 503, e.code)
 
         # Return response in format frontend expects (unwrapped)
         job_data = get_job_status(job_id)

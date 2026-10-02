@@ -343,9 +343,19 @@ def generate_large_scale_csv():
         # Get file size
         file_size = os.path.getsize(output_path) if os.path.exists(output_path) else None
 
+        # With web access off the generator skips web research and says so.
+        research_skipped = stats.get("web_research_skipped")
+        web_research_used = bool(enable_web_research) and not research_skipped
+        message = (
+            f"Large-scale CSV generation completed successfully. Generated {stats.get('total_rows', 0)} rows "
+            f"with {'web research' if web_research_used else 'LLM-only content'}."
+        )
+        if research_skipped:
+            message += f" {research_skipped}"
+
         # Enhanced response with chunking information
         response_data = {
-            "message": f"Large-scale CSV generation completed successfully. Generated {stats.get('total_rows', 0)} rows with {'web research' if enable_web_research else 'LLM-only content'}.",
+            "message": message,
             "generation_type": "large_scale_bulk",
             "output_file": os.path.basename(output_path),
             "output_path": output_path,
@@ -353,7 +363,7 @@ def generate_large_scale_csv():
             "statistics": {
                 **stats,
                 "processing_method": "chunked" if num_items > 500 else "standard",
-                "web_research_enabled": enable_web_research,
+                "web_research_enabled": web_research_used,
                 "total_chunks": len(tasks) // chunk_size + (1 if len(tasks) % chunk_size else 0) if num_items > 500 else 1,
                 "chunk_size": chunk_size,
                 "concurrent_workers": concurrent_workers
@@ -368,20 +378,19 @@ def generate_large_scale_csv():
 
 @unified_gen_bp.route("/status", methods=["GET"])
 def get_generation_status():
-    """Get status of generation jobs"""
+    """Status of one generation job, by the job_id a generation route returned
+    (the progress_url of a bulk job response points here)."""
+    job_id = (request.args.get("job_id") or "").strip()
+    if not job_id:
+        return jsonify({"error": "job_id is required"}), 400
     try:
-        job_id = request.args.get("job_id")
-        if not job_id:
-            return jsonify({"error": "job_id is required"}), 400
-        
-        progress_system = get_unified_progress()
-        status = progress_system.get_job_status(job_id)
-        
-        return jsonify({
-            "job_id": job_id,
-            "status": status
-        }), 200
-        
+        status = get_unified_progress().get_job_status(job_id)
     except Exception as e:
         logger.error(f"Error getting generation status: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+    if status is None:
+        return jsonify({
+            "error": f"No job {job_id}: it never existed here, or its record has been cleaned up.",
+            "job_id": job_id,
+        }), 404
+    return jsonify(status), 200

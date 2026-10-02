@@ -37,7 +37,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from .core import Finding, FindingKind, Severity, is_excluded
+from .core import Finding, FindingKind, Severity, source_files
 
 # Cap so a pathological repo can't flood the findings list.
 _MAX_FINDINGS = 100
@@ -203,9 +203,7 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[st
         all_strings: set[str] = set()
         all_exports: set[str] = set()
 
-        for py in root.rglob("*.py"):
-            if is_excluded(py, extra_excludes):
-                continue
+        for py in source_files(root, extra_excludes, pattern="*.py"):
             try:
                 rel = str(py.relative_to(root))
             except ValueError:

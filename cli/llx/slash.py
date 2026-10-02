@@ -628,15 +628,9 @@ class SlashRouter:
                 if response:
                     self._console.print(f"[llx.dim]{response}[/llx.dim]")
                 try:
-                    from pathlib import Path as _Path
+                    from llx.media_preview import show_generated
 
-                    from llx.media_preview import extract_media_path, preview_image
-
-                    media = extract_media_path(data, server or "")
-                    if media and not str(media).startswith("http") and _Path(media).is_file():
-                        preview_image(media, console=self._console)
-                    elif media:
-                        self._console.print(f"[link={media}]{media}[/link]")
+                    show_generated(data.get("generated_images"), client.server_url, self._console)
                 except Exception:
                     pass
             else:
@@ -721,17 +715,22 @@ class SlashRouter:
         server = self._state.get("server")
 
         try:
-            from llx.client import get_client, LlxError, LlxConnectionError
-            client = get_client(server)
-            data = client.post("/api/index/bulk", json={
-                "paths": [path],
-            })
-            result = data.get("data", data)
-            total = result.get("total_documents", 0)
-            job_id = result.get("job_id", "")
-            self._console.print(f"[llx.success]Indexing started: {total} documents[/llx.success]")
-            if job_id:
-                self._console.print(f"[llx.dim]Job: {job_id}[/llx.dim]")
+            from llx.client import get_client
+            from llx.kb import ingest_path
+
+            def _shown(entry):
+                if entry.get("error"):
+                    self._console.print(f"  [llx.error]✗ {entry['file']}: {entry['error']}[/llx.error]")
+                else:
+                    self._console.print(f"  [llx.dim]✓ {entry['file']} (id {entry['id']})[/llx.dim]")
+
+            results = ingest_path(get_client(server), path, on_file=_shown)
+            ok = sum(1 for r in results if not r.get("error"))
+            failed = len(results) - ok
+            self._console.print(
+                f"[llx.success]Added {ok} file{'s' if ok != 1 else ''}; indexing runs in the background.[/llx.success]"
+                + (f" [llx.error]{failed} failed.[/llx.error]" if failed else ""))
+            self._console.print("[llx.dim]Check with: /rag status[/llx.dim]")
         except Exception as e:
             self._console.print(f"[llx.error]Indexing failed: {e}[/llx.error]")
 
@@ -1142,8 +1141,8 @@ class SlashRouter:
                     "old_text": old_t,
                     "new_text": new_t
                 })
-                if res.get("success"):
-                    out = res.get("result", res)
+                out = res.get("result", res)
+                if res.get("success") and not (isinstance(out, dict) and out.get("success") is False):
                     self._console.print("[llx.success]Used backend edit_code tool (guarded)[/llx.success]")
                     diff = (out.get("diff") if isinstance(out, dict) else None) or str(out)[:1800]
                     try:
@@ -1155,23 +1154,33 @@ class SlashRouter:
             except Exception:
                 pass  # fall to local
         elif len(rest) > 20:
-            # Instruction-style edit (no explicit old/new) → use intelligent backend path (like frontend codeIntelligenceService)
+            # Instruction-style edit: the backend proposes a change; nothing is
+            # written, because its reply mixes code with explanation.
             try:
+                from rich.markdown import Markdown
                 from llx.client import get_client
+                from llx.local_tools import _resolve_path
+                target = _resolve_path(path, self._state.get("cwd"))
+                original = target.read_text(encoding="utf-8")
                 client = get_client(server)
                 res = client.edit_code_intelligent(
-                    original_code="",  # backend will read the file
+                    original_code=original,
                     edit_instructions=rest,
-                    language="auto",
-                    file_path=path
+                    language=target.suffix.lstrip(".") or "text",
+                    file_path=str(target.name),
                 )
-                if res.get("success"):
-                    self._console.print("[llx.success]Used backend edit_code_intelligent (smart patch + verify)[/llx.success]")
-                    out = res.get("result") or res
-                    self._console.print(str(out)[:2000])
+                data = res.get("data", res)
+                suggestion = (data.get("editedCode") if isinstance(data, dict) else None) or ""
+                if suggestion:
+                    self._console.print("[llx.accent]Suggested edit (not applied):[/llx.accent]")
+                    self._console.print(Markdown(suggestion[:4000]))
+                    self._console.print("[llx.dim]Apply a change with: /edit {} 'old text' -> 'new text'[/llx.dim]".format(path))
                     return
-            except Exception:
-                pass  # fallthrough
+            except Exception as e:
+                self._console.print(f"[llx.error]Could not get a suggestion: {e}[/llx.error]")
+                return
+            self._console.print("[llx.dim]The backend had no suggestion. Use /edit <file> 'old' -> 'new'.[/llx.dim]")
+            return
 
         # Local fast path
         from llx.local_tools import apply_search_replace
@@ -1205,9 +1214,7 @@ class SlashRouter:
         mem["active_file"] = res.get("path", path)
         self._state["working_memory"] = mem
 
-        # Suggest verification like real agent workflows (using existing verify_change tool)
-        if "edit" in tool_name.lower() or "edit" in str(locals().get("res", "")):
-            self._console.print("[llx.dim]Tip: /tool verify_change filepath={} expected=... (or use after edit to confirm change)[/llx.dim]".format(path))
+        self._console.print("[llx.dim]Tip: /tool verify_change filepath={} expected=... to confirm the change[/llx.dim]".format(path))
 
     def _cmd_run(self, args: list[str]):
         if not args:
@@ -1473,37 +1480,35 @@ class SlashRouter:
             except Exception:
                 pass  # if no tty, proceed
 
+        # The tool runs once. Nothing after this call may fall back to running it
+        # again: an error while printing or recording must not repeat a write.
         try:
             result = client.execute_tool(tool_name, params)
-            if result.get("success"):
-                out = result.get("result", result)
-                self._console.print(f"[llx.success]Tool '{tool_name}' executed successfully[/llx.success]")
-                if isinstance(out, dict):
-                    if "output" in out or "success" in out:
-                        content = out.get("output") or out.get("result") or out
-                        self._console.print(str(content)[:2500])
-                    else:
-                        self._console.print(str(out)[:2500])
-                else:
-                    self._console.print(str(out)[:2500])
-
-                # record for context
-                from llx.working_memory import record_tool_use
-                mem = normalize_working_memory(self._state.get("working_memory"))
-                record_tool_use(mem, tool_name, params, str(out)[:100] if 'out' in locals() else None)
-                self._state["working_memory"] = mem
-            else:
-                err = result.get("error") or result
-                self._console.print(f"[llx.error]Tool failed: {err}[/llx.error]")
         except (LlxConnectionError, LlxError) as e:
             self._console.print(f"[llx.error]Backend unreachable for tool call: {e}[/llx.error]")
-        except Exception as e:
-            # last resort direct-tool
-            try:
-                res2 = client.direct_tool(tool_name=tool_name, params=params)
-                self._console.print(f"[llx.dim]Fell back to direct-tool: {str(res2)[:1200]}[/llx.dim]")
-            except Exception as e2:
-                self._console.print(f"[llx.error]Tool execution failed: {e} / {e2}[/llx.error]")
+            return
+
+        out = result.get("result", result) if isinstance(result, dict) else result
+        ran = bool(result.get("success")) and not (isinstance(out, dict) and out.get("success") is False)
+        if not ran:
+            err = (out.get("error") if isinstance(out, dict) else None) or result.get("error") or result
+            self._console.print(f"[llx.error]Tool failed: {err}[/llx.error]")
+            return
+
+        self._console.print(f"[llx.success]Tool '{tool_name}' executed successfully[/llx.success]")
+        if isinstance(out, dict) and ("output" in out or "success" in out):
+            content = out.get("output") or out.get("result") or out
+        else:
+            content = out
+        self._console.print(str(content)[:2500])
+
+        try:
+            from llx.working_memory import normalize_working_memory, record_tool_use
+            mem = normalize_working_memory(self._state.get("working_memory"))
+            record_tool_use(mem, tool_name, params, str(out)[:100])
+            self._state["working_memory"] = mem
+        except Exception:
+            pass
 
     def _cmd_context(self, args: list[str]):
         """Show current CLI working context (files, todos, git, tools summary). Like a status for agentic work."""

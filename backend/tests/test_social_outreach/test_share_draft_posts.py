@@ -1,0 +1,146 @@
+"""A share draft made with outreach_draft_post can actually be posted.
+
+The posting tick reads the subreddit from the row's target_url, so the tool
+has to queue a share row that points at the subreddit named in share_target.
+The persona is a stand-in (no LLM), the Reddit submit poster is a recorder
+(no browser), and the tool's HTTP call is answered by the test client.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from backend.api import social_outreach_api
+from backend.models import SocialOutreachLog, db
+from backend.services.social_outreach import audit, kill_switch
+from backend.tasks import social_outreach_tasks as tasks
+from backend.tools import outreach_tools
+from backend.utils.backend_http import BackendError, BackendResponse
+
+
+@pytest.fixture
+def draft_post(app, client, monkeypatch, tmp_path):
+    """outreach_draft_post on the MCP path, wired to the test app's routes."""
+    app.register_blueprint(social_outreach_api.social_outreach_bp)
+    monkeypatch.setattr(audit, "AUDIT_DIR", tmp_path)
+    monkeypatch.setattr(audit, "AUDIT_FILE", tmp_path / "audit.jsonl")
+    seen = {"persona_calls": 0, "title": "Local-first AI studio"}
+
+    def backend(method, path, payload=None, **kwargs):
+        resp = client.open(path, method=method, json=payload)
+        body = resp.get_json()
+        if resp.status_code >= 400:
+            raise BackendError("http", body.get("error"), status=resp.status_code, body=body)
+        return BackendResponse(status=resp.status_code, body=body, data=body)
+
+    def persona(**kwargs):
+        seen["persona_calls"] += 1
+        seen["context"] = kwargs["context"]
+        text = json.dumps({"title": seen["title"], "body": "b", "link_url": kwargs["context"]["link_url"]})
+        return {"draft": text, "grade": 0.9, "reason": "r"}
+
+    monkeypatch.setattr(outreach_tools, "request_json", backend)
+    monkeypatch.setattr(outreach_tools.persona, "draft_outreach_text", persona)
+
+    def call(**arguments):
+        tool = outreach_tools.OutreachDraftPostTool()
+        tool.set_context({"transport": "mcp"})
+        return tool.execute(**arguments)
+
+    call.seen = seen
+    call.client = client
+    return call
+
+
+def _rows():
+    db.session.expire_all()
+    return SocialOutreachLog.query.order_by(SocialOutreachLog.id).all()
+
+
+def test_share_draft_is_queued_at_its_subreddit(draft_post):
+    result = draft_post(platform="reddit", mode="share", share_target="r/SideProject")
+
+    assert result.success, result.error
+    assert result.output["target_url"] == "https://www.reddit.com/r/SideProject"
+    row = _rows()[0]
+    assert (row.action, row.status) == ("share", "drafted")
+    assert row.target_url == "https://www.reddit.com/r/SideProject"
+    assert draft_post.seen["context"]["target"] == "r/SideProject"
+
+
+@pytest.mark.parametrize("share_target", [
+    "SideProject", "/r/SideProject", "r/SideProject/", "https://www.reddit.com/r/SideProject/",
+    "https://old.reddit.com/r/SideProject/comments/abc/x/",
+])
+def test_share_target_spellings_name_the_same_subreddit(draft_post, share_target):
+    result = draft_post(platform="reddit", mode="share", share_target=share_target)
+
+    assert result.output["target_url"] == "https://www.reddit.com/r/SideProject"
+
+
+def test_share_ignores_a_stray_target_url(draft_post):
+    draft_post(platform="reddit", mode="share", share_target="r/selfhosted",
+               target_url="https://www.reddit.com/r/Other/comments/abc/x/")
+
+    assert _rows()[0].target_url == "https://www.reddit.com/r/selfhosted"
+
+
+@pytest.mark.parametrize("arguments, needle", [
+    ({"platform": "reddit", "share_target": "my followers"}, "not a subreddit"),
+    ({"platform": "reddit", "share_target": "u/someone"}, "not a subreddit"),
+    ({"platform": "reddit", "share_target": "https://example.com/r/x"}, "not a subreddit"),
+    ({"platform": "reddit"}, "requires share_target"),
+    ({"platform": "twitter", "share_target": "my timeline"}, "can only be posted on reddit"),
+    ({"platform": "discord", "share_target": "#general"}, "can only be posted on reddit"),
+])
+def test_share_that_could_never_post_is_refused_before_drafting(draft_post, arguments, needle):
+    result = draft_post(mode="share", **arguments)
+
+    assert not result.success
+    assert needle in result.error
+    assert draft_post.seen["persona_calls"] == 0
+    assert _rows() == []
+
+
+def test_share_draft_without_a_title_is_not_queued(draft_post):
+    draft_post.seen["title"] = ""
+
+    result = draft_post(platform="reddit", mode="share", share_target="r/SideProject")
+
+    assert not result.success
+    assert "no title" in result.error
+    assert _rows() == []
+
+
+def test_an_approved_share_draft_is_submitted_to_its_subreddit(draft_post, app, monkeypatch):
+    submitted = []
+
+    def submit(subreddit, title, link_url, *, before_submit=None):
+        assert before_submit is not None and before_submit()
+        submitted.append((subreddit, title, link_url))
+        return True, "ok"
+
+    def with_ctx(fn, *args, **kwargs):
+        with app.app_context():
+            return fn(*args, **kwargs)
+
+    def record_post(url, json=None, timeout=None):
+        return draft_post.client.post("/api/social-outreach/record-post", json=json)
+
+    monkeypatch.setattr(tasks, "_with_app_context", with_ctx)
+    monkeypatch.setattr(kill_switch, "is_enabled", lambda: True)
+    monkeypatch.setattr(kill_switch, "cadence_allows_post", lambda platform: (True, None))
+    monkeypatch.setattr(kill_switch, "record_post", lambda platform: None)
+    monkeypatch.setattr("backend.services.social_outreach.self_share._submit_post_via_servo", submit)
+    monkeypatch.setattr("requests.post", record_post)
+
+    row_id = draft_post(platform="reddit", mode="share", share_target="r/SideProject").output["audit_id"]
+    assert draft_post.client.post(f"/api/social-outreach/approve/{row_id}").status_code == 200
+
+    result = tasks.tick_process_approved_drafts.run()
+
+    assert submitted == [("SideProject", "Local-first AI studio", "https://guaardvark.com")]
+    assert result["processed"] == 1
+    assert _rows()[0].status == "posted"

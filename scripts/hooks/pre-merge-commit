@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#
+# Pre-merge-commit hook: read what a merge brings in before its commit exists,
+# and in enforce mode refuse a merge the inbound guard holds or blocks.
+#
+# scripts/install_hooks.sh installs this as a copy and pins a copy of the engine
+# in the git directory, so a merge that rewrites the guard is still judged by the
+# guard already installed. Faults never stop git: a missing python3, a missing
+# engine or an engine crash let the merge through with a note.
+set -u
+mode="${GUAARDVARK_INBOUND_GUARD:-$(git config --get inboundguard.mode)}"
+case "$mode" in ""|off) exit 0 ;; esac
+
+engine="$(git rev-parse --git-common-dir)/inbound-guard/engine/check_inbound.py"
+if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$engine" ]; then
+    echo "inbound guard: merge not read (python3 or the installed engine is missing; run scripts/install_hooks.sh)" >&2
+    exit 0
+fi
+python3 "$engine" hook pre-merge-commit
+status=$?
+[ "$status" -eq 3 ] && exit 1
+[ "$status" -ne 0 ] && echo "inbound guard: engine failed (exit $status); merge not read" >&2
+exit 0

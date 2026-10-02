@@ -58,3 +58,18 @@ def test_start_sh_reserve_vram_matches_python_helper():
     assert RESERVE_VRAM_ENV in text
     assert ':-1.0}' in text
     assert '--reserve-vram "$RESERVE_VRAM"' in text
+
+
+def test_cast_loras_are_on_comfyui_search_path(tmp_path):
+    from backend.config import STORAGE_DIR
+    from backend.services.comfyui_launch_flags import MODEL_PATHS_ENV, model_paths_launch
+    root = Path(__file__).resolve().parents[3]
+    args, env = model_paths_launch(root)
+    cfg = root / "plugins/comfyui/guaardvark_model_paths.yaml"
+    assert args == ["--extra-model-paths-config", str(cfg)]
+    assert env == {MODEL_PATHS_ENV: str(Path(STORAGE_DIR) / "training")}
+    assert "${" + MODEL_PATHS_ENV + "}" in cfg.read_text()
+    assert model_paths_launch(tmp_path) == ([], {})
+    start_sh = (root / "plugins/comfyui/scripts/start.sh").read_text()
+    assert f"export {MODEL_PATHS_ENV}=" in start_sh
+    assert '--extra-model-paths-config "$PLUGIN_ROOT/guaardvark_model_paths.yaml"' in start_sh

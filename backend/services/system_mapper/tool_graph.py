@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .core import Finding, FindingKind, Severity
+from .core import Finding, FindingKind, Severity, source_files
 
 
 # Subprocess probe: import the real registry in a sanitized, offline, no-GPU
@@ -47,6 +47,20 @@ try:
 except Exception as exc:
     print(json.dumps({"ok": False, "error": repr(exc)}))
 """
+
+
+def _is_uploaded(root: Path) -> bool:
+    """True when root lies in Guaardvark's uploads directory, where Code
+    Repository folders people upload are kept."""
+    try:
+        from backend.config import UPLOAD_DIR
+    except Exception:
+        return False
+    try:
+        Path(root).resolve().relative_to(Path(UPLOAD_DIR).resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _probe_runtime_registry(root: Path, timeout: float = 20.0) -> tuple[set[str], dict]:
@@ -333,14 +347,15 @@ def _find_invocations(root: Path, tool_names: set[str]) -> dict[str, list[str]]:
     if not backend.is_dir():
         return out
     name_re = {name: re.compile(rf"""['"]\b{re.escape(name)}\b['"]""") for name in tool_names}
-    for py in backend.rglob("*.py"):
-        if "/__pycache__/" in str(py) or "/venv/" in str(py):
-            continue
+    # Only these two folders are skipped here, so a tool named in tests or
+    # migrations still counts as referenced.
+    for py in source_files(root, pattern="*.py", under=backend,
+                           exclude_dirs=frozenset({"__pycache__", "venv"})):
+        rel = str(py.relative_to(root))
         try:
             text = py.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
-        rel = str(py.relative_to(root))
         for name, rx in name_re.items():
             if rx.search(text):
                 out[name].append(rel)
@@ -388,7 +403,12 @@ def _analyze(root: Path, extra_excludes: frozenset[str] = frozenset()) -> dict[s
 
     # Prefer the live registry when it can be probed: it sees loop-registered
     # tools the AST pass may miss. Fall back to AST-only when the probe fails.
-    runtime_names, probe_info = _probe_runtime_registry(root)
+    # The probe imports the mapped tree's own code, so a repository someone
+    # uploaded is read, never run.
+    if _is_uploaded(root):
+        runtime_names, probe_info = set(), {"error": "uploaded code is not run"}
+    else:
+        runtime_names, probe_info = _probe_runtime_registry(root)
     if runtime_names:
         tool_registry_source = "runtime"
         # Synthesize graph entries for runtime-only names not seen by the AST.

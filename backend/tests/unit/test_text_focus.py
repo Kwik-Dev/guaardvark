@@ -37,6 +37,21 @@ def test_a_passage_beats_a_menu_that_repeats_the_same_words():
     assert window.index(spec) < 400
 
 
+def test_a_term_matches_at_the_start_of_a_word_only():
+    text = "A great creature of great heat. " * 40 + "It eats ants at night. " + "Filler words here. " * 40
+    window = focus_window(text, "What does it eat?", 120)
+    assert "It eats ants" in window
+
+
+def test_the_page_subject_does_not_outweigh_the_passage_with_the_rarer_word():
+    subject = " ".join(f"The aardvark digs burrow {i}." for i in range(40))
+    diet = "The aardvark eats ants, avoids eating driver ants, and has eaten the aardvark cucumber."
+    later = " ".join(f"The aardvark sleeps by day {i}." for i in range(40))
+    elsewhere = "A cartoon aardvark tried to eat an ant."
+    text = f"{subject} {diet} {later} {elsewhere} " + "The aardvark. " * 30
+    assert diet in focus_window(text, "What does an aardvark eat?", 400)
+
+
 def test_anchors_count_like_query_terms():
     text = "x " * 500 + "part ELN-01 fits" + " y" * 500
     assert "ELN-01" in focus_window(text, "", 80, anchors=["ELN-01"])

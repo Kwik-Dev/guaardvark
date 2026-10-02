@@ -14,6 +14,15 @@ system_app = typer.Typer(help="System and model commands")
 models_app = typer.Typer(help="LLM model management", no_args_is_help=True)
 
 
+def _payload(resp: dict) -> dict:
+    """The body of a backend reply: `data`, or an older route's dict `message`.
+    A string `message` ("Model status retrieved") is a status line, not the body."""
+    for key in ("data", "message"):
+        if isinstance(resp.get(key), dict):
+            return resp[key]
+    return {}
+
+
 def _find_project_root(path: str) -> str:
     """Find project root (directory containing start.sh and scripts/system-manager)."""
     resolved = os.path.abspath(path)
@@ -168,6 +177,7 @@ def health(
     server: str = typer.Option(None, "--server", "-s", help="Server URL override"),
     json_out: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ):
+    """Is the backend up? One line: status, version, uptime."""
     server = server or get_global_server()
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
@@ -193,6 +203,7 @@ def status(
     server: str = typer.Option(None, "--server", "-s", help="Server URL override"),
     json_out: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ):
+    """Everything at a glance: server, chat model, workers, GPU, MCP, version."""
     server = server or get_global_server()
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
@@ -232,9 +243,7 @@ def status(
         s_style = "llx.status.online" if status_ok else "llx.status.offline"
         server_line = f"[llx.kv.key]Server:[/llx.kv.key]  {server_url}  [{s_style}]{s_icon} {'Online' if status_ok else 'Offline'}[/{s_style}]"
 
-        model_info = model_data.get("message", model_data.get("data", {}))
-        if isinstance(model_info, str):
-            model_info = {}
+        model_info = _payload(model_data)
         text_model = model_info.get("text_model", "none")
         model_line = f"[llx.kv.key]Model:[/llx.kv.key]   [llx.accent]{text_model}[/llx.accent]"
 
@@ -259,7 +268,7 @@ def status(
             mcp_line = (f"[llx.kv.key]MCP:[/llx.kv.key]     {mcp_data.get('servers_connected', 0)}/"
                         f"{mcp_data.get('servers_configured', 0)} servers, "
                         f"{mcp_data.get('total_tools_available', 0)} tools"
-                        + ("" if mcp_ok else f"  [{m_style}]{ICON_OFFLINE} see: llx mcp client status[/{m_style}]"))
+                        + ("" if mcp_ok else f"  [{m_style}]{ICON_OFFLINE} see: guaardvark mcp client status[/{m_style}]"))
         else:
             mcp_line = "[llx.kv.key]MCP:[/llx.kv.key]     [llx.dim]disabled or unavailable[/llx.dim]"
 
@@ -275,6 +284,7 @@ def status(
 
 
 def init():
+    """Point the CLI at a Guaardvark server and save it (asks for the URL and API key)."""
     console.print("[llx.brand]Guaardvark Setup[/llx.brand]\n")
 
     config = load_config()
@@ -292,9 +302,7 @@ def init():
 
     try:
         model_data = client.get("/api/model/status")
-        model_info = model_data.get("message", model_data.get("data", {}))
-        if isinstance(model_info, str):
-            model_info = {}
+        model_info = _payload(model_data)
         model_name = model_info.get("text_model", "none")
         console.print(f"  Active model: [llx.accent]{model_name}[/llx.accent]")
     except LlxError:
@@ -322,9 +330,7 @@ def models_list(
     try:
         client = get_client(server)
         data = client.get("/api/model/list", refresh=str(refresh).lower())
-        msg = data.get("message", data.get("data", {}))
-        if isinstance(msg, str):
-            msg = {}
+        msg = _payload(data)
         models = msg.get("models", [])
 
         if json_out or output.is_pipe():
@@ -353,9 +359,7 @@ def models_active(
     try:
         client = get_client(server)
         data = client.get("/api/model/status")
-        info = data.get("message", data.get("data", {}))
-        if isinstance(info, str):
-            info = {}
+        info = _payload(data)
 
         if json_out or output.is_pipe():
             output.print_json({"status": "success", "data": info})

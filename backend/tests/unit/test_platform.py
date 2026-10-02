@@ -51,6 +51,12 @@ def test_screen_agent_is_linux_only(monkeypatch):
     assert plat.screen_agent_available() is True
 
 
+def test_media_player_is_linux_only(monkeypatch):
+    for system, expected in (("Darwin", False), ("Windows", False), ("Linux", True)):
+        monkeypatch.setattr(plat, "os_name", lambda s=system: s)
+        assert plat.media_player_available() is expected
+
+
 def test_lora_train_time_budgets_stock_cuda_unchanged_from_main():
     """The non-Darwin path must keep main's numbers exactly, so a future edit
     cannot silently widen the CUDA caps (a wedged NVIDIA run would then hold the

@@ -22,7 +22,9 @@ import logging
 import random
 import re
 import time
-from typing import Optional
+from typing import Callable, Optional
+
+from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 logger = logging.getLogger(__name__)
 
@@ -467,6 +469,8 @@ def post_youtube_comment_via_servo(
     target_url: str,
     comment_text: str,
     task_id: Optional[int] = None,
+    *,
+    before_submit: Optional[Callable[[], bool]] = None,
 ) -> tuple[bool, str]:
     """Navigate to target_url, post comment_text as a top-level comment.
 
@@ -478,6 +482,10 @@ def post_youtube_comment_via_servo(
       - "navigate_failed: …"
       - "composer_not_found: …"
       - "submit_unverified: …"
+
+    ``before_submit`` is called immediately before the step that publishes;
+    when it returns False nothing is published and the reason is
+    ``transitions.WITHDRAWN_BEFORE_SUBMIT``.
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
@@ -535,6 +543,8 @@ def post_youtube_comment_via_servo(
             return False, f"composer_not_found: {info}"
 
     # 4) Fill + submit entirely via BiDi/DOM (xdotool paste was landing off-target).
+    if before_submit is not None and not before_submit():
+        return False, WITHDRAWN_BEFORE_SUBMIT
     ok, fill_msg = _bidi_fill_and_submit_comment(comment_text)
     logger.warning("yt bidi fill/submit: ok=%s msg=%s task_id=%s", ok, fill_msg, task_id)
     if not ok:
@@ -556,12 +566,18 @@ def post_youtube_reply_via_servo(
     parent_comment_match_text: str,
     reply_text: str,
     task_id: Optional[int] = None,
+    *,
+    before_submit: Optional[Callable[[], bool]] = None,
 ) -> tuple[bool, str]:
     """Navigate to target_url, find the parent comment by text substring,
     open its Reply composer, post reply_text under it.
 
     Reply path still uses the recipe chain (parent-comment find is unique to
     find_on_page). Top-level comments use the BiDi path above.
+
+    ``before_submit`` is called immediately before the step that publishes;
+    when it returns False nothing is published and the reason is
+    ``transitions.WITHDRAWN_BEFORE_SUBMIT``.
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
@@ -612,6 +628,8 @@ def post_youtube_reply_via_servo(
     screen.type_text(reply_text)
     _human_pause()
 
+    if before_submit is not None and not before_submit():
+        return False, WITHDRAWN_BEFORE_SUBMIT
     ok, reason = _run_recipe_step(service, screen, "send the comment", "submit_failed")
     if not ok:
         return False, reason

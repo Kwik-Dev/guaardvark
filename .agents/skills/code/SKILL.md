@@ -16,7 +16,7 @@ description: >-
 | `search_codebase` | semantic search over the indexed project: "where is thinking enabled per model" |
 | `search_code` | case-insensitive regex across files |
 | `list_code_files` | directory listing to orient |
-| `read_code` | a whole file with line numbers |
+| `read_code` | a file, or a line range of it (`start_line`, `end_line`); large files come back in pages |
 | `read_ast_node` | one class or function by name from a Python file |
 | `get_repository_map` | PageRank-ranked architectural map for a folder id |
 | `get_dependency_graph` | file-level import graph for a folder id |

@@ -45,7 +45,9 @@ Never pass a step count below the model's `min_steps`; the server raises it and 
 ## Looping animation: MCP `generate_animation`
 
 Frame-morph GIF/MP4 via img2img: `prompt`, `motion`, `frames` 2-24, `strength` 0.1-0.5, `format` gif|mp4|both.
-Use for short loops and stickers, not for cinema clips.
+Use for short loops and stickers, not for cinema clips. Over MCP it answers at once with a job id
+(`tooljob_...`); poll `get_generation_status` for the GIF and MP4 URLs, or pass
+`wait_for_result: true` to wait up to 60 s for them.
 
 ## Batch: REST
 

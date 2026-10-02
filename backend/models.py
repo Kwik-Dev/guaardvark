@@ -24,6 +24,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship  # Ensure relationship is imported
 
+from backend.utils.clock import utcnow
+
 logger = logging.getLogger(__name__)
 db = SQLAlchemy()
 
@@ -2441,7 +2443,7 @@ class ExperimentRun(db.Model):
     proposer_model = db.Column(db.String(100), nullable=True)
     judge_model = db.Column(db.String(100), nullable=True)
     retrieval_metrics = db.Column(db.JSON, nullable=True)  # hit_rate_at_k/mrr/ndcg_at_10
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    created_at = db.Column(db.DateTime, default=utcnow, index=True)
 
     def to_dict(self):
         return {
@@ -2481,7 +2483,7 @@ class EvalPair(db.Model):
     # generation instead of stacking cost forever.
     is_active = db.Column(db.Boolean, default=True, index=True)
     stale_reason = db.Column(db.String(100), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
 
     source_document = db.relationship("Document", backref="eval_pairs", lazy=True)
 
@@ -2513,7 +2515,7 @@ class ResearchConfig(db.Model):
     # promoted = live-eligible; candidate = awaiting A/B confirmation (nightly
     # runs, family broadcasts); rejected/superseded = history.
     status = db.Column(db.String(20), nullable=True, default="promoted")
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
 
     def to_dict(self):
         return {
@@ -2548,7 +2550,7 @@ class ResearchRun(db.Model):
     halt_reason = db.Column(db.String(200), nullable=True)
     # The research program text frozen at kickoff (reproducibility).
     program_snapshot = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    created_at = db.Column(db.DateTime, default=utcnow, index=True)
 
     def to_dict(self, include_report: bool = False):
         d = {
@@ -3275,6 +3277,57 @@ class Subject(db.Model):
         }
 
 
+class SubjectLora(db.Model):
+    """One LoRA a Cast member holds for one base model (trained here or imported).
+
+    A member can hold a LoRA per base (Z-Image Turbo, FLUX.1 Dev, ...). The
+    current LoRA for a base is its highest ``version``; lower versions are kept
+    as history. ``Subject.lora_path`` stays the member's default LoRA and is the
+    only thing read by code that predates this table. Which row a render uses is
+    decided in ``backend.services.cast_lora_selection``; write rows through its
+    ``record_subject_lora`` so versions and the default stay consistent.
+    """
+    __tablename__ = "subject_loras"
+
+    id = db.Column(db.Integer, primary_key=True)
+    subject_id = db.Column(
+        db.Integer,
+        db.ForeignKey("subjects.id", name="fk_subject_lora_subject_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    base_model_id = db.Column(db.String(64), nullable=False)
+    lora_path = db.Column(db.String(512), nullable=False)
+    # Per (subject, base) counter, independent of the file name's _v<n>.
+    version = db.Column(db.Integer, nullable=False, default=1)
+    # Token this LoRA was trained on; NULL means the member's own trigger_word.
+    trigger_word = db.Column(db.String(64), nullable=True)
+    source = db.Column(db.String(16), nullable=False, default="trained")  # trained | imported
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+
+    subject = db.relationship(
+        "Subject", backref=db.backref("lora_versions", cascade="all, delete-orphan")
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_id", "base_model_id", "version", name="uq_subject_lora_base_version"
+        ),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "subject_id": self.subject_id,
+            "base_model_id": self.base_model_id,
+            "lora_path": self.lora_path,
+            "version": self.version,
+            "trigger_word": self.trigger_word,
+            "source": self.source,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class SubjectSample(db.Model):
     """One reference-sheet image for a Subject — output of the Character Generator.
 
@@ -3650,7 +3703,85 @@ class SuspendedChatState(db.Model):
     rag_context = db.Column(db.Text, nullable=True)
     llm_response = db.Column(db.Text, nullable=True)
     step_info = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
 
 
 
+
+
+class InboundScan(db.Model):
+    """One inbound-guard verdict on a change that tried to land in this checkout.
+
+    Rows with a hold or block stay "open" until a person approves or rejects them.
+    ``payload`` carries what is needed to land a held change that has no other
+    home (a new file, a delete, a rename); a held edit to an existing file lives
+    as a PendingFix and is linked by ``pending_fix_id`` instead.
+    """
+    __tablename__ = "inbound_scans"
+
+    id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=utcnow, index=True)
+    source = db.Column(db.String(40), nullable=False)
+    subject = db.Column(db.String(500), nullable=False)
+    mode = db.Column(db.String(10), nullable=False)
+    verdict = db.Column(db.String(10), nullable=False)
+    top_severity = db.Column(db.String(10))
+    digest = db.Column(db.String(40), nullable=False, index=True)
+    findings = db.Column(db.Text, nullable=False, default="[]")
+    providers = db.Column(db.Text)
+    errors = db.Column(db.Text)
+    files = db.Column(db.Integer, default=0)
+    added_lines = db.Column(db.Integer, default=0)
+    status = db.Column(db.String(12), nullable=False, default="open", index=True)  # open, clear, approved, rejected
+    payload = db.Column(db.Text)
+    pending_fix_id = db.Column(db.Integer, index=True)
+    decided_by = db.Column(db.String(80))
+    decided_at = db.Column(db.DateTime)
+    decision_note = db.Column(db.Text)
+
+    def to_dict(self, include_payload: bool = False) -> dict:
+        out = {
+            "id": self.id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "source": self.source,
+            "subject": self.subject,
+            "mode": self.mode,
+            "verdict": self.verdict,
+            "top_severity": self.top_severity,
+            "digest": self.digest,
+            "findings": json.loads(self.findings or "[]"),
+            "providers": json.loads(self.providers or "[]"),
+            "errors": json.loads(self.errors or "[]"),
+            "files": self.files,
+            "added_lines": self.added_lines,
+            "status": self.status,
+            "pending_fix_id": self.pending_fix_id,
+            "decided_by": self.decided_by,
+            "decided_at": self.decided_at.isoformat() if self.decided_at else None,
+            "decision_note": self.decision_note,
+            "landable": bool(self.payload),
+        }
+        if include_payload:
+            out["payload"] = json.loads(self.payload) if self.payload else None
+        return out
+
+
+class InboundBaseline(db.Model):
+    """The last judged state of one watched file, so the source watch reads only what changed.
+
+    ``accepted`` holds fingerprints of findings already reviewed or present when
+    the watch started; a later change raises only findings outside that set.
+    ``status``: clean, held (new findings waiting in the review list) or approved.
+    """
+    __tablename__ = "inbound_baselines"
+
+    id = db.Column(db.Integer, primary_key=True)
+    path = db.Column(db.String(1024), nullable=False, unique=True, index=True)
+    sha256 = db.Column(db.String(64), nullable=False)
+    size = db.Column(db.BigInteger)
+    mtime = db.Column(db.Float)
+    status = db.Column(db.String(10), nullable=False, default="clean")
+    attribution = db.Column(db.String(20))  # seed, git, product, out-of-band, approved
+    accepted = db.Column(db.Text, nullable=False, default="[]")
+    scan_id = db.Column(db.Integer)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)

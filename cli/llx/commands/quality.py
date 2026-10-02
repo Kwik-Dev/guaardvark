@@ -14,13 +14,13 @@ def quality_scorecard(
     server: str = typer.Option(None, "--server", "-s", help="Backend base URL"),
     json_out: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ):
-    """Fetch structured quality scorecard from GET /api/meta/quality-scorecard."""
+    """Run the structured quality scorecard (POST /api/meta/quality-scorecard)."""
     server = server or get_global_server()
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
     try:
         client = get_client(server)
-        raw = client.get("/api/meta/quality-scorecard")
+        raw = client.post("/api/meta/quality-scorecard")
         data = raw.get("data", raw)
         if json_out or output.is_pipe():
             output.print_json({"status": "success", "data": data})

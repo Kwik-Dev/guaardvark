@@ -65,6 +65,8 @@ def _configure_logging(cmd: str | None, verbose: bool = False) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    from backend.mcp.installer import CLIENTS
+
     parser = argparse.ArgumentParser(prog="python -m backend.mcp")
     sub = parser.add_subparsers(dest="cmd")
 
@@ -84,13 +86,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     install_cmd = sub.add_parser(
         "install",
-        help="Write the guaardvark entry into agent client configs (Cursor, Claude, Grok, ...)",
+        help="Write the guaardvark entry into agent client configs (Cursor, Claude, Codex, Grok, ...)",
     )
     install_cmd.add_argument(
         "--client",
         action="append",
         dest="clients",
-        choices=("cursor", "claude-code", "grok", "claude-desktop", "zed", "gemini"),
+        choices=CLIENTS,
         help="Client to configure (repeatable). Default: every client detected on this machine.",
     )
     install_cmd.add_argument(
@@ -129,6 +131,13 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _refuse_to_start(reason: Exception) -> int:
+    """Say on stderr why no server was started. stdout stays empty: it is the
+    JSON-RPC pipe, and a client shows the server's stderr in its MCP log."""
+    print(f"guaardvark mcp: {reason}", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -140,8 +149,11 @@ def main(argv: list[str] | None = None) -> int:
         # Import + tool registry boot are loud — quarantine them from stdout
         # so the JSON-RPC pipe stays clean when Claude Desktop pipes us in.
         with _stdout_to_stderr():
-            from backend.mcp.server import build_server, run_stdio
-            prebuilt = build_server()
+            from backend.mcp.server import MCPServerDisabled, build_server, run_stdio
+            try:
+                prebuilt = build_server()
+            except MCPServerDisabled as exc:
+                return _refuse_to_start(exc)
         try:
             asyncio.run(run_stdio(prebuilt=prebuilt))
         except KeyboardInterrupt:
@@ -150,8 +162,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "http":
         with _stdout_to_stderr():
-            from backend.mcp.server import build_server, run_http
-            prebuilt = build_server()
+            from backend.mcp.server import MCPServerDisabled, build_server, run_http
+            try:
+                prebuilt = build_server()
+            except MCPServerDisabled as exc:
+                return _refuse_to_start(exc)
         try:
             run_http(host=args.host, port=args.port, prebuilt=prebuilt)
         except KeyboardInterrupt:

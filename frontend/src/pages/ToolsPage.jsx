@@ -58,6 +58,7 @@ import {
   getToolSchemas,
   getToolCategories,
 } from "../api/toolsService";
+import { ApiKeyRefusalAlert } from "../components/common/ApiKeyRefusalNotice";
 import { useStatus } from "../contexts/StatusContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
 
@@ -196,12 +197,16 @@ const ToolsPage = () => {
         });
       }
     } catch (err) {
-      setTestResult({ success: false, error: err.message });
-      setSnackbar({
-        open: true,
-        message: err.message || "Tool execution failed",
-        severity: "error",
-      });
+      // err.authRefused: running a tool here needs the Guaardvark machine or
+      // this install's API key; err.message says which.
+      setTestResult({ success: false, error: err.message, authRefused: err.authRefused || null });
+      if (!err.authRefused) {
+        setSnackbar({
+          open: true,
+          message: err.message || "Tool execution failed",
+          severity: "error",
+        });
+      }
     } finally {
       setTestLoading(false);
     }
@@ -761,7 +766,10 @@ const ToolsPage = () => {
                 )
               )}
 
-              {testResult && (
+              {testResult?.authRefused && (
+                <ApiKeyRefusalAlert message={testResult.error} sx={{ mt: 3 }} />
+              )}
+              {testResult && !testResult.authRefused && (
                 <Box sx={{ mt: 3 }}>
                   <Typography variant="subtitle2" sx={{ mb: 1 }}>
                     Result

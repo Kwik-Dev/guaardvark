@@ -103,3 +103,20 @@ class TestChatEndpoint:
         data = resp.get_json()
         assert data["success"] is True
         assert data["data"]["response"] == "Hello!"
+
+
+class TestHostCheck:
+    """A page whose DNS name was re-pointed at 127.0.0.1 sends its own name
+    as Host; the REPL sends 127.0.0.1."""
+
+    @pytest.mark.parametrize("host", ["127.0.0.1:5002", "localhost:5002", "localhost", "[::1]:5002"])
+    def test_this_machine_is_answered(self, client, host):
+        assert client.get("/api/health", headers={"Host": host}).status_code == 200
+
+    @pytest.mark.parametrize("host", ["evil.example:5002", "localhost.evil.example", "127.0.0.1.nip.io:5002"])
+    def test_other_names_are_refused_before_any_route(self, client, patch_config, host):
+        resp = client.post("/api/model/set", data=json.dumps({"model": "x"}),
+                           content_type="application/json", headers={"Host": host})
+        assert resp.status_code == 421
+        from llx.launch_config import load_launch_config
+        assert load_launch_config().get("model") != "x"

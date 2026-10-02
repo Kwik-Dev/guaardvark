@@ -282,16 +282,16 @@ def run_casting_director(prod_id: int, llm=None):
         # Cast library (existing trained Subject rows where lora_path is not None)
         library = Subject.query.filter(Subject.lora_path.isnot(None)).all()
         
-        # Fetch available voices from Audio Foundry
+        # The built-in voices installed on this machine: the ids the Editor's
+        # voiceover can speak. Read from the voice catalog the plugin ships,
+        # so the list does not depend on Audio Foundry running.
         available_voices = []
         try:
-            flask_port = os.environ.get("FLASK_PORT", "5002")
-            resp = requests.get(f"http://localhost:{flask_port}/api/audio-foundry/voices", timeout=5)
-            if resp.status_code == 200:
-                available_voices = resp.json().get("voices", [])
+            from backend.services.audio_foundry_models import kokoro_voice_choices
+            available_voices = kokoro_voice_choices(installed_only=True)
         except Exception as e:
             import logging
-            logging.warning(f"Could not fetch available voices: {e}")
+            logging.warning(f"Could not read the Audio Foundry voice catalog: {e}")
 
         input_data = {
             "subjects": script_subjects,
@@ -661,6 +661,18 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
         resolved, resolve_err = resolve_active_video_model(
             "i2v", video_model, surface="film-crew",
         )
+        from backend.services.plugin_bridge import job_service_start_enabled
+        if job_service_start_enabled() and (video_model or resolved):
+            # Start ComfyUI when the model renders there and it is down, the
+            # way a Video Gen batch does, then resolve again against it.
+            from backend.services.video_model_registry import prepare_video_model
+            ready, prep_err = prepare_video_model(video_model or resolved)
+            if ready and resolve_err:
+                resolved, resolve_err = resolve_active_video_model(
+                    "i2v", video_model, surface="film-crew",
+                )
+            elif not ready and not resolve_err:
+                resolve_err = prep_err
         if resolve_err:
             ctx.fail(resolve_err)
             return

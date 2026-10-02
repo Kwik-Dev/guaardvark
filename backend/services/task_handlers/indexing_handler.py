@@ -188,10 +188,12 @@ class DocumentIndexingHandler(BaseTaskHandler):
             })
 
             # Submit each document for indexing
+            from backend.celery_dispatch import TaskNotStarted
+
+            not_queued = []
+            last_error = None
             for i, doc_id in enumerate(document_ids):
                 process_id = f"{job_id}_doc_{doc_id}"
-                # Note: index_document_task is a regular function, call directly
-                # In production, you'd use Celery's apply_async
                 try:
                     from backend.celery_app import celery
                     celery_result = celery.send_task(
@@ -202,21 +204,36 @@ class DocumentIndexingHandler(BaseTaskHandler):
                     celery_task_ids.append(celery_result.id)
                 except Exception as celery_error:
                     logger.warning(f"Celery submission failed for doc {doc_id}: {celery_error}")
+                    not_queued.append(doc_id)
+                    last_error = celery_error
+                    if isinstance(celery_error, TaskNotStarted):
+                        # Redis is down: the rest would fail the same way.
+                        not_queued.extend(list(document_ids)[i + 1:])
+                        break
 
-            progress_callback(10, f"Submitted {len(document_ids)} documents to queue", {
-                "celery_task_count": len(celery_task_ids),
+            queued = len(celery_task_ids)
+            progress_callback(10, f"Submitted {queued} of {len(document_ids)} documents to queue", {
+                "celery_task_count": queued,
                 "job_id": job_id
             })
 
+            if not_queued:
+                status = TaskResultStatus.PARTIAL if queued else TaskResultStatus.FAILED
+                message = f"Queued {queued} of {len(document_ids)} documents for indexing"
+            else:
+                status = TaskResultStatus.SUCCESS
+                message = f"Submitted {queued} documents for indexing"
             return TaskResult(
-                status=TaskResultStatus.SUCCESS,
-                message=f"Submitted {len(document_ids)} documents for indexing",
+                status=status,
+                message=message,
                 output_data={
                     "celery_task_ids": celery_task_ids,
                     "job_id": job_id,
                     "document_count": len(document_ids),
+                    "not_queued": not_queued,
                     "async": True
                 },
+                error_message=str(last_error) if last_error else None,
                 items_total=len(document_ids),
                 started_at=started_at,
                 completed_at=datetime.now()

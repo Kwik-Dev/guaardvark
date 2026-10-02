@@ -150,7 +150,15 @@ class VideoGenerationRouter:
             self._active_generation_count += 1
             self._cancel_idle_shutdown()
         try:
-            generator = self.get_active_generator()
+            try:
+                generator = self.get_active_generator()
+            except RuntimeError as e:
+                # No backend: ComfyUI is down and there is nothing to fall back to.
+                from backend.services.job_types import RenderErrorKind
+                return VideoGenerationResult(
+                    success=False, error=str(e), error_kind=RenderErrorKind.COMFYUI_DOWN.value,
+                    prompt_used=request.prompt,
+                )
             # The batch runner holds a gpu_session around every clip; direct
             # callers (tools, adapters, tests) came through here with nothing
             # evicting the resident chat model, so a 14 GB video budget on a
@@ -160,9 +168,11 @@ class VideoGenerationRouter:
                 result = generator.generate_video(request)
             return result
         except RuntimeError as e:
+            from backend.services.job_operation_gate import classify_render_exception
             return VideoGenerationResult(
                 success=False,
                 error=str(e),
+                error_kind=classify_render_exception(e).value,
                 prompt_used=request.prompt,
             )
         finally:
@@ -334,7 +344,7 @@ class VideoGenerationRouter:
             # Mirror plugins/comfyui/scripts/start.sh: loopback bind and the
             # memory flags the #13109 patch depends on.
             listen = os.environ.get("GUAARDVARK_COMFYUI_LISTEN", "127.0.0.1")
-            from backend.services.comfyui_launch_flags import preview_cli_args
+            from backend.services.comfyui_launch_flags import model_paths_launch, preview_cli_args
             args = [
                 str(venv_python), str(main_py), "--listen", listen, "--port", "8188",
                 "--disable-smart-memory", "--cache-none", "--reserve-vram", "1.0",
@@ -342,12 +352,15 @@ class VideoGenerationRouter:
             if os.environ.get("GUAARDVARK_COMFYUI_PINNED_MEMORY", "0") != "1":
                 args.append("--disable-pinned-memory")
             args.extend(preview_cli_args())
+            paths_args, paths_env = model_paths_launch(GUAARDVARK_ROOT)
+            args.extend(paths_args)
             proc = subprocess.Popen(
                 args,
                 cwd=str(comfyui_dir),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                env={**os.environ, **paths_env},
             )
             self._comfyui_process = proc
 

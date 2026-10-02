@@ -74,7 +74,7 @@ def audio_tts(
             return
         path = extract_media_path(result if isinstance(result, dict) else {}, client.server_url)
         filename = (result.get("filename") if isinstance(result, dict) else None) or path or "audio"
-        output.print_success(f"Audio generated: {filename}")
+        output.print_success(f"Audio generated: {str(filename).rsplit('/', 1)[-1]}")
         if path and not str(path).startswith("http"):
             player = play_audio(path, no_play=no_play)
             if player:
@@ -91,23 +91,60 @@ def audio_tts(
 
 @audio_app.command("music")
 def audio_music(
-    prompt: str = typer.Argument(..., help="Music description"),
+    style: str = typer.Argument(..., help="The sound you want: genre, instruments, mood, tempo"),
+    lyrics: str = typer.Option(None, "--lyrics", "-l", help="Words to sing, or a path to a text file of them"),
+    seconds: float = typer.Option(30.0, "--seconds", "-d", help="Length in seconds (up to 240)"),
+    instrumental: bool = typer.Option(False, "--instrumental", help="No vocals"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for the song, then play it"),
+    no_play: bool = typer.Option(False, "--no-play", help="With --wait: do not play it"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """Generate music from a prompt."""
+    """Generate a song (ACE-Step in Audio Foundry)."""
+    import time
+    from pathlib import Path
+
+    from llx.job_status import TERMINAL, read_job
+
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
+    if lyrics and len(lyrics) < 4096 and Path(lyrics).expanduser().is_file():
+        lyrics = Path(lyrics).expanduser().read_text(encoding="utf-8")
+    body = {"style_prompt": style, "duration_s": seconds, "instrumental_only": instrumental, "async": True}
+    if lyrics and not instrumental:
+        body["lyrics"] = lyrics
     try:
-        data = _client(server).post("/api/audio-foundry/generate/music", json={"prompt": prompt})
-        result = _unwrap(data)
-        if json_out or output.is_pipe():
-            output.print_json({"status": "success", "data": result})
-            return
+        client = _client(server)
+        result = _unwrap(client.post("/api/audio-foundry/generate/music", json=body))
         job_id = result.get("job_id") if isinstance(result, dict) else None
-        output.print_success("Music generation started")
-        if job_id:
-            console.print(f"[llx.dim]Job: {job_id}  →  guaardvark jobs watch {job_id}[/llx.dim]")
+        if not wait or not job_id:
+            if json_out or output.is_pipe():
+                output.print_json({"status": "success", "data": result})
+                return
+            if job_id:
+                output.print_success("Music generation started")
+                console.print(f"[llx.dim]Job: {job_id}  →  guaardvark jobs watch {job_id}[/llx.dim]")
+            else:
+                name = Path(str((result or {}).get("path", "song"))).name
+                output.print_success(f"Song ready: {name}")
+            return
+
+        with console.status("[llx.brand]Writing the song…[/llx.brand]", spinner="dots"):
+            info = read_job(client, job_id)
+            while info["status"] not in TERMINAL:
+                time.sleep(2)
+                info = read_job(client, job_id)
+        if json_out or output.is_pipe():
+            output.print_json({"status": "success", "data": {k: v for k, v in info.items() if k != "raw"}})
+            return
+        if info["status"] != "completed" or not info.get("files"):
+            output.print_error(str(info.get("error") or f"Song {info['status']}"), code="JOB_FAILED")
+            raise typer.Exit(1)
+        path = info["files"][0]
+        output.print_success(f"Song ready: {Path(path).name}")
+        player = play_audio(path, no_play=no_play)
+        if player:
+            console.print(f"[llx.dim]Playing with {player}[/llx.dim]")
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")
         raise typer.Exit(1)

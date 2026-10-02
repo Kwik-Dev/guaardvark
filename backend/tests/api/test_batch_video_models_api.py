@@ -22,7 +22,7 @@ def client(monkeypatch):
     monkeypatch.setattr(api, "_check_model_downloaded", lambda _m: False)
     monkeypatch.setattr(api, "_missing_check_files", lambda _m: [])
     monkeypatch.setattr(api, "_detected_total_vram_mb", lambda: 16376)
-    monkeypatch.setattr(api, "resolve_active_video_model", lambda role, explicit=None, surface=None: (None, "none"))
+    monkeypatch.setattr(api, "resolve_active_video_model", lambda role, explicit=None, surface=None, comfyui_down_ok=False: (None, "none"))
     return app.test_client()
 
 

@@ -71,10 +71,15 @@ echo "Plugin dir: $PLUGIN_ROOT"
 echo "Service port: $SERVICE_PORT"
 echo "Log: $LOG_FILE"
 
-# Start uvicorn
+# Start uvicorn. The camera routes and the latest frame are open, and every
+# caller (chat's vision context, the camera buttons, the GPU coordinator) is
+# the backend on this host, so it listens on loopback only.
+# GUAARDVARK_VISION_PIPELINE_HOST=0.0.0.0 in .env opens it to the LAN
+# deliberately, camera included.
+BIND_HOST="${GUAARDVARK_VISION_PIPELINE_HOST:-127.0.0.1}"
 cd "$PLUGIN_ROOT"
 PYTHONPATH="$PLUGIN_ROOT:$PYTHONPATH" \
-python -m uvicorn service.app:app --host 0.0.0.0 --port 8201 --workers 1 \
+python -m uvicorn service.app:app --host "$BIND_HOST" --port "$SERVICE_PORT" --workers 1 \
     >> "$LOG_FILE" 2>&1 &
 
 # Save PID

@@ -43,6 +43,18 @@ def _zimage_via_comfyui_enabled() -> bool:
     return zimage_via_comfyui_enabled()
 
 
+def _offline_key_for(profile: dict) -> Optional[str]:
+    """Offline model key for a train-base profile; Z-Image is the only offline base.
+
+    A ComfyUI base (FLUX, SDXL) has none. Giving it Z-Image's key made FLUX
+    characters take Z-Image's strength setting and its 9 steps / guidance 0.
+    """
+    key = profile.get("offline_model_key")
+    if key:
+        return key
+    return "zimage-turbo" if (profile.get("family") or "zimage") == "zimage" else None
+
+
 def _subjects_from_ids(subject_ids: Sequence[int] | None) -> list:
     """Load Subjects by id. Safe from daemon threads / Celery (opens app_context)."""
     if not subject_ids:
@@ -126,11 +138,17 @@ def render_character_still(
     enhance: str = "none",
     keep_pipeline: bool = True,
     hold_gpu: bool = False,
+    image_model: str | None = None,
 ) -> StillResult:
     """Render one identity-locked still. Never raises — returns StillResult.
 
     ``apply_subject_loras=False`` still routes by subject/LoRA family but loads
     no adapters (Cast base sheet / explorative regen).
+
+    ``image_model`` is the model the person picked (None or "auto" for none).
+    Members holding LoRAs for several bases render with the one for that model,
+    and the render is refused when a member has none; see
+    ``cast_lora_selection``.
     """
     from backend.services.cast_lock import apply_lock, resolve_lora_strength
     from backend.services.image_prompt_sanitize import sanitize_image_prompt
@@ -145,6 +163,29 @@ def render_character_still(
     subjs = list(subjects or [])
     if subject_ids and not subjs:
         subjs = _subjects_from_ids(subject_ids)
+
+    if subjs:
+        from backend.services.cast_lora_selection import CastLoraRefusal, select_cast_loras
+        try:
+            selection = select_cast_loras(subjs, image_model, pin_paths=list(lora_paths or []))
+        except CastLoraRefusal as e:
+            return StillResult(
+                success=False,
+                error=str(e),
+                prompt_used=base,
+                metadata={"source": source, "subject_ids": list(subject_ids or [])},
+            )
+        except Exception as e:
+            log.warning("Cast LoRA selection failed (%s); using default LoRAs", e)
+            selection = None
+        if selection is not None and not selection.legacy:
+            subjs = selection.subjects
+            # Paths passed for these same members are a fallback for a failed
+            # member lookup; the selection has already chosen theirs.
+            lora_paths = [
+                p for p in (lora_paths or [])
+                if (p or "").strip() not in selection.member_paths
+            ]
 
     paths: list[str] = []
     lock = ""
@@ -214,7 +255,7 @@ def render_character_still(
                     route = {
                         "family": profile.get("family") or "zimage",
                         "inference_engine": profile.get("inference_engine") or "offline",
-                        "offline_model_key": profile.get("offline_model_key") or "zimage-turbo",
+                        "offline_model_key": _offline_key_for(profile),
                         "comfy_model_tag": profile.get("comfy_model_tag"),
                         "base_model_id": profile.get("id") or explicit,
                     }
@@ -224,7 +265,7 @@ def render_character_still(
                 route = {
                     "family": profile.get("family") or "zimage",
                     "inference_engine": profile.get("inference_engine") or "offline",
-                    "offline_model_key": profile.get("offline_model_key") or "zimage-turbo",
+                    "offline_model_key": _offline_key_for(profile),
                     "comfy_model_tag": profile.get("comfy_model_tag"),
                     "base_model_id": profile.get("id") or base_id,
                 }
@@ -247,8 +288,14 @@ def render_character_still(
     )
     strength = resolve_lora_strength(strength_model, lora_strength)
 
+    from backend.services.image_render_limits import resolve_canvas, strict_limits_enabled
+    strict = strict_limits_enabled()
+    defaults_model = route.get("offline_model_key") or route.get("comfy_model_tag") or "auto"
+    if engine == "comfy" and route.get("comfy_model_tag"):
+        # A ComfyUI base samples from its own row (FLUX-dev 28 steps / 3.5).
+        defaults_model = route["comfy_model_tag"]
     defaults = resolve_stills_defaults(
-        route.get("offline_model_key") or route.get("comfy_model_tag") or "auto",
+        defaults_model,
         width=width,
         height=height,
         steps=steps,
@@ -348,6 +395,11 @@ def render_character_still(
             model_tag = "zimage"
         else:
             model_tag = route.get("comfy_model_tag") or ("flux-dev" if family == "flux" else "sdxl")
+        # The resolved guidance, not the graph's own default of 7.0 (FLUX-dev's
+        # FluxGuidance value is 3.5). Canvas limits stay behind strict mode.
+        extra = {"cfg": g}
+        if strict:
+            w, h, _ = resolve_canvas(w, h, model_tag)
         gen = ComfyUIImageGenerator(lora_strength=strength)
         path = gen.generate_image(
             prompt=final_prompt,
@@ -360,6 +412,7 @@ def render_character_still(
             steps_explicit=steps_explicit,
             model=model_tag,
             negative_prompt=negative_prompt or None,
+            **extra,
         )
         st = getattr(gen, "last_steps", st)
         meta["steps"] = st

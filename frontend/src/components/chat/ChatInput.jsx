@@ -43,188 +43,6 @@ import {
   refuseAttachmentMessage,
 } from "../../utils/chatAttachment";
 
-const WEB_SEARCH_ENABLED_KEY = "guaardvark_webSearchEnabled";
-
-const fetchDuckDuckGoSnippet = async (query) => {
-  try {
-    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(
-      query
-    )}&format=json&no_redirect=1&no_html=1`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error("DuckDuckGo request failed");
-    const data = await response.json();
-    // Prefer AbstractText, fallback to first RelatedTopics
-    if (data.AbstractText) return data.AbstractText;
-    if (Array.isArray(data.RelatedTopics) && data.RelatedTopics.length > 0) {
-      const first = data.RelatedTopics[0];
-      if (typeof first === "object" && first.Text) return first.Text;
-    }
-    return "No relevant snippet found.";
-  } catch (err) {
-    return `Web search failed: ${err.message}`;
-  }
-};
-
-const analyzeWebsite = async (url) => {
-  try {
-    // Normalize URL
-    if (!url.startsWith("http")) {
-      url = "https://" + url;
-    }
-
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; Guaardvark-WebAnalyzer/1.0)",
-      },
-    });
-
-    if (!response.ok)
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-
-    const html = await response.text();
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, "text/html");
-
-    // Extract basic site info
-    const title = doc.querySelector("title")?.textContent?.trim() || "No title";
-    const description =
-      doc.querySelector('meta[name="description"]')?.getAttribute("content") ||
-      "No description";
-    const keywords =
-      doc.querySelector('meta[name="keywords"]')?.getAttribute("content") ||
-      "No keywords";
-
-    // Extract navigation links
-    const navLinks = Array.from(
-      doc.querySelectorAll("nav a, .nav a, .navigation a, header a")
-    )
-      .map((a) => ({ text: a.textContent?.trim(), href: a.href }))
-      .filter((link) => link.text && link.href)
-      .slice(0, 10);
-
-    // Extract main content areas
-    const mainContent =
-      doc
-        .querySelector("main, .main, .content, #content")
-        ?.textContent?.trim()
-        .substring(0, 500) || "No main content found";
-
-    // Look for sitemap
-    const sitemapLink =
-      doc.querySelector('link[rel="sitemap"]')?.getAttribute("href") ||
-      doc.querySelector('a[href*="sitemap"]')?.getAttribute("href");
-
-    return {
-      url,
-      title,
-      description,
-      keywords,
-      navLinks,
-      mainContent: mainContent + (mainContent.length >= 500 ? "..." : ""),
-      sitemapUrl: sitemapLink ? new URL(sitemapLink, url).href : null,
-    };
-  } catch (err) {
-    return { error: `Website analysis failed: ${err.message}` };
-  }
-};
-
-const analyzeSitemap = async (url) => {
-  try {
-    // Normalize URL
-    if (!url.startsWith("http")) {
-      url = "https://" + url;
-    }
-
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; Guaardvark-SitemapAnalyzer/1.0)",
-      },
-    });
-
-    if (!response.ok)
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-
-    const xml = await response.text();
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xml, "text/xml");
-
-    // Check for XML parsing errors
-    const parseError = doc.querySelector("parsererror");
-    if (parseError) throw new Error("Invalid XML format");
-
-    // Extract URLs from sitemap
-    const urls = Array.from(doc.querySelectorAll("url"))
-      .map((url) => {
-        const loc = url.querySelector("loc")?.textContent;
-        const lastmod = url.querySelector("lastmod")?.textContent;
-        const changefreq = url.querySelector("changefreq")?.textContent;
-        const priority = url.querySelector("priority")?.textContent;
-
-        return { loc, lastmod, changefreq, priority };
-      })
-      .filter((url) => url.loc);
-
-    // If no <url> tags found, try alternative sitemap formats
-    if (urls.length === 0) {
-      const sitemapIndex = Array.from(doc.querySelectorAll("sitemap")).map(
-        (sitemap) => {
-          const loc = sitemap.querySelector("loc")?.textContent;
-          const lastmod = sitemap.querySelector("lastmod")?.textContent;
-          return { loc, lastmod, type: "sitemap" };
-        }
-      );
-
-      if (sitemapIndex.length > 0) {
-        return {
-          type: "sitemap_index",
-          sitemaps: sitemapIndex,
-          totalSitemaps: sitemapIndex.length,
-        };
-      }
-    }
-
-    // Analyze URL patterns for landing page insights
-    const urlPatterns = urls.map((url) => {
-      const path = new URL(url.loc).pathname;
-      const segments = path.split("/").filter((s) => s);
-      return {
-        url: url.loc,
-        path,
-        segments,
-        depth: segments.length,
-        lastmod: url.lastmod,
-        priority: url.priority,
-      };
-    });
-
-    // Group by depth and find landing pages
-    const byDepth = {};
-    urlPatterns.forEach((pattern) => {
-      if (!byDepth[pattern.depth]) byDepth[pattern.depth] = [];
-      byDepth[pattern.depth].push(pattern);
-    });
-
-    // Identify potential landing pages (depth 1, high priority)
-    const landingPages = urlPatterns
-      .filter((p) => p.depth === 1 && parseFloat(p.priority || 0) > 0.5)
-      .slice(0, 5);
-
-    return {
-      type: "sitemap",
-      totalUrls: urls.length,
-      urls: urls.slice(0, 20), // Limit to first 20 for readability
-      urlPatterns: urlPatterns.slice(0, 20),
-      byDepth,
-      landingPages,
-      sitemapUrl: url,
-    };
-  } catch (err) {
-    return { error: `Sitemap analysis failed: ${err.message}` };
-  }
-};
-
 const ChatInput = forwardRef(
   ({ onSendMessage, onStop, disabled = false, sessionId = "default", codeGenMode = false, onVoiceStateChange = () => { }, onAddMessage, onUpdateMessage, onClearMessages, onPlanCreated, projectId, composerError, onClearComposerError }, ref) => {
     const [inputText, setInputText] = useState("");
@@ -851,6 +669,10 @@ Please try uploading the file again or contact support if the issue persists.`;
         // Check if it's an image first
         if (file.type.startsWith("image/")) {
           handleImageUpload(file);
+          // The image now lives in imageState. Left in the input, the send
+          // path would read it back as a document for the next message and
+          // open the upload dialog instead of sending that message.
+          event.target.value = "";
           return;
         }
 
@@ -1126,9 +948,17 @@ Please try a different image or check if the vision model is properly loaded.`;
         return;
       }
 
-      // Slash command interception — handled before any other logic
-      if (slashCmds.isCommand) {
-        const result = await slashCmds.executeCommand(inputText);
+      // Fallback: If programmatic input bypassed React state, grab from DOM
+      let currentText = inputText;
+      if (!currentText && inputRef.current && inputRef.current.value) {
+        currentText = inputRef.current.value;
+      }
+
+      // Slash commands run through their registry handlers before any other
+      // logic. The text is checked as well as isCommand, which only follows
+      // typing: a command recalled from history (Up arrow) must run the same way.
+      if (slashCmds.isCommand || currentText.trim().startsWith("/")) {
+        const result = await slashCmds.executeCommand(currentText);
         if (result?.handled) {
           setInputText("");
           if (inputRef.current) {
@@ -1137,12 +967,6 @@ Please try a different image or check if the vision model is properly loaded.`;
           }
           return;
         }
-      }
-
-      // Fallback: If programmatic input bypassed React state, grab from DOM
-      let currentText = inputText;
-      if (!currentText && inputRef.current && inputRef.current.value) {
-        currentText = inputRef.current.value;
       }
 
       const file = fileRef.current?.files?.[0] || null;
@@ -1164,101 +988,6 @@ Please try a different image or check if the vision model is properly loaded.`;
           `Message too long. Please limit to ${maxLength} characters. Current length: ${sanitizedInput.length}`,
           null
         );
-        return;
-      }
-
-      // /websearch command handling
-      if (sanitizedInput.toLowerCase().startsWith("/websearch")) {
-        const webSearchEnabled =
-          localStorage.getItem(WEB_SEARCH_ENABLED_KEY) === "true";
-        if (!webSearchEnabled) {
-          onSendMessage("Web search is currently disabled in settings.", null);
-          setInputText("");
-          return;
-        }
-
-        const query = currentText.replace(/^\/websearch\s*/i, "").trim();
-        if (!query) {
-          onSendMessage(
-            "Please provide a search query after /websearch.",
-            null
-          );
-          setInputText("");
-          return;
-        }
-
-        // Check for special commands
-        if (query.toLowerCase().startsWith("site:")) {
-          const url = query.replace(/^site:\s*/i, "").trim();
-          if (!url) {
-            onSendMessage("Please provide a URL after site:", null);
-            setInputText("");
-            return;
-          }
-          onSendMessage(`Analyzing website: ${url}`, null);
-          setInputText("");
-          const analysis = await analyzeWebsite(url);
-          if (analysis.error) {
-            onSendMessage(`Website Analysis Error: ${analysis.error}`, null);
-          } else {
-            const report = `Website Analysis for ${analysis.url}:
-Title: ${analysis.title}
-Description: ${analysis.description}
-Keywords: ${analysis.keywords}
-Navigation Links: ${analysis.navLinks
-                .map((l) => `${l.text} (${l.href})`)
-                .join(", ")}
-Main Content Preview: ${analysis.mainContent}
-Sitemap URL: ${analysis.sitemapUrl || "Not found"}`;
-            onSendMessage(`Website Analysis Report:\n${report}`, null);
-          }
-          return;
-        }
-
-        if (query.toLowerCase().startsWith("sitemap:")) {
-          const url = query.replace(/^sitemap:\s*/i, "").trim();
-          if (!url) {
-            onSendMessage("Please provide a sitemap URL after sitemap:", null);
-            setInputText("");
-            return;
-          }
-          onSendMessage(`Analyzing sitemap: ${url}`, null);
-          setInputText("");
-          const analysis = await analyzeSitemap(url);
-          if (analysis.error) {
-            onSendMessage(`Sitemap Analysis Error: ${analysis.error}`, null);
-          } else {
-            let report = `Sitemap Analysis for ${analysis.sitemapUrl}:
-Type: ${analysis.type}
-Total URLs: ${analysis.totalUrls}`;
-
-            if (analysis.type === "sitemap_index") {
-              report += `\nSitemap Index with ${analysis.totalSitemaps} sitemaps:`;
-              analysis.sitemaps.forEach((sitemap, i) => {
-                report += `\n${i + 1}. ${sitemap.loc} (Last modified: ${sitemap.lastmod || "Unknown"
-                  })`;
-              });
-            } else {
-              report += `\nLanding Pages (depth 1, high priority):`;
-              analysis.landingPages.forEach((page, i) => {
-                report += `\n${i + 1}. ${page.url} (Priority: ${page.priority || "Unknown"
-                  })`;
-              });
-              report += `\nURL Structure by Depth:`;
-              Object.entries(analysis.byDepth).forEach(([depth, urls]) => {
-                report += `\nDepth ${depth}: ${urls.length} URLs`;
-              });
-            }
-            onSendMessage(`Sitemap Analysis Report:\n${report}`, null);
-          }
-          return;
-        }
-
-        // Regular web search
-        onSendMessage("Searching the web for: " + query, null);
-        setInputText("");
-        const snippet = await fetchDuckDuckGoSnippet(query);
-        onSendMessage(`Web Search Result: ${snippet}`, null);
         return;
       }
 

@@ -75,7 +75,7 @@ def fake_repo(tmp_path, monkeypatch):
 
 def test_logs_fallback_tails_disk_log(fake_repo):
     repo, swarm_id, task_id, log_lines = fake_repo
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://127.0.0.1:8210")
 
     resp = client.get(f"/swarm/{swarm_id}/logs/{task_id}", params={"lines": 5}, headers=_HDRS)
     assert resp.status_code == 200
@@ -112,7 +112,7 @@ def test_logs_fallback_no_logfile(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "_internal_secret", _SECRET, raising=False)
     monkeypatch.setattr(app_module, "_active_orchestrators", {}, raising=True)
 
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://127.0.0.1:8210")
     resp = client.get(f"/swarm/{swarm_id}/logs/{task_id}", headers=_HDRS)
     assert resp.status_code == 200
     assert resp.json()["logs"] == "(no log file)"
@@ -127,6 +127,6 @@ def test_logs_missing_worktree_404(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "_internal_secret", _SECRET, raising=False)
     monkeypatch.setattr(app_module, "_active_orchestrators", {}, raising=True)
 
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://127.0.0.1:8210")
     resp = client.get("/swarm/does-not-exist/logs/nope", headers=_HDRS)
     assert resp.status_code == 404

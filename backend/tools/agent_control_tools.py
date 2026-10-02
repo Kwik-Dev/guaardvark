@@ -230,7 +230,8 @@ class AgentScreenCaptureTool(BaseTool):
                 filename = f"agent_capture_{int(time.time() * 1000)}.webp"
                 filepath = os.path.join(SCREENSHOTS_DIR, filename)
                 screenshot.save(filepath, format="WEBP", quality=80)
-                image_url = f"/api/tools/screenshots/{filename}"
+                from backend.utils.screenshot_urls import screenshot_url
+                image_url = screenshot_url(filename)
                 _prune_old_screenshots(SCREENSHOTS_DIR)
             except Exception as e:
                 logger.warning(f"Failed to save screenshot for chat: {e}")

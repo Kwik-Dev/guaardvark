@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { formatUiError } from "../utils/uiError";
+import { dispatchWarning } from "../api/taskQueue";
 import {
   Box,
   Typography,
@@ -39,6 +40,9 @@ const FilmCrewPage = () => {
   const [retrying, setRetrying] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
+  // A step the backend saved but could not queue ({dispatched: false,
+  // warning}); shown on the production it belongs to.
+  const [notice, setNotice] = useState(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [regenPolling, setRegenPolling] = useState(false);
 
@@ -59,11 +63,16 @@ const FilmCrewPage = () => {
     }
   }, []);
 
-  const fetchDetail = useCallback(async (id) => {
+  // `quiet` refreshes the production already on screen without the loading
+  // spinner. The spinner replaces the whole detail view, which unmounts the
+  // storyboard grid and with it an open "Regenerate shot" dialog and the
+  // prompt being typed there. The 5 s poll and the refresh after a shot regen
+  // (both run while the person may be typing the next override) stay quiet.
+  const fetchDetail = useCallback(async (id, { quiet = false } = {}) => {
     if (!id) return;
     detailRequestId.current += 1;
     const myRequestId = detailRequestId.current;
-    setLoadingDetail(true);
+    if (!quiet) setLoadingDetail(true);
     try {
       const data = await getProduction(id);
       // Drop the response if a newer fetch was kicked off while we were
@@ -98,7 +107,7 @@ const FilmCrewPage = () => {
     if (active) {
       interval = setInterval(async () => {
         await fetchProductions();
-        await fetchDetail(selectedProdId);
+        await fetchDetail(selectedProdId, { quiet: true });
         if (productionDetail.current_stage === 'awaiting_approval' && regenPolling) {
           regenPollCount.current += 1;
           if (regenPollCount.current >= 12) {
@@ -119,10 +128,16 @@ const FilmCrewPage = () => {
     setTab(0); // Switch to Productions tab if we were in Cast Library
   };
 
+  const noteDispatch = (id, result) => {
+    const warning = dispatchWarning(result);
+    if (warning) setNotice({ id, text: warning });
+  };
+
   const handleCreateProduction = async (data) => {
     const newProd = await createProduction(data);
     await fetchProductions();
     handleProductionSelect(newProd.id);
+    noteDispatch(newProd.id, newProd);
   };
 
   const handleApprove = async () => {
@@ -130,11 +145,12 @@ const FilmCrewPage = () => {
     setApproving(true);
     setError(null);
     try {
-      await approveStoryboard(selectedProdId);
+      const result = await approveStoryboard(selectedProdId);
+      noteDispatch(selectedProdId, result);
       await fetchDetail(selectedProdId);
       await fetchProductions();
     } catch (err) {
-      setError('Failed to approve storyboard');
+      setError(formatUiError(err?.response?.data?.error) || 'Failed to approve storyboard');
     } finally {
       setApproving(false);
     }
@@ -144,7 +160,8 @@ const FilmCrewPage = () => {
     if (!selectedProdId) return;
     setError(null);
     const result = await regenerateShot(selectedProdId, shotId, data);
-    await fetchDetail(selectedProdId);
+    noteDispatch(selectedProdId, result);
+    await fetchDetail(selectedProdId, { quiet: true });
     if (result?.regen_job_id) {
       regenPollCount.current = 0;
       setRegenPolling(true);
@@ -156,7 +173,8 @@ const FilmCrewPage = () => {
     setRetrying(true);
     setError(null);
     try {
-      await retryProduction(id);
+      const result = await retryProduction(id);
+      noteDispatch(id, result);
       await fetchDetail(id);
       await fetchProductions();
     } catch (err) {
@@ -225,10 +243,15 @@ const FilmCrewPage = () => {
                 production={productionDetail}
                 loading={loadingDetail}
                 error={error}
+                notice={notice && notice.id === selectedProdId ? notice.text : null}
+                onDismissNotice={() => setNotice(null)}
                 approving={approving}
                 retrying={retrying}
                 deleting={deleting}
-                onCastingConfirmed={() => fetchDetail(selectedProdId)}
+                onCastingConfirmed={(warning) => {
+                  if (warning) setNotice({ id: selectedProdId, text: warning });
+                  return fetchDetail(selectedProdId);
+                }}
                 onRegenerateShot={handleRegen}
                 onApproveStoryboard={handleApprove}
                 onRetry={handleRetry}

@@ -54,30 +54,93 @@ def swarm_list(
 
 @swarm_app.command("run")
 def swarm_run(
-    prompt: str = typer.Argument(..., help="Task prompt for the swarm"),
+    what: str = typer.Argument(..., help="What to do in plain words, a plan .md file, or a template name"),
+    repo: str = typer.Option(None, "--repo", "-r", help="Git repository to work on (default: Guaardvark itself)"),
+    max_agents: int = typer.Option(None, "--max-agents", "-n", help="Agents working at once"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Parse and plan, start no agents"),
+    allow_dirty: bool = typer.Option(False, "--allow-dirty", help="Start even with uncommitted changes in Guaardvark's own checkout"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """Launch a swarm from a prompt."""
+    """Launch a swarm: each task gets its own agent in its own git worktree.
+
+    A sentence becomes a one-task plan. A markdown plan has one `## Task:` heading
+    per agent (see `swarm templates`).
+    """
+    from pathlib import Path
+
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
+    body: dict = {"dry_run": dry_run, "acknowledge_dirty_tree": allow_dirty}
+    if repo:
+        body["repo_path"] = str(Path(repo).expanduser().resolve())
+    if max_agents:
+        body["max_agents"] = max_agents
     try:
-        data = _client(server).post("/api/swarm/launch", json={"prompt": prompt, "goal": prompt})
+        client = _client(server)
+        local = Path(what).expanduser()
+        if what.endswith(".md") and local.is_file():
+            body["plan_markdown"] = local.read_text(encoding="utf-8")
+        elif what.endswith(".md") or " " not in what.strip():
+            names = [t.get("filename", t) if isinstance(t, dict) else t
+                     for t in (_unwrap(client.get("/api/swarm/templates")) or {}).get("templates", [])]
+            name = what if what.endswith(".md") else f"{what}.md"
+            if name in names:
+                body["plan_path"] = f"plugins/swarm/templates/{name}"
+            else:
+                body["prompt"] = what
+        else:
+            body["prompt"] = what
+
+        data = client.post("/api/swarm/launch", json=body)
         result = _unwrap(data)
         if json_out or output.is_pipe():
             output.print_json({"status": "success", "data": result})
             return
         swarm_id = result.get("swarm_id", result.get("id", "")) if isinstance(result, dict) else ""
-        output.print_success("Swarm launched")
+        output.print_success("Swarm planned (dry run)" if dry_run else "Swarm launched")
         if swarm_id:
             console.print(f"[llx.dim]id: {swarm_id}  →  guaardvark swarm status {swarm_id}[/llx.dim]")
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")
         raise typer.Exit(1)
     except LlxError as e:
-        output.print_error(str(e), code="API_ERROR")
+        if e.status_code == 409:
+            output.print_error(
+                "Guaardvark's own checkout has uncommitted changes, and a swarm would build on top of "
+                "them. Commit them first, or run again with --allow-dirty.", code="DIRTY_TREE")
+        elif e.status_code == 503:
+            output.print_error("The Swarm plugin is not running. Start it with: guaardvark plugins start swarm",
+                               code="SWARM_OFFLINE")
+        else:
+            output.print_error(str(e), code="API_ERROR")
         raise typer.Exit(1)
 
+
+@swarm_app.command("templates")
+def swarm_templates(
+    server: str = typer.Option(None, "--server", "-s"),
+    json_out: bool = typer.Option(False, "--json", "-j"),
+):
+    """List the plan templates a swarm can start from."""
+    json_out = json_out or get_global_json()
+    output.set_json_mode(json_out)
+    try:
+        data = _unwrap(_client(server).get("/api/swarm/templates")) or {}
+        items = data.get("templates", [])
+        if json_out or output.is_pipe():
+            output.print_json({"status": "success", "data": items})
+            return
+        rows = [{"template": t.get("filename", ""), "title": t.get("title", t.get("name", "")),
+                 "tasks": t.get("task_count", t.get("tasks", ""))} if isinstance(t, dict)
+                else {"template": str(t), "title": "", "tasks": ""} for t in items]
+        output.print_table(rows, title="Swarm templates")
+    except LlxConnectionError as e:
+        output.print_error(str(e), code="CONNECTION_ERROR")
+        raise typer.Exit(1)
+    except LlxError as e:
+        output.print_error(str(e), code="API_ERROR")
+        raise typer.Exit(1)
 
 @swarm_app.command("status")
 def swarm_status(

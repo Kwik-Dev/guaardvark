@@ -154,6 +154,8 @@ class ComfyUIProgressBridge:
         self._stop = threading.Event()
         self._ws: Optional[websocket.WebSocket] = None
         self._last_preview_emit = 0.0
+        self._process_id: Optional[str] = None
+        self._reported = False
 
     def start(
         self,
@@ -193,6 +195,8 @@ class ComfyUIProgressBridge:
         ws_url = comfy_url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
         ws_url = f"{ws_url}/ws?clientId={client_id}"
 
+        self._process_id = process_id
+        self._reported = False
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,
@@ -210,6 +214,28 @@ class ComfyUIProgressBridge:
                 self._ws.close()
         except Exception:
             pass
+
+    def finish(self, success: bool, message: str = "") -> None:
+        """Stop, then close the job the bridge reported on: complete or error.
+
+        The bridge only ever writes "processing" (clamped to 99%), so without
+        this the render's job stayed at 99% after a finished render, the
+        progress bar never cleared, and the stale-job reaper later relabelled
+        a good render as an error. The listener is joined first so no late
+        progress event lands after the terminal one.
+        """
+        self.stop()
+        if self._thread is not None:
+            self._thread.join(timeout=8)
+        if not (self._reported and self._process_id):
+            return
+        emit_progress_event(
+            process_id=self._process_id,
+            progress=100 if success else 99,
+            message=message or ("Render finished" if success else "Render failed"),
+            status="complete" if success else "error",
+            process_type="video_render",
+        )
 
     # ── the listener thread ──────────────────────────────────────────────────
     def _run(self, ws_url: str, process_id: str, node_labels: Dict[str, str],
@@ -281,6 +307,7 @@ class ComfyUIProgressBridge:
                             process_type="video_render",
                             additional_data=add,
                         )
+                        self._reported = True
 
                 elif mtype == "executing":
                     # node == None means the prompt finished / queue went idle.

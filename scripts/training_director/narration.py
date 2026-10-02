@@ -6,9 +6,8 @@ whisper, and assembles takes into one WAV with constructed silence between
 lines.
 
 The narrator's clip, delivery preset and trade vocabulary come from the active
-project; endpoints come from the environment. Only the audio half of the
-walkthrough harness (`scripts/demo_director/`) is carried over — there is no
-screen capture here.
+project; endpoints come from the environment. There is no screen capture
+here.
 """
 
 from __future__ import annotations

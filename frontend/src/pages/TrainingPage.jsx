@@ -70,35 +70,59 @@ import { useSnackbar } from "../components/common/SnackbarProvider";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
+import {
+  createFormSync,
+  dirtyFields,
+  markFieldsSaved,
+  mergeServerValues,
+  setFieldValue,
+} from "../utils/serverFormSync";
 
 
 const LEARN_API = "/api/agent-control/learn";
 
-const DemoRow = ({ demo, expanded, onToggle, onDelete, onAttempt, showMessage, theme }) => {
-  const [editorValue, setEditorValue] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(false);
+/** The steps editor's text for a demonstration as the server holds it. */
+const stepsJson = (steps) =>
+  JSON.stringify((steps || []).map(({ _id, ...rest }) => rest), null, 2);
 
+// `draft` is this row's unsaved editor text as a synced form
+// (utils/serverFormSync), held by the page so that collapsing the row or
+// reloading the list does not drop it; null when there is no edit.
+// updateDraft(id, fn) replaces it with fn(current form).
+const DemoRow = ({ demo, expanded, onToggle, onDelete, onAttempt, draft, updateDraft, onSaved, showMessage, theme }) => {
+  const [saving, setSaving] = useState(false);
+  const serverSteps = stepsJson(demo.steps);
+  const editorValue = draft ? draft.values.steps : serverSteps;
+  const dirty = Boolean(draft) && dirtyFields(draft).length > 0;
+
+  // Steps saved elsewhere while this row holds an edit: the edit is kept (the
+  // next save writes over them) and the person is told, through the page's
+  // existing snackbar.
+  const conflict = draft?.conflicts?.steps;
   useEffect(() => {
-    if (expanded && demo.steps) {
-      const stepsJson = JSON.stringify(
-        demo.steps.map(({ _id, ...rest }) => rest),
-        null,
-        2
+    if (conflict !== undefined) {
+      showMessage(
+        `Steps of "${demo.name || "Untitled"}" were changed elsewhere. Your unsaved edit is kept; Save Steps replaces that change.`,
+        "warning",
       );
-      setEditorValue(stepsJson);
-      setDirty(false);
     }
-  }, [expanded, demo.steps]);
+  }, [conflict]);
+
+  const handleEdit = (val) =>
+    updateDraft(demo.id, (form) => setFieldValue(form || createFormSync({ steps: serverSteps }), "steps", val || ""));
 
   const handleSaveSteps = async () => {
+    const sent = editorValue;
     setSaving(true);
     try {
-      const parsed = JSON.parse(editorValue);
+      const parsed = JSON.parse(sent);
       if (!Array.isArray(parsed)) throw new Error("Steps must be a JSON array");
-      await axios.put(`${LEARN_API}/demonstrations/${demo.id}/steps`, { steps: parsed });
+      const res = await axios.put(`${LEARN_API}/demonstrations/${demo.id}/steps`, { steps: parsed });
+      updateDraft(demo.id, (form) => (form ? markFieldsSaved(form, { steps: sent }) : form));
+      // The list's copy now matches what was saved, so the step count is right
+      // and re-opening the row shows the saved steps.
+      onSaved(res.data?.demonstration || { ...demo, steps: parsed });
       showMessage("Steps saved", "success");
-      setDirty(false);
     } catch (err) {
       showMessage(`Save failed: ${err.message}`, "error");
     } finally {
@@ -167,7 +191,7 @@ const DemoRow = ({ demo, expanded, onToggle, onDelete, onAttempt, showMessage, t
                 language="json"
                 theme={theme.palette.mode === "dark" ? "vs-dark" : "vs-light"}
                 value={editorValue}
-                onChange={(val) => { setEditorValue(val || ""); setDirty(true); }}
+                onChange={handleEdit}
                 options={{
                   minimap: { enabled: false },
                   fontSize: 13,
@@ -213,6 +237,37 @@ const TrainingPage = () => {
     const demoParam = searchParams.get("demo");
     return demoParam ? parseInt(demoParam, 10) : null;
   });
+  // Unsaved steps edits by demonstration id (see DemoRow). Kept here because
+  // the rows unmount while the list reloads.
+  const [stepDrafts, setStepDrafts] = useState({});
+  const updateStepDraft = useCallback((id, fn) => {
+    setStepDrafts((prev) => {
+      const next = fn(prev[id] || null);
+      if (next === (prev[id] || null)) return prev;
+      return { ...prev, [id]: next };
+    });
+  }, []);
+  // Each reload folds the server's steps into the drafts: a draft with no
+  // edit left is dropped, an edited one keeps its text (and notes a conflict
+  // when the server's steps moved on), and a deleted demonstration's goes.
+  useEffect(() => {
+    setStepDrafts((prev) => {
+      const next = {};
+      Object.entries(prev).forEach(([id, form]) => {
+        const demo = demonstrations.find((d) => String(d.id) === id);
+        if (!demo || !form) return;
+        const merged = mergeServerValues(form, { steps: stepsJson(demo.steps) });
+        if (dirtyFields(merged).length) next[id] = merged;
+      });
+      const same = Object.keys(next).length === Object.keys(prev).length
+        && Object.keys(next).every((id) => next[id] === prev[id]);
+      return same ? prev : next;
+    });
+  }, [demonstrations]);
+  const handleDemoSaved = useCallback((saved) => {
+    if (!saved?.id) return;
+    setDemonstrations((prev) => prev.map((d) => (d.id === saved.id ? { ...d, ...saved } : d)));
+  }, []);
 
   // Datasets state
   const [datasets, setDatasets] = useState([]);
@@ -631,6 +686,9 @@ const TrainingPage = () => {
                           onToggle={() => setExpandedDemoId(expandedDemoId === demo.id ? null : demo.id)}
                           onDelete={handleDeleteDemo}
                           onAttempt={handleAttemptDemo}
+                          draft={stepDrafts[demo.id] || null}
+                          updateDraft={updateStepDraft}
+                          onSaved={handleDemoSaved}
                           showMessage={showMessage}
                           theme={theme}
                         />

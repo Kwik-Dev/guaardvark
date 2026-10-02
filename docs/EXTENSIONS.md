@@ -53,6 +53,7 @@ extensions/<id>/
   seed.py             seed(app), idempotent, run once per version
   bundles/            rule / lesson bundles for `flask load-rules` / `load-lessons`
   profile.json        the distribution profile
+  inbound_guard.py    register(registry): add checks to the inbound guard, hear its verdicts
   plugin/plugin.json  an optional sidecar service, discovered like plugins/
   frontend/index.jsx  what the vertical adds to the UI
   requirements.txt    pip deps (not yet installed automatically)
@@ -73,6 +74,13 @@ are declared in `media_models.py`: its `register()` calls
 the capability keys the Video Generator, `generate_video` and Film Crew read) and
 `register_family_spec(family, spec)` when the extension also ships a workflow builder for a
 new family. Entries are verified on registration and a broken one is logged by id.
+
+An extension that watches the machine can join the inbound guard (`scripts/check_inbound.py`)
+through `inbound_guard.py`: `register(registry)` gets `registry.scanner(name, fn)`, where
+`fn(changes, context)` returns extra `registry.Finding`s for every scan (it may add findings,
+never remove them, and a failure is recorded on the verdict, not raised), and
+`registry.listener(name, fn)`, called on a background thread with every verdict and every change
+that lands. Both run in the backend and in Celery workers.
 
 Failures are loud and contained: a broken extension is reported by id in the log and on
 `GET /api/settings/profile`, every other extension still loads, and a declared `url_prefixes`

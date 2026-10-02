@@ -1,10 +1,21 @@
 ###############################################################################
 # Guaardvark — Self-Hosted AI Workstation
-# docker compose up — that's it.
+# ./start-docker.sh — that's it. On first start it writes GUAARDVARK_API_KEY
+# to .env next to this file and prints it; enter it once in Settings → API key
+# in each browser.
 # GPU: ./start-docker.sh --gpu  (or: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up)
 ###############################################################################
 
 services:
+  # PostgreSQL, Redis and Ollama are published on this host's loopback only.
+  # The backend reaches them over the compose network (postgres:5432,
+  # redis:6379, ollama:11434); the published ports are for tools on this host
+  # (psql, redis-cli, ollama). None has a login worth the name here: the
+  # database password below is the stock one, Redis has none, and Ollama has
+  # none. GUAARDVARK_POSTGRES_PUBLISH_HOST, GUAARDVARK_REDIS_PUBLISH_HOST and
+  # GUAARDVARK_OLLAMA_PUBLISH_HOST in the .env next to this file (e.g. 0.0.0.0)
+  # publish one on other interfaces deliberately; see INSTALL.md.
+
   # ── PostgreSQL ─────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
@@ -15,7 +26,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "${GUAARDVARK_POSTGRES_PUBLISH_HOST:-127.0.0.1}:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U guaardvark"]
       interval: 10s
@@ -26,7 +37,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${GUAARDVARK_REDIS_PUBLISH_HOST:-127.0.0.1}:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -37,7 +48,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     ports:
-      - "11434:11434"
+      - "${GUAARDVARK_OLLAMA_PUBLISH_HOST:-127.0.0.1}:11434:11434"
     volumes:
       - ollama_models:/root/.ollama
 
@@ -54,6 +65,22 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       OLLAMA_HOST: http://ollama:11434
       FLASK_PORT: "5000"
+      # The UI reaches the backend through the frontend container, so even a
+      # browser on this host counts as another device: protected actions
+      # (running tools, automation, backups, ...) need this key. Compose reads
+      # it from .env next to this file; ./start-docker.sh creates it.
+      GUAARDVARK_API_KEY: ${GUAARDVARK_API_KEY:-}
+      # Tells Settings → API key that the key is managed in that .env.
+      GUAARDVARK_DOCKER: "1"
+      # Browser origins besides http://localhost:5173, comma-separated, e.g.
+      # http://192.168.1.20:5173 to open the UI from another device. The
+      # container cannot see this host's addresses. The backend answers only
+      # to IP addresses, localhost and the names listed here or below, so a
+      # name such as http://myhost:5173 must be listed to open the UI by it.
+      GUAARDVARK_CORS_ORIGINS: ${GUAARDVARK_CORS_ORIGINS:-}
+      # The name other containers on this network call the backend by
+      # (http://backend:5000).
+      VITE_ALLOWED_HOSTS: backend
       # Optional — set your Anthropic key for Uncle Claude:
       # ANTHROPIC_API_KEY: sk-ant-...
     ports:

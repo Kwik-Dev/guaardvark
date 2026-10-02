@@ -128,6 +128,10 @@ If you want to evaluate the UI/API without a native Python install:
 
 Docker runs the **core stack** (API, UI, PostgreSQL, Redis, Ollama). It does not include plugins, ComfyUI, or the virtual agent display. For the full experience, use `./start.sh`.
 
+**API key.** Under Docker the UI reaches the backend through the frontend container, so every browser, this host's included, counts as another device, and protected actions (running tools, automation, backups, file edits) need this install's API key. The first `./start-docker.sh` creates one, saves it as `GUAARDVARK_API_KEY` in `.env` next to `docker-compose.yml`, and prints it. Open the Web UI, go to **Settings → API key**, paste it and press Save. That signs the browser in once (it keeps a sign-in cookie, not the key); do the same once in each browser you use. Later starts leave the key alone; `grep GUAARDVARK_API_KEY .env` shows it again. To change it, edit that line (or delete it and let the next start make a new one) and run `./start-docker.sh` again; every browser then signs in again with the new key. Running `docker compose up` yourself skips this step, and protected actions stay refused until `GUAARDVARK_API_KEY` is set in `.env`.
+
+**Ports.** The Web UI (5173) and the API (5000) are published on every interface, so other devices can use them with the API key. PostgreSQL (5432), Redis (6379) and Ollama (11434) are published on `127.0.0.1` only: the backend reaches them inside Docker's network, and the host ports are there for `psql`, `redis-cli` or `ollama` on this machine. None of the three has a real login here (the database password is the stock `guaardvark`, Redis and Ollama have none), so publishing one to the network gives everyone on it your data, your task queue or your models. To do that anyway for a setup that needs it, set `GUAARDVARK_POSTGRES_PUBLISH_HOST=0.0.0.0`, `GUAARDVARK_REDIS_PUBLISH_HOST=0.0.0.0` or `GUAARDVARK_OLLAMA_PUBLISH_HOST=0.0.0.0` (or one address of this machine) in the `.env` next to `docker-compose.yml` and run `./start-docker.sh` again. For PostgreSQL, change the password first: `ALTER USER guaardvark PASSWORD '…'` in `psql` (the image reads `POSTGRES_PASSWORD` only when it creates the database), then the password in the backend's `DATABASE_URL` and in `POSTGRES_PASSWORD` in `docker-compose.yml`.
+
 Stop: `docker compose down`
 
 ## Custom plugin ports
@@ -140,9 +144,31 @@ echo '{"port": 8000}' > plugins/comfyui/plugin.local.json
 
 The file is gitignored and merged over the manifest at load, so the override survives updates. Any manifest key can be overridden the same way. The backend's ComfyUI clients follow the effective port automatically (or set `GUAARDVARK_COMFYUI_URL` to point somewhere else entirely).
 
+## Plugin servers and the network
+
+Every plugin server is called by the backend on the same machine, so each listens on `127.0.0.1` only. To let another machine reach one (another install driving this box's ComfyUI or audio, say), set its variable in `.env` and restart the plugin:
+
+| Plugin | Port | Variable |
+|---|---|---|
+| ComfyUI | 8188 | `GUAARDVARK_COMFYUI_LISTEN=0.0.0.0` |
+| Audio Foundry | 8206 | `GUAARDVARK_AUDIO_FOUNDRY_HOST=0.0.0.0` |
+| Upscaling | 8202 | `GUAARDVARK_UPSCALING_HOST=0.0.0.0` |
+| Video Editor | 8207 | `GUAARDVARK_VIDEO_EDITOR_HOST=0.0.0.0` |
+| Vision Pipeline | 8201 | `GUAARDVARK_VISION_PIPELINE_HOST=0.0.0.0` (the camera and its frames come with it) |
+| GPU Embedding | 8204 | `PLUGIN_GPU_EMBEDDING_HOST=0.0.0.0` |
+| Discord bot health | 8200 | `DISCORD_HEALTH_HOST=0.0.0.0` |
+
+Most of these servers have no login of their own; opening one to the network opens it to everyone on that network. Upscaling and the Vision Pipeline answer every route but `/health` only with the token in `data/.upscaling_internal_secret` or `data/.vision_pipeline_internal_secret` (sent as `Authorization: Bearer <token>`), which the backend sends for you; another machine calling them needs that token. The Swarm (8210) runs coding agents in your repositories and stays on `127.0.0.1`.
+
+The optional web terminal (`scripts/terminal_server.sh start`, ttyd on port 7682, needs `ttyd` installed) is a shell on this machine. It listens on `127.0.0.1` and asks for the user `gvk` and a password made on its first start, kept in `data/terminal/.terminal_auth` (`scripts/terminal_server.sh regenerate-credentials` makes a new one). `GUAARDVARK_TERMINAL_INTERFACE=0.0.0.0` opens it to the network; anyone who can read that password, or watch the process list on this machine, can then use your shell from there. Each answers only requests addressed to an IP address, `localhost` or one of this machine's names, as the backend does (see `host_not_allowed` under Troubleshooting); a caller that uses another name for this machine needs that name in `GUAARDVARK_CORS_ORIGINS`.
+
 ## Troubleshooting
 
 - Permission issues: `chmod +x *.sh`
+- **A page says to enter the API key**: protected actions (running tools, automation, backups, file edits) work without a key only on the Guaardvark machine itself. To use them from another device, create a key in **Settings → API key** on the Guaardvark machine, then paste it into **Settings → API key** on the other device and press Save, once per browser. Once a key exists, every browser needs to be signed in with it, the Guaardvark machine's included (the browser that created the key already is); that machine keeps the key in `.env` as `GUAARDVARK_API_KEY`.
+- **Chat replies, progress or voice never arrive in a browser that reaches Guaardvark under another name** (a reverse proxy such as `https://guaardvark.example`, a DNS name from your router, or Docker opened from another device at `http://<host-ip>:5173`): the backend accepts browser pages only from this install's own addresses — the frontend port on `localhost`, `127.0.0.1`, this machine's own IP addresses, its hostname and `<hostname>.local`, plus `VITE_FRONTEND_URL`. Add the other origin to `.env` as `GUAARDVARK_CORS_ORIGINS=https://guaardvark.example` (comma-separated for several; each is what the browser's address bar shows before the first `/` after the host) and restart the backend. Under Docker, put the line in the `.env` next to `docker-compose.yml`. `logs/backend.log` names the refused one in a line ending `is not an accepted origin.` The same setting applies when saving or starting anything is refused with `cross_site_request` (logged as `[CROSS-SITE] Refused ...`), which can happen with a browser that does not report same-origin requests behind a proxy that does not pass the address it was reached at.
+- **A request is refused with `host_not_allowed` (HTTP 421, "this Guaardvark does not answer to the name …")**: the backend answers only requests addressed to an IP address, `localhost`, this machine's hostname (its first part and `<first part>.local` too), or a name you have listed, so a web page whose DNS name has been pointed at this machine cannot use it. If you reach the backend or the UI by another name (a DNS name from your router such as `gpubox.lan`, a Tailscale name, an Interconnector master URL written with a name, a reverse proxy that passes on the `Host` header, or Docker opened at `http://<name>:5173`), add that address to `.env` as `GUAARDVARK_CORS_ORIGINS=http://gpubox.lan:5000` (the refusal names the exact address to add; comma-separated for several) and restart. Under Docker, put the line in the `.env` next to `docker-compose.yml`. A name in `VITE_ALLOWED_HOSTS` counts too, and `VITE_ALLOWED_HOSTS=all` turns this check off along with Vite's. An Interconnector master URL written as the master's IP address always works. `logs/backend.log` names each refused request in a line starting `[HOST] Refused`. The plugin servers and the ComfyUI Guaardvark starts apply the same check with the same settings (restart the plugin after changing them), as do the MCP server's HTTP transport (`python -m backend.mcp http`) and the reboot log; their refusals are logged in the plugin's own log under `logs/`, and ComfyUI's in `logs/comfyui.log`.
+- **`start.sh is running as root`**: run `./start.sh` as your normal user, without `sudo`; it asks for your password itself when it installs system packages. If root is the only account on the machine (some GPU cloud hosts and containers), run `GUAARDVARK_ALLOW_ROOT=1 ./start.sh`.
 - Health diagnostics: `./start.sh --test`
 - Wrong Python venv (e.g. after upgrade): `rm -rf backend/venv && ./start.sh`
 - Check logs in `logs/`
@@ -161,11 +187,16 @@ The file is gitignored and merged over the manifest at load, so the override sur
   after; the ComfyUI plugin's start log prints the backend it chose. Measured on
   MiniMax H3 (16 GB RTX 40-series, 864x480, 20 steps): `ck` took 339 s against
   390 s with frames indistinguishable at the same seed.
+- **Video clips from chat or MCP look washed out or over-cooked**: a request that names no
+  guidance renders with the model's own template value (LTX 1, Wan 14B 3.5, Wan 5B 5). Set
+  `GUAARDVARK_VIDEO_REFERENCE_DEFAULTS=1` in `.env` (off by default) and restart the backend to
+  also send Wan's template negative prompt when none is given. `scripts/video_prompt_ab.py`
+  compares the variants on your card.
 - **A 20 GB-class video model runs out of memory at the first step** (MiniMax H3 on a 16 GB
-  card): ComfyUI loaded it partially and left too little room for its activations. Set
-  `GUAARDVARK_COMFYUI_RESERVE_VRAM=3.0` in `.env` and restart the ComfyUI plugin; the loader
-  offloads more weights and the step completes (slower, but it finishes). The 1344x768
-  canvas on a 16 GB card needs `5.0` (measured: 171 s for a 5 s clip on the 4-step profile).
+  card): ComfyUI left too little room for its activations. Each model declares the
+  `--reserve-vram` it needs (H3 5.0, Wan 2.2 14B 1.0) and Guaardvark relaunches ComfyUI when the
+  running value differs. Remove `GUAARDVARK_COMFYUI_RESERVE_VRAM` from `.env` if it is set: an
+  explicit value overrides every model's own, and H3 runs out of memory at 1.0.
 
 ## Data
 

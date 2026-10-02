@@ -23,7 +23,7 @@ class LlxClient:
 
     def __init__(self, server_url: str | None = None, api_key: str | None = None, timeout: float | None = None):
         self.server_url = server_url or get_server_url()
-        api_key = api_key or get_api_key()
+        api_key = api_key or get_api_key(self.server_url)
         timeout = timeout or get_global_timeout() or get_timeout()
         headers = {}
         if api_key:
@@ -196,7 +196,7 @@ class LlxClient:
             "customPrompt": custom_prompt,
             "rulesCutoff": rules_cutoff,
         }
-        return self.post("/code-intelligence/analyze", json=payload)
+        return self.post("/api/code-intelligence/analyze", json=payload)
 
     def edit_code_intelligent(self, original_code, edit_instructions, language="javascript", file_path="untitled", rules_cutoff=False):
         """Intelligent edit via backend (matches frontend codeIntelligenceService)."""
@@ -207,7 +207,7 @@ class LlxClient:
             "filePath": file_path,
             "rulesCutoff": rules_cutoff,
         }
-        return self.post("/code-intelligence/edit", json=payload)
+        return self.post("/api/code-intelligence/edit", json=payload)
 
 
 def get_client(server: str | None = None) -> LlxClient:

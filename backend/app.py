@@ -132,6 +132,7 @@ except Exception as _e:
     logging.getLogger(__name__).warning(f"Plugin-runner sidecar failed to start: {_e}")
     # Non-fatal — plugin_manager will fall back to direct subprocess.run
 
+from backend.celery_dispatch import TaskNotStarted, register_flask_handler as register_celery_dispatch_handler
 from backend.utils.clock import utcnow
 from backend.utils.chat_utils import (
     DEFAULT_FALLBACK_SYSTEM_PROMPT,
@@ -413,25 +414,6 @@ except ImportError as e:
     )
 
 
-def dev_allowed_origins(frontend_url: str) -> list[str]:
-    """Browser origins the dev backend accepts, including Socket.IO handshakes.
-
-    A sibling install moves its dev server and backend off the default ports so
-    the two can run at once, so both are read from the environment: a hardcoded
-    list refuses every websocket from a relocated frontend.
-    """
-    flask_port = os.getenv("FLASK_PORT", os.getenv("PORT", "5000"))
-    dev_ports = sorted({os.getenv("VITE_PORT", "5173"), "3000", "5173", "5175"})
-    return [
-        f"http://{host}:{port}"
-        for port in dev_ports
-        for host in ("localhost", "127.0.0.1")
-    ] + [frontend_url] + [
-        f"http://localhost:{flask_port}",
-        f"http://127.0.0.1:{flask_port}",
-    ]
-
-
 # Re-entry guard. create_app() must run exactly once per Python process.
 # A second call would re-register all 80 blueprints, re-init BrainState, re-discover
 # plugins, and spawn duplicate background threads — corrupting all the singletons
@@ -482,7 +464,7 @@ def _initialize_app_components(app):
     start_time = time.time()
     executor = Executor(app)
     app.executor = executor
-    from backend.socketio_instance import socketio, FRONTEND_URL
+    from backend.socketio_instance import socketio
     from backend.celery_app import celery as shared_celery
     celery = shared_celery
     
@@ -528,77 +510,23 @@ def _initialize_app_components(app):
     app.logger.info(
         f"Backend application version {__version__} starting..."
     )
-    app.logger.info(
-        f"CORS policy configured to allow specific origins."
-    )
-
-    if flask_env == "production":
-        allowed_origins = [FRONTEND_URL]
-        supports_credentials = True
-        app.logger.info(f"Production CORS: Allowing only {FRONTEND_URL}")
-    else:
-        allowed_origins = dev_allowed_origins(FRONTEND_URL)
-        supports_credentials = True
-        app.logger.info(f"Development CORS: Allowing {len(allowed_origins)} origins")
-
-    # Always allow LAN private-IP origins for local workstation access from phones,
-    # tablets, or other browsers on the same network. This is the primary enabler for
-    # "go to the printed LAN IP + VITE_PORT and use chat/voice". The patterns were
-    # previously only added in interconnector master mode; we now include them
-    # unconditionally (additive) because this is a personal offline AI machine, not
-    # a public service. The interconnector block below may still run for cluster cases.
-    lan_patterns = [
-        r"http://192\.168\.\d+\.\d+:\d+",
-        r"http://10\.\d+\.\d+\.\d+:\d+",
-        r"http://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
-        r"https://192\.168\.\d+\.\d+:\d+",
-        r"https://10\.\d+\.\d+\.\d+:\d+",
-        r"https://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
-    ]
-    allowed_origins = lan_patterns + allowed_origins
-
-    interconnector_master_mode = False
-    try:
-        from backend.api.interconnector_api import _get_config
-        interconnector_config = _get_config()
-        if interconnector_config:
-            if interconnector_config.get("node_mode") == "master":
-                interconnector_master_mode = True
-                # (patterns already prepended above for general LAN UI access)
-                supports_credentials = False
-                app.logger.info("CORS: Master mode active for interconnector (LAN patterns already enabled)")
-            master_url = interconnector_config.get("master_url")
-            if master_url:
-                from urllib.parse import urlparse
-                parsed = urlparse(master_url)
-                master_origin = f"{parsed.scheme}://{parsed.netloc}"
-                if master_origin not in allowed_origins:
-                    allowed_origins.append(master_origin)
-                    app.logger.info(f"CORS: Added master origin {master_origin}")
-    except Exception as cors_err:
-        if "application context" not in str(cors_err).lower():
-            app.logger.warning(f"Could not load interconnector config for CORS: {cors_err}")
-
-    CORS(
-        app,
-        # Apply CORS to everything. The security boundary is the `allowed_origins` list
-        # (localhost variants + VITE_FRONTEND_URL + private LAN IP regex patterns).
-        # This is required because the frontend (when using an absolute VITE_API_BASE_URL
-        # pointing at the backend on a different port or LAN IP) makes direct calls to many
-        # top-level routes that are *not* under /api/* (e.g. some /voice/*, /model, /clients,
-        # /tasks, /meta/*, /gpu/*, /settings/*, /enhanced-chat/*, /plugins, /memory, /projects,
-        # /claude/*, /self-improvement/*, /autoresearch/*, /agent-control/*, /interconnector/*,
-        # /system/*, /files/*, etc.). Previously only /api/* and /health* were covered, so
-        # cross-origin requests from a LAN-loaded (or localhost + baked-LAN) frontend hit
-        # "CORS header ‘Access-Control-Allow-Origin’ missing".
-        resources={r"/*": {"origins": allowed_origins}},
-        supports_credentials=supports_credentials,
-        allow_headers=["Content-Type", "Authorization", "X-API-Key"],
-        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    )
+    # Browsers may read replies, and open Socket.IO, only from this install's
+    # own pages (backend/utils/cors_policy.py). Every route is covered, not
+    # only /api: a build with an absolute VITE_API_BASE_URL calls top-level
+    # routes on the backend directly.
+    from backend.utils.cors_policy import extra_origins, init_cors
+    allowed_origins = init_cors(app, CORS)
+    app.logger.info(f"CORS: allowing {len(allowed_origins)} origins of this install")
+    if extra_origins():
+        app.logger.info(f"CORS: GUAARDVARK_CORS_ORIGINS adds {', '.join(extra_origins())}")
 
     socketio.init_app(app)
     app.logger.info("CORS and SocketIO configured with secure origins")
+    # Only requests addressed to one of this install's names reach Socket.IO
+    # or any view (backend/utils/host_check.py). Wraps Socket.IO's middleware,
+    # so it must come after socketio.init_app.
+    from backend.utils.host_check import HostCheckMiddleware
+    app.wsgi_app = HostCheckMiddleware(app.wsgi_app)
 
     try:
         from backend.utils.unified_progress_system import get_unified_progress
@@ -955,8 +883,8 @@ def _initialize_app_components(app):
         if app.config.get("SECRET_KEY") == "dev-secret-key":
             security_warnings.append(" Using default secret key - change in production")
         
-        if flask_env == "production" and len(allowed_origins) > 1:
-            security_warnings.append(" Multiple CORS origins in production - restrict to single domain")
+        if flask_env == "production" and extra_origins():
+            security_warnings.append(" GUAARDVARK_CORS_ORIGINS allows extra origins in production - keep only frontends you serve")
         
         max_upload = app.config.get("MAX_CONTENT_LENGTH", 0)
         if max_upload > 500 * 1024 * 1024:
@@ -986,6 +914,11 @@ def _initialize_app_components(app):
         app.logger.debug(
             f"Incoming {request.method} request to {request.path} from {request.remote_addr}"
         )
+
+    # A page on another site may not change anything here, API key or not
+    # (backend/utils/cross_site_guard.py). Runs before the auth guard and every view.
+    from backend.utils.cross_site_guard import refuse_cross_site_request
+    app.before_request(refuse_cross_site_request)
 
     # Protect sensitive endpoints (code execution, backup restore/delete)
     from backend.utils.auth_guard import check_endpoint_auth
@@ -1197,6 +1130,8 @@ def _initialize_app_components(app):
             # A blueprint import error becomes a warning in discovery; without
             # this, a vertical's every route 404s behind a clean startup.
             app.logger.error("extension %s: no routes mounted under %s — check its api/ imports", _e.id, ", ".join(_missing))
+    for _ext_id, _err in _ext.register_inbound_guard(_extensions).items():
+        _ext.record(_ext_id, "inbound_guard", _err is None, _err)
 
     # Resume any in-flight video projects (productions + music videos, + future kinds)
     # after a crash. DB-driven — no in-memory state to lose. One registry-driven pass,
@@ -1260,6 +1195,15 @@ def _initialize_app_components(app):
             get_confine_tool_paths()
     except Exception as e:
         app.logger.warning(f"Could not load the tool path limit setting: {e}")
+    try:
+        with app.app_context():
+            from backend.services.inbound_guard_service import get_mode
+            get_mode()
+        # Importing the watch registers its listener; the thread sweeps only while the guard is on.
+        from backend.services import inbound_guard_watch
+        inbound_guard_watch.start_background(app)
+    except Exception as e:
+        app.logger.warning(f"Could not start the inbound guard: {e}")
 
     try:
         from backend.tools.mcp_tools import install_proxy_sync
@@ -2144,6 +2088,13 @@ def health_celery():
         }
 
         return _cache_and_return((jsonify({"status": "up", **worker_info}), 200), "up")
+    except TaskNotStarted as exc:
+        # Redis itself did not answer; asking the workers would go through it too.
+        return _cache_and_return((jsonify({
+            "status": "down",
+            "error": str(exc),
+            "suggestion": "Start Redis and the Celery worker (./start.sh starts both).",
+        }), 503), "down")
     except Exception as exc:
         error_msg = str(exc)
 
@@ -2344,6 +2295,10 @@ def handle_sqlalchemy_db_error(e):
         else "A database error occurred."
     )
     return jsonify({"error": "Database Error", "message": msg}), 500
+
+
+# A task Redis did not take answers 503 with the reason (backend/celery_dispatch.py).
+register_celery_dispatch_handler(app)
 
 
 @app.errorhandler(500)
@@ -2644,13 +2599,13 @@ def db_health_cli():
 
 @app.cli.command("celery-health")
 def celery_health_cli():
-    result = celery.send_task('backend.celery_tasks_isolated.ping', queue='health')
-    try:
-        response = result.get(timeout=5)
-    except Exception as exc:
-        print(json.dumps({"status": "down", "error": str(exc)}))
-        return
-    print(json.dumps({"status": "up", "result": response}))
+    """One line, "up: <answer>" or "down: <reason>"; exit status 1 when down."""
+    from backend.celery_dispatch import ping_worker
+
+    ok, line = ping_worker(celery)
+    print(line)
+    if not ok:
+        sys.exit(1)
 
 
 @app.cli.command("list-routes")

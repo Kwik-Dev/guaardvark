@@ -12,14 +12,13 @@ from lxml import etree
 
 
 def _sanitize_csv_field(value):
-    """Normalize line breaks and escape quotes for a CSV field."""
+    """Normalize line breaks in a CSV field. Quotes are left to the csv writer,
+    which doubles them itself."""
     if value is None:
         return ""
     if not isinstance(value, str):
         value = str(value)
-    value = value.replace("\r\n", "\n").replace("\r", "\n")
-    value = value.replace('"', '""')
-    return value
+    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 logger = logging.getLogger(__name__)

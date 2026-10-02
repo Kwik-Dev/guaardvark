@@ -45,6 +45,10 @@ def test_generate_with_character_lora_passes_subject_ids():
     # Paths always passed as fallback if worker subject resolve fails
     assert kwargs.get("lora_paths") == ["/tmp/batman.safetensors"]
     assert kwargs.get("source") == "batch"
+    # Steps and guidance come from the character's base model, not the page (9 / 0.0 above)
+    assert kwargs.get("steps") is None
+    assert kwargs.get("steps_explicit") is False
+    assert kwargs.get("guidance") is None
     # Scene only — no bare trigger prepend
     assert render.call_args.args[0] == "walking through Gotham rain"
 

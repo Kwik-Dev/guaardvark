@@ -6,17 +6,22 @@ return 501 because no backends are registered yet. /health and /status work.
 """
 from __future__ import annotations
 
+import importlib.util
 import logging
+import sys
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 # Names only — this module keeps torch inside its methods, so importing it
 # here does not pull the ML stack into service startup.
 from backends.voice_gen_chatterbox import EMOTION_PRESETS
+from backends.kokoro_voices import UnknownVoice, check_voice_id
+from backends.voice_consent import ConsentRequired, require_consent
 from service.bootstrap import bootstrap
 from service.config_loader import load_config, resolve_backend_url
 from service.dispatcher import BackendUnavailable, Dispatcher, Intent, NotWired
@@ -60,6 +65,10 @@ class VoiceRequest(BaseModel):
     seed: Optional[int] = None
     output_format: str = Field("wav", pattern="^(wav|mp3)$")
     async_mode: bool = Field(False, alias="async")
+    # With async: queue a job however short the text, so the caller always
+    # gets a job id to poll (MCP's generate_speech, which must answer before
+    # its client's call timeout even on a cold model load).
+    queue: bool = False
 
 
 class MusicRequest(BaseModel):
@@ -79,19 +88,34 @@ class MusicRequest(BaseModel):
 
 # ---------- app setup --------------------------------------------------------
 
+_GUARD_MODULE = "guaardvark_sidecar_guard"
+
+
+def _load_guard():
+    """backend/utils/sidecar_guard.py, loaded by path: this service runs in
+    its own venv, outside the backend package."""
+    loaded = sys.modules.get(_GUARD_MODULE)
+    if loaded is not None:
+        return loaded
+    path = Path(__file__).resolve().parents[3] / "backend" / "utils" / "sidecar_guard.py"
+    spec = importlib.util.spec_from_file_location(_GUARD_MODULE, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[_GUARD_MODULE] = module
+    return module
+
+
+# No CORS middleware: browsers never call this service. The Studio goes
+# through the backend's /api/audio-foundry proxy, and every other caller is a
+# process on this machine (scripts/start.sh binds 127.0.0.1). A page whose
+# name was re-pointed at 127.0.0.1 is still a browser on this machine, so the
+# Host check refuses any request addressed to a name that is not this one's.
 app = FastAPI(
     title="Audio Foundry",
     version="0.1.0",
     description="Audio generation plugin for Guaardvark (voiceover, SFX, music).",
 )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(_load_guard().HostCheckASGIMiddleware)
 
 _config = load_config()
 
@@ -183,7 +207,8 @@ def _estimate_seconds(intent: Intent, params: dict) -> float:
 
 
 def _dispatch(intent: Intent, req) -> Any:
-    """Inline if short / async not requested; otherwise queue a job and 202."""
+    """Inline if short / async not requested; otherwise queue a job and 202.
+    ``queue`` (voice) queues whatever the estimate."""
     # Fail fast before accepting a job: a backend that can't run on this
     # machine (e.g. SAO without CUDA) must 503 here, not crash the job later.
     try:
@@ -194,8 +219,9 @@ def _dispatch(intent: Intent, req) -> Any:
         raise HTTPException(status_code=503, detail=str(e))
     params = req.model_dump(exclude_none=True)
     want_async = bool(params.pop("async_mode", False))
+    always_queue = bool(params.pop("queue", False))
     est = _estimate_seconds(intent, params)
-    if _ASYNC_ENABLED and want_async and est >= _ASYNC_THRESHOLD_S:
+    if _ASYNC_ENABLED and want_async and (always_queue or est >= _ASYNC_THRESHOLD_S):
         job_id = _jobs.submit(intent.value, params)
         return JSONResponse(status_code=202, content={
             "mode": "async",
@@ -256,67 +282,40 @@ def evict_backend(intent: str) -> dict[str, Any]:
 def list_voices() -> dict[str, Any]:
     """Return the available voice catalog grouped by backend.
 
-    Kokoro voices are listed inline (the IDs are stable per Kokoro release).
-    Chatterbox voices come from reference clips at request-time, so the
-    Chatterbox section just describes the contract — not a list.
+    Kokoro voices come from backends/kokoro_voices.json; each carries
+    ``installed``, true when its voice pack is in the local Hugging Face cache
+    (a voice that is not installed is refused at generation with an Install
+    hint rather than downloaded). Chatterbox voices come from reference clips
+    at request-time, so the Chatterbox section just describes the contract.
 
     Frontend uses this to render the voice picker dropdown so we don't have
-    to redeploy the UI when Kokoro adds voices upstream.
+    to redeploy the UI when the catalog changes.
     """
-    # Kokoro v1.0+ catalog. American and British English are the wired set;
-    # voice_gen_kokoro.py routes lang_code from the voice prefix at runtime.
-    return {
-        "kokoro": {
-            "default": "af_heart",
-            "groups": [
-                {"label": "American Female", "voices": [
-                    {"id": "af_heart",   "label": "Heart (default)"},
-                    {"id": "af_bella",   "label": "Bella"},
-                    {"id": "af_nicole",  "label": "Nicole"},
-                    {"id": "af_sarah",   "label": "Sarah"},
-                    {"id": "af_sky",     "label": "Sky"},
-                    {"id": "af_alloy",   "label": "Alloy"},
-                    {"id": "af_aoede",   "label": "Aoede"},
-                    {"id": "af_jessica", "label": "Jessica"},
-                    {"id": "af_kore",    "label": "Kore"},
-                    {"id": "af_nova",    "label": "Nova"},
-                    {"id": "af_river",   "label": "River"},
-                ]},
-                {"label": "American Male", "voices": [
-                    {"id": "am_adam",    "label": "Adam"},
-                    {"id": "am_michael", "label": "Michael"},
-                    {"id": "am_eric",    "label": "Eric"},
-                    {"id": "am_echo",    "label": "Echo"},
-                    {"id": "am_fenrir",  "label": "Fenrir"},
-                    {"id": "am_liam",    "label": "Liam"},
-                    {"id": "am_onyx",    "label": "Onyx"},
-                    {"id": "am_puck",    "label": "Puck"},
-                    {"id": "am_santa",   "label": "Santa"},
-                ]},
-                {"label": "British Female", "voices": [
-                    {"id": "bf_emma",     "label": "Emma"},
-                    {"id": "bf_isabella", "label": "Isabella"},
-                    {"id": "bf_alice",    "label": "Alice"},
-                    {"id": "bf_lily",     "label": "Lily"},
-                ]},
-                {"label": "British Male", "voices": [
-                    {"id": "bm_george",  "label": "George"},
-                    {"id": "bm_lewis",   "label": "Lewis"},
-                    {"id": "bm_daniel",  "label": "Daniel"},
-                    {"id": "bm_fable",   "label": "Fable"},
-                ]},
-                {"label": "Spanish Female", "voices": [
-                    {"id": "ef_dora",    "label": "Dora"},
-                ]},
-                {"label": "Spanish Male", "voices": [
-                    {"id": "em_alex",    "label": "Alex"},
-                    {"id": "em_santa",   "label": "Santa"},
-                ]},
+    from backends import kokoro_voices
+    from backends.hub_weights import cached_hub_file
+
+    catalog = kokoro_voices.load_catalog()
+    repo = kokoro_voices.hf_repo()
+    groups = [
+        {
+            "label": group["label"],
+            "voices": [
+                {**voice,
+                 "installed": cached_hub_file(repo, kokoro_voices.voice_file(voice["id"])) is not None}
+                for voice in group["voices"]
             ],
-        },
+        }
+        for group in catalog["groups"]
+    ]
+    return {
+        "kokoro": {"default": catalog["default"], "groups": groups},
         "chatterbox": {
             "type": "reference_clip",
-            "description": "Zero-shot voice cloning from a 5-10s reference clip. Pass `reference_clip_path` in the /generate/voice request.",
+            "description": (
+                "Zero-shot voice cloning from a 5-10s reference clip imported in Audio Studio "
+                "with consent recorded. Pass its path as `reference_clip_path` in the "
+                "/generate/voice request; a clip without a consent record is refused (403)."
+            ),
         },
     }
 
@@ -326,9 +325,39 @@ def generate_fx(req: FxRequest) -> Any:
     return _dispatch(Intent.FX, req)
 
 
+def _checked_voice_request(req: VoiceRequest) -> VoiceRequest:
+    """Refuse, before any job is queued or model loaded, a request that could
+    only be answered with a different voice than it names (routing rules in
+    backends/voice_gen.py):
+
+    * a reference clip without a consent record (403); ChatterboxBackend
+      checks again when it clones. The clip travels on as the real path that
+      was checked, and decides the voice, so voice_id is then not used;
+    * a voice_id with backend 'chatterbox', which has no built-in voices, or
+      one that is not a catalog Kokoro voice (400).
+    """
+    if req.reference_clip_path:
+        try:
+            clip = require_consent(req.reference_clip_path)
+        except ConsentRequired as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        return req.model_copy(update={"reference_clip_path": str(clip)})
+    if req.voice_id:
+        if req.backend == "chatterbox":
+            raise HTTPException(status_code=400, detail=(
+                f"Chatterbox has no built-in voices, so voice_id '{req.voice_id}' cannot be "
+                "used with backend 'chatterbox'. Use backend 'kokoro' or 'auto' for a "
+                "built-in voice, or a reference clip to clone one."))
+        try:
+            check_voice_id(req.voice_id)
+        except UnknownVoice as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return req
+
+
 @app.post("/generate/voice")
 def generate_voice(req: VoiceRequest) -> Any:
-    return _dispatch(Intent.VOICE, req)
+    return _dispatch(Intent.VOICE, _checked_voice_request(req))
 
 
 @app.post("/generate/voice/stream")
@@ -339,26 +368,29 @@ def generate_voice_stream(req: VoiceRequest) -> Any:
     playable immediately (header included per chunk).
     """
     from starlette.responses import StreamingResponse
-    params = req.model_dump(exclude_none=True)
-    # Force inline load for stream path (chat texts are short)
-    with _dispatcher._intent_locks[Intent.VOICE]:
-        with _dispatcher._state_lock:
-            backend = _dispatcher._backends.get(Intent.VOICE)
-            if backend is None:
-                raise NotWired("No voice backend registered")
-            if not backend.is_loaded:
-                _dispatcher._load_with_orchestrator(Intent.VOICE, backend)
-    _dispatcher._last_used[Intent.VOICE] = __import__("time").monotonic()
-    backend = _dispatcher._backends[Intent.VOICE]
-    if hasattr(backend, "stream"):
-        raw_gen = backend.stream(**params)
-    else:
-        # fallback: full file as one chunk
-        res = backend.generate(**params)
-        def _one():
-            with open(res.path, "rb") as f:
-                yield f.read()
-        raw_gen = _one()
+    params = _checked_voice_request(req).model_dump(exclude_none=True)
+    # The status is sent with the first byte, so every error that can happen
+    # before audio exists maps to the same codes as /generate/voice.
+    with _http_errors(Intent.VOICE):
+        # Force inline load for stream path (chat texts are short)
+        with _dispatcher._intent_locks[Intent.VOICE]:
+            with _dispatcher._state_lock:
+                backend = _dispatcher._backends.get(Intent.VOICE)
+                if backend is None:
+                    raise NotWired("No voice backend registered")
+                if not backend.is_loaded:
+                    _dispatcher._load_with_orchestrator(Intent.VOICE, backend)
+        _dispatcher._last_used[Intent.VOICE] = __import__("time").monotonic()
+        backend = _dispatcher._backends[Intent.VOICE]
+        if hasattr(backend, "stream"):
+            raw_gen = backend.stream(**params)
+        else:
+            # fallback: full file as one chunk
+            res = backend.generate(**params)
+            def _one():
+                with open(res.path, "rb") as f:
+                    yield f.read()
+            raw_gen = _one()
     def byte_stream():
         for item in raw_gen:
             if isinstance(item, (tuple, list)):
@@ -426,21 +458,35 @@ def clear_jobs() -> dict[str, Any]:
 def _run(intent: Intent, params: dict[str, Any]) -> dict[str, Any]:
     """Synchronous generate (short inputs / async not requested).
 
-    Translates NotWired to 501, real errors to 500. Registration of the output
-    as a Document happens in _finalize (shared with the async worker) and is
+    Translates NotWired to 501, an unknown Kokoro voice id to 400, a clip
+    without consent to 403, real errors to 500. Registration of the output as
+    a Document happens in _finalize (shared with the async worker) and is
     non-fatal — a failure there doesn't kill the response; the file is on disk.
     """
     # progress_cb/cancel_event are popped if a caller ever sent them by mistake.
     params.pop("progress_cb", None)
     params.pop("cancel_event", None)
-    try:
+    with _http_errors(intent):
         result = _dispatcher.generate(intent, **params)
+    return _finalize(result)
+
+
+@contextmanager
+def _http_errors(intent: Intent):
+    """A generation error as the HTTP status the caller acts on."""
+    try:
+        yield
+    except HTTPException:
+        raise
     except NotWired as e:
         # Valid intent, no backend registered yet (skeleton for voice/music).
         raise HTTPException(status_code=501, detail=str(e))
     except BackendUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e))
+    except UnknownVoice as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ConsentRequired as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.exception("Generation failed for intent=%s", intent.value)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-    return _finalize(result)

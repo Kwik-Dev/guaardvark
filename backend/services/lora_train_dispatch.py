@@ -43,9 +43,9 @@ def dispatch_lora_train(subject_id: int) -> dict:
 
     try:
         task = celery.send_task("lora_trainer.train_lora", args=[subject_id, job_id])
-    except Exception:
+    except Exception as exc:
         try:
-            progress.error_process(job_id, "Dispatch failed")
+            progress.error_process(job_id, str(exc) or "Dispatch failed")
         except Exception:
             pass
         s.training_status = "untrained"

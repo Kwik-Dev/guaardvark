@@ -152,12 +152,49 @@ def get_timeout() -> float:
     return float(load_config().get("timeout", 60))
 
 
-def get_api_key() -> str | None:
-    """Get the API key from env vars or config."""
+def _is_loopback_url(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
+def _install_env_api_key() -> str | None:
+    """GUAARDVARK_API_KEY from the local install's .env, where start.sh and
+    Settings → API key keep it."""
+    try:
+        from llx.launch_config import resolve_guaardvark_root
+
+        root = resolve_guaardvark_root()
+        if root is None:
+            return None
+        value = None
+        for line in (root / ".env").read_text().splitlines():
+            if line.startswith(f"{ENV_API_KEY}="):
+                value = line.split("=", 1)[1].strip().strip("'\"")
+        return value or None
+    except (OSError, ValueError):
+        return None
+
+
+def get_api_key(server_url: str | None = None) -> str | None:
+    """Get the API key: env vars, then the CLI config, then (for a server on
+    this machine) the local install's .env, so a key created in Settings works
+    here without copying it."""
     key = os.environ.get(ENV_API_KEY) or os.environ.get(ENV_API_KEY_ALT)
     if key:
         return key
-    return load_config().get("api_key")
+    configured = load_config().get("api_key")
+    if configured:
+        return configured
+    if _is_loopback_url(server_url):
+        return _install_env_api_key()
+    return None
 
 
 # --- Session persistence ---

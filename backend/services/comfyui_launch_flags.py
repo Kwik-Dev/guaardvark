@@ -88,6 +88,26 @@ PREVIEW_SIZE_MIN = 64
 PREVIEW_SIZE_MAX = 1024
 
 
+MODEL_PATHS_ENV = "GUAARDVARK_TRAINING_DIR"
+
+
+def model_paths_launch(project_root) -> tuple[list, dict]:
+    """argv and env that add Cast Library LoRAs to ComfyUI's LoRA search.
+
+    ComfyUI resolves LoRAs by filename within its search paths, and Cast LoRAs
+    live in STORAGE_DIR/training/loras. plugins/comfyui/guaardvark_model_paths.yaml
+    names that folder through GUAARDVARK_TRAINING_DIR. Mirrors
+    plugins/comfyui/scripts/start.sh; empty when the YAML is absent, since ComfyUI
+    refuses to start on a missing config file.
+    """
+    cfg = Path(project_root) / "plugins" / "comfyui" / "guaardvark_model_paths.yaml"
+    if not cfg.is_file():
+        return [], {}
+    from backend.config import STORAGE_DIR
+    return (["--extra-model-paths-config", str(cfg)],
+            {MODEL_PATHS_ENV: str(Path(STORAGE_DIR) / "training")})
+
+
 def preview_cli_args(env: Optional[Mapping[str, str]] = None) -> Sequence[str]:
     """Return `--preview-method` / `--preview-size` for a ComfyUI argv.
 

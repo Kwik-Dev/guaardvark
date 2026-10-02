@@ -432,6 +432,21 @@ def train_subject_lora_for_subject(subject_id: int, job_id: str | None = None) -
     # UI stuck with polling=true / spinner / "starting training" even after the
     # GPU work is finished.
     if result.get("status") == "ok":
+        # A finished run becomes the member's default, as it always has. It is
+        # also recorded per base, so a LoRA the member holds for another base
+        # (trained earlier or imported) stays available to renders on that base.
+        try:
+            from backend.services.cast_lora_selection import record_subject_lora
+            from backend.services.lora_training_settings import settings_for_subject
+            trained_base = (
+                result.get("base_model_id") or settings_for_subject(s).get("base_model_id")
+            )
+            with db.session.begin_nested():
+                record_subject_lora(
+                    s, trained_base, result["lora_path"], source="trained", make_default=True,
+                )
+        except Exception as e:
+            logger.warning("lora train for %s: per-base LoRA record failed: %s", subject_id, e)
         s.lora_path = result["lora_path"]
         s.lora_version = result.get("lora_version", 1)
         s.training_status = "trained"

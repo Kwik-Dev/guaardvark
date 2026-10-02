@@ -16,15 +16,16 @@ immediately.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from mlt.auto_editor_runner import run_auto_editor
@@ -83,14 +84,34 @@ _jobs = JobTable(
 # v1 Crew implementation. Swap to FilmCrewClient when plugins/film_crew/ lands.
 _crew = LocalArtDirector(ollama_url="http://localhost:11434")
 
+_GUARD_MODULE = "guaardvark_sidecar_guard"
+
+
+def _load_guard():
+    """backend/utils/sidecar_guard.py, loaded by path: this service runs in
+    its own venv, outside the backend package."""
+    loaded = sys.modules.get(_GUARD_MODULE)
+    if loaded is not None:
+        return loaded
+    path = Path(__file__).resolve().parents[3] / "backend" / "utils" / "sidecar_guard.py"
+    spec = importlib.util.spec_from_file_location(_GUARD_MODULE, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[_GUARD_MODULE] = module
+    return module
+
+
 app = FastAPI(
     title="Video Editor",
     version=_config["manifest"].get("version", "0.1.0"),
     description="MLT/Shotcut + auto-editor backend for Guaardvark Video Editor.",
 )
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
-)
+# No CORS middleware: browsers never call this service. The editor pages go
+# through the backend's /api/video-editor proxy and every other caller (the
+# music video and render tasks) is a process on this machine, so no web page
+# is allowed to read a reply. The Host check refuses a page whose name was
+# re-pointed at 127.0.0.1, which needs no CORS to read one.
+app.add_middleware(_load_guard().HostCheckASGIMiddleware)
 
 
 # ---------- request models ---------------------------------------------------

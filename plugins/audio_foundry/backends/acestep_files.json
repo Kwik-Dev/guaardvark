@@ -1,0 +1,16 @@
+{
+  "hf_repo": "ACE-Step/ACE-Step-v1-3.5B",
+  "files": [
+    "ace_step_transformer/config.json",
+    "ace_step_transformer/diffusion_pytorch_model.safetensors",
+    "music_dcae_f8c8/config.json",
+    "music_dcae_f8c8/diffusion_pytorch_model.safetensors",
+    "music_vocoder/config.json",
+    "music_vocoder/diffusion_pytorch_model.safetensors",
+    "umt5-base/config.json",
+    "umt5-base/model.safetensors",
+    "umt5-base/special_tokens_map.json",
+    "umt5-base/tokenizer_config.json",
+    "umt5-base/tokenizer.json"
+  ]
+}

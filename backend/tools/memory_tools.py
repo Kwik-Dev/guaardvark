@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.models import db, AgentMemory, AgentMemoryAudit
 from backend.api.memory_api import add_memory, _query_memories
-from backend.utils.backend_http import BackendError, is_mcp_transport, request_json
+from backend.utils.backend_http import BackendError, is_mcp_transport, request_json, run_tool_in_backend
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,15 @@ class SaveMemoryTool(BaseTool):
     name = "save_memory"
     read_only = False
     destructive = False
-    description = "Save a fact, user preference, or instruction to long-term memory. Use this to remember things the user tells you about themselves, their projects, or how they want you to behave."
+    description = (
+        "Store one fact, preference or standing instruction in Guaardvark's long-term memory; returns "
+        "'Successfully saved to long-term memory (ID: <id>).' Guaardvark's chat recalls relevant "
+        "entries into its prompts: facts as ground truth, notes as rules, preferences as defaults. Use "
+        "it when the user tells you about themselves, their projects or how they want you to behave; "
+        "run search_memory first to avoid duplicates. Each call adds a new entry (nothing is merged); "
+        "over MCP the entry is visible to every project and session. Entries are edited or deleted on "
+        "the Agent Memory page, not with this tool. Needs the Guaardvark backend running."
+    )
     is_dangerous = False
     requires_approval = False
 
@@ -27,27 +35,30 @@ class SaveMemoryTool(BaseTool):
         "content": ToolParameter(
             name="content",
             type="string",
-            description="The fact, preference, or instruction to remember. Be specific and concise.",
+            description="The memory as one self-contained statement, e.g. 'Prefers metric units'. Guaardvark's chat shows at most 200 characters of a fact, 400 of a note and 250 of a preference.",
             required=True
         ),
         "type": ToolParameter(
             name="type",
             type="string",
-            description="Type of memory: 'fact', 'preference', or 'note'. Legacy 'instruction' is normalized to 'note'.",
+            description="'fact' (default): something true about the user or their work, recalled as ground truth; 'preference': a default the user can override per request; 'note': a standing instruction ('instruction' is stored as 'note'). Unknown values are stored as 'note'.",
             required=False,
             default="fact"
         ),
         "tags": ToolParameter(
             name="tags",
             type="list",
-            description="List of string tags for categorization (e.g. ['python', 'formatting']).",
+            items="string",
+            description="Keywords for the entry, e.g. ['python', 'formatting']; stored lower-cased without duplicates. search_memory matches tags as well as content.",
             required=False,
             default=[]
         ),
         "importance": ToolParameter(
             name="importance",
             type="float",
-            description="Importance score from 0.0 to 1.0. Higher means it should be retrieved more often.",
+            minimum=0.0,
+            maximum=1.0,
+            description="0.0-1.0, default 0.8. The heaviest single factor when Guaardvark's chat ranks recall; the three highest facts or notes at 0.85 or above join every recall even when they do not match the question.",
             required=False,
             default=0.8
         )
@@ -131,7 +142,21 @@ class SearchMemoryTool(BaseTool):
     
     name = "search_memory"
     read_only = True
-    description = "Search your long-term memory for previously saved facts, preferences, or instructions."
+    description = (
+        "Look up entries in Guaardvark's long-term memory: facts, preferences and notes saved with "
+        "save_memory or in the app, and the entries Guaardvark keeps itself, which are lessons "
+        "(returned as their stored JSON, a title and steps), lesson summaries, snippets and the "
+        "screen agent's 'belief_update' observations. Every type is searched and each line shows "
+        "its type. An entry matches when its content or tags contain any of the "
+        "first eight query words that has three or more characters (case-insensitive text, not "
+        "semantic); results are ranked by "
+        "importance, match, source trust, confidence and recency. Returns lines "
+        "'- [ID: <id>] (<type>) <content>', or 'No memories found matching ...'; a query with no such "
+        "word lists the top entries instead. Read-only: searching does not count as a recall. Use it "
+        "to recall what the user said earlier and before "
+        "save_memory; for indexed documents use search_knowledge_base, for the web web_search. Needs "
+        "the Guaardvark backend running."
+    )
     is_dangerous = False
     requires_approval = False
     
@@ -139,37 +164,52 @@ class SearchMemoryTool(BaseTool):
         "query": ToolParameter(
             name="query",
             type="string",
-            description="Search query or keyword to look for in memories.",
+            description="Keywords to look for, e.g. 'units python'. Only the first eight words count, and words under three characters are ignored; an empty query lists the top entries.",
             required=True
         ),
         "limit": ToolParameter(
             name="limit",
             type="integer",
-            description="Maximum number of results to return (default 5).",
+            minimum=1,
+            maximum=50,
+            description="How many entries to return, 1-50 (default 5).",
             required=False,
             default=5
         )
     }
 
     def execute(self, **kwargs) -> ToolResult:
-        query = kwargs.get("query", "").lower()
-        limit = kwargs.get("limit", 5)
+        query = str(kwargs.get("query") or "").lower()
+        try:
+            limit = max(1, min(int(kwargs.get("limit") or 5), 50))
+        except (TypeError, ValueError):
+            limit = 5
 
         if is_mcp_transport(self):
-            return self._search_via_backend(query, limit)
+            # The backend runs this same tool, so MCP and chat match the same way.
+            return run_tool_in_backend(self.name, {"query": query, "limit": limit})
 
+        # Only words of 3+ characters among the first eight filter (see _query_memories);
+        # without one, list the top entries.
+        searching = any(len(word) >= 3 for word in query.split()[:8])
         try:
-            memories = _query_memories(query=query, limit=limit, raise_errors=True)
-            
+            memories = _query_memories(
+                query=query if searching else None, limit=limit, raise_errors=True,
+                include_always_on=False, count_access=False,
+            )
+
             if not memories:
                 return ToolResult(
                     success=True,
-                    output=f"No memories found matching '{query}'.",
+                    output=f"No memories found matching '{query}'." if searching else "No memories saved yet.",
                     metadata={"results": []}
                 )
-                
+
             results = []
-            output_lines = [f"Found {len(memories)} memories matching '{query}':"]
+            output_lines = [
+                f"Found {len(memories)} memories matching '{query}':" if searching
+                else f"Top {len(memories)} memories:"
+            ]
             for m in memories:
                 results.append(m.to_dict())
                 output_lines.append(f"- [ID: {m.id}] ({m.type}) {m.content}")
@@ -182,25 +222,6 @@ class SearchMemoryTool(BaseTool):
         except Exception as e:
             logger.error(f"Failed to search memory: {e}")
             return ToolResult(success=False, error=f"Database error: {str(e)}")
-
-    def _search_via_backend(self, query: str, limit) -> ToolResult:
-        # GET /api/memory matches the query as one substring of content or tags
-        # and orders by trust; the in-process ranker also weighs recency and scope.
-        params = {"search": query, "limit": limit, "status": "active", "sort": "trust"}
-        try:
-            body = request_json("GET", "/api/memory", params=params).body
-        except BackendError as e:
-            return ToolResult(success=False, error=f"Memory search failed: {e}")
-        memories = (body or {}).get("memories") or []
-        if not memories:
-            return ToolResult(
-                success=True,
-                output=f"No memories found matching '{query}'.",
-                metadata={"results": []},
-            )
-        output_lines = [f"Found {len(memories)} memories matching '{query}':"]
-        output_lines += [f"- [ID: {m.get('id')}] ({m.get('type')}) {m.get('content')}" for m in memories]
-        return ToolResult(success=True, output="\n".join(output_lines), metadata={"results": memories})
 
 
 class DeleteMemoryTool(BaseTool):

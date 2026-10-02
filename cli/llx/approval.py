@@ -1,4 +1,4 @@
-"""Approval prompt for `llx mcp client call`.
+"""Approval prompt for `guaardvark mcp client call`.
 
 MCP tools the server policy gates (destructive, or with a write/delete/run
 style name) ask before they run. In a terminal the user is prompted (default:

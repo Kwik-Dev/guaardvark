@@ -66,6 +66,10 @@ class MCPServerConfig:
     deny_tools: List[str] = field(default_factory=list)
     confirm_tools: List[str] = field(default_factory=list)
     auto_approve_tools: List[str] = field(default_factory=list)
+    # Tool arguments Guaardvark supplies on every call to this server, e.g. an
+    # absolute workspace ``root``. The model is never offered these parameters,
+    # so a small model cannot garble them. Values may use ``${VAR}``.
+    fixed_args: Dict[str, str] = field(default_factory=dict)
 
     # ---- serialisation -------------------------------------------------
     _KEYMAP = {
@@ -74,6 +78,7 @@ class MCPServerConfig:
         "denyTools": "deny_tools",
         "confirmTools": "confirm_tools",
         "autoApproveTools": "auto_approve_tools",
+        "fixedArgs": "fixed_args",
     }
 
     def to_json(self) -> Dict[str, Any]:
@@ -123,6 +128,7 @@ class MCPServerConfig:
             "deny_tools": list(self.deny_tools),
             "confirm_tools": list(self.confirm_tools),
             "auto_approve_tools": list(self.auto_approve_tools),
+            "fixed_arg_names": sorted(self.fixed_args.keys()),
         }
 
 
@@ -190,6 +196,7 @@ def parse_server(name: str, raw: Dict[str, Any]) -> MCPServerConfig:
         deny_tools=_str_list(raw.get("deny_tools"), "denyTools", name),
         confirm_tools=_str_list(raw.get("confirm_tools"), "confirmTools", name),
         auto_approve_tools=_str_list(raw.get("auto_approve_tools"), "autoApproveTools", name),
+        fixed_args=_str_dict(raw.get("fixed_args"), "fixedArgs", name),
     )
 
     if not cfg.command:
@@ -284,6 +291,22 @@ def resolve_env_refs(value: str, environ: Optional[Dict[str, str]] = None) -> st
     """Expand ``${VAR}`` references from the backend environment."""
     environ = os.environ if environ is None else environ
     return _ENV_REF_RE.sub(lambda m: environ.get(m.group(1), ""), value)
+
+
+def resolve_fixed_args(cfg: MCPServerConfig, environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The server's fixed arguments with ``${VAR}`` expanded.
+
+    ``${GUAARDVARK_ROOT}`` is the checkout even when the variable is not
+    exported, so a shared example config needs no machine path.
+    """
+    env = dict(os.environ if environ is None else environ)
+    if not env.get("GUAARDVARK_ROOT"):
+        try:
+            from backend.config import GUAARDVARK_ROOT
+            env["GUAARDVARK_ROOT"] = str(GUAARDVARK_ROOT)
+        except Exception:
+            pass
+    return {k: resolve_env_refs(v, env) for k, v in cfg.fixed_args.items()}
 
 
 def build_child_env(cfg: MCPServerConfig, environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:

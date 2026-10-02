@@ -4,10 +4,21 @@ import typer
 
 from llx.client import get_client, LlxError, LlxConnectionError
 from llx.global_opts import get_global_json, get_global_server
+from llx.kb import search_passages
 from llx.theme import make_console
 from llx import output
 
 console = make_console()
+
+
+def _snippet(text: str, width: int = 110) -> str:
+    """The passage body on one line: the index's "Document: … Section: …" label
+    (already in the source column) and line breaks dropped."""
+    head, sep, body = text.partition("\n\n")
+    if sep and head.startswith(("Document:", "[")):
+        text = body
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[:width].rstrip() + "…"
 
 
 def search(
@@ -16,28 +27,34 @@ def search(
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """Semantic search over indexed documents."""
+    """Search your indexed documents: the best-matching passages, with their scores."""
     server = server or get_global_server()
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
     try:
         client = get_client(server)
-        data = client.post("/api/search/semantic", json={"query": query})
+        passages, trace = search_passages(client, query, limit)
 
         if json_out or output.is_pipe():
-            output.print_json({"status": "success", "data": data})
+            output.print_json({"status": "success", "data": {"results": passages, "retrieval": trace}})
             return
 
-        answer = data.get("answer", "")
-        sources = data.get("sources", [])[:limit]
+        if not passages:
+            console.print(f"[llx.dim]Nothing indexed matches: {query}[/llx.dim]")
+            return
 
-        if answer:
-            output.print_markdown(answer)
-
-        if sources:
-            console.print(f"\n[llx.dim]Sources ({len(sources)}):[/llx.dim]")
-            rows = [{"source": s.get("source_document", "?"), "score": f"{s.get('score', 0):.3f}"} for s in sources]
-            output.print_table(rows, columns=["source", "score"])
+        rows = [{
+            "source": p["source"] + (f" p.{p['page']}" if p["page"] else ""),
+            "score": f"{p['score']:.3f}" if isinstance(p["score"], (int, float)) else "—",
+            "passage": _snippet(p["text"]),
+        } for p in passages]
+        output.print_table(rows, columns=["source", "score", "passage"], title=f"Search: {query}")
+        rerank = (trace or {}).get("rerank") or {}
+        if rerank.get("applied"):
+            console.print("[llx.dim]Scores come from the reranker: closer to 1 is a better match.[/llx.dim]")
+        else:
+            why = f" ({rerank['reason']})" if rerank.get("reason") else ""
+            console.print(f"[llx.dim]The reranker did not run{why}; these scores only order the results.[/llx.dim]")
 
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")

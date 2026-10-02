@@ -287,6 +287,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const unusedNegAnat = ignoresNegativeAndAnatomy(params.model);
   const isModernDit = family === 'auto' || family === 'zimage' || family.startsWith('krea');
   const qualityPresets = qualityPresetsForModel(params.model);
+  // A selected character renders with its base model's steps and guidance (the
+  // backend ignores the page's values), so those controls are locked while one is
+  // picked. Every mode but CSV sends the cast.
+  const castLocked = castSubjectIds.length > 0 && inputMode !== 'csv';
+  const castLockedNote = 'Set by the selected character\u2019s base model while a character is picked.';
 
   // Dimension presets — base + model-family 2K / Flux~2MP packs (filtered below)
   const dimensionPresetsBase = [
@@ -1742,7 +1747,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                         variant="outlined"
                       />
                       <Chip
-                        label={`Steps: ${params.steps}`}
+                        label={castLocked ? 'Steps: from character' : `Steps: ${params.steps}`}
                         size="small"
                         variant="outlined"
                       />
@@ -1840,6 +1845,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             <Select
                               value={params.quality_preset}
                               onChange={(e) => handleQualityPresetChange(e.target.value)}
+                              disabled={castLocked}
                             >
                               {qualityPresets.map(option => (
                                 <MenuItem key={option.value} value={option.value}>
@@ -1852,6 +1858,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                                 </MenuItem>
                               ))}
                             </Select>
+                            {castLocked && (
+                              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                                {castLockedNote}
+                              </Typography>
+                            )}
                           </FormControl>
                         </Grid>
 
@@ -1962,12 +1973,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
                         <Grid item xs={12}>
                           <Typography gutterBottom>
-                            Steps: {params.steps}
-                            {isFlux ? ' (FLUX quality ↑ with more steps)' : ''}
+                            Steps: {castLocked ? 'set by the character' : params.steps}
+                            {isFlux && !castLocked ? ' (FLUX quality ↑ with more steps)' : ''}
                           </Typography>
                           <Slider
                             value={params.steps}
                             onChange={(e, value) => setParams({ ...params, steps: value, steps_explicit: true })}
+                            disabled={castLocked}
                             min={1}
                             max={100}
                             step={1}
@@ -1983,7 +1995,9 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
                         <Grid item xs={12}>
                           <Typography gutterBottom>
-                            {isZimage
+                            {castLocked
+                              ? 'Guidance: set by the character'
+                              : isZimage
                               ? 'Guidance Scale: 0 (CFG-free model)'
                               : isFlux
                                 ? `FluxGuidance: ${params.guidance}`
@@ -2000,9 +2014,14 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             max={isFlux ? 6 : 20}
                             step={0.5}
                             marks
-                            disabled={isZimage}
+                            disabled={isZimage || castLocked}
                           />
-                          {isZimage && (
+                          {castLocked && (
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                              {castLockedNote}
+                            </Typography>
+                          )}
+                          {isZimage && !castLocked && (
                             <Typography variant="caption" color="text.secondary">
                               Z-Image runs CFG-free — guidance is fixed at 0. Use Steps for quality.
                             </Typography>

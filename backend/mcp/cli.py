@@ -8,9 +8,9 @@ Usage::
     python -m backend.mcp config --client cursor
     python -m backend.mcp config --client zed
 
-Prints the exact JSON to paste into the client's config file along with
-the path where it lives, so users can get Guaardvark wired up without
-reading four different docs.
+Prints what to paste, or the command to run, to wire Guaardvark into the
+client by hand, along with where it goes. ``python -m backend.mcp install``
+does the same without the pasting.
 """
 
 from __future__ import annotations
@@ -18,9 +18,12 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
+
+SERVER_NAME = "guaardvark"
 
 CLIENT_CHOICES = ("claude-desktop", "claude-code", "cursor", "zed")
 
@@ -49,6 +52,30 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
+def _shell_wrapper() -> tuple[str, list[str]]:
+    """
+    Command that launches the stdio server from any working directory.
+
+    ``python -m backend.mcp`` needs the repo root on ``sys.path`` (and several
+    tools resolve ``data/`` relative to the cwd), so the entry must cd first.
+    Not every client honours a ``cwd`` key, so wrap in ``sh -c`` — portable
+    across every POSIX client we target.
+    """
+    root = shlex.quote(str(_project_root()))
+    python = shlex.quote(_python_executable())
+    return "sh", ["-c", f"cd {root} && exec {python} -m backend.mcp"]
+
+
+def _launch() -> dict[str, Any]:
+    """The ``command``/``args`` a client entry needs to start the server."""
+    if platform.system() == "Windows":
+        # No ``sh`` to wrap with, so ``cwd`` is the only way to set the directory.
+        cmd = _server_cmd()
+        return {"command": cmd[0], "args": cmd[1:], "cwd": str(_project_root())}
+    command, args = _shell_wrapper()
+    return {"command": command, "args": args}
+
+
 def _claude_desktop_config_path() -> Path:
     """OS-specific path to Claude Desktop's config file."""
     system = platform.system()
@@ -61,85 +88,53 @@ def _claude_desktop_config_path() -> Path:
     return Path.home() / ".config/Claude/claude_desktop_config.json"
 
 
-def _snippet(client: str) -> tuple[dict[str, Any], Path | None]:
-    """Return (snippet, config_file_path). Path is None if the client has no standard file."""
-    cmd = _server_cmd()
-    cwd = str(_project_root())
+def _claude_code_add_command() -> list[str]:
+    """The ``claude mcp add`` line that registers the server for every project."""
+    launch = _launch()
+    return ["claude", "mcp", "add", "--scope", "user", SERVER_NAME, "--",
+            launch["command"], *launch["args"]]
+
+
+def _snippet(client: str) -> tuple[dict[str, Any], str]:
+    """Return (snippet, where it goes) for ``client``."""
+    launch = _launch()
 
     if client == "claude-desktop":
-        return (
-            {
-                "mcpServers": {
-                    "guaardvark": {
-                        "command": cmd[0],
-                        "args": cmd[1:],
-                        "cwd": cwd,
-                    }
-                }
-            },
-            _claude_desktop_config_path(),
-        )
+        return {"mcpServers": {SERVER_NAME: launch}}, str(_claude_desktop_config_path())
 
     if client == "claude-code":
-        # Claude Code reads from ~/.claude/mcp_servers.json (user scope)
-        # or <project>/.claude/mcp_servers.json (project scope).
-        return (
-            {
-                "mcpServers": {
-                    "guaardvark": {
-                        "command": cmd[0],
-                        "args": cmd[1:],
-                        "cwd": cwd,
-                    }
-                }
-            },
-            Path.home() / ".claude/mcp_servers.json",
-        )
+        # Claude Code keeps user-scope servers in its own state file, written
+        # by ``claude mcp add``. The file it reads that is meant to be edited
+        # by hand is a project's ``.mcp.json``.
+        return {"mcpServers": {SERVER_NAME: launch}}, ".mcp.json in the root of that project"
 
     if client == "cursor":
         # Cursor: Settings → MCP Servers, or ~/.cursor/mcp.json.
-        return (
-            {
-                "mcpServers": {
-                    "guaardvark": {
-                        "command": cmd[0],
-                        "args": cmd[1:],
-                        "cwd": cwd,
-                    }
-                }
-            },
-            Path.home() / ".cursor/mcp.json",
-        )
+        return {"mcpServers": {SERVER_NAME: launch}}, str(Path.home() / ".cursor/mcp.json")
 
     if client == "zed":
         # Zed: settings.json → context_servers.
-        return (
-            {
-                "context_servers": {
-                    "guaardvark": {
-                        "command": {
-                            "path": cmd[0],
-                            "args": cmd[1:],
-                            "env": {},
-                        }
-                    }
-                }
-            },
-            Path.home() / ".config/zed/settings.json",
-        )
+        command = {"path": launch["command"], "args": launch["args"], "env": {}}
+        return ({"context_servers": {SERVER_NAME: {"command": command}}},
+                str(Path.home() / ".config/zed/settings.json"))
 
     raise ValueError(f"Unknown client: {client}")
 
 
 def print_snippet(client: str) -> int:
     try:
-        snippet, path = _snippet(client)
+        snippet, where = _snippet(client)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print(f"choose one of: {', '.join(CLIENT_CHOICES)}", file=sys.stderr)
         return 2
 
-    if path is not None:
-        print(f"# Paste the following into: {path}")
+    if client == "claude-code":
+        print("# Claude Code registers MCP servers through its own CLI. To add Guaardvark for every project, run:")
+        print(" ".join(shlex.quote(part) for part in _claude_code_add_command()))
+        print("#")
+        print(f"# Or, for one project only, save the following as {where}:")
+    else:
+        print(f"# Paste the following into: {where}")
     print(json.dumps(snippet, indent=2))
     return 0

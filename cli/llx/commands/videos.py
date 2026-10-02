@@ -53,7 +53,7 @@ def _poll_batch(api_client, batch_id: str, json_out: bool):
     # Print final results
     if json_out or output.is_pipe():
         output.print_json(result)
-        return
+        return result
 
     output.print_kv({
         "Batch ID": batch_id,
@@ -70,6 +70,18 @@ def _poll_batch(api_client, batch_id: str, json_out: bool):
             "path": r.get("video_path") or r.get("error", ""),
         } for r in results]
         output.print_table(rows, columns=["item", "success", "path"], title="Results")
+    return result
+
+
+def _save_first_clip(api_client, batch_id: str, result: dict, dest: Path) -> None:
+    """Download the batch's first finished clip to dest."""
+    clip = next((r.get("video_path") for r in (result or {}).get("results", [])
+                 if r.get("success") and r.get("video_path")), None)
+    if not clip:
+        output.print_error("No finished clip to save.", code="NO_CLIP")
+        raise typer.Exit(1)
+    api_client.download(f"/api/batch-video/video/{batch_id}/{clip}", dest)
+    output.print_success(f"Saved {dest.name}")
 
 
 def _build_gen_params(
@@ -157,6 +169,7 @@ def videos_generate(
     seed: int = typer.Option(None, "--seed", help="Random seed for reproducibility"),
     frames_only: bool = typer.Option(False, "--frames-only", help="Generate frames without combining"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for completion with progress"),
+    save: Path = typer.Option(None, "--save", help="With --wait: download the finished clip to this file"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -174,7 +187,9 @@ def videos_generate(
         batch_id = result.get("batch_id", "")
 
         if wait and batch_id:
-            _poll_batch(api_client, batch_id, json_out)
+            final = _poll_batch(api_client, batch_id, json_out)
+            if save:
+                _save_first_clip(api_client, batch_id, final, save)
             return
 
         if json_out or output.is_pipe():

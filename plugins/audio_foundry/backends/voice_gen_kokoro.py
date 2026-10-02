@@ -8,6 +8,13 @@ Heavy imports live inside methods.
 
 Install (handled at first start.sh run after the requirements.txt bump):
     pip install kokoro
+
+Everything a generation reads comes from this machine: the model files and
+voice packs from the Hugging Face cache (resolved to local paths here, so
+kokoro's own hf_hub_download is never reached), and spaCy's English pipeline
+from the plugin venv. A missing piece raises WeightsNotInstalled naming Audio
+Studio → Manage models, whose Install fetches all of it. The voice list is
+backends/kokoro_voices.json.
 """
 from __future__ import annotations
 
@@ -17,7 +24,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from backends import kokoro_voices
 from backends.base import AudioBackend, GenerationResult
+from backends.hub_weights import (
+    INSTALL_HINT,
+    WeightsNotInstalled,
+    cached_hub_file,
+    require_hub_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,30 +80,96 @@ class KokoroBackend(AudioBackend):
         prefix = voice_id[0].lower()
         return cls._ACCENT_LANG_CODES.get(prefix, "a")
 
+    def _model_paths(self) -> dict[str, str]:
+        """Local paths of config.json and the weights, or WeightsNotInstalled."""
+        return require_hub_files(
+            kokoro_voices.hf_repo(), kokoro_voices.model_files(), "Kokoro voice",
+        )
+
+    @staticmethod
+    def _require_english_g2p(lang_code: str) -> None:
+        """Refuse before misaki would pip-install spaCy's English pipeline."""
+        g2p = kokoro_voices.english_g2p()
+        if lang_code not in g2p["lang_codes"]:
+            return
+        from importlib import metadata
+
+        try:
+            # The same test misaki runs (spacy.util.is_package) before it
+            # falls back to spacy.cli.download.
+            metadata.distribution(g2p["package"])
+        except metadata.PackageNotFoundError:
+            raise WeightsNotInstalled(
+                f"Kokoro English voices need spaCy's {g2p['package']} language "
+                f"model, which is not installed in the Audio Foundry environment. "
+                f"{INSTALL_HINT}"
+            ) from None
+
+    def _voice_path(self, voice_id: str) -> str:
+        """Local path of a catalog voice pack.
+
+        Passing KPipeline a path (it loads anything ending in .pt directly)
+        instead of the id keeps it from calling hf_hub_download. Ids outside
+        the catalog are refused here, so a caller cannot hand it an arbitrary
+        file or a comma-separated blend.
+        """
+        voice_id = kokoro_voices.check_voice_id(voice_id)
+        path = cached_hub_file(kokoro_voices.hf_repo(), kokoro_voices.voice_file(voice_id))
+        if path is None:
+            raise WeightsNotInstalled(
+                f"Kokoro voice '{voice_id}' is not on this machine. {INSTALL_HINT}"
+            )
+        if "," in path:
+            # KPipeline.load_voice splits on commas; a cache under such a
+            # directory would be read as a blend of partial paths.
+            raise WeightsNotInstalled(
+                f"Kokoro voice '{voice_id}': the Hugging Face cache path contains a "
+                f"comma ({path}), which Kokoro cannot load. Move HF_HOME."
+            )
+        return path
+
+    def _build_pipeline(self, lang_code: str, device: str) -> Any:
+        from kokoro import KModel, KPipeline
+
+        paths = self._model_paths()
+        repo = kokoro_voices.hf_repo()
+        model = KModel(
+            repo_id=repo,
+            config=paths[kokoro_voices.config_file()],
+            model=paths[kokoro_voices.weights_file()],
+        ).to(device).eval()
+        return KPipeline(lang_code=lang_code, repo_id=repo, model=model)
+
     def _get_or_load_pipeline(self, lang_code: str) -> Any:
         """Return the KPipeline for this lang_code, loading it if needed."""
         if lang_code in self._pipelines:
             return self._pipelines[lang_code]
 
         try:
-            from kokoro import KPipeline
+            import kokoro  # noqa: F401
         except ImportError as e:
             raise RuntimeError(
                 "kokoro package not installed. Run: pip install kokoro"
             ) from e
+        import torch
 
-        logger.info("Loading Kokoro pipeline for lang_code=%r", lang_code)
+        # Both checks raise before any model memory is allocated.
+        self._model_paths()
+        self._require_english_g2p(lang_code)
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("Loading Kokoro pipeline for lang_code=%r on %s", lang_code, device)
         try:
-            pipeline = KPipeline(lang_code=lang_code)
+            pipeline = self._build_pipeline(lang_code, device)
         except RuntimeError as e:
-            if "CUDA" not in str(e):
+            if device != "cuda" or "CUDA" not in str(e):
                 raise
             # Kokoro-82M is tiny — when a render owns the card (observed:
             # 12.4GB ComfyUI job left 39MB free), narration must not die.
             # CPU synthesis is near-realtime for this model.
             logger.warning(
                 "Kokoro CUDA init failed (%s) — retrying on CPU", e)
-            pipeline = KPipeline(lang_code=lang_code, device="cpu")
+            pipeline = self._build_pipeline(lang_code, "cpu")
         self._pipelines[lang_code] = pipeline
         return pipeline
 
@@ -99,13 +179,6 @@ class KokoroBackend(AudioBackend):
         if self._pipelines:
             return
         logger.info("Loading Kokoro-82M from local cache...")
-        from backends.hub_weights import require_hub_files
-
-        require_hub_files(
-            "hexgrad/Kokoro-82M",
-            ["config.json", "kokoro-v1_0.pth"],
-            "Kokoro voice",
-        )
         self._get_or_load_pipeline(self._lang_code_for(self._default_voice))
         logger.info("Kokoro loaded")
 
@@ -128,6 +201,9 @@ class KokoroBackend(AudioBackend):
         requested_format = params.get("output_format", "wav")
         # Kokoro has no reference-clip cloning — silently ignore those args.
 
+        voice = kokoro_voices.check_voice_id(voice)
+        voice_path = self._voice_path(voice)
+
         # Route to the right phonemizer for this voice's accent. American voices
         # speak Kokoro's American pipeline; British speak its British pipeline.
         lang_code = self._lang_code_for(voice)
@@ -142,7 +218,7 @@ class KokoroBackend(AudioBackend):
         # KPipeline streams tuples: (graphemes, phonemes, audio_tensor).
         # We concatenate all audio chunks; each is a 1-D float tensor at 24 kHz.
         segments = []
-        for _, _, audio_tensor in pipeline(text, voice=voice):
+        for _, _, audio_tensor in pipeline(text, voice=voice_path):
             arr = audio_tensor.cpu().numpy() if hasattr(audio_tensor, "cpu") else np.asarray(audio_tensor)
             segments.append(arr)
         gen_seconds = time.monotonic() - t0
@@ -203,6 +279,8 @@ class KokoroBackend(AudioBackend):
 
         text: str = params["text"]
         voice = params.get("voice_id") or self._default_voice
+        voice = kokoro_voices.check_voice_id(voice)
+        voice_path = self._voice_path(voice)
         lang_code = self._lang_code_for(voice)
         pipeline = self._get_or_load_pipeline(lang_code)
 
@@ -211,7 +289,7 @@ class KokoroBackend(AudioBackend):
         import io
 
         first = True
-        for _, _, audio_tensor in pipeline(text, voice=voice):
+        for _, _, audio_tensor in pipeline(text, voice=voice_path):
             arr = audio_tensor.cpu().numpy() if hasattr(audio_tensor, "cpu") else np.asarray(audio_tensor)
             buf = io.BytesIO()
             sf.write(buf, arr, self._sample_rate, format='WAV')

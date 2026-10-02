@@ -4,7 +4,7 @@
 # message and the added lines of every commit each pushed ref would publish,
 # including commits made with --no-verify or before the other hooks existed.
 #
-# Install: ln -sf ../../scripts/pre-push "$(git rev-parse --git-common-dir)/hooks/pre-push"
+# Install with scripts/install_hooks.sh.
 set -uo pipefail
 repo_root="$(git rev-parse --show-toplevel)" || exit 1
 remote="$1"

@@ -133,7 +133,7 @@ class TestMapAndDispatch:
             }],
             "_cache": {"hit": True},
         }
-        monkeypatch.setattr(wt, "_load_snapshot", lambda root, refresh: snapshot)
+        monkeypatch.setattr(wt, "_map_snapshot", lambda root, refresh, wait_seconds: (snapshot, None))
 
         result = wt.MapCodebaseTool().execute()
         assert result.success

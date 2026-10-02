@@ -74,10 +74,48 @@ def test_serve_http_runs_expected_argv(tmp_path, monkeypatch):
     assert executed["cwd"] == str(fake_root)
 
 
+def _no_exec(py, argv):
+    # A real exec would replace the test process with the MCP server.
+    raise AssertionError(f"mcp serve tried to exec {argv}")
+
+
+def test_serve_from_any_folder_uses_the_installed_checkout(tmp_path, monkeypatch):
+    fake_root = tmp_path / "fake_repo"
+    (fake_root / "backend" / "venv" / "bin").mkdir(parents=True)
+    (fake_root / "start.sh").touch()
+    fake_py = fake_root / "backend" / "venv" / "bin" / "python"
+    fake_py.touch()
+    elsewhere = tmp_path / "client_folder"
+    elsewhere.mkdir()
+
+    monkeypatch.delenv("GUAARDVARK_ROOT", raising=False)
+    monkeypatch.chdir(elsewhere)
+    from llx.commands import mcp as mcp_cmd
+    monkeypatch.setattr(mcp_cmd, "_installed_checkout", lambda: fake_root)
+
+    executed = {}
+
+    def mock_execv(py, argv):
+        executed["argv"] = argv
+        executed["cwd"] = os.getcwd()
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", mock_execv)
+
+    result = runner.invoke(app, ["mcp", "serve"])
+
+    assert result.exit_code == 0
+    assert executed["argv"] == [str(fake_py), "-m", "backend.mcp"]
+    assert executed["cwd"] == str(fake_root)
+
+
 def test_serve_without_root_exits_nonzero_with_message(tmp_path, monkeypatch):
-    # Ensure no GUAARDVARK_ROOT is set and cwd is isolated from any checkout
+    # No GUAARDVARK_ROOT, a cwd outside any checkout, and no installed checkout to fall back to
     monkeypatch.delenv("GUAARDVARK_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
+    from llx.commands import mcp as mcp_cmd
+    monkeypatch.setattr(mcp_cmd, "_installed_checkout", lambda: None)
+    monkeypatch.setattr(os, "execv", _no_exec)
 
     result = runner.invoke(app, ["mcp", "serve"])
 

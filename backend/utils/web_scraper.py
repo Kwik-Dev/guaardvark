@@ -60,11 +60,27 @@ def _discover_sitemaps(base_url: str, session: requests.Session) -> list:
     return discovered
 
 
-def scrape_website(url: str) -> dict:
-    """Scrape basic information from the given URL."""
-    session = requests.Session()
+def scrape_website(url: str, public_only: bool = False) -> dict:
+    """Scrape basic information from the given URL.
 
-    html = _fetch(session, url)
+    ``public_only`` is for a URL that a caller, a model or a search result
+    chose: the page is fetched as fetch_url fetches it (public addresses only,
+    on every redirect; bounded in size and time; no ~/.netrc logins), and the
+    robots.txt and sitemap probes connect only to public addresses. A refused
+    URL raises :class:`backend.utils.web_fetch.FetchRefused`, whose message
+    says why. Without it any address is fetched: a website someone added to
+    crawl may be on their own network.
+    """
+    if public_only:
+        from backend.utils.hosts import public_only_session
+        from backend.utils.web_fetch import decode_page, fetch_page
+
+        page = fetch_page(url, headers=DEFAULT_HEADERS, public_only=True)
+        html, _encoding = decode_page(page.body, page.charset, complete=page.cut is None)
+        session = public_only_session()
+    else:
+        session = requests.Session()
+        html = _fetch(session, url)
     soup = BeautifulSoup(html, "html.parser")
 
     parsed = urlparse(url)
@@ -103,7 +119,10 @@ def scrape_website(url: str) -> dict:
         if name and tag.get("content"):
             metadata[name.lower()] = tag["content"].strip()
 
-    sitemaps = _discover_sitemaps(url, session)
+    try:
+        sitemaps = _discover_sitemaps(url, session)
+    finally:
+        session.close()
 
     return {
         "url": url,

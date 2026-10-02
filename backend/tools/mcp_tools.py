@@ -25,6 +25,7 @@ from backend import config as app_config
 from backend.services import mcp_policy
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.services.mcp_client_service import MCP_ENABLED, get_mcp_service
+from backend.services.mcp_config import resolve_fixed_args
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,20 @@ def _coerce_json_arg(value: Any, expected: str) -> Any:
             except json.JSONDecodeError:
                 return value
     return value
+
+
+def _coerce_fixed_arg(value: str, expected: str) -> Any:
+    """A fixed argument is stored as text; give it the type the tool's schema wants."""
+    try:
+        if expected == "int":
+            return int(value)
+        if expected == "float":
+            return float(value)
+        if expected == "bool":
+            return value.strip().lower() in ("1", "true", "yes", "on")
+    except (TypeError, ValueError):
+        return value
+    return _coerce_json_arg(value, expected)
 
 
 def _llm_output(server: str, tool: str, result: Dict[str, Any]) -> str:
@@ -328,7 +343,7 @@ class MCPProxyTool(BaseTool):
     observation_chars = 4000  # MCP results (file contents, query rows) are the answer
 
     def __init__(self, server: str, tool_def: Dict[str, Any], decision: mcp_policy.PolicyDecision,
-                 server_description: str = ""):
+                 server_description: str = "", fixed_args: Optional[Dict[str, str]] = None):
         remote = tool_def.get("name", "")
         self.name = mcp_policy.sanitize_tool_name(server, remote)
         desc = tool_def.get("description") or tool_def.get("title") or remote
@@ -342,12 +357,18 @@ class MCPProxyTool(BaseTool):
         props = self.input_schema.get("properties") or {}
         required = set(self.input_schema.get("required") or [])
         self.parameters = {}
+        # (value, type) for the parameters the server config fills in; they are
+        # left out of self.parameters so the model is never asked for them.
+        self._fixed: Dict[str, tuple] = {}
         for pname, spec in props.items():
             spec = spec if isinstance(spec, dict) else {}
             jtype = spec.get("type")
             if isinstance(jtype, list):
                 jtype = next((t for t in jtype if t != "null"), "string")
             ptype = _JSON_TO_PARAM_TYPE.get(jtype or "string", "string")
+            if fixed_args and pname in fixed_args:
+                self._fixed[pname] = (fixed_args[pname], ptype)
+                continue
             pdesc = spec.get("description") or spec.get("title") or ""
             if spec.get("enum"):
                 pdesc += f" (one of: {', '.join(map(str, spec['enum'][:10]))})"
@@ -369,8 +390,17 @@ class MCPProxyTool(BaseTool):
         server, remote = self.mcp_origin
         arguments = {}
         for key, value in kwargs.items():
+            # The registry adds _agent_context (the user's message, the
+            # project path) for any tool that takes **kwargs. It is ours,
+            # never an argument for the external server.
+            if key == "_agent_context":
+                continue
+            if key in self._fixed:
+                continue
             param = self.parameters.get(key)
             arguments[key] = _coerce_json_arg(value, param.type) if param else value
+        for key, (value, ptype) in self._fixed.items():
+            arguments[key] = _coerce_fixed_arg(value, ptype)
         if self.requires_confirmation:
             from backend.services.tool_confirmation import (
                 approval_required_message,
@@ -410,7 +440,8 @@ def sync_proxy_tools(server: str) -> List[str]:
             if decision.action == mcp_policy.DENY:
                 continue
             try:
-                proxy = MCPProxyTool(server, tool_def, decision, rt.config.description)
+                proxy = MCPProxyTool(server, tool_def, decision, rt.config.description,
+                                     fixed_args=resolve_fixed_args(rt.config))
             except Exception as e:
                 logger.warning(f"Skipping MCP tool {server}/{tool_def.get('name')}: {e}")
                 continue

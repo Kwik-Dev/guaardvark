@@ -21,6 +21,28 @@ training_bp = Blueprint("training", __name__, url_prefix="/api/training")
 logger = logging.getLogger(__name__)
 
 
+def _not_started(job, what: str, exc: Exception):
+    """Answer for a job whose task was not queued: the job is failed with the
+    reason, so it does not sit at pending or running with nothing behind it."""
+    from backend.celery_dispatch import TaskNotStarted
+
+    job.status = "failed"
+    job.error_message = f"Failed to start {what} task: {exc}"
+    db.session.commit()
+    if isinstance(exc, TaskNotStarted):
+        return error_response(f"Failed to start {what}: {exc}", 503, exc.code)
+    return error_response(f"Failed to start {what}: {exc}", 500)
+
+
+def _put_back(job, before, what: str, exc: Exception):
+    """Answer for a step started on an existing job (export, import, resume)
+    whose task was not queued: nothing ran, so the job returns to the status
+    and stage it had, and the step can be started again."""
+    job.status, job.pipeline_stage = before
+    db.session.commit()
+    return error_response(f"Failed to start {what}: {exc}", 503, exc.code)
+
+
 @training_bp.route("/jobs", methods=["GET"])
 @ensure_db_session_cleanup
 def list_jobs():
@@ -150,11 +172,15 @@ def create_job():
         db.session.commit()
         
         if data.get("start_immediately", False):
+            from backend.celery_dispatch import TaskNotStarted
             from backend.tasks.training_tasks import finetune_model_task
-            task = finetune_model_task.apply_async(
-                args=[job_id, json.loads(job.config_json)],
-                queue=queue
-            )
+            try:
+                task = finetune_model_task.apply_async(
+                    args=[job_id, json.loads(job.config_json)],
+                    queue=queue
+                )
+            except TaskNotStarted as e:
+                return _not_started(job, "training", e)
             job.celery_task_id = task.id
             job.status = "running"
             db.session.commit()
@@ -299,6 +325,7 @@ def resume_job(job_id):
         if not job.is_resumable:
             return error_response("Job is not resumable (no checkpoint available)", 400)
 
+        before = (job.status, job.pipeline_stage)
         job.status = "pending"
         job.error_message = None
         job.progress = 0
@@ -310,14 +337,20 @@ def resume_job(job_id):
             import json
             job_config = json.loads(job.config_json)
 
+        from backend.celery_dispatch import TaskNotStarted
         try:
             from backend.tasks.training_tasks import finetune_model_task
 
-            task = finetune_model_task.apply_async(
-                args=[job.job_id, job_config],
-                kwargs={"resume": True},
-                queue="training_gpu"
-            )
+            try:
+                task = finetune_model_task.apply_async(
+                    args=[job.job_id, job_config],
+                    kwargs={"resume": True},
+                    queue="training_gpu"
+                )
+            except TaskNotStarted as e:
+                # Back to failed or cancelled, so Resume stays available.
+                job.error_message = str(e)
+                return _put_back(job, before, "resume", e)
 
             job.celery_task_id = task.id
             job.status = "running"
@@ -558,7 +591,8 @@ def start_parse_job():
             logger.info(f"Started parse task for job {job_id}: {task.id}")
         except Exception as e:
             logger.error(f"Failed to start parse task: {e}", exc_info=True)
-        
+            return _not_started(job, "parse", e)
+
         logger.info(f"Created parse job: {job_id}")
         return success_response(job.to_dict(), status_code=201)
     except Exception as e:
@@ -602,6 +636,7 @@ def start_filter_job():
             logger.info(f"Started filter task for job {job_id}: {task.id}")
         except Exception as e:
             logger.error(f"Failed to start filter task: {e}", exc_info=True)
+            return _not_started(job, "filter", e)
 
         logger.info(f"Created filter job: {job_id}")
         return success_response(job.to_dict(), status_code=201)
@@ -634,11 +669,13 @@ def export_job_to_gguf(job_id):
         data = request.get_json() or {}
         quantization = data.get("quantization", "q4_k_m")
 
+        before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "exporting"
         job.status = "running"
         job.quantization_level = quantization
         db.session.commit()
 
+        from backend.celery_dispatch import TaskNotStarted
         try:
             from backend.tasks.training_tasks import export_gguf_task
             task = export_gguf_task.apply_async(
@@ -648,6 +685,8 @@ def export_job_to_gguf(job_id):
             job.celery_task_id = task.id
             db.session.commit()
             logger.info(f"Started GGUF export task for job {job_id}: {task.id}")
+        except TaskNotStarted as e:
+            return _put_back(job, before, "export", e)
         except Exception as e:
             job.status = "failed"
             job.error_message = f"Failed to start export task: {str(e)}"
@@ -683,10 +722,12 @@ def import_job_to_ollama(job_id):
         data = request.get_json() or {}
         model_name = data.get("model_name") or job.output_model_name or f"guaardvark-{job.name.lower().replace(' ', '-')}"
 
+        before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "importing"
         job.status = "running"
         db.session.commit()
 
+        from backend.celery_dispatch import TaskNotStarted
         try:
             from backend.tasks.training_tasks import import_ollama_task
             task = import_ollama_task.apply_async(
@@ -696,6 +737,8 @@ def import_job_to_ollama(job_id):
             job.celery_task_id = task.id
             db.session.commit()
             logger.info(f"Started Ollama import task for job {job_id}: {task.id}")
+        except TaskNotStarted as e:
+            return _put_back(job, before, "import", e)
         except Exception as e:
             job.status = "failed"
             job.error_message = f"Failed to start import task: {str(e)}"
@@ -734,15 +777,20 @@ def export_to_ollama(job_id):
 
         if job.gguf_path and Path(job.gguf_path).exists():
             logger.info(f"GGUF already exists at {job.gguf_path}, skipping to import")
+            before = (job.status, job.pipeline_stage)
             job.pipeline_stage = "importing"
             job.status = "running"
             db.session.commit()
 
+            from backend.celery_dispatch import TaskNotStarted
             from backend.tasks.training_tasks import import_ollama_task
-            task = import_ollama_task.apply_async(
-                args=[job.job_id, job.gguf_path, model_name],
-                queue="training"
-            )
+            try:
+                task = import_ollama_task.apply_async(
+                    args=[job.job_id, job.gguf_path, model_name],
+                    queue="training"
+                )
+            except TaskNotStarted as e:
+                return _put_back(job, before, "import", e)
             job.celery_task_id = task.id
             db.session.commit()
 
@@ -760,12 +808,14 @@ def export_to_ollama(job_id):
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
 
+        before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "exporting"
         job.status = "running"
         job.output_model_name = model_name
         job.quantization_level = quantization
         db.session.commit()
 
+        from backend.celery_dispatch import TaskNotStarted
         try:
             from backend.tasks.training_tasks import export_gguf_task, import_ollama_task
             from celery import chain
@@ -778,6 +828,8 @@ def export_to_ollama(job_id):
             job.celery_task_id = result.id
             db.session.commit()
             logger.info(f"Started export-to-ollama workflow for job {job_id}: {result.id}")
+        except TaskNotStarted as e:
+            return _put_back(job, before, "export to Ollama", e)
         except Exception as e:
             job.status = "failed"
             job.error_message = f"Failed to start export-to-ollama workflow: {str(e)}"

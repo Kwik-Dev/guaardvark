@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -45,7 +46,14 @@ def _full_gate(base_url: str) -> int:
     import requests
 
     try:
-        r = requests.get(f"{base_url.rstrip('/')}/api/meta/quality-scorecard", timeout=30)
+        # Running the scorecard is a protected action once the backend has an
+        # API key, so the key goes along when this environment has one.
+        key = os.environ.get("GUAARDVARK_API_KEY", "").strip()
+        r = requests.post(
+            f"{base_url.rstrip('/')}/api/meta/quality-scorecard",
+            headers={"X-API-Key": key} if key else {},
+            timeout=30,
+        )
         payload = r.json()
     except Exception as e:
         print(f"FAIL: could not fetch scorecard: {e}", file=sys.stderr)

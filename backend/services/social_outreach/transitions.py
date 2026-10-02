@@ -1,15 +1,59 @@
-"""Legal status transitions for social outreach draft rows."""
+"""Status transitions for social outreach draft rows.
+
+    candidate -> drafted -> approved -> processing -> submitting -> posted
+                                             |              |
+    rejected <- (candidate, drafted,         +--> aborted <-+
+                 approved, processing)
+
+``processing`` means a poster has claimed the row and is driving the browser
+towards the composer; the row can still be rejected. ``submitting`` means the
+poster has started the step that publishes, which cannot be taken back.
+
+Every change of status goes through ``move``, a compare-and-set in one UPDATE,
+so a reject and a poster racing for the same row cannot both win: either the
+reject lands and ``begin_submit`` refuses, or the submit has begun and the
+reject is refused.
+"""
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Callable, Iterable, NamedTuple, Optional
+
+# Every status a row can hold, in pipeline order.
+KNOWN_STATUSES = (
+    "candidate",
+    "drafted",
+    "approved",
+    "processing",
+    "submitting",
+    "posted",
+    "rejected",
+    "aborted",
+)
 
 # Approve only from drafted (human or unsupervised auto-approve path).
 APPROVE_FROM = frozenset({"drafted"})
 
-# Reject may cancel work that has not yet posted.
+# Reject cancels work whose publishing step has not started.
 REJECT_FROM = frozenset({"candidate", "drafted", "approved", "processing"})
 
 # Claim for posting (Celery tick / Discord cog).
 CLAIM_FROM = frozenset({"approved"})
+
+# Start the publishing step. Only a claimed row that nobody rejected.
+SUBMIT_FROM = frozenset({"processing"})
+
+# A poster giving up on a row it claimed.
+ABORT_FROM = frozenset({"processing", "submitting"})
+
+# The reason a poster returns when ``begin_submit`` refused, so its caller can
+# tell a withdrawn row from a servo failure.
+WITHDRAWN_BEFORE_SUBMIT = "withdrawn_before_submit"
+
+# abort_reason doubles as the claim timestamp while a row is in flight; the
+# table has no updated_at column for the stuck-row reaper to age rows by.
+_IN_FLIGHT_STAMPS = ("processing_since:", "submitting_since:")
 
 
 def can_approve(status: str | None) -> bool:
@@ -22,3 +66,151 @@ def can_reject(status: str | None) -> bool:
 
 def can_claim(status: str | None) -> bool:
     return (status or "") in CLAIM_FROM
+
+
+def reject_refusal(status: str | None) -> str:
+    """Why a row in ``status`` cannot be rejected, in words a user can act on."""
+    base = f"cannot reject from status '{status}'"
+    if status == "submitting":
+        return base + ": the post is being submitted right now and can no longer be stopped"
+    if status == "posted":
+        return base + ": it is already posted, and rejecting it would not take the post down"
+    if status == "rejected":
+        return base + ": it is already rejected and will not post"
+    if status == "aborted":
+        return base + ": posting it was abandoned and it will not be retried"
+    return base
+
+
+def _stamp(prefix: str) -> str:
+    return f"{prefix}{datetime.now(timezone.utc).isoformat()}"
+
+
+def in_flight_since(abort_reason: str | None) -> Optional[datetime]:
+    """When a processing/submitting row entered that status, or None."""
+    reason = abort_reason or ""
+    for prefix in _IN_FLIGHT_STAMPS:
+        if reason.startswith(prefix):
+            try:
+                stamp = datetime.fromisoformat(reason[len(prefix):].replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+    return None
+
+
+def move(audit_id: int, to_status: str, allowed_from: Iterable[str], **fields: Any) -> bool:
+    """Set ``status`` (and ``fields``) only if the row's status is still one of
+    ``allowed_from``. True when this call made the change.
+
+    Commits ``db.session``; ORM objects the caller holds are refreshed on their
+    next read.
+    """
+    from backend.models import SocialOutreachLog
+
+    return _update_where(
+        audit_id, SocialOutreachLog.status.in_(tuple(allowed_from)), {"status": to_status, **fields},
+    )
+
+
+def _update_where(audit_id: int, status_is, values: dict) -> bool:
+    from backend.models import SocialOutreachLog, db
+
+    try:
+        changed = (
+            db.session.query(SocialOutreachLog)
+            .filter(SocialOutreachLog.id == audit_id)
+            .filter(status_is)
+            .update(values, synchronize_session=False)
+        )
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+    return changed == 1
+
+
+def current_status(audit_id: int) -> Optional[str]:
+    """The row's status as the database has it now, or None if there is no row."""
+    from backend.models import SocialOutreachLog, db
+
+    found = (
+        db.session.query(SocialOutreachLog.status)
+        .filter(SocialOutreachLog.id == audit_id)
+        .first()
+    )
+    return found[0] if found else None
+
+
+def approve(audit_id: int, draft_text: Optional[str] = None) -> bool:
+    fields = {} if draft_text is None else {"draft_text": draft_text}
+    return move(audit_id, "approved", APPROVE_FROM, **fields)
+
+
+def claim(audit_id: int) -> bool:
+    """approved -> processing. False when the row is no longer approved."""
+    return move(audit_id, "processing", CLAIM_FROM, abort_reason=_stamp("processing_since:"))
+
+
+def begin_submit(audit_id: int) -> bool:
+    """processing -> submitting. A poster calls this immediately before the
+    step that publishes and must not publish when it returns False: the row was
+    rejected (or reaped) while the poster was working."""
+    return move(audit_id, "submitting", SUBMIT_FROM, abort_reason=_stamp("submitting_since:"))
+
+
+def submit_gate(audit_id: int) -> Callable[[], bool]:
+    """``begin_submit`` for one row, in the shape posters take as ``before_submit``."""
+    return lambda: begin_submit(audit_id)
+
+
+def abort_in_flight(audit_id: int, reason: str) -> bool:
+    """processing/submitting -> aborted. Leaves a row that was rejected meanwhile alone."""
+    return move(audit_id, "aborted", ABORT_FROM, abort_reason=(reason or "")[:512])
+
+
+def mark_posted(audit_id: int, posted_text: str) -> bool:
+    """Record a published post. False when the row is missing or rejected.
+
+    A post that went out is recorded whatever the row said, except over a
+    rejection: a rejected row never turns into a posted one.
+    """
+    from backend.models import SocialOutreachLog
+
+    return _update_where(
+        audit_id, SocialOutreachLog.status != "rejected",
+        {"status": "posted", "posted_text": posted_text},
+    )
+
+
+def note_posted_despite_rejection(audit_id: int, posted_text: str) -> bool:
+    """Keep what was published on a rejected row without changing its status."""
+    return move(
+        audit_id, "rejected", ("rejected",),
+        posted_text=posted_text, abort_reason="posted_despite_rejection",
+    )
+
+
+class RejectOutcome(NamedTuple):
+    rejected: bool
+    # The status the row was rejected from; when not rejected, the status that
+    # blocked it, or None if the row does not exist.
+    status: Optional[str]
+
+
+def reject(audit_id: int) -> RejectOutcome:
+    """Reject a row unless its publishing step has started or it is finished."""
+    # A row can change status between the read and the UPDATE (the poster
+    # claiming it, for one), so the UPDATE names the status it read and the
+    # loop re-reads when that no longer matches.
+    status = current_status(audit_id)
+    for _ in range(len(KNOWN_STATUSES)):
+        if status is None or not can_reject(status):
+            return RejectOutcome(False, status)
+        # A claimed row carries its claim time in abort_reason; replace it so
+        # the history says why a claimed draft never posted.
+        fields = {"abort_reason": "rejected_before_submit"} if status == "processing" else {}
+        if move(audit_id, "rejected", (status,), **fields):
+            return RejectOutcome(True, status)
+        status = current_status(audit_id)
+    return RejectOutcome(False, status)

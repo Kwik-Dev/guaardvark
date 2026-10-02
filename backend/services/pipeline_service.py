@@ -10,6 +10,11 @@ class attributes:
   - ``stage_to_agent``     current_stage → resuming agent (None = user-gated)
   - ``task_namespace``     celery task prefix ("production", "music_video", …)
 
+and ``stage_context``, the key its stages have in plugin_bridge's
+STAGE_PLUGIN_REQUIREMENTS and the orchestrator's STAGE_MODEL_REQUIREMENTS
+("film-crew", "music-video"). It is not the task prefix: those maps use the
+page names.
+
 The per-pipeline ``create()`` and any domain helpers (cut planning, etc.) stay on
 the subclass. Everything here is genre-agnostic — it only touches the lifecycle
 spine (status / current_stage / error_blob) that every video kind shares.
@@ -22,6 +27,7 @@ simplify it to a read-then-write.
 from __future__ import annotations
 
 import logging
+import os
 
 from sqlalchemy.orm import Session
 
@@ -31,6 +37,25 @@ log = logging.getLogger(__name__)
 # Raw terminal statuses. Per-stage failures use the ``failed_<stage>`` pattern,
 # matched separately in find_non_terminal so failed rows aren't re-dispatched.
 TERMINAL_STATUSES = {"complete", "failed"}
+
+# Stage prep at dispatch (start the stage's plugins, run the orchestrator's stage
+# model prep) looked the stages up under the celery prefix, which the stage maps
+# do not use, so it never did anything. Keyed correctly it starts plugins and,
+# for the render stages, evicts every non-video model this process has booked,
+# before the render has claimed the GPU. Off until that is wanted.
+STAGE_PREP_ENV = "GUAARDVARK_PIPELINE_STAGE_PREP"
+
+
+def stage_prep_enabled() -> bool:
+    return os.environ.get(STAGE_PREP_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def dispatch_report(warning: str | None) -> dict:
+    """Response fields for a route that tried to dispatch an agent:
+    ``dispatched``, and ``warning`` (from try_dispatch) when it was not."""
+    if warning:
+        return {"dispatched": False, "warning": warning}
+    return {"dispatched": True}
 
 
 def _coerce_error(error):
@@ -58,6 +83,7 @@ class PipelineService:
     valid_transitions: dict[str, str] = {}
     stage_to_agent: dict[str, "str | None"] = {}
     task_namespace: str = ""
+    stage_context: str = ""
 
     def __init__(self, session: Session, gate=None):
         self.s = session
@@ -116,30 +142,56 @@ class PipelineService:
             .all()
         )
 
+    def prepare_stage(self, row) -> None:
+        """Start the plugins and run the model prep the row's current stage needs.
+
+        Skipped unless GUAARDVARK_PIPELINE_STAGE_PREP is on and the plugin
+        auto-orchestrator is enabled. ``ensure_plugins_for_stage`` also runs the
+        orchestrator's ``prepare_for_stage``, so this is the only call. A failure
+        is logged and the agent is dispatched anyway.
+        """
+        if not stage_prep_enabled():
+            return
+        from backend.services.plugin_bridge import (
+            auto_orchestrator_enabled,
+            ensure_plugins_for_stage,
+        )
+        if not auto_orchestrator_enabled():
+            return
+        context = self.stage_context or self.task_namespace
+        try:
+            ensure_plugins_for_stage(context, row.current_stage)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "Stage prep failed for %s %s stage=%s (non-fatal): %s",
+                context, row.id, row.current_stage, e,
+            )
+
     def dispatch_agent(self, row_id: int, agent_name: str) -> None:
-        # P2: wire phase map – ensure plugins for the row's current stage before dispatching
-        # (idempotent; uses persist_user_pref=False for auto-orchestrated paths)
         row = self.s.get(self.model_cls, row_id)
         if row:
-            try:
-                from backend.services.plugin_bridge import ensure_plugins_for_stage
-                ensure_plugins_for_stage(self.task_namespace, row.current_stage)
-            except Exception:
-                log.warning(
-                    "Phase ensure failed for %s %s stage=%s (non-fatal)",
-                    self.task_namespace, row_id, row.current_stage,
-                )
-            try:
-                # P3: GPU model phase prep in dispatch path too
-                from backend.services.gpu_memory_orchestrator import get_orchestrator
-                get_orchestrator().prepare_for_stage(self.task_namespace, row.current_stage)
-            except Exception:
-                log.warning(
-                    "GPU stage prepare failed for %s %s stage=%s (non-fatal)",
-                    self.task_namespace, row_id, row.current_stage,
-                )
+            self.prepare_stage(row)
         from backend.celery_app import celery
         celery.send_task(f"{self.task_namespace}.run_{agent_name}", args=[row_id])
+
+    def try_dispatch(self, row_id: int, agent_name: str) -> str | None:
+        """dispatch_agent for a route that has already moved the row forward:
+        None when the agent was queued, otherwise why it was not, worded for
+        the response. The row keeps its stage either way; resume_all
+        dispatches it when Guaardvark next starts."""
+        from backend.celery_dispatch import TaskNotStarted
+
+        try:
+            self.dispatch_agent(row_id, agent_name)
+        except Exception as e:  # noqa: BLE001 - reported to the caller, not raised
+            log.warning("%s %s: %s dispatch failed: %s", self.task_namespace, row_id, agent_name, e)
+            why = e.why if isinstance(e, TaskNotStarted) else (str(e) or type(e).__name__)
+            step = agent_name.replace("_", " ")
+            return (
+                f"The {step} was not started: {why}. Nothing is lost: it starts when "
+                "Guaardvark is restarted (./start.sh)."
+            )
+        return None
 
     def resume_all(self) -> int:
         """Boot-time resume. Dispatch the agent for each non-terminal row's stage.
@@ -153,24 +205,7 @@ class PipelineService:
             if agent is None:
                 continue
             try:
-                # P2 phase hook: ensure before dispatch (dispatch also ensures, but resume path benefits from early)
-                try:
-                    from backend.services.plugin_bridge import ensure_plugins_for_stage
-                    ensure_plugins_for_stage(self.task_namespace, row.current_stage)
-                except Exception:
-                    log.warning(
-                        "Phase ensure failed for %s %s stage=%s (non-fatal)",
-                        self.task_namespace, row.id, row.current_stage,
-                    )
-                try:
-                    # P3: enhance GPU orch with stage/phase model prep (parallel to plugin phases)
-                    from backend.services.gpu_memory_orchestrator import get_orchestrator
-                    get_orchestrator().prepare_for_stage(self.task_namespace, row.current_stage)
-                except Exception:
-                    log.warning(
-                        "GPU stage prepare failed for %s %s stage=%s (non-fatal)",
-                        self.task_namespace, row.id, row.current_stage,
-                    )
+                # dispatch_agent runs the stage prep.
                 self.dispatch_agent(row.id, agent)
                 count += 1
             except Exception as e:  # noqa: BLE001

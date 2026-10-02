@@ -498,8 +498,15 @@ def get_live_gpu_stats():
 
 
 # --- Vision Pipeline camera proxy routes ---
+# The plugin needs its token on every route but /health; the browser calls
+# these, and they add it.
 
 VISION_PIPELINE_URL = "http://localhost:8201"
+
+
+def _vision_headers() -> dict:
+    from backend.utils.vision_context_utils import vision_pipeline_headers
+    return vision_pipeline_headers()
 
 @plugins_bp.route("/vision_pipeline/camera/start", methods=["POST"])
 def vision_camera_start():
@@ -507,7 +514,7 @@ def vision_camera_start():
     try:
         data = request.get_json(silent=True) or {}
         resp = http_requests.post(
-            f"{VISION_PIPELINE_URL}/camera/start", json=data, timeout=5
+            f"{VISION_PIPELINE_URL}/camera/start", json=data, headers=_vision_headers(), timeout=5
         )
         return resp.json(), resp.status_code
     except http_requests.ConnectionError:
@@ -521,7 +528,7 @@ def vision_camera_stop():
     """Proxy camera stop to the Vision Pipeline plugin."""
     try:
         resp = http_requests.post(
-            f"{VISION_PIPELINE_URL}/camera/stop", timeout=5
+            f"{VISION_PIPELINE_URL}/camera/stop", headers=_vision_headers(), timeout=5
         )
         return resp.json(), resp.status_code
     except http_requests.ConnectionError:
@@ -535,7 +542,7 @@ def vision_camera_status():
     """Proxy camera status from the Vision Pipeline plugin."""
     try:
         resp = http_requests.get(
-            f"{VISION_PIPELINE_URL}/camera/status", timeout=5
+            f"{VISION_PIPELINE_URL}/camera/status", headers=_vision_headers(), timeout=5
         )
         return resp.json(), resp.status_code
     except http_requests.ConnectionError:

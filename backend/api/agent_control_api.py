@@ -354,9 +354,34 @@ def learn_update_demonstration(demo_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def _step_coordinates(step_data):
+    """(x, y) for a step written back through the steps API, or None if malformed.
+
+    Two shapes arrive: ``coordinates_x`` / ``coordinates_y``, the column names,
+    and ``coordinates: [x, y]`` (or null), which is how DemoStep.to_dict()
+    hands steps out and so what the Training page's steps editor sends back.
+    The column names win when either is present.
+    """
+    if "coordinates_x" in step_data or "coordinates_y" in step_data:
+        return step_data.get("coordinates_x"), step_data.get("coordinates_y")
+    coords = step_data.get("coordinates")
+    if coords is None:
+        return None, None
+    if not isinstance(coords, (list, tuple)) or len(coords) != 2:
+        return None
+    try:
+        return int(coords[0]), int(coords[1])
+    except (TypeError, ValueError):
+        return None
+
+
 @agent_control_bp.route("/learn/demonstrations/<int:demo_id>/steps", methods=["PUT"])
 def learn_replace_steps(demo_id):
-    """Replace all steps for a demonstration with the provided JSON array."""
+    """Replace all steps for a demonstration with the provided JSON array.
+
+    Steps may carry their click position either as coordinates_x/_y or as
+    coordinates: [x, y] (see _step_coordinates).
+    """
     try:
         from backend.models import db, Demonstration, DemoStep
         demo = db.session.get(Demonstration, demo_id)
@@ -367,9 +392,14 @@ def learn_replace_steps(demo_id):
         if not isinstance(steps, list):
             return jsonify({"success": False, "error": "'steps' must be a list"}), 400
         valid_actions = {"click", "type", "hotkey", "scroll"}
+        positions = []
         for i, s in enumerate(steps):
             if s.get("action_type") not in valid_actions:
                 return jsonify({"success": False, "error": f"Step {i}: invalid action_type '{s.get('action_type')}'"}), 400
+            position = _step_coordinates(s)
+            if position is None:
+                return jsonify({"success": False, "error": f"Step {i}: coordinates must be [x, y] or null"}), 400
+            positions.append(position)
         # Delete existing steps
         DemoStep.query.filter_by(demonstration_id=demo_id).delete()
         # Create new steps with enforced sequential indexing
@@ -380,8 +410,8 @@ def learn_replace_steps(demo_id):
                 action_type=step_data["action_type"],
                 target_description=step_data.get("target_description", ""),
                 element_context=step_data.get("element_context", ""),
-                coordinates_x=step_data.get("coordinates_x"),
-                coordinates_y=step_data.get("coordinates_y"),
+                coordinates_x=positions[i][0],
+                coordinates_y=positions[i][1],
                 text=step_data.get("text"),
                 keys=step_data.get("keys"),
                 intent=step_data.get("intent"),

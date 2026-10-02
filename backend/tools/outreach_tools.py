@@ -17,11 +17,13 @@ gates still apply downstream — none of these tools bypass them.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
-from backend.services.social_outreach import audit, kill_switch, persona
+from backend.services.social_outreach import audit, kill_switch, persona, transitions
 from backend.utils.backend_http import BackendError, is_mcp_transport, request_json
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,48 @@ _KNOWN_PLATFORMS = ("reddit", "discord", "facebook", "twitter", "youtube")
 _KNOWN_RUN_PLATFORMS = (
     "reddit", "self_share", "recon", "draft", "youtube", "youtube_recon",
 )
+# Statuses outreach_list_queue lists oldest first: the posting tick takes
+# approved rows in created_at order, so "what posts next" is the oldest.
+_OLDEST_FIRST_STATUSES = ("approved",)
+# What outreach_draft_post can draft. The mode decides both the persona prompt
+# and the queued row's action, so anything else ("reply", "comments") is
+# refused rather than drafted as one thing and queued as another.
+_DRAFT_MODES = ("comment", "share")
+# Platforms a mode='share' draft can be posted to. The posting tick's share
+# branch (tick_process_approved_drafts) submits a link post to the subreddit
+# named in the row's target_url and knows no other destination, so a share
+# draft for any other platform would be approved and then aborted.
+_SHARE_PLATFORMS = ("reddit",)
+
+# A share_target is "r/SideProject", "/r/SideProject", "SideProject", or a
+# reddit.com/r/SideProject URL.
+_SUBREDDIT_SHORT_RE = re.compile(r"^/?(?:r/)?(?P<name>[A-Za-z0-9_]{2,21})/?$", re.IGNORECASE)
+_SUBREDDIT_URL_RE = re.compile(
+    r"^https?://(?:[a-z]+\.)?reddit\.com/r/(?P<name>[A-Za-z0-9_]{2,21})(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _subreddit_name(share_target: str) -> Optional[str]:
+    """The subreddit a share_target names, or None if it names none."""
+    target = (share_target or "").strip()
+    match = _SUBREDDIT_SHORT_RE.match(target) or _SUBREDDIT_URL_RE.match(target)
+    return match.group("name") if match else None
+
+
+def _share_title(draft_text: str) -> str:
+    """The title the posting tick will submit for a share row's draft_text.
+
+    Mirrors the share branch of tick_process_approved_drafts: a JSON draft
+    carries "title"; anything else is used whole.
+    """
+    try:
+        payload = json.loads(draft_text or "{}")
+    except json.JSONDecodeError:
+        return (draft_text or "").strip()
+    if not isinstance(payload, dict):
+        return (draft_text or "").strip()
+    return (payload.get("title") or "").strip()
 
 
 def _row_summary(row) -> Dict[str, Any]:
@@ -70,20 +114,38 @@ class OutreachStatusTool(BaseTool):
     parameters: Dict[str, ToolParameter] = {}
 
     def execute(self, **kwargs) -> ToolResult:
-        try:
-            payload = {
-                "enabled": kill_switch.is_enabled(),
-                "supervised": kill_switch.is_supervised(),
-                "caps": {
-                    "min_gap_seconds": kill_switch.CADENCE_MIN_GAP_SECONDS,
-                    "daily_cap": kill_switch.CADENCE_DAILY_CAP,
-                },
-                "cadence": kill_switch.cadence_status(),
-            }
-            return ToolResult(success=True, output=payload, metadata=payload)
-        except Exception as e:
-            logger.exception("outreach_status failed")
-            return ToolResult(success=False, error=str(e))
+        if is_mcp_transport(self):
+            # The backend owns the settings table and the cadence counters;
+            # this process has neither a database session nor the backend's
+            # environment, and would report its own defaults as the answer.
+            try:
+                payload = request_json("GET", "/api/social-outreach/status").data
+            except BackendError as e:
+                return ToolResult(
+                    success=False,
+                    error=f"Could not read the outreach status: {e}",
+                    metadata={"backend_error": e.kind},
+                )
+            if not isinstance(payload, dict):
+                return ToolResult(success=False, error="The backend returned no outreach status.")
+        else:
+            try:
+                payload = kill_switch.status_snapshot()
+            except Exception as e:
+                logger.exception("outreach_status failed")
+                return ToolResult(success=False, error=str(e))
+
+        if payload.get("settings_readable") is False:
+            return ToolResult(
+                success=False,
+                error=(
+                    "The backend could not read the outreach settings from its database, so "
+                    "whether outreach is enabled or supervised is unknown. Nothing posts "
+                    "while the settings are unreadable."
+                ),
+                metadata=payload,
+            )
+        return ToolResult(success=True, output=payload, metadata=payload)
 
 
 class OutreachListQueueTool(BaseTool):
@@ -92,15 +154,20 @@ class OutreachListQueueTool(BaseTool):
     name = "outreach_list_queue"
     read_only = True
     description = (
-        "List social outreach drafts. Defaults to status='drafted' (pending review). "
-        "Pass status='approved' to see what's queued to post next, or status='posted' "
-        "for recent history. Returns up to `limit` rows (default 10)."
+        "List social outreach drafts by status. Defaults to status='drafted' (waiting "
+        "for review). status='approved' lists what is queued to post, oldest first, "
+        "which is the order it posts in; every other status is newest first, e.g. "
+        "status='posted' for recent history. Returns up to `limit` rows (default 10)."
     )
     parameters = {
         "status": ToolParameter(
             name="status", type="string", required=False,
-            description="One of: drafted, approved, posted, rejected",
-            default="drafted",
+            description=(
+                "candidate (found, not drafted yet), drafted (waiting for review), approved "
+                "(queued to post), processing (a poster has picked it up), submitting (being "
+                "published now), posted, rejected, aborted (posting failed)"
+            ),
+            default="drafted", enum=list(transitions.KNOWN_STATUSES),
         ),
         "limit": ToolParameter(
             name="limit", type="int", required=False,
@@ -108,8 +175,25 @@ class OutreachListQueueTool(BaseTool):
         ),
     }
 
+    @staticmethod
+    def _answer(status: str, summary: List[Dict[str, Any]]) -> ToolResult:
+        order = "oldest_first" if status in _OLDEST_FIRST_STATUSES else "newest_first"
+        return ToolResult(
+            success=True,
+            output={"count": len(summary), "status": status, "order": order, "rows": summary},
+            metadata={"count": len(summary), "status": status},
+        )
+
     def execute(self, **kwargs) -> ToolResult:
-        status = (kwargs.get("status") or "drafted").strip().lower()
+        status = str(kwargs.get("status") or "drafted").strip().lower()
+        if status not in transitions.KNOWN_STATUSES:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"status must be one of {transitions.KNOWN_STATUSES}, got '{status}'. "
+                    "Drafts waiting for review are 'drafted'."
+                ),
+            )
         try:
             limit = int(kwargs.get("limit") or 10)
         except (TypeError, ValueError):
@@ -121,16 +205,15 @@ class OutreachListQueueTool(BaseTool):
 
         try:
             from backend.models import SocialOutreachLog
-            q = SocialOutreachLog.query
-            if status:
-                q = q.filter(SocialOutreachLog.status == status)
-            rows = q.order_by(SocialOutreachLog.created_at.desc()).limit(limit).all()
-            summary = [_row_summary(r) for r in rows]
-            return ToolResult(
-                success=True,
-                output={"count": len(summary), "status": status, "rows": summary},
-                metadata={"count": len(summary), "status": status},
+            created = SocialOutreachLog.created_at
+            rows = (
+                SocialOutreachLog.query
+                .filter(SocialOutreachLog.status == status)
+                .order_by(created.asc() if status in _OLDEST_FIRST_STATUSES else created.desc())
+                .limit(limit)
+                .all()
             )
+            return self._answer(status, [_row_summary(r) for r in rows])
         except Exception as e:
             logger.exception("outreach_list_queue failed")
             return ToolResult(success=False, error=str(e))
@@ -150,13 +233,8 @@ class OutreachListQueueTool(BaseTool):
         except BackendError as e:
             return ToolResult(success=False, error=f"Could not list outreach drafts: {e}")
         rows = [r for r in rows if r.get("status") == status]
-        rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
-        summary = [_row_summary(r) for r in rows[:limit]]
-        return ToolResult(
-            success=True,
-            output={"count": len(summary), "status": status, "rows": summary},
-            metadata={"count": len(summary), "status": status},
-        )
+        rows.sort(key=lambda r: r.get("created_at") or "", reverse=status not in _OLDEST_FIRST_STATUSES)
+        return self._answer(status, [_row_summary(r) for r in rows[:limit]])
 
 
 class OutreachDraftPostTool(BaseTool):
@@ -170,8 +248,9 @@ class OutreachDraftPostTool(BaseTool):
         "Platforms: reddit, discord, facebook, twitter, youtube. "
         "For mode='comment' you must supply either thread_context (the OP/comment/video "
         "description) or target_url (we'll scout it — for YouTube URLs, scrapes the video "
-        "title + description). For mode='share' supply share_target (e.g. 'r/SideProject') "
-        "and optionally share_link (defaults to guaardvark.com). "
+        "title + description). mode='share' drafts a Reddit link post: platform must be "
+        "reddit, share_target is the subreddit (e.g. 'r/SideProject') and share_link is "
+        "optional (defaults to guaardvark.com). "
         "The draft lands in the queue at status='drafted' for human approval — nothing "
         "posts until the user approves it in the OutreachPage UI."
     )
@@ -182,7 +261,8 @@ class OutreachDraftPostTool(BaseTool):
         ),
         "mode": ToolParameter(
             name="mode", type="string", required=False,
-            description="'comment' or 'share'", default="comment",
+            description="'comment' (reply in a thread) or 'share' (new Reddit link post)",
+            default="comment", enum=list(_DRAFT_MODES),
         ),
         "thread_context": ToolParameter(
             name="thread_context", type="string", required=False,
@@ -190,11 +270,14 @@ class OutreachDraftPostTool(BaseTool):
         ),
         "target_url": ToolParameter(
             name="target_url", type="string", required=False,
-            description="URL of the thread; if thread_context is missing we scout it",
+            description=(
+                "Comment mode: URL of the thread; if thread_context is missing we scout it. "
+                "Ignored in share mode, where the destination is share_target."
+            ),
         ),
         "share_target": ToolParameter(
             name="share_target", type="string", required=False,
-            description="Where the share post goes, e.g. 'r/SideProject' (share mode)",
+            description="Share mode: the subreddit the link post goes to, e.g. 'r/SideProject'",
         ),
         "share_link": ToolParameter(
             name="share_link", type="string", required=False,
@@ -211,11 +294,12 @@ class OutreachDraftPostTool(BaseTool):
         "include_link": ToolParameter(
             name="include_link", type="bool", required=False,
             description=(
-                "Comment mode only. When true, the persona includes a "
-                "guaardvark.com link where it fits naturally. The persona "
-                "still self-grades and may return grade<0.7 if the link "
-                "would feel forced (the human reviewer would rather hold "
-                "than ship spam). Defaults to false."
+                "Comment mode only. When true, the draft carries a link: the "
+                "GitHub repo for YouTube, guaardvark.com for other platforms. "
+                "The persona is asked to work it in; if it leaves it out, the "
+                "link is appended on its own line. The persona is told to grade "
+                "below 0.7 when the link cannot be made to feel natural; the "
+                "draft is queued either way. Defaults to false."
             ),
             default=False,
         ),
@@ -228,20 +312,48 @@ class OutreachDraftPostTool(BaseTool):
                 success=False,
                 error=f"platform must be one of {_KNOWN_PLATFORMS}, got '{platform}'",
             )
-        mode = (kwargs.get("mode") or "comment").strip().lower()
+        mode = str(kwargs.get("mode") or "comment").strip().lower()
+        if mode not in _DRAFT_MODES:
+            return ToolResult(
+                success=False,
+                error=f"mode must be one of {_DRAFT_MODES}, got '{mode}'",
+            )
         target_url = kwargs.get("target_url")
         target_thread_id = None
 
         # Build context dict for persona.draft_outreach_text
         if mode == "share":
+            if platform not in _SHARE_PLATFORMS:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"mode='share' can only be posted on {', '.join(_SHARE_PLATFORMS)} "
+                        f"(a link post to a subreddit). For {platform}, draft a comment on a "
+                        "thread with mode='comment'."
+                    ),
+                )
             share_target = (kwargs.get("share_target") or "").strip()
             if not share_target:
                 return ToolResult(
                     success=False,
                     error="share mode requires share_target (e.g. 'r/SideProject')",
                 )
+            subreddit = _subreddit_name(share_target)
+            if not subreddit:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"share_target '{share_target}' is not a subreddit. "
+                        "Use the form 'r/SideProject'."
+                    ),
+                )
+            # The posting tick reads the subreddit from the row's target_url,
+            # so a share row points at the subreddit, whatever target_url the
+            # caller sent.
+            from backend.services.social_outreach.reddit_outreach import REDDIT_BASE
+            target_url = f"{REDDIT_BASE}/r/{subreddit}"
             context = {
-                "target": share_target,
+                "target": f"r/{subreddit}",
                 "link_url": (kwargs.get("share_link") or persona.SITE_URL),
             }
         else:
@@ -312,6 +424,17 @@ class OutreachDraftPostTool(BaseTool):
         grade = float(result.get("grade") or 0.0)
         reason = result.get("reason") or ""
 
+        if mode == "share" and not _share_title(draft_text):
+            return ToolResult(
+                success=False,
+                error=(
+                    "The persona returned a share draft with no title. A Reddit link post "
+                    "needs one, so nothing was queued."
+                ),
+                output={"platform": platform, "mode": mode, "draft": draft_text,
+                        "grade": grade, "reason": reason},
+            )
+
         if is_mcp_transport(self):
             return self._queue_via_backend(
                 platform, mode, target_url, target_thread_id, draft_text, grade, reason,
@@ -337,6 +460,7 @@ class OutreachDraftPostTool(BaseTool):
                 "audit_id": audit_id,
                 "platform": platform,
                 "mode": mode,
+                "target_url": target_url,
                 "draft": draft_text,
                 "grade": grade,
                 "reason": reason,
@@ -353,6 +477,7 @@ class OutreachDraftPostTool(BaseTool):
         draft = {
             "platform": platform,
             "mode": mode,
+            "target_url": target_url,
             "draft": draft_text,
             "grade": grade,
             "reason": reason,
@@ -407,20 +532,18 @@ class OutreachApproveDraftTool(BaseTool):
             return ToolResult(success=False, error="id must be an integer")
 
         try:
-            from backend.models import SocialOutreachLog, db
-            from backend.services.social_outreach.transitions import can_approve
-            row = SocialOutreachLog.query.get(event_id)
-            if row is None:
-                return ToolResult(success=False, error=f"draft {event_id} not found")
-            if not can_approve(row.status):
+            from backend.models import SocialOutreachLog
+            from backend.services.social_outreach import transitions
+            draft_text = kwargs.get("draft_text")
+            if not transitions.approve(event_id, None if draft_text is None else str(draft_text)):
+                status = transitions.current_status(event_id)
+                if status is None:
+                    return ToolResult(success=False, error=f"draft {event_id} not found")
                 return ToolResult(
                     success=False,
-                    error=f"cannot approve from status '{row.status}' (only from drafted)",
+                    error=f"cannot approve from status '{status}' (only from drafted)",
                 )
-            if "draft_text" in kwargs and kwargs["draft_text"] is not None:
-                row.draft_text = str(kwargs["draft_text"])
-            row.status = "approved"
-            db.session.commit()
+            row = SocialOutreachLog.query.get(event_id)
             return ToolResult(
                 success=True,
                 output=_row_summary(row),
@@ -439,7 +562,10 @@ class OutreachRejectDraftTool(BaseTool):
     # A rejected draft cannot be moved back to the queue.
     destructive = True
     description = (
-        "Reject an outreach draft by id. Marks the row 'rejected' so it won't post. "
+        "Reject an outreach draft by id so it will not post. Success means the row is "
+        "'rejected' and nothing will be published for it, even if it had already been "
+        "picked up for posting. Once a draft is being submitted or is posted it can no "
+        "longer be stopped: the call then fails and says so, and the row is left as it is. "
         "Use when the user says 'kill that one', 'don't post draft 42', etc."
     )
     parameters = {
@@ -448,6 +574,29 @@ class OutreachRejectDraftTool(BaseTool):
             description="SocialOutreachLog row id",
         ),
     }
+
+    @staticmethod
+    def _rejected(row, rejected_from: Optional[str]) -> ToolResult:
+        summary = _row_summary(row)
+        summary["rejected_from"] = rejected_from
+        if rejected_from == "processing":
+            summary["note"] = (
+                "This draft had been picked up for posting. It was stopped before it "
+                "was submitted and will not post."
+            )
+        return ToolResult(
+            success=True,
+            output=summary,
+            metadata={"id": summary["id"], "status": summary["status"], "rejected_from": rejected_from},
+        )
+
+    @staticmethod
+    def _not_rejected(event_id: int, status: Optional[str], refusal: str) -> ToolResult:
+        return ToolResult(
+            success=False,
+            error=f"Draft {event_id} was not rejected: {refusal}.",
+            metadata={"id": event_id, "status": status},
+        )
 
     def execute(self, **kwargs) -> ToolResult:
         try:
@@ -461,31 +610,23 @@ class OutreachRejectDraftTool(BaseTool):
             except BackendError as e:
                 if e.status == 404:
                     return ToolResult(success=False, error=f"draft {event_id} not found")
+                if e.status == 409:
+                    status = e.body.get("status") if isinstance(e.body, dict) else None
+                    return self._not_rejected(event_id, status, str(e))
                 return ToolResult(success=False, error=str(e))
-            return ToolResult(
-                success=True,
-                output=_row_summary(row),
-                metadata={"id": row.get("id"), "status": row.get("status")},
-            )
+            return self._rejected(row, row.get("rejected_from"))
 
         try:
-            from backend.models import SocialOutreachLog, db
-            from backend.services.social_outreach.transitions import can_reject
-            row = SocialOutreachLog.query.get(event_id)
-            if row is None:
+            from backend.models import SocialOutreachLog
+            from backend.services.social_outreach import transitions
+            outcome = transitions.reject(event_id)
+            if outcome.status is None:
                 return ToolResult(success=False, error=f"draft {event_id} not found")
-            if not can_reject(row.status):
-                return ToolResult(
-                    success=False,
-                    error=f"cannot reject from status '{row.status}'",
+            if not outcome.rejected:
+                return self._not_rejected(
+                    event_id, outcome.status, transitions.reject_refusal(outcome.status),
                 )
-            row.status = "rejected"
-            db.session.commit()
-            return ToolResult(
-                success=True,
-                output=_row_summary(row),
-                metadata={"id": row.id, "status": row.status},
-            )
+            return self._rejected(SocialOutreachLog.query.get(event_id), outcome.status)
         except Exception as e:
             logger.exception("outreach_reject_draft failed")
             return ToolResult(success=False, error=str(e))
@@ -501,7 +642,8 @@ class OutreachRunPassTool(BaseTool):
         "(pass topics or keyword_profile for YouTube scout). For freeform requests "
         "like 'comment on YouTube videos about Offline AI', prefer "
         "outreach_execute_intent instead. Cadence + kill switch still apply; "
-        "never auto-posts while supervised."
+        "a YouTube scout also needs web access on in Settings (off by default). "
+        "Never auto-posts while supervised."
     )
     requires_approval = True
     parameters = {

@@ -81,8 +81,24 @@ const InterconnectorSettings = () => {
     sync_entities: ["clients", "projects", "websites"],
   });
 
-  // Track last-saved config for cancel/revert
+  // Last-saved config: the ref backs Cancel; the state drives everything that
+  // runs on its own (registration, heartbeat, auto-sync), so the form's
+  // unsaved values never reach the master and only take effect on Save.
   const savedConfigRef = useRef(null);
+  const [savedConfig, setSavedConfig] = useState(null);
+  const rememberSaved = (cfg) => {
+    savedConfigRef.current = { ...cfg };
+    setSavedConfig({ ...cfg });
+  };
+
+  // The registration last sent to the master (or in flight), so the same one
+  // is not sent twice: once by Save, which registers itself to report the
+  // result, and again by the registration effect reacting to the new saved
+  // config; or again after the master hands back this node's id.
+  const lastRegistration = useRef(null);
+  const registrationKey = (cfg, id) => JSON.stringify([
+    cfg.master_url, cfg.master_api_key, cfg.node_name, cfg.sync_entities || null, id || null,
+  ]);
 
   // State for status
   const [status, setStatus] = useState(null);
@@ -186,9 +202,12 @@ const InterconnectorSettings = () => {
     return () => clearInterval(interval);
   }, [config.is_enabled]);
 
-  // Client node: Automatic registration and heartbeat
+  // Client node: automatic registration and heartbeat, from the saved
+  // configuration only. Registers on load and when this node's id changes;
+  // Save registers on its own. Nothing is sent while fields are typed into.
   useEffect(() => {
-    if (!config.is_enabled || config.node_mode !== "client") {
+    const config = savedConfig; // the saved copy, not the form being edited
+    if (!config?.is_enabled || config.node_mode !== "client") {
       return;
     }
 
@@ -196,7 +215,7 @@ const InterconnectorSettings = () => {
       return;
     }
 
-    // Register with master on mount or when config changes
+    const key = registrationKey(config, nodeId);
     const registerClient = async () => {
       try {
         // Get the actual network IP from the backend
@@ -252,6 +271,7 @@ const InterconnectorSettings = () => {
         });
 
         if (response.error) {
+          if (lastRegistration.current === key) lastRegistration.current = null;
           console.error("[INTERCONNECTOR] Failed to register with master:", response.error);
           console.error("[INTERCONNECTOR] Registration error details:", {
             error: response.error,
@@ -267,11 +287,14 @@ const InterconnectorSettings = () => {
           nodeId: redactValue(returnedNodeId),
         });
         if (returnedNodeId && returnedNodeId !== nodeId) {
+          // The master already knows this node by the id it returned.
+          lastRegistration.current = registrationKey(config, returnedNodeId);
           setNodeId(returnedNodeId);
           localStorage.setItem('interconnector_node_id', returnedNodeId);
           debugLog("[INTERCONNECTOR] Stored node_id", { nodeId: redactValue(returnedNodeId) });
         }
       } catch (error) {
+        if (lastRegistration.current === key) lastRegistration.current = null;
         console.error("[INTERCONNECTOR] Error registering client:", error);
         console.error("[INTERCONNECTOR] Registration exception:", {
           name: error.name,
@@ -281,7 +304,10 @@ const InterconnectorSettings = () => {
       }
     };
 
-    registerClient();
+    if (lastRegistration.current !== key) {
+      lastRegistration.current = key;
+      registerClient();
+    }
 
     // Track if component is still mounted to prevent state updates after unmount
     let isMounted = true;
@@ -322,7 +348,7 @@ const InterconnectorSettings = () => {
       isMounted = false;
       clearInterval(heartbeatInterval);
     };
-  }, [config.is_enabled, config.node_mode, config.master_url, config.master_api_key, config.node_name, config.sync_entities, nodeId]);
+  }, [savedConfig, nodeId]);
 
   // Auto-fill node name from system branding name when node_name is empty
   useEffect(() => {
@@ -331,9 +357,11 @@ const InterconnectorSettings = () => {
     }
   }, [systemName]); // Only run when systemName changes (e.g. on initial load)
 
-  // Auto-sync if enabled
+  // Auto-sync if enabled in the saved configuration: the toggle, interval and
+  // entity choices take effect on Save, like registration.
   useEffect(() => {
-    if (!config.is_enabled || config.node_mode !== "client") {
+    const config = savedConfig; // the saved copy, not the form being edited
+    if (!config?.is_enabled || config.node_mode !== "client") {
       return;
     }
 
@@ -358,7 +386,7 @@ const InterconnectorSettings = () => {
     }, syncInterval);
 
     return () => clearInterval(autoSyncInterval);
-  }, [config.is_enabled, config.node_mode, config.auto_sync_enabled, config.sync_interval_seconds, config.sync_entities, isSyncingData]);
+  }, [savedConfig, isSyncingData]);
 
   const loadConfiguration = async () => {
     setIsLoading(true);
@@ -373,68 +401,13 @@ const InterconnectorSettings = () => {
       } else if (response.data?.config) {
         const loadedConfig = response.data.config;
         setConfig(loadedConfig);
-        savedConfigRef.current = { ...loadedConfig };
-
-        // If client mode and enabled, trigger immediate registration
-        if (loadedConfig.is_enabled && loadedConfig.node_mode === "client" && 
-            loadedConfig.master_url && loadedConfig.master_api_key && loadedConfig.node_name) {
-          // Trigger registration after a short delay to ensure state is updated
-          setTimeout(() => {
-            const registerClient = async () => {
-              try {
-                // Get actual network IP from backend
-                let networkIp = null;
-                let networkPort = 5000;
-                try {
-                  const networkInfo = await interconnectorApi.getNetworkInfo();
-                  if (networkInfo.data) {
-                    networkIp = networkInfo.data.network_ip;
-                    networkPort = networkInfo.data.port || 5000;
-                  }
-                } catch (netErr) {
-                  console.warn("[INTERCONNECTOR] Could not get network info:", netErr);
-                }
-                
-                const capabilities = {
-                  cpu_cores: navigator.hardwareConcurrency || 4,
-                  memory_mb: (navigator.deviceMemory || 4) * 1024,
-                  gpu_available: false,
-                };
-
-                const registrationData = {
-                  node_name: loadedConfig.node_name,
-                  node_id: nodeId,
-                  node_mode: "client",
-                  sync_entities: loadedConfig.sync_entities || ["clients", "projects"],
-                  capabilities: capabilities,
-                  // Use actual network IP from backend
-                  client_ip: networkIp,
-                  client_port: networkPort,
-                };
-
-                const regResponse = await interconnectorApi.registerWithMaster(
-                  loadedConfig.master_url,
-                  loadedConfig.master_api_key,
-                  registrationData
-                );
-
-                if (!regResponse.error) {
-                  const returnedNodeId = regResponse.data?.node_id;
-                  if (returnedNodeId && returnedNodeId !== nodeId) {
-                    setNodeId(returnedNodeId);
-                    localStorage.setItem('interconnector_node_id', returnedNodeId);
-                  }
-                }
-              } catch (error) {
-                console.error("Error registering client on load:", error);
-              }
-            };
-            registerClient();
-          }, 500);
-        }
+        // The registration effect registers a client node from this saved
+        // config; nothing is sent from here.
+        rememberSaved(loadedConfig);
       } else if (response.config) {
         // Fallback for direct config in response
         setConfig(response.config);
+        rememberSaved(response.config);
       }
     } catch (error) {
       // Silently handle if plugin is not enabled
@@ -564,7 +537,7 @@ const InterconnectorSettings = () => {
       }
       const newConfig = response.data?.config || response.config || configToSave;
       setConfig(newConfig);
-      savedConfigRef.current = { ...newConfig };
+      rememberSaved(newConfig);
       showMessage("Network Interconnector disabled", "success");
     } catch (error) {
       setConfig(prev => ({ ...prev, is_enabled: true }));
@@ -623,10 +596,15 @@ const InterconnectorSettings = () => {
         setConfig(response.config);
       }
       
-      // Update savedConfigRef so Cancel reverts to this state
-      savedConfigRef.current = { ...config, ...configToSave };
-      if (response.data?.config) savedConfigRef.current = { ...response.data.config };
-      else if (response.config) savedConfigRef.current = { ...response.config };
+      // Cancel reverts to this, and registration, heartbeat and auto-sync now
+      // run from it. A client node is registered below, by this handler, so it
+      // can report the result; claiming the registration first keeps the
+      // registration effect from sending the same one when it sees the save.
+      const saved = response.data?.config || response.config || { ...config, ...configToSave };
+      const registersNow = saved.is_enabled && saved.node_mode === "client"
+        && saved.master_url && saved.master_api_key && saved.node_name;
+      if (registersNow) lastRegistration.current = registrationKey(saved, nodeId);
+      rememberSaved(saved);
 
       showMessage("Configuration saved successfully", "success");
 
@@ -639,7 +617,8 @@ const InterconnectorSettings = () => {
       }
 
       // If client mode, automatically register with master
-      if (configToSave.is_enabled && configToSave.node_mode === "client" && configToSave.master_url && configToSave.master_api_key && configToSave.node_name) {
+      if (registersNow) {
+        const key = lastRegistration.current;
         try {
           // Get actual network IP from backend
           let networkIp = null;
@@ -661,10 +640,10 @@ const InterconnectorSettings = () => {
           };
 
           const registrationData = {
-            node_name: configToSave.node_name,
+            node_name: saved.node_name,
             node_id: nodeId,
             node_mode: "client",
-            sync_entities: configToSave.sync_entities || ["clients", "projects"],
+            sync_entities: saved.sync_entities || ["clients", "projects"],
             capabilities: capabilities,
             // Use actual network IP from backend
             client_ip: networkIp,
@@ -672,23 +651,26 @@ const InterconnectorSettings = () => {
           };
 
           const regResponse = await interconnectorApi.registerWithMaster(
-            configToSave.master_url,
-            configToSave.master_api_key,
+            saved.master_url,
+            saved.master_api_key,
             registrationData
           );
 
           if (regResponse.error) {
+            if (lastRegistration.current === key) lastRegistration.current = null;
             console.warn("Failed to register with master:", regResponse.error);
             showMessage("Configuration saved, but registration with master failed. Please check connection.", "warning");
           } else {
             const returnedNodeId = regResponse.data?.node_id;
             if (returnedNodeId && returnedNodeId !== nodeId) {
+              lastRegistration.current = registrationKey(saved, returnedNodeId);
               setNodeId(returnedNodeId);
               localStorage.setItem('interconnector_node_id', returnedNodeId);
             }
             showMessage("Configuration saved and registered with master successfully", "success");
           }
         } catch (error) {
+          if (lastRegistration.current === key) lastRegistration.current = null;
           console.error("Error registering client:", error);
           showMessage("Configuration saved, but registration failed. Please check connection.", "warning");
         }

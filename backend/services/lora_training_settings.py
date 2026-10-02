@@ -51,6 +51,21 @@ def normalize_training_settings(raw: dict | None) -> dict[str, Any]:
     }
 
 
+def merge_training_settings(existing: dict | None, raw: dict | None) -> dict[str, Any]:
+    """Return a subject's stored settings with the hyperparameters from ``raw``.
+
+    ``Subject.training_settings_json`` holds more than hyperparameters: the
+    identity state (bible_vision_grounded, bible_manual_override,
+    bible_vision_tags, bible_identity_marks, class_token) and the post-train
+    smoke_identity score live in the same object. A hyperparameter write
+    replaces the six keys normalize_training_settings returns, exactly as
+    before, and leaves every other key as it was.
+    """
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.update(normalize_training_settings(raw))
+    return merged
+
+
 def settings_for_subject(subject) -> dict[str, Any]:
     raw = getattr(subject, "training_settings_json", None) or {}
     return normalize_training_settings(raw if isinstance(raw, dict) else None)

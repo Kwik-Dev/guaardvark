@@ -11,9 +11,18 @@ from typing import Iterable
 
 # Files an agent should never read or list the contents of, even inside an
 # allowed directory (they hold credentials for the whole installation).
+# Matched against the lower-cased file name, so CERT.PEM counts too.
+# Names are listed one by one. A blanket "*secret*" would also refuse source
+# files that are about secrets (backend/utils/plugin_secrets.py and its test),
+# which the code tools must keep reading.
 SENSITIVE_PATTERNS = (
-    ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "id_ecdsa*",
-    ".netrc", ".pgpass", "credentials", "credentials.*", "mcp_servers.json", ".git-credentials",
+    ".env", ".env.*", "*.env", "*.pem", "*.key", "*.p12", "*.pfx", "*.kdbx",
+    "*.ppk", "*.jks", "*.keystore",
+    "id_rsa*", "id_dsa*", "id_ed25519*", "id_ecdsa*",
+    ".netrc", ".pgpass", ".npmrc", ".pypirc",
+    "credentials", "credentials.*", "mcp_servers.json", ".git-credentials",
+    # Dot-files with "secret" in the name (data/.swarm_internal_secret).
+    ".*secret*", "*.secret", "client_secret*.json",
 )
 
 
@@ -41,8 +50,8 @@ def is_within(path: str, roots: Iterable[str], base: str = None) -> bool:
 
 
 def is_sensitive(path: str) -> bool:
-    name = os.path.basename(str(path).rstrip("/"))
-    return any(fnmatch.fnmatch(name, p) for p in SENSITIVE_PATTERNS)
+    name = os.path.basename(str(path).rstrip("/")).lower()
+    return any(fnmatch.fnmatchcase(name, p) for p in SENSITIVE_PATTERNS)
 
 
 def safe_join(base: str, *parts: str) -> str:

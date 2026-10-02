@@ -282,3 +282,107 @@ class TestPendingToolMarker:
         assert uce._split_pending_tool_marker("see [1] and [note") == ("see [1] and [note", "")
         assert uce._split_pending_tool_marker("a < b") == ("a < b", "")
         assert uce._split_pending_tool_marker("plain") == ("plain", "")
+
+
+# Content-stream forms recorded from Ollama 0.33.3 with think:false (2026-09-26).
+INLINE_REASONING = "3:40 plus 95 minutes is 1 hour 35 minutes later, so 5:15."
+INLINE_ANSWER = "The train arrives at 5:15."
+
+
+def _chunked(text, size=5):
+    return [text[i:i + size] for i in range(0, len(text), size)]
+
+
+def _visible_after_resets(tokens):
+    shown = ""
+    for t in tokens:
+        shown = ("" if t.get("reset") else shown) + t["content"]
+    return shown
+
+
+class TestInlineReasoning:
+    """Reasoning written into message.content lands on the reasoning channel."""
+
+    def _run(self, engine, raw):
+        def chat(**_kw):
+            for piece in _chunked(raw):
+                yield {"message": {"content": piece}}
+            yield _done()
+
+        (content, _, _), events = _stream(engine, chat)
+        return content, events
+
+    def test_tagged_reasoning(self, engine):
+        # lfm2.5:8b
+        content, events = self._run(engine, f"<think>\n{INLINE_REASONING}\n</think>\n{INLINE_ANSWER}")
+        assert content == INLINE_ANSWER
+        assert _visible_after_resets(_tokens(events)).strip() == INLINE_ANSWER
+        assert INLINE_REASONING in engine._last_llm_call_meta["thinking"]
+
+    def test_closing_tag_without_opening_tag(self, engine):
+        # granite4.2:8b: the reasoning streams as if it were the answer until </think>.
+        content, events = self._run(engine, f"{INLINE_REASONING}\n</think>\n{INLINE_ANSWER}")
+        assert content == INLINE_ANSWER
+        tokens = _tokens(events)
+        assert any(t.get("reset") for t in tokens)
+        assert _visible_after_resets(tokens).strip() == INLINE_ANSWER
+        assert INLINE_REASONING in engine._last_llm_call_meta["thinking"]
+        done = [p for p in _reasoning(events) if p.get("done")]
+        assert INLINE_REASONING in done[0]["text"]
+
+    def test_plain_answer_streams_untouched(self, engine):
+        content, events = self._run(engine, INLINE_ANSWER)
+        assert content == INLINE_ANSWER
+        tokens = _tokens(events)
+        assert not any(t.get("reset") for t in tokens)
+        assert "".join(t["content"] for t in tokens) == INLINE_ANSWER
+
+
+class TestReasoningTagsFromTheRecord:
+    def test_the_engine_uses_the_models_declared_pairs(self, engine, monkeypatch):
+        from types import SimpleNamespace
+        import backend.services.model_capabilities as mc
+        monkeypatch.setattr(mc, "capabilities_for", lambda tag, **kw: SimpleNamespace(
+            reasoning_tags=(("Here is my thought process:", "Here is my response:"),)))
+
+        def chat(**_kw):
+            raw = f"Here is my thought process: {INLINE_REASONING} Here is my response: {INLINE_ANSWER}"
+            for piece in _chunked(raw):
+                yield {"message": {"content": piece}}
+            yield _done()
+
+        (content, _, _), events = _stream(engine, chat)
+        assert content == INLINE_ANSWER
+        assert _visible_after_resets(_tokens(events)).strip() == INLINE_ANSWER
+        assert INLINE_REASONING in engine._last_llm_call_meta["thinking"]
+
+
+class TestModelsNotMarkedThinking:
+    """A model Ollama does not list as thinking: only a block that opens the answer moves."""
+
+    def _run(self, engine, monkeypatch, raw):
+        from backend.utils import ollama_resource_manager as orm
+        monkeypatch.setattr(orm, "model_supports_thinking", lambda _m: False)
+        engine.llm = MagicMock(model="imported-r1:latest", context_window=8192)
+
+        def chat(**kw):
+            assert "think" not in kw
+            for piece in _chunked(raw):
+                yield {"message": {"content": piece}}
+            yield _done()
+
+        (content, _, _), events = _stream(engine, chat)
+        return content, events
+
+    def test_a_leading_block_moves_to_reasoning(self, engine, monkeypatch):
+        content, events = self._run(engine, monkeypatch, f"<think>\n{INLINE_REASONING}\n</think>\n{INLINE_ANSWER}")
+        assert content == INLINE_ANSWER
+        assert _visible_after_resets(_tokens(events)).strip() == INLINE_ANSWER
+        assert INLINE_REASONING in engine._last_llm_call_meta["thinking"]
+
+    def test_a_mentioned_tag_stays_in_the_answer(self, engine, monkeypatch):
+        raw = f"{INLINE_ANSWER} Some models wrap reasoning in <think> and </think>."
+        content, events = self._run(engine, monkeypatch, raw)
+        assert content == raw
+        assert "".join(t["content"] for t in _tokens(events)) == raw
+        assert engine._last_llm_call_meta["thinking"] == ""

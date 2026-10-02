@@ -10,20 +10,37 @@ PID_FILE="$PROJECT_ROOT/pids/comfyui.pid"
 PORT=8188
 CURRENT_USER=$(whoami)
 
-# Free port 8188 of any *current-user* listener still bound to it.
+# Working directory of a pid, or empty when it can't be read.
+proc_cwd() {
+    if [ -e "/proc/$1/cwd" ]; then
+        readlink -f "/proc/$1/cwd" 2>/dev/null
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -a -d cwd -p "$1" -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+    fi
+    return 0
+}
+
+# Free port 8188 of a listener from this install still bound to it.
 # A crashed ComfyUI (or an orphaned child) can keep 8188 held with no usable
 # PID file; the next start then dies with "OSError: [Errno 98] address already
 # in use", which trips the circuit breaker and spams the boot log on every
-# restart. Mirrors Ollama stop.sh Step 4. Current-user-only for safety — never
-# kill a listener owned by another user (e.g. a system service on the port).
+# restart. Mirrors Ollama stop.sh Step 4. Only a current-user process whose
+# working directory is inside this install is killed: a system service, or a
+# ComfyUI the user runs separately on the same port, is left alone.
 free_port_8188() {
     command -v lsof >/dev/null 2>&1 || return 0
-    local remaining_pids
+    local remaining_pids install_root
     remaining_pids=$(lsof -i TCP:$PORT -sTCP:LISTEN -t 2>/dev/null || true)
     [ -n "$remaining_pids" ] || return 0
+    install_root=$(cd "$PROJECT_ROOT" && pwd -P)
     for pid in $remaining_pids; do
-        local proc_owner
+        local proc_owner cwd
         proc_owner=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
+        cwd=$(proc_cwd "$pid")
+        if [ -z "$cwd" ] || { [ "$cwd" != "$install_root" ] && [[ "$cwd" != "$install_root"/* ]]; }; then
+            echo "Port $PORT is held by a process outside this install (PID: $pid${cwd:+, $cwd}); leaving it running."
+            continue
+        fi
         if [ "$proc_owner" = "$CURRENT_USER" ]; then
             echo "Freeing port $PORT — killing remaining ComfyUI listener (PID: $pid)..."
             kill -TERM "$pid" 2>/dev/null || true

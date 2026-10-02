@@ -35,14 +35,25 @@ def _ensure_tools_initialized() -> None:
     initialize_all_tools()
 
 
+class MCPServerDisabled(RuntimeError):
+    """The configuration switches the server off; nothing is built or served."""
+
+
 def build_server(config: MCPConfig | None = None) -> tuple[Server, dict[str, int]]:
     """
     Construct the MCP server with all adapters wired up.
 
     Returns (server, stats) where stats is ``{"tools": N, "resources": M}``.
     Callers print the stats banner before handing off to a transport.
+    Raises ``MCPServerDisabled`` when the configuration turns the server off.
     """
     cfg = config or load_config()
+    if not cfg.enabled:
+        raise MCPServerDisabled(
+            "The Guaardvark MCP server is switched off by "
+            f"{cfg.disabled_by or 'its configuration'}. Set it to true, or remove it, "
+            "to let MCP clients connect."
+        )
     version = get_version()
 
     _ensure_tools_initialized()
@@ -100,7 +111,8 @@ def run_http(
 
     Phase 1 has no auth, so the default bind is loopback-only. The SDK
     auto-enables DNS-rebinding protection for localhost binds; anything
-    wider is a deliberate operator choice.
+    wider is a deliberate operator choice, and http_app still refuses a
+    request addressed to a name that is not this machine's.
     """
     import uvicorn
 
@@ -109,5 +121,13 @@ def run_http(
         "MCP server ready (http): %s v%s — %d tools, %d resources on http://%s:%d/mcp",
         MCP_NAME, get_version(), stats["tools"], stats["resources"], host, port,
     )
-    app = server.streamable_http_app(host=host)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(http_app(server, host), host=host, port=port, log_level="info")
+
+
+def http_app(server: Server, host: str):
+    """The streamable HTTP app behind the backend's Host check
+    (backend/utils/host_check.py). The SDK checks Host only when bound to a
+    loopback address; the backend's rule applies on any bind."""
+    from backend.utils.host_check import HostCheckASGIMiddleware
+
+    return HostCheckASGIMiddleware(server.streamable_http_app(host=host))

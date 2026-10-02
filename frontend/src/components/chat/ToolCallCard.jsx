@@ -11,8 +11,6 @@ import {
   IconButton,
   Chip,
   CircularProgress,
-  Button,
-  ButtonGroup,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
@@ -118,10 +116,11 @@ const ToolCallCard = ({
 
   const isSuccess = result?.success;
   const isError = result && !result.success;
-  const borderColor = requiresApproval && !responded
-    ? "error.main"
-    : isPending
-    ? "warning.main"
+  // Waiting states (approval, running) use the theme's primary colour; red and
+  // green are kept for a tool that actually failed or finished.
+  const awaitingApproval = requiresApproval && !responded;
+  const borderColor = awaitingApproval || isPending
+    ? "primary.main"
     : isSuccess
     ? "success.main"
     : isError
@@ -145,7 +144,7 @@ const ToolCallCard = ({
         borderLeft: 3,
         borderColor,
         borderRadius: 1,
-        bgcolor: requiresApproval && !responded ? "error.light" : "action.hover",
+        bgcolor: awaitingApproval ? "action.selected" : "action.hover",
         overflow: "hidden",
         opacity: requiresApproval && !responded ? 1 : 0.9,
       }}
@@ -164,9 +163,9 @@ const ToolCallCard = ({
         onClick={() => setExpanded((prev) => !prev)}
       >
         {requiresApproval && !responded ? (
-          <SecurityIcon sx={{ fontSize: 14, color: "error.main" }} />
+          <SecurityIcon sx={{ fontSize: 14, color: "primary.main" }} />
         ) : isPending ? (
-          <CircularProgress size={14} color="warning" />
+          <CircularProgress size={14} color="primary" />
         ) : (
           <BuildIcon sx={{ fontSize: 14, color: borderColor }} />
         )}
@@ -176,7 +175,7 @@ const ToolCallCard = ({
           sx={{ 
             fontWeight: 600, 
             fontFamily: "monospace",
-            color: requiresApproval && !responded ? "error.main" : "text.primary"
+            color: "text.primary"
           }}
         >
           {toolName} {requiresApproval && !responded && "(Needs Approval)"}
@@ -284,19 +283,19 @@ const ToolCallCard = ({
             ) : (
               <Box
                 data-testid="tool-approval-card"
-                sx={{ mb: 1, p: 1, bgcolor: "background.paper", borderRadius: 1, border: "1px solid", borderColor: "error.main" }}
+                sx={{ mb: 1, p: 1.25, bgcolor: "background.paper", borderRadius: 1, border: "1px solid", borderColor: "divider" }}
               >
-                <Typography variant="caption" sx={{ fontWeight: 600, color: "error.main", display: "block", mb: 1 }}>
-                  This action requires your approval. Do you want to proceed?
+                <Typography variant="body2" sx={{ display: "block", mb: 1 }}>
+                  This action needs your approval. Go ahead?
                 </Typography>
-                <ButtonGroup size="small" fullWidth variant="contained">
-                  <Button color="success" startIcon={<CheckCircleIcon />} onClick={() => handleApproval(true)}>
+                <Box sx={{ display: "flex", gap: 1, alignItems: "center", flexWrap: "wrap" }}>
+                  <ActionButton kind="primary" onClick={() => handleApproval(true)}>
                     Approve
-                  </Button>
-                  <Button color="error" startIcon={<ErrorIcon />} onClick={() => handleApproval(false)}>
+                  </ActionButton>
+                  <ActionButton kind="link" onClick={() => handleApproval(false)}>
                     Reject
-                  </Button>
-                </ButtonGroup>
+                  </ActionButton>
+                </Box>
               </Box>
             )
           )}

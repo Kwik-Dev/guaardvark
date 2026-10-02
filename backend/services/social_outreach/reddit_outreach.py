@@ -23,12 +23,13 @@ import sqlite3
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import quote
 
 import requests
 
 from backend.services.social_outreach import audit, kill_switch, persona
+from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 logger = logging.getLogger(__name__)
 
@@ -516,7 +517,12 @@ def record_post_via_backend(
         logger.warning("record-post call failed: %s", e)
 
 
-def post_comment_via_servo(permalink: str, comment_text: str) -> tuple[bool, str]:
+def post_comment_via_servo(
+    permalink: str,
+    comment_text: str,
+    *,
+    before_submit: Optional[Callable[[], bool]] = None,
+) -> tuple[bool, str]:
     """
     Drive Firefox on DISPLAY=:99 to land the comment.
     Returns (success, reason).
@@ -528,6 +534,10 @@ def post_comment_via_servo(permalink: str, comment_text: str) -> tuple[bool, str
 
     On failure: ServoController records success=False; we treat that as servo
     failure and abort.
+
+    ``before_submit`` is called once the text is typed and immediately before
+    the step that publishes; when it returns False nothing is published and
+    the reason is ``transitions.WITHDRAWN_BEFORE_SUBMIT``.
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
@@ -612,6 +622,8 @@ def post_comment_via_servo(permalink: str, comment_text: str) -> tuple[bool, str
     # already focused from the click and type, so this keystroke routes to
     # the right element. Reddit interprets Ctrl+Enter as form-submit
     # for comment composers.
+    if before_submit is not None and not before_submit():
+        return False, WITHDRAWN_BEFORE_SUBMIT
     logger.warning("submitting comment via Ctrl+Enter")
     screen.hotkey("ctrl", "Return")
     time.sleep(SERVO_SETTLE_SECONDS)

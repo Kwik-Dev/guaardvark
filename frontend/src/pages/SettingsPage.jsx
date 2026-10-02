@@ -24,6 +24,7 @@ import ManageBackupsModal from "../components/modals/ManageBackupsModal";
 import PurgeIndexModal from "../components/modals/PurgeIndexModal";
 import ThemeSelectorModal from "../components/modals/ThemeSelectorModal";
 import UncleClaudeSection from "../components/settings/UncleClaudeSection";
+import InboundGuardSection from "../components/settings/InboundGuardSection";
 import AgentDisplaySection from "../components/settings/AgentDisplaySection";
 import KillSwitchModal from "../components/modals/KillSwitchModal";
 import RebootProgressModal from "../components/modals/RebootProgressModal";
@@ -41,7 +42,9 @@ import { SUPPORT_LINKS } from "../config/constants";
 import CoffeeIcon from "@mui/icons-material/Coffee";
 import StarIcon from "@mui/icons-material/Star";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+import ApiKeySection, { API_KEY_SECTION_ID } from "../components/settings/ApiKeySection";
+import { onSessionChanged } from "../api/apiAuth";
 import {
   getBranding,
   updateBranding,
@@ -141,6 +144,7 @@ const SettingsPage = () => {
   const [isTestingLLM, setIsTestingLLM] = useState(false); // Local state for Test LLM button
   const { showMessage, closeSnackbar } = useSnackbar();
   const navigate = useNavigate();
+  const location = useLocation();
   const [enhancedContext, setEnhancedContext] = useState(false);
   const [advancedRag, setAdvancedRag] = useState(false);
   const [advancedDebug, setAdvancedDebug] = useState(getInitialAdvancedDebug);
@@ -2208,15 +2212,38 @@ const SettingsPage = () => {
     fetchMemoryCount();
   }, [fetchMemoryCount]);
 
-  useEffect(() => {
+  const fetchMcpStatus = useCallback(() => {
     getMcpStatus()
       .then(setMcpStatus)
-      .catch((err) => console.warn("Failed to read MCP status:", err));
+      .catch((err) => {
+        console.warn("Failed to read MCP status:", err);
+        // Refused: the backend answers MCP status only on its own machine, or
+        // to this install's API key; err.message says which to use.
+        if (err?.authRefused) setMcpStatus({ refused: err.message });
+      });
+  }, []);
+
+  useEffect(() => {
+    fetchMcpStatus();
     apiService.getConfineToolPaths().then((result) => {
       const on = result?.data?.confine_tool_paths ?? result?.confine_tool_paths;
       if (typeof on === "boolean") setConfineToolPaths(on);
     });
-  }, []);
+    // Signing in (or creating a key) in the API key panel may unlock it.
+    return onSessionChanged(fetchMcpStatus);
+  }, [fetchMcpStatus]);
+
+  // /settings#settings-api-key (the link every refusal carries) and the other
+  // panel ids: scroll there once the page has laid out, and again when the
+  // hash changes while the page is open.
+  useEffect(() => {
+    const id = decodeURIComponent((location.hash || "").replace(/^#/, ""));
+    if (!id) return undefined;
+    const timer = window.setTimeout(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [location.hash]);
 
   const handleConfineToolPathsToggle = async (next) => {
     const previous = confineToolPaths;
@@ -3181,6 +3208,7 @@ const SettingsPage = () => {
       description="The mentor, what it remembers, where it can see."
     >
       <UncleClaudeSection />
+      <InboundGuardSection />
       <Cluster
         label="Memory"
         note="facts, preferences and lessons the agent has learned"
@@ -3208,17 +3236,40 @@ const SettingsPage = () => {
       <Cluster label="MCP servers" note="local programs that give the agent more tools">
         <Line>
           <StatusPill
-            tone={mcpStatus?.servers_connected > 0 ? "ok" : "neutral"}
-            label={
-              mcpStatus
-                ? `${mcpStatus.servers_connected}/${mcpStatus.servers_configured} connected`
-                : "checking"
+            tone={
+              mcpStatus?.refused
+                ? "warn"
+                : mcpStatus?.servers_connected > 0
+                  ? "ok"
+                  : "neutral"
             }
+            label={
+              mcpStatus?.refused
+                ? "needs the API key"
+                : mcpStatus
+                  ? `${mcpStatus.servers_connected}/${mcpStatus.servers_configured} connected`
+                  : "checking"
+            }
+            tooltip={mcpStatus?.refused || ""}
           />
-          <ActionButton onClick={() => navigate("/agents/mcp")}>
-            Manage MCP servers
-          </ActionButton>
+          {mcpStatus?.refused ? (
+            <ActionButton
+              kind="link"
+              onClick={() =>
+                document
+                  .getElementById(API_KEY_SECTION_ID)
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+            >
+              Settings → API key
+            </ActionButton>
+          ) : (
+            <ActionButton onClick={() => navigate("/agents/mcp")}>
+              Manage MCP servers
+            </ActionButton>
+          )}
         </Line>
+        {mcpStatus?.refused && <Hint>{mcpStatus.refused}</Hint>}
       </Cluster>
       <Cluster label="Display" note="the virtual screen agents act on">
         <AgentDisplaySection showMessage={showMessage} />
@@ -3530,11 +3581,14 @@ const SettingsPage = () => {
     </SettingsPanel>
   );
 
+  const apiKeyPanel = <ApiKeySection />;
+
   const columnSets =
     columns === 3
       ? [
           [generalPanel, chatPanel, dataPanel, aboutPanel],
-          [modelsPanel, modelManagementPanel, knowledgePanel, dangerPanel],
+          [modelsPanel, modelManagementPanel, knowledgePanel, apiKeyPanel, dangerPanel],
+
           [generationPanel, agentsPanel, syncPanel, developerPanel],
         ]
       : columns === 2
@@ -3551,6 +3605,7 @@ const SettingsPage = () => {
               modelManagementPanel,
               knowledgePanel,
               syncPanel,
+              apiKeyPanel,
               dataPanel,
               dangerPanel,
               aboutPanel,
@@ -3566,6 +3621,7 @@ const SettingsPage = () => {
               knowledgePanel,
               agentsPanel,
               syncPanel,
+              apiKeyPanel,
               dataPanel,
               dangerPanel,
               developerPanel,

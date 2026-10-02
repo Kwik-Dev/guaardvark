@@ -107,14 +107,21 @@ def stream_reboot():
             # -- Spawn standalone log server --
             log_server_url = f"http://localhost:{log_server_port}"
             try:
-                # Kill any leftover log server from a previous reboot
+                # Stop any leftover log server from a previous reboot
                 import urllib.request
                 try:
-                    urllib.request.urlopen(f"{log_server_url}/shutdown", timeout=2)
+                    urllib.request.urlopen(
+                        urllib.request.Request(f"{log_server_url}/shutdown", data=b"", method="POST"),
+                        timeout=2,
+                    )
                     time.sleep(0.3)
                 except Exception:
                     pass
 
+                # Only this install's frontend may read the log from a browser.
+                from backend.utils.cors_policy import frontend_origins
+                origin_args = [arg for origin in sorted(frontend_origins())
+                               for arg in ("--allow-origin", origin)]
                 subprocess.Popen(
                     [
                         sys.executable,
@@ -122,6 +129,7 @@ def stream_reboot():
                         "--port", str(log_server_port),
                         "--log-file", log_file_path,
                         "--timeout", "300",
+                        *origin_args,
                     ],
                     cwd="/tmp",  # stop.sh checks CWD — /tmp won't match project root
                     stdout=subprocess.DEVNULL,

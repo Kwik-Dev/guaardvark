@@ -22,6 +22,7 @@ from werkzeug.utils import secure_filename
 from backend.utils.response_utils import success_response, error_response
 from backend.utils.path_guard import PathEscapesRoot, contained
 from backend.services.batch_video_generator import get_batch_video_generator
+from backend.services.job_types import RenderErrorKind, batch_failure, describe_failure, failure_kind
 # Single source of truth for video-model file layout (download dst == install
 # check == ComfyUI loader paths). See backend/services/video_model_registry.py.
 from backend.services.video_model_registry import (
@@ -128,10 +129,34 @@ def _parse_int(value):
         return None
 
 
+def _parse_float(value):
+    """A number, or None for a field left out (the model's own value applies)."""
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def _failure_response(message, default_kind=RenderErrorKind.INVALID_REQUEST, status_code: int = 400):
+    """A refused request, with its failure record (job_types.describe_failure)
+    under error.details so every caller reads the same kind."""
+    kind = failure_kind(message, default_kind)
+    return error_response(str(message), status_code, details={"failure": describe_failure(kind, message)})
+
+
+def _withheld_style_error(params: dict):
+    """400 when the request asks for a prompt style its model does not offer."""
+    if not params.get("enhance_prompt"):
+        return None
+    from backend.services.video_render_limits import withheld_style
+    why = withheld_style(params["model"], params.get("prompt_style"))
+    return _failure_response(why) if why else None
+
+
 def _resolve_request_model(data, role: str):
     """Explicit body model, else the active-video-model resolver."""
     explicit = (data.get("model") or "").strip() or None
-    model_id, err = resolve_active_video_model(role, explicit)
+    # Both routes run prepare_video_model next, which starts a stopped ComfyUI.
+    model_id, err = resolve_active_video_model(role, explicit, comfyui_down_ok=True)
     if err:
         return None, err
     return model_id, None
@@ -182,10 +207,10 @@ def generate_text_to_video_batch():
 
         model_id, resolve_err = _resolve_request_model(data, "t2v")
         if resolve_err:
-            return error_response(resolve_err, 400)
+            return _failure_response(resolve_err)
         ready, preflight_err = prepare_video_model(model_id)
         if not ready:
-            return error_response(preflight_err, 400)
+            return _failure_response(preflight_err)
         # Per-prompt guides (audio or image anchors) on models that declare
         # audio_in: a list per prompt of {"kind", "path", "frame_idx", ...}.
         guides = data.get("guides") if isinstance(data.get("guides"), list) else []
@@ -199,7 +224,7 @@ def generate_text_to_video_batch():
             "height": clip["height"],
             "motion_strength": float(data.get("motion_strength", 1.0)),
             "num_inference_steps": clip["num_inference_steps"],
-            "guidance_scale": float(data.get("guidance_scale", 7.5)),
+            "guidance_scale": _parse_float(data.get("guidance_scale")),
             "seed": _parse_int(data.get("seed")),
             "generate_frames_only": str(data.get("generate_frames_only", "false")).lower() == "true",
             "frames_per_batch": int(data.get("frames_per_batch", 1)),
@@ -247,6 +272,9 @@ def generate_text_to_video_batch():
             return error_response("Video generation service not available", 503)
 
         gpu_hint = _gpu_queue_hint()
+        style_err = _withheld_style_error(params)
+        if style_err:
+            return style_err
         status = generator.start_batch_from_prompts(prompts=prompts, guides=guides, **params)
         return success_response({
             "batch_id": status.batch_id,
@@ -279,10 +307,10 @@ def generate_image_to_video_batch():
 
         model_id, resolve_err = _resolve_request_model(data, "i2v")
         if resolve_err:
-            return error_response(resolve_err, 400)
+            return _failure_response(resolve_err)
         ready, preflight_err = prepare_video_model(model_id)
         if not ready:
-            return error_response(preflight_err, 400)
+            return _failure_response(preflight_err)
         clip = _clip_params(data, model_id)
 
         params = {
@@ -294,7 +322,7 @@ def generate_image_to_video_batch():
             "height": clip["height"],
             "motion_strength": float(data.get("motion_strength", 1.0)),
             "num_inference_steps": clip["num_inference_steps"],
-            "guidance_scale": float(data.get("guidance_scale", 7.5)),
+            "guidance_scale": _parse_float(data.get("guidance_scale")),
             "seed": _parse_int(data.get("seed")),
             "generate_frames_only": str(data.get("generate_frames_only", "false")).lower() == "true",
             "frames_per_batch": int(data.get("frames_per_batch", 1)),
@@ -336,6 +364,9 @@ def generate_image_to_video_batch():
         if not generator.service_available:
             return error_response("Video generation service not available", 503)
 
+        style_err = _withheld_style_error(params)
+        if style_err:
+            return style_err
         gpu_hint = _gpu_queue_hint()
         status = generator.start_batch_from_images(
             image_paths=image_paths, last_frame_paths=last_frame_paths, guides=guides, **params
@@ -512,11 +543,8 @@ def enhance_prompt_preview():
             from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY
             model_family = (VIDEO_MODEL_REGISTRY.get(model) or {}).get("type")
 
-        from backend.utils.prompt_enhancer import (
-            enhance_video_prompt,
-            get_default_negative_prompt,
-            has_text_intent,
-        )
+        from backend.services import video_render_limits as render_limits
+        from backend.utils.prompt_enhancer import enhance_video_prompt, has_text_intent
 
         enhanced = enhance_video_prompt(
             prompt,
@@ -525,15 +553,22 @@ def enhance_prompt_preview():
             height=height,
             fidelity_mode=fidelity,
             model_family=model_family,
+            motion_strength=data.get("motion_strength"),
         )
 
         # Default negative that the backend would inject if user left it blank
-        default_neg = get_default_negative_prompt(style=style)
+        character = bool(_parse_list(data.get("subject_ids")) or data.get("lora_name") or data.get("adapters"))
+        default_neg = render_limits.default_negative(
+            model, style, enhanced=True, character=character, family=model_family)
+        unset_cfg = render_limits.cfg_when_unset(model, model_family) if model else None
 
         return success_response({
             "original_prompt": prompt,
             "enhanced_prompt": enhanced,
             "default_negative_prompt": default_neg,
+            # Guidance a request that names none renders with.
+            "cfg_when_unset": unset_cfg if unset_cfg is not None else render_limits.LEGACY_CFG,
+            "reference_defaults": render_limits.reference_defaults_enabled(),
             "fidelity_mode": fidelity,
             "has_text_intent": has_text_intent(prompt),
             "model_family": model_family,
@@ -560,6 +595,8 @@ def get_batch_status(batch_id: str):
                 "frame_paths": r.frame_paths,
                 "thumbnail_path": r.thumbnail_path,
                 "error": r.error,
+                "error_kind": r.error_kind,
+                "failure": None if r.success else describe_failure(r.error_kind, r.error),
                 "metadata": r.metadata,
             }
             for r in status.results
@@ -574,6 +611,11 @@ def get_batch_status(batch_id: str):
                 "total_videos": status.total_videos,
                 "completed_videos": status.completed_videos,
                 "failed_videos": status.failed_videos,
+                # Finished but not usable as rendered: the post-render quality flags.
+                "flagged_videos": sum(
+                    1 for r in status.results
+                    if r.success and ((r.metadata or {}).get("quality") or {}).get("flagged")
+                ),
                 "start_time": status.start_time.isoformat() if status.start_time else None,
                 "end_time": status.end_time.isoformat() if status.end_time else None,
                 "results": results,
@@ -581,6 +623,8 @@ def get_batch_status(batch_id: str):
                 "output_dir": status.output_dir,
                 "retry_data": getattr(status, "retry_data", None),
                 "error": getattr(status, "error", None),
+                # Why it stopped, the same record for the batch and each clip.
+                "failure": batch_failure(status),
             }
         )
     except Exception as e:
@@ -869,12 +913,20 @@ def download_batch(batch_id: str):
 
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".zip")
         os.close(tmp_fd)
-        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-            for file_path in batch_dir.rglob("*"):
-                if file_path.is_file():
-                    arcname = file_path.relative_to(batch_dir)
-                    zipf.write(file_path, arcname)
-        return send_file(tmp_path, as_attachment=True, download_name=f"{batch_id}.zip")
+        try:
+            with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in batch_dir.rglob("*"):
+                    if file_path.is_file():
+                        arcname = file_path.relative_to(batch_dir)
+                        zipf.write(file_path, arcname)
+            # The open handle keeps the data readable after the name is gone,
+            # so every download leaves nothing behind in the temp directory
+            # (tmpfs on many systems), whether or not the client reads it all.
+            archive = open(tmp_path, "rb")
+        finally:
+            os.unlink(tmp_path)
+        return send_file(archive, as_attachment=True, download_name=f"{batch_id}.zip",
+                         mimetype="application/zip")
     except Exception as e:
         logger.error(f"Failed to download batch: {e}")
         return error_response(str(e), 500)
@@ -1062,8 +1114,8 @@ def list_video_models():
     try:
         models = []
         total_vram_mb = _detected_total_vram_mb()
-        active_t2v, _ = resolve_active_video_model("t2v")
-        active_i2v, _ = resolve_active_video_model("i2v")
+        active_t2v, _ = resolve_active_video_model("t2v", comfyui_down_ok=True)
+        active_i2v, _ = resolve_active_video_model("i2v", comfyui_down_ok=True)
         for model_id, info in VIDEO_MODEL_REGISTRY.items():
             plan = _resolve_download_plan(model_id)
             requires = info.get("requires", [])

@@ -256,11 +256,19 @@ fi
 fi  # end comfyui_enabled/running check
 
 # 3. Orphaned listener on the ComfyUI port — always swept, because a router
-#    direct-launch or a crashed plugin leaves no PID file.
+#    direct-launch or a crashed plugin leaves no PID file. Only a process
+#    running from this install is ours: a ComfyUI the user runs separately on
+#    the same port is left alone, as is one whose working directory can't be read.
 if command -v lsof >/dev/null 2>&1; then
     port_pids=$(lsof -i TCP:"$COMFYUI_PORT" -sTCP:LISTEN -t 2>/dev/null)
     if [ -n "$port_pids" ]; then
+        install_root=$(cd "$SCRIPT_DIR" && pwd -P)
         for pid in $port_pids; do
+            proc_cwd=$(_proc_cwd "$pid")
+            if [ -z "$proc_cwd" ] || { [ "$proc_cwd" != "$install_root" ] && [[ "$proc_cwd" != "$install_root"/* ]]; }; then
+                vader_info "Port $COMFYUI_PORT is held by a process outside this install (PID: $pid${proc_cwd:+, $proc_cwd}); leaving it running."
+                continue
+            fi
             vader_info "Killing orphaned ComfyUI process on port $COMFYUI_PORT (PID: $pid)..."
             kill -TERM "$pid" 2>/dev/null
             sleep 1

@@ -5,42 +5,72 @@ import re
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 import requests
-from urllib.parse import quote_plus, urlparse, parse_qs
+from urllib.parse import quote_plus, urlsplit
 from bs4 import BeautifulSoup
+from xml.etree import ElementTree as ET
 
 from flask import Blueprint, current_app, jsonify, request
 from backend.utils.response_utils import success_response, error_response
 from backend.utils.settings_utils import get_web_access
 from backend.utils.safe_math import evaluate_arithmetic
+from backend.utils.hosts import no_netrc_session
 from backend.utils.text_focus import focus_window
+from backend.utils.web_fetch import (
+    LOCAL_FILE_ADVICE, FetchFailed, FetchRefused, decode_page, fetch_page,
+)
+from backend.utils.web_search_sources import (
+    DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS, SEARCH_ENGINE, WEATHER_SOURCE,
+)
 
 web_search_bp = Blueprint("web_search_api", __name__, url_prefix="/api/web-search")
 logger = logging.getLogger(__name__)
 
-def extract_website_content(url: str, query: Optional[str] = None) -> Dict[str, Any]:
+_NOT_A_WEB_URL = f"Refused: only http and https URLs can be fetched. {LOCAL_FILE_ADVICE}"
+
+
+def extract_website_content(url: str, query: Optional[str] = None, public_only: bool = False) -> Dict[str, Any]:
     """Fetch a page and return its title, description and up to 2,000 characters of its text.
+
+    ``public_only`` refuses any address that is not globally routable, on every
+    redirect hop; every fetch of a URL a caller or a model chose asks for it
+    (fetch_url, analyze_website, a URL in a web search, a competitor page).
+    Logins saved in ~/.netrc are never sent, with or without it.
+
+    The fetch is bounded in size and time (:mod:`backend.utils.web_fetch`). A
+    page that was read only in part is still returned, with ``page_cut`` saying
+    what was left out; the key is absent for a page read in full.
 
     With ``query`` the text is the stretch of the page about the query
     (:func:`backend.utils.text_focus.focus_window`); without it, the head of the page.
     """
     try:
-        if not url.startswith(('http://', 'https://')):
+        url = url.strip()
+        scheme = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*)://", url)
+        if scheme and scheme.group(1).lower() not in ("http", "https"):
+            return {"success": False, "url": url, "error": _NOT_A_WEB_URL}
+        if scheme:
+            url = scheme.group(1).lower() + url[len(scheme.group(1)):]
+        else:
             url = 'https://' + url
             
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        
-        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser', from_encoding='utf-8')
-        
+
+        try:
+            page = fetch_page(url, headers=headers, public_only=public_only)
+        except (FetchRefused, FetchFailed) as e:
+            return {"success": False, "url": url, "error": str(e)}
+        current = page.url
+
+        text, _encoding = decode_page(page.body, page.charset, complete=page.cut is None)
+        soup = BeautifulSoup(text, 'html.parser')
+
         for script in soup(["script", "style", "nav", "footer", "aside"]):
             script.decompose()
         
         title = soup.find('title')
-        title_text = title.get_text().strip() if title else "No title found"
+        title_text = title.get_text().strip() if title else ""
         
         meta_desc = soup.find('meta', attrs={'name': 'description'})
         description = meta_desc['content'].strip() if meta_desc and meta_desc.get('content') else ""
@@ -62,17 +92,23 @@ def extract_website_content(url: str, query: Optional[str] = None) -> Dict[str, 
             content_text = soup.get_text(separator=' ', strip=True)
         
         content_text = re.sub(r'\s+', ' ', content_text)
+        page_word_count = len(content_text.split())
         content_text = focus_window(content_text, query, 2000) if query else content_text[:2000]
         
-        return {
+        result = {
             "success": True,
             "url": url,
+            "final_url": current,
             "title": title_text,
             "description": description,
             "content": content_text,
-            "content_length": len(content_text)
+            "content_length": len(content_text),
+            "page_word_count": page_word_count,
         }
-        
+        if page.cut:
+            result["page_cut"] = page.cut
+        return result
+
     except requests.RequestException as e:
         logger.error(f"Website scraping failed for {url}: {e}")
         return {
@@ -88,6 +124,130 @@ def extract_website_content(url: str, query: Optional[str] = None) -> Dict[str, 
             "error": f"Failed to extract content: {str(e)}"
         }
 
+# Entries a sitemap report lists by name; its counts cover every entry read.
+SITEMAP_LISTED_ENTRIES = 20
+# Top-level pages (one path segment) a sitemap report names as landing pages.
+SITEMAP_LANDING_PAGES = 5
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _sitemap_entries(body: bytes):
+    """Parse a sitemap body as far as it is well-formed.
+
+    Returns ``(kind, entries, stopped)``: kind is the root element's name
+    ("urlset" or "sitemapindex"), or None when the body is not a sitemap;
+    entries are dicts of the child elements of each <url> or <sitemap>; stopped
+    is None, or the parse error that ended reading early (a body cut at the size
+    limit ends that way).
+    """
+    parser = ET.XMLPullParser(events=("start", "end"))
+    kind = None
+    entry_name = None
+    entries = []
+    stopped = None
+    try:
+        parser.feed(body)
+        parser.close()
+    except ET.ParseError as e:
+        stopped = e
+    try:
+        for event, element in parser.read_events():
+            name = _local_name(element.tag)
+            if event == "start":
+                if kind is None:
+                    kind = name
+                    if kind not in ("urlset", "sitemapindex"):
+                        return None, [], None
+                    entry_name = "url" if kind == "urlset" else "sitemap"
+                continue
+            if name == entry_name:
+                entry = {}
+                for child in element:
+                    field = _local_name(child.tag)
+                    if field in ("loc", "lastmod", "changefreq", "priority") and child.text:
+                        entry[field] = child.text.strip()
+                if entry.get("loc"):
+                    entries.append(entry)
+                element.clear()
+    except ET.ParseError as e:
+        stopped = stopped or e
+    return kind, entries, stopped
+
+
+def _path_depth(url: str) -> int:
+    return len([part for part in urlsplit(url).path.split("/") if part])
+
+
+def read_sitemap(url: str) -> Dict[str, Any]:
+    """Fetch one sitemap and summarise it: its kind (a list of pages, or an
+    index of other sitemaps), how many entries it has, the first
+    ``SITEMAP_LISTED_ENTRIES`` of them, and for a list of pages, how many sit at
+    each path depth and which top-level pages it gives a priority above 0.5.
+
+    The fetch is the one fetch_url makes: public addresses only, on every
+    redirect; no ~/.netrc logins; bounded in size and time. The sitemaps an
+    index names are listed, not fetched. A sitemap cut at the size limit is
+    read up to the cut, and ``page_cut`` says so.
+    """
+    url = (url or "").strip()
+    scheme = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*)://", url)
+    if scheme and scheme.group(1).lower() not in ("http", "https"):
+        return {"success": False, "url": url, "error": _NOT_A_WEB_URL}
+    if not scheme:
+        url = "https://" + url
+
+    try:
+        page = fetch_page(url, headers={"User-Agent": "Guaardvark-Sitemap/1.0"}, public_only=True)
+    except (FetchRefused, FetchFailed) as e:
+        return {"success": False, "url": url, "error": str(e)}
+    except requests.RequestException as e:
+        return {"success": False, "url": url, "error": f"Failed to access the sitemap: {e}"}
+
+    kind, entries, stopped = _sitemap_entries(page.body)
+    if kind is None:
+        return {
+            "success": False,
+            "url": url,
+            "error": (f"Not a sitemap: {page.url} is not a sitemap XML document "
+                      "(its root element is not <urlset> or <sitemapindex>)."),
+        }
+
+    report: Dict[str, Any] = {
+        "success": True,
+        "url": url,
+        "final_url": page.url,
+        "type": kind,
+        "total": len(entries),
+        "entries": entries[:SITEMAP_LISTED_ENTRIES],
+    }
+    if kind == "urlset":
+        by_depth: Dict[int, int] = {}
+        landing_pages = []
+        for entry in entries:
+            depth = _path_depth(entry["loc"])
+            by_depth[depth] = by_depth.get(depth, 0) + 1
+            try:
+                priority = float(entry.get("priority") or 0)
+            except ValueError:
+                priority = 0.0
+            if depth == 1 and priority > 0.5 and len(landing_pages) < SITEMAP_LANDING_PAGES:
+                landing_pages.append(entry)
+        report["by_depth"] = dict(sorted(by_depth.items()))
+        report["landing_pages"] = landing_pages
+    if page.cut:
+        report["page_cut"] = page.cut
+    elif stopped is not None:
+        read = f"{len(entries)} entry" if len(entries) == 1 else f"{len(entries)} entries"
+        report["incomplete"] = (
+            f"The sitemap stops being well-formed XML after {read} ({stopped}); "
+            "the counts cover only those."
+        )
+    return report
+
+
 def get_weather_info(location: str) -> Dict[str, Any]:
     try:
         
@@ -98,8 +258,9 @@ def get_weather_info(location: str) -> Dict[str, Any]:
         for api_url in weather_apis:
             try:
                 headers = {'User-Agent': 'Guaardvark-Weather/1.0'}
-                response = requests.get(api_url, headers=headers, timeout=10)
-                
+                with no_netrc_session() as session:
+                    response = session.get(api_url, headers=headers, timeout=10)
+
                 if response.ok:
                     data = response.json()
                     
@@ -117,7 +278,7 @@ def get_weather_info(location: str) -> Dict[str, Any]:
                             "temperature_fahrenheit": temp_f,
                             "description": weather_desc,
                             "humidity": humidity,
-                            "source": "wttr.in"
+                            "source": WEATHER_SOURCE
                         }
                         
             except Exception as e:
@@ -138,8 +299,15 @@ def get_weather_info(location: str) -> Dict[str, Any]:
             "error": f"Weather service error: {str(e)}"
         }
 
-def enhanced_web_search(query: str) -> Dict[str, Any]:
-    
+def enhanced_web_search(query: str, max_results: int = DEFAULT_SEARCH_RESULTS) -> Dict[str, Any]:
+    """Answer ``query`` from the web. A URL in the query is fetched directly,
+    and only from a public address, on every redirect, exactly as fetch_url
+    fetches: the query can come from a model or from a page it read, on any
+    path (chat and MCP tools, the web-search routes, /websearch, research tasks,
+    the outreach recon). ``max_results`` is how many search results to ask for
+    (1 to ``MAX_SEARCH_RESULTS``). ``data["source"]`` names the service that
+    answered."""
+
     results = {
         "query": query,
         "strategy_used": "",
@@ -150,18 +318,25 @@ def enhanced_web_search(query: str) -> Dict[str, Any]:
     special_result = handle_special_queries(query)
     if special_result["success"]:
         return special_result
-    
-    url_pattern = r'(?:https?://|www\.)[^\s]+'
-    urls = re.findall(url_pattern, query.lower())
-    
+
+    urls = _urls_in_text(query)
+
     if urls:
         url = urls[0]
-        if not url.startswith(('http://', 'https://')):
+        if not re.match(r'https?://', url, re.IGNORECASE):
             url = 'https://' + url
             
         logger.info(f"Direct website access for: {url}")
-        website_data = extract_website_content(url)
-        
+        website_data = extract_website_content(url, public_only=True)
+        if not website_data["success"] and str(website_data.get("error", "")).startswith(
+                ("Refused", "Not a web page")):
+            # A refused address, or a URL that serves a file instead of a page,
+            # ends the call: searching the web for the URL's text would answer a
+            # question nobody asked, and would send the query to the search engine.
+            results["error"] = website_data["error"]
+            results["data"] = {"message": website_data["error"]}
+            return results
+
         if website_data["success"]:
             results.update({
                 "strategy_used": "direct_website",
@@ -175,50 +350,188 @@ def enhanced_web_search(query: str) -> Dict[str, Any]:
                     "snippet": f"Website: {website_data['title']}\n\nDescription: {website_data['description']}\n\nContent: {website_data['content'][:500]}..."
                 }
             })
+            if website_data.get("page_cut"):
+                results["data"]["page_cut"] = website_data["page_cut"]
             return results
         else:
             results["data"]["website_error"] = website_data["error"]
     
-    logger.info(f"Performing DuckDuckGo search for: {query}")
-    ddg_results = perform_duckduckgo_search(query)
-    
-    if ddg_results["success"]:
+    logger.info(f"Performing web search for: {query}")
+    search = perform_duckduckgo_search(query, max_results=max_results)
+
+    # strategy_used "duckduckgo_search" is named after the client package and
+    # is matched on by callers; data["source"] is what names the engine.
+    if search["success"]:
         results.update({
             "strategy_used": "duckduckgo_search",
             "success": True,
             "data": {
                 "type": "search_results",
-                "results": ddg_results["results"],
-                "snippet": ddg_results["snippet"],
-                "total_results": ddg_results["total_results"],
-                "source": "DuckDuckGo"
+                "results": search["results"],
+                "snippet": search["snippet"],
+                "total_results": search["total_results"],
+                "source": search.get("source") or SEARCH_ENGINE
             }
         })
         return results
-    
-    results["data"]["duckduckgo_error"] = ddg_results.get("error", "Unknown error")
+
+    # No results and a failed search both end here, with the engine's own
+    # answer as the message: "no_results" when it found nothing,
+    # "search_failed" when it could not be asked.
+    message = search.get("error") or f"The search could not be completed at {SEARCH_ENGINE}."
+    website_error = results["data"].get("website_error")
+    if website_error:
+        message = f"Could not read {url}: {str(website_error).rstrip('.')}. {message}"
     return {
         "query": query,
         "strategy_used": "failed",
         "success": False,
+        "error": message,
         "data": {
-            "type": "search_failed",
-            "message": f"Unable to find current information for: {query}",
-            "errors": results["data"],
+            "type": "no_results" if search.get("no_results") else "search_failed",
+            "message": message,
+            "source": SEARCH_ENGINE,
+            "errors": {**results["data"], "search_error": search.get("error")},
             "attempted_strategies": ["duckduckgo_search"] + (["direct_website"] if urls else [])
         }
     }
 
 
+_URL_IN_TEXT = re.compile(r'(?:https?://|www\.)\S+', re.IGNORECASE)
+_URL_TRAILING_PUNCTUATION = ".,;:!?'\"`*"
+_URL_CLOSERS = {")": "(", "]": "[", "}": "{", ">": "<"}
+
+
+def _urls_in_text(text: str) -> List[str]:
+    """The URLs in ``text`` as written (path case kept), without the sentence
+    punctuation or quotes that follow them. A closing bracket stays when the URL
+    itself opened it, as in ``https://en.wikipedia.org/wiki/Mercury_(planet)``."""
+    urls = []
+    for url in _URL_IN_TEXT.findall(text or ""):
+        while url:
+            last = url[-1]
+            if last in _URL_TRAILING_PUNCTUATION or (
+                last in _URL_CLOSERS and url.count(last) > url.count(_URL_CLOSERS[last])
+            ):
+                url = url[:-1]
+            else:
+                break
+        if _URL_IN_TEXT.fullmatch(url):
+            urls.append(url)
+    return urls
+
+
+# Shortcuts that answer a query without searching: the clock, wttr.in and the
+# calculator. Each fires only when the whole query asks for it. A query that
+# merely contains 'time', 'temperature', 'forecast' or '=' ('python requests
+# timeout', 'LLM temperature setting explained', 'equation of a line y = 2x + 3')
+# goes to the search. Chat passes the person's whole message, so a short polite
+# lead-in and a trailing "now" / "today" are allowed around each form.
+_LEAD_IN = (
+    r"(?:(?:hey|hi|ok|okay|so|please)[,!]?\s+)*"
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:tell\s+me|check|look\s+up|find\s+out)\s+"
+    r"|(?:do|does)\s+(?:you|anyone)\s+know\s+"
+    r"|(?:please\s+)?tell\s+me\s+"
+    r"|i\s+(?:want|need|would\s+like)\s+to\s+know\s+)?"
+)
+_WHEN = r"(?:\s+(?:now|right\s+now|today|tonight|currently|at\s+the\s+moment|please))*"
+# Every shortcut form is a short question; a longer query is always searched,
+# which also keeps the matchers below cheap on very long input.
+_SHORTCUT_MAX_CHARS = 200
+_WHAT_IS = r"what(?:'s|s|\s+is)?"
+
+# The clock knows this machine's zone and UTC only, so "what time is it in
+# Tokyo" is left to the search.
+_TIME_QUERY = re.compile(
+    "^" + _LEAD_IN + "(?:"
+    + _WHAT_IS + r"\s+(?:the\s+)?(?:current\s+|exact\s+)?time(?:\s+is\s+it|\s+it\s+is)?"
+    r"|(?:the\s+)?(?:current|exact)\s+time"
+    r"|(?:the\s+)?time(?:\s+right)?\s+now"
+    r"|(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?tell\s+me\s+the\s+time"
+    ")" + _WHEN + "$"
+)
+
+_WEATHER_QUERY = re.compile(
+    "^" + _LEAD_IN + "(?:"
+    r"(?:(?:what|how)(?:'s|s|\s+is)?\s+)?(?:the\s+)?(?:current\s+|today'?s\s+)?weather"
+    r"(?:\s+forecast)?(?:\s+(?:like|is|going\s+to\s+be))*"
+    r"|(?:" + _WHAT_IS + r"\s+(?:the\s+)?(?:current\s+)?|(?:the\s+)?current\s+)temperature(?:\s+(?:is|outside))*"
+    r"|how\s+(?:hot|cold|warm)\s+is\s+it(?:\s+outside)?"
+    r"|is\s+it\s+(?:raining|snowing|sunny|hot|cold|warm)(?:\s+outside)?"
+    ")" + _WHEN + r"\s+(?:in|at|for)\s+(?P<place>[^\W_][\w .,'\-]*?)" + _WHEN + "$"
+)
+_PLACE_MAX_WORDS = 5
+# First words of phrases after "in/at/for" that are not a place name:
+# "temperature in celsius", "how hot is it in a car", "weather for tomorrow".
+_NOT_A_PLACE = frozenset({
+    "a", "an", "this", "next", "my", "your", "our",
+    "celsius", "fahrenheit", "kelvin", "degrees",
+    "today", "tonight", "tomorrow", "now",
+})
+
+# A query that is itself arithmetic, optionally after "calculate" / "what is".
+_MATH_QUERY = re.compile(
+    "^" + _LEAD_IN
+    + r"(?:(?P<verb>(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?"
+    r"(?:calculate|compute|evaluate|solve|work\s+out|how\s+much\s+is|" + _WHAT_IS + r"))\s+)?"
+    r"(?P<expr>[\d\s.+\-*/%^()]+?)(?:\s*=)?$"
+)
+_MATH_BINARY_OP = re.compile(r"[\d.)]\s*(?:\*\*|//|[-+*/%^])\s*[-+(\s]*[\d.]")
+# Digits joined by one repeated '-' or '/' read as a date, phone or part
+# number ("2026-09-30", "9/30/2026", "555-123-4567"); without "calculate" in
+# front they are searched, not subtracted or divided.
+_MATH_IDENTIFIER = re.compile(r"^\d+(?:-\d+){2,}$|^\d+(?:/\d+){2,}$")
+
+
+# Typographic apostrophe, multiplication, division and minus signs.
+_QUERY_CHARACTERS = str.maketrans({"\u2019": "'", "\u00d7": "*", "\u00f7": "/", "\u2212": "-"})
+
+
+def _normalise_query(query: str) -> str:
+    text = (query or "").translate(_QUERY_CHARACTERS)
+    return re.sub(r"\s+", " ", text).strip().lower().rstrip("?!. ")
+
+
+def _is_time_query(normalised: str) -> bool:
+    return bool(_TIME_QUERY.match(normalised))
+
+
+def _weather_place(normalised: str) -> Optional[str]:
+    """The place a weather question names, or None when the query is not one."""
+    match = _WEATHER_QUERY.match(normalised)
+    if not match:
+        return None
+    place = match.group("place").strip(" ,.")
+    words = place.split()
+    if not words or len(words) > _PLACE_MAX_WORDS or words[0] in _NOT_A_PLACE:
+        return None
+    return place
+
+
+def _arithmetic_expression(normalised: str) -> Optional[str]:
+    """The expression when the query is an arithmetic question, else None."""
+    match = _MATH_QUERY.match(normalised)
+    if not match:
+        return None
+    expr = match.group("expr").strip()
+    if not _MATH_BINARY_OP.search(expr):
+        return None
+    if not match.group("verb") and _MATH_IDENTIFIER.match(expr):
+        return None
+    return expr.replace("^", "**")
+
+
 def handle_special_queries(query: str) -> Dict[str, Any]:
-    query_lower = query.lower().strip()
-    
-    if any(keyword in query_lower for keyword in ['time', 'clock', 'current time', 'what time']):
+    normalised = _normalise_query(query)
+    short = len(normalised) <= _SHORTCUT_MAX_CHARS
+
+    if short and _is_time_query(normalised):
         try:
             from datetime import datetime
             import pytz
             
-            current_time = datetime.now()
+            # Aware local time, so %Z names the zone.
+            current_time = datetime.now().astimezone()
             utc_time = datetime.now(pytz.UTC)
             
             time_info = {
@@ -243,91 +556,58 @@ def handle_special_queries(query: str) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"Time query failed: {e}")
     
-    weather_keywords = ['weather', 'temperature', 'forecast', 'climate', 'how hot', 'how cold', 'degrees']
-    location_keywords = ['in ', 'at ', 'for ']
-    
-    if any(keyword in query_lower for keyword in weather_keywords):
+    location = _weather_place(normalised) if short else None
+    if location:
         try:
-            import re
-            location = None
-            
-            location_patterns = [
-                r'(?:weather|temperature|forecast|climate).*?(?:in|at|for)\s+([^?]+?)(?:\?|$)',
-                r'(?:what.*?)(?:weather|temperature).*?(?:in|at|for)\s+([^?]+?)(?:\?|$)',
-                r'(?:how\s+hot|how\s+cold).*?(?:in|at|for)\s+([^?]+?)(?:\?|$)',
-                r'current\s+temperature\s+(?:in|at|for)\s+([^?]+?)(?:\?|$)'
-            ]
-            
-            for pattern in location_patterns:
-                match = re.search(pattern, query_lower)
-                if match:
-                    location = match.group(1).strip()
-                    location = re.sub(r'\b(right\s+now|now|currently|today|tonight)\b', '', location, flags=re.IGNORECASE).strip()
-                    location = re.sub(r',\s*$', '', location).strip()
-                    break
-            
-            if not location:
-                words = query_lower.split()
-                if len(words) >= 2:
-                    location = ' '.join(words[-2:])
-                    
-                    location = re.sub(r'\b(what|is|the|current)\b', '', location).strip()
-            
-            if location and len(location) > 1:
-                logger.info(f"Weather query detected for location: {location}")
-                weather_result = get_weather_info(location)
-                
-                if weather_result.get("success"):
-                    temp_f = weather_result.get('temperature_fahrenheit', 'N/A')
-                    temp_c = weather_result.get('temperature_celsius', 'N/A')
-                    description = weather_result.get('description', 'N/A')
-                    humidity = weather_result.get('humidity', 'N/A')
-                    
-                    snippet = f"Current weather in {location}:\nTemperature: {temp_f}°F ({temp_c}°C)\nConditions: {description}\nHumidity: {humidity}%"
-                    
-                    return {
-                        "query": query,
-                        "strategy_used": "weather_service",
-                        "success": True,
-                        "data": {
-                            "type": "weather",
-                            "location": location,
-                            "temperature_fahrenheit": temp_f,
-                            "temperature_celsius": temp_c,
-                            "description": description,
-                            "humidity": humidity,
-                            "snippet": snippet,
-                            "source": "Weather API"
-                        }
-                    }
-                else:
-                    logger.warning(f"Weather lookup failed for {location}: {weather_result.get('error', 'Unknown error')}")
-            else:
-                logger.warning(f"Could not extract location from weather query: {query}")
-        except Exception as e:
-            logger.warning(f"Weather query processing failed: {e}")
-    
-    if any(keyword in query_lower for keyword in ['calculate', 'math', 'equation', '=']) and any(op in query for op in ['+', '-', '*', '/', '=']):
-        try:
-            import re
-            math_expr = re.sub(r'[^0-9+\-*/.() ]', '', query)
-            if math_expr.strip():
-                result = evaluate_arithmetic(math_expr.strip())
+            logger.info(f"Weather query detected for location: {location}")
+            weather_result = get_weather_info(location)
+
+            if weather_result.get("success"):
+                temp_f = weather_result.get('temperature_fahrenheit', 'N/A')
+                temp_c = weather_result.get('temperature_celsius', 'N/A')
+                description = weather_result.get('description', 'N/A')
+                humidity = weather_result.get('humidity', 'N/A')
+
+                snippet = f"Current weather in {location}:\nTemperature: {temp_f}°F ({temp_c}°C)\nConditions: {description}\nHumidity: {humidity}%"
+
                 return {
                     "query": query,
-                    "strategy_used": "math_calculation",
+                    "strategy_used": "weather_service",
                     "success": True,
                     "data": {
-                        "type": "calculation",
-                        "expression": math_expr.strip(),
-                        "result": result,
-                        "snippet": f"Calculation: {math_expr.strip()} = {result}",
-                        "source": "System Calculator"
+                        "type": "weather",
+                        "location": location,
+                        "temperature_fahrenheit": temp_f,
+                        "temperature_celsius": temp_c,
+                        "description": description,
+                        "humidity": humidity,
+                        "snippet": snippet,
+                        "source": weather_result.get("source") or WEATHER_SOURCE
                     }
                 }
+            logger.warning(f"Weather lookup failed for {location}: {weather_result.get('error', 'Unknown error')}")
+        except Exception as e:
+            logger.warning(f"Weather query processing failed: {e}")
+
+    math_expr = _arithmetic_expression(normalised) if short else None
+    if math_expr:
+        try:
+            result = evaluate_arithmetic(math_expr)
+            return {
+                "query": query,
+                "strategy_used": "math_calculation",
+                "success": True,
+                "data": {
+                    "type": "calculation",
+                    "expression": math_expr,
+                    "result": result,
+                    "snippet": f"Calculation: {math_expr} = {result}",
+                    "source": "System Calculator"
+                }
+            }
         except Exception as e:
             logger.warning(f"Math calculation failed: {e}")
-    
+
     return {
         "query": query,
         "success": False,
@@ -335,104 +615,124 @@ def handle_special_queries(query: str) -> Dict[str, Any]:
     }
 
 
-def perform_duckduckgo_search(query: str) -> Dict[str, Any]:
+def search_result_count(value: Any) -> int:
+    """``value`` as a number of results to ask for, within 1..MAX_SEARCH_RESULTS."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SEARCH_RESULTS
+    return max(1, min(count, MAX_SEARCH_RESULTS))
+
+
+# A search that fails or comes back empty is asked once more, with a new
+# client; one the engine refused is not. With the pinned client every attempt
+# goes to SEARCH_ENGINE (see backend/utils/web_search_sources.py).
+_SEARCH_ATTEMPTS = 2
+
+
+def _search_failure(exc: BaseException) -> tuple[str, bool]:
+    """Why asking the search engine failed, in words a person or a model can act
+    on, and whether the engine refused the search (so asking again at once is
+    pointless).
+
+    The client wraps the error of its last backend in a plain
+    DuckDuckGoSearchException, so the original exception is looked for in its
+    arguments.
+    """
+    inner = exc.args[0] if exc.args and isinstance(exc.args[0], BaseException) else exc
+    text = str(inner)
+    try:
+        from duckduckgo_search.exceptions import RatelimitException, TimeoutException
+    except ImportError:
+        RatelimitException = TimeoutException = ()
+    # The client reports every refusal status (403, 429 and a few others) as
+    # "<url> <status> Ratelimit".
+    refused = re.search(r"\b(\d{3}) Ratelimit\b", text)
+    if refused or isinstance(inner, RatelimitException):
+        status = f" (HTTP {refused.group(1)})" if refused else ""
+        return (f"{SEARCH_ENGINE} refused the search{status}; it limits automated searches. "
+                "Try again in a few minutes."), True
+    if isinstance(inner, TimeoutException):
+        return f"{SEARCH_ENGINE} did not answer in time.", False
+    if " return None." in text:
+        # Any other status that is not 200, a server error say; the client's
+        # message repeats the query and not the status, so it is not passed on.
+        return f"{SEARCH_ENGINE} answered the search with an error.", False
+    return f"The search could not be completed at {SEARCH_ENGINE}: {text[:300]}", False
+
+
+def perform_duckduckgo_search(query: str, max_results: int = DEFAULT_SEARCH_RESULTS) -> Dict[str, Any]:
+    """Search SEARCH_ENGINE for ``query``. The name is the client package's
+    (duckduckgo-search), not the engine's; see web_search_sources.py.
+
+    ``success`` is True when the engine returned results. Otherwise ``error``
+    says why there are none: ``no_results`` is True when the engine answered
+    with nothing, and absent when it could not be asked (refused, timed out,
+    unreachable, or the client is not installed). The query goes nowhere else
+    either way. ``source`` names the engine.
+    """
+    max_results = search_result_count(max_results)
     try:
         from duckduckgo_search import DDGS
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Web search is not available: the duckduckgo-search package is not installed.",
+            "results": [],
+            "snippet": "",
+            "source": SEARCH_ENGINE,
+        }
 
-        results = []
-        search_snippets = []
-        last_error = None
-        for backend in ("lite", "html"):
-            try:
-                with DDGS() as ddgs:
-                    search_rows = ddgs.text(query, backend=backend, max_results=5)
+    results = []
+    search_snippets = []
+    answered_empty = False
+    failure = None
+    for _attempt in range(_SEARCH_ATTEMPTS):
+        try:
+            with DDGS() as ddgs:
+                search_rows = ddgs.text(query, max_results=max_results) or []
+        except Exception as search_error:
+            failure, refused = _search_failure(search_error)
+            logger.warning(f"Web search ({SEARCH_ENGINE}) failed: {search_error}")
+            if refused:
+                break
+            continue
 
-                for row in search_rows:
-                    title = (row.get("title") or "").strip()
-                    url = row.get("href", "")
-                    snippet = (row.get("body") or row.get("snippet") or "").strip()
+        for row in search_rows:
+            title = (row.get("title") or "").strip()
+            url = row.get("href", "")
+            snippet = (row.get("body") or row.get("snippet") or "").strip()
 
-                    if title and (url or snippet):
-                        results.append({
-                            "title": title,
-                            "url": url,
-                            "snippet": snippet[:300]
-                        })
-                        if snippet:
-                            search_snippets.append(f"{title}: {snippet[:200]}")
-
-                if results:
-                    break
-            except Exception as backend_error:
-                last_error = str(backend_error)
-                logger.warning(f"DuckDuckGo {backend} backend failed: {backend_error}")
-                continue
-
-        if not results:
-            try:
-                proxy_url = f"https://r.jina.ai/http://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
-                headers = {"User-Agent": "guaardvark-web-search/1.0"}
-                resp = requests.get(proxy_url, headers=headers, timeout=10)
-                resp.raise_for_status()
-
-                lines = resp.text.splitlines()
-                for idx, line in enumerate(lines):
-                    match = re.match(r"\d+\.\[(.+?)\]\((.+?)\)", line.strip())
-                    if not match:
-                        continue
-
-                    title = match.group(1).strip()
-                    url = match.group(2).strip()
-
-                    parsed = urlparse(url)
-                    query_params = parse_qs(parsed.query)
-                    uddg_target = query_params.get("uddg", [])
-                    if uddg_target:
-                        url = uddg_target[0]
-
-                    snippet = ""
-                    if idx + 1 < len(lines):
-                        candidate = lines[idx + 1].strip()
-                        if candidate and not candidate.startswith("Markdown Content"):
-                            snippet = candidate[:300]
-
-                    results.append({
-                        "title": title,
-                        "url": url,
-                        "snippet": snippet
-                    })
-                    if snippet:
-                        search_snippets.append(f"{title}: {snippet}")
-                    if len(results) >= 5:
-                        break
-            except Exception as proxy_error:
-                last_error = last_error or str(proxy_error)
-                logger.warning(f"DuckDuckGo proxy fallback failed: {proxy_error}")
+            if title and (url or snippet):
+                results.append({
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet[:300]
+                })
+                if snippet:
+                    search_snippets.append(f"{title}: {snippet[:200]}")
 
         if results:
-            combined_snippet = "\n\n".join(search_snippets[:3]) if search_snippets else ""
-            return {
-                "success": True,
-                "results": results,
-                "snippet": f"Search results for '{query}':\n\n{combined_snippet}",
-                "total_results": len(results)
-            }
+            break
+        answered_empty = True
 
+    if results:
+        combined_snippet = "\n\n".join(search_snippets[:3]) if search_snippets else ""
         return {
-            "success": False,
-            "error": last_error or "No search results found",
-            "results": [],
-            "snippet": ""
+            "success": True,
+            "results": results,
+            "snippet": f"Search results for '{query}':\n\n{combined_snippet}",
+            "total_results": len(results),
+            "source": SEARCH_ENGINE,
         }
 
-    except Exception as e:
-        logger.error(f"DuckDuckGo search failed: {e}")
-        return {
-            "success": False,
-            "error": f"DuckDuckGo search error: {str(e)}",
-            "results": [],
-            "snippet": ""
-        }
+    outcome = {"success": False, "results": [], "snippet": "", "source": SEARCH_ENGINE}
+    if answered_empty:
+        outcome["no_results"] = True
+        outcome["error"] = f"{SEARCH_ENGINE} returned no results for this query."
+    else:
+        outcome["error"] = failure or f"The search could not be completed at {SEARCH_ENGINE}."
+    return outcome
 
 @web_search_bp.route("/quick-search", methods=["POST"])
 def quick_search():
@@ -511,14 +811,38 @@ def web_search():
         logger.error(f"Error in enhanced web search: {e}", exc_info=True)
         return error_response(f"Search failed: {str(e)}", status_code=500)
 
+@web_search_bp.route("/sitemap", methods=["POST"])
+def sitemap_report():
+    """Summarise one sitemap (the chat's ``/websearch sitemap:<url>``); see read_sitemap."""
+    try:
+        if not get_web_access():
+            return error_response("Web access is disabled in system settings", status_code=403)
+
+        data = request.get_json(silent=True) or {}
+        url = str(data.get("url") or "").strip()
+        if not url:
+            return error_response("A sitemap URL is required", status_code=400)
+
+        report = read_sitemap(url)
+        if not report["success"]:
+            return error_response(report["error"], status_code=422, error_code="SITEMAP_NOT_READ",
+                                  data={"url": report["url"]})
+        return success_response(report)
+
+    except Exception as e:
+        logger.error(f"Error reading sitemap: {e}", exc_info=True)
+        return error_response(f"Reading the sitemap failed: {str(e)}", status_code=500)
+
 @web_search_bp.route("/status", methods=["GET"])
 def search_status():
     try:
         web_enabled = get_web_access()
 
         # Probe the REAL building blocks — import + callable only, NO network I/O
-        # (a status poll must never hammer DuckDuckGo / weather APIs; see SSRF/DOS
-        # trap). Each of these is a module-level function in this file.
+        # (a status poll must never hammer the search engine or the weather
+        # service; see SSRF/DOS trap). Each of these is a module-level function
+        # in this file. The "duckduckgo_search" keys are named after the client
+        # package and kept for callers that read them.
         probes = {
             "website_scraping": callable(globals().get("extract_website_content")),
             "duckduckgo_search": callable(globals().get("perform_duckduckgo_search")),
@@ -561,7 +885,11 @@ def search_status():
             ],
             "reliability_notes": {
                 "direct_website": "Reliable for specific URLs",
-                "duckduckgo_search": "Primary general search provider"
+                "duckduckgo_search": (
+                    f"General search: {SEARCH_ENGINE} through the duckduckgo-search client. "
+                    "When it finds nothing or cannot be reached the search says so; "
+                    "the query is not sent anywhere else"
+                )
             }
         })
         

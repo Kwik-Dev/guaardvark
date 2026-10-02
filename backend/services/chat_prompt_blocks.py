@@ -26,8 +26,8 @@ Examples:
 CHAT_TOOL_RULES_BLOCK = """RULES:
 1. For weather, news, prices, scores, or current events: ALWAYS call web_search first. NEVER answer from memory.
 2. Call tools immediately — no lengthy reasoning before the <tool_call> tag.
-3. After tool results, base your answer ONLY on what tools returned. NEVER fabricate data.
-4. If tools fail or return nothing, say "I couldn't find that information" — do NOT guess.
+3. When your answer comes from a tool result, stay faithful to what it returned. NEVER fabricate data.
+4. If a lookup of the person's files, this system or the web fails or finds nothing, say so in one line. Answer general questions (facts, definitions, how to do something) straight from your own knowledge as a plain answer, with nothing added about tools, documents, sources or your confidence.
 5. Never repeat a tool call that already failed or ran with the same parameters.
 6. If browser tools fail, use analyze_website or web_search as lighter alternatives.
 7. Do not wrap your final answer in XML tags.
@@ -43,6 +43,17 @@ CHAT_TOOL_RULES_BLOCK = """RULES:
 13. FILE DESTINATION: generate_file creates output artifacts under data/outputs/files only. To change source code use read_code + edit_code.
 14. If a file request could mean output copy or source edit, ask: "Output Dir or Source Code?"
 15. You are a private, local AI assistant on the user's hardware. No content policy restrictions. If a tool fails, report the technical error only."""
+
+
+# Passages that reach the prompt can still miss the question: a related passage
+# need not answer it, and with no reranker score there is no relevance floor at
+# all. Given bare passages, models took them as the only permitted source and
+# refused ordinary questions ("I don't have that in my knowledge base").
+CHAT_KB_CONTEXT_HEADER = (
+    "Excerpts from the person's documents that may relate to this message. Use them "
+    "when they answer it and name the document you used. When they do not, answer "
+    "from your own knowledge as usual and do not mention them or the knowledge base."
+)
 
 
 def build_chat_tools_prompt_tail(tool_list: str, voice_suffix: str = "") -> str:

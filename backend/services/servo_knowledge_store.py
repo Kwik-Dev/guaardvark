@@ -346,14 +346,22 @@ def get_vision_config(model_name: str = "") -> Dict[str, Any]:
         if model_name.startswith(f"{key}-") or model_name.startswith(f"{key}:"):
             return config
 
-    # Known multimodal families not yet in MODEL_VISION_CONFIGS (e.g. qwen3-vl:4b).
-    if model_name_looks_vision(model_name):
+    # A model with no row: whether it sees is the capability resolver's answer
+    # (Ollama's capabilities first; the name guess only when Ollama is down).
+    # The name markers alone got both ways wrong: qwen3.5, qwen3.6 and
+    # ministral-3 see, a gemma4-named build without a vision tower does not.
+    try:
+        from backend.services.model_capability_resolver import _vision_with_evidence
+        sees, evidence = _vision_with_evidence(model_name)
+    except Exception:  # noqa: BLE001 - fall back to the name markers
+        sees, evidence = model_name_looks_vision(model_name), "name_markers"
+    if sees:
         return {
             **_DEFAULT_VISION_CONFIG,
             "has_vision": True,
             "vision_model": None,
-            "source": "name_heuristic_vision",
-            "notes": f"'{model_name}' looks multimodal by name — treat as native vision.",
+            "source": f"resolver_{evidence}",
+            "notes": f"'{model_name}' sees natively ({evidence}).",
         }
 
     logger.info(f"No vision config for '{model_name}', using text-only defaults")

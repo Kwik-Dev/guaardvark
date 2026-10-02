@@ -337,6 +337,12 @@ def _keyframe_cast_context(
             if sub is not None:
                 subjects.append(sub)
                 subject_ids.append(int(sid))
+        try:
+            from backend.services.cast_lora_selection import select_cast_loras
+            subjects = select_cast_loras(subjects).subjects
+        except Exception as e:
+            # A refusal is raised again, with its message, by the keyframe render.
+            log.info("music_video %s: cast LoRA selection: %s", mv.id, e)
         subj_paths, _lock = subjects_to_lock(subjects, include_bible=False)
         lora_paths.extend(subj_paths)
 
@@ -919,13 +925,9 @@ def _generate_one_clip(mv: MusicVideo, clip: dict):
                 raise RuntimeError("ComfyUI unavailable for music-video i2v clip render.")
             result = vg.generate_video(req)
             if not result.success or not result.video_path:
-                err = result.error or "no video produced"
-                if any(kw in (err or "").lower() for kw in ("oom", "out of memory", "cuda")):
-                    raise RuntimeError(
-                        f"{i2v_model} i2v OOM ({err}). Reduce i2v_steps/resolution, ensure VRAM free "
-                        "(Comfy /free), or lower interpolation. See media team audit for preflight."
-                    )
-                raise RuntimeError(f"{i2v_model} i2v failed: {err}")
+                from backend.services.job_types import RenderErrorKind, render_failed
+                raise RuntimeError(render_failed(
+                    f"{i2v_model} i2v", result.error_kind or (RenderErrorKind.OUTPUT_MISSING if result.success else None), result.error))
             wan_abs = resolve_generated_video_path(result, out_dir)
             if not wan_abs.exists():
                 raise RuntimeError(f"WAN output not found at resolved path: {wan_abs}")

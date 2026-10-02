@@ -846,6 +846,9 @@ class BatchImageGenerator:
             from backend.services.character_still_pipeline import render_character_still
             # Always pass both: subject_ids for identity core; lora_paths as
             # fallback when worker DB resolve fails (paths were resolved at API time).
+            # Steps and guidance are locked to the character's base model defaults
+            # (image_render_limits), whatever the page sent; the page's values apply
+            # to renders without a character.
             still = render_character_still(
                 final_prompt,
                 subject_ids=sid_list or None,
@@ -854,14 +857,15 @@ class BatchImageGenerator:
                 source="batch",
                 width=width,
                 height=height,
-                steps=prompt.steps,
-                steps_explicit=prompt.metadata.get("steps_explicit", False),
-                guidance=prompt.guidance,
+                steps=None,
+                steps_explicit=False,
+                guidance=None,
                 seed=prompt.seed,
                 negative_prompt=prompt.negative_prompt or "",
                 output_path=out_path,
                 style=prompt.style or "realistic",
                 keep_pipeline=True,
+                image_model=prompt.model,
             )
             meta = still.metadata or {}
             logger.info(

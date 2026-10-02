@@ -24,7 +24,7 @@ hybrid search, cross-encoder reranking on the user's GPU).
 | `read_document_section` | the actual text of one section or page, no search |
 | `process_file` | extract content from a PDF, DOCX, CSV, Excel, image or other file the user names |
 | `fetch_url` | title, description and main text of one web page; pass `query` (the user's question) to get the passage about it instead of the top of the page |
-| `web_search` | DuckDuckGo results (titles, snippets, URLs) when the answer is not local |
+| `web_search` | web results (titles, snippets, URLs) when the answer is not local; `source` names the search engine that answered, and `no_results` says when it found nothing |
 
 Pattern: `summarize_corpus` or `list_documents` → `search_knowledge_base` → read the exact
 section with `get_document_outline` + `read_document_section` before quoting.

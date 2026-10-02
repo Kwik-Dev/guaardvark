@@ -11,8 +11,10 @@ deduplication.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -47,23 +49,43 @@ class BackendResponse:
     data: Any
 
 
+def _checkout_env_value(key: str, env_file: Optional[Path] = None) -> str:
+    """``key`` from this checkout's ``.env`` (last line wins), or ""."""
+    env_file = env_file or Path(__file__).resolve().parents[2] / ".env"
+    value = ""
+    try:
+        for line in env_file.read_text().splitlines():
+            if line.startswith(f"{key}="):
+                value = line.split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        pass
+    return value
+
+
 def backend_base_url() -> str:
     """Where the backend answers HTTP. ``GUAARDVARK_URL`` wins; otherwise the
     port ``start.sh`` recorded in ``.env`` (macOS writes 5055); otherwise 5000."""
     url = (os.environ.get("GUAARDVARK_URL") or "").strip()
     if url:
         return url.rstrip("/")
-    port = (os.environ.get("FLASK_PORT") or "").strip()
-    if not port:
-        env_file = Path(__file__).resolve().parents[2] / ".env"
-        try:
-            for line in env_file.read_text().splitlines():
-                if line.startswith("FLASK_PORT="):
-                    port = line.split("=", 1)[1].strip().strip("'\"")
-                    break
-        except OSError:
-            pass
+    port = (os.environ.get("FLASK_PORT") or "").strip() or _checkout_env_value("FLASK_PORT")
     return f"http://127.0.0.1:{port or '5000'}"
+
+
+def backend_api_key() -> str:
+    """The API key to send, or "".
+
+    For this checkout's own backend (no ``GUAARDVARK_URL``), the key in its
+    ``.env`` comes first and is read on every call: that is the key the backend
+    runs with, and Settings → API key rewrites it, so a key created or replaced
+    there works here without restarting the MCP client. Otherwise, and when
+    ``.env`` has none, ``GUAARDVARK_API_KEY`` from this process's environment.
+    """
+    if not (os.environ.get("GUAARDVARK_URL") or "").strip():
+        saved = _checkout_env_value("GUAARDVARK_API_KEY")
+        if saved:
+            return saved
+    return (os.environ.get("GUAARDVARK_API_KEY") or "").strip()
 
 
 def in_mcp_process() -> bool:
@@ -75,6 +97,42 @@ def is_mcp_transport(tool: Any) -> bool:
     """True when the MCP adapter is the one calling this tool."""
     context = getattr(tool, "_context", None) or {}
     return context.get("transport") == "mcp"
+
+
+# Body field run_tool_in_backend adds so POST /api/tools/execute knows the call
+# came from an MCP client.
+CALLER_TRANSPORT_FIELD = "caller_transport"
+
+_caller = threading.local()
+
+
+@contextlib.contextmanager
+def calls_for_mcp_client(active: bool = True):
+    """Treat tool calls made on this thread as calls from an MCP client.
+
+    POST /api/tools/execute enters this for calls that run_tool_in_backend
+    forwarded, so a tool the MCP server hands to the backend keeps the input
+    rules it has over MCP. The mark is thread-local and only ever makes those
+    rules stricter, so a caller that sets it on purpose gains nothing.
+    """
+    previous = getattr(_caller, "mcp", False)
+    _caller.mcp = previous or bool(active)
+    try:
+        yield
+    finally:
+        _caller.mcp = previous
+
+
+def is_mcp_caller(tool: Any) -> bool:
+    """True when an MCP client asked for this call, in either process.
+
+    ``is_mcp_transport`` answers only "am I in the MCP server, so hand the
+    work to the backend?" and is false once the backend runs the tool. Rules
+    that are stricter for MCP clients (which files a tool may read) check this
+    instead: it is also true inside the backend for a call run_tool_in_backend
+    forwarded.
+    """
+    return is_mcp_transport(tool) or bool(getattr(_caller, "mcp", False))
 
 
 def _error_message(body: Any, fallback: str) -> str:
@@ -103,7 +161,7 @@ def request_json(
 
     base = backend_base_url()
     send_headers = dict(headers or {})
-    api_key = (os.environ.get("GUAARDVARK_API_KEY") or "").strip()
+    api_key = backend_api_key()
     if api_key:
         send_headers[API_KEY_HEADER] = api_key
 
@@ -137,7 +195,10 @@ def request_json(
         message = _error_message(body, (resp.text or "").strip()[:200] or f"HTTP {resp.status_code}")
         if resp.status_code in (401, 403):
             kind = "auth"
-            message += " (the backend requires GUAARDVARK_API_KEY in this client's environment)"
+            message += (
+                " (the backend needs its API key: set GUAARDVARK_API_KEY in this client's"
+                " environment, or in the .env of the Guaardvark checkout it runs from)"
+            )
         elif resp.status_code == 503:
             kind = "plugin_offline"
             message += " (start the plugin from the Studio Plugins page or POST /api/plugins/<id>/start)"
@@ -166,9 +227,11 @@ def run_tool_in_backend(tool_name: str, arguments: Mapping[str, Any], read_timeo
 
     For tools whose work belongs to the backend: its database session, Flask
     config, Celery dispatch or GPU queue. POST /api/tools/execute runs the
-    same tool through the backend's registry, so behaviour matches chat.
-    Arguments starting with ``_`` are internal to the calling process and
-    are not sent.
+    same tool through the backend's registry, so behaviour matches chat,
+    except where a tool is stricter with MCP clients: the call is marked as
+    coming from one (``CALLER_TRANSPORT_FIELD``), and ``is_mcp_caller`` is
+    true while the backend runs it. Arguments starting with ``_`` are
+    internal to the calling process and are not sent.
     """
     from backend.services.agent_tools import ToolResult
 
@@ -176,7 +239,7 @@ def run_tool_in_backend(tool_name: str, arguments: Mapping[str, Any], read_timeo
     try:
         body = request_json(
             "POST", "/api/tools/execute",
-            payload={"tool_name": tool_name, "parameters": parameters},
+            payload={"tool_name": tool_name, "parameters": parameters, CALLER_TRANSPORT_FIELD: "mcp"},
             read_timeout=read_timeout,
         ).body or {}
     except BackendError as e:

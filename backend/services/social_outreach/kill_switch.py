@@ -56,27 +56,30 @@ def _get_direct_engine():
             "DATABASE_URL",
             "postgresql://guaardvark:guaardvark@localhost:5432/guaardvark",
         )
-        _direct_engine = create_engine(url, pool_pre_ping=True)
+        # A database host that accepts no connection must fail the read, not
+        # hang the beat tick that asked.
+        connect_args = {"connect_timeout": 3} if url.startswith("postgresql") else {}
+        _direct_engine = create_engine(url, pool_pre_ping=True, connect_args=connect_args)
     return _direct_engine
 
 
-def _read_setting_direct(key: str, default: str) -> str:
-    try:
-        from sqlalchemy import text
+def _lookup_setting_direct(key: str) -> Optional[str]:
+    from sqlalchemy import text
 
-        with _get_direct_engine().connect() as conn:
-            row = conn.execute(
-                text("SELECT value FROM settings WHERE key = :key"),
-                {"key": key},
-            ).fetchone()
-            if row and row[0] is not None:
-                return str(row[0])
-    except Exception as e:
-        logger.warning("direct setting read failed for %s: %s", key, e)
-    return default
+    with _get_direct_engine().connect() as conn:
+        row = conn.execute(
+            text("SELECT value FROM settings WHERE key = :key"),
+            {"key": key},
+        ).fetchone()
+    return str(row[0]) if row and row[0] is not None else None
 
 
-def _read_setting(key: str, default: str) -> str:
+def _lookup_setting(key: str) -> Optional[str]:
+    """The stored value, or None when the key was never set.
+
+    Raises when the settings table cannot be read, so a caller can tell
+    "off" from "unknown".
+    """
     try:
         from flask import has_app_context
 
@@ -84,22 +87,66 @@ def _read_setting(key: str, default: str) -> str:
             from backend.models import Setting
 
             row = Setting.query.filter_by(key=key).first()
-            if row and row.value is not None:
-                return str(row.value)
-            return default
+            return str(row.value) if row and row.value is not None else None
     except Exception as e:
         logger.warning("setting read failed for %s: %s", key, e)
-    return _read_setting_direct(key, default)
+    return _lookup_setting_direct(key)
+
+
+def _read_setting(key: str, default: str) -> str:
+    try:
+        value = _lookup_setting(key)
+    except Exception as e:
+        logger.warning("direct setting read failed for %s: %s", key, e)
+        return default
+    return default if value is None else value
+
+
+def _is_on(value: Optional[str]) -> bool:
+    return (value or "").strip().lower() in ("true", "1", "yes", "on")
 
 
 def is_enabled() -> bool:
-    val = _read_setting("social_outreach_enabled", "false").strip().lower()
-    return val in ("true", "1", "yes", "on")
+    """Whether outreach is switched on. Off when the setting cannot be read."""
+    return _is_on(_read_setting("social_outreach_enabled", "false"))
 
 
 def is_supervised() -> bool:
-    val = _read_setting("social_outreach_supervised", "false").strip().lower()
-    return val in ("true", "1", "yes", "on")
+    """Whether drafts wait for review. Defaults to false when never set, and
+    to true when the setting cannot be read: unknown must not mean "post
+    without review"."""
+    try:
+        return _is_on(_lookup_setting("social_outreach_supervised"))
+    except Exception as e:
+        logger.warning("supervised setting unreadable, treating as supervised: %s", e)
+        return True
+
+
+def status_snapshot() -> dict:
+    """What GET /api/social-outreach/status and outreach_status report.
+
+    ``settings_readable`` is false when the settings table could not be read;
+    ``enabled`` and ``supervised`` are then the fail-closed values the posting
+    paths use, not what the user set.
+    """
+    readable = True
+    try:
+        enabled = _is_on(_lookup_setting("social_outreach_enabled"))
+        supervised = _is_on(_lookup_setting("social_outreach_supervised"))
+    except Exception as e:
+        logger.warning("outreach settings unreadable: %s", e)
+        readable, enabled, supervised = False, False, True
+    return {
+        "enabled": enabled,
+        "supervised": supervised,
+        "settings_readable": readable,
+        "caps": {
+            "min_gap_seconds": CADENCE_MIN_GAP_SECONDS,
+            "daily_cap": CADENCE_DAILY_CAP,
+            "servo_failure_abort_threshold": SERVO_FAILURE_ABORT_THRESHOLD,
+        },
+        "cadence": cadence_status(),
+    }
 
 
 def set_enabled(value: bool) -> None:

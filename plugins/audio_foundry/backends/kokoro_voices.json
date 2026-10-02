@@ -1,0 +1,57 @@
+{
+  "hf_repo": "hexgrad/Kokoro-82M",
+  "config_file": "config.json",
+  "weights_file": "kokoro-v1_0.pth",
+  "voice_file": "voices/{voice}.pt",
+  "english_g2p": {
+    "lang_codes": ["a", "b"],
+    "package": "en_core_web_sm",
+    "wheel": "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85"
+  },
+  "default": "af_heart",
+  "groups": [
+    {"label": "American Female", "voices": [
+      {"id": "af_heart",   "label": "Heart (default)"},
+      {"id": "af_bella",   "label": "Bella"},
+      {"id": "af_nicole",  "label": "Nicole"},
+      {"id": "af_sarah",   "label": "Sarah"},
+      {"id": "af_sky",     "label": "Sky"},
+      {"id": "af_alloy",   "label": "Alloy"},
+      {"id": "af_aoede",   "label": "Aoede"},
+      {"id": "af_jessica", "label": "Jessica"},
+      {"id": "af_kore",    "label": "Kore"},
+      {"id": "af_nova",    "label": "Nova"},
+      {"id": "af_river",   "label": "River"}
+    ]},
+    {"label": "American Male", "voices": [
+      {"id": "am_adam",    "label": "Adam"},
+      {"id": "am_michael", "label": "Michael"},
+      {"id": "am_eric",    "label": "Eric"},
+      {"id": "am_echo",    "label": "Echo"},
+      {"id": "am_fenrir",  "label": "Fenrir"},
+      {"id": "am_liam",    "label": "Liam"},
+      {"id": "am_onyx",    "label": "Onyx"},
+      {"id": "am_puck",    "label": "Puck"},
+      {"id": "am_santa",   "label": "Santa"}
+    ]},
+    {"label": "British Female", "voices": [
+      {"id": "bf_emma",     "label": "Emma"},
+      {"id": "bf_isabella", "label": "Isabella"},
+      {"id": "bf_alice",    "label": "Alice"},
+      {"id": "bf_lily",     "label": "Lily"}
+    ]},
+    {"label": "British Male", "voices": [
+      {"id": "bm_george",  "label": "George"},
+      {"id": "bm_lewis",   "label": "Lewis"},
+      {"id": "bm_daniel",  "label": "Daniel"},
+      {"id": "bm_fable",   "label": "Fable"}
+    ]},
+    {"label": "Spanish Female", "voices": [
+      {"id": "ef_dora",    "label": "Dora"}
+    ]},
+    {"label": "Spanish Male", "voices": [
+      {"id": "em_alex",    "label": "Alex"},
+      {"id": "em_santa",   "label": "Santa"}
+    ]}
+  ]
+}

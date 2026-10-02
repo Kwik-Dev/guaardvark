@@ -89,8 +89,8 @@ const BUILT_IN_COMMANDS = [
   },
   {
     name: "/websearch",
-    description: "Search the web via DuckDuckGo",
-    usage: "/websearch <query>",
+    description: "Search the web, audit one page (site:<address>) or list a sitemap (sitemap:<url>)",
+    usage: "/websearch <query> | site:<address> | sitemap:<url>",
     category: "utility",
     args: "required",
     handler: "builtin",

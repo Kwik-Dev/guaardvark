@@ -58,6 +58,12 @@ https://github.com/user-attachments/assets/c6d9d18b-cfff-4ae2-8220-dc7f329fee5d
 
 **The self-hosted AI studio.** Coding agents and 20-agent swarms in isolated git worktrees, screen agents with their own real desktop, self-tuning RAG, continuous voice chat — and a full media pipeline: video, image, full-song music, neural voice. One install, one GPU, everything on your machine. Your machine. Your data. Your rules.
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=RSFDHY39lwI"><img src="https://img.youtube.com/vi/RSFDHY39lwI/maxresdefault.jpg" alt="Everything New in 2.9 — Guaardvark Ep 19" width="720"></a><br>
+  <b>▶ New: <a href="https://www.youtube.com/watch?v=RSFDHY39lwI">Everything new in 2.9, on the real product</a></b> (Episode 19, 3:50)<br>
+  A thumbs up that teaches · web pages read for you · MCP tools used from chat · Hugging Face models checked before download · photo edits in chat · video with its own voice
+</p>
+
 **Works with your coding agent.** Claude Code, Cursor, Codex, OpenClaw and Gemini CLI drive every flow above through the built-in MCP server and fifteen [agent skills](.agents/skills/README.md): "make a music video from this song", "film this script", "train a LoRA of this character", "swarm this refactor" — the agent queues the job on your GPU and polls it to the finished file.
 
 **Runs on Linux with one NVIDIA card** (16 GB for video). Apple Silicon is supported with GPU features arriving through Metal (what works today is in [INSTALL.md](INSTALL.md#install-macos-apple-silicon)); Windows through WSL2 is being verified.
@@ -92,13 +98,13 @@ curl -fsSL https://raw.githubusercontent.com/Kwik-Dev/guaardvark/cloud-plus/inst
 | | | See it |
 |---|---|---|
 | **Media studio** | 11 local video models across five families (Wan 2.2, CogVideoX, LTX, HunyuanVideo, MiniMax H3 with native audio), image generation, full-song music, neural voice with consent-gated cloning, 4K/8K upscaling | Eps [5](https://www.youtube.com/watch?v=s9I_0gD9Iko) · [6](https://www.youtube.com/watch?v=9rae9IJhXow) · [7](https://www.youtube.com/watch?v=BXlm7p-SxtU) |
-| **Directors** | A beat-synced music-video director, a 5-role Film Crew, an auto-editing video editor — and the walkthrough director that produced this README's own video series | Eps [8](https://www.youtube.com/watch?v=l2LqKA9GQDc) · [9](https://www.youtube.com/watch?v=sq104u9N4Qg) |
+| **Directors** | A beat-synced music-video director, a 5-role Film Crew, an auto-editing video editor | Eps [8](https://www.youtube.com/watch?v=l2LqKA9GQDc) · [9](https://www.youtube.com/watch?v=sq104u9N4Qg) |
 | **Coding agent & code intelligence** | Monaco editor, AST-aware analysis and dependency graphs, System Mapper: a live constellation of the whole codebase | Ep [14](https://www.youtube.com/watch?v=yEy1tVKxsF0) |
 | **Agent swarms** | Up to 20 parallel coding agents in isolated git worktrees with dependency-aware merging; fully-local backend via Ollama | [CAPABILITIES.md](CAPABILITIES.md) |
 | **Screen agents** | A real Ubuntu/XFCE desktop of their own, vision + closed-loop servo clicking, live VNC viewer on any page | Ep [4](https://www.youtube.com/watch?v=3VfHrJmqYos) |
 | **Knowledge** | Hybrid RAG on pgvector with cross-encoder reranking, layout-aware document parsing with page-level citations, retrieval that shows its chunks and scores, Autoresearch that tunes retrieval overnight | Ep [3](https://www.youtube.com/watch?v=pT_J93qTCL0) |
 | **Voice & channels** | Continuous voice chat, a three-tier chat brain, Discord bot, supervised outreach, MCP in both directions, a 25-module CLI | Ep [2](https://www.youtube.com/watch?v=5HcSAf96j_M) |
-| **Self-running platform** | Self-improvement behind guardian review and kill switches, rules engine, jobs & scheduling, schema-aware backups, GPU orchestrator, multi-machine Interconnector | Eps [11](https://www.youtube.com/watch?v=7kHvi_2vT6U) · [12](https://www.youtube.com/watch?v=IMEnss9gjl4) |
+| **Self-running platform** | Self-improvement behind guardian review and kill switches, rules engine, jobs & scheduling, schema-aware backups, GPU orchestrator, multi-machine Interconnector | Eps [11](https://www.youtube.com/watch?v=7kHvi_2vT6U) · [12](https://www.youtube.com/watch?v=A1-_ykcHOhQ) |
 
 > **The aardvark** (/ˈɑːrd.vɑːrk/; *Orycteropus afer*) is a medium-sized, burrowing, nocturnal mammal native to Africa. The aardvark is the only living member of the genus *Orycteropus*, the family Orycteropodidae and the order Tubulidentata. It is found over much of the southern two-thirds of the African continent, avoiding areas that are mainly rocky. A nocturnal feeder, the aardvark subsists on ants and termites (myrmecophagy) by using its sharp claws and powerful legs to dig the insects out of their hills, and its long snout to sniff out food. It digs a burrow in which to live and rear its young.
 >
@@ -108,7 +114,7 @@ curl -fsSL https://raw.githubusercontent.com/Kwik-Dev/guaardvark/cloud-plus/inst
 
 ## ▶ The Walkthrough Series — every feature, on camera
 
-Short, unscripted-feeling screen recordings of the real system doing real work — narrated by a voice the system cloned itself (that's Episode 7). Twelve episodes are live: the first series covers the twelve subsystems, and a second series picks up what shipped since.
+Short, unscripted-feeling screen recordings of the real system doing real work — narrated by the system's own local speech engine (Episode 7 shows it cloning a voice). Fourteen episodes are live: the first series covers the twelve subsystems, and a second series picks up what shipped since.
 
 | | |
 |:---:|:---:|
@@ -116,8 +122,9 @@ Short, unscripted-feeling screen recordings of the real system doing real work �
 | [![The Agent Behind the Glass — Guaardvark Ep 4](https://img.youtube.com/vi/3VfHrJmqYos/maxresdefault.jpg)](https://www.youtube.com/watch?v=3VfHrJmqYos)<br>**Ep 4 — Screen Agent:** its own desktop, eyes, and hands | [![Local Image Gen — Guaardvark Ep 5](https://img.youtube.com/vi/s9I_0gD9Iko/maxresdefault.jpg)](https://www.youtube.com/watch?v=s9I_0gD9Iko)<br>**Ep 5 — Image Gen:** one prompt, a whole story |
 | [![Local Video Generation — Guaardvark Ep 6](https://img.youtube.com/vi/9rae9IJhXow/maxresdefault.jpg)](https://www.youtube.com/watch?v=9rae9IJhXow)<br>**Ep 6 — Video Gen:** seven models, one GPU | [![Local Voice Cloning — Guaardvark Ep 7](https://img.youtube.com/vi/BXlm7p-SxtU/maxresdefault.jpg)](https://www.youtube.com/watch?v=BXlm7p-SxtU)<br>**Ep 7 — Voice Clone:** consent-gated, self-checking |
 | [![Local AI Music Video — Guaardvark Ep 8](https://img.youtube.com/vi/l2LqKA9GQDc/maxresdefault.jpg)](https://www.youtube.com/watch?v=l2LqKA9GQDc)<br>**Ep 8 — Music Video:** drop a song, get a film | [![Local AI Film Crew — Guaardvark Ep 9](https://img.youtube.com/vi/sq104u9N4Qg/maxresdefault.jpg)](https://www.youtube.com/watch?v=sq104u9N4Qg)<br>**Ep 9 — Film Crew:** script, cast, storyboard, cut |
-| [![The System That Fixes Itself — Guaardvark Ep 11](https://img.youtube.com/vi/7kHvi_2vT6U/maxresdefault.jpg)](https://www.youtube.com/watch?v=7kHvi_2vT6U)<br>**Ep 11 — Self-Repair:** it fixes its own code, behind a gate you control | [![Command Center — Guaardvark Ep 12](https://img.youtube.com/vi/IMEnss9gjl4/maxresdefault.jpg)](https://www.youtube.com/watch?v=IMEnss9gjl4)<br>**Ep 12 — Command Center:** see everything, gate everything, kill everything |
+| [![The System That Fixes Itself — Guaardvark Ep 11](https://img.youtube.com/vi/7kHvi_2vT6U/maxresdefault.jpg)](https://www.youtube.com/watch?v=7kHvi_2vT6U)<br>**Ep 11 — Self-Repair:** it fixes its own code, behind a gate you control | [![Command Center — Guaardvark Ep 12](https://img.youtube.com/vi/A1-_ykcHOhQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=A1-_ykcHOhQ)<br>**Ep 12 — Command Center:** see everything, gate everything, kill everything |
 | [![The New Front Door — Guaardvark Ep 13](https://img.youtube.com/vi/3-3XHJHHVmA/maxresdefault.jpg)](https://www.youtube.com/watch?v=3-3XHJHHVmA)<br>**Ep 13 — The New Front Door:** the Workspaces bar, and everything new since the first series | [![A Map of Everything — Guaardvark Ep 14](https://img.youtube.com/vi/yEy1tVKxsF0/maxresdefault.jpg)](https://www.youtube.com/watch?v=yEy1tVKxsF0)<br>**Ep 14 — System Map:** every module, drawn from its real imports; findings that carry their own fix |
+| [![Plug In Anything: MCP for Any Client — Guaardvark Ep 16](https://img.youtube.com/vi/1qc6GZBLy5k/maxresdefault.jpg)](https://www.youtube.com/watch?v=1qc6GZBLy5k)<br>**Ep 16 — MCP:** plug Guaardvark into any MCP client | [![Everything New in 2.9 — Guaardvark Ep 19](https://img.youtube.com/vi/RSFDHY39lwI/maxresdefault.jpg)](https://www.youtube.com/watch?v=RSFDHY39lwI)<br>**Ep 19 — What's New in 2.9:** teach it, point it at a page, plug in tools, edit photos, make video that talks |
 
 **[▶ Watch the full playlist](https://www.youtube.com/playlist?list=PLYycooXIy1Qs)** — Episode 1 (the full tour) and Episode 10 (the video editor) are on the way.
 
@@ -188,7 +195,7 @@ The local-AI ecosystem has excellent tools for every slice: chat UIs, RAG second
 | Agents on a real desktop | — | — | — | — | browser/tool use | core ([Ep 4](https://www.youtube.com/watch?v=3VfHrJmqYos)) |
 | Parallel coding swarms | — | — | — | usually one agent | — | up to 20 in git worktrees |
 | Self-improvement behind human gates | — | — | — | — | — | core ([Ep 11](https://www.youtube.com/watch?v=7kHvi_2vT6U)) |
-| One-GPU resource arbitration | — | — | — | — | — | core ([Ep 12](https://www.youtube.com/watch?v=IMEnss9gjl4)) |
+| One-GPU resource arbitration | — | — | — | — | — | core ([Ep 12](https://www.youtube.com/watch?v=A1-_ykcHOhQ)) |
 | Integration / plugin ecosystem breadth | varies | varies | **enormous** | growing | **enormous** | smaller — 10 first-party plugins, plus MCP both ways |
 | Hosted / mobile option | often | often | often | often | often | none, by design — it's your machine |
 
@@ -319,12 +326,12 @@ A client's Linux desktop player refused to play a video — the distro was missi
 
 ### Model Context Protocol (MCP)
 
-Guaardvark speaks MCP both ways — exposes its tools to any MCP client (Claude Code, Cursor, Grok, Claude Desktop, Zed, Gemini, etc.) and can call tools from connected external MCP servers.
+Guaardvark speaks MCP both ways — exposes its tools to any MCP client (Claude Code, Codex, Cursor, Grok, Antigravity, opencode, Claude Desktop, Zed, Gemini, etc.) and can call tools from connected external MCP servers.
 
 - **One-command setup** — `python -m backend.mcp install` detects the agent clients on your machine and writes the `guaardvark` server entry into their configs (existing files are backed up, other entries untouched). `python -m backend.mcp doctor` diagnoses a broken setup: server self-test, a real stdio handshake, and a scan of client configs for stale paths.
 - **Claude Code plugin** — two lines, no clone: `/plugin marketplace add guaardvark/guaardvark` then `/plugin install guaardvark@guaardvark`. It asks for the path of your Guaardvark checkout, wires the MCP server from there, and loads every skill below as `/guaardvark:<skill>`.
 - **Agent skills** — `.agents/skills/` ships one skill per flow (images, video, music video, Film Crew, voice, music, upscaling, Cast/LoRA training, Hugging Face model onboarding, swarm, knowledge, code, outreach, ops) in the [Agent Skills](https://agentskills.io) format, so Claude Code, Cursor, Codex and OpenClaw know which tool or route to call for each job. `python -m backend.mcp install --skills` links them into `~/.claude/skills`; other agents read `.agents/skills/` from the checkout. Start with `setup`.
-- **As a server** — `python -m backend.mcp` (stdio, the default) or `python -m backend.mcp http` (streamable HTTP on `127.0.0.1:8788/mcp`; loopback-only by default since there is no auth yet). Strong default-deny policy (see `backend/mcp/config.py`): categories such as `desktop`, `agent_control`, `system`, `browser`, `test_execution`, and `mcp` meta-tools are denied by default. Dozens of safer tools (chat, RAG, files, generation, memory, etc.) plus read-only `guaardvark://outputs/` resources are exposed — `python -m backend.mcp list-tools` prints the live list. Generation tools queue by default over MCP and hand back a batch id (`get_generation_status` reads it); every call runs on a worker thread under an enforced timeout (`GUAARDVARK_MCP_TIMEOUT`, 120 s; 30 min when a caller asks to wait for a render). Verified end-to-end by an initialize/tools-list handshake in the smoke tests.
+- **As a server** — `python -m backend.mcp` (stdio, the default) or `python -m backend.mcp http` (streamable HTTP on `127.0.0.1:8788/mcp`; loopback-only by default since there is no auth yet). Strong default-deny policy (see `backend/mcp/config.py`): categories such as `desktop`, `agent_control`, `system`, `browser`, `test_execution`, and `mcp` meta-tools are denied by default. Dozens of safer tools (chat, RAG, files, generation, memory, etc.) plus read-only `guaardvark://outputs/` resources are exposed — `python -m backend.mcp list-tools` prints the live list. Generation tools queue by default over MCP and hand back a batch id (`get_generation_status` reads it); every call runs on a worker thread under an enforced timeout (`GUAARDVARK_MCP_SERVER_TIMEOUT`, 120 s; 30 min when a caller asks to wait for a render). Verified end-to-end by an initialize/tools-list handshake in the smoke tests.
 - **As a client** — `mcp_connect` / `mcp_execute` + live tool inventory so the chat LLM can discover and use tools from other MCP servers by name.
 - Audit logging, timeouts, and circuit breakers are built in.
 
@@ -557,7 +564,7 @@ Config: `~/.guaardvark/cli.json` (legacy `~/.llx/config.json` is still read). Th
 | Dependency | Version | Notes |
 |-----------|---------|-------|
 | Python | 3.12 only | Backend. 3.13/3.14 not yet supported — the ML stack (numpy<2.0, mediapipe, basicsr/gfpgan) has no wheels for them. |
-| Node.js | 20+ | Frontend build |
+| Node.js | 20.19+ or 22.12+ | Frontend build (Vite 8). On Linux, `start.sh` installs Node 22 to `~/.local/node` when the system one is older. |
 | PostgreSQL | 14+ | Auto-installed |
 | Redis | 5.0+ | Auto-installed |
 | Ollama | latest | Local LLM inference |
@@ -683,7 +690,7 @@ Questions, install trouble, or feedback: **support@guaardvark.com**. Press, part
 
 ## Get Involved
 
-The Guaardvark engine is open source (MIT) and built in public; paid layers and client products built on it are separate and not covered by that license. Whether you want to try the bot, ship a small PR, or hang out with other local-AI builders — here is the short path.
+Guaardvark is open source (MIT) and built in public. Whether you want to try the bot, ship a small PR, or hang out with other local-AI builders — here is the short path.
 
 ### 1. Join the community
 

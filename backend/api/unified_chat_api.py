@@ -261,8 +261,10 @@ def unified_chat():
             # (agent_task_execute etc) can stream live "chat:thinking" events with
             # source=agent_loop for the see-think-act steps. This was only done
             # inside legacy engine before; AgentBrain/Tier3 paths bypassed it.
-            from backend.services.agent_control_service import set_chat_emit_fn
+            from backend.services.agent_control_service import set_chat_emit_fn, set_chat_stop_check
+            from backend.services.unified_chat_engine import is_aborted
             set_chat_emit_fn(emit_fn)
+            set_chat_stop_check(lambda: is_aborted(session_id))
             logger.debug(
                 f"[EMIT-HANDOFF][UNIFIED_API] set_chat_emit_fn called for session={session_id} "
                 f"thread={threading.get_ident()} emit_fn_id={id(emit_fn)} use_agent_brain={use_agent_brain}"
@@ -329,8 +331,9 @@ def unified_chat():
             # Always clear the thread-local emitter when this chat turn ends
             # (success, error, or abort) so the next turn on this thread gets a fresh one.
             try:
-                from backend.services.agent_control_service import set_chat_emit_fn
+                from backend.services.agent_control_service import set_chat_emit_fn, set_chat_stop_check
                 set_chat_emit_fn(None)
+                set_chat_stop_check(None)
                 logger.debug(
                     f"[EMIT-HANDOFF][UNIFIED_API] cleared chat_emit_fn in finally for session={session_id} "
                     f"thread={threading.get_ident()}"
@@ -472,9 +475,13 @@ def get_history(session_id):
             .all()
         )
 
+        from backend.utils.screenshot_urls import sign_screenshot_urls
+
+        # Screenshot links are signed as they go out, so messages saved before
+        # a secret change (or before links were signed) still show them.
         return jsonify({
             "success": True,
-            "messages": [m.to_dict() for m in messages],
+            "messages": sign_screenshot_urls([m.to_dict() for m in messages]),
             "session_id": session_id,
         })
     except Exception as e:

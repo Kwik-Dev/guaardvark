@@ -5,6 +5,7 @@
  */
 
 import { useAppStore } from "../stores/useAppStore";
+import { BASE_URL } from "../api/apiClient";
 import { getChatImageModel, setChatImageModel as persistChatImageModel } from "../api/settingsService";
 
 // ============================================================
@@ -233,6 +234,7 @@ async function handleImageModel(args, { addMessage }) {
         COMFYUI_MODEL_OPTION,
         ...models.filter((m) => m.is_downloaded),
       ];
+
       const editLines = editBackends.length
         ? editBackends.map(formatEditBackendLine).join("\n")
         : "_(could not load edit backends)_";
@@ -258,7 +260,7 @@ async function handleImageModel(args, { addMessage }) {
     await saveImageModelChoice("auto");
     addMessage({
       role: "system",
-      content: "Image model switched to **auto** (Qwen-Image-Edit for edits when installed, else Kontext, else img2img).",
+      content: "Image model switched to **auto** (edits use Qwen-Image-Edit when installed, else Kontext; with neither, editing asks you to install one).",
       tempId: `imgmodel-${Date.now()}`,
       type: "command",
     });
@@ -510,23 +512,109 @@ async function handleFilmCrew(args, { addMessage, onSendMessage }) {
 }
 
 // ============================================================
-// /websearch <query> — direct web_search tool
+// /websearch <query> | site:<address> | sitemap:<url>
 // ============================================================
+// Every form runs in the backend, under its web-access setting, and the reply
+// names the service that answered. Nothing is fetched from the browser.
+//   <query>                the web_search tool (the search engine)
+//   site:<address>         the analyze_website tool: that page's title,
+//                          description and SEO report (public addresses only)
+//   site:<domain> <words>  a search, with the engine's own site: filter
+//   sitemap:<url>          POST /api/web-search/sitemap: what the sitemap lists
+//                          (public addresses only)
+
+const WEBSEARCH_USAGE =
+  "Usage: `/websearch <query>`, `/websearch site:<address>` (audit one page) or " +
+  "`/websearch sitemap:<url>` (list a sitemap's pages)";
 
 async function handleWebSearch(args, { addMessage, onSendMessage }) {
-  if (!args) {
-    addMessage({ role: "system", content: "Usage: `/websearch <query>`", tempId: `ws-${Date.now()}` });
+  const query = (args || "").trim();
+  const bareForm = /^(site|sitemap):\s*$/i.test(query);
+  if (!query || bareForm) {
+    addMessage({ role: "system", content: WEBSEARCH_USAGE, tempId: `ws-${Date.now()}` });
     return { handled: true };
   }
 
-  onSendMessage(`/websearch ${args}`, null, {
+  const sitemap = query.match(/^sitemap:\s*(.+)$/i);
+  if (sitemap) {
+    return reportSitemap(sitemap[1].trim(), query, addMessage);
+  }
+
+  const site = query.match(/^site:\s*(\S+)$/i);
+  if (site) {
+    onSendMessage(`/websearch ${query}`, null, {
+      direct_tool: "analyze_website",
+      direct_tool_params: { url: site[1] },
+      slash_command: "websearch",
+      slash_args: query,
+    });
+    return { handled: true };
+  }
+
+  onSendMessage(`/websearch ${query}`, null, {
     direct_tool: "web_search",
-    direct_tool_params: { query: args },
+    direct_tool_params: { query },
     slash_command: "websearch",
-    slash_args: args,
+    slash_args: query,
   });
 
   return { handled: true };
+}
+
+async function reportSitemap(url, query, addMessage) {
+  const stamp = Date.now();
+  addMessage({ role: "user", content: `/websearch ${query}`, tempId: `sitemap-user-${stamp}`, type: "command" });
+  let content;
+  try {
+    const res = await fetch(`${BASE_URL}/web-search/sitemap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json().catch(() => ({}));
+    content = res.ok && body.success
+      ? formatSitemapReport(body.data || {})
+      : `Sitemap not read: ${body.message || `the backend answered HTTP ${res.status}`}`;
+  } catch (err) {
+    content = `Sitemap not read: ${err.message}`;
+  }
+  addMessage({ role: "system", content, tempId: `sitemap-${stamp}`, type: "command" });
+  return { handled: true };
+}
+
+/** The chat message for a /api/web-search/sitemap report. */
+export function formatSitemapReport(report) {
+  const entries = report.entries || [];
+  const where = report.final_url && report.final_url !== report.url
+    ? `${report.url} (redirected to ${report.final_url})`
+    : report.url;
+  const lines = [`**Sitemap:** ${where}`];
+  if (report.type === "sitemapindex") {
+    lines.push(`A sitemap index naming ${report.total} sitemaps; they are listed, not opened.`);
+    if (entries.length < report.total) lines.push(`First ${entries.length}:`);
+    entries.forEach((e, i) => {
+      lines.push(`${i + 1}. ${e.loc}${e.lastmod ? ` (last modified ${e.lastmod})` : ""}`);
+    });
+  } else {
+    lines.push(`${report.total} page URL${report.total === 1 ? "" : "s"}.`);
+    const depths = Object.entries(report.by_depth || {})
+      .map(([depth, count]) => `depth ${depth}: ${count}`);
+    if (depths.length) lines.push(`By path depth: ${depths.join(", ")}`);
+    const landing = report.landing_pages || [];
+    if (landing.length) {
+      lines.push("Landing pages (top level, priority above 0.5):");
+      landing.forEach((e, i) => lines.push(`${i + 1}. ${e.loc} (priority ${e.priority})`));
+    }
+    if (entries.length) {
+      lines.push(entries.length < report.total ? `First ${entries.length}:` : "Pages:");
+      entries.forEach((e) => {
+        lines.push(`- ${e.loc}${e.lastmod ? ` (last modified ${e.lastmod})` : ""}`);
+      });
+    }
+  }
+  if (report.page_cut) lines.push(`_${report.page_cut}_`);
+  if (report.incomplete) lines.push(`_${report.incomplete}_`);
+  return lines.join("\n");
 }
 
 function handleGpu(_args, { onSendMessage }) {

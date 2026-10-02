@@ -700,6 +700,7 @@ def gpu_session(
     slot_id: Optional[str] = None,
     lease_seconds: Optional[int] = None,
     vram_reserve_mb: int = 0,
+    cancel_event=None,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
 
@@ -711,6 +712,9 @@ def gpu_session(
         and the estimate still does not fit, then
       * admits against system load and books the GPUMemoryOrchestrator budget when
         ``vram_estimate_mb`` is given, releasing everything on exit.
+
+    ``cancel_event`` ends an ``on_busy='wait'`` gate wait with ``GpuBusyError``
+    once it is set, so a cancelled job does not hold up the queue behind it.
 
     A refusal raised after the claim releases the gate without its post-release
     cooldown: nothing touched the card. Teardown runs in reverse order and before
@@ -776,7 +780,7 @@ def gpu_session(
                 lease_held = False
 
     with gate.gpu_exclusive(
-        kind, op_id, on_busy=on_busy, wait_timeout=wait_timeout
+        kind, op_id, on_busy=on_busy, wait_timeout=wait_timeout, cancel_event=cancel_event
     ) as acq:
         acquired = acq
         if acquired:
@@ -856,3 +860,65 @@ def gpu_session(
             if acquired:
                 _session_tls.held = False
                 _teardown()
+
+
+class GpuWaitStopped(Exception):
+    """The person stopped the request while it waited for the GPU."""
+
+
+@contextlib.contextmanager
+def gpu_session_when_free(
+    kind,
+    op_id: str,
+    *,
+    wait_s: float,
+    on_wait=None,
+    should_stop=None,
+    **session_kwargs,
+) -> Iterator[bool]:
+    """``gpu_session`` that waits its turn instead of refusing.
+
+    A refusal while claiming (``GpuBusyError``: another job holds the card, or a
+    resident may still leave) is retried with backoff for up to ``wait_s``
+    seconds, then re-raised. ``GpuCapacityError`` (the job cannot fit this card
+    at all) is raised at once, and so is anything the body raises: only the
+    claim is retried. The gate's own ``on_busy="wait"`` covers this process
+    only, so the retry sits outside the whole claim, cross-process lease and
+    fit check included, as the batch image loop does.
+
+    ``on_wait(reason)`` is called before each retry. ``should_stop()`` is
+    polled while waiting; True ends the wait with ``GpuWaitStopped``.
+    """
+    from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
+
+    deadline = time.monotonic() + max(0.0, float(wait_s))
+    backoff = 2.0
+    while True:
+        if should_stop and should_stop():
+            raise GpuWaitStopped("stopped while waiting for the GPU")
+        stack = contextlib.ExitStack()
+        try:
+            held = stack.enter_context(
+                gpu_session(kind, op_id, on_busy="raise", **session_kwargs)
+            )
+        except GpuCapacityError:
+            raise
+        except GpuBusyError as e:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            if on_wait:
+                try:
+                    on_wait(str(e))
+                except Exception:  # noqa: BLE001 — a status line must not end the wait
+                    pass
+            end = time.monotonic() + min(backoff, remaining)
+            while time.monotonic() < end:
+                if should_stop and should_stop():
+                    raise GpuWaitStopped("stopped while waiting for the GPU") from e
+                time.sleep(max(0.0, min(0.5, end - time.monotonic())))
+            backoff = min(15.0, backoff * 1.5)
+            continue
+        with stack:
+            yield held
+        return

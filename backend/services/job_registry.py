@@ -19,7 +19,7 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from backend.services.job_types import Job, JobKind, JobStatus, map_status
+from backend.services.job_types import Job, JobKind, JobStatus, batch_failure, failure_text, map_status
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +346,17 @@ def adapt_music_video(mv) -> Job:
     )
 
 
+def _as_status_object(data: dict):
+    """A batch status dict (batch_metadata.json) read the way batch_failure reads
+    a BatchVideoStatus."""
+    from types import SimpleNamespace
+
+    results = [SimpleNamespace(success=bool(r.get("success")), error=r.get("error"), error_kind=r.get("error_kind"))
+               for r in data.get("results") or [] if isinstance(r, dict)]
+    return SimpleNamespace(status=data.get("status"), error=data.get("error"),
+                           error_kind=data.get("error_kind"), results=results)
+
+
 def adapt_video_gen(status) -> Job:
     """BatchVideoStatus (or dict) → Job for the Jobs page."""
     if isinstance(status, dict):
@@ -372,6 +383,11 @@ def adapt_video_gen(status) -> Job:
         is_running = native_status == "running"
 
     status_enum = map_status(JobKind.VIDEO_GEN, native_status)
+    failure = None
+    if status_enum in (JobStatus.FAILED, JobStatus.CANCELLED):
+        failure = batch_failure(_as_status_object(status) if isinstance(status, dict) else status)
+        if failure:
+            error = failure_text(failure["kind"], failure["message"])
     display = metadata.get("display_name") or batch_id
     stage = None
     progress_pct = None
@@ -415,6 +431,7 @@ def adapt_video_gen(status) -> Job:
             "is_running": is_running,
             "queue_position": metadata.get("queue_position"),
             "stage": stage,
+            "failure": failure,
         },
     )
 
@@ -476,11 +493,18 @@ def _load_demo_step(native_id):
 
 
 def _load_unified_progress(process_id):
-    """Fetch the live ProgressEvent dict for `process_id`. None if unknown."""
+    """Fetch the live ProgressEvent for `process_id` as the dict
+    adapt_unified_progress reads. None if unknown."""
     from backend.utils.unified_progress_system import get_unified_progress
     ups = get_unified_progress()
     snapshot = ups.get_active_processes() if hasattr(ups, "get_active_processes") else {}
-    return snapshot.get(process_id)
+    event = snapshot.get(process_id)
+    if event is None:
+        return None
+    # The progress system holds ProgressEvent objects; the adapter calls .get().
+    payload = dict(event) if isinstance(event, dict) else dict(getattr(event, "__dict__", {}))
+    payload.setdefault("process_id", process_id)
+    return payload
 
 
 def _load_video_gen(batch_id):

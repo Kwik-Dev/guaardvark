@@ -9,6 +9,7 @@ Version 2.0: Enhanced with Context Variables System
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, time
 from typing import Dict, List, Optional
@@ -34,15 +35,29 @@ from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
 bulk_gen_bp = Blueprint("bulk_generation_api", __name__, url_prefix="/api/bulk-generate")
 logger = logging.getLogger(__name__)
 
-def get_unique_filename(output_dir: str, filename: str) -> str:
+# Output names of /csv jobs still running. Their file appears only when the job
+# ends, so without this a second job started meanwhile gets the same name and
+# overwrites (or, on a failed validation, deletes) the first job's CSV.
+_running_bulk_names: set = set()
+_running_bulk_names_lock = threading.Lock()
+
+
+def _release_bulk_name(name) -> None:
+    if name:
+        with _running_bulk_names_lock:
+            _running_bulk_names.discard(name)
+
+
+def get_unique_filename(output_dir: str, filename: str, taken=frozenset()) -> str:
     """
     Generate a unique filename by adding sequence number if file already exists
     Example: filename.csv -> filename-001.csv, filename-002.csv, etc.
+    Names in ``taken`` count as existing.
     """
     base_path = contained_path(output_dir, filename)
 
     # If file doesn't exist, return original filename
-    if not os.path.exists(base_path):
+    if not os.path.exists(base_path) and filename not in taken:
         return filename
 
     # Split filename and extension
@@ -54,7 +69,7 @@ def get_unique_filename(output_dir: str, filename: str) -> str:
         sequence_filename = f"{name}-{counter:03d}{ext}"
         sequence_path = contained_path(output_dir, sequence_filename)
 
-        if not os.path.exists(sequence_path):
+        if not os.path.exists(sequence_path) and sequence_filename not in taken:
             return sequence_filename
 
         counter += 1
@@ -553,9 +568,16 @@ def generate_bulk_csv():
     Generate bulk CSV content based on topics and specifications
     Database-free version to avoid transaction issues
     """
+    return start_bulk_csv_job(request.get_json(silent=True))
 
+
+def start_bulk_csv_job(data):
+    """Start a background bulk CSV job from the fields the /csv route takes and
+    return that route's response. Needs an app context; the generate_bulk_csv
+    chat tool calls it in-process."""
+    reserved_name = None
+    thread_started = False
     try:
-        data = request.get_json()
         if not data:
             return jsonify({"error": "Request body must be JSON."}), 400
 
@@ -715,8 +737,13 @@ def generate_bulk_csv():
         if not output_dir:
             return jsonify({"error": "Server configuration error: Output directory not set"}), 500
 
-        # Generate unique filename with sequence number if needed
-        secure_output_filename = get_unique_filename(output_dir, secure_output_filename)
+        # Generate unique filename with sequence number if needed. The name stays
+        # reserved until the job's thread ends.
+        with _running_bulk_names_lock:
+            secure_output_filename = get_unique_filename(
+                output_dir, secure_output_filename, taken=_running_bulk_names)
+            _running_bulk_names.add(secure_output_filename)
+        reserved_name = secure_output_filename
 
         # Create enhanced generation tasks using prompt rule system
         tasks = []
@@ -839,9 +866,11 @@ def generate_bulk_csv():
         # Log task creation
         logger.info(f"Created {len(tasks)} enhanced generation tasks with prompt rule integration")
 
-        # Simple job ID without database
+        # Simple job ID without database. Seconds alone collide when two jobs start
+        # together (chat can run tools in parallel), so a short random suffix follows.
         import time
-        job_id = f"bulk_gen_{int(time.time())}"
+        import uuid
+        job_id = f"bulk_gen_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         logger.info(f"Starting bulk CSV generation. Job ID: {job_id}")
         
         # Use existing task or create new database Task for job management
@@ -934,7 +963,9 @@ def generate_bulk_csv():
             'concurrent_workers': concurrent_workers,
             'batch_size': batch_size,
             'insert_content': insert_content,
-            'insert_position': insert_position
+            'insert_position': insert_position,
+            # Lets a status check find the file after the in-memory job is gone.
+            'output_filename': secure_output_filename,
         }
 
         # Create enhanced generator with prompt rule integration and progress tracking
@@ -964,6 +995,8 @@ def generate_bulk_csv():
                     "client": client,
                     "project": project,
                     "website": website,
+                    "output_filename": secure_output_filename,
+                    "num_items": len(tasks),
                     "target_word_count": target_word_count,
                     "concurrent_workers": concurrent_workers,
                     "batch_size": batch_size,
@@ -1008,10 +1041,12 @@ def generate_bulk_csv():
                     progress_system.error_process(job_id, f"CSV generation failed: {str(e)}")
                     # Note: Database Task status updates removed to avoid application context errors in background thread
                 finally:
+                    _release_bulk_name(secure_output_filename)
                     logger.info(f"[{thread_name}] CSV generation thread exiting for job {job_id}")
 
             thread = threading.Thread(target=process_csv, daemon=True, name=f"csv_gen_{job_id}")
             thread.start()
+            thread_started = True
             logger.info(f"Started CSV generation thread: {thread.name}")
 
             return jsonify({
@@ -1027,10 +1062,14 @@ def generate_bulk_csv():
         
         except Exception as e:
             logger.error(f"Error in CSV generation setup: {e}")
+            if not thread_started:
+                _release_bulk_name(reserved_name)
             return jsonify({"error": f"CSV generation setup error: {str(e)}"}), 500
 
     except Exception as e:
         logger.error(f"Error in bulk CSV generation: {e}")
+        if not thread_started:
+            _release_bulk_name(reserved_name)
         return jsonify({"error": f"CSV generation error: {str(e)}"}), 500
 
 
@@ -1503,6 +1542,8 @@ def get_generation_status(job_id):
                 "process_type": process.process_type.value,
                 "timestamp": process.timestamp.isoformat()
             },
+            "output_filename": (process.additional_data or {}).get("output_filename"),
+            "num_items": (process.additional_data or {}).get("num_items"),
             "task_status": {
                 "id": task.id if task else None,
                 "status": task.status if task else "UNKNOWN",

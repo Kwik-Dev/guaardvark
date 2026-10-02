@@ -20,6 +20,7 @@ import {
   LinearProgress,
 } from '@mui/material';
 import { listCastLibrary, listProductionSubjects, castSubject, confirmCasting } from '../../api/productionService';
+import { dispatchWarning } from '../../api/taskQueue';
 import { useUnifiedProgress } from '../../contexts/UnifiedProgressContext';
 import DragDropImageUpload from './DragDropImageUpload';
 import CollapsibleAlert from "../common/CollapsibleAlert";
@@ -155,6 +156,12 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
       for (const subj of subjectsToCast) {
         if (hasValidFormAction(subj)) {
           const res = await castSubject(productionId, subj.id, castingData[subj.id]);
+          const notStarted = dispatchWarning(res);
+          if (notStarted) {
+            // Its LoRA training was not queued, so casting cannot be confirmed yet.
+            setError(notStarted);
+            return;
+          }
           if (res?.training_job_id) {
             setTrainingJobs((prev) => ({
               ...prev,
@@ -163,8 +170,8 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
           }
         }
       }
-      await confirmCasting(productionId);
-      await onCastingConfirmed();
+      const confirmed = await confirmCasting(productionId);
+      await onCastingConfirmed(dispatchWarning(confirmed));
     } catch (err) {
       // Surface the backend's real reason instead of a generic failure. The
       // confirm endpoint returns {error, incomplete_subjects:[{name,...}]}.

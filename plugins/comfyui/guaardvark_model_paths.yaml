@@ -1,0 +1,13 @@
+# Extra model folders for Guaardvark's ComfyUI, passed by scripts/start.sh with
+# --extra-model-paths-config. ComfyUI resolves LoRAs by filename within its search
+# paths, so Cast Library LoRAs (STORAGE_DIR/training/loras) must be on them.
+# start.sh exports GUAARDVARK_TRAINING_DIR, resolved the way backend/config.py
+# resolves STORAGE_DIR.
+guaardvark_cast:
+    base_path: ${GUAARDVARK_TRAINING_DIR}
+    loras: loras
+# Guaardvark's own ComfyUI extensions, kept outside ComfyUI/ so an update of
+# ComfyUI keeps them: the Host check in front of every request
+# (guaardvark_nodes/guaardvark_host_check.py). Relative to this file.
+guaardvark_nodes:
+    custom_nodes: guaardvark_nodes

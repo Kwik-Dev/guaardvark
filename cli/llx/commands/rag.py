@@ -6,6 +6,7 @@ from rich.tree import Tree
 
 from llx.client import get_client, LlxError, LlxConnectionError
 from llx.global_opts import get_global_json, get_global_server
+from llx.kb import list_documents, search_passages
 from llx.theme import make_console, make_panel, ICON_SUCCESS, ICON_WARNING
 from llx import output
 
@@ -24,34 +25,38 @@ def rag_status(
     output.set_json_mode(json_out)
     try:
         client = get_client(server)
-        data = client.get("/api/indexing/status")
-        status_data = data.get("data", data)
+        listing, meta = list_documents(client)
+        try:
+            info = client.get("/api/meta/index-info")
+        except LlxError:
+            info = {}
+        docs = []
+        for line in listing.splitlines()[1:]:
+            name, sep, rest = line.strip().partition(" — ")
+            if sep and "passages" in rest:
+                docs.append({"document": name, "passages": rest.split(" passages")[0]})
+        status_data = {
+            "documents": meta.get("total"),
+            "passages_listed": sum(int(d["passages"]) for d in docs if d["passages"].isdigit()),
+            "embedding_model": info.get("embedding_model"),
+            "documents_listed": docs,
+        }
 
         if json_out or output.is_pipe():
             output.print_json({"status": "success", "data": status_data})
             return
 
-        total = status_data.get("total_documents", status_data.get("document_count", "?"))
-        indexed = status_data.get("indexed_documents", status_data.get("indexed_count", "?"))
-        pending = status_data.get("pending_documents", status_data.get("pending_count", 0))
-        embedding = status_data.get("embedding_model", "?")
-
-        lines = []
-        lines.append(f"[llx.kv.key]Total Documents:[/llx.kv.key]  {total}")
-        lines.append(f"[llx.kv.key]Indexed:[/llx.kv.key]          {indexed}")
-        if pending:
-            lines.append(f"[llx.warning]{ICON_WARNING} Pending: {pending}[/llx.warning]")
-        else:
-            lines.append(f"[llx.kv.key]Pending:[/llx.kv.key]          0")
-        lines.append(f"[llx.kv.key]Embedding Model:[/llx.kv.key]  [llx.accent]{embedding}[/llx.accent]")
-
-        # Try to get storage info
-        storage = status_data.get("storage", {})
-        if storage:
-            store_type = storage.get("type", "?")
-            lines.append(f"[llx.kv.key]Store Type:[/llx.kv.key]      {store_type}")
-
+        total = status_data["documents"]
+        lines = [
+            f"[llx.kv.key]Documents indexed:[/llx.kv.key] {total if total is not None else '?'}",
+            f"[llx.kv.key]Passages:[/llx.kv.key]          {status_data['passages_listed']}"
+            + (" (first 200 documents)" if (total or 0) > len(docs) else ""),
+            f"[llx.kv.key]Embedding model:[/llx.kv.key]   [llx.accent]{status_data['embedding_model'] or '?'}[/llx.accent]",
+        ]
         console.print(make_panel("\n".join(lines), title="RAG Index"))
+        if docs:
+            output.print_table(docs[:10], columns=["document", "passages"],
+                               title="Largest documents" if len(docs) > 10 else "Documents")
 
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")
@@ -74,14 +79,10 @@ def rag_query(
     output.set_json_mode(json_out)
     try:
         client = get_client(server)
-        data = client.post("/api/search", json={
-            "query": query,
-            "top_k": top_k,
-        })
-        results = data.get("results", data.get("data", {}).get("results", []))
+        results, trace = search_passages(client, query, top_k)
 
         if json_out or output.is_pipe():
-            output.print_json({"status": "success", "data": {"results": results}})
+            output.print_json({"status": "success", "data": {"results": results, "retrieval": trace}})
             return
 
         if not results:
@@ -91,13 +92,13 @@ def rag_query(
         console.print(f"[llx.accent]Results for:[/llx.accent] [bold]{query}[/bold]\n")
 
         for i, r in enumerate(results, 1):
-            score = r.get("score", r.get("relevance", 0))
-            source = r.get("source", r.get("filename", r.get("document_name", "?")))
-            text = r.get("text", r.get("content", ""))[:200]
+            score = r["score"] if isinstance(r["score"], (int, float)) else 0.0
+            source = r["source"] + (f" p.{r['page']}" if r["page"] else "")
+            text = r["text"][:200]
 
             score_color = "llx.success" if score > 0.7 else ("llx.warning" if score > 0.4 else "llx.error")
             console.print(f"  [bold]{i}.[/bold] [{score_color}]{score:.3f}[/{score_color}]  [llx.accent]{source}[/llx.accent]")
-            console.print(f"     [llx.dim]{text}{'...' if len(r.get('text', '')) > 200 else ''}[/llx.dim]")
+            console.print(f"     [llx.dim]{text}{'...' if len(r['text']) > 200 else ''}[/llx.dim]")
             console.print()
 
     except LlxConnectionError as e:
@@ -119,34 +120,10 @@ def rag_entities(
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
     try:
-        client = get_client(server)
-        data = client.get("/api/indexing/entities", limit=limit)
-        entities = data.get("entities", data.get("data", {}).get("entities", []))
-
-        if json_out or output.is_pipe():
-            output.print_json({"status": "success", "data": {"entities": entities}})
-            return
-
-        if not entities:
-            console.print("[llx.dim]No entities extracted yet. Index some documents first.[/llx.dim]")
-            return
-
-        table = Table(title=f"Knowledge Graph Entities ({len(entities)})", border_style="llx.panel.border")
-        table.add_column("Entity", style="llx.accent")
-        table.add_column("Type")
-        table.add_column("Mentions", justify="right")
-        table.add_column("Related To")
-
-        for e in entities:
-            name = e.get("name", e.get("entity", "?"))
-            etype = e.get("type", e.get("entity_type", "?"))
-            mentions = str(e.get("mention_count", e.get("count", "?")))
-            related = ", ".join(e.get("related_entities", e.get("relationships", []))[:3])
-            if not related:
-                related = "[llx.dim]-[/llx.dim]"
-            table.add_row(name, etype, mentions, related)
-
-        console.print(table)
+        output.print_error(
+            "Guaardvark does not build an entity graph from your documents, so there is nothing "
+            "to list. `guaardvark rag status` shows what is indexed.", code="NOT_AVAILABLE")
+        raise typer.Exit(1)
 
     except LlxConnectionError as e:
         output.print_error(str(e), code="CONNECTION_ERROR")

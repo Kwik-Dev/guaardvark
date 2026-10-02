@@ -32,6 +32,7 @@ import {
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { a11yDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { selfImprovementService } from "../../api/selfImprovementService";
+import { FindingList } from "./InboundGuardSection";
 
 // severity → chip color. The backend uses critical/high/medium/low; anything else falls to default.
 const SEVERITY_COLOR = {
@@ -331,7 +332,27 @@ export default function FixesModal({ open, onClose, showMessage }) {
                     {selected.run_id && (
                       <Chip label={`run #${selected.run_id}`} size="small" variant="outlined" />
                     )}
+                    {selected.inbound && (
+                      <Chip
+                        label={`inbound guard: ${selected.inbound.verdict}`}
+                        size="small"
+                        color={selected.inbound.verdict === "block" ? "error" : selected.inbound.verdict === "hold" ? "warning" : "success"}
+                        variant="outlined"
+                      />
+                    )}
                   </Stack>
+
+                  {selected.inbound && selected.inbound.findings?.length > 0 && (
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">
+                        What the inbound guard found
+                        {selected.inbound.verdict === "block"
+                          ? " (blocked: approving the fix is not enough; approve it under Inbound guard first)"
+                          : ""}
+                      </Typography>
+                      <FindingList findings={selected.inbound.findings} />
+                    </Box>
+                  )}
 
                   <Box>
                     <Typography variant="caption" color="text.secondary">What broke / why</Typography>

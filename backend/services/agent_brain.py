@@ -823,7 +823,8 @@ class AgentBrain:
                 logger.warning(f"[narration_fallback] narration call failed (attempt {attempt}): {e}")
                 continue
             raw = "".join(accumulated)
-            text = re.sub(r'<think>[\s\S]*?</think>\s*', '', raw).strip()
+            from backend.utils.inline_reasoning import split_inline_reasoning
+            text = split_inline_reasoning(raw)[1]
             logger.info(
                 f"[narration] attempt={attempt} reason={reason!r} success={success} "
                 f"chunks={len(accumulated)} raw_len={len(raw)} clean_len={len(text)} "
@@ -1032,6 +1033,7 @@ class AgentBrain:
             try:
                 import time as _sc_time
                 from backend.tools.agent_control_tools import SCREENSHOTS_DIR, _prune_old_screenshots
+                from backend.utils.screenshot_urls import screenshot_url
                 from backend.utils.vision_analyzer import VisionAnalyzer
 
                 screenshot, cursor_pos = screen.capture()
@@ -1039,7 +1041,7 @@ class AgentBrain:
                 filename = f"agent_capture_{int(_sc_time.time() * 1000)}.webp"
                 filepath = os.path.join(SCREENSHOTS_DIR, filename)
                 screenshot.save(filepath, format="WEBP", quality=80)
-                image_url = f"/api/tools/screenshots/{filename}"
+                image_url = screenshot_url(filename)
                 _prune_old_screenshots(SCREENSHOTS_DIR)
 
                 emit_fn("chat:image", {

@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
-from service.auth import AUTH_TOKEN, verify_token
+from service.auth import TOKEN_NAME, auth_token, guard, verify_token
 from service.config import UpscalingConfig, load_config
 from service.health import get_health_status
 from service.jobs import JobManager
@@ -34,9 +34,6 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger("upscaling.app")
-
-# Re-export for test access
-_auth_token = AUTH_TOKEN
 
 # --- Globals (initialized on startup) ---
 _config: Optional[UpscalingConfig] = None
@@ -120,6 +117,9 @@ async def lifespan(app):
         compile_enabled=_config.compile_model,
     )
     _job_manager = JobManager(max_history=50)
+    # The token file exists before the first request, so the backend has a
+    # token to send.
+    auth_token()
 
     # Spin up the single worker that drains the job queue
     _job_queue = queue.Queue()
@@ -158,6 +158,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Every route but /health needs the token, the reads included: job lists
+# name files on this machine, and only the backend (which sends the token)
+# calls this service. The routes that act still check it themselves too.
+app.add_middleware(guard.BearerTokenASGIMiddleware, name=TOKEN_NAME)
+# Added last, so it runs first: a request addressed to a name that is not
+# this machine's (a page re-pointed at 127.0.0.1) is refused before the token
+# gate, CORS or any route sees it.
+app.add_middleware(guard.HostCheckASGIMiddleware)
 
 
 def _submit_watch_job(input_path: str):
@@ -605,22 +613,17 @@ def _send_callback(event: str, payload: dict):
 
 # --- Endpoints ---
 
-# SECURITY NOTE: /health is unauthenticated and returns the per-process
-# bootstrap auth token in the body. This is the handshake mechanism the main
-# Guaardvark backend uses to obtain credentials for the protected endpoints
-# (see backend/api/upscaling_api.py::_get_auth_token), so the field MUST stay
-# in the response. Because of this, port 8202 must remain bound to localhost
-# only — exposing this port externally hands out the bearer token for free
-# and lets anyone download/cancel/configure jobs.
+# Status only, and the one route open without the token (start.sh and the
+# Plugins page probe it). The token is never in a reply: the backend reads it
+# from data/.upscaling_internal_secret (service/auth.py), and the backend
+# relays this reply to browsers.
 @app.get("/health")
 def health():
-    result = get_health_status(
+    return get_health_status(
         model_loaded=_model_manager.current_model_name if _model_manager else None,
         active_jobs=_job_manager.active_job_count if _job_manager else 0,
         compile_enabled=_config.compile_model if _config else False,
     )
-    result["auth_token"] = _auth_token
-    return result
 
 
 @app.get("/models")

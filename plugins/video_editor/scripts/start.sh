@@ -90,9 +90,13 @@ echo "Plugin dir: $PLUGIN_ROOT"
 echo "Service port: $SERVICE_PORT"
 echo "Log: $LOG_FILE"
 
+# The service has no auth and every caller (the backend proxy, the music video
+# and render tasks) is on this host, so it listens on loopback only.
+# GUAARDVARK_VIDEO_EDITOR_HOST=0.0.0.0 in .env opens it to the LAN deliberately.
+BIND_HOST="${GUAARDVARK_VIDEO_EDITOR_HOST:-127.0.0.1}"
 cd "$PLUGIN_ROOT"
 PYTHONPATH="$PLUGIN_ROOT:$PYTHONPATH" \
-python -m uvicorn service.app:app --host 0.0.0.0 --port "$SERVICE_PORT" --workers 1 \
+python -m uvicorn service.app:app --host "$BIND_HOST" --port "$SERVICE_PORT" --workers 1 \
     --no-access-log \
     >> "$LOG_FILE" 2>&1 &
 

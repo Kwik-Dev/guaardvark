@@ -19,18 +19,31 @@ def _unwrap(data):
     return data.get("data", data) if isinstance(data, dict) else data
 
 
+def _session(session: str | None) -> str:
+    """The chat a lesson belongs to: the one named, else this CLI's latest chat."""
+    from llx.config import get_last_session_id
+
+    sid = session or get_last_session_id()
+    if not sid:
+        output.print_error("A lesson is attached to a conversation. Chat first (guaardvark chat or the REPL), "
+                           "or pass --session <id>.", code="NO_SESSION")
+        raise typer.Exit(1)
+    return sid
+
+
 @lessons_app.command("begin")
 def lessons_begin(
-    session: str = typer.Option(None, "--session", help="Chat session id"),
+    session: str = typer.Option(None, "--session", help="Chat session id (default: your latest chat)"),
+    title: str = typer.Option(None, "--title", "-t", help="A name for the lesson"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
     """Start a lesson bracket."""
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
-    body = {}
-    if session:
-        body["session_id"] = session
+    body = {"session_id": _session(session)}
+    if title:
+        body["title"] = title
     try:
         data = _unwrap(_client(server).post("/api/lessons/start", json=body))
         if json_out or output.is_pipe():
@@ -71,6 +84,7 @@ def lessons_end(
 
 @lessons_app.command("list")
 def lessons_list(
+    session: str = typer.Option(None, "--session", help="Chat session id (default: your latest chat)"),
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
@@ -78,15 +92,17 @@ def lessons_list(
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
     try:
-        data = _unwrap(_client(server).get("/api/lessons/active"))
+        data = _unwrap(_client(server).get("/api/lessons/active", session_id=_session(session)))
         if json_out or output.is_pipe():
             output.print_json({"status": "success", "data": data})
             return
-        if not data:
+        if not data or (isinstance(data, dict) and not data.get("active")):
             console.print("[llx.dim]No active lesson. /lessons begin to start one.[/llx.dim]")
             return
         if isinstance(data, dict):
-            output.print_kv({k: v for k, v in data.items() if not isinstance(v, (dict, list))}, title="Active lesson")
+            output.print_kv({k: v for k, v in data.items()
+                             if k not in ("success", "active") and not isinstance(v, (dict, list))},
+                            title="Active lesson")
         else:
             console.print(data)
     except LlxConnectionError as e:

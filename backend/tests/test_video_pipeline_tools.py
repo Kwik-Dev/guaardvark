@@ -152,8 +152,10 @@ def _no_dispatch_and_no_gpu(monkeypatch):
 @pytest.fixture
 def uploads_at_tmp(tmp_path, monkeypatch):
     """Treat tmp_path as the uploads directory so temp media counts as ours."""
+    from backend import config
     import backend.services.output_registration as oreg
     monkeypatch.setattr(oreg, "UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "UPLOAD_DIR", str(tmp_path))
     return tmp_path
 
 

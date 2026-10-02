@@ -67,7 +67,7 @@ Documentation lives in the README, `docs/ARCHITECTURE.md`, and inline code comme
 ### Prerequisites
 
 - Python 3.12+
-- Node.js 20+
+- Node.js 20.19+ or 22.12+
 - PostgreSQL 14+ (auto-installed by `start.sh`)
 - Redis 5.0+ (auto-installed by `start.sh`)
 - NVIDIA GPU recommended (not required for non-generation features)
@@ -249,16 +249,16 @@ Nothing else is.
 committed.
 
 `scripts/check_portable.sh --staged` scans the lines a commit would add, and is the
-gate that actually prevents a leak. **Install it once per clone:**
+gate that actually prevents a leak. **Install the hooks once per clone:**
 
 ```bash
-ln -sf ../../scripts/pre-commit "$(git rev-parse --git-common-dir)/hooks/pre-commit"
+scripts/install_hooks.sh
 ```
 
-Resolve the path rather than writing `.git/hooks` directly: in a git worktree `.git` is
-a file, and every worktree shares the main clone's single hooks directory — so a naive
-install from a worktree rewrites the main clone's hook and breaks when that worktree is
-removed.
+It works from a worktree too: there `.git` is a file and every worktree shares the main
+clone's single hooks directory, which the installer resolves for you. Linking into
+`.git/hooks` by hand from a worktree rewrites the main clone's hook and breaks when that
+worktree is removed.
 
 Identifiers specific to your own machine belong in the untracked
 `scripts/.portable-local-patterns`, one `pattern<TAB>explanation` per line. The guard
@@ -278,6 +278,44 @@ The riskiest moment is adding a **new** file, not editing a tracked one. Run
 If a check fires, fix the content — don't widen the allowlist and don't reach for
 `--no-verify`. An allowlist entry is permanent permission for an entire path.
 
+### Code coming in
+
+The portability guard watches what leaves a clone. `scripts/check_inbound.py` reads what
+arrives: every pull request is checked by the base branch's copy of it, which annotates
+the lines a maintainer should read before merging. It reads only the lines you add, so
+existing code never trips it. The check reports; it does not fail your pull request.
+
+What it points out, so nothing in a review is a surprise:
+
+- **Guards and policy:** changes to either guard, to CI workflows (triggers, permissions,
+  secrets, actions), to auth and MCP policy, and anything that shortens a protected list.
+- **Agent instructions:** `AGENTS.md`, skills, rule and lesson bundles. These steer agents,
+  so they are read as instructions, not prose.
+- **Network:** hosted AI or telemetry clients, new outside hosts, turning off TLS checks.
+  Guaardvark never contacts an outside host except behind a visible Install.
+- **Running code:** `shell=True`, `eval`/`exec`, unpickling, `torch.load` without
+  `weights_only=True`, `trust_remote_code=True`, `curl | sh`.
+- **Hidden text:** bidirectional and invisible characters, look-alike identifiers, long
+  encoded strings.
+- **Dependencies:** new packages, installs from a repository or URL, other package
+  indexes, npm install scripts.
+- **File shape:** symlinks out of the repository, pickle files, binaries among source.
+
+Run it on your branch before opening a pull request:
+
+```bash
+python3 scripts/check_inbound.py scan --range main...HEAD
+```
+
+A test that needs trigger text keeps it in a data file (see
+`backend/tests/inbound_guard/cases.json`), so the test itself reads clean.
+
+In your own clone the same guard can watch merges and fetches. `scripts/install_hooks.sh`
+installs it switched off; `git config inboundguard.mode observe` records what each fetch,
+merge or cherry-pick brought to `main`, and `enforce` also refuses a merge it would hold
+until you approve that exact change. `python3 scripts/check_inbound.py log` shows what
+it has seen.
+
 ---
 
 ## Pull Request Guidelines
@@ -287,10 +325,10 @@ If a check fires, fix the content — don't widen the allowlist and don't reach 
 - **Include screenshots** for UI changes.
 - **Keep PRs reviewable** — under 500 lines of diff when possible.
 - **Don't break the build.** Run `npm run lint` and `python3 run_tests.py` before pushing.
-- **Install the pre-commit hook** once per clone — see
-  [Portability and Secrets](#portability-and-secrets). It catches machine paths and
-  secrets before they reach a commit, which is the only point at which they are still
-  cheap to remove.
+- **Install the hooks** once per clone with `scripts/install_hooks.sh` — see
+  [Portability and Secrets](#portability-and-secrets). The pre-commit hook catches
+  machine paths and secrets before they reach a commit, which is the only point at
+  which they are still cheap to remove.
 - **Sign the CLA.** On your first PR a bot will ask you to read the
   [Contributor License Agreement](CLA.md) and post one line as a comment. It takes a minute
   and you only do it once. You keep the copyright to your work — the CLA grants the project a

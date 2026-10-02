@@ -45,7 +45,7 @@ class LlxStreamer:
 
     def _connect_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
-        api_key = get_api_key()
+        api_key = get_api_key(self.server_url)
         if api_key:
             headers["X-API-Key"] = api_key
         return headers
@@ -279,7 +279,7 @@ class LlxStreamer:
         """Subscribe to job progress updates via Socket.IO."""
         self._done.clear()
 
-        @self.sio.on("progress")
+        @self.sio.on("job_progress")
         def handle_progress(data):
             on_progress(data)
             status = data.get("status", "")
@@ -353,7 +353,8 @@ def _set_title(title: str):
 class ChatRenderer:
     """Renders streaming chat responses with live markdown and tool-call UI."""
 
-    def __init__(self):
+    def __init__(self, server_url: str | None = None):
+        self.server_url = server_url
         self._console = make_console()
         self._tokens: list[str] = []
         self._tool_lines: list[str] = []
@@ -430,10 +431,24 @@ class ChatRenderer:
         full_text = "".join(self._tokens)
         if full_text.strip():
             self._console.print(Text(f"{_ICON_ASSISTANT} ", style="llx.brand"), end="")
-            self._console.print(Markdown(full_text))
+            # The marker takes two columns of the first line; laid out at full
+            # width, that line's last word broke mid-word at the window edge.
+            self._console.print(Markdown(full_text), width=max(20, self._console.width - 2))
             hint = _maybe_web_access_hint(full_text)
             if hint:
                 self._console.print(f"[llx.dim]{hint}[/llx.dim]")
+
+        # Pictures the turn made are drawn once the live display has stopped,
+        # so its redraws cannot overwrite them.
+        images = (self._complete_data or {}).get("generated_images") if isinstance(self._complete_data, dict) else None
+        if images:
+            try:
+                from llx.config import get_server_url
+                from llx.media_preview import show_generated
+
+                show_generated(images, self.server_url or get_server_url(), self._console)
+            except Exception:
+                pass
 
         # Print error if any
         if self._error:

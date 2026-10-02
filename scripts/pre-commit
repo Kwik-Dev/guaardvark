@@ -4,9 +4,8 @@
 # or secrets. A push cannot be taken back, so this is the last cheap place to
 # catch them.
 #
-# Install. Worktrees share the main repo's single hooks directory, and their
-# .git is a file, so resolve the target rather than writing .git/hooks directly:
-#   ln -sf ../../scripts/pre-commit "$(git rev-parse --git-common-dir)/hooks/pre-commit"
+# Install with scripts/install_hooks.sh, which links it into the hooks directory
+# every worktree shares.
 #
 # Bypass for a commit you are certain about:
 #   git commit --no-verify
@@ -15,4 +14,14 @@ set -uo pipefail
 # Resolved from git, not from BASH_SOURCE: git invokes this through the
 # .git/hooks symlink, which bash does not follow.
 repo_root="$(git rev-parse --show-toplevel)" || exit 1
+
+# A merge that stopped (on conflicts, or because the inbound guard held it) is
+# finished with `git commit`, which runs this hook instead of pre-merge-commit.
+# Give the inbound guard the same say here; its hook lets git through on any
+# fault of its own.
+inbound_hook="$(git rev-parse --git-path hooks)/pre-merge-commit"
+if [ -f "$(git rev-parse --git-path MERGE_HEAD)" ] && [ -x "$inbound_hook" ]; then
+    "$inbound_hook" || exit 1
+fi
+
 exec "$repo_root/scripts/check_portable.sh" --staged

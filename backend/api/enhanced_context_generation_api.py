@@ -87,7 +87,8 @@ def generate_enhanced_csv_endpoint():
                         "output_filename": result.get("output_filename"),
                         "pages_generated": result.get("pages_generated"),
                         "context_utilized": result.get("context_used"),
-                        "competitor_analyzed": bool(competitor_url),
+                        "competitor_analyzed": bool(competitor_url) and not result.get("competitor_skipped"),
+                        "competitor_skipped": result.get("competitor_skipped"),
                         "keywords_targeted": len(target_keywords),
                         "generation_metadata": result.get("generation_metadata", {})
                     }
@@ -151,6 +152,7 @@ def preview_generation_context():
                     "entity_relationships_summary": context.entity_relationships.get("summary", ""),
                     "competitor_content": {
                         "url": context.competitor_content.get("url", ""),
+                        "skipped": context.competitor_content.get("skipped"),
                         "title": context.competitor_content.get("title", ""),
                         "keywords_found": len(context.competitor_content.get("keywords", [])),
                         "products_found": len(context.competitor_content.get("products", []))

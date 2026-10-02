@@ -137,4 +137,6 @@ def test_run_tool_in_backend_returns_the_tool_result_without_internal_arguments(
     }, 0)
     result = run_tool_in_backend("generate_image", {"prompt": "x", "_agent_context": {"session": 1}})
     assert (result.success, result.error, result.metadata) == (False, "GPU busy", {"a": 1})
-    assert json.loads(requests[-1][3]) == {"tool_name": "generate_image", "parameters": {"prompt": "x"}}
+    assert json.loads(requests[-1][3]) == {
+        "tool_name": "generate_image", "parameters": {"prompt": "x"}, "caller_transport": "mcp",
+    }

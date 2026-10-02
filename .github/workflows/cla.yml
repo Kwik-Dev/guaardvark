@@ -22,11 +22,14 @@ jobs:
       # pull_request_target runs the base branch's workflow, never the PR's
       # code, and nothing here checks the PR out — which is what makes the
       # write permissions above safe.
+      # The sign line is matched with contains(): a pasted line often carries a
+      # trailing newline, and an exact match skips it. The action itself then
+      # compares each comment trimmed, so only the exact sentence records.
       - name: Check or record signature
         if: >-
           github.event_name == 'pull_request_target' ||
           github.event.comment.body == 'recheck' ||
-          github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
+          contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

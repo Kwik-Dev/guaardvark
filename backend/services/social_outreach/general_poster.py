@@ -19,7 +19,9 @@ from __future__ import annotations
 import logging
 import random
 import time
-from typing import Optional
+from typing import Callable, Optional
+
+from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,7 @@ def post_via_agent_loop(
     *,
     action: str = "comment",
     anchor_hint: Optional[str] = None,
+    before_submit: Optional[Callable[[], bool]] = None,
 ) -> tuple[bool, str]:
     """Post `text` on `target_url` by driving the general see-think-act loop.
 
@@ -90,6 +93,10 @@ def post_via_agent_loop(
     instruction. The loop is asked only to CLICK the composer and the submit
     control; the text is typed via screen.type_text(), bypassing the prompt (same
     hardening as self_share._submit_post_via_servo).
+
+    ``before_submit`` is called once the text is typed and immediately before
+    the step that publishes; when it returns False nothing is published and
+    the reason is ``transitions.WITHDRAWN_BEFORE_SUBMIT``.
     """
     from backend.services.agent_control_service import get_agent_control_service
     from backend.services.local_screen_backend import LocalScreenBackend
@@ -148,6 +155,8 @@ def post_via_agent_loop(
     _human_pause()
 
     # 5) Submit.
+    if before_submit is not None and not before_submit():
+        return False, WITHDRAWN_BEFORE_SUBMIT
     submit_task = (
         f"On this page, click the button that publishes/submits the {action} "
         "(e.g. Post, Reply, Comment, Tweet). Then say done."

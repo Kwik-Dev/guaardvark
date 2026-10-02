@@ -34,8 +34,10 @@ Setup, one line each:
 
 - Claude Code: `/plugin marketplace add guaardvark/guaardvark` then `/plugin install guaardvark@guaardvark`,
   or from the checkout `python -m backend.mcp install --skills`.
-- Cursor, Codex, OpenClaw, Gemini CLI, Zed: `python -m backend.mcp install` from the checkout
-  writes the MCP entry; the skills are read from `.agents/skills/` in this repository.
+- Codex, Cursor, Grok, Antigravity, opencode, Gemini CLI, Zed, Claude Desktop:
+  `python -m backend.mcp install` (or `guaardvark mcp install`) from the checkout writes the MCP
+  entry. Any other MCP client can launch `guaardvark mcp serve`. The skills are read from
+  `.agents/skills/` in this repository.
 - Backend URL: `GUAARDVARK_URL`, default `http://localhost:5000` (macOS: 5055).
 
 Changing Guaardvark itself: `CONTRIBUTING.md`, and section 12 of the guide.

@@ -33,6 +33,16 @@ Optional flags:
   the defaults (`venv`, `node_modules`, `__pycache__`, `ComfyUI`, `voice`,
   `.swarm-worktrees`, `data`, `logs`, …).
 
+## Which files are surveyed
+
+Every analyzer gets its file list from `core.source_files`. In a git checkout
+that is what `git ls-files --cached --others --exclude-standard` lists:
+tracked files plus untracked files git does not ignore. Scratch folders,
+worktree copies and anything else in `.gitignore` or `.git/info/exclude` are
+not mapped, and a folder git ignores maps as empty. Outside a git checkout, or
+when git is missing or does not answer, the folder is walked instead. The
+directory names above are skipped in both cases.
+
 ## Library
 
 ```python

@@ -211,14 +211,16 @@ _linux_ensure_node_via_binary() {
     local node_dir="$HOME/.local/node"
     local node_bin="$node_dir/bin/node"
     local npm_bin="$node_dir/bin/npm"
-    if [ -x "$node_bin" ] && [ -x "$npm_bin" ]; then
+    # A Node left here by an earlier run is reused only while it meets the
+    # frontend's floor; an older one is replaced.
+    if [ -x "$node_bin" ] && [ -x "$npm_bin" ] && node_version_supported "$("$node_bin" --version 2>/dev/null)"; then
         export PATH="$node_dir/bin:$PATH"
         NPM_CMD=npm
         export NPM_CMD
         return 0
     fi
-    vader_info "Installing Node.js 20 LTS to ~/.local/node (no sudo required)..."
-    local ver="v20.18.0"
+    vader_info "Installing Node.js 22 LTS to ~/.local/node (no sudo required)..."
+    local ver="v22.22.1"
     local arch="linux-x64"
     case "$(uname -m)" in
         aarch64|arm64) arch="linux-arm64" ;;
@@ -234,6 +236,9 @@ _linux_ensure_node_via_binary() {
     rm -rf "$node_dir"
     mv "$HOME/.local/node-${ver}-${arch}" "$node_dir"
     export PATH="$node_dir/bin:$PATH"
+    # node_modules was installed for the previous Node; start.sh reinstalls it.
+    GUAARDVARK_NODE_REPLACED=1
+    export GUAARDVARK_NODE_REPLACED
     if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
         NPM_CMD=npm
         export NPM_CMD
@@ -244,17 +249,15 @@ _linux_ensure_node_via_binary() {
 }
 
 ensure_node_npm() {
-    # User-local installs from prior runs
-    if [ -d "$HOME/.local/node/bin" ]; then
+    # A user-local install from a prior run goes first, while the frontend can
+    # still build with it; an older one must not shadow a good system Node.
+    if [ -x "$HOME/.local/node/bin/node" ] && node_version_supported "$("$HOME/.local/node/bin/node" --version 2>/dev/null)"; then
         export PATH="$HOME/.local/node/bin:$PATH"
     fi
     # Require both node and npm — reject PATH entries that only provide node (e.g. IDE bundles)
     local node_ok=0 npm_ok=0
     if command -v node >/dev/null 2>&1; then
-        local ver major
-        ver=$(node --version 2>/dev/null | sed 's/^v//')
-        major=${ver%%.*}
-        [ -n "$major" ] && [ "$major" -ge 20 ] 2>/dev/null && node_ok=1
+        node_version_supported && node_ok=1
     fi
     if command -v npm >/dev/null 2>&1; then
         npm_ok=1
@@ -265,12 +268,24 @@ ensure_node_npm() {
         return 0
     fi
 
+    # A Node that is present but too old is left in place: apt rarely has a
+    # newer one (Ubuntu 24.04 ships 18), and replacing a NodeSource or nvm
+    # install is the user's call. A supported Node goes in ~/.local/node instead.
+    if [ "$node_ok" -eq 0 ] && command -v node >/dev/null 2>&1; then
+        vader_warn "Node.js $(node --version) is older than the frontend build needs ($GUAARDVARK_NODE_FLOOR_TEXT)."
+        if _linux_ensure_node_via_binary; then
+            return 0
+        fi
+        vader_error "Could not install Node.js to ~/.local/node. Upgrade Node.js to $GUAARDVARK_NODE_FLOOR_TEXT and re-run."
+        return 1
+    fi
+
     if ! command -v apt-get >/dev/null 2>&1 || ! _linux_sudo_available; then
         if _linux_ensure_node_via_binary; then
             return 0
         fi
-        vader_error "Node.js 20+ and npm are required but not found, and apt/sudo is unavailable."
-        vader_info "Install manually: sudo apt-get install -y nodejs npm"
+        vader_error "Node.js $GUAARDVARK_NODE_FLOOR_TEXT and npm are required but not found, and apt/sudo is unavailable."
+        vader_info "Install Node.js 22 LTS from https://nodejs.org and re-run."
         return 1
     fi
 
@@ -278,12 +293,9 @@ ensure_node_npm() {
     sudo apt-get update -qq >/dev/null 2>&1 || true
     if sudo apt-get install -y nodejs npm >/dev/null 2>&1; then
         # Re-check the VERSION, not just presence: Ubuntu 24.04's apt ships Node 18,
-        # which fails the >=20 gate in start.sh. Without this the function reports
+        # which fails the frontend's Node floor. Without this the function reports
         # success, the binary fallback below is never reached, and start.sh exits.
-        local apt_ver apt_major
-        apt_ver=$(node --version 2>/dev/null | sed 's/^v//')
-        apt_major=${apt_ver%%.*}
-        if command -v npm >/dev/null 2>&1 && [ -n "$apt_major" ] && [ "$apt_major" -ge 20 ] 2>/dev/null; then
+        if command -v npm >/dev/null 2>&1 && node_version_supported; then
             NPM_CMD=npm
             export NPM_CMD
             vader_success "Node.js $(node --version) and npm ready"

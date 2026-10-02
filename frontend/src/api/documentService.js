@@ -1,6 +1,7 @@
 // frontend/src/api/documentService.js
 // Version 1.1: Added document usage and context analytics endpoints.
 import { BASE_URL, handleResponse } from "./apiClient";
+import { needsCredentials } from "./apiAuth";
 import { API_TIMEOUT_GENERATION } from "../config/constants";
 
 export const getDocuments = async (queryParams = {}) => {
@@ -294,7 +295,11 @@ export const uploadFile = async (
     };
 
     // Configure request
-    xhr.open("POST", `${BASE_URL}/docs/upload`);
+    const uploadUrl = `${BASE_URL}/docs/upload`;
+    xhr.open("POST", uploadUrl);
+    // Same-origin XHR carries the sign-in cookie by itself; a backend the
+    // build names on another origin needs it asked for.
+    if (needsCredentials(uploadUrl)) xhr.withCredentials = true;
     xhr.timeout = API_TIMEOUT_GENERATION;
 
     // Handle request cancellation via AbortSignal

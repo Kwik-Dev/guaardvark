@@ -13,7 +13,6 @@ Execution model: dependency-aware DAG execution.
 """
 
 import logging
-import re
 from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 import json
@@ -122,12 +121,8 @@ class OrchestratorService:
             return None
 
         text = str(content).strip()
-        text = re.sub(
-            r"<think>.*?</think>",
-            "",
-            text,
-            flags=re.DOTALL | re.IGNORECASE,
-        ).strip()
+        from backend.utils.inline_reasoning import split_inline_reasoning
+        text = split_inline_reasoning(text)[1]
 
         if "```json" in text:
             text = text.split("```json", 1)[1].split("```", 1)[0].strip()

@@ -214,9 +214,11 @@ def llm_ready_endpoint():
     return jsonify({"ready": ready, "model": model}), 200
 
 
-@diagnostics_bp.route("/test-llm", methods=["GET"])
+# POST only: it loads the model and runs it, and a GET can be sent by any
+# page (an <img>) without asking first.
+@diagnostics_bp.route("/test-llm", methods=["POST"])
 def test_llm_endpoint():
-    logger.info("API: Received GET /api/meta/test-llm request")
+    logger.info("API: Received POST /api/meta/test-llm request")
 
     llm = None
     try:
@@ -829,13 +831,17 @@ def _determine_overall_status(results: dict) -> str:
         return "WARNING"
 
 
-@diagnostics_bp.route("/diagnostics/export", methods=["GET"])
+# POST only: gathering diagnostics runs the model twice and writes probe files
+# (and, with include_system, a copy of the data), which a GET from any page
+# could otherwise start.
+@diagnostics_bp.route("/diagnostics/export", methods=["POST"])
 def export_diagnostics():
-    logger.info("API: Received GET /api/meta/diagnostics/export request")
+    logger.info("API: Received POST /api/meta/diagnostics/export request")
     if not local_imports_ok or not llama_index_available:
         return jsonify({"error": "Core components unavailable for export."}), 503
 
-    include_system = request.args.get("include_system") in ("1", "true", "True")
+    body = request.get_json(silent=True) or {}
+    include_system = str(body.get("include_system", request.args.get("include_system"))) in ("1", "true", "True")
 
     results = _gather_diagnostics()
     if include_system:
@@ -1048,15 +1054,21 @@ def restore_diagnostics():
     return jsonify({"message": "Restore completed."}), 200
 
 
-@diagnostics_bp.route("/quality-scorecard", methods=["GET"])
+@diagnostics_bp.route("/quality-scorecard", methods=["POST"])
 def get_quality_scorecard():
-    """Structured quality scorecard for KPIs, CI, and automation (see docs/quality/)."""
+    """Structured quality scorecard for KPIs, CI, and automation (see docs/quality/).
+
+    POST only: it runs the RAG assessment (retrieval, answers and judging on
+    the model) and probes ``base_url``, which a GET from any page could
+    otherwise start. ``base_url`` comes from the JSON body or the query string.
+    """
     try:
         from flask import current_app
 
         from backend.services.quality_scorecard import build_scorecard
 
-        base_url = request.args.get("base_url")
+        body = request.get_json(silent=True) or {}
+        base_url = body.get("base_url") or request.args.get("base_url")
         payload = build_scorecard(
             app=current_app._get_current_object(),
             public_base_url=base_url,

@@ -208,8 +208,25 @@ cd "$PLUGIN_ROOT"
 # Xet-backed HF transfers flake on this network (observed: partial ACE-Step
 # snapshot, SAO CAS client errors) — classic HTTP downloads are reliable.
 export HF_HUB_DISABLE_XET=1
+# Nothing leaves the machine during generation. Kokoro and Chatterbox call
+# hf_hub_download on their own (voice packs, model files), which contacts
+# huggingface.co on every cold load and downloads whatever is missing; ACE-Step
+# falls back to snapshot_download when a snapshot is partial. With the Hub
+# client offline in this process and its children (the ACE-Step subprocess), a
+# missing file is an error naming Audio Studio → Manage models. Installs run in
+# the backend process behind that Install button, which this does not touch.
+# Same set as LOCAL_ONLY_ENV in backend/services/comfyui_launch_flags.py.
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_DISABLE_TELEMETRY=1
+export DO_NOT_TRACK=1
+# The service has no auth and every caller (the backend proxy, generation
+# history, the GPU policy, the swarm Editor) is on this host, so it listens on
+# loopback only. GUAARDVARK_AUDIO_FOUNDRY_HOST=0.0.0.0 in .env opens it to the
+# LAN deliberately, e.g. for another install driving this box's audio.
+BIND_HOST="${GUAARDVARK_AUDIO_FOUNDRY_HOST:-127.0.0.1}"
 PYTHONPATH="$PLUGIN_ROOT:$PYTHONPATH" \
-python -m uvicorn service.app:app --host 0.0.0.0 --port "$SERVICE_PORT" --workers 1 \
+python -m uvicorn service.app:app --host "$BIND_HOST" --port "$SERVICE_PORT" --workers 1 \
     >> "$LOG_FILE" 2>&1 &
 
 PID_DIR="$PROJECT_ROOT/pids"
@@ -221,7 +238,7 @@ echo "Audio Foundry started (PID: $(cat "$PID_DIR/audio_foundry.pid"))"
 # (all models load lazily) so this should normally be a few seconds.
 echo "Waiting for health endpoint on port $SERVICE_PORT..."
 for i in $(seq 1 30); do
-    if curl -sf "http://localhost:$SERVICE_PORT/health" >/dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:$SERVICE_PORT/health" >/dev/null 2>&1; then
         echo "Audio Foundry health endpoint ready"
         exit 0
     fi

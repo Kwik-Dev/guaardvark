@@ -61,6 +61,30 @@ def get_web_access() -> bool:
     return allow
 
 
+def web_access_block_reason(action: str) -> Optional[str]:
+    """None when web access (Settings, allow_web_search; off by default) is on;
+    otherwise the error to report, naming ``action``.
+
+    Everything that reaches the internet on a person's or a model's behalf
+    asks this: the web tools, research tasks, the outreach recon search. In
+    the MCP server process, which has no Flask app, the backend is asked.
+    """
+    disabled = f"Web access is disabled. Enable it in Settings to {action}."
+    try:
+        if has_app_context():
+            return None if get_web_access() else disabled
+    except Exception:
+        pass
+    from backend.utils.backend_http import BackendError, in_mcp_process, request_json
+    if in_mcp_process():
+        try:
+            data = request_json("GET", "/api/settings/web_access").data or {}
+        except BackendError as e:
+            return f"Could not check whether web access is enabled: {e}"
+        return None if data.get("allow_web_search") else disabled
+    return disabled
+
+
 def get_llm_debug() -> bool:
     """Return True if LLM debug logging is enabled."""
     if not db or not Setting:
@@ -131,6 +155,8 @@ ENV_VAR_MAP = {
     "media_cast_train_base": "GUAARDVARK_CAST_TRAIN_BASE",
     "media_max_quality_model": "GUAARDVARK_MAX_QUALITY_MODEL",
     "confine_tool_paths": "GUAARDVARK_CONFINE_TOOL_PATHS",
+    # The same variable git hooks read, so one line in .env sets both sides.
+    "inbound_guard_mode": "GUAARDVARK_INBOUND_GUARD",
 }
 
 _BOOL_TRUTHY = {"true", "1", "yes"}

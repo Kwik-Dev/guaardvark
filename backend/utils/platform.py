@@ -98,6 +98,12 @@ def screen_agent_available() -> bool:
     return os_name() == "Linux"
 
 
+def media_player_available() -> bool:
+    """The media tools reach players over D-Bus MPRIS2 (gdbus), set volume with
+    ALSA's amixer and play in a Linux VLC build: Linux only."""
+    return os_name() == "Linux"
+
+
 # ── LoRA trainer time budgets ─────────────────────────────────────────────────
 # One platform decision, next to the probes above, so the trainer daemon caps,
 # the Celery task limits, and the stuck-training reaper cutoff cannot drift

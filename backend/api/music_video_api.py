@@ -13,6 +13,7 @@ from flask import Blueprint, request, jsonify, send_file
 
 from backend.models import db, MusicVideo, Project, Document
 from backend.services.music_video_service import MusicVideoService
+from backend.services.pipeline_service import dispatch_report
 from backend.services.gpu_resource_policy import gpu_session, free_comfyui_vram
 from backend.services.job_types import JobKind
 from backend.services.job_operation_gate import GpuBusyError
@@ -169,15 +170,13 @@ def create():
     )
 
     # Kick the pipeline: draft → analyzing, then dispatch the analyzer. A dispatch
-    # failure is non-fatal — state moved forward so boot resume_all picks it up.
+    # failure is reported, not fatal: the row exists and boot resume_all picks it up.
+    dispatch = {}
     if svc.advance_if_predecessor(mv.id, expected_predecessor="draft"):
-        try:
-            svc.dispatch_agent(mv.id, "analyzer")
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"Analyzer dispatch failed for music_video {mv.id}: {e}")
+        dispatch = dispatch_report(svc.try_dispatch(mv.id, "analyzer"))
         db.session.refresh(mv)
 
-    return jsonify(_mv_dict(mv)), 201
+    return jsonify({**_mv_dict(mv), **dispatch}), 201
 
 
 @bp.get("")
@@ -265,14 +264,12 @@ def approve(mv_id):
         log.warning(f"Music-video preflight soft-failed (proceeding): {_pf}")
 
     svc = MusicVideoService(db.session)
+    dispatch = {}
     if svc.advance_if_predecessor(mv_id, expected_predecessor="awaiting_approval"):
-        try:
-            svc.dispatch_agent(mv_id, "clip_generator")
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"Clip generator dispatch failed for music_video {mv_id}: {e}")
+        dispatch = dispatch_report(svc.try_dispatch(mv_id, "clip_generator"))
         db.session.refresh(mv)
 
-    return jsonify(_mv_dict(mv))
+    return jsonify({**_mv_dict(mv), **dispatch})
 
 
 # --- Pre-approval plan inspection & editing -------------------------------
@@ -350,11 +347,12 @@ def update_plan(mv_id):
     return jsonify(_mv_dict(updated))
 
 
-def _restart_analysis(mv_id: int) -> MusicVideo | None:
-    """Move a music video back to analyzing and dispatch the analyzer agent."""
+def _restart_analysis(mv_id: int) -> tuple[MusicVideo | None, str | None]:
+    """Move a music video back to analyzing and dispatch the analyzer agent.
+    Returns the row and, when the analyzer was not queued, why."""
     mv = db.session.get(MusicVideo, mv_id)
     if mv is None:
-        return None
+        return None, None
     mv.current_stage = "analyzing"
     mv.status = "analyzing"
     mv.error_blob = None
@@ -362,13 +360,9 @@ def _restart_analysis(mv_id: int) -> MusicVideo | None:
         mv.cut_plan = None
         mv.clips = []
     db.session.commit()
-    svc = MusicVideoService(db.session)
-    try:
-        svc.dispatch_agent(mv_id, "analyzer")
-    except Exception as e:  # noqa: BLE001
-        log.warning("Analyzer dispatch failed for music_video %s: %s", mv_id, e)
+    warning = MusicVideoService(db.session).try_dispatch(mv_id, "analyzer")
     db.session.refresh(mv)
-    return mv
+    return mv, warning
 
 
 @bp.post("/<int:mv_id>/analyze")
@@ -391,13 +385,9 @@ def start_analysis(mv_id):
         return jsonify({"error": f"Cannot analyze while at stage '{stage}'"}), 409
 
     if stage == "analyzing" and status == "analyzing" and not has_plan:
-        svc = MusicVideoService(db.session)
-        try:
-            svc.dispatch_agent(mv_id, "analyzer")
-        except Exception as e:  # noqa: BLE001
-            log.warning("Analyzer re-dispatch failed for music_video %s: %s", mv_id, e)
+        warning = MusicVideoService(db.session).try_dispatch(mv_id, "analyzer")
         db.session.refresh(mv)
-        return jsonify(_mv_dict(mv))
+        return jsonify({**_mv_dict(mv), **dispatch_report(warning)})
 
     needs_analysis = (
         not has_plan
@@ -411,10 +401,10 @@ def start_analysis(mv_id):
             "error": "Analysis already complete — approve the plan or use re-plan to re-render."
         }), 409
 
-    mv = _restart_analysis(mv_id)
+    mv, warning = _restart_analysis(mv_id)
     if mv is None:
         return jsonify({"error": "not_found"}), 404
-    return jsonify(_mv_dict(mv))
+    return jsonify({**_mv_dict(mv), **dispatch_report(warning)})
 
 
 @bp.post("/<int:mv_id>/replan")
@@ -430,10 +420,10 @@ def replan(mv_id):
 
     has_plan = bool(mv.cut_plan and len(mv.cut_plan) > 0)
     if not has_plan:
-        mv = _restart_analysis(mv_id)
+        mv, warning = _restart_analysis(mv_id)
         if mv is None:
             return jsonify({"error": "not_found"}), 404
-        return jsonify(_mv_dict(mv))
+        return jsonify({**_mv_dict(mv), **dispatch_report(warning)})
 
     if not (mv.current_stage in ("complete",) or (mv.status or "").startswith("failed") or (mv.status or "") == "cancelled" or mv.current_stage == "cancelled"):
         return jsonify({
@@ -559,7 +549,17 @@ def generate_storyboards(mv_id):
     db.session.commit()
 
     from backend.celery_app import celery
-    task = celery.send_task("music_video.run_storyboard_generator", args=[mv_id, force])
+    from backend.celery_dispatch import TaskNotStarted
+    try:
+        task = celery.send_task("music_video.run_storyboard_generator", args=[mv_id, force])
+    except TaskNotStarted as e:
+        # Nothing will clear the flag, which would lock the button for the TTL.
+        settings = dict(mv.settings_json or {})
+        settings["storyboard_generating"] = False
+        settings["storyboard_error"] = str(e)
+        mv.settings_json = settings
+        db.session.commit()
+        raise
     return jsonify({
         "task_id": task.id,
         "mv_id": mv_id,

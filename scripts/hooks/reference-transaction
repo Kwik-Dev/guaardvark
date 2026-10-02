@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# Reference-transaction hook: after a watched ref moves (a fetch updating
+# origin/main, a merge, pull or cherry-pick landing on main), record what it
+# brought in and print a line when something should be read.
+#
+# Only the "committed" state is used. Git ignores this hook's exit status there,
+# so nothing here can stop a commit, fetch or checkout in any worktree. Watched
+# refs: `git config --add inboundguard.ref <glob>`, default main and origin/main.
+set -u
+if [ "${1:-}" != committed ]; then cat >/dev/null; exit 0; fi
+mode="${GUAARDVARK_INBOUND_GUARD:-$(git config --get inboundguard.mode)}"
+case "$mode" in ""|off) cat >/dev/null; exit 0 ;; esac
+
+wanted="$(git config --get-all inboundguard.ref)"
+[ -n "$wanted" ] || wanted=$'refs/heads/main\nrefs/remotes/origin/main'
+updates=""
+while read -r old new ref; do
+    while IFS= read -r pattern; do
+        # shellcheck disable=SC2254  # the pattern is a glob on purpose
+        case "$ref" in $pattern) updates+="$old $new $ref"$'\n'; break ;; esac
+    done <<< "$wanted"
+done
+[ -n "$updates" ] || exit 0
+
+engine="$(git rev-parse --git-common-dir)/inbound-guard/engine/check_inbound.py"
+command -v python3 >/dev/null 2>&1 && [ -f "$engine" ] || exit 0
+printf '%s' "$updates" | python3 "$engine" hook reference-transaction committed
+exit 0

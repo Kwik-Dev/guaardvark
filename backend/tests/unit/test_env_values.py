@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import stat
+
 import pytest
 
 from backend import profiles as P
@@ -32,6 +34,16 @@ def test_creates_the_file_and_terminates_a_missing_newline(tmp_path):
     env.write_text("A=1")
     P.set_env_value("X_KEY", "v", tmp_path)
     assert env.read_text() == "A=1\nX_KEY=v\n"
+
+
+def test_a_new_file_is_private_and_an_existing_one_keeps_its_mode(tmp_path):
+    env = tmp_path / ".env"
+    P.set_env_value("GUAARDVARK_API_KEY", "k", tmp_path)
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    env.chmod(0o640)
+    P.set_env_value("GUAARDVARK_API_KEY", "k2", tmp_path)
+    assert stat.S_IMODE(env.stat().st_mode) == 0o640
+    assert not (tmp_path / ".env.tmp").exists()
 
 
 def test_rejects_bad_keys_and_multiline_values(tmp_path):

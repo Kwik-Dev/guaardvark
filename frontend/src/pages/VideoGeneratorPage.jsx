@@ -77,6 +77,9 @@ import {
   snapDimensions,
   fitAreaToRatio,
 } from "../constants/videoGeneratorPresets";
+import QualityFlagsPill from "../components/videogen/QualityFlagsPill";
+import RenderFailureNote from "../components/videogen/RenderFailureNote";
+import { refusalText } from "../utils/renderFailure";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
 import { videoGenStageLabel } from "../components/videogen/stageLabels";
@@ -546,6 +549,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // The capability record the registry declares for the selected model
   // (modes, audio, cfg, step floor, speed profiles, style embeddings).
   const modelCaps = useMemo(() => modelMeta[model]?.capabilities || null, [model, modelMeta]);
+  // Prompt styles the model offers; a style its registry entry withholds is
+  // not listed, and a selection it withholds falls back to the first offered.
+  const offeredStyles = modelCaps?.prompt_styles || null;
+  useEffect(() => {
+    if (offeredStyles && !offeredStyles.includes(promptStyle)) {
+      setPromptStyle(offeredStyles[0] || "none");
+    }
+  }, [offeredStyles, promptStyle]);
   const activeSpeedProfile = useMemo(() => {
     const profiles = modelCaps?.speed_profiles;
     if (!profiles) return null;
@@ -1313,7 +1324,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
-        setError(formatUiError(errorData.error || errorData.message) || `Failed to queue batch: HTTP ${res.status}`);
+        setError(refusalText(errorData) || `Failed to queue batch: HTTP ${res.status}`);
         return;
       }
 
@@ -2548,9 +2559,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   <FormControl size="small" sx={{ minWidth: 180 }}>
                     <InputLabel>Prompt style</InputLabel>
                     <Select value={promptStyle} onChange={(e) => setPromptStyle(e.target.value)} label="Prompt style">
-                      {Object.entries(PROMPT_STYLES).map(([key, preset]) => (
-                        <MenuItem key={key} value={key}>{preset.label}</MenuItem>
-                      ))}
+                      {Object.entries(PROMPT_STYLES)
+                        .filter(([key]) => !offeredStyles || offeredStyles.includes(key))
+                        .map(([key, preset]) => (
+                          <MenuItem key={key} value={key}>{preset.label}</MenuItem>
+                        ))}
                     </Select>
                   </FormControl>
                   <TextField
@@ -2944,20 +2957,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                                 variant="outlined"
                               />
                             )}
-                            {res.metadata?.quality?.flagged && (
-                              <Chip
-                                label="Review"
-                                size="small"
-                                color="warning"
-                                title={(res.metadata.quality.flag_reasons || []).join(", ")}
-                              />
-                            )}
+                            <QualityFlagsPill quality={res.metadata?.quality} />
                           </Stack>
-                          {res.error && (
-                            <Typography variant="caption" color="error" display="block" sx={{ mt: 0.5 }}>
-                              {formatUiError(res.error)}
-                            </Typography>
-                          )}
+                          {!res.success && <RenderFailureNote failure={res.failure} error={res.error} />}
                         </CardContent>
                         <CardActions sx={{ pt: 0 }}>
                           {videoUrl && (

@@ -418,12 +418,8 @@ def generate_text_basic(llm=None, prompt=None, is_json_response: bool = False):
             f"generate_text_basic: Raw LLM response received (length: {len(content)}). Preview: {content[:100]}"
         )
 
-        # --- Post-processing to remove <think>...</think> blocks ---
-        # Using re.DOTALL to make '.' match newlines, and re.IGNORECASE for the tags.
-        # Non-greedy match .*? is important.
-        cleaned_content = re.sub(
-            r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE
-        )
+        from backend.utils.inline_reasoning import split_inline_reasoning
+        cleaned_content = split_inline_reasoning(content)[1]
 
         if len(cleaned_content) < len(content):
             logger.info(

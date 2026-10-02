@@ -103,6 +103,36 @@ def test_scout_youtube_offline_ai_comfyui_queues(app):
         assert kwargs[1]["chain_draft"] is True
 
 
+def test_youtube_scout_is_not_queued_while_web_access_is_off(app):
+    """The YouTube scout searches the web, so with web access off (the default,
+    no setting row here) nothing is queued and the reply says how to turn it on.
+    The real queue_outreach_run runs; it refuses before any Task or Celery call."""
+    from backend.models import Task
+    from backend.services.social_outreach.intent import execute_outreach_intent
+
+    clf = _classifier({
+        "intent": "scout_and_draft",
+        "platform": "youtube",
+        "topics": ["Offline AI", "ComfyUI"],
+        "draft_id": None,
+        "confidence": 0.92,
+        "reason": "user asked to comment on youtube about those topics",
+    })
+
+    with app.app_context(), \
+         patch("backend.services.social_outreach.kill_switch.is_enabled", return_value=True), \
+         patch("backend.services.social_outreach.kill_switch.is_supervised", return_value=True):
+        result = execute_outreach_intent(
+            "comment on some youtube videos regarding Offline AI or ComfyUI",
+            created_by="test",
+            classifier=clf,
+        )
+        assert result["ok"] is False
+        assert result["message"] == "Web access is disabled. Enable it in Settings to scout YouTube for outreach."
+        assert result["task_ids"] == []
+        assert Task.query.count() == 0
+
+
 def test_low_confidence_scout_refuses(app):
     from backend.services.social_outreach.intent import execute_outreach_intent
 

@@ -45,6 +45,21 @@ def test_qwen_edit_workflow_pad_and_extra_refs():
     assert wf["pad"]["inputs"]["left"] == 256
     assert "image2" in wf["pos"]["inputs"]
     assert "image3" in wf["pos"]["inputs"]
+    # The model sees the unpadded original; only the padded border is sampled.
+    assert wf["pos"]["inputs"]["image1"] == ["scale_ref", 0]
+    assert wf["scale_ref"]["inputs"]["image"] == ["load1", 0]
+    assert wf["outpaint_mask"]["inputs"]["mask"] == ["pad", 1]
+    assert wf["sampler"]["inputs"]["latent_image"] == ["outpaint_mask", 0]
+    assert wf["encode"]["inputs"]["pixels"] == ["scale", 0]
+
+
+def test_qwen_edit_workflow_without_pad_samples_the_whole_image():
+    gen = ComfyUIImageGenerator()
+    wf = gen._build_qwen_edit_workflow(src_names=["a.png"], instruction="make it night",
+                                       steps=20, cfg=2.5, seed=1)
+    assert "outpaint_mask" not in wf and "scale_ref" not in wf
+    assert wf["sampler"]["inputs"]["latent_image"] == ["encode", 0]
+    assert wf["pos"]["inputs"]["image1"] == ["scale", 0]
 
 
 def test_pulid_workflow_has_apply_node():

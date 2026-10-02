@@ -19,6 +19,13 @@ describe("built-in slash commands", () => {
     expect(mv.usage).toContain("<song-path-or-id>");
     expect(mv.description.toLowerCase()).toContain("approve");
   });
+
+  it("describes /websearch without naming a search service it does not use", () => {
+    const ws = getBuiltInCommands().find((c) => c.name === "/websearch");
+    expect(ws.description.toLowerCase()).not.toContain("duckduckgo");
+    expect(ws.usage).toContain("site:");
+    expect(ws.usage).toContain("sitemap:");
+  });
 });
 
 describe("extractCommandRules", () => {

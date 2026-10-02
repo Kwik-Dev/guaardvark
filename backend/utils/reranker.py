@@ -2,8 +2,8 @@
 
 The fused retriever scores a query and a passage independently (bi-encoder plus
 BM25); a cross-encoder reads the pair together and is markedly better at deciding
-relevance. It is applied to the candidate pool AFTER filtering and dedup, and
-BEFORE MMR -- rerank decides what is relevant, MMR decides what is diverse.
+relevance. It is applied to the candidate pool AFTER filtering and dedup, and its
+order is final: MMR runs only when the cross-encoder did not score the pool.
 
 The model competes for VRAM with image and video generation, so loading is
 admitted against free VRAM and falls back to CPU rather than failing a query.
@@ -48,6 +48,61 @@ def is_enabled() -> bool:
 
 def model_name() -> str:
     return os.environ.get("GUAARDVARK_RERANK_MODEL", DEFAULT_MODEL)
+
+
+# Below this rerank score a passage is unrelated to the question, per model: the
+# scale belongs to the model, so a model not listed here gets no floor.
+#
+# bge-reranker-v2-m3, measured 2026-09-27 through search_with_llamaindex on two
+# indexes (1,145 chunks of product docs and extrusion manuals; two short notes):
+# for 12 questions the documents answer, the best passage scored 0.76-0.998 and
+# every passage from an answering document scored 0.62 or more; 12 general
+# questions they do not answer (capital of Australia, coffee beans, the 1928
+# World Series, ...) peaked at 0.0996 on either index. 0.30 is the midpoint of
+# that gap on the logit scale.
+RELEVANCE_FLOOR = {
+    "BAAI/bge-reranker-v2-m3": 0.30,
+}
+
+
+def relevance_floor() -> Optional[float]:
+    """The score a passage needs to count as related, or None when unknown.
+
+    GUAARDVARK_RAG_MIN_RERANK_SCORE overrides the measured value; 0 turns the
+    floor off.
+    """
+    raw = os.environ.get("GUAARDVARK_RAG_MIN_RERANK_SCORE", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning("GUAARDVARK_RAG_MIN_RERANK_SCORE=%r is not a number; ignoring", raw)
+    return RELEVANCE_FLOOR.get(model_name())
+
+
+def drop_unrelated(results: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """Keep the retrieved passages this reranker rates related to the question.
+
+    Applies only when the reranker scored this retrieval and its model has a
+    floor. A hit it did not score, such as a dependency-expansion chunk, stays
+    only beside a surviving scored hit from the same source. Returns (kept,
+    number dropped).
+    """
+    floor = relevance_floor()
+    scored = [r for r in results if r.get("rerank_score") is not None]
+    if not floor or not scored:
+        return results, 0
+
+    def _source(r):
+        return (r.get("metadata") or {}).get("source_filename")
+
+    related_sources = {_source(r) for r in scored if r["rerank_score"] >= floor}
+    kept = [
+        r for r in results
+        if (r["rerank_score"] >= floor if r.get("rerank_score") is not None
+            else _source(r) in related_sources)
+    ]
+    return kept, len(results) - len(kept)
 
 
 def _pick_device() -> str:

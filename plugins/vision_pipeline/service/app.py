@@ -3,12 +3,14 @@
 All endpoints are sync def (not async def). Uvicorn runs them in its
 default thread pool. Single worker process.
 """
+import importlib.util
 import os
+import sys
 import time
 import json
-import secrets
 import logging
 from dataclasses import asdict
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
@@ -30,6 +32,25 @@ from service.camera_capture import (
 
 logger = logging.getLogger("vision_pipeline.app")
 
+_GUARD_MODULE = "guaardvark_sidecar_guard"
+
+
+def _load_guard():
+    """backend/utils/sidecar_guard.py, loaded by path: this service runs
+    outside the backend package."""
+    loaded = sys.modules.get(_GUARD_MODULE)
+    if loaded is not None:
+        return loaded
+    path = Path(__file__).resolve().parents[3] / "backend" / "utils" / "sidecar_guard.py"
+    spec = importlib.util.spec_from_file_location(_GUARD_MODULE, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[_GUARD_MODULE] = module
+    return module
+
+
+_guard = _load_guard()
+
 app = FastAPI(title="Guaardvark Vision Pipeline", version="1.0.0")
 
 # CORS — restrict to frontend origins only
@@ -39,16 +60,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # --- Bearer token security ---
-# Generated at startup. Shared with main backend via /health response.
-# Required on POST /frame, POST /analyze, PUT /config.
-_auth_token = secrets.token_urlsafe(32)
+# Every route but /health needs the token: the camera, its frames and the
+# scene context are behind this port, and only the backend calls it. The
+# token is in data/.vision_pipeline_internal_secret, which the backend reads
+# too (backend/utils/vision_context_utils.py); no reply carries it. POST
+# /frame, POST /analyze and PUT /config still check it themselves too.
+TOKEN_NAME = "vision_pipeline"
+app.add_middleware(_guard.BearerTokenASGIMiddleware, name=TOKEN_NAME)
+# Added last, so it runs first: a request addressed to a name that is not
+# this machine's (a page re-pointed at 127.0.0.1) is refused before the token
+# gate, CORS or any route sees it.
+app.add_middleware(_guard.HostCheckASGIMiddleware)
+
+
+def _auth_token() -> str:
+    return _guard.internal_token(TOKEN_NAME)
+
 
 def _verify_token(request: Request):
     """Check Authorization: Bearer <token> header."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer ") or auth[7:] != _auth_token:
+    if not _guard.bearer_matches(TOKEN_NAME, request.headers.get("Authorization")):
         raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
 
 # --- Global pipeline components (initialized on startup) ---
@@ -104,6 +136,9 @@ def startup():
     _benchmarker = Benchmarker(ollama_url=_config.ollama_url)
 
     _camera_capture = CameraCapture(_stream_manager, _config)
+    # The token file exists before the first request, so the backend has a
+    # token to send.
+    _auth_token()
 
     # Check vision model availability
     if _model_tier.get_any_available_model():
@@ -152,9 +187,10 @@ class BenchmarkRequest(BaseModel):
 # --- Endpoints ---
 
 @app.get("/health")
-def health(request: Request):
-    """Health check. Returns auth token on first call (for main backend handshake)."""
-    resp = {
+def health():
+    """Status only, and the one route open without the token (start.sh and
+    the Plugins page probe it); the backend relays this reply to browsers."""
+    return {
         "status": _health_status,
         "uptime_seconds": round(time.time() - _start_time, 1),
         "active_streams": len([s for s in (_stream_manager.streams.values() if _stream_manager else [])
@@ -162,10 +198,6 @@ def health(request: Request):
         "ollama_connected": _model_tier.get_any_available_model() is not None if _model_tier else False,
         "monitor_model_loaded": _model_tier.verify_model_available(_config.monitor_model) if _model_tier else False,
     }
-    # Include token for initial handshake (no auth header = first contact)
-    if not request.headers.get("Authorization"):
-        resp["token"] = _auth_token
-    return resp
 
 @app.get("/status")
 def status():

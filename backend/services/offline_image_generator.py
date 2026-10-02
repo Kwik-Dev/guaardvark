@@ -176,13 +176,18 @@ class ImageGenerationResult:
 
 
 def normalize_zimage_lora_state_dict(state_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Rewrite PEFT-wrapped Z-Image LoRA keys to Diffusers ``load_lora_weights`` form.
+    """Rewrite Z-Image LoRA keys to the form Diffusers ``load_lora_weights`` accepts.
 
-    Our early peft_zimage trainer saved keys like
-    ``transformer.base_model.model.layers.*.attention.to_q.lora_A.weight``.
-    ZImagePipeline expects ``transformer.layers.*.attention.to_q.lora_A.weight``
-    (no PEFT ``base_model.model`` wrapper). Without this remap, PEFT raises
-    "Target modules {...} not found in the base model".
+    Two layouts need help:
+
+    - Our early peft_zimage trainer saved keys like
+      ``transformer.base_model.model.layers.*.attention.to_q.lora_A.weight``.
+      ZImagePipeline expects ``transformer.layers.*.attention.to_q.lora_A.weight``
+      (no PEFT ``base_model.model`` wrapper). Without this remap, PEFT raises
+      "Target modules {...} not found in the base model".
+    - LoRAs trained against ComfyUI's Z-Image module tree name the attention
+      projections ``attention.qkv`` (fused) and ``attention.out``. See
+      ``_split_fused_zimage_attention``.
     """
     out: Dict[str, Any] = {}
     for key, value in state_dict.items():
@@ -194,7 +199,67 @@ def normalize_zimage_lora_state_dict(state_dict: Dict[str, Any]) -> Dict[str, An
         elif ".base_model.model." in nk:
             nk = nk.replace(".base_model.model.", ".", 1)
         out[nk] = value
+    return _split_fused_zimage_attention(out)
+
+
+# ComfyUI's Z-Image attention block ("<block>.attention.qkv" / ".out", or the kohya
+# spelling "<block>_attention_qkv"). Diffusers 0.40 drops the qkv delta and then fails
+# on the orphaned out alpha ("`state_dict` should be empty at this point").
+_ZIMAGE_FUSED_ATTN_KEY = re.compile(
+    r"^(?P<block>.*?(?:layers|context_refiner|noise_refiner)[._]\d+[._]attention)"
+    r"(?P<sep>[._])(?P<proj>qkv|out)"
+    r"\.(?P<suffix>lora_A\.weight|lora_B\.weight|lora_down\.weight|lora_up\.weight|alpha)$"
+)
+_ZIMAGE_SPLIT_ATTN_KEY = re.compile(
+    r"^(?P<block>.*?(?:layers|context_refiner|noise_refiner)[._]\d+[._]attention)[._]to[._]"
+)
+
+
+def _split_fused_zimage_attention(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Rename ComfyUI-layout Z-Image attention LoRA keys to the Diffusers module names.
+
+    ``out`` becomes ``to_out.0``. The fused ``qkv`` projection stacks q, k and v
+    rows (``dim`` each, Z-Image has as many kv heads as heads), so its update
+    ``B @ A`` splits exactly into ``B_q @ A``, ``B_k @ A`` and ``B_v @ A``: the down
+    matrix and alpha are shared, the up matrix is cut into thirds. Blocks that also
+    carry split ``to_*`` keys are left alone; Diffusers treats the fused copy there
+    as redundant.
+    """
+    split_blocks = {
+        m.group("block") for m in map(_ZIMAGE_SPLIT_ATTN_KEY.match, state_dict) if m
+    }
+    out: Dict[str, Any] = {}
+    for key, value in state_dict.items():
+        m = _ZIMAGE_FUSED_ATTN_KEY.match(key)
+        if not m or m.group("block") in split_blocks:
+            out[key] = value
+            continue
+        block, sep, proj, suffix = m.group("block", "sep", "proj", "suffix")
+        if proj == "out":
+            out[f"{block}{sep}to_out{sep}0.{suffix}"] = value
+            continue
+        if suffix in ("lora_B.weight", "lora_up.weight"):
+            if value.shape[0] % 3:
+                out[key] = value
+                continue
+            parts = [chunk.contiguous() for chunk in value.chunk(3, dim=0)]
+        else:
+            parts = [value, value, value]
+        for name, part in zip("qkv", parts):
+            out[f"{block}{sep}to_{name}.{suffix}"] = part
     return out
+
+
+def _image_limits_for(model: str) -> dict:
+    from backend.services.image_render_limits import limits_for
+    return limits_for(model)
+
+
+def _offline_family_values(field: str) -> dict:
+    """``{family: value}`` for the Diffusers families that declare ``field``."""
+    from backend.services.image_render_limits import family_values
+    return {fam: value for fam, value in family_values(field).items()
+            if _image_limits_for(fam).get("engine") == "offline"}
 
 
 class OfflineImageGenerator:
@@ -761,6 +826,17 @@ class OfflineImageGenerator:
             return "sdxl"
         return "sd"
 
+    def supports_img2img(self, model_key: str) -> bool:
+        """True when catalog key ``model_key`` can run generate_image_from_image
+        (a family ``_build_img2img_pipeline`` builds)."""
+        model_id = self.available_models.get(model_key or "")
+        if not model_id or model_key in self.comfy_only_models:
+            return False
+        family = self._model_family(model_id)
+        if family == "zimage":
+            return ZImageImg2ImgPipeline is not None
+        return family in ("sdxl", "sd")
+
     def _build_img2img_pipeline(self, family: str):
         """Share weights from the loaded txt2img pipeline for img2img edits."""
         if family == 'krea2':
@@ -808,11 +884,14 @@ class OfflineImageGenerator:
     # wall of resident Ollama models (gemma 4.95GB + qwen3-embedding 4.32GB).
     # zimage: WITH enable_model_cpu_offload. krea2 model-offload peak ~14GB on 16GB
     # (2026-07-11); sequential offload is used on consumer cards and peaks lower.
-    _FAMILY_VRAM_MB = {"krea2": 14000, "zimage": 11000, "sdxl": 8000, "sd": 4000}
-    _KREA2_SEQUENTIAL_VRAM_MB = 10000  # layer-by-layer offload on ≤18GB cards
+    # Per-family prices are declared in media_model_registry.IMAGE_FAMILY_SPECS
+    # (vram_mb, vram_mb_sequential, ram_gb, *_slope_*), with the measurements
+    # behind them; the Diffusers families are read here.
+    _FAMILY_VRAM_MB = _offline_family_values("vram_mb")
+    _KREA2_SEQUENTIAL_VRAM_MB = _offline_family_values("vram_mb_sequential")["krea2"]  # layer-by-layer offload on ≤18GB cards
     # CPU-RAM footprint with enable_model_cpu_offload (weights + PyTorch arena).
     # Observed: ~47 GB RSS on 60 GB box during Z-Image batch; gate before load.
-    _FAMILY_RAM_GB = {"krea2": 24.0, "zimage": 21.0, "sdxl": 10.0, "sd": 6.0}
+    _FAMILY_RAM_GB = _offline_family_values("ram_gb")
     # zimage 24.0 -> 21.0 (2026-08-05): 24.0 predated the ladder/unload leak fixes
     # (the "~47 GB RSS" note above is from that era). The CALIBRATED comment below
     # measured peak RSS flat at 20.9-21.0 GB across 1024/1448/2048 AFTER those fixes.
@@ -834,8 +913,8 @@ class OfflineImageGenerator:
     # Tiled peaks are noisy but bounded WELL under 16GB, so slopes are modest:
     # they price bigger canvases without refusing tiled 2K on 16GB cards.
     # Override via GUAARDVARK_VRAM_SLOPE_MB_PER_MP / GUAARDVARK_RAM_SLOPE_GB_PER_MP.
-    _FAMILY_VRAM_SLOPE_MB_PER_MP = {"krea2": 1000, "zimage": 500, "sdxl": 1500, "sd": 800}
-    _FAMILY_RAM_SLOPE_GB_PER_MP = {"krea2": 1.0, "zimage": 1.0, "sdxl": 1.0, "sd": 0.5}
+    _FAMILY_VRAM_SLOPE_MB_PER_MP = _offline_family_values("vram_slope_mb_per_mp")
+    _FAMILY_RAM_SLOPE_GB_PER_MP = _offline_family_values("ram_slope_gb_per_mp")
 
     @staticmethod
     def _extra_megapixels(width: Optional[int], height: Optional[int]) -> float:
@@ -885,7 +964,7 @@ class OfflineImageGenerator:
         else:
             family = self._model_family(model_id)
             if family == "flux":
-                base = 12000
+                base = int(_image_limits_for("flux")["vram_mb"])
             elif family == "krea2" and self._will_use_sequential_for_krea2():
                 base = self._KREA2_SEQUENTIAL_VRAM_MB
             else:
@@ -907,7 +986,7 @@ class OfflineImageGenerator:
         else:
             family = self._model_family(model_id)
             if family == "flux":
-                base = 16.0
+                base = float(_image_limits_for("flux")["ram_gb"])
             else:
                 base = self._FAMILY_RAM_GB.get(family, 6.0)
         extra_mp = self._extra_megapixels(width, height)
@@ -1159,57 +1238,21 @@ class OfflineImageGenerator:
 
         Used on the primary generate path so Batch UI High / slider values actually run.
         Hard defaults live in ``_apply_family_sampling`` (fallback / family switch only).
+        The envelope (steps_range, cfg_range, default, measured floor) is the
+        model's registry row: a typed step count stands, an unset or runaway one
+        takes the default, and guidance outside the range takes the default.
         """
         if family == "zimage":
-            # Official HF: 9 steps / guidance 0. The low bound is the measured floor
-            # declared in stills_defaults, so a value the resolver raised is not
-            # changed again here; only an unset or runaway value falls back to 9.
-            from backend.services.stills_defaults import _FAMILY_DEFAULTS
-            floor = int(_FAMILY_DEFAULTS["zimage"].get("min_steps") or 4)
-            steps = int(request.num_inference_steps or 0)
-            if request.steps_explicit:
-                request.num_inference_steps = steps
-            elif steps <= 0 or steps > 30:
-                request.num_inference_steps = 9
-            else:
-                request.num_inference_steps = max(steps, floor)
-            try:
-                g = float(request.guidance_scale)
-            except (TypeError, ValueError):
-                g = -1.0
-            if g < 0.0 or g > 2.0:
-                request.guidance_scale = 0.0
-            else:
-                request.guidance_scale = g
+            key = "zimage-turbo"
         elif family == "krea2":
-            if self._krea2_variant(request.model or "") == "raw":
-                steps = int(request.num_inference_steps or 0)
-                if not request.steps_explicit and (steps < 20 or steps > 80):
-                    request.num_inference_steps = 52
-                else:
-                    request.num_inference_steps = steps
-                try:
-                    g = float(request.guidance_scale)
-                except (TypeError, ValueError):
-                    g = -1.0
-                if g < 1.0 or g > 7.0:
-                    request.guidance_scale = 3.5
-                else:
-                    request.guidance_scale = g
-            else:
-                steps = int(request.num_inference_steps or 0)
-                if not request.steps_explicit and (steps < 4 or steps > 20):
-                    request.num_inference_steps = 8
-                else:
-                    request.num_inference_steps = steps
-                try:
-                    g = float(request.guidance_scale)
-                except (TypeError, ValueError):
-                    g = -1.0
-                if g < 0.0 or g > 1.0:
-                    request.guidance_scale = 0.0
-                else:
-                    request.guidance_scale = g
+            key = "krea2-raw" if self._krea2_variant(request.model or "") == "raw" else "krea2-turbo"
+        else:
+            return
+        from backend.services.image_render_limits import envelope_cfg, envelope_steps
+        request.num_inference_steps = envelope_steps(
+            key, request.num_inference_steps, explicit=bool(request.steps_explicit),
+        )
+        request.guidance_scale = envelope_cfg(key, request.guidance_scale)
 
     def _apply_family_sampling(self, request: ImageGenerationRequest, family: str) -> None:
         """Force family-appropriate steps/guidance after model switch or fallback."""
@@ -2249,8 +2292,10 @@ Negative Prompt: {negative_prompt}""",
         """Best-effort notification to vision pipeline. Fire and forget."""
         try:
             import requests as req
+            from backend.utils.vision_context_utils import vision_pipeline_headers
             req.post("http://localhost:8201/gpu/contention",
-                     json={"source": "image_gen", "action": action}, timeout=1)
+                     json={"source": "image_gen", "action": action},
+                     headers=vision_pipeline_headers(), timeout=1)
         except Exception:
             pass
 
@@ -3066,28 +3111,33 @@ Negative Prompt: {negative_prompt}""",
             except Exception:
                 pass
             name = f"cast_{i}"
+            from backend.services.zimage_lora_check import lora_file_problem, plain_load_error
+
+            problem = lora_file_problem(p)
+            if problem:
+                raise RuntimeError(f"Can't use LoRA {p.name}. {problem}")
             try:
                 # Prefer an in-memory remapped dict so PEFT-prefixed saves
                 # (transformer.base_model.model.*) from early peft_zimage trains
-                # still load. Diffusers accepts a state-dict dict here.
+                # and ComfyUI-layout attention keys still load. Diffusers accepts a
+                # state-dict dict here.
                 from safetensors.torch import load_file as _load_st
 
                 raw = _load_st(str(p), device="cpu")
                 remapped = normalize_zimage_lora_state_dict(raw)
-                n_rewritten = sum(
-                    1 for old_k, new_k in zip(raw.keys(), remapped.keys()) if old_k != new_k
-                )
+                n_rewritten = sum(1 for k in remapped if k not in raw)
                 if n_rewritten:
                     logger.info(
-                        "Z-Image LoRA %s: stripped PEFT base_model.model prefix from "
-                        "%d/%d keys for Diffusers",
+                        "Z-Image LoRA %s: rewrote %d of %d keys to Diffusers names",
                         p.name,
                         n_rewritten,
                         len(remapped),
                     )
                 self._pipeline.load_lora_weights(remapped, adapter_name=name)
             except Exception as e:
-                raise RuntimeError(f"Failed to load Z-Image LoRA {p}: {e}") from e
+                raise RuntimeError(
+                    f"Failed to load Z-Image LoRA {p.name}: {plain_load_error(e)}"
+                ) from e
             adapters.append(name)
             weights.append(float(scale))
 

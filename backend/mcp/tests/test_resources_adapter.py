@@ -17,10 +17,15 @@ def _make(root: Path, names):
         path.write_text(name)
 
 
-def _collect(root: Path, page_size: int):
+def _scope(*folders, root_files=True):
+    return ra.OutputScope(folders=tuple(tuple(f.split("/")) for f in folders), root_files=root_files)
+
+
+def _collect(root: Path, page_size: int, scope=None):
+    scope = scope or _scope()
     seen, cursor = [], None
     while True:
-        page, cursor = ra._list_page(root, cursor, page_size=page_size)
+        page, cursor = ra._list_page(root, scope, cursor, page_size=page_size)
         seen += [p.relative_to(root).as_posix() for p in page]
         if cursor is None:
             return seen
@@ -32,19 +37,19 @@ def test_pages_return_every_file_once_in_a_stable_order(tmp_path):
                  ".progress_jobs/job.json", "Thumbs.db"])
     expected = ["a.txt", "b/c.txt", "b/d/e.txt", "b.txt", "f/g.txt", "z.txt"]
     for page_size in (1, 2, 4, 100):
-        assert _collect(root, page_size) == expected
+        assert _collect(root, page_size, _scope("b", "f")) == expected
 
 
 def test_more_files_than_the_old_listing_cap_are_all_reachable(tmp_path):
     root = tmp_path.resolve()
     _make(root, [f"batch/{i:04d}.png" for i in range(510)])
-    assert len(_collect(root, ra.PAGE_SIZE)) == 510
+    assert len(_collect(root, ra.PAGE_SIZE, _scope("batch"))) == 510
 
 
 @pytest.mark.parametrize("cursor", ["!!not-base64!!", "Li4vZXRjL3Bhc3N3ZA=="])  # the second is ../etc/passwd
 def test_an_invalid_cursor_is_refused(tmp_path, cursor):
     with pytest.raises(ValueError):
-        ra._list_page(tmp_path.resolve(), cursor)
+        ra._list_page(tmp_path.resolve(), _scope(), cursor)
 
 
 def test_a_symlink_out_of_the_root_is_neither_listed_nor_readable(tmp_path_factory):
@@ -56,12 +61,12 @@ def test_a_symlink_out_of_the_root_is_neither_listed_nor_readable(tmp_path_facto
 
     assert _collect(root, 10) == ["real.txt"]
     with pytest.raises(FileNotFoundError):
-        ra._read_contents(ra._uri_for(root / "link.txt", root), root, 1024)
+        ra._read_contents(ra._uri_for(root / "link.txt", root), root, _scope(), 1024)
 
 
 def test_a_parent_escape_uri_is_refused(tmp_path):
     with pytest.raises(FileNotFoundError):
-        ra._read_contents("guaardvark://outputs/..%2F..%2Fetc%2Fpasswd", tmp_path.resolve(), 1024)
+        ra._read_contents("guaardvark://outputs/..%2F..%2Fetc%2Fpasswd", tmp_path.resolve(), _scope(), 1024)
 
 
 def test_a_file_that_disappears_is_not_found(tmp_path):
@@ -70,7 +75,7 @@ def test_a_file_that_disappears_is_not_found(tmp_path):
     uri = ra._uri_for(root / "gone.txt", root)
     (root / "gone.txt").unlink()
     with pytest.raises(FileNotFoundError):
-        ra._read_contents(uri, root, 1024)
+        ra._read_contents(uri, root, _scope(), 1024)
 
 
 def test_a_file_above_the_inline_limit_is_linked_not_embedded(tmp_path, monkeypatch):
@@ -78,7 +83,7 @@ def test_a_file_above_the_inline_limit_is_linked_not_embedded(tmp_path, monkeypa
     root = tmp_path.resolve()
     (root / "clips").mkdir()
     (root / "clips" / "big clip.mp4").write_bytes(b"\x00" * 4096)
-    contents, size = ra._read_contents(ra._uri_for(root / "clips" / "big clip.mp4", root), root, 1024)
+    contents, size = ra._read_contents(ra._uri_for(root / "clips" / "big clip.mp4", root), root, _scope("clips"), 1024)
     assert size == 4096
     assert isinstance(contents, mcp_types.TextResourceContents)
     assert "http://127.0.0.1:5000/outputs/clips/big%20clip.mp4" in contents.text
@@ -87,7 +92,7 @@ def test_a_file_above_the_inline_limit_is_linked_not_embedded(tmp_path, monkeypa
 def test_a_small_binary_file_is_embedded(tmp_path):
     root = tmp_path.resolve()
     (root / "tiny.png").write_bytes(b"\x89PNG")
-    contents, _size = ra._read_contents(ra._uri_for(root / "tiny.png", root), root, 1024)
+    contents, _size = ra._read_contents(ra._uri_for(root / "tiny.png", root), root, _scope(), 1024)
     assert isinstance(contents, mcp_types.BlobResourceContents)
 
 

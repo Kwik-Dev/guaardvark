@@ -503,11 +503,14 @@ class RAGEvalHarness:
             retrieved_chunks = [r.get("text", "") for r in results]
 
             # Answer with the same context shape production chat builds
-            # (_retrieve_rag_context: source-labeled, 500-char-clipped chunks),
+            # (_retrieve_rag_context: unrelated passages dropped, source-labeled,
+            # 500-char-clipped chunks),
             # on the production answer model — so score deltas transfer to
             # what users actually experience.
+            from backend.utils.reranker import drop_unrelated
+            answer_results, _ = drop_unrelated(results)
             context_blocks = []
-            for r in results:
+            for r in answer_results:
                 source = (r.get("metadata") or {}).get("source_filename", "Unknown")
                 context_blocks.append(f"[Source: {source}]\n{cut_on_whitespace(r.get('text', ''), 500)}")
             context = "\n\n".join(context_blocks)

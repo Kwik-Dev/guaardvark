@@ -1231,22 +1231,16 @@ def text_to_speech():
         narrations_dir = os.path.join(guaardvark_root, "data", "outputs", "narrations")
         os.makedirs(narrations_dir, exist_ok=True)
 
-        af_result = _try_audio_foundry_voice(text_for_tts, "wav", narrations_dir)
+        # The voice setting names Piper voices; Kokoro speaks one only when it
+        # is also a Kokoro voice id, and its default voice otherwise.
+        kokoro_voice = _kokoro_voice_for(voice)
+        if stream:
+            # Streaming response for first-chunk latency (voice specialist rec).
+            audio_chunks = _open_audio_foundry_stream(text_for_tts, kokoro_voice)
+            if audio_chunks is not None:
+                return Response(audio_chunks, mimetype="audio/wav")
+        af_result = _try_audio_foundry_voice(text_for_tts, "wav", narrations_dir, voice_id=kokoro_voice)
         if af_result is not None:
-            if stream:
-                # Streaming response for first-chunk latency (voice specialist rec).
-                # Client gets audio bytes as soon as first sentence is ready.
-                def audio_stream():
-                    r = requests.post(
-                        f"{AUDIO_FOUNDRY_URL}/generate/voice/stream",
-                        json={"text": text_for_tts, "backend": "kokoro", "output_format": "wav", "voice_id": voice},
-                        stream=True,
-                        timeout=(2, 180),
-                    )
-                    for chunk in r.iter_content(chunk_size=4096):
-                        if chunk:
-                            yield chunk
-                return Response(audio_stream(), mimetype="audio/wav")
             # _try_audio_foundry_voice yields a /voice/audio/<file> path (the
             # /narrate convention, consumed under BASE_URL=/api). The
             # /text-to-speech consumer (VoiceContext.speak) prepends BACKEND_URL
@@ -1359,7 +1353,60 @@ def stream_tts(stream_id):
     from flask import Response
     return Response(generate_audio(), mimetype="audio/wav")
 
-def _try_audio_foundry_voice(text: str, output_format: str, narrations_dir: str) -> Optional[Dict]:
+def _kokoro_voice_for(voice: Optional[str]) -> Optional[str]:
+    """``voice`` when it is one of Audio Foundry's Kokoro voices, else None
+    (Kokoro's default voice).
+
+    Piper ids such as 'libritts' are not Kokoro voices, and Audio Foundry
+    refuses a voice it does not offer rather than substitute one.
+    """
+    if not voice:
+        return None
+    try:
+        from backend.services.audio_foundry_models import kokoro_voice_ids
+        return voice if voice in kokoro_voice_ids() else None
+    except Exception as e:  # noqa: BLE001 - catalog unreadable: speak with the default voice
+        logger.warning("Voice API: Kokoro voice catalog unreadable (%s)", e)
+        return None
+
+
+def _open_audio_foundry_stream(text: str, voice_id: Optional[str]):
+    """Start Audio Foundry's streamed Kokoro voice; an iterator of WAV bytes, or None.
+
+    The request is sent and its status read before anything is returned, so a
+    refusal or a stopped plugin falls back to the file path (and Piper) instead
+    of reaching the client as bytes of an error message played as audio.
+    """
+    payload = {"text": text, "backend": "kokoro", "output_format": "wav"}
+    if voice_id:
+        payload["voice_id"] = voice_id
+    try:
+        resp = requests.post(
+            f"{AUDIO_FOUNDRY_URL}/generate/voice/stream", json=payload, stream=True,
+            timeout=(2, 180),  # 2s connect — fails fast when plugin is off
+        )
+    except requests.exceptions.RequestException as e:
+        logger.info("Voice API: audio_foundry stream unreachable (%s) — using the file path", e)
+        return None
+    if resp.status_code != 200:
+        logger.warning("Voice API: audio_foundry stream returned %d: %s — using the file path",
+                       resp.status_code, resp.text[:200])
+        resp.close()
+        return None
+
+    def chunks():
+        try:
+            for chunk in resp.iter_content(chunk_size=4096):
+                if chunk:
+                    yield chunk
+        finally:
+            resp.close()
+
+    return chunks()
+
+
+def _try_audio_foundry_voice(text: str, output_format: str, narrations_dir: str,
+                             voice_id: Optional[str] = None) -> Optional[Dict]:
     """Hand the request off to the Audio Foundry plugin (Kokoro primary for natural conversational TTS per team audit,
     with Chatterbox for cloning). Returns a Piper-shaped response dict on success, or None
     when the plugin is disabled, unreachable, or errors out — caller falls
@@ -1368,10 +1415,13 @@ def _try_audio_foundry_voice(text: str, output_format: str, narrations_dir: str)
     Multi-section scripts are flattened into a single text body; Chatterbox
     handles long-text chunking internally (see voice_gen_chatterbox.py).
     """
+    payload = {"text": text, "backend": "kokoro", "output_format": output_format}
+    if voice_id:
+        payload["voice_id"] = voice_id
     try:
         resp = requests.post(
             f"{AUDIO_FOUNDRY_URL}/generate/voice",
-            json={"text": text, "backend": "kokoro", "output_format": output_format},
+            json=payload,
             timeout=(2, 180),  # 2s connect — fails fast when plugin is off
         )
     except requests.exceptions.RequestException as e:

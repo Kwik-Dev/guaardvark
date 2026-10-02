@@ -6,11 +6,13 @@ viewing logs, merging branches, and managing worktrees.
 The frontend polls /swarm/status for real-time dashboard updates.
 """
 
+import importlib.util
 import json
 import logging
 import os
 import secrets
 import subprocess
+import sys
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -184,6 +186,29 @@ async def _require_internal_token(request: Request, call_next):
     if not expected or not secrets.compare_digest(provided, expected):
         return JSONResponse(status_code=403, content={"detail": "Forbidden: invalid internal token"})
     return await call_next(request)
+
+
+_GUARD_MODULE = "guaardvark_sidecar_guard"
+
+
+def _load_guard():
+    """backend/utils/sidecar_guard.py, loaded by path: this service runs
+    outside the backend package."""
+    loaded = sys.modules.get(_GUARD_MODULE)
+    if loaded is not None:
+        return loaded
+    path = Path(__file__).resolve().parents[3] / "backend" / "utils" / "sidecar_guard.py"
+    spec = importlib.util.spec_from_file_location(_GUARD_MODULE, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[_GUARD_MODULE] = module
+    return module
+
+
+# Added last, so it runs first, before CORS and the token gate: a request
+# addressed to a name that is not this machine's (a page re-pointed at
+# 127.0.0.1) is refused, /health included.
+app.add_middleware(_load_guard().HostCheckASGIMiddleware)
 
 
 # --- Health ---

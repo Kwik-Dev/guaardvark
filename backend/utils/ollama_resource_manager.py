@@ -7,6 +7,7 @@ available system resources before loading.
 """
 
 import logging
+import os
 import re
 import threading
 import time
@@ -17,34 +18,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Vision/multimodal model patterns — these need special handling
-VISION_MODEL_PATTERNS = [
-    r'vl\b', r'vision', r'llava', r'moondream', r'bakllava',
-    r'minicpm-v', r'llama.*vision', r'granite.*vision', r'gemma.*vision',
-    # Gemma 4 integrates vision natively — match even without "vision" suffix
-    r'gemma[\-_]?4',
-]
-
-# Model families that reason in Ollama's hidden ``thinking`` channel before
-# answering. Ollama's own capabilities list (``/api/show``) is authoritative
-# when it can be fetched; these names cover a server that is not answering yet
-# and unit tests that never reach one. What each cost when left on:
-#   * gemma4 12B, chat, 2026-09-06: 1,163 tokens / ~40 s for a 554-char reply
-#     against 183 tokens / ~10 s for an 858-char reply with thinking off.
-#   * gemma4 12B, summarisation (raptor_service): ~45x slower, shorter output.
-#   * qwen3.5 9B, structured extraction: 2-4k reasoning tokens per call, enough
-#     to blow a 120 s request timeout.
-THINKING_MODEL_PATTERNS = [
-    r'deepseek-r1', r'thinking', r'gemma[\-_]?4', r'qwen3',
-]
-
-# Models that are vision-only (not suitable as default text LLM).
-# Omits natively multimodal models (Gemma 4) that handle both text and vision.
-NON_TEXT_MODEL_PATTERNS = [
-    r'vl\b', r'vision', r'llava', r'moondream', r'bakllava',
-    r'minicpm-v', r'llama.*vision', r'granite.*vision', r'gemma.*vision',
-    r'embed', r'retrieval', r'minilm',
-]
+# Name rules for when Ollama cannot answer. Declared, with what each one cost
+# or protects against, in backend/services/model_capability_data.py.
+from backend.services.model_capability_data import (  # noqa: E402
+    NON_TEXT_NAME_PATTERNS as NON_TEXT_MODEL_PATTERNS,
+    THINKING_NAME_PATTERNS as THINKING_MODEL_PATTERNS,
+    VISION_NAME_PATTERNS as VISION_MODEL_PATTERNS,
+)
 
 # Memory reserves (MB)
 GPU_RESERVE_MB = 2048   # 2GB for embedding model + display + system
@@ -151,11 +131,57 @@ def is_vision_model(model_name: str) -> bool:
 
 
 def is_text_chat_model(model_name: str) -> bool:
-    """Check if a model is suitable as a default text chat LLM."""
+    """Check if a model is suitable as a default text chat LLM.
+
+    The name rule leaves out vision-only and embedding models; when Ollama can
+    describe the model, one it lists as embedding is left out too, whatever its
+    name (bge-m3 has no "embed" in it).
+    """
     if not model_name:
         return False
     lower = model_name.lower()
-    return not any(re.search(p, lower) for p in NON_TEXT_MODEL_PATTERNS)
+    if any(re.search(p, lower) for p in NON_TEXT_MODEL_PATTERNS):
+        return False
+    from backend.services.model_capabilities import capabilities_for
+    rec = capabilities_for(model_name, with_vision=False)
+    return not (rec.exists and rec.embedding)
+
+
+def _gpu_memory_mb() -> Optional[tuple]:
+    """(free_mb, total_mb) of the first visible GPU, or None."""
+    index = 0
+    visible = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
+    if visible.isdigit():
+        index = int(visible)
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        try:
+            info = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(index))
+            return info.free / (1024 * 1024), info.total / (1024 * 1024)
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception as e:
+        logger.debug("Could not query GPU memory via NVML: %s", e)
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["nvidia-smi", f"--id={index}", "--query-gpu=memory.free,memory.total",
+             "--format=csv,nounits,noheader"],
+            timeout=5, text=True,
+        )
+        free, total = (float(x) for x in out.strip().split(","))
+        return free, total
+    except Exception:
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            mem_free, mem_total = torch.cuda.mem_get_info(0)
+            return mem_free / (1024 * 1024), mem_total / (1024 * 1024)
+    except Exception as e:
+        logger.debug("Could not query GPU memory via torch: %s", e)
+    return None
 
 
 def get_system_resources() -> Dict[str, float]:
@@ -171,29 +197,12 @@ def get_system_resources() -> Dict[str, float]:
         "ram_total_mb": 0.0,
     }
 
-    # GPU memory via PyTorch/pynvml
-    try:
-        import torch
-        if torch.cuda.is_available():
-            mem_free, mem_total = torch.cuda.mem_get_info(0)
-            result["gpu_free_mb"] = mem_free / (1024 * 1024)
-            result["gpu_total_mb"] = mem_total / (1024 * 1024)
-    except Exception as e:
-        logger.debug("Could not query GPU memory via torch: %s", e)
-        # Fallback: try nvidia-smi
-        try:
-            import subprocess
-            out = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=memory.free,memory.total",
-                 "--format=csv,nounits,noheader"],
-                timeout=5, text=True,
-            )
-            parts = out.strip().split(",")
-            if len(parts) == 2:
-                result["gpu_free_mb"] = float(parts[0].strip())
-                result["gpu_total_mb"] = float(parts[1].strip())
-        except Exception:
-            pass
+    # GPU memory. NVML and nvidia-smi read it without touching CUDA; asking torch
+    # first created a ~200 MB CUDA context in every process that imported the
+    # indexing service (each MCP server, scripts) just to read two numbers.
+    gpu = _gpu_memory_mb()
+    if gpu:
+        result["gpu_free_mb"], result["gpu_total_mb"] = gpu
 
     # System RAM via psutil
     try:
@@ -259,7 +268,12 @@ def get_model_info(model_name: str) -> Optional[dict]:
         parameter_count = 0
         native_context = 0
         loose_context = 0
+        embedding_length = 0
         for key, value in model_info_raw.items():
+            # "<arch>.embedding_length" only: multimodal models also report
+            # "<arch>.vision.embedding_length" and "<arch>.audio.embedding_length".
+            if key.endswith(".embedding_length") and key.count(".") == 1:
+                embedding_length = int(value)
             if key.endswith(".context_length"):
                 native_context = int(value)
             elif "context_length" in key:
@@ -306,6 +320,7 @@ def get_model_info(model_name: str) -> Optional[dict]:
             "size_mb": size_bytes / (1024 * 1024) if size_bytes else 0,
             "parameter_count": parameter_count,
             "native_context": native_context,
+            "embedding_length": embedding_length,
             "architecture": details.get("family", "unknown"),
             "families": details.get("families", []),
             "quantization": details.get("quantization_level", "unknown"),
@@ -341,11 +356,10 @@ def model_info_available(model_name: str) -> bool:
 
 
 def model_supports_tools(model_name: str) -> bool:
-    """Check if a model supports native function calling via Ollama's capabilities API."""
-    info = get_model_info(model_name)
-    if not info:
-        return False
-    return "tools" in info.get("capabilities", [])
+    """Check if a model supports native function calling via Ollama's capabilities API
+    (or the model's declared row; see model_capabilities)."""
+    from backend.services.model_capabilities import capabilities_for
+    return capabilities_for(model_name, with_vision=False).tools
 
 
 def model_supports_thinking(model_name: str) -> bool:
@@ -358,13 +372,10 @@ def model_supports_thinking(model_name: str) -> bool:
     """
     if not model_name:
         return False
-    lower = model_name.lower()
-    if any(re.search(p, lower) for p in THINKING_MODEL_PATTERNS):
+    from backend.services.model_capabilities import capabilities_for, thinks_by_name
+    if thinks_by_name(model_name):
         return True
-    info = get_model_info(model_name)
-    if not info:
-        return False
-    return "thinking" in (info.get("capabilities") or [])
+    return capabilities_for(model_name, with_vision=False).thinking
 
 
 def thinking_kwargs(model_name: str) -> dict:

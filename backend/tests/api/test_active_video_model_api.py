@@ -29,7 +29,7 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         "backend.services.video_model_registry.resolve_active_video_model",
-        lambda role, explicit=None, surface=None: (stored.get("active_video_model") or "wan22-5b", None),
+        lambda role, explicit=None, surface=None, comfyui_down_ok=False: (stored.get("active_video_model") or "wan22-5b", None),
     )
     return app.test_client()
 

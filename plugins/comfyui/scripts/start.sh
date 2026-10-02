@@ -202,6 +202,10 @@ echo "Log: $LOG_FILE"
 #                           acts. GUAARDVARK_COMFYUI_PINNED_MEMORY=1 re-enables it.
 #   --listen 127.0.0.1      ComfyUI has no auth; every consumer is on this host.
 #                           GUAARDVARK_COMFYUI_LISTEN overrides for deliberate LAN use.
+#   --extra-model-paths-config guaardvark_model_paths.yaml: Cast Library LoRAs,
+#                           and guaardvark_nodes/, whose Host check refuses a
+#                           request addressed to a name that is not this
+#                           machine's (a page re-pointed at 127.0.0.1).
 #   --preview-method/size   ComfyUI defaults to none, so API runs emit no sampler
 #                           thumbnails. auto → Latent2RGB. Keep in lockstep with
 #                           backend/services/comfyui_launch_flags.py.
@@ -278,7 +282,16 @@ case "$RESERVE_VRAM" in
     ''|*[!0-9.]*) RESERVE_VRAM=1.0; RESERVE_SOURCE="default (value was not a number)" ;;
 esac
 echo "Reserve VRAM: ${RESERVE_VRAM} GB (${RESERVE_SOURCE})"
-"$VENV_PYTHON" main.py --listen "${GUAARDVARK_COMFYUI_LISTEN:-127.0.0.1}" --port "$PORT" --disable-smart-memory --cache-none --reserve-vram "$RESERVE_VRAM" --disable-api-nodes $PIN_FLAG $PREVIEW_FLAGS $ATTN_FLAG >> "$LOG_FILE" 2>&1 &
+# Cast Library LoRAs live in STORAGE_DIR/training/loras; guaardvark_model_paths.yaml
+# adds that folder to ComfyUI's LoRA search. STORAGE_DIR resolves as in backend/config.py.
+STORAGE_DIR="${GUAARDVARK_STORAGE_DIR:-data}"
+case "$STORAGE_DIR" in
+    /*) ;;
+    *) STORAGE_DIR="${GUAARDVARK_ROOT:-$PROJECT_ROOT}/$STORAGE_DIR" ;;
+esac
+export GUAARDVARK_TRAINING_DIR="$STORAGE_DIR/training"
+echo "Cast LoRAs: $GUAARDVARK_TRAINING_DIR/loras"
+"$VENV_PYTHON" main.py --listen "${GUAARDVARK_COMFYUI_LISTEN:-127.0.0.1}" --port "$PORT" --disable-smart-memory --cache-none --reserve-vram "$RESERVE_VRAM" --disable-api-nodes --extra-model-paths-config "$PLUGIN_ROOT/guaardvark_model_paths.yaml" $PIN_FLAG $PREVIEW_FLAGS $ATTN_FLAG >> "$LOG_FILE" 2>&1 &
 
 # Save PID
 PID_DIR="$PROJECT_ROOT/pids"

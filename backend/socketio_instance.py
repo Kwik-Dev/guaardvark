@@ -1,44 +1,8 @@
 import logging
-import os
 
 from flask_socketio import SocketIO
 
-# Configure SocketIO with secure CORS settings
-FRONTEND_URL = os.getenv("VITE_FRONTEND_URL", "http://localhost:5173")
-_FLASK_PORT = os.getenv("FLASK_PORT", os.getenv("PORT", "5000"))
-_BACKEND_ORIGINS = [
-    f"http://localhost:{_FLASK_PORT}",
-    f"http://127.0.0.1:{_FLASK_PORT}",
-]
-
-# Environment-specific CORS configuration
-if os.getenv("FLASK_ENV") == "production":
-    allowed_origins = [FRONTEND_URL] + _BACKEND_ORIGINS
-else:
-    allowed_origins = [
-        FRONTEND_URL,
-        "http://localhost:5173",  # Vite default
-        "http://localhost:5175",  # Vite alternate
-        "http://localhost:3000",  # React default
-        "http://127.0.0.1:5173",  # Alternative localhost
-        "http://127.0.0.1:5175",  # Alternative localhost
-        "http://127.0.0.1:3000",  # Alternative localhost
-    ] + _BACKEND_ORIGINS
-
-# Always allow LAN private-IP origins for local workstation use (phone/tablet/browser
-# on the same network accessing the printed LAN IP + VITE_PORT). This enables
-# SocketIO (real-time chat, progress, voice streaming) when the client Origin is
-# http://192.168.x.x:port etc. Patterns are the same set used (under interconnector
-# master) for Flask CORS. Ungated here because this is a personal offline machine.
-lan_patterns = [
-    r"http://192\.168\.\d+\.\d+:\d+",
-    r"http://10\.\d+\.\d+\.\d+:\d+",
-    r"http://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
-    r"https://192\.168\.\d+\.\d+:\d+",
-    r"https://10\.\d+\.\d+\.\d+:\d+",
-    r"https://172\.(1[6-9]|2\d|3[01])\.\d+\.\d+:\d+",
-]
-allowed_origins = lan_patterns + allowed_origins
+from backend.utils.cors_policy import socketio_origin_allowed
 
 # Largest decoded chat attachment the server accepts: the base64 ``image`` on a
 # ``chat:send`` packet or a ``POST /api/chat/unified`` body. 16 MB fits a phone
@@ -86,7 +50,10 @@ def chat_attachment_too_large(image_data) -> str | None:
 
 # Configure SocketIO with memory leak prevention
 socketio = SocketIO(
-    cors_allowed_origins=allowed_origins,
+    # The origins Flask's CORS allows (backend/utils/cors_policy.py). Engine.IO
+    # refuses a request whose Origin is not one of them; the CLI's polling
+    # requests send no Origin and pass.
+    cors_allowed_origins=socketio_origin_allowed,
     ping_timeout=60,  # 60 second ping timeout
     ping_interval=25,  # 25 second ping interval
     max_http_buffer_size=SOCKET_MAX_HTTP_BUFFER_SIZE,

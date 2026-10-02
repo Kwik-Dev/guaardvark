@@ -18,6 +18,7 @@ from flask import Blueprint, current_app, request, jsonify, Response, stream_wit
 
 logger = logging.getLogger(__name__)
 
+from backend.utils.display_paths import display_params
 from backend.utils.settings_utils import get_setting
 
 # Local imports
@@ -100,6 +101,13 @@ enhanced_chat_bp = Blueprint("enhanced_chat", __name__, url_prefix="/api/enhance
 _active_requests = set()
 _request_cache = {}
 _cache_lock = threading.Lock()
+
+
+def _web_answer_source(search_results: Dict[str, Any]) -> str:
+    """The service that answered a web search, as enhanced_web_search names it
+    in data["source"]; the page's URL for a page read directly."""
+    data = search_results.get("data") or {}
+    return data.get("source") or data.get("url") or search_results.get("strategy_used", "unknown")
 
 
 class StaticResponseStream:
@@ -1690,19 +1698,26 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                     "strategy_used": strategy,
                     "raw_results": search_results,
                     "formatted_context": formatted_context,
-                    "user_message": f"Based on web search results ({strategy}): {data.get('snippet', 'Information retrieved')}"
+                    "user_message": (
+                        f"Based on web search results ({_web_answer_source(search_results)}): "
+                        f"{data.get('snippet', 'Information retrieved')}"
+                    )
                 }
             else:
                 # Web search failed - return failure info for transparency
                 error_info = search_results.get("data", {})
                 logger.warning(f"Web search failed: {error_info}")
+                reason = search_results.get("error") or error_info.get("message") or "the search failed."
 
                 return {
                     "success": False,
                     "error": "Web search failed",
                     "strategy_used": search_results.get("strategy_used", "failed"),
                     "raw_results": search_results,
-                    "user_message": "I attempted to search the web but couldn't retrieve current information. I'll provide what I can from my training knowledge."
+                    "user_message": (
+                        f"I searched the web and could not retrieve current information: {reason} "
+                        "I'll provide what I can from my training knowledge."
+                    )
                 }
 
         except Exception as e:
@@ -1715,12 +1730,11 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             }
 
     def _format_web_search_context(self, search_results: Dict[str, Any], original_query: str) -> str:
-        """CHANGE 4: Format web search results for LLM context with clear source attribution"""
+        """Format web search results for LLM context, naming the service that answered."""
         data = search_results.get("data", {})
-        strategy = search_results.get("strategy_used", "unknown")
 
         context_parts = [f"=== WEB SEARCH RESULTS FOR: {original_query} ==="]
-        context_parts.append(f"Search Strategy: {strategy}")
+        context_parts.append(f"Source: {_web_answer_source(search_results)}")
         context_parts.append(f"Search Timestamp: {datetime.now().isoformat()}")
         context_parts.append("")
         context_parts.append("IMPORTANT: Use this real-time web search information to answer the user's question. This is current, up-to-date information from the internet.")
@@ -1745,9 +1759,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             context_parts.append("NOTE: This is current weather data retrieved from the web.")
 
         elif data_type == "search_results":
-            # CHANGE 4: Handle DuckDuckGo search results properly
-            context_parts.append(f"WEB SEARCH RESULTS (DuckDuckGo):")
-            context_parts.append(f"Source: {data.get('source', 'DuckDuckGo')}")
+            context_parts.append("WEB SEARCH RESULTS:")
             if data.get('results'):
                 context_parts.append("")
                 context_parts.append("Search Results:")
@@ -2116,7 +2128,12 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             }
 
     def _handle_website_analysis_request(self, session_id: str, message: str, project_id: int = None) -> Dict[str, Any]:
-        """Handle website analysis requests using web search API"""
+        """Handle website analysis requests using web search API.
+
+        The page is fetched only with web access on in Settings (off by
+        default), the check the web tools make, and only from a public address
+        (see enhanced_web_search).
+        """
         start_time = datetime.now()
         try:
             # Import web search functionality
@@ -2156,16 +2173,29 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
 
+            from backend.utils.settings_utils import web_access_block_reason
+            blocked = web_access_block_reason("analyze websites")
+            if blocked:
+                return {
+                    "success": False,
+                    "error": blocked,
+                    "response": f"I can't read {url}: {blocked}",
+                    "response_time": (datetime.now() - start_time).total_seconds()
+                }
+
             logger.info(f"Analyzing website: {url}")
 
             # Use web search API to get website content
             search_result = enhanced_web_search(url)
 
             if not search_result.get("success"):
+                # A refused address or an unreachable site says which; fall back
+                # to the general wording only when no reason came back.
+                reason = search_result.get("error") or "The website might be unavailable or blocked."
                 return {
                     "success": False,
                     "error": "Website analysis failed",
-                    "response": f"Sorry, I couldn't analyze the website {url}. The website might be unavailable or blocked.",
+                    "response": f"Sorry, I couldn't analyze the website {url}. {reason}",
                     "response_time": (datetime.now() - start_time).total_seconds()
                 }
 
@@ -4757,32 +4787,14 @@ def get_chat_history(session_id: str):
     """Get chat history for a session"""
     try:
         from flask import request
-        from backend.models import db, LLMMessage, LLMSession
+        from backend.models import db, LLMMessage
 
         # Get query parameters
         limit = int(request.args.get('limit', 50))
         before_id = request.args.get('before_id')
 
-        # Ensure session exists
-        session = db.session.get(LLMSession, session_id)
-        if not session:
-            try:
-                # Create session if it doesn't exist
-                session = LLMSession(id=session_id, user="default")
-                db.session.add(session)
-                db.session.commit()
-                logger.info(f"Created new session: {session_id}")
-            except Exception as e:
-                # Handle race condition where session was created between check and insert
-                db.session.rollback()
-                session = db.session.get(LLMSession, session_id)
-                if not session:
-                    # If still no session, re-raise the error
-                    logger.error(f"Failed to create session {session_id}: {e}")
-                    raise
-                logger.warning(f"Session {session_id} already existed during creation attempt")
-
-        # Query messages from database
+        # Reading creates nothing: a session that does not exist yet has no
+        # messages, and whatever saves its first message creates it.
         query = db.session.query(LLMMessage).filter(
             LLMMessage.session_id == session_id
         ).order_by(LLMMessage.timestamp.desc())
@@ -4821,7 +4833,9 @@ def get_chat_history(session_id: str):
                         msg_data[key] = msg.extra_data[key]
                 # Restore tool call steps for unified chat rendering
                 if 'steps' in msg.extra_data:
-                    msg_data['toolCalls'] = msg.extra_data['steps']
+                    # Stored with the real paths the tools ran on; shown the
+                    # way the live chat:tool_call event shows them.
+                    msg_data['toolCalls'] = display_params(msg.extra_data['steps'])
                     msg_data['isUnifiedChat'] = True
             formatted_messages.append(msg_data)
 
@@ -4840,8 +4854,12 @@ def get_chat_history(session_id: str):
 
         logger.info(f"Retrieved {len(formatted_messages)} messages for session {session_id} (total: {total_count})")
 
+        from backend.utils.screenshot_urls import sign_screenshot_urls
+
+        # Screenshot links are signed as they go out, so messages saved before
+        # a secret change (or before links were signed) still show them.
         return jsonify({
-            "messages": formatted_messages,
+            "messages": sign_screenshot_urls(formatted_messages),
             "has_more": has_more,
             "session_id": session_id,
             "total_count": total_count,
@@ -4859,7 +4877,9 @@ def get_chat_history(session_id: str):
 
 @enhanced_chat_bp.route("/history/all", methods=["GET", "DELETE"])
 def clear_all_chat_history():
-    """GET: return counts of chat data.  DELETE: clear all chat history."""
+    """GET (and the HEAD Flask adds to it): counts of chat data. DELETE:
+    clear all chat history. Only an explicit DELETE deletes: a page on any
+    site can make a browser send HEAD without asking first."""
     from backend.models import db, LLMMessage, LLMSession
     from backend.config import CONTEXT_PERSISTENCE_DIR, STORAGE_DIR
     import glob as glob_mod
@@ -4870,7 +4890,7 @@ def clear_all_chat_history():
             return len(glob_mod.glob(os.path.join(d, "*.json")))
         return 0
 
-    if request.method == "GET":
+    if request.method != "DELETE":
         try:
             message_count = db.session.query(LLMMessage).count()
             session_count = db.session.query(LLMSession).count()

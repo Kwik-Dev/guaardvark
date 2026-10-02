@@ -5,6 +5,9 @@
       "ZVEC_GREP_HOME": "plugins/zvec_grep/cache",
       "ZVEC_GREP_MODEL_CACHE": "plugins/zvec_grep/cache/models",
       "ZVEC_GREP_DEVICE": "cpu"
+    },
+    "fixedArgs": {
+      "root": "${GUAARDVARK_ROOT}"
     }
   }
 }

@@ -11,6 +11,7 @@ block in the first prompt.
 import pytest
 
 import backend.services.unified_chat_engine as uce
+from backend.services.chat_prompt_blocks import CHAT_KB_CONTEXT_HEADER
 
 KB = "KB PASSAGE: the chat sessions route is documented in the API guide."
 HITS = "backend/api/chat_sessions_api.py:42: def list_sessions():"
@@ -140,7 +141,8 @@ class TestCodeQuestion:
         first = e.calls["llm_messages"][0]
         assert uce._CODE_SEARCH_NUDGE in _text(first)
         assert KB not in _text(first)
-        assert "knowledge base" not in _text(first).lower()
+        assert CHAT_KB_CONTEXT_HEADER not in _text(first)
+        assert uce._KB_SECONDARY_LABEL not in _text(first)
 
     def test_kb_block_joins_after_a_code_search_with_the_secondary_label(self, monkeypatch):
         e = _engine(monkeypatch, [_tool_call("search_codebase", "route handler"), "Final answer."])
@@ -193,8 +195,16 @@ class TestNonCodeQuestion:
         _run(e, DOC_QUESTION)
         first = e.calls["llm_messages"][0]
         user = [m for m in first if m["role"] == "user"][-1]["content"]
-        assert f"Relevant context from knowledge base:\n{KB}" in user
+        assert f"{CHAT_KB_CONTEXT_HEADER}\n{KB}" in user
+        assert "answer from your own knowledge" in user
         assert uce._CODE_SEARCH_NUDGE not in _text(first)
+
+    def test_no_passages_means_no_kb_block(self, monkeypatch):
+        e = _engine(monkeypatch, ["Canberra."])
+        e._retrieve_rag_context = lambda message: ""
+        _run(e, DOC_QUESTION)
+        first = e.calls["llm_messages"][0]
+        assert CHAT_KB_CONTEXT_HEADER not in _text(first)
 
     def test_code_question_without_the_tool_keeps_the_block_too(self, monkeypatch):
         """No search_codebase in the registry: nothing to hold the docs for."""

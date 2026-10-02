@@ -37,7 +37,8 @@ def executed_sql(monkeypatch):
         for row in rows:
             entry = grouped.setdefault(row["source_filename"], {"chunks": 0, "parsed_by": row["parsed_by"]})
             entry["chunks"] += 1
-        listing = [(src, v["chunks"], 1, v["parsed_by"]) for src, v in grouped.items()]
+        # (name, passages, sections, parser, document key, path, files sharing the name)
+        listing = [(src, v["chunks"], 1, v["parsed_by"], "", None, 1) for src, v in grouped.items()]
         listing.sort(key=lambda r: r[1], reverse=True)
         return listing, None
 

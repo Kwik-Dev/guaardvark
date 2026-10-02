@@ -28,7 +28,13 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import best_match
 
 from backend.mcp.audit import audit_call
-from backend.mcp.config import WAIT_TIMEOUT_SECONDS, MCPConfig, tool_is_exposed
+from backend.mcp.config import (
+    SERVER_TIMEOUT_ENV,
+    WAIT_HEADROOM_SECONDS,
+    WAIT_TIMEOUT_SECONDS,
+    MCPConfig,
+    tool_is_exposed,
+)
 from backend.services.agent_tools import BaseTool, get_tool_registry
 from backend.services.tool_execution_guard import ToolExecutionGuard
 
@@ -197,12 +203,25 @@ def _content_blocks_from_result(result: Any) -> list[mcp_types.ContentBlock]:
     return [mcp_types.TextContent(type="text", text=str(result))]
 
 
-def _call_timeout(config: MCPConfig, arguments: dict[str, Any]) -> float:
+def _call_timeout(config: MCPConfig, arguments: dict[str, Any], tool: Any = None) -> float:
     """The per-call ceiling: the configured timeout, or the wait ceiling when
-    the caller asked a generation tool to block until the render finishes."""
+    the caller asked a generation tool to block until the render finishes.
+
+    This is the one place that decides how long a waiting call may take. A
+    tool that gives up on its own declares how long it waits as ``MAX_WAIT_S``
+    next to its definition, and the ceiling stays ``WAIT_HEADROOM_SECONDS``
+    above that, so the tool's "still running (batch X)" answer reaches the
+    client instead of this adapter's timeout.
+
+    Tools that run as tool jobs (backend/services/tool_jobs.py) wait at most
+    half the configured timeout even with wait_for_result, so this ceiling
+    never cuts them off first."""
     wait = arguments.get("wait_for_result")
     if str(wait).lower() in ("1", "true", "yes"):
-        return float(max(config.timeout_seconds, WAIT_TIMEOUT_SECONDS))
+        own_wait = getattr(tool, "MAX_WAIT_S", None)
+        if isinstance(own_wait, bool) or not isinstance(own_wait, (int, float)):
+            own_wait = 0
+        return float(max(config.timeout_seconds, WAIT_TIMEOUT_SECONDS, own_wait + WAIT_HEADROOM_SECONDS))
     return float(config.timeout_seconds)
 
 
@@ -213,18 +232,22 @@ def _timeout_message(name: str, timeout: float, read_only: bool = False, key: st
     )
     if read_only:
         return head + (
-            " It changes nothing, so calling it again is safe; for longer work raise "
-            "GUAARDVARK_MCP_TIMEOUT or data/config/mcp.json server.timeout_seconds."
+            " It changes nothing, so a retry is safe, but the first run keeps going: a retry "
+            "starts a second one behind it (model-backed tools such as analyze_code can run "
+            "for minutes). Give it time before retrying; for longer work raise "
+            f"{SERVER_TIMEOUT_ENV} or data/config/mcp.json server.timeout_seconds."
         )
     if key:
         return head + (
             f" Call again with the same {IDEMPOTENCY_KEY} ('{key}') to wait for this run; "
             "that will not start a second one."
         )
+    # A call that timed out never handed back a batch or job id, so there is
+    # nothing to poll; say where the result will turn up instead.
     return head + (
-        " Calling it again would start a second run. A render lands in Studio and "
-        "data/outputs when it completes; for a queued generation, poll "
-        "get_generation_status with its batch id. Send an "
+        " Calling it again would start a second run. This call returned no job id, so there "
+        "is nothing to poll with get_generation_status; anything it writes lands in Studio "
+        "and data/outputs when it completes (resources/list shows generated files). Send an "
         f"{IDEMPOTENCY_KEY} next time so a retry waits for the first run."
     )
 
@@ -234,6 +257,22 @@ def _error_result(text: str) -> mcp_types.CallToolResult:
         content=[mcp_types.TextContent(type="text", text=text)],
         is_error=True,
     )
+
+
+def _drop_internal_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> list[str]:
+    """Remove, in place, the underscore keys a client sent that the tool does
+    not publish, and return their names.
+
+    Inside the backend an underscore key carries the caller's own context to a
+    tool: ``_agent_context`` holds the chat's session, project and workspace
+    root, and tools act on it (``save_memory`` files the memory under that
+    project). An MCP client has no such context to give, so it may not supply
+    one."""
+    published = schema.get("properties") or {}
+    dropped = sorted(key for key in arguments if str(key).startswith("_") and key not in published)
+    for key in dropped:
+        del arguments[key]
+    return dropped
 
 
 def _argument_error(validator: Draft202012Validator | None, arguments: dict[str, Any]) -> str | None:
@@ -324,10 +363,16 @@ async def _await_result(task: asyncio.Future, name: str, timeout: float, read_on
         rec["error_code"] = "tool_failed"
 
     payload = getattr(tool_result, "output", tool_result)
-    if not success and payload in (None, ""):
-        # A failed ToolResult carries its reason in ``error``; without
-        # this the client saw "(no output)" and nothing to act on.
-        payload = getattr(tool_result, "error", None) or "Tool failed without a message."
+    if not success:
+        # A failed ToolResult carries its reason in ``error``; lead with it, then
+        # any output the tool attached, so the client always sees why.
+        error = getattr(tool_result, "error", None)
+        if payload in (None, ""):
+            payload = error or "Tool failed without a message."
+        elif error and error != payload:
+            blocks = [mcp_types.TextContent(type="text", text=str(error))] + _content_blocks_from_result(payload)
+            rec["bytes_out"] = sum(len(getattr(b, "text", "")) for b in blocks)
+            return mcp_types.CallToolResult(content=blocks, is_error=True)
     blocks = _content_blocks_from_result(payload)
     rec["bytes_out"] = sum(len(getattr(b, "text", "")) for b in blocks)
     return mcp_types.CallToolResult(content=blocks, is_error=not success)
@@ -348,18 +393,23 @@ def build_tool_handlers(config: MCPConfig) -> tuple[Any, Any, int]:
             logger.warning("MCP: no argument validation for %s: %s", name, exc)
             validators[name] = None
 
-    # Guard state belongs to a client session: one stdio client, or one HTTP
-    # session. Entries go away with their session object.
+    # State belongs to a client session and goes away with its object. The guard
+    # follows the SDK's session object, which mcp 2.x builds per request, so its
+    # duplicate and failure counts cover one call. Keyed calls follow the
+    # connection that session wraps (one stdio client, or one HTTP session), so a
+    # retry with the same idempotency_key finds the first run.
     sessions: weakref.WeakKeyDictionary[Any, _SessionState] = weakref.WeakKeyDictionary()
     sessionless = _SessionState()
     # An MCP call is one-shot: there is no ReACT loop to number it, so the guard's
     # iteration field carries call order instead.
     call_seq = count(1)
 
-    def _state_for(ctx: Any) -> _SessionState:
+    def _state_for(ctx: Any, per_connection: bool = False) -> _SessionState:
         session = getattr(ctx, "session", None)
         if session is None:
             return sessionless
+        if per_connection:
+            session = getattr(session, "_connection", None) or session
         try:
             state = sessions.get(session)
             if state is None:
@@ -381,7 +431,9 @@ def build_tool_handlers(config: MCPConfig) -> tuple[Any, Any, int]:
         params: mcp_types.CallToolRequestParams,
     ) -> mcp_types.CallToolResult:
         name = params.name
-        arguments = dict(params.arguments or {})
+        # A null is an omitted argument: dropped before the published defaults
+        # apply, so validation, the guard and the tool all see the same call.
+        arguments = {k: v for k, v in (params.arguments or {}).items() if v is not None}
         with audit_call(method="tools/call", target=name) as rec:
             rec["bytes_in"] = len(json.dumps(arguments, default=str))
 
@@ -391,7 +443,10 @@ def build_tool_handlers(config: MCPConfig) -> tuple[Any, Any, int]:
                 rec["error_code"] = "tool_not_exposed"
                 return _error_result(f"Tool '{name}' is not exposed by this MCP server.")
 
-            base_tool, _ = pair
+            base_tool, mcp_tool = pair
+            dropped = _drop_internal_arguments(arguments, mcp_tool.input_schema)
+            if dropped:
+                logger.warning("MCP: ignored internal argument(s) %s sent to '%s'", dropped, name)
             read_only = getattr(base_tool, "read_only", None) is True
             key = arguments.pop(IDEMPOTENCY_KEY, None)
             key = str(key) if key not in (None, "") else None
@@ -406,11 +461,12 @@ def build_tool_handlers(config: MCPConfig) -> tuple[Any, Any, int]:
                 return _error_result(f"Invalid arguments for '{name}': {problem}")
 
             state = _state_for(ctx)
-            timeout = _call_timeout(config, arguments)
+            keyed_state = _state_for(ctx, per_connection=True)
+            timeout = _call_timeout(config, arguments, base_tool)
             args_hash = ToolExecutionGuard._hash_call(name, arguments)
 
             if key is not None:
-                earlier = state.keyed.get(key)
+                earlier = keyed_state.keyed.get(key)
                 if earlier is not None:
                     if (earlier.tool, earlier.args_hash) != (name, args_hash):
                         rec["outcome"] = "error"
@@ -440,7 +496,7 @@ def build_tool_handlers(config: MCPConfig) -> tuple[Any, Any, int]:
             task = asyncio.ensure_future(asyncio.to_thread(base_tool.execute, **arguments))
             task.add_done_callback(partial(_record_outcome, state.guard, name, dict(arguments), call_seq))
             if key is not None:
-                state.remember(key, _KeyedCall(name, args_hash, task))
+                keyed_state.remember(key, _KeyedCall(name, args_hash, task))
             return await _await_result(task, name, timeout, read_only, key, rec)
 
     return on_list_tools, on_call_tool, len(by_name)

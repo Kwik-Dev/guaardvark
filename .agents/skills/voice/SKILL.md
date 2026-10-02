@@ -24,6 +24,10 @@ Piper works without it. `B=${GUAARDVARK_URL:-http://localhost:5000}`.
 
 ## Speak a line or a script
 
+Over MCP, call `generate_speech` (`text` up to 3000 characters, optional `voice` such as
+`af_heart`, `engine` auto | kokoro | chatterbox); it waits and returns the file with a download
+link. Cloning is not offered over MCP. Without MCP, or for the Chatterbox knobs, use REST:
+
 ```bash
 curl -s -X POST $B/api/audio-foundry/generate/voice -H 'Content-Type: application/json' -d '{
   "text": "The line to speak.",

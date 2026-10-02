@@ -10,7 +10,9 @@ regex search, so the tool never advertises more than the machine can do.
 The workspace root is never asked of the model: the MCP tool behind this one
 requires an absolute root, and in the first trial the model guessed, ran
 `pwd`, and burned two turns finding it. It comes from the request's
-project_root, else the configured Guaardvark root.
+project_root, else the configured Guaardvark root. Over Guaardvark's own MCP
+server it is always the Guaardvark checkout: the client works in a repository
+of its own, and this tool never reaches outside the checkout for it.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from typing import Any, Dict, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.utils.backend_http import is_mcp_transport
+from backend.utils.display_paths import display_path
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +36,9 @@ DEFAULT_LIMIT = 8
 MAX_OUTPUT_CHARS = 12000
 
 _SEMANTIC_UNAVAILABLE = (
-    "Semantic code search is unavailable: the zvec_grep plugin is not connected, and the "
-    "query has no code names to search for literally. Ask with a function, class or file "
-    "name, or start the zvec_grep plugin from the Plugins page."
+    "Semantic code search is unavailable (the zvec_grep plugin is not connected, or has no "
+    "index for this checkout), and the query has no code names to search for literally. Ask "
+    "with a function, class or file name, or start the zvec_grep plugin from the Plugins page."
 )
 _SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
@@ -45,11 +48,16 @@ def _default_root() -> str:
     return str(default_repo_root())
 
 
-def _resolve_root(explicit: Optional[str], agent_context: Optional[Dict[str, Any]]) -> str:
+def _resolve_root(explicit: Optional[str], agent_context: Optional[Dict[str, Any]],
+                  confine: bool = False) -> str:
     """The checkout to search. A relative ``root`` ("frontend/src") narrows the
     project root rather than failing: the model reaches for that when it wants
-    to look in one area, and the index is per checkout anyway."""
-    ctx = agent_context or {}
+    to look in one area, and the index is per checkout anyway.
+
+    With ``confine`` (the MCP transport) the base is always the Guaardvark
+    checkout, whatever the arguments carry, and a root outside it raises
+    ValueError instead of being searched."""
+    ctx = {} if confine else (agent_context or {})
     base = Path(str(ctx.get("project_root") or _default_root())).expanduser().resolve()
     if not explicit:
         return str(base)
@@ -63,7 +71,43 @@ def _resolve_root(explicit: Optional[str], agent_context: Optional[Dict[str, Any
         given.relative_to(base)
         return str(base)
     except ValueError:
+        if confine:
+            raise ValueError(
+                f"root '{display_path(explicit)}' is outside this Guaardvark install's own source "
+                "checkout, which is all search_codebase searches over MCP. Leave root empty to "
+                "search Guaardvark's source; use your own tools for other folders."
+            ) from None
         return str(given)
+
+
+def _checkout_relative(root: str) -> Optional[str]:
+    """root relative to the Guaardvark checkout ("." for the checkout itself),
+    or None when it lies outside. The checkout is the configured root or the
+    one search_code reads; they differ only when GUAARDVARK_ROOT points away
+    from the code that is running."""
+    from backend.tools.llama_code_tools import PROJECT_ROOT
+    path = Path(root).resolve()
+    for checkout in (Path(_default_root()).resolve(), PROJECT_ROOT.resolve()):
+        try:
+            return path.relative_to(checkout).as_posix()
+        except ValueError:
+            continue
+    return None
+
+
+def _is_checkout(root: str) -> bool:
+    """True when root is (inside) the Guaardvark checkout, the only tree the
+    regex fallback can search."""
+    return _checkout_relative(root) is not None
+
+
+def _root_label(root: str) -> str:
+    """The searched root as the result names it, never as an absolute path:
+    "Guaardvark's own source checkout (.)" for the checkout itself."""
+    rel = _checkout_relative(root)
+    if rel is not None:
+        return f"Guaardvark's own source checkout ({rel})"
+    return display_path(root)
 
 
 def _hybrid_search(root: str, query: str, limit: int) -> Optional[str]:
@@ -140,32 +184,36 @@ def _symbol_tokens(query: str) -> list[str]:
     return tokens[:6]
 
 
-def _regex_search(query: str) -> tuple[Optional[str], str]:
-    """The repository's regex search, for when semantic search is unavailable.
+def _regex_search(query: str, limit: int = DEFAULT_LIMIT) -> tuple[Optional[str], str]:
+    """The repository's regex search over the Guaardvark checkout, for when
+    semantic search is unavailable. Lists at most ``limit`` hits.
 
     Returns (hits, searched_for). hits is None when the query has nothing a
     literal search can use.
     """
     from backend.tools.llama_code_tools import search_code
-    out = search_code(re.escape(query))
+    out = search_code(re.escape(query), max_hits=limit)
     if "No matches" not in out and out.strip():
         return out, query
     symbols = _symbol_tokens(query)
     if not symbols:
         return None, ""
-    return search_code("|".join(re.escape(s) for s in symbols)), ", ".join(symbols)
+    return search_code("|".join(re.escape(s) for s in symbols), max_hits=limit), ", ".join(symbols)
 
 
 class SearchCodebaseTool(BaseTool):
     name = "search_codebase"
     read_only = True
     description = (
-        "Search the current project's source code, which is already indexed: no path or "
-        "upload is needed, just call it. Ask by meaning or by symbol: 'where is it decided "
-        "whether a model supports thinking', 'which function cuts retrieved text', "
-        "'callers of think_payload'. Returns the matching files with line numbers and the "
-        "code itself. Use it before saying the code is unavailable, before reading whole "
-        "files, and instead of shell commands like grep or ls."
+        "Search this Guaardvark install's own source code by meaning or by symbol. It does not "
+        "search the caller's workspace or any other repository. The checkout is already indexed, "
+        "so no path or upload is needed: ask 'where is it decided whether a model supports "
+        "thinking', 'which function cuts retrieved text', 'callers of think_payload'. The first "
+        "line of the result names the checkout searched and how; then come the matching files "
+        "with checkout-relative line numbers and the code itself. With the zvec_grep plugin "
+        "connected the search is hybrid (meaning plus keyword); without it, a literal search "
+        "for the query and for the code names in it. Use it before saying Guaardvark's code is "
+        "unavailable and before reading whole files."
     )
     category = "code"
     observation_chars = MAX_OUTPUT_CHARS
@@ -176,11 +224,15 @@ class SearchCodebaseTool(BaseTool):
         ),
         "limit": ToolParameter(
             name="limit", type="int", required=False, default=DEFAULT_LIMIT,
-            description="How many hits to return (default 8)",
+            description="How many hits to return, 1 to 25 (default 8)",
         ),
         "root": ToolParameter(
             name="root", type="string", required=False,
-            description="Checkout to search; leave empty for the current project",
+            description=(
+                "Leave empty. Defaults to Guaardvark's own checkout (in chat, the project folder "
+                "the request came from); a folder inside it searches the same whole-checkout "
+                "index. Over MCP a root outside the checkout is refused."
+            ),
         ),
     }
 
@@ -192,27 +244,47 @@ class SearchCodebaseTool(BaseTool):
             limit = max(1, min(int(kwargs.get("limit") or DEFAULT_LIMIT), 25))
         except (TypeError, ValueError):
             limit = DEFAULT_LIMIT
-        root = _resolve_root(kwargs.get("root"), kwargs.get("_agent_context"))
+        over_mcp = is_mcp_transport(self)
+        try:
+            root = _resolve_root(kwargs.get("root"), kwargs.get("_agent_context"), confine=over_mcp)
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc))
         if not Path(root).is_dir():
-            return ToolResult(success=False, error=f"root is not a directory: {root}")
+            return ToolResult(success=False, error=f"root is not a directory: {display_path(root)}")
+        label = _root_label(root)
+        meta = {"root": root, "limit": limit}
 
-        if is_mcp_transport(self):
+        if over_mcp:
             text = _hybrid_search_via_backend(root, query, limit)
         else:
             text = _hybrid_search(root, query, limit)
         engine = "hybrid"
-        if text is None:
+        if text is not None:
+            text = f"[Searched {label}: hybrid meaning and keyword search (zvec_grep)]\n{text}"
+        else:
             engine = "regex"
-            hits, searched_for = _regex_search(query)
-            if hits is None:
+            if not _is_checkout(root):
+                # The literal fallback reads only the Guaardvark checkout; its
+                # hits would come from a different tree than the one asked for.
                 return ToolResult(
-                    success=False, error=_SEMANTIC_UNAVAILABLE,
-                    metadata={"engine": engine, "root": root, "limit": limit},
+                    success=False,
+                    error=(
+                        f"Semantic code search did not answer for {label} (the zvec_grep plugin "
+                        "is not connected, or has no index there), and the literal fallback "
+                        "searches only Guaardvark's own checkout."
+                    ),
+                    metadata={"engine": engine, **meta},
                 )
+            hits, searched_for = _regex_search(query, limit)
+            if hits is None:
+                return ToolResult(success=False, error=_SEMANTIC_UNAVAILABLE, metadata={"engine": engine, **meta})
+            if hits.startswith("ERROR"):
+                return ToolResult(success=False, error=hits, metadata={"engine": engine, **meta})
             text = (
-                "[Semantic search is unavailable (zvec_grep plugin not connected); "
-                f"regex matches for: {searched_for}]\n{hits}"
+                f"[Searched {label}: literal search for {searched_for}, at most {limit} hits listed. "
+                "Semantic search is unavailable (the zvec_grep plugin is not connected, or has no "
+                f"index for this checkout).]\n{hits}"
             )
         if len(text) > MAX_OUTPUT_CHARS:
             text = text[:MAX_OUTPUT_CHARS].rsplit("\n", 1)[0] + "\n... [more hits omitted]"
-        return ToolResult(success=True, output=text, metadata={"engine": engine, "root": root, "limit": limit})
+        return ToolResult(success=True, output=text, metadata={"engine": engine, **meta})

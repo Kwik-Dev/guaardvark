@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from backends.base import AudioBackend, GenerationResult
+from backends.hub_weights import require_hub_files
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ logger = logging.getLogger(__name__)
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 _RUNNER_SCRIPT = _PLUGIN_ROOT / "scripts" / "run_acestep.py"
 _MUSIC_VENV_PYTHON = _PLUGIN_ROOT / "venv-music" / "bin" / "python"
+# Every file ACE-Step reads; the daemon and the Install probe use the same list.
+_REQUIRED_FILES = _PLUGIN_ROOT / "backends" / "acestep_files.json"
 
 # Default load timeout — first run pulls ~10 GB of weights from HF, which
 # can take several minutes on first cold start. After warm cache, ~30s.
@@ -80,6 +83,10 @@ class ACEStepBackend(AudioBackend):
     def load(self) -> None:
         if self.is_loaded:
             return
+
+        # A partial Install refuses here, before a daemon or a 10 GB load starts.
+        required = json.loads(_REQUIRED_FILES.read_text(encoding="utf-8"))
+        require_hub_files(required["hf_repo"], required["files"], "ACE-Step music")
 
         if not _MUSIC_VENV_PYTHON.exists():
             raise RuntimeError(

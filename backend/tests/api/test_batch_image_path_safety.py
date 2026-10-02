@@ -162,3 +162,14 @@ def test_cast_library_deletes_are_protected_but_posts_stay_public():
     for path in ["/api/cast-library/subjects/3/train", "/api/cast-library/subjects/3/generate"]:
         with app.test_request_context(path, method="POST"):
             assert _is_protected() is False, f"POST {path}"
+
+
+def test_cast_lora_import_is_protected():
+    from backend.utils.auth_guard import _is_protected
+    app = Flask(__name__)
+    for path in ["/api/cast-library/subjects/3/import-lora", "/api/cast-library/subjects/3/import-lora/"]:
+        with app.test_request_context(path, method="POST"):
+            assert _is_protected() is True, f"POST {path}"
+    for path in ["/api/cast-library/subjects/3/upload-refs", "/api/cast-library/subjects/3/train"]:
+        with app.test_request_context(path, method="POST"):
+            assert _is_protected() is False, f"POST {path}"

@@ -45,7 +45,8 @@ def queue_outreach_run(
 
     Raises:
         ValueError: unsupported platform.
-        RuntimeError: Outreach is disabled or Celery submission fails.
+        RuntimeError: Outreach is disabled, web access is off for a YouTube
+            scout, or Celery submission fails.
     """
     normalized = (platform or "").strip().lower()
     task_type = OUTREACH_TASK_TYPES.get(normalized)
@@ -55,6 +56,16 @@ def queue_outreach_run(
 
     if not kill_switch.is_enabled():
         raise RuntimeError("outreach is disabled (kill switch is off)")
+
+    if task_type == "social_outreach_youtube":
+        # The YouTube scout sends its query to the web search engine, so it is
+        # not queued with web access off; the recon itself checks again when
+        # it runs (scout_youtube).
+        from backend.utils.settings_utils import web_access_block_reason
+
+        blocked = web_access_block_reason("scout YouTube for outreach")
+        if blocked:
+            raise RuntimeError(blocked)
 
     workflow_config: dict[str, Any] = {
         "platform": normalized,

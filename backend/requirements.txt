@@ -20,10 +20,10 @@ Flask-SocketIO==5.3.6
 flask-cors==6.0.0
 alembic==1.20.0
 anthropic>=1.7.0
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 
 # Background Tasks & Caching
-celery==5.4.0
+celery==5.6.3
 redis==5.0.4
 eventlet==0.41.2
 
@@ -32,6 +32,11 @@ numpy<2.0,>=1.26.4  # Pin to <2.0 for PyTorch compatibility
 pandas==2.2.2
 pydantic==2.13.5
 psutil==7.2.2
+# regex runs search_code's caller-supplied patterns under a per-call timeout
+# (backend/tools/llama_code_tools.py). transformers, nltk and tiktoken install it
+# too; it is named here because backend code imports it directly. The floor is
+# the one transformers 5.16 already requires.
+regex>=2025.10.22
 # nvidia-ml-py (imports as pynvml) is GPU-only — it powers VRAM queries in
 # gpu_resource_coordinator/ollama_resource_manager, but every importer does so
 # lazily inside try/except and falls back to nvidia-smi or "unknown". On
@@ -46,7 +51,7 @@ psutil==7.2.2
 # Web Scraping & File Processing
 beautifulsoup4==4.15.0
 lxml==6.1.3
-pypdf==6.16.1
+pypdf==6.19.0
 requests==2.34.2
 google-auth==2.57.1
 websocket-client==1.8.0
@@ -123,7 +128,7 @@ imageio-ffmpeg==0.6.0
 
 # Voice Processing Dependencies
 piper-tts==1.7.0
-onnxruntime==1.22.1
+onnxruntime==1.30.0
 pydub==0.25.1
 librosa>=0.10.2  # Audio decode + duration probe in voice_api.py
 numba>=0.61  # librosa's JIT; its numpy ceiling is what bounds the numpy line in constraints.txt
@@ -161,7 +166,7 @@ tree-sitter-c>=0.24.2
 tree-sitter-cpp>=0.23.4
 tree-sitter-ruby>=0.23.0
 tree-sitter-php>=0.24.1
-tree-sitter-c-sharp>=0.23.0
+tree-sitter-c-sharp>=0.23.5
 pathspec>=0.12.0
 networkx>=3.2
 

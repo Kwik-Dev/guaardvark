@@ -47,23 +47,27 @@ app = typer.Typer(
 
 # Top-level analyze and init for headless / natural use (e.g. guaardvark analyze /path )
 # These delegate to the REPL logic but run non-interactively when --non-interactive or no REPL needed.
-def _run_analyze(project: str = None, **opts):
-    from llx.slash import SlashRouter
-    from llx.working_memory import empty_working_memory, normalize_working_memory
-    state = {"server": None, "session_id": "headless", "cwd": None, "working_memory": empty_working_memory()}
-    router = SlashRouter(state)
-    args = [project] if project else []
-    router.dispatch("analyze " + " ".join(args) if args else "analyze")
-    # For headless, the cmd prints; if more output needed, enhance.
-
-app.command("analyze")(_run_analyze)
-
-def _run_init(**opts):
+def _run_analyze(
+    project: str = typer.Argument(None, help="Folder to analyze (default: the current one)"),
+):
+    """Analyze a project folder: languages, structure, entry points."""
     from llx.slash import SlashRouter
     from llx.working_memory import empty_working_memory
     state = {"server": None, "session_id": "headless", "cwd": None, "working_memory": empty_working_memory()}
     router = SlashRouter(state)
-    router.dispatch("init")
+    router.dispatch(f"analyze {project}" if project else "analyze")
+
+app.command("analyze")(_run_analyze)
+
+def _run_init(
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing GUAARDVARK.md"),
+):
+    """Scan this project and write GUAARDVARK.md, the instructions chat and /suggest follow."""
+    from llx.slash import SlashRouter
+    from llx.working_memory import empty_working_memory
+    state = {"server": None, "session_id": "headless", "cwd": None, "working_memory": empty_working_memory()}
+    router = SlashRouter(state)
+    router.dispatch("init --force" if force else "init")
 
 app.command("init")(_run_init)
 

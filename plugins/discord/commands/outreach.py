@@ -200,6 +200,14 @@ class OutreachCog(commands.Cog):
                 msg = await channel.fetch_message(msg_id)
                 draft = row.get("draft_text", "")
                 if draft:
+                    # The last moment a reject can stop this draft: the backend
+                    # moves it processing -> submitting, and refuses if it was
+                    # rejected after the claim. Anything but a yes means no send.
+                    try:
+                        await self.api._post(f"/social-outreach/submit/{audit_id}")
+                    except Exception as e:
+                        logger.info("outreach: draft %s not sent, submit refused: %s", audit_id, e)
+                        continue
                     await msg.reply(draft, mention_author=False)
 
                     await self.api._post(
@@ -215,10 +223,23 @@ class OutreachCog(commands.Cog):
                     posted_this_tick = True
             except discord.NotFound:
                 logger.warning("outreach: msg %s not found, rejecting draft %s", msg_id, audit_id)
-                await self.api._post(f"/social-outreach/reject/{audit_id}")
+                await self._give_up(audit_id)
             except Exception as e:
                 logger.warning("outreach: failed to post approved draft %s: %s", audit_id, e)
-                await self.api._post(f"/social-outreach/reject/{audit_id}")
+                await self._give_up(audit_id)
+
+    async def _give_up(self, audit_id) -> None:
+        """Reject a claimed draft that could not be sent.
+
+        Once the send has begun the backend refuses the reject, because the
+        reply may be out; the row is then closed by the backend's stuck-row
+        reaper. A refusal raised from here would stop the polling loop, so it
+        is logged instead.
+        """
+        try:
+            await self.api._post(f"/social-outreach/reject/{audit_id}")
+        except Exception as e:
+            logger.warning("outreach: draft %s not rejected, left for the reaper: %s", audit_id, e)
 
     @poll_approved_drafts.before_loop
     async def _before_approved_loop(self):

@@ -9,13 +9,31 @@ breaks everything.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import subprocess
+import sys
 from pathlib import Path
 
 from .models import MergeResult, SwarmTask, SwarmStatus
 
 logger = logging.getLogger("swarm.merge")
+
+# The inbound guard ships with the Guaardvark checkout this plugin lives in.
+_GUAARDVARK_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _inbound_guard():
+    """The inbound guard engine, or None when this checkout has none."""
+    if not (_GUAARDVARK_ROOT / "scripts" / "inbound_guard" / "__init__.py").is_file():
+        return None
+    if str(_GUAARDVARK_ROOT) not in sys.path:
+        sys.path.insert(0, str(_GUAARDVARK_ROOT))
+    try:
+        return importlib.import_module("scripts.inbound_guard")
+    except Exception as exc:
+        logger.warning(f"Inbound guard unavailable: {exc}")
+        return None
 
 
 class MergeManager:
@@ -42,6 +60,55 @@ class MergeManager:
         if self.enable_merger_agent and self.backend_url:
             from .merger_agent import MergerAgent
             self._merger = MergerAgent(self.backend_url)
+
+    def _inbound_check(self, task: SwarmTask) -> MergeResult | None:
+        """Judge the merge result with the inbound guard; a MergeResult when it refuses.
+
+        ``git merge-tree --write-tree`` builds the merged tree as objects only, so
+        nothing reaches the working tree until the guard has read it. Mode comes
+        from GUAARDVARK_INBOUND_GUARD or `git config inboundguard.mode`, which the
+        Settings page writes; off means this does nothing.
+        """
+        guard = _inbound_guard()
+        if guard is None:
+            return None
+        mode = guard.git_mode(self.repo_path)
+        if mode == "off":
+            return None
+        try:
+            tree = self._git("merge-tree", "--write-tree", self.base_branch, task.branch_name, check=False)
+            merged = tree.stdout.split()[0] if tree.stdout.strip() else ""
+            if not merged:
+                raise RuntimeError(tree.stderr.strip() or "merge-tree produced no tree")
+            verdict = guard.scan_diff(self.repo_path, [self.base_branch, merged], source="swarm",
+                                      subject=f"swarm {task.id}: {task.branch_name}", mode=mode)
+            from scripts.inbound_guard import ledger
+            from scripts.inbound_guard.sources import git_common_dir
+
+            path = ledger.ledger_path(git_common_dir(self.repo_path))
+            data = verdict.to_dict()
+            data["kind"] = "verdict"
+            ledger.append(path, data)
+            approved = ledger.approval_for(path, verdict.digest) is not None
+        except Exception as exc:
+            logger.error(f"Inbound guard could not read {task.branch_name}: {exc}")
+            if mode == "enforce":
+                return MergeResult(task_id=task.id, success=False,
+                                   error=f"The inbound guard could not read this branch ({exc}); not merging.")
+            return None
+        if verdict.findings:
+            logger.info(f"Inbound guard on {task.branch_name}: {verdict.verdict}, "
+                        f"{len(verdict.findings)} finding(s)")
+        if not verdict.enforced or approved:
+            return None
+        worst = verdict.findings[0]
+        where = f"{worst.path}:{worst.line}" if worst.line else worst.path
+        return MergeResult(
+            task_id=task.id, success=False,
+            error=(f"{'Held' if verdict.verdict == 'hold' else 'Blocked'} by the inbound guard: "
+                   f"{len(verdict.findings)} finding(s), worst {worst.severity} {worst.rule} at {where}. "
+                   f"Approve with: python3 scripts/check_inbound.py approve {verdict.digest} --note \"why\""),
+        )
 
     def check_conflicts(self, branch_name: str) -> MergeResult:
         """
@@ -96,6 +163,13 @@ class MergeManager:
                 task_id=task.id, success=False,
                 error="No branch name — task was never launched",
             )
+
+        # Read what the branch brings in before its tests run its code or the
+        # conflict check writes it into the checkout.
+        refused = self._inbound_check(task)
+        if refused is not None:
+            task.status = SwarmStatus.NEEDS_REVIEW
+            return refused
 
         # optionally run tests in the worktree before merging
         if run_tests and task.worktree_path:

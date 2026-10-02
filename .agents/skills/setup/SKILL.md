@@ -26,17 +26,19 @@ If the backend is not reachable, tell the user to start it from the Guaardvark c
 
 1. **MCP tools** (preferred when present): the `guaardvark` MCP server exposes chat, RAG, memory,
    code intelligence, file processing, web fetch, image/video/animation/music-video/film-crew
-   generation, `get_generation_status` for any queued batch, outreach drafting and GPU/log
+   generation, songs and speech (`generate_music`, `generate_speech`),
+   `get_generation_status` for any queued batch or song, outreach drafting and GPU/log
    inspection. Generation tools queue by default over MCP and return a batch id. In Claude Code they appear as
    `mcp__guaardvark__<tool>` after `python -m backend.mcp install`, or as
    `mcp__plugin_guaardvark_guaardvark__<tool>` when the plugin was installed from the marketplace. Install once from the checkout:
    ```bash
-   python -m backend.mcp install      # writes the server entry into Claude Code, Cursor, Claude Desktop, Codex, Zed, Gemini
+   python -m backend.mcp install      # writes the server entry into every detected client: Claude Code, Codex,
+                                      # Cursor, Grok, Antigravity, opencode, Claude Desktop, Zed, Gemini
    python -m backend.mcp doctor       # self-test + stale-config scan
    python -m backend.mcp list-tools   # what is exposed right now
    ```
    Restart the client after installing so it re-reads its MCP config.
-2. **REST** for everything the MCP policy does not expose (voice, music, upscaling, batches,
+2. **REST** for everything the MCP policy does not expose (voice cloning, sound effects, upscaling, batches,
    cast/LoRA training, swarm launch, interconnector, plugins). Use `curl` against the backend URL.
    Responses are wrapped as `{"success": bool, "data": {...}, "message": str}` on most routes; a few
    older routes return the bare object. Read `data` when it is present.

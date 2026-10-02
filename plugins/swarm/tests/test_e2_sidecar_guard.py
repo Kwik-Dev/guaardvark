@@ -20,7 +20,8 @@ def client(monkeypatch, tmp_path):
     import service.app as app_module
 
     monkeypatch.setattr(app_module, "check_internet", lambda *a, **k: False)
-    with TestClient(app_module.app) as c:
+    # An address the service's Host check answers.
+    with TestClient(app_module.app, base_url="http://127.0.0.1:8210") as c:
         yield c
 
 
@@ -108,3 +109,9 @@ def test_cors_origin_is_not_wildcard(client):
     # The middleware stores the configured origin list; '*' must be gone.
     assert "*" not in app_module._cors_origin
     assert app_module._cors_origin.startswith("http://localhost")
+
+
+def test_a_page_rebound_to_this_machine_is_refused_even_with_the_token(client):
+    for path in ("/health", "/swarm/status"):
+        resp = client.get(path, headers={**HEADERS, "Host": "evil.example:8210"})
+        assert resp.status_code == 421

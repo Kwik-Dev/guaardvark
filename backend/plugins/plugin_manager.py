@@ -536,6 +536,25 @@ class PluginManager:
             f"(it was started from another install), then start the plugin."
         )
     
+    def _install_root(self) -> str:
+        return os.path.realpath(str(self.registry.plugins_dir.parent))
+
+    def _runs_outside_install(self, pid: int) -> bool:
+        """True when ``pid``'s working directory is known and outside this install.
+
+        Plugins are started with their plugin folder as the working directory,
+        so a process whose cwd lies elsewhere was not started by this install:
+        a second checkout sharing the ports, or a service run by hand. When the
+        cwd cannot be read (no /proc, or a non-dumpable process) the answer is
+        False and the caller keeps its old behaviour.
+        """
+        try:
+            cwd = os.path.realpath(os.readlink(f"/proc/{pid}/cwd"))
+        except OSError:
+            return False
+        root = self._install_root()
+        return not (cwd == root or cwd.startswith(root + os.sep))
+
     def _kill_by_port(self, port: int):
         """Kill any process listening on the given port (orphan cleanup).
 
@@ -611,6 +630,13 @@ class PluginManager:
                         f"Refusing to kill PID {pid} on port {port} — it is the backend "
                         f"process (or a child of it). Plugin manifest likely declares a "
                         f"port that collides with FLASK_PORT. Fix the plugin.json port."
+                    )
+                    continue
+                if self._runs_outside_install(pid):
+                    logger.warning(
+                        f"Not killing PID {pid} on port {port}: it runs from outside this "
+                        f"install ({self._install_root()}). Another copy of Guaardvark, or a "
+                        f"service started by hand, is using the port."
                     )
                     continue
                 try:
@@ -1271,6 +1297,26 @@ class PluginManager:
             except Exception as e:
                 logger.warning(f"Ollama disable: error unloading {name}: {e}")
     
+    def _record_health(self, plugin_id: str, *, answering: bool) -> None:
+        """Keep the recorded status in step with what a health probe just saw.
+
+        A service that crashed (ComfyUI mid-render) stays RUNNING in
+        get_status() until something refreshes it; a probe that finds it gone
+        records it STOPPED, and one that finds it answering again records it
+        RUNNING. An ERROR kept for a stranger on the port is left alone, and the
+        persisted running set is not touched (see _refresh_status).
+        """
+        before = self._plugin_status.get(plugin_id)
+        if answering and before == PluginStatus.STOPPED:
+            after = PluginStatus.RUNNING
+        elif not answering and before == PluginStatus.RUNNING:
+            after = PluginStatus.STOPPED
+        else:
+            return
+        self._plugin_status[plugin_id] = after
+        logger.info(f"Health check: '{plugin_id}' {before.value} -> {after.value}")
+        self._broadcast_plugins_status(f"health:{plugin_id}:{after.value}")
+
     def health_check(self, plugin_id: str) -> Dict[str, Any]:
         """
         Get health status of a plugin.
@@ -1303,7 +1349,18 @@ class PluginManager:
                 response = requests.get(url, timeout=5)
                 
                 if response.status_code == 200:
-                    data = response.json()
+                    self._record_health(plugin_id, answering=True)
+                    # Relayed to browsers (/api/plugins/<id>/health and the
+                    # plugin's info), so a credential in a plugin's reply
+                    # never travels on.
+                    from backend.utils.secret_redaction import redact_fields
+                    # Answering 200 is the health signal. Some services reply
+                    # with a page rather than JSON (ComfyUI's "/").
+                    try:
+                        body = response.json()
+                    except ValueError:
+                        body = None
+                    data = redact_fields(body) if isinstance(body, dict) else {'status': 'healthy'}
                     data['plugin_id'] = plugin_id
                     return data
                 else:
@@ -1313,6 +1370,7 @@ class PluginManager:
                         'plugin_id': plugin_id
                     }
             except requests.exceptions.ConnectionError:
+                self._record_health(plugin_id, answering=False)
                 payload = {'status': 'stopped', 'error': 'Service not running'}
                 # For the swarm plugin, the sidecar can't tell us *why* it's down
                 # when it isn't running. Run its static dependency check out of

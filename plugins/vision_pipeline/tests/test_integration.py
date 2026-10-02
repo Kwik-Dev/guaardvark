@@ -36,8 +36,8 @@ def client():
             })
         )
         from service.app import app, _auth_token
-        with TestClient(app) as c:
-            c.headers["Authorization"] = f"Bearer {_auth_token}"
+        with TestClient(app, base_url="http://127.0.0.1:8201") as c:
+            c.headers["Authorization"] = f"Bearer {_auth_token()}"
             yield c
 
 

@@ -3,6 +3,8 @@
 Provides the minimum API surface for TUI chat, model management,
 and health checks without requiring PostgreSQL, Redis, or Celery.
 """
+import ipaddress
+
 import httpx
 from flask import Flask, request, jsonify
 
@@ -10,13 +12,45 @@ from llx import __version__
 from llx.launch_config import load_launch_config, save_launch_config, resolve_ollama_url
 
 
+def addressed_to_this_machine(host: str) -> bool:
+    """Whether a Host header names this machine the way a client of a
+    127.0.0.1-only server can: localhost or an IP address. A browser page
+    whose DNS name was re-pointed at 127.0.0.1 sends that name instead."""
+    name = (host or "").strip().lower()
+    if name.startswith("["):
+        end = name.find("]")
+        name = name[1:end] if end > 0 else ""
+    elif name.count(":") == 1:
+        name = name.split(":", 1)[0]
+    if name.endswith("."):
+        name = name[:-1]
+    if name == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
 def create_lite_app() -> Flask:
     """Create a minimal Flask app for lite mode.
 
     Lite mode is stateless — config lives in JSON, chat is proxied to Ollama.
-    No database is used.
+    No database is used. It listens on 127.0.0.1, and its client (the REPL)
+    calls it by that address, so a request addressed to any other name is
+    refused before a route runs.
     """
     app = Flask(__name__)
+
+    @app.before_request
+    def refuse_other_names():
+        if not addressed_to_this_machine(request.host):
+            return jsonify({
+                "success": False,
+                "message": f"Refused: this server answers only to localhost and IP addresses, not {request.host[:100]!r}.",
+            }), 421
+        return None
 
     @app.route("/api/health")
     def health():

@@ -13,7 +13,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from .core import Finding, FindingKind, Severity, is_excluded
+from .core import Finding, FindingKind, Severity, source_files
 
 
 def _module_name(rel: Path) -> str:
@@ -100,9 +100,7 @@ def analyze(root: Path, extra_excludes: frozenset[str] = frozenset(),
     dynamic_modules = set(dynamic_modules or ())
     # 1. Discover all internal modules (those we own and can analyze)
     modules: dict[str, Path] = {}  # module_name -> path
-    for py in root.rglob("*.py"):
-        if is_excluded(py, extra_excludes):
-            continue
+    for py in source_files(root, extra_excludes, pattern="*.py"):
         try:
             rel = py.relative_to(root)
         except ValueError:
@@ -307,8 +305,6 @@ def _lifecycle_for(rel: str, importers: set | None) -> str:
 def _collect_test_basenames(root: Path, extra_excludes: frozenset[str]) -> set[str]:
     """Set of module stems that have a `test_<stem>.py` somewhere in the tree."""
     out: set[str] = set()
-    for py in root.rglob("test_*.py"):
-        if is_excluded(py, extra_excludes):
-            continue
+    for py in source_files(root, extra_excludes, pattern="test_*.py"):
         out.add(py.stem[len("test_"):])
     return out

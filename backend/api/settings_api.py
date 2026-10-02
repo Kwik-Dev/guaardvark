@@ -187,7 +187,7 @@ def get_active_video_model_route():
     overrides = get_active_video_model_overrides()
     resolved = {}
     for role in ("t2v", "i2v", "scene"):
-        mid, err = resolve_active_video_model(role)
+        mid, err = resolve_active_video_model(role, comfyui_down_ok=True)
         resolved[role] = {"model": mid, "error": err}
     return success_response({
         "model": get_active_video_model(),
@@ -854,39 +854,15 @@ def get_password_requirements():
 
 @settings_bp.route("/security/check", methods=["GET"])
 def security_check():
-    """Run security checks on the application configuration."""
-    current_app.logger.info("API: Received GET /api/settings/security/check request")
-    
+    """What this install exposes and what guards it: the API key (set or not,
+    never the key), tool-endpoint protection, the Host and origin checks, debug
+    mode, web access, tool file access, and the addresses the backend, web UI,
+    Redis, PostgreSQL and each plugin listen on. Read-only
+    (backend/services/security_summary.py)."""
     try:
-        from backend.tools.security_self_check import run_security_checks
-        
-        warnings = run_security_checks()
-        
-        # Additional runtime security checks
-        additional_checks = []
-        
-        # Check if default secret key is being used
-        if current_app.config.get("SECRET_KEY") == "dev-secret-key":
-            additional_checks.append("Application is using default secret key - change in production")
-        
-        # Check if debug mode is enabled
-        if current_app.debug:
-            additional_checks.append("Debug mode is enabled - disable in production")
-        
-        # Check CORS configuration
-        if os.getenv("FLASK_ENV") == "production":
-            frontend_url = os.getenv("VITE_FRONTEND_URL", "http://localhost:5173")
-            if "localhost" in frontend_url:
-                additional_checks.append("Frontend URL contains localhost in production environment")
-        
-        all_warnings = warnings + additional_checks
-        
-        return success_response({
-            "warnings": all_warnings,
-            "warning_count": len(all_warnings),
-            "security_level": "high" if len(all_warnings) == 0 else "medium" if len(all_warnings) < 3 else "low"
-        })
-        
+        from backend.services.security_summary import security_summary
+
+        return success_response(security_summary(debug=current_app.debug))
     except Exception as e:
         current_app.logger.error(f"Failed to run security check: {e}", exc_info=True)
         return error_response(f"Failed to run security check: {e}")
