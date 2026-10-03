@@ -17,9 +17,10 @@ Design
 - A SINGLE worker thread drains a FIFO queue and runs one generation at a time —
   matching the single GPU and the dispatcher's existing per-intent serialization.
 - Job state is persisted to disk (one JSON per job) so status survives polling
-  gaps and restarts. On restart, a job left 'running'/'queued' is marked 'error'
+  gaps and restarts. On restart, a job left 'running' is marked 'error'
   (interrupted) — generation can't resume mid-stream, but finished outputs are
-  already on disk and registered.
+  already on disk and registered. A job still 'queued' never started, so it is
+  queued again in its original order.
 - Progress is reported per-chunk via a callback; cancellation is cooperative
   (the worker sets an Event the backend checks between chunks).
 
@@ -204,6 +205,7 @@ class JobManager:
             logger.warning("Could not persist job %s: %s", job.id, e)
 
     def _recover_on_start(self) -> None:
+        requeue: list[Job] = []
         for f in self._dir.glob("*.json"):
             try:
                 data = json.loads(f.read_text())
@@ -211,16 +213,21 @@ class JobManager:
             except Exception as e:  # noqa: BLE001
                 logger.warning("Skipping unreadable job file %s: %s", f, e)
                 continue
-            if job.status in ("queued", "running"):
-                # The worker that owned it is gone; it cannot be resumed.
+            if job.status == "running":
+                # The worker that owned it is gone; a render cannot be resumed.
                 job.status = "error"
                 job.error = "interrupted by service restart"
                 job.finished_at = time.time()
                 self._persist(job)
+            elif job.status == "queued":
+                requeue.append(job)
             self._jobs[job.id] = job
             self._cancels[job.id] = threading.Event()
+        for job in sorted(requeue, key=lambda j: j.created_at):
+            self._queue.put(job.id)
         if self._jobs:
-            logger.info("Recovered %d audio job record(s) from disk", len(self._jobs))
+            logger.info("Recovered %d audio job record(s) from disk, %d queued again",
+                        len(self._jobs), len(requeue))
 
     def _prune(self) -> None:
         finished = [j for j in self._jobs.values()
