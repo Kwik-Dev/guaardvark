@@ -45,7 +45,7 @@ _KIND_ALIASES = {
 }
 
 _STATUS_WORDS = {
-    "INDEXED": "indexed, searchable",
+    "INDEXED": "indexed",
     "INDEXING": "still indexing",
     "PENDING": "waiting to be indexed",
     "ERROR": "indexing failed",

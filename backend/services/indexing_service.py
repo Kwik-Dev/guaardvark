@@ -3050,7 +3050,7 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
             with _phase("parse_ms", timings):
                 documents = get_documents_from_file(
                     file_path=file_path,
-                    client=db_document.project.client.name if db_document.project and db_document.project.client else None,
+                    client=db_document.project.client_ref.name if db_document.project and db_document.project.client_ref else None,
                     upload_date=db_document.uploaded_at.isoformat() if db_document.uploaded_at else None
                 )
             
