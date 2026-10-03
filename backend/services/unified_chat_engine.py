@@ -93,7 +93,8 @@ _CLAIMED_SEARCH_NOTE = "Note: no search ran for this reply."
 # A message asking to find or look something up. Answered with no tool call,
 # the model reported a match in a document that does not exist.
 _LOOKUP_REQUEST_RE = re.compile(
-    r"\b(?:find|search|look\s+(?:up|for)|locate|lookup)\b"
+    r"\b(?:find|search(?:ed|ing)?|look\s+(?:up|for)|locate|lookup)\b"
+    r"|\bcheck (?:the|your|for|if|whether)\b"
     r"|\bsee if (?:you can|there)\b|\bis there (?:a|an|any)\b|\bdo (?:we|i) have\b",
     re.IGNORECASE,
 )
