@@ -2918,9 +2918,16 @@ class UnifiedChatEngine:
                 from backend.services.tool_confirmation import trusted_caller
                 approval_mark = (trusted_caller("chat_approval") if t_name in human_approved
                                  else contextlib.nullcontext())
+                # Several calls in one step run on pool threads, which have no
+                # Flask app context: a tool that reads the database there failed
+                # with "Working outside of application context".
+                from flask import has_app_context
+                app_ctx = (self.app.app_context()
+                           if getattr(self, "app", None) is not None and not has_app_context()
+                           else contextlib.nullcontext())
                 try:
                     exec_params = inject_chat_image_model(t_name, dict(t_params or {}), options)
-                    with approval_mark:
+                    with app_ctx, approval_mark:
                         res = self.registry.execute_tool(
                             t_name,
                             on_output=on_output,
