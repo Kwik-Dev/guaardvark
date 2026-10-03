@@ -1091,6 +1091,9 @@ class ListCodeRepositoriesTool(BaseTool):
 
     name = "list_code_repositories"
     read_only = True
+    # The built-in 'live' entry alone is about 450 characters, and the count
+    # comes after the list: at the 500 default neither reached the model.
+    observation_chars = 4000
     description = (
         "List the folders marked as Code Repositories in Guaardvark, as a JSON array of {id, name, path, "
         "has_metadata, description}. Call it first to get the integer folder_id that get_repository_map, "

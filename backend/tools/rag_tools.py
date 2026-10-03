@@ -98,6 +98,9 @@ class KnowledgeSearchTool(BaseTool):
 
     name = "search_knowledge_base"
     read_only = True
+    # The passages are the answer: at the 500 default the model read the
+    # header and the start of one passage.
+    observation_chars = 4000
     description = (
         "Search the user's indexed documents and code repositories (the local knowledge base) by "
         "meaning and keywords. Returns the top passages (the configured number, 3 on a stock install, "

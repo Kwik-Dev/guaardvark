@@ -64,6 +64,33 @@ _TOOL_LIST_ECHO_FALLBACK_TEXT = (
     "thinking off with /thinking."
 )
 
+# A reply that says a search is under way, or will report back, when no tool ran
+# in it. Nothing keeps running once a reply ends, so the claim is false.
+_SEARCH_IN_PROGRESS_RE = re.compile(
+    r"\bi(?: am|'m|’m) (?:now |currently |still )?"
+    r"(?:searching|scanning|checking|looking through|going through|combing through)\b"
+    r"|\bi(?:'ll|’ll| will) (?:let you know|report back|get back to you)\b"
+    r"[^.!?\n]{0,80}\b(?:find|found|result|search)",
+    re.IGNORECASE,
+)
+# A reply that says a search ran. True only if a tool ran this turn or in the
+# reply before (a recap of earlier results); see _claims_unrun_search.
+_SEARCH_DONE_RE = re.compile(
+    r"\bi(?: have|'ve|’ve) (?:now )?(?:completed|finished|done|performed|run|ran) "
+    r"(?:the|a|my) (?:search|scan|check|lookup)\b"
+    r"|\bi (?:searched|scanned|looked through|went through) (?:your|the|all)\b",
+    re.IGNORECASE,
+)
+_CLAIMED_SEARCH_NUDGE = (
+    "Your reply says a search is running or has run, but no tool ran in this reply, and "
+    "nothing keeps running after a reply ends. If the user wants the search, call the tool "
+    "now: find_records for Guaardvark's projects, clients, documents and other records, "
+    "find_files for files on this computer. Otherwise tell the user plainly that you have "
+    "not searched."
+)
+# Added when the repeat claims it again, or when this turn had no tools to call.
+_CLAIMED_SEARCH_NOTE = "Note: no search ran for this reply."
+
 # A reply that opens with a tool signature the way the TOOLS prompt block prints
 # one: optional bracket or dash, a tool name, then "(param:type" ...
 _TOOL_SIGNATURE_RE = re.compile(r"^[\[\-\s]*([A-Za-z_]\w*)\(\s*[A-Za-z_]\w*\s*:\s*\w+\??")
@@ -225,6 +252,15 @@ def _tool_needs_approval_card(tool, tool_name: str, params: Dict[str, Any], prea
     """
     if not tool or not getattr(tool, "requires_approval", False) or tool_name in preapproved:
         return False
+    # A tool can narrow its own approval to the calls that need it, e.g.
+    # find_files inside Guaardvark's folders. Unsure means ask.
+    per_call = getattr(tool, "needs_approval", None)
+    if callable(per_call):
+        try:
+            if not per_call(params or {}):
+                return False
+        except Exception:
+            logger.debug("needs_approval check failed for %s; asking", tool_name, exc_info=True)
     if getattr(tool, "consent_gate", False):
         ref = _consent_reference(tool, params)
         if ref:
@@ -317,6 +353,8 @@ CORE_TOOLS = [
     "delete_memory",
     "agent_status",  # cheap introspection — agent should always be able to report its state
     "list_documents",  # registered in tool_registry_init but unreachable: system-map finding a21f45035732cf31
+    "find_records",  # projects, clients, documents and the other records the pages show
+    "find_files",  # files on disk by name
 ]
 BROWSER_TOOLS = ["browser_navigate", "browser_click", "browser_fill", "browser_screenshot",
                  "browser_extract", "browser_wait", "browser_execute_js", "browser_get_html"]
@@ -1211,7 +1249,7 @@ def build_concise_tool_list(registry, tool_names: List[str]) -> str:
             req = "" if param.required else "?"
             params.append(f"{pname}:{param.type}{req}")
         param_str = ", ".join(params)
-        desc = tool.description[:80] if tool.description else ""
+        desc = getattr(tool, "chat_summary", "") or (tool.description[:80] if tool.description else "")
         lines.append(f"- {name}({param_str}) - {desc}")
     return "\n".join(lines)
 
@@ -1287,6 +1325,8 @@ class SemanticToolSelector:
         "search_memory",
         "delete_memory",
         "agent_status",
+        "find_records",
+        "find_files",
     }
 
     # Embedding model used for semantic tool ranking. Override via env var for
@@ -2064,6 +2104,11 @@ class UnifiedChatEngine:
             rag_context = self._retrieve_rag_context(message)
 
         # 3. Route-aware tool selection (skipped for social / skip_tools path)
+        # A "yes" to the assistant's own offer is selected for by what was
+        # offered: "yes" alone matches no tool, and the selectors read it as
+        # small talk and return none.
+        accepted_offer = str((options or {}).get("accepted_offer") or "").strip()
+        selection_text = f"{accepted_offer}\n{message}" if accepted_offer else message
         model_name = getattr(self.llm, "model", "unknown")
         self._prov_note("model", model_name)
         _skip_tools = bool(getattr(self, "_skip_tools", False) or options.get("skip_tools"))
@@ -2075,12 +2120,12 @@ class UnifiedChatEngine:
             rules_persona = self._load_rules(model_name)
 
             # Ask the router what this message needs (if available)
-            routed_tools = self._get_routed_tools(message)
+            routed_tools = self._get_routed_tools(selection_text)
 
             try:
-                selected_tools = self._semantic_selector.select(message, self.registry)
+                selected_tools = self._semantic_selector.select(selection_text, self.registry)
             except Exception:
-                selected_tools = select_tools_for_context(message, self.registry.list_tools())
+                selected_tools = select_tools_for_context(selection_text, self.registry.list_tools())
 
             # Merge router's tool suggestions with semantic selection (router takes priority)
             if routed_tools:
@@ -2090,19 +2135,19 @@ class UnifiedChatEngine:
                         merged.append(t)
                 selected_tools = merged
 
-            selected_tools = _pin_repo_intel_tools(message, selected_tools, self.registry.list_tools())
-            selected_tools = _pin_code_search_tools(message, selected_tools, self.registry.list_tools())
-            selected_tools = _pin_knowledge_nav_tools(message, selected_tools, self.registry.list_tools())
-            selected_tools = _pin_workstation_tools(message, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_repo_intel_tools(selection_text, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_code_search_tools(selection_text, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_knowledge_nav_tools(selection_text, selected_tools, self.registry.list_tools())
+            selected_tools = _pin_workstation_tools(selection_text, selected_tools, self.registry.list_tools())
             selected_tools = _pin_image_edit_tools(bool(self._image_data), selected_tools, self.registry.list_tools())
             selected_tools = _pin_image_generation_tools(
-                message, selected_tools, self.registry.list_tools(), session_id=session_id,
+                selection_text, selected_tools, self.registry.list_tools(), session_id=session_id,
             )
 
             # Semantic selector can return CORE-only when embeddings are cold; keyword
             # router still knows which category matched — merge so action tools survive.
             if not _skip_tools:
-                keyword_tools = select_tools_for_context(message, self.registry.list_tools())
+                keyword_tools = select_tools_for_context(selection_text, self.registry.list_tools())
                 merged = list(selected_tools)
                 for t in keyword_tools:
                     if t not in merged and len(merged) < 25:
@@ -2113,7 +2158,7 @@ class UnifiedChatEngine:
             # of its configured keywords) go in ahead of the rest.
             try:
                 selected_tools = merge_forced_tools(
-                    selected_tools, select_mcp_tools_for_message(message, self.registry),
+                    selected_tools, select_mcp_tools_for_message(selection_text, self.registry),
                     max_tools=25,
                 )
             except Exception as exc:
@@ -2260,6 +2305,12 @@ class UnifiedChatEngine:
         self._local_facts_this_turn = any(name != PAGE_PROVIDER_NAME for name, _ in _entries)
         if provider_context:
             context_parts.append(f"Current context:\n{provider_context}")
+        _accepted = str(_opts.get("accepted_offer") or "").strip()
+        if _accepted:
+            context_parts.append(
+                f'The user\'s reply accepts what you offered in your last message: "{_accepted}" '
+                "Do it now: call the tool for it in this reply."
+            )
         if rag_context and not hold_rag_for_code:
             from backend.services.chat_prompt_blocks import CHAT_KB_CONTEXT_HEADER
             context_parts.append(f"{CHAT_KB_CONTEXT_HEADER}\n{rag_context}")
@@ -2356,6 +2407,7 @@ class UnifiedChatEngine:
 
         wrap_up_nudge_pushed = False
         tool_list_echo_retried = False
+        claimed_search_retried = False
         for iteration in range(1, self.max_iterations + 1):
             if is_aborted(session_id):
                 emit_fn("chat:complete", {
@@ -2493,6 +2545,24 @@ class UnifiedChatEngine:
                         continue
                     final_text = _TOOL_LIST_ECHO_FALLBACK_TEXT
                     emit_fn("chat:token", {"content": final_text, "session_id": session_id})
+                if (
+                    not steps  # no tool was even attempted this turn
+                    and not options.get("skip_nudges")
+                    and self._claims_unrun_search(final_text, session_id)
+                ):
+                    if not claimed_search_retried and not _skip_tools and not is_aborted(session_id):
+                        claimed_search_retried = True
+                        logger.info(
+                            f"[UNIFIED_ENGINE] iter={iteration} reply claims a search no tool ran; "
+                            "re-asking once"
+                        )
+                        # The claim was streamed as it was written; take it off the screen.
+                        emit_fn("chat:token", {"content": "", "reset": True, "session_id": session_id})
+                        ollama_messages.append({"role": "system", "content": _CLAIMED_SEARCH_NUDGE})
+                        continue
+                    logger.info(f"[UNIFIED_ENGINE] iter={iteration} reply still claims an unrun search; noting it")
+                    final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
+                    emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
@@ -4843,6 +4913,28 @@ class UnifiedChatEngine:
         except Exception as e:
             logger.warning(f"[VISION] All pasted image analysis attempts failed: {e}")
             return None
+
+    def _claims_unrun_search(self, text: str, session_id: str) -> bool:
+        """True when a reply with no tool call says a search is running, or says
+        one ran when the previous reply ran no tool either (a recap of earlier
+        results is allowed)."""
+        if not text:
+            return False
+        if _SEARCH_IN_PROGRESS_RE.search(text):
+            return True
+        if not _SEARCH_DONE_RE.search(text):
+            return False
+        try:
+            from backend.models import LLMMessage
+            row = (LLMMessage.query
+                   .filter_by(session_id=session_id, role="assistant")
+                   .order_by(LLMMessage.timestamp.desc())
+                   .first())
+            steps = ((row.extra_data or {}).get("steps") if row else None) or []
+            return not steps
+        except Exception:
+            logger.debug("previous reply's tools unavailable for %s", session_id, exc_info=True)
+            return True
 
     def _load_history(self, session_id: str, limit: int = 20) -> List[Dict[str, str]]:
         """Load conversation history from DB (thread-safe with app context)."""

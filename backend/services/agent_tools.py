@@ -95,6 +95,11 @@ class BaseTool:
     # next turn. 500 keeps a chatty tool from crowding the context; a search
     # tool whose whole point is the text it returns declares more.
     observation_chars: int = 500
+    # The line the chat model reads in its tool list. Chat shows only the first
+    # 80 characters of `description`, which cut the rules off tools whose use
+    # depends on them; a tool that needs more sets this (keep it under ~250).
+    # MCP clients always get the full description.
+    chat_summary: str = ""
     requires_confirmation: bool = False
     required_context: List[str] = []  # e.g., ['project_id', 'user_id'] (read-only; never mutate)
     

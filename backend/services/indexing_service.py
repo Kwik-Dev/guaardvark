@@ -813,6 +813,12 @@ def _pg_table_name(project_id=None, profile: Optional[str] = None) -> Optional[s
 _vector_store_fallback_reason: Optional[str] = None
 # Latch so the warning below is emitted once per process, not per query.
 _fallback_warned = False
+# True when the fallback came from an unreachable embedding backend, which
+# clears by itself once Ollama answers; a store that failed to build does not.
+_fallback_transient = False
+_last_fallback_retry = 0.0
+# How often a process on the stand-in store checks whether it can leave it.
+_FALLBACK_RETRY_S = 30.0
 
 
 def vector_store_fallback_reason() -> Optional[str]:
@@ -820,14 +826,48 @@ def vector_store_fallback_reason() -> Optional[str]:
     return _vector_store_fallback_reason
 
 
-def _fall_back_to_simple(reason: str):
-    global _vector_store_fallback_reason
+def _fall_back_to_simple(reason: str, transient: bool = False):
+    global _vector_store_fallback_reason, _fallback_transient
     _vector_store_fallback_reason = reason
+    _fallback_transient = transient
     logger.warning(
         "pgvector requested but %s — using an EMPTY SimpleVectorStore; "
         "the persisted index will NOT be consulted", reason,
     )
     return SimpleVectorStore() if SimpleVectorStore else None
+
+
+def _lift_transient_fallback() -> bool:
+    """Drop an index built on the stand-in store once the embedding backend answers.
+
+    A backend or worker that starts while Ollama is down cannot learn the
+    embedding width, so it builds on an empty in-memory store. That index is
+    cached for the life of the process, which left search empty, and indexing
+    writing nowhere, until a restart. Checked at most every _FALLBACK_RETRY_S;
+    returns True when the cached index was dropped so the caller rebuilds it.
+    """
+    global index, storage_context, _last_fallback_retry
+    if not (_vector_store_fallback_reason and _fallback_transient):
+        return False
+    now = time.monotonic()
+    if now - _last_fallback_retry < _FALLBACK_RETRY_S:
+        return False
+    _last_fallback_retry = now
+    if not _active_embed_dim():
+        return False
+    logger.warning(
+        "Embedding backend reachable again; rebuilding the index on the configured "
+        "vector store (was: %s)", _vector_store_fallback_reason,
+    )
+    with _index_operation_lock:
+        index = None
+        storage_context = None
+        try:
+            from flask import current_app
+            current_app.config.get("INDEX_CACHE", {}).clear()
+        except Exception:
+            pass  # no app context (Celery worker): the module globals are the only cache
+    return True
 
 
 def _make_vector_store(project_id=None, profile: Optional[str] = None):
@@ -843,7 +883,8 @@ def _make_vector_store(project_id=None, profile: Optional[str] = None):
     if not table or not dim:
         return _fall_back_to_simple(
             "the embedding dimension is unknown (embedding backend unreachable? "
-            "set GUAARDVARK_EMBEDDING_DIM to pin it)"
+            "set GUAARDVARK_EMBEDDING_DIM to pin it)",
+            transient=True,
         )
 
     try:
@@ -1430,6 +1471,7 @@ def get_or_create_index(project_id: Optional[str] = None):
 
     from backend.config import INDEX_ROOT, PROJECT_INDEX_MODE
 
+    _lift_transient_fallback()
     _sync_embed_model()
 
     index_mode = os.getenv("GUAARDVARK_PROJECT_INDEX_MODE", PROJECT_INDEX_MODE)
@@ -1870,8 +1912,10 @@ def search_with_llamaindex(
     try:
         with _index_operation_lock:
             local_index = index
-            if local_index is None:
-                logger.warning("search_with_llamaindex: Index not available, attempting to load...")
+            if local_index is None or vector_store_fallback_reason():
+                if local_index is None:
+                    logger.warning("search_with_llamaindex: Index not available, attempting to load...")
+                # On the stand-in store this is also where the index leaves it.
                 get_or_create_index(project_id=str(project_id) if project_id else None)
                 local_index = index
 
@@ -2358,6 +2402,15 @@ def add_text_to_index(text: str, metadata: Dict[str, Any], project_id: Optional[
     but callers that care can distinguish empty (None) from failed (False).
     """
     global index, storage_context
+
+    # Same rule as add_file_to_index: nothing is replaced or written while the
+    # persisted store is not in use.
+    if index is None or vector_store_fallback_reason():
+        get_or_create_index(project_id)
+    _fallback = vector_store_fallback_reason()
+    if _fallback:
+        logger.error("add_text_to_index: not writing; the persisted vector store is not in use (%s)", _fallback)
+        return False
 
     try:
         if replace_where:
@@ -2939,6 +2992,18 @@ def add_file_to_index(file_path: str, db_document: DBDocument, progress_callback
             "Cannot add file: Index or Storage Context not properly initialized."
         )
         logger.error("Index service not ready for document indexing")
+        return False
+
+    # On the stand-in store, vectors would land in this process's memory, where
+    # no search sees them and a restart loses them, and the purge below would
+    # first delete the copy that search does use. Callers read the reason from
+    # vector_store_fallback_reason() and leave the document to be indexed later.
+    _fallback = vector_store_fallback_reason()
+    if _fallback:
+        logger.error(
+            "Not indexing %s: the persisted vector store is not in use (%s)",
+            getattr(db_document, "filename", file_path), _fallback,
+        )
         return False
 
     if db_document is None:

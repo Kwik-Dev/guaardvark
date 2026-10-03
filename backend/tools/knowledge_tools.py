@@ -188,6 +188,7 @@ class ListDocumentsTool(BaseTool):
 
     name = "list_documents"
     read_only = True
+    observation_chars = 4000  # one line per document; 500 held about six
     description = (
         "List the documents in the local knowledge base, most passages first: one line per file with "
         "its passage count, its section count when above one, and the parser that read it, under a "
@@ -308,6 +309,7 @@ class DocumentOutlineTool(BaseTool):
 
     name = "get_document_outline"
     read_only = True
+    observation_chars = 3000  # a heading per line
     description = (
         "Show the structure of one indexed document: its sections (heading paths such as 'Setup > "
         "Install') and pages in the order they appear, each with a passage count, under a header with "
@@ -376,6 +378,7 @@ class ReadDocumentSectionTool(BaseTool):
 
     name = "read_document_section"
     read_only = True
+    observation_chars = 2000  # a section is up to _MAX_TEXT (1200) characters plus its header
     description = (
         "Read the stored text of an indexed document, without searching, in document order. Pass "
         "source_filename plus heading_path or page_label from get_document_outline to read one "
@@ -494,6 +497,7 @@ class CorpusSummaryTool(BaseTool):
 
     name = "summarize_corpus"
     read_only = True
+    observation_chars = 3000  # the summaries are the answer
     description = (
         "Return precomputed summaries of the knowledge base, written by the local LLM when a summary "
         "build last ran (Settings > Build summaries). Until one has run the tool says none exist, and "

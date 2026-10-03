@@ -115,6 +115,55 @@ SOCIAL_TIER2_PATTERNS = re.compile(
 # Back-compat alias (tests / imports)
 CONVERSATIONAL_PASSTHROUGH = SOCIAL_TIER2_PATTERNS
 
+# A bare "yes" answers whatever the assistant just offered. On the social path
+# it reached the model with no tools, so "Would you like me to search your
+# files?" / "Yes" got a reply saying a search was under way, and none ran.
+AFFIRMATION_PATTERNS = re.compile(
+    r"^(yes|yeah|yep|yup|y|ok(ay)?|sure|please|please do|yes please|go ahead|please go ahead|"
+    r"do it|go for it|absolutely|of course|definitely|certainly|alright|fine|sounds good)"
+    r"[\s?!.,]*$",
+    re.IGNORECASE,
+)
+
+# An offer to act, or an announcement that an action is under way, in the
+# assistant's last reply.
+_OFFER_PATTERNS = re.compile(
+    r"would you like me to|do you want me to|shall i\b|should i\b|want me to\b|"
+    r"\bi can\b[^.?!\n]{0,160}\bif you(?:'d| would)? like|"
+    r"\bi(?: am|'m|’m) (?:now |currently |still )?(?:searching|looking|checking|scanning)\b|"
+    r"\bi(?:'ll|’ll| will) let you know\b",
+    re.IGNORECASE,
+)
+
+
+def pending_offer(assistant_text: Optional[str]) -> Optional[str]:
+    """The sentence of the assistant's last reply that offered or announced an
+    action, or None. Offers close a reply, so only the tail is read."""
+    if not assistant_text:
+        return None
+    tail = str(assistant_text).strip()[-800:]
+    for sentence in reversed(re.split(r"(?<=[.?!])\s+", tail)):
+        if _OFFER_PATTERNS.search(sentence):
+            return sentence.strip()[:300]
+    return None
+
+
+def _last_assistant_text(app, session_id: str) -> Optional[str]:
+    """Content of the newest assistant message in the session, or None."""
+    if not app or not session_id:
+        return None
+    try:
+        with app.app_context():
+            from backend.models import LLMMessage
+            row = (LLMMessage.query
+                   .filter_by(session_id=session_id, role="assistant")
+                   .order_by(LLMMessage.timestamp.desc())
+                   .first())
+            return row.content if row else None
+    except Exception as e:
+        logger.debug("last assistant message unavailable for %s: %s", session_id, e)
+        return None
+
 # Pure-chat openers that don't need a screenshot (subset used by gemma4 direct)
 NO_SCREEN_CONTEXT = SOCIAL_TIER2_PATTERNS
 
@@ -444,6 +493,19 @@ class AgentBrain:
                     image_url=image_url, is_voice_message=is_voice_message,
                     prompt_key="vision", budget=budget,
                 )
+
+            # -- "Yes" to the assistant's own offer: do it, with tools --
+            if AFFIRMATION_PATTERNS.fullmatch(message.strip()):
+                offer = pending_offer(_last_assistant_text(app, session_id))
+                if offer:
+                    tier_used = 2
+                    route_intent = "accepted_offer"
+                    budget.charge(1, 2, "accepted offer")
+                    return self._instinct(
+                        session_id, message, {**(options or {}), "accepted_offer": offer},
+                        emit_fn, app, project_id=project_id,
+                        is_voice_message=is_voice_message, budget=budget,
+                    )
 
             # -- Social / conversational (Tier 2, skip_tools, real LLM) --
             if SOCIAL_TIER2_PATTERNS.fullmatch(message.strip()):
