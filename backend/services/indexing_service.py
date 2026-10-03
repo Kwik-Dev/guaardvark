@@ -782,6 +782,17 @@ def _test_table_prefix() -> str:
     return ""
 
 
+def _store_scope(project_id=None):
+    """The project a document's vectors are stored under: its own in per_project
+    mode, None (the shared table) otherwise. get_or_create_index writes every
+    document to the shared table in global mode, so a purge keyed by the
+    document's project there looked in a table that is never written, removed
+    nothing, and re-indexing left the old copy beside the new one."""
+    from backend.config import PROJECT_INDEX_MODE
+    mode = os.getenv("GUAARDVARK_PROJECT_INDEX_MODE", PROJECT_INDEX_MODE)
+    return project_id if mode == "per_project" else None
+
+
 def _pg_table_name(project_id=None, profile: Optional[str] = None) -> Optional[str]:
     """Per (profile, scope, dimension) table.
 
@@ -1015,7 +1026,7 @@ def purge_document_vectors(document_id, project_id=None, profile: Optional[str] 
         return PurgeResult(0, "not_pgvector")
     if document_id is None:
         return PurgeResult(0, "no_document_id")
-    table = _pg_table_name(project_id, profile)
+    table = _pg_table_name(_store_scope(project_id), profile)
     if not table:
         return PurgeResult(0, "no_table")
     # The stored key is the LlamaIndex document id, `doc_<db_id>_<content_hash>` --
@@ -2330,7 +2341,7 @@ def purge_nodes_by_metadata(filters: Dict[str, Any], profile: Optional[str] = No
     """
     if not filters:
         return 0
-    table = resolve_existing_vector_table(project_id, profile)
+    table = resolve_existing_vector_table(_store_scope(project_id), profile)
     if not table:
         return 0
     clauses, params = [], []
