@@ -129,6 +129,7 @@ AFFIRMATION_PATTERNS = re.compile(
 # assistant's last reply.
 _OFFER_PATTERNS = re.compile(
     r"would you like me to|do you want me to|shall i\b|should i\b|want me to\b|"
+    r"\bif you(?:'d| would)? like me to\b|\bif you want me to\b|"
     r"\bi can\b[^.?!\n]{0,160}\bif you(?:'d| would)? like|"
     r"\bi(?: am|'m|’m) (?:now |currently |still )?(?:searching|looking|checking|scanning)\b|"
     r"\bi(?:'ll|’ll| will) let you know\b",
