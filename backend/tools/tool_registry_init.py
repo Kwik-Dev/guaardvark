@@ -404,17 +404,44 @@ def register_system_tools() -> List[str]:
     category = "system"
 
     try:
-        from backend.tools.system_tools import SystemCommandTool
+        from backend.tools.system_tools import FindFilesTool, SystemCommandTool
 
         register_tool(SystemCommandTool())
         registered.append("system_command")
         _tool_categories["system_command"] = category
         logger.debug("Registered: SystemCommandTool")
 
+        register_tool(FindFilesTool())
+        registered.append("find_files")
+        _tool_categories["find_files"] = category
+        logger.debug("Registered: FindFilesTool")
+
     except ImportError as e:
         logger.error(f"Failed to import system tools: {e}")
     except Exception as e:
         logger.error(f"Failed to register system tools: {e}")
+
+    return registered
+
+
+def register_records_tools() -> List[str]:
+    """Register the lookup over Guaardvark's own records (projects, clients, ...)"""
+    global _tool_categories
+    registered = []
+    category = "records"
+
+    try:
+        from backend.tools.records_tools import FindRecordsTool
+
+        register_tool(FindRecordsTool())
+        registered.append("find_records")
+        _tool_categories["find_records"] = category
+        logger.debug("Registered: FindRecordsTool")
+
+    except ImportError as e:
+        logger.error(f"Failed to import records tools: {e}")
+    except Exception as e:
+        logger.error(f"Failed to register records tools: {e}")
 
     return registered
 
@@ -850,6 +877,7 @@ def initialize_all_tools() -> ToolRegistry:
     _registered_tools.extend(register_mcp_tools())
     _registered_tools.extend(register_system_tools())
     _registered_tools.extend(register_memory_tools())
+    _registered_tools.extend(register_records_tools())
     _registered_tools.extend(register_rag_tools())
     _registered_tools.extend(register_media_tools())
     _registered_tools.extend(register_image_tools())
