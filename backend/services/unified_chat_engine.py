@@ -1236,6 +1236,31 @@ def merge_forced_tools(selected: List[str], forced: List[str], max_tools: int = 
     return merged[:max(max_tools, len(core) + len(forced))]
 
 
+# What the latest reply's tools returned, replayed with it in history. Without
+# it a follow-up such as "yes, open the second one" reached a model that could
+# see only the reply's prose, and it made the list up.
+_TOOL_RESULTS_NOTE_CHARS = 3000
+
+
+def _tool_results_note(extra_data) -> str:
+    steps = (extra_data or {}).get("steps") if isinstance(extra_data, dict) else None
+    parts, used = [], 0
+    for step in steps or []:
+        for call in (step or {}).get("tool_calls") or []:
+            if not call.get("success") or not call.get("output_preview"):
+                continue
+            text = f"{call.get('tool_name')}: {call['output_preview']}"
+            if used + len(text) > _TOOL_RESULTS_NOTE_CHARS:
+                text = text[: max(0, _TOOL_RESULTS_NOTE_CHARS - used)] + "…"
+            parts.append(text)
+            used += len(text)
+            if used >= _TOOL_RESULTS_NOTE_CHARS:
+                break
+    if not parts:
+        return ""
+    return "\n\n[What the tools returned for this reply:\n" + "\n".join(parts) + "]"
+
+
 def build_concise_tool_list(registry, tool_names: List[str]) -> str:
     """Build a concise tool description list for the system prompt (~20 tokens per tool)."""
     lines = []
@@ -2968,7 +2993,10 @@ class UnifiedChatEngine:
                     if out:
                         tool_output_snippets.append(out[:300])
 
-                preview_limit = 1200 if tool_name == "edit_code" else 200
+                # A lookup's result is what the next message refers to ("open the
+                # second one"); history replays this preview, so keep enough of it.
+                _declared = int(getattr(self.registry.get_tool(tool_name), "observation_chars", 500) or 500)
+                preview_limit = 1200 if tool_name == "edit_code" else (2000 if _declared > 500 else 200)
                 step_call = {
                     "tool_name": tool_name,
                     "params": params,
@@ -4968,6 +4996,7 @@ class UnifiedChatEngine:
                         "role": "assistant",
                         "content": "Earlier conversation summary:\n" + summary.summary[:1800],
                     })
+                last_reply = next((m for m in reversed(messages) if m.role == "assistant"), None)
                 for m in messages:
                     content = m.content
                     # Add image context marker if message had an image
@@ -4975,6 +5004,8 @@ class UnifiedChatEngine:
                         if m.extra_data.get("hasImage") or m.extra_data.get("messageType") == "image_upload":
                             fname = m.extra_data.get("imageFileName", "image")
                             content = f"[User attached an image: {fname}] {content}"
+                    if m is last_reply:
+                        content += _tool_results_note(m.extra_data)
                     result.append({"role": m.role, "content": content})
                 return result
             finally:

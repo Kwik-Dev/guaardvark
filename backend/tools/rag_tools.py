@@ -62,6 +62,13 @@ def _render(query: str, results: List[Dict[str, Any]], trace: Dict[str, Any]) ->
     if not results:
         head.append("")
         head.append("No matching content. The index may be empty, or the filters too narrow.")
+        # Names of projects, clients and the like are never indexed text; a
+        # search for one comes back empty here even when the record exists.
+        head.append(
+            f"If \"{query}\" is the name of something in Guaardvark (a project, client, "
+            f"document, video, note, Cast member...), find_records with name=\"{query}\" checks "
+            "those directly; find_files checks file names on disk."
+        )
         return "\n".join(head)
 
     body = []
