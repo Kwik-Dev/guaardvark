@@ -93,7 +93,8 @@ class FindRecordsTool(BaseTool):
     chat_summary = (
         "Look up Guaardvark's own projects, clients, documents and uploads, images, videos, "
         "audio, websites, tasks, notes, Cast, Film Crew productions, music videos and code repos. "
-        "Use it first whenever the user names one of these. No arguments = a count of each kind."
+        "Use it first whenever the user names or searches for one: pass name=\"<the name>\". "
+        "No arguments = a count of each kind."
     )
     description = (
         "Look up the records Guaardvark keeps, the same ones its Projects, Clients, Documents, "
