@@ -397,6 +397,40 @@ def _lora_file_base(path: Optional[str], subject: Any) -> Optional[str]:
     return _profile_id(subject_base_model_id(subject))
 
 
+def _keep_default_as_row(subject: Any, existing: list, replacing_path: str) -> None:
+    """Record the member's default as a row before ``replacing_path`` replaces it.
+
+    Only a default no row holds needs this (one that predates the table); without
+    a row it would drop out of the member's options the moment another LoRA
+    became the default. Appends the new row to ``existing``.
+    """
+    from backend.models import SubjectLora, db
+
+    old_default = (getattr(subject, "lora_path", None) or "").strip()
+    if not old_default or old_default == str(replacing_path).strip():
+        return
+    if any((r.lora_path or "").strip() == old_default for r in existing):
+        return
+    prior_base = default_base(subject, existing)
+    if not prior_base:
+        return
+    settings = getattr(subject, "training_settings_json", None)
+    imported = isinstance(settings, dict) and bool(settings.get("imported"))
+    prior = SubjectLora(
+        subject_id=subject.id,
+        base_model_id=prior_base,
+        lora_path=old_default,
+        version=1 + max(
+            (r.version or 0 for r in existing if _profile_id(r.base_model_id) == prior_base),
+            default=0,
+        ),
+        trigger_word=getattr(subject, "trigger_word", None),
+        source="imported" if imported else "trained",
+    )
+    db.session.add(prior)
+    existing.append(prior)
+
+
 def record_subject_lora(
     subject: Any,
     base_model_id: str,
@@ -422,25 +456,8 @@ def record_subject_lora(
 
     if make_default is None:
         make_default = not old_default or old_base == base
-    if make_default and old_default and old_default != lora_path and not any(
-        (r.lora_path or "").strip() == old_default for r in existing
-    ):
-        prior_base = _lora_file_base(old_default, subject) or old_base
-        if prior_base:
-            prior_version = 1 + max(
-                (r.version or 0 for r in existing if _profile_id(r.base_model_id) == prior_base),
-                default=0,
-            )
-            prior = SubjectLora(
-                subject_id=subject.id,
-                base_model_id=prior_base,
-                lora_path=old_default,
-                version=prior_version,
-                trigger_word=getattr(subject, "trigger_word", None),
-                source="trained",
-            )
-            db.session.add(prior)
-            existing.append(prior)
+    if make_default:
+        _keep_default_as_row(subject, existing, lora_path)
 
     version = 1 + max(
         (r.version or 0 for r in existing if _profile_id(r.base_model_id) == base),
@@ -463,7 +480,9 @@ def record_subject_lora(
 def set_default_lora(subject: Any, base_model_id: str):
     """Make the member's current LoRA for ``base_model_id`` its default. Caller commits.
 
-    Raises ``CastLoraRefusal`` when the member has no LoRA for that base.
+    Raises ``CastLoraRefusal`` when the member has no LoRA for that base. A default
+    being replaced that predates the table is recorded as a row first, so the
+    member can switch back to it.
     """
     from backend.models import SubjectLora
 
@@ -472,5 +491,6 @@ def set_default_lora(subject: Any, base_model_id: str):
     row = current_rows_by_base(rows).get(base)
     if row is None:
         raise CastLoraRefusal(f"{_member_name(subject)} has no LoRA for {_label(base)}.")
+    _keep_default_as_row(subject, rows, row.lora_path)
     subject.lora_path = row.lora_path
     return row

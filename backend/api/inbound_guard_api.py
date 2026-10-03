@@ -69,12 +69,58 @@ def list_scans():
 
 @inbound_guard_bp.route("/scans/<int:scan_id>", methods=["GET"])
 def get_scan(scan_id):
-    from backend.models import InboundScan, db
+    """One verdict with what a person needs to judge it: the diff it would apply."""
+    from backend.models import InboundScan, PendingFix, db
 
     row = db.session.get(InboundScan, scan_id)
     if row is None:
         return error_response("No such inbound verdict", 404)
-    return success_response(row.to_dict(include_payload=True))
+    data = row.to_dict(include_payload=True)
+    if row.pending_fix_id:
+        fix = db.session.get(PendingFix, row.pending_fix_id)
+        if fix is not None:
+            data["fix"] = {"id": fix.id, "status": fix.status, "file_path": fix.display_path(),
+                           "diff": fix.proposed_diff, "description": fix.fix_description}
+    payload = data.get("payload") or {}
+    if payload.get("kind") == "write_file":
+        from backend.services.guarded_code_service import build_unified_diff
+
+        target = guard.REPO_ROOT / payload["path"]
+        current = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+        data["diff"] = build_unified_diff(payload["path"], current, payload.get("content", ""))
+        data["payload"] = {k: v for k, v in payload.items() if k != "content"}
+    elif payload.get("kind") == "delete_file":
+        data["diff"] = f"delete {payload['path']}"
+    elif payload.get("kind") == "rename_file":
+        data["diff"] = f"rename {payload['path']} -> {payload['new_path']}"
+    return success_response(data)
+
+
+def _act(fn, scan_id, **kwargs):
+    from backend.services.guarded_code_service import GuardedCodeError
+
+    try:
+        return success_response(fn(scan_id, **kwargs))
+    except LookupError as exc:
+        return error_response(str(exc), 404)
+    except ValueError as exc:
+        return error_response(str(exc), 409)
+    except GuardedCodeError as exc:
+        return error_response(str(exc), exc.status_code, exc.code)
+
+
+@inbound_guard_bp.route("/scans/<int:scan_id>/approve", methods=["POST"])
+def approve_scan(scan_id):
+    """Approve a held change and land it; nothing changes if it cannot land."""
+    data = request.get_json(silent=True) or {}
+    return _act(guard.approve_and_land, scan_id, by=str(data.get("by") or "operator"),
+                note=str(data.get("note") or ""), override_block=bool(data.get("override_block")))
+
+
+@inbound_guard_bp.route("/scans/<int:scan_id>/reject", methods=["POST"])
+def reject_scan(scan_id):
+    data = request.get_json(silent=True) or {}
+    return _act(guard.reject_held, scan_id, by=str(data.get("by") or "operator"), note=str(data.get("note") or ""))
 
 
 @inbound_guard_bp.route("/scans/<int:scan_id>/decide", methods=["POST"])

@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "_doc": "Every way Guaardvark reaches outside this machine, in one list. The inbound guard reads it three ways: new code that names an outside host no entry declares is held at high severity (a declared host is still held, as any new destination is); the posture check reports any entry whose switch turns on; the network monitor extension reports a Guaardvark process reaching a host no entry declares. 'switch' says what turns a path on; 'person' means it runs only when someone starts it. 'any_host' marks paths whose destination someone chooses (a URL, a configured server), which therefore declare no fixed host.",
+
+  "paths": [
+    {
+      "id": "huggingface",
+      "title": "Hugging Face: model installs, Check access, first use of a model not on disk",
+      "hosts": ["huggingface.co", "*.huggingface.co", "hf.co", "*.hf.co"],
+      "switch": {"person": true},
+      "sends": "model repository names; HF_TOKEN on downloads, never on Check access"
+    },
+    {
+      "id": "github-downloads",
+      "title": "GitHub release weights and tools a person installs (CodeFormer, facexlib, rembg, whisper.cpp)",
+      "hosts": ["github.com", "*.github.com", "*.githubusercontent.com"],
+      "switch": {"person": true},
+      "sends": "requests for the files being installed"
+    },
+    {
+      "id": "installer",
+      "title": "Installer and dependency reconcile (start.sh, plugin install)",
+      "hosts": ["pypi.org", "files.pythonhosted.org", "download.pytorch.org", "registry.npmjs.org", "nodejs.org", "ollama.com", "registry.ollama.ai", "github.com"],
+      "switch": {"person": true},
+      "sends": "package names and versions being installed"
+    },
+    {
+      "id": "uncle-claude-scheduled",
+      "title": "Uncle Claude on a schedule: twice-daily advice, servo change reviews",
+      "hosts": ["api.anthropic.com"],
+      "switch": {"all": [{"env": "ANTHROPIC_API_KEY"}, {"system_setting": "claude_scheduled_sends"}]},
+      "sends": "time, node id, GPU name and memory (advice); a source excerpt and a proposed diff (servo review)"
+    },
+    {
+      "id": "uncle-claude-chat-always",
+      "title": "Chat escalation mode 'always': every chat turn goes to Uncle Claude",
+      "hosts": ["api.anthropic.com"],
+      "switch": {"all": [{"env": "ANTHROPIC_API_KEY"}, {"system_setting_equals": ["claude_escalation_mode", "always"]}]},
+      "sends": "each chat message and the last 10 turns of the conversation"
+    },
+    {
+      "id": "uncle-claude-person",
+      "title": "Uncle Claude when a person asks (Test connection, advice, a review they start)",
+      "hosts": ["api.anthropic.com"],
+      "switch": {"person": true},
+      "sends": "what that request carries"
+    },
+    {
+      "id": "web-access",
+      "title": "Web access: search, page fetch, weather, YouTube outreach recon",
+      "hosts": ["www.bing.com", "*.bing.com", "wttr.in", "www.youtube.com"],
+      "any_host": true,
+      "switch": {"setting": "allow_web_search"},
+      "sends": "search queries the model writes, so local text can be in them; fetches of public pages they name"
+    },
+    {
+      "id": "address-suggestions",
+      "title": "Address suggestions (Geoapify)",
+      "hosts": ["api.geoapify.com"],
+      "switch": {"all": [{"setting": "allow_web_search"}, {"setting_nonempty": "address_provider_key"}]},
+      "sends": "typed address text (three characters or more) and the Geoapify key"
+    },
+    {
+      "id": "outreach",
+      "title": "Social outreach (Reddit rules, threads, approved posts)",
+      "hosts": ["www.reddit.com", "*.reddit.com", "old.reddit.com"],
+      "switch": {"setting": "social_outreach_enabled"},
+      "sends": "requests for rules and threads with the agent browser's Reddit cookies; approved posts"
+    },
+    {
+      "id": "outreach-unsupervised",
+      "title": "Outreach posting without a person's approval (supervised mode switched off)",
+      "hosts": ["www.reddit.com", "*.reddit.com"],
+      "switch": {"all": [{"setting": "social_outreach_enabled"}, {"setting_equals": ["social_outreach_supervised", "false"]}]},
+      "sends": "graded drafts, posted under the user's name without review"
+    },
+    {
+      "id": "google-indexing",
+      "title": "Google Indexing auto-drip",
+      "hosts": ["indexing.googleapis.com", "oauth2.googleapis.com", "www.googleapis.com"],
+      "switch": {"check": "google_indexing"},
+      "sends": "up to 3 URLs from the site's sitemap every 15 minutes"
+    },
+    {
+      "id": "interconnector-client",
+      "title": "Interconnector client heartbeat and sync",
+      "hosts": [],
+      "any_host": true,
+      "switch": {"check": "interconnector_client"},
+      "sends": "hardware profile, hostname, node id, port, sync-entity list and the master API key, to the configured master"
+    },
+    {
+      "id": "publish-connections",
+      "title": "Publish connections (YouTube, Bluesky, Mastodon, Telegram, Discord webhooks)",
+      "hosts": ["www.googleapis.com", "oauth2.googleapis.com", "youtube.googleapis.com", "bsky.social", "*.bsky.network", "api.telegram.org", "discord.com", "discordapp.com"],
+      "any_host": true,
+      "switch": {"check": "publish_connections"},
+      "sends": "posts a person approves or publishes"
+    },
+    {
+      "id": "wordpress",
+      "title": "WordPress REST to a site a person configured",
+      "hosts": [],
+      "any_host": true,
+      "switch": {"person": true},
+      "sends": "content the person pulls or pushes"
+    },
+    {
+      "id": "website-crawl",
+      "title": "Crawl of a website a person added",
+      "hosts": [],
+      "any_host": true,
+      "switch": {"person": true},
+      "sends": "requests for that site's pages and sitemaps"
+    },
+    {
+      "id": "discord-bot",
+      "title": "Discord bot plugin",
+      "hosts": ["discord.com", "gateway.discord.gg", "*.discord.gg", "cdn.discordapp.com", "discordapp.com"],
+      "switch": {"check": "discord_plugin"},
+      "sends": "the bot's gateway session, messages it answers"
+    },
+    {
+      "id": "mcp-servers",
+      "title": "MCP servers a person configured (local commands; such a command may reach anywhere)",
+      "hosts": [],
+      "any_host": true,
+      "switch": {"check": "mcp_servers"},
+      "sends": "whatever the configured command sends"
+    },
+    {
+      "id": "ollama-remote",
+      "title": "Ollama on another machine (OLLAMA_BASE_URL not on this one)",
+      "hosts": [],
+      "any_host": true,
+      "switch": {"env_not_loopback": "OLLAMA_BASE_URL"},
+      "sends": "every chat prompt and model request"
+    }
+  ]
+}

@@ -13,6 +13,11 @@ from werkzeug.utils import secure_filename
 from backend.config import STORAGE_DIR
 from backend.celery_dispatch import TaskNotStarted, mark_progress_not_started
 from backend.models import db, Subject, SubjectSample
+from backend.services.cast_lora_selection import (
+    CastLoraRefusal,
+    record_subject_lora,
+    set_default_lora,
+)
 from backend.services.media_model_registry import (
     ZIMAGE_TURBO,
     FLUX_DEV,
@@ -101,6 +106,12 @@ def _serialize(s: Subject) -> dict:
         "voice_id": s.voice_id,
         "lora_path": s.lora_path,
         "lora_version": s.lora_version,
+        # Every LoRA this member holds, one row per import/train per base; the
+        # Versions tab groups these by base. Newest version of each base first.
+        "lora_versions": sorted(
+            (r.to_dict() for r in (s.lora_versions or [])),
+            key=lambda r: (r["base_model_id"], -r["version"]),
+        ),
         "training_status": s.training_status,
         "training_error": getattr(s, 'training_error', None),
         "current_training_job_id": getattr(s, 'current_training_job_id', None),
@@ -1160,6 +1171,10 @@ def import_subject_lora(subject_id):
     tmp_fd, _tmp_name = tempfile.mkstemp(dir=target_dir, suffix=".partial")
     os.close(tmp_fd)
     tmp_path = Path(_tmp_name)
+    # mkstemp creates the file owner-only (0600) and the rename below keeps that
+    # mode. ComfyUI loads Cast LoRAs from this folder and can run as another
+    # user (Docker), so the stored LoRA is made readable like a trained one.
+    os.chmod(tmp_path, 0o644)
 
     written = 0
     oversized = False
@@ -1210,8 +1225,11 @@ def import_subject_lora(subject_id):
                      f"the detected key layout ({detected_family!r})"
         }), 400
 
-    next_version = (s.lora_version or 0) + 1
-    final_path = target_dir / f"subject_{subject_id}_imported_v{next_version}.safetensors"
+    # A running counter, not the per-base version record_subject_lora keeps below
+    # (SubjectLora.version) — just enough to keep filenames unique across every
+    # import this member ever makes, whichever base each one targets.
+    next_import_seq = (s.lora_version or 0) + 1
+    final_path = target_dir / f"subject_{subject_id}_imported_v{next_import_seq}.safetensors"
     tmp_path.replace(final_path)
 
     write_lora_sidecar(
@@ -1225,11 +1243,43 @@ def import_subject_lora(subject_id):
         extra={"imported": True, "train_backend": None},
     )
 
-    s.lora_path = str(final_path.resolve())
-    s.trigger_word = trigger_word
-    s.lora_version = next_version
+    resolved_path = str(final_path.resolve())
+    # record_subject_lora adds the next version for this base and, per the
+    # import rule (see its docstring), makes it the member's default only when
+    # the member has none yet or the default is already on this same base —
+    # otherwise this base's new row is added and the current default is left
+    # alone (see the maintainer's phase 2 split on issue #245).
+    record_subject_lora(
+        s, base_model_id, resolved_path, source="imported", trigger_word=trigger_word,
+    )
+    s.lora_version = next_import_seq
     s.training_status = "trained"
-    s.training_settings_json = dict(s.training_settings_json or {}, base_model_id=base_model_id, imported=True)
+    became_default = s.lora_path == resolved_path
+    if became_default:
+        # Member-level fields are the default LoRA's own — only touch them when
+        # this import is the one that became the default.
+        s.trigger_word = trigger_word
+        s.training_settings_json = dict(
+            s.training_settings_json or {}, base_model_id=base_model_id, imported=True,
+        )
     db.session.commit()
 
+    return jsonify({"subject": _serialize(s)})
+
+
+@bp.post("/subjects/<int:subject_id>/loras/<base_model_id>/make-default")
+def make_default_lora(subject_id, base_model_id):
+    """Make the member's current LoRA for ``base_model_id`` its default.
+
+    Used by the Versions tab's "Make default" button (one per base the member
+    holds a LoRA for) — see the maintainer's phase 2 split on issue #245.
+    """
+    s = db.session.get(Subject, subject_id)
+    if s is None:
+        return jsonify({"error": "subject not found"}), 404
+    try:
+        set_default_lora(s, base_model_id)
+    except CastLoraRefusal as e:
+        return jsonify({"error": str(e)}), 400
+    db.session.commit()
     return jsonify({"subject": _serialize(s)})

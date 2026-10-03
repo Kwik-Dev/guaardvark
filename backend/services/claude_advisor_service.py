@@ -455,6 +455,23 @@ class ClaudeAdvisorService:
             return {"available": False, "reason": f"API error: {str(e)}"}
 
 
+SCHEDULED_SENDS_KEY = "claude_scheduled_sends"
+
+
+def scheduled_sends_allowed() -> bool:
+    """Whether Uncle Claude may contact Anthropic on its own schedule.
+
+    The twice-daily advice and the servo review run from beat, not from a
+    person. A key alone enables only what someone starts (Test connection, a
+    review they ask for); scheduled sends also need Settings → Uncle Claude →
+    Scheduled sends, which is off unless switched on.
+    """
+    try:
+        return bool(get_setting(SCHEDULED_SENDS_KEY, default=False, cast=bool))
+    except Exception:
+        return False
+
+
 def get_claude_advisor() -> ClaudeAdvisorService:
     """Get or create the singleton ClaudeAdvisorService instance."""
     return ClaudeAdvisorService()

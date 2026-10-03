@@ -1,8 +1,9 @@
 // frontend/src/pages/ApprovalsPage.jsx
 //
-// Publishes waiting on a human. Anything an agent queues — from chat, MCP or a
-// schedule — is held here until it is approved, and so is everything else when
-// supervised mode is on.
+// Everything waiting on a human. Publishes: anything an agent queues — from
+// chat, MCP or a schedule — is held here until it is approved, and so is
+// everything else when supervised mode is on. Code changes: what the inbound
+// guard holds before it lands in this checkout.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Box,
@@ -33,6 +34,8 @@ import {
 } from "@mui/icons-material";
 import PageLayout from "../components/layout/PageLayout";
 import RejectPublishDialog from "../components/connections/RejectPublishDialog";
+import HeldChangesPanel from "../components/approvals/HeldChangesPanel";
+import OutreachDraftsPanel from "../components/approvals/OutreachDraftsPanel";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import {
   approvePublish,
@@ -89,7 +92,7 @@ const ApprovalsPage = () => {
   const [rejecting, setRejecting] = useState(null);
   const [notifyEnabled, setNotifyEnabled] = useState(desktopNotificationsGranted);
 
-  const { pending, loading, error, refresh } = usePendingApprovals({
+  const { pending, held, outreach, loading, heldLoading, outreachLoading, error, refresh } = usePendingApprovals({
     notify: notifyEnabled,
   });
 
@@ -362,7 +365,7 @@ const ApprovalsPage = () => {
   return (
     <PageLayout
       title="Approvals"
-      subtitle="Publishes waiting on you before they go out"
+      subtitle="Waiting on you: publishes and outreach posts before they go out, code before it lands"
       actions={
         <Stack direction="row" spacing={1} alignItems="center">
           {desktopNotificationsAvailable() && (
@@ -422,16 +425,40 @@ const ApprovalsPage = () => {
         >
           <Tab
             value="pending"
-            label={pending.length ? `Pending (${pending.length})` : "Pending"}
+            label={pending.length ? `Publishes (${pending.length})` : "Publishes"}
+          />
+          <Tab
+            value="outreach"
+            label={outreach.length ? `Outreach (${outreach.length})` : "Outreach"}
+          />
+          <Tab
+            value="code"
+            label={held.length ? `Code changes (${held.length})` : "Code changes"}
           />
           <Tab value="history" label="History" />
         </Tabs>
-        <Box sx={{ display: "flex", minHeight: 360 }}>
-          <Box sx={{ width: 340, borderRight: 1, borderColor: "divider" }}>
-            {renderList()}
+        {tab === "code" ? (
+          <HeldChangesPanel
+            held={held}
+            loading={heldLoading}
+            onChanged={refresh}
+            showMessage={showMessage}
+          />
+        ) : tab === "outreach" ? (
+          <OutreachDraftsPanel
+            drafts={outreach}
+            loading={outreachLoading}
+            onChanged={refresh}
+            showMessage={showMessage}
+          />
+        ) : (
+          <Box sx={{ display: "flex", minHeight: 360 }}>
+            <Box sx={{ width: 340, borderRight: 1, borderColor: "divider" }}>
+              {renderList()}
+            </Box>
+            <Box sx={{ flex: 1, overflowY: "auto" }}>{renderDetail()}</Box>
           </Box>
-          <Box sx={{ flex: 1, overflowY: "auto" }}>{renderDetail()}</Box>
-        </Box>
+        )}
       </Paper>
 
       <RejectPublishDialog

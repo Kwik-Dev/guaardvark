@@ -3,7 +3,8 @@ Kill switch + cadence enforcement for outreach.
 
 Three layers of brakes:
   1. is_enabled() — global on/off via Setting('social_outreach_enabled', 'true'/'false'). Defaults false.
-  2. is_supervised() — when true, drafts queue for review instead of posting. Defaults false (per user choice; flip to true if first night looks bot-y).
+  2. is_supervised() — when true, drafts wait for a person (Approvals → Outreach) instead of posting.
+     Defaults true; only an explicit "false" lets graded drafts post on their own.
   3. cadence checks — Redis-backed, per-platform. Hard caps: 1 post / 30 min / platform, 8 posts / 24h / platform.
 
 Plus task-level abort on 2 servo failures (enforced by the loop, not here).
@@ -111,12 +112,18 @@ def is_enabled() -> bool:
     return _is_on(_read_setting("social_outreach_enabled", "false"))
 
 
+def _supervised(value: Optional[str]) -> bool:
+    # Never set means supervised: a post goes out under the user's name, so
+    # posting without a person's click has to be chosen, not defaulted into.
+    return True if value is None else _is_on(value)
+
+
 def is_supervised() -> bool:
-    """Whether drafts wait for review. Defaults to false when never set, and
-    to true when the setting cannot be read: unknown must not mean "post
-    without review"."""
+    """Whether drafts wait for review. True unless switched off explicitly, and
+    true when the setting cannot be read: unknown must not mean "post without
+    review"."""
     try:
-        return _is_on(_lookup_setting("social_outreach_supervised"))
+        return _supervised(_lookup_setting("social_outreach_supervised"))
     except Exception as e:
         logger.warning("supervised setting unreadable, treating as supervised: %s", e)
         return True
@@ -132,7 +139,7 @@ def status_snapshot() -> dict:
     readable = True
     try:
         enabled = _is_on(_lookup_setting("social_outreach_enabled"))
-        supervised = _is_on(_lookup_setting("social_outreach_supervised"))
+        supervised = _supervised(_lookup_setting("social_outreach_supervised"))
     except Exception as e:
         logger.warning("outreach settings unreadable: %s", e)
         readable, enabled, supervised = False, False, True

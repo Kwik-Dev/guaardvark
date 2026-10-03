@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { formatUiError } from "../utils/uiError";
 import { useParams, useNavigate } from 'react-router-dom';
 import { useUnifiedProgress } from '../contexts/UnifiedProgressContext';
@@ -19,7 +19,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import {
   getCastSubject, getCastSubjectDetail, updateCastSubject, planCharacter, rebuildBibleFromRefs,
   generateSamples, cancelGenerateSamples, listSamples, regenerateSample, approveSamples,
-  deleteSample, trainSubject, cancelTrainSubject, importSubjectLora,
+  deleteSample, trainSubject, cancelTrainSubject, importSubjectLora, makeDefaultSubjectLora,
 } from '../api/productionService';
 import { SubjectThumb } from '../components/filmcrew/CastLibraryView';
 import DragDropImageUpload from '../components/filmcrew/DragDropImageUpload';
@@ -40,6 +40,13 @@ const SETTLE_POLL_MS = 30000;
 const TERMINAL_JOB_STATUSES = ['complete', 'end', 'error', 'cancelled', 'failed'];
 
 const EMPTY_OVERVIEW = { name: '', description: '', trigger_word: '', voice_id: '', bible: '' };
+
+// Matches the Import dialog's two options; falls back to the raw id for any
+// base the registry adds later.
+const BASE_MODEL_LABELS = {
+  'zimage-turbo': 'Z-Image Turbo',
+  'flux-dev': 'FLUX.1 Dev',
+};
 
 const overviewFromSubject = (subject) => ({
   name: subject.name || '',
@@ -192,6 +199,57 @@ const CastMemberPage = () => {
       setImportBusy(false);
     }
   };
+
+  // Which base's "Make default" button is mid-request, so only that one row
+  // shows a spinner; null when none is.
+  const [makingDefaultBase, setMakingDefaultBase] = useState(null);
+  const [makeDefaultError, setMakeDefaultError] = useState(null);
+
+  const submitMakeDefault = async (baseModelId) => {
+    setMakingDefaultBase(baseModelId);
+    setMakeDefaultError(null);
+    try {
+      const res = await makeDefaultSubjectLora(subject.id, baseModelId);
+      setSubject(res.subject);
+    } catch (e) {
+      setMakeDefaultError(formatUiError(e.response?.data?.error) || 'Could not make this the default.');
+    } finally {
+      setMakingDefaultBase(null);
+    }
+  };
+
+  // subject.lora_versions is one row per LoRA this member holds, newest
+  // version of each base first (see _serialize in cast_library_api.py).
+  // Grouped here into one card per base for the Versions tab.
+  const loraBaseGroups = useMemo(() => {
+    const rows = subject?.lora_versions || [];
+    const byBase = new Map();
+    for (const row of rows) {
+      if (!byBase.has(row.base_model_id)) byBase.set(row.base_model_id, []);
+      byBase.get(row.base_model_id).push(row);
+    }
+    const groups = Array.from(byBase.entries()).map(([base, baseRows]) => ({
+      base,
+      history: baseRows,
+      current: baseRows[0],
+      isDefault: baseRows[0].lora_path === subject?.lora_path,
+    }));
+    // A default LoRA that predates this table has no row of its own.
+    if (subject?.lora_path && !groups.some((g) => g.isDefault)) {
+      groups.unshift({
+        base: subject.base_model_id || 'unknown',
+        history: [],
+        current: {
+          version: subject.lora_version || 1,
+          source: subject.training_settings_json?.imported ? 'imported' : 'trained',
+          trigger_word: subject.trigger_word,
+          lora_path: subject.lora_path,
+        },
+        isDefault: true,
+      });
+    }
+    return groups.sort((a, b) => (b.isDefault - a.isDefault) || a.base.localeCompare(b.base));
+  }, [subject]);
 
   // Local state to surface training progress from unified jobs (so frontend "knows"
   // when GPU is crunching on long LoRA train, even if subject poll lags or health/celery 503s).
@@ -1292,14 +1350,8 @@ const CastMemberPage = () => {
         <Box sx={{ maxWidth: 560 }}>
           <Typography variant="subtitle2" gutterBottom>Trained LoRA</Typography>
           <Typography variant="body2">Status: <b>{subject.training_status}</b></Typography>
-          <Typography variant="body2">Version: {subject.lora_version || 0}</Typography>
-          {subject.training_settings_json?.imported && (
-            <Typography variant="body2" color="text.secondary">
-              Imported (base: {subject.training_settings_json?.base_model_id || 'unknown'})
-            </Typography>
-          )}
           <Typography variant="body2" sx={{ wordBreak: 'break-all' }}>
-            Path: {subject.lora_path || <em>none yet</em>}
+            Default path: {subject.lora_path || <em>none yet</em>}
           </Typography>
           <Box sx={{ mt: 1.5 }}>
             <Tooltip title={training ? 'Training is in progress — wait for it to finish before importing.' : ''}>
@@ -1311,10 +1363,48 @@ const CastMemberPage = () => {
             </Tooltip>
             {subject.lora_path && (
               <Typography variant="caption" color="text.secondary" sx={{ ml: 1.5 }}>
-                Importing replaces the current LoRA with a new version.
+                Importing adds a new version for that base; a base the member has
+                none for yet becomes the default. Pick a base's current LoRA
+                default below with "Make default".
               </Typography>
             )}
           </Box>
+
+          {/* One card per base the member holds a LoRA for (trained or imported). */}
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="subtitle2" gutterBottom>LoRAs by base model</Typography>
+            {makeDefaultError && <Alert severity="error" sx={{ mb: 1 }}>{makeDefaultError}</Alert>}
+            {loraBaseGroups.length === 0 ? (
+              <Typography variant="body2" color="text.secondary">Nothing trained or imported yet.</Typography>
+            ) : (
+              loraBaseGroups.map(({ base, current, isDefault }) => (
+                <Box key={base} sx={{
+                  mb: 1.5, p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 1,
+                }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Typography variant="body2">
+                      <b>{BASE_MODEL_LABELS[base] || base}</b>
+                      {isDefault && <Chip label="default" size="small" color="primary" sx={{ ml: 1 }} />}
+                    </Typography>
+                    {!isDefault && (
+                      <Button size="small" onClick={() => submitMakeDefault(base)}
+                              disabled={makingDefaultBase === base}>
+                        {makingDefaultBase === base ? 'Setting…' : 'Make default'}
+                      </Button>
+                    )}
+                  </Box>
+                  <Typography variant="caption" color="text.secondary" display="block">
+                    v{current.version} · {current.source === 'imported' ? 'imported' : 'trained'}
+                    {current.trigger_word ? ` · trigger: ${current.trigger_word}` : ' · trigger: (member default)'}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ wordBreak: 'break-all' }}>
+                    {current.lora_path}
+                  </Typography>
+                </Box>
+              ))
+            )}
+          </Box>
+
           {subject.training_status === 'trained' && (
             <Box sx={{ mt: 2 }}>
               <Typography variant="body2" color="text.secondary">Use this character in:</Typography>

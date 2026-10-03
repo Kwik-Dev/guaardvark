@@ -215,9 +215,8 @@ def approve_fix(fix_id):
     fix.review_notes = data.get("notes", "")
     fix.reviewed_at = datetime.now()
     db.session.commit()
-    from backend.services import inbound_guard_service
-
-    inbound_guard_service.resolve_for_fix(fix.id, "approve", by=fix.reviewed_by, note=fix.review_notes)
+    # A held edit stays held until it is applied: approving it here only clears
+    # it to be applied, and the guard's record settles when it lands.
     return success_response(data=fix.to_dict(), message="Fix approved")
 
 
@@ -273,6 +272,10 @@ def apply_fix(fix_id):
         fix.status = "applied"
         fix.applied_at = datetime.now()
         db.session.commit()
+        from backend.services import inbound_guard_service
+
+        inbound_guard_service.resolve_for_fix(fix.id, "approve", by=fix.reviewed_by or "user",
+                                              note=fix.review_notes or "")
         return success_response(
             data={**fix.to_dict(), "apply_result": {
                 "relative_path": apply_result.relative_path,

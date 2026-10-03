@@ -854,14 +854,21 @@ class SelfImprovementService:
                 f'+        "scale_y": {sy},\n'
             )
 
-            # Submit for Uncle Claude review
+            # Uncle Claude reviews it only when scheduled sends are on: this runs
+            # from beat, and the review uploads source to Anthropic.
+            from backend.services.claude_advisor_service import scheduled_sends_allowed
             advisor = get_claude_advisor()
-            review = advisor.review_change(
-                file_path=file_path,
-                current_content=current_content[:2000],
-                proposed_diff=proposed_diff,
-                reasoning=reasoning,
-            )
+            reviewed = scheduled_sends_allowed()
+            if reviewed:
+                review = advisor.review_change(
+                    file_path=file_path,
+                    current_content=current_content[:2000],
+                    proposed_diff=proposed_diff,
+                    reasoning=reasoning,
+                )
+            else:
+                review = {"approved": None, "directive": None,
+                          "reason": "not sent: scheduled sends to Uncle Claude are off"}
 
             logger.info(f"Scale factor review: approved={review.get('approved')} "
                         f"directive={review.get('directive')}")
@@ -878,7 +885,7 @@ class SelfImprovementService:
                     proposed_diff=proposed_diff,
                     severity="low",
                     status="proposed",
-                    reviewed_by="uncle_claude" if advisor.is_available() else "pending",
+                    reviewed_by="uncle_claude" if reviewed and advisor.is_available() else "pending",
                 )
                 db.session.add(fix)
                 db.session.commit()

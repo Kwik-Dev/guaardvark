@@ -1199,9 +1199,11 @@ def _initialize_app_components(app):
         with app.app_context():
             from backend.services.inbound_guard_service import get_mode
             get_mode()
-        # Importing the watch registers its listener; the thread sweeps only while the guard is on.
+        # Importing the watch registers its listener; the thread sweeps only while the guard is on,
+        # and only in the server: Celery workers build this app too, and one sweeper is enough.
         from backend.services import inbound_guard_watch
-        inbound_guard_watch.start_background(app)
+        if os.environ.get("CELERY_WORKER_MODE", "false").lower() != "true":
+            inbound_guard_watch.start_background(app)
     except Exception as e:
         app.logger.warning(f"Could not start the inbound guard: {e}")
 

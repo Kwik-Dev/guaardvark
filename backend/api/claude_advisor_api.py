@@ -13,11 +13,13 @@ def get_status():
     """Check Claude API availability and usage."""
     from backend.services.claude_advisor_service import get_claude_advisor
     advisor = get_claude_advisor()
+    from backend.services.claude_advisor_service import scheduled_sends_allowed
     return success_response(data={
         "available": advisor.is_available(),
         "usage": advisor.get_usage(),
         "escalation_mode": advisor._escalation_mode,
         "model": advisor._model,
+        "scheduled_sends": scheduled_sends_allowed(),
     })
 
 
@@ -110,6 +112,10 @@ def update_config():
     if "model" in data:
         advisor._model = data["model"]
         _save_setting("claude_model", advisor._model)
+
+    if "scheduled_sends" in data:
+        from backend.services.claude_advisor_service import SCHEDULED_SENDS_KEY
+        _save_setting(SCHEDULED_SENDS_KEY, "true" if data["scheduled_sends"] is True else "false")
 
     return success_response(data={"updated": True})
 

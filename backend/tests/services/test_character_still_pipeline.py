@@ -164,8 +164,14 @@ def test_render_without_lora_returns_still_result_type(monkeypatch):
         assert still.success is False
 
 
-def test_cast_requested_but_empty_paths_fails_loudly():
+def test_cast_requested_but_empty_paths_fails_loudly(monkeypatch):
     """Do not silently render generic T2I when cast was requested but nothing resolved."""
+    # The missing member is simulated: the real lookup, called outside an app
+    # context, imports backend.app, which builds the whole backend (scheduler and
+    # LLM threads) against whatever DATABASE_URL the environment or .env holds.
+    monkeypatch.setattr(
+        "backend.services.character_still_pipeline._subjects_from_ids", lambda ids: []
+    )
     still = render_character_still(
         "batman in the rain",
         subject_ids=[999999],  # missing — resolve yields no paths

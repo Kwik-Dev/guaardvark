@@ -4,12 +4,22 @@ import axios from "axios";
 import App from "./App.jsx";
 import { installBackendCredentials } from "./api/apiAuth";
 import { installQueueMessages } from "./api/taskQueue";
-// Inter, served from this origin — no request to Google Fonts on page load.
+// Every font is served from this origin — no request to Google Fonts on page
+// load. Inter is the base face; the themes use Lato for body text and Raleway
+// for headings, at the weights the old Google Fonts link asked for.
 import "@fontsource/inter/300.css";
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
 import "@fontsource/inter/700.css";
+import "@fontsource/lato/300.css";
+import "@fontsource/lato/400.css";
+import "@fontsource/lato/700.css";
+import "@fontsource/raleway/200.css";
+import "@fontsource/raleway/300.css";
+import "@fontsource/raleway/400.css";
+import "@fontsource/raleway/500.css";
+import "@fontsource/raleway/600.css";
 import "./index.css"; // Basic global styles
 
 // Before the first render: axios refusals become Settings → API key advice,

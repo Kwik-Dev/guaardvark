@@ -12,6 +12,7 @@ around them, which change what Guaardvark does as surely as an edit would:
 - packages installed in the backend's environment
 - pickle-format model files appearing in the model folders
 - extension and plugin folders: code that loads in-process at the next boot
+- every switchable outbound path in scripts/inbound_guard/egress.json: on or off
 
 Each check keeps its last snapshot as a baseline row (path "@posture/<name>").
 The first run records quietly; after that a change is diffed and judged, and
@@ -157,6 +158,96 @@ def snap_code_folders() -> Dict[str, str]:
     return out
 
 
+def _egress_paths() -> list:
+    path = guard.REPO_ROOT / "scripts" / "inbound_guard" / "egress.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("paths", [])
+    except (OSError, ValueError):
+        return []
+
+
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def _check(name: str) -> bool:
+    """Switches that are not one setting: rows, plugin state, configured servers."""
+    from backend import config
+
+    if name == "google_indexing":
+        from backend.models import GoogleIndexingConfig
+
+        return (GoogleIndexingConfig.query.filter_by(enabled=True).count() > 0
+                and os.path.exists(config.GOOGLE_INDEXING_KEY_PATH))
+    if name == "interconnector_client":
+        from backend.celery_beat_gates import interconnector_client_gate
+
+        return interconnector_client_gate()
+    if name == "publish_connections":
+        from backend.models import Connection
+        from backend.utils.settings_utils import get_setting
+
+        return (Connection.query.filter_by(enabled=True).count() > 0
+                and str(get_setting("connections_publish_enabled", default="true")).lower() != "false")
+    if name == "discord_plugin":
+        state = guard.REPO_ROOT / "data" / "plugin_state.json"
+        try:
+            return bool(json.loads(state.read_text(encoding="utf-8")).get("user_enabled", {}).get("discord"))
+        except (OSError, ValueError):
+            return False
+    if name == "mcp_servers":
+        from backend.services.mcp_config import load_server_configs
+
+        servers, _errors = load_server_configs(config.MCP_CONFIG_FILE, config.MCP_SERVERS_CONFIG)
+        return bool(servers)
+    raise ValueError(f"unknown outbound check {name!r}")
+
+
+def _switch_on(switch: dict) -> bool:
+    from urllib.parse import urlparse
+
+    from backend.utils.settings_utils import get_setting
+
+    if "all" in switch:
+        return all(_switch_on(part) for part in switch["all"])
+    if "env" in switch:
+        return bool(os.environ.get(switch["env"], "").strip())
+    if "env_not_loopback" in switch:
+        url = os.environ.get(switch["env_not_loopback"], "").strip()
+        host = urlparse(url if "://" in url else f"http://{url}").hostname or ""
+        return bool(url) and host not in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    if "setting" in switch or "system_setting" in switch:
+        return _truthy(get_setting(switch.get("setting") or switch.get("system_setting")))
+    if "setting_equals" in switch or "system_setting_equals" in switch:
+        key, wanted = switch.get("setting_equals") or switch.get("system_setting_equals")
+        return str(get_setting(key) or "").strip().lower() == wanted
+    if "setting_nonempty" in switch:
+        return bool(str(get_setting(switch["setting_nonempty"]) or "").strip())
+    if "check" in switch:
+        return _check(switch["check"])
+    raise ValueError(f"unknown switch {switch!r}")
+
+
+_outbound_titles: Dict[str, dict] = {}
+
+
+def snap_outbound() -> Dict[str, str]:
+    """Each switchable outbound path in egress.json: on or off right now."""
+    out: Dict[str, str] = {}
+    _outbound_titles.clear()
+    for path in _egress_paths():
+        switch = path.get("switch") or {}
+        if switch.get("person"):
+            continue
+        _outbound_titles[path["id"]] = path
+        try:
+            out[path["id"]] = "on" if _switch_on(switch) else "off"
+        except Exception as exc:
+            logger.warning("outbound path %s: could not read its switch: %s", path.get("id"), exc)
+            out[path["id"]] = "unknown"
+    return out
+
+
 # -- judging a change ---------------------------------------------------------------------------
 
 def _judge_git(key: str, change: str) -> Tuple[str, str]:
@@ -199,7 +290,29 @@ def _judge_folder(key: str, change: str) -> Tuple[str, str]:
     return "medium", f"a code folder was {change}; its code loads in-process at the next start"
 
 
+def _judge_outbound(key: str, change: str) -> Tuple[str, str]:
+    path = _outbound_titles.get(key, {})
+    title, sends = path.get("title", key), path.get("sends", "")
+    now = snap_state_now.get(key)
+    if now == "on":
+        return "high", f"an outbound path was switched on: {title}. It sends {sends}."
+    if now == "unknown":
+        return "medium", f"could not tell whether '{title}' is on"
+    return "info", f"an outbound path was switched off: {title}"
+
+
+snap_state_now: Dict[str, str] = {}
+
+
+def _snap_outbound_tracked() -> Dict[str, str]:
+    state = snap_outbound()
+    snap_state_now.clear()
+    snap_state_now.update(state)
+    return state
+
+
 CHECKS: List[Tuple[str, Callable[[], Dict[str, str]], Callable[[str, str], Tuple[str, str]]]] = [
+    ("outbound", _snap_outbound_tracked, _judge_outbound),
     ("git", snap_git, _judge_git),
     ("env", snap_env, _judge_env),
     ("instructions", snap_instructions, _judge_instructions),

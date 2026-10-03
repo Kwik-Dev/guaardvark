@@ -151,6 +151,11 @@ MUTATION_PROTECTED_PREFIXES = (
     '/api/settings/confine_tool_paths',
     # Switching the inbound guard off, or approving a change it held, lets code in.
     '/api/settings/inbound_guard',
+    # Approving or applying a staged fix writes code into the checkout.
+    '/api/self-improvement/pending-fixes',
+    # Every Uncle Claude POST sends to Anthropic or changes when it may
+    # (escalation mode, scheduled sends); the status stays readable.
+    '/api/claude/',
     # Persists the product profile into .env.
     '/api/settings/profile',
     '/api/memory',

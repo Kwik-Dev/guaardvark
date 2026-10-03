@@ -22,6 +22,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 from .model import SEVERITY_RANK, Change, Finding
 
 RULES_FILE = Path(__file__).with_name("inbound_rules.json")
+EGRESS_FILE = Path(__file__).with_name("egress.json")
 
 # (change, "old" | "new") -> full text, or None when it cannot be read
 Loader = Callable[..., Optional[str]]
@@ -83,13 +84,31 @@ class RuleSet:
         self.local_hosts = {h.lower() for h in net.get("local_hosts", [])}
         self.local_suffixes = tuple(s.lower() for s in net.get("local_suffixes", []))
         self.protected_lists = data.get("protected_lists", [])
+        # host pattern -> title of the outbound path that declares it
+        self.declared_hosts: Dict[str, str] = {}
+        for path in data.get("_egress", {}).get("paths", []):
+            for host in path.get("hosts", []):
+                self.declared_hosts.setdefault(host.lower(), path.get("title", path.get("id", "")))
         self._blob = re.compile(_BLOB.pattern % int(self.caps.get("blob_min_length", 120)))
         self._glob_cache: Dict[str, List[str]] = {}
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "RuleSet":
         with open(path or RULES_FILE, encoding="utf-8") as fh:
-            return cls(json.load(fh))
+            data = json.load(fh)
+        egress = (Path(path).with_name("egress.json") if path else EGRESS_FILE)
+        if egress.is_file():
+            with open(egress, encoding="utf-8") as fh:
+                data["_egress"] = json.load(fh)
+        return cls(data)
+
+    def declared_for(self, host: str) -> Optional[str]:
+        """The outbound path (egress.json) that declares ``host``, if any."""
+        bare = host.lower().rstrip(".").rsplit("@", 1)[-1].split(":", 1)[0]
+        for pattern, title in self.declared_hosts.items():
+            if fnmatch.fnmatchcase(bare, pattern):
+                return title
+        return None
 
     # -- path matching -----------------------------------------------------
 
@@ -261,10 +280,18 @@ class RuleSet:
                         prose = _python_prose_lines(blob_loader(change))
                     if number in prose:
                         continue  # a docstring names the host; nothing here calls it
-                out.add(Finding("net.new-destination", "outbound-network", "medium", change.path, number,
-                                visible(text),
-                                f"names an outside host ({visible(host, 60)}); "
-                                "the product never contacts one except behind a visible Install"))
+                declared = self.declared_for(host)
+                if declared:
+                    out.add(Finding("net.new-destination", "outbound-network", "medium", change.path, number,
+                                    visible(text),
+                                    f"names {visible(host, 60)}, which egress.json declares for "
+                                    f"'{visible(declared, 80)}'; read what this new code sends there"))
+                else:
+                    out.add(Finding("net.new-destination", "outbound-network", "high", change.path, number,
+                                    visible(text),
+                                    f"names an outside host ({visible(host, 60)}) that no outbound path in "
+                                    "scripts/inbound_guard/egress.json declares; the product never contacts one "
+                                    "except behind a visible Install"))
 
     # -- trojan source and obfuscation ---------------------------------------
 

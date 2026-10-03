@@ -69,6 +69,15 @@ export default function UncleClaudeSection() {
     }
   };
 
+  const handleToggleScheduledSends = async (next) => {
+    try {
+      await claudeAdvisorService.updateConfig({ scheduled_sends: next });
+      fetchStatus();
+    } catch (err) {
+      console.error("Failed to update scheduled sends:", err);
+    }
+  };
+
   const handleToggleSelfImprovement = async () => {
     try {
       await selfImprovementService.toggle(!siStatus?.enabled);
@@ -155,6 +164,13 @@ export default function UncleClaudeSection() {
               <MenuItem value="always">Always (every query, paid)</MenuItem>
             </Select>
           </FormControl>
+          <SettingChip
+            label="Scheduled sends"
+            on={!!status?.scheduled_sends}
+            onToggle={handleToggleScheduledSends}
+            disabled={!status?.available}
+            tooltip="On: Uncle Claude contacts Anthropic on its own schedule — advice twice a day (time and GPU details) and reviews of servo changes (a source excerpt and the diff). Off: it only runs when you start it here."
+          />
         </Line>
         {testResult && (
           <CollapsibleAlert severity={testResult.success ? "success" : "error"} sx={{ py: 0.25 }} onClose={() => setTestResult(null)}>

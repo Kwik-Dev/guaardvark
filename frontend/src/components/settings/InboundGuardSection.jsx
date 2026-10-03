@@ -19,6 +19,7 @@ import {
 } from "@mui/material";
 import { ActionButton, ChoiceChips, Cluster, Hint, Line, StatusPill } from "./ui";
 import { inboundGuardService } from "../../api/inboundGuardService";
+import { approveHeldChange, rejectHeldChange } from "../../api/heldChanges";
 
 const MODES = [
   { value: "off", label: "Off", tooltip: "Nothing is read. Code lands exactly as before." },
@@ -93,10 +94,10 @@ function ReviewDialog({ open, onClose, onChanged }) {
     setBusy(true);
     setError(null);
     try {
-      if (selected.kind === "git") {
-        await inboundGuardService.approveGit(selected.item.digest, note);
+      if (decision === "approve") {
+        await approveHeldChange(selected, { note, overrideBlock });
       } else {
-        await inboundGuardService.decide(selected.item.id, decision, { note, overrideBlock });
+        await rejectHeldChange(selected, { note });
       }
       setSelected(null);
       setNote("");
@@ -176,7 +177,7 @@ function ReviewDialog({ open, onClose, onChanged }) {
             loading={busy}
             tooltip={blocked ? "This was blocked, not held: approve only after reading every finding." : ""}
           >
-            {blocked ? "Approve despite the block" : item.landable ? "Approve and apply" : "Approve"}
+            {blocked ? "Approve despite the block" : item.landable || item.pending_fix_id ? "Approve and apply" : "Approve"}
           </ActionButton>
         )}
         <ActionButton onClick={onClose}>Close</ActionButton>

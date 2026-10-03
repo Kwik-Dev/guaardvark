@@ -16,6 +16,7 @@ from __future__ import annotations
 import heapq
 import json
 import logging
+import os
 import time
 from typing import Callable, Dict, Optional
 
@@ -82,6 +83,18 @@ def self_improvement_gate() -> bool:
     return raw.strip().lower() in _TRUE
 
 
+def uncle_claude_scheduled_gate() -> bool:
+    """Uncle Claude's own schedule: self-improvement on, and Settings → Uncle
+    Claude → Scheduled sends on (off unless switched on; env fallback
+    GUAARDVARK_CLAUDE_SCHEDULED, as settings_utils reads it)."""
+    if not self_improvement_gate():
+        return False
+    raw = _read_setting("claude_scheduled_sends", None, table="system_settings")
+    if raw is None:
+        raw = os.environ.get("GUAARDVARK_CLAUDE_SCHEDULED", "false")
+    return raw.strip().lower() in _TRUE
+
+
 def interconnector_client_gate() -> bool:
     """This node is an enabled Interconnector *client* with a master URL."""
     raw = _read_setting("interconnector_config")
@@ -102,6 +115,7 @@ GATES: Dict[str, Callable[[], bool]] = {
     "autoresearch": autoresearch_gate,
     "social_outreach": social_outreach_gate,
     "self_improvement": self_improvement_gate,
+    "uncle_claude_scheduled": uncle_claude_scheduled_gate,
     "interconnector_client": interconnector_client_gate,
 }
 

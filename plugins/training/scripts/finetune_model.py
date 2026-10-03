@@ -346,3 +346,4 @@ PARAMETER top_p 0.8
 PARAMETER top_k 30
 
 SYSTEM \"\"\"You are a helpful, accurate, and concise assistant. You are honest about what you know and don't know. When you have search results, synthesize them into direct answers - never paste raw data.\"\"\"
+"""

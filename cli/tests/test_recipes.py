@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from llx.commands.recipes import load_recipes, validate_recipes
@@ -14,10 +15,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _recipe(action: str = "click") -> dict:
+    step: dict = {"action": action}
+    if action == "click":
+        # The backend validator requires a target_description on click steps.
+        step["target_description"] = "the test button"
     return {
         "description": "A test recipe.",
         "triggers": ["^test$"],
-        "steps": [{"action": action}],
+        "steps": [step],
     }
 
 
@@ -84,3 +89,56 @@ def test_show_unknown_recipe_is_clear(monkeypatch):
 
     assert result.exit_code == 1
     assert "Unknown recipe: not-a-recipe" in result.stdout
+
+
+def test_cli_action_allowlist_matches_backend():
+    from llx.commands import recipes as recipes_mod
+
+    backend = recipes_mod._backend_validator()
+    if backend is None:
+        pytest.skip("backend validator unavailable in this layout")
+
+    assert recipes_mod.KNOWN_ACTIONS == set(backend.SUPPORTED_RECIPE_ACTIONS)
+
+
+def test_validation_delegates_to_backend_rules():
+    from llx.commands import recipes as recipes_mod
+
+    if recipes_mod._backend_validator() is None:
+        pytest.skip("backend validator unavailable in this layout")
+
+    # Click coordinates pass the old lightweight CLI check but must be rejected
+    # by the canonical backend rules the CLI now delegates to.
+    payload = {
+        "clicky": {
+            "description": "d",
+            "triggers": ["^click$"],
+            "steps": [{"action": "click", "x": 1, "y": 2}],
+        }
+    }
+
+    assert any("x/y" in error for error in recipes_mod.validate_recipes(payload))
+
+
+def test_list_and_show_accept_file_option(tmp_path):
+    path = tmp_path / "recipes.json"
+    path.write_text(json.dumps({"sample": _recipe()}), encoding="utf-8")
+
+    listed = runner.invoke(app, ["recipes", "list", "--file", str(path), "--json"])
+    shown = runner.invoke(app, ["recipes", "show", "sample", "--file", str(path), "--json"])
+
+    assert listed.exit_code == 0
+    assert json.loads(listed.stdout)["data"]["recipes"][0]["name"] == "sample"
+    assert shown.exit_code == 0
+    assert json.loads(shown.stdout)["data"]["recipe"]["name"] == "sample"
+
+
+def test_show_exposes_preconditions_and_proof_timeout(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_ROOT", str(REPO_ROOT))
+
+    result = runner.invoke(app, ["recipes", "show", "open_firefox", "--json"])
+
+    assert result.exit_code == 0
+    recipe = json.loads(result.stdout)["data"]["recipe"]
+    assert recipe["preconditions"] == ["firefox_not_running"]
+    assert "success_proof_timeout_s" in recipe

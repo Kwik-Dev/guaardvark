@@ -231,9 +231,18 @@ def test_snapshot_reads_the_stored_settings(monkeypatch):
 
     snapshot = kill_switch.status_snapshot()
 
-    assert (snapshot["enabled"], snapshot["supervised"], snapshot["settings_readable"]) == (True, False, True)
+    # Never set means supervised: posting without a person has to be chosen.
+    assert (snapshot["enabled"], snapshot["supervised"], snapshot["settings_readable"]) == (True, True, True)
     assert kill_switch.is_enabled() is True
+    assert kill_switch.is_supervised() is True
+
+
+def test_supervised_off_only_when_switched_off(monkeypatch):
+    stored = {"social_outreach_enabled": "true", "social_outreach_supervised": "false"}
+    monkeypatch.setattr(kill_switch, "_lookup_setting", stored.get)
+    monkeypatch.setattr(kill_switch, "cadence_status", lambda: {})
     assert kill_switch.is_supervised() is False
+    assert kill_switch.status_snapshot()["supervised"] is False
 
 
 def test_unreadable_settings_fail_closed_and_are_flagged(monkeypatch):

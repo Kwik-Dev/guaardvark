@@ -657,8 +657,11 @@ def list_models():
             return error_response("Image generator not initialized", 503)
             
         # Curated, ordered, menu-ready list carrying label/description/recommended
-        # and a per-model usability verdict. Single source of truth.
-        meta = generator.image_generator.get_available_models()
+        # and a per-model usability verdict. Single source of truth. Hugging Face
+        # is asked about models that are not on disk only when the person asks
+        # (?check=1, Check access in Manage models), never on page load.
+        check = request.args.get("check", "").lower() in ("1", "true", "yes")
+        meta = generator.image_generator.get_available_models(probe_remote=check)
         models = []
         unavailable = []
         for model_id, info in sorted(meta.items(), key=lambda kv: kv[1].get("order", 99)):
@@ -672,6 +675,7 @@ def list_models():
                 "recommended": info.get("recommended", False),
                 "size_gb": info.get("size_gb") or IMAGE_MODEL_SIZES.get(info["id"], 2.5),
                 "availability": info.get("availability", "downloadable"),
+                "gated": bool(info.get("gated")),
                 # User catalog rows (Manage Image Models → Add new model).
                 "user": bool(info.get("user")),
                 "family": info.get("family"),

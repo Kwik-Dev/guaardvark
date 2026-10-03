@@ -292,6 +292,20 @@ def _setting_checks() -> list[dict]:
             "Not limited to the project folder. Settings can limit file-reading tools to "
             "it and GUAARDVARK_ALLOWED_PATHS.",
         ))
+    try:
+        from backend.services.inbound_guard_posture import _outbound_titles, snap_outbound
+
+        state = snap_outbound()
+        on = [(_outbound_titles.get(k) or {}).get("title", k) for k, v in state.items() if v == "on"]
+        checks.append(_check(
+            "outbound_paths", "Outbound paths", INFO if on else OK,
+            ("On: " + "; ".join(on) + ". The full list, with what each sends, is "
+             "scripts/inbound_guard/egress.json.") if on else
+            "None of the switchable outbound paths is on; downloads and installs still run when you start them.",
+        ))
+    except Exception as exc:  # the security check must answer even if this cannot
+        checks.append(_check("outbound_paths", "Outbound paths", INFO, f"Could not read them: {exc}"))
+
     from backend.services.inbound_guard_service import get_mode
 
     mode = get_mode()

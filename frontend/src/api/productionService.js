@@ -222,4 +222,15 @@ export const importSubjectLora = async (id, { file, baseModelId, triggerWord }) 
   return response.data;
 };
 
+// Make the member's current LoRA for baseModelId its default (Versions tab,
+// one "Make default" button per base the member holds a LoRA for). Returns
+// { subject } on success, throws (400) when the member has no LoRA for that
+// base.
+export const makeDefaultSubjectLora = async (id, baseModelId) => {
+  const response = await axios.post(
+    `${API_BASE}/cast-library/subjects/${id}/loras/${baseModelId}/make-default`,
+  );
+  return response.data;
+};
+
 export default productionService;

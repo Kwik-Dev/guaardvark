@@ -127,6 +127,7 @@ SYSTEM_SETTING_KEYS = {
     "claude_escalation_mode",
     "claude_monthly_budget",
     "claude_model",
+    "claude_scheduled_sends",
     "claude_token_usage",
 }
 
@@ -136,6 +137,7 @@ ENV_VAR_MAP = {
     "advanced_rag_enabled": "GUAARDVARK_ADVANCED_RAG",
     "claude_escalation_mode": "GUAARDVARK_CLAUDE_ESCALATION_MODE",
     "claude_monthly_budget": "GUAARDVARK_CLAUDE_TOKEN_BUDGET",
+    "claude_scheduled_sends": "GUAARDVARK_CLAUDE_SCHEDULED",
     "vision_pipeline_enabled": "GUAARDVARK_VISION_PIPELINE",
     "vision_pipeline_max_fps": "GUAARDVARK_VISION_MAX_FPS",
     "vision_pipeline_quality": "GUAARDVARK_VISION_QUALITY",

@@ -19,6 +19,35 @@ def app():
         db.session.remove()
         db.drop_all()
 
+
+@pytest.fixture(autouse=True)
+def _no_live_gpu(monkeypatch):
+    """Keep the real-trainer path off this machine's GPU and services.
+
+    Under it, train_subject_lora_for_subject starts the Cast plugins, claims
+    the GPU through gpu_session (a real VRAM check, Ollama eviction, a free on
+    the running ComfyUI, a cross-process lease) and shuts the trainer daemon
+    down. A test that reaches it then passes or fails on whatever else holds
+    the card, and evicts models the person is using.
+    """
+    from contextlib import contextmanager
+
+    from plugins.lora_trainer import real_trainer
+
+    @contextmanager
+    def no_gpu_session(*args, **kwargs):
+        yield
+
+    monkeypatch.setattr("backend.services.gpu_resource_policy.gpu_session", no_gpu_session)
+    monkeypatch.setattr(
+        "backend.services.gpu_resource_policy.compositor_vram_reserve_mb", lambda: 0
+    )
+    monkeypatch.setattr(
+        "backend.services.plugin_bridge.ensure_plugins_for_stage", lambda *a, **k: None
+    )
+    monkeypatch.setattr(real_trainer._TRAINER, "shutdown", lambda: None)
+
+
 def test_mock_trainer_writes_safetensors_and_sidecar(tmp_path):
     from plugins.lora_trainer.mock_trainer import train_subject_lora
     out_dir = tmp_path / "loras"

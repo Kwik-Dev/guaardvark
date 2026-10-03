@@ -94,6 +94,7 @@ class InterconnectorFileSyncService:
             "backend/cuda_config.py",
             "backend/__init__.py",
             "backend/models.py",
+            "backend/no_netrc.py",
             "backend/rule_utils.py",
             "backend/seed_data.py",
             "backend/seed_models.py",

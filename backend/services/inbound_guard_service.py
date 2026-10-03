@@ -518,9 +518,18 @@ register_inbound_listener("code-index", _refresh_code_index)
 # -- decisions on held changes ------------------------------------------------------------------
 
 def decide(scan_id: int, decision: str, *, by: str, note: str = "", override_block: bool = False) -> dict:
-    """Approve or reject an open verdict. Approving one with a payload lands it."""
-    from datetime import datetime
+    """Approve (and land) or reject an open verdict."""
+    if decision == "approve":
+        return approve_and_land(scan_id, by=by, note=note, override_block=override_block)
+    if decision == "reject":
+        return reject_held(scan_id, by=by, note=note)
+    raise ValueError("decision must be approve or reject")
 
+
+_land_lock = threading.Lock()
+
+
+def _open_scan(scan_id: int):
     from backend.models import InboundScan, db
 
     row = db.session.get(InboundScan, scan_id)
@@ -528,28 +537,147 @@ def decide(scan_id: int, decision: str, *, by: str, note: str = "", override_blo
         raise LookupError("No such inbound verdict")
     if row.status != "open":
         raise ValueError(f"That verdict is already {row.status}")
-    if decision not in ("approve", "reject"):
-        raise ValueError("decision must be approve or reject")
-    if decision == "approve" and row.verdict == "block" and not override_block:
-        raise ValueError("That change was blocked, not held. Read the findings; approving it needs override_block.")
+    return row
 
-    row.status = "approved" if decision == "approve" else "rejected"
+
+def _settle(row, status: str, by: str, note: str) -> None:
+    from datetime import datetime
+
+    row.status = status
     row.decided_by = by[:80]
     row.decided_at = datetime.now()
     row.decision_note = note
+
+
+def approve_and_land(scan_id: int, *, by: str, note: str = "", override_block: bool = False) -> dict:
+    """Approve a held change and make it land, or change nothing.
+
+    Every kind of held item lands here, so a person's "approve" means the same
+    thing wherever they press it:
+    - an edit waiting as a pending fix is applied (exact text only, and only if
+      it still reads as it did when it was held);
+    - a held file operation (create, delete, rename) is carried out;
+    - a source-watch hold takes the file as it is now as judged.
+    The change lands first and the approval is recorded after, so a failure
+    leaves the item open with the reason.
+    """
+    from backend.models import db
+
+    with _land_lock:
+        row = _open_scan(scan_id)
+        if row.verdict == "block" and not override_block:
+            raise ValueError("That change was blocked, not held. Read the findings; approving it needs override_block.")
+        landed: List[str] = []
+        if row.pending_fix_id:
+            landed = _land_pending_fix(row, by=by, note=note)
+        elif row.payload:
+            landed = _land_payload(json.loads(row.payload))
+            _emit({"kind": "landed", "paths": landed, "source": row.source, "subject": row.subject,
+                   "digest": row.digest, "scan_id": row.id})
+        _settle(row, "approved", by, note)
+        db.session.commit()
+        if row.source == "watch":
+            from backend.services import inbound_guard_watch
+
+            inbound_guard_watch.approve_held(row.id)
+        return {**row.to_dict(), "landed": landed}
+
+
+def _land_pending_fix(row, *, by: str, note: str) -> List[str]:
+    """Apply the pending fix a held edit is waiting in, after checking it still reads as held."""
+    import hashlib
+    from datetime import datetime
+
+    from backend.models import InboundScan, PendingFix, db
+    from backend.services.guarded_code_service import GuardedCodeError, apply_exact_replacement
+
+    fix = db.session.get(PendingFix, row.pending_fix_id)
+    if fix is None:
+        raise ValueError("The pending fix this change waits in no longer exists")
+    if fix.status not in ("proposed", "triaged", "approved"):
+        raise ValueError(f"The pending fix is already {fix.status}")
+    if fix.original_content is None or fix.proposed_new_content is None:
+        raise ValueError("The pending fix has no text to apply")
+    path = Path(fix.file_path)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    current = path.read_text(encoding="utf-8") if path.is_file() else None
+    if current is None or current.count(fix.original_content) != 1:
+        raise ValueError("Changed since it was held: the text it replaces is no longer in the file exactly once. "
+                         "Reject it and propose the edit again.")
+
+    # Judge it again as it would land now, with the core rules only (an
+    # extension's view of a host can change over time). Anything new means the
+    # change is not the one that was held.
+    change = change_for_replacement(path, current, fix.original_content, fix.proposed_new_content)
+    again = engine().scan([change], source="approved_fix", subject=row.subject, mode="observe", repo=REPO_ROOT)
+    held = {(f.get("rule"), f.get("excerpt")) for f in json.loads(row.findings or "[]")}
+    fresh = [f for f in again.findings if (f.rule, f.excerpt) not in held]
+    if fresh or (again.verdict == "block" and row.verdict != "block"):
+        worst = (fresh or again.findings)[0]
+        raise ValueError(f"Changed since it was held: it now reads {worst.severity} {worst.rule}. "
+                         "Reject it and propose the edit again.")
+
+    pre_approved = []
+    if row.verdict == "block":
+        # The gate lets a block through only on an approval recorded for exactly
+        # this change; the person's override is that approval.
+        for twin in db.session.query(InboundScan).filter_by(digest=again.digest, status="open").all():
+            _settle(twin, "approved", by, note or "approved despite the block")
+            pre_approved.append(twin)
+        db.session.commit()
+    try:
+        apply_exact_replacement(
+            str(path), fix.original_content, fix.proposed_new_content,
+            origin="approved_fix", human_approved=True,
+            expected_hash=hashlib.sha256(current.encode("utf-8")).hexdigest(),
+        )
+    except GuardedCodeError:
+        for twin in pre_approved:
+            twin.status, twin.decided_by, twin.decided_at, twin.decision_note = "open", None, None, None
+        db.session.commit()
+        raise
+
+    now = datetime.now()
+    fix.status = "applied"
+    fix.reviewed_by = (fix.reviewed_by or by)[:50]
+    fix.reviewed_at = fix.reviewed_at or now
+    fix.applied_at = now
+    fix.review_notes = ((fix.review_notes or "") + f"\n\nApplied from the inbound guard's held list by {by}."
+                        + (f" {note}" if note else "")).strip()
+    for twin in db.session.query(InboundScan).filter_by(digest=again.digest, status="open").all():
+        if twin.id != row.id:
+            _settle(twin, "approved", by, f"applied with #{row.id}")
     db.session.commit()
+    resolve_for_fix(fix.id, "approve", by=by, note=note)
+    return [relative(path)]
 
-    if decision == "approve" and row.source == "watch":
-        from backend.services import inbound_guard_watch
 
-        inbound_guard_watch.approve_held(row.id)
+def reject_held(scan_id: int, *, by: str, note: str = "") -> dict:
+    """Reject a held change. An edit waiting as a pending fix is rejected with it.
 
-    landed_paths: List[str] = []
-    if decision == "approve" and row.payload:
-        landed_paths = _land_payload(json.loads(row.payload))
-        _emit({"kind": "landed", "paths": landed_paths, "source": row.source, "subject": row.subject,
-               "digest": row.digest, "scan_id": row.id})
-    return {**row.to_dict(), "landed": landed_paths}
+    A source-watch hold is already on disk: rejecting it leaves the file there
+    and keeps it out of what this machine serves to others until it changes.
+    """
+    from datetime import datetime
+
+    from backend.models import PendingFix, db
+
+    with _land_lock:
+        row = _open_scan(scan_id)
+        _settle(row, "rejected", by, note)
+        if row.pending_fix_id:
+            fix = db.session.get(PendingFix, row.pending_fix_id)
+            if fix is not None and fix.status in ("proposed", "triaged", "approved"):
+                fix.status = "rejected"
+                fix.reviewed_by = by[:50]
+                fix.reviewed_at = datetime.now()
+                fix.review_notes = ((fix.review_notes or "") + "\n\nRejected from the inbound guard's held list."
+                                    + (f" {note}" if note else "")).strip()
+        db.session.commit()
+        if row.pending_fix_id:
+            resolve_for_fix(row.pending_fix_id, "reject", by=by, note=note)
+        return {**row.to_dict(), "landed": []}
 
 
 def _land_payload(payload: dict) -> List[str]:

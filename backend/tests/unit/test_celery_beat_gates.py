@@ -173,4 +173,17 @@ def test_every_toggle_governed_loop_declares_its_gate():
     schedule_self_improvement_tasks(app)
     declared = app.conf.beat_feature_gates
     assert declared["autoresearch-idle-check"] == "autoresearch"
-    assert {declared[n] for n in ("self-improvement-check", "uncle-claude-advice", "servo-optimization")} == {"self_improvement"}
+    assert {declared[n] for n in ("self-improvement-check", "servo-optimization")} == {"self_improvement"}
+    assert declared["uncle-claude-advice"] == "uncle_claude_scheduled"
+
+
+def test_uncle_claude_schedule_needs_its_own_switch(monkeypatch):
+    """A key and self-improvement are not enough for Uncle Claude to send on a timer."""
+    stored = {}
+    monkeypatch.setattr(gates, "_read_setting", lambda key, default=None, table="settings": stored.get(key, default))
+    monkeypatch.delenv("GUAARDVARK_CLAUDE_SCHEDULED", raising=False)
+    assert gates.uncle_claude_scheduled_gate() is False
+    stored["claude_scheduled_sends"] = "true"
+    assert gates.uncle_claude_scheduled_gate() is True
+    stored["self_improvement_enabled"] = "false"
+    assert gates.uncle_claude_scheduled_gate() is False

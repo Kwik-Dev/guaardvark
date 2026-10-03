@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Nothing leaves the machine just because a page opened.** The web UI's Lato and Raleway fonts
+  ship with the app instead of loading from Google Fonts, and the image pages no longer ask
+  Hugging Face about every model that is not installed: Manage models has **Check access**, which
+  asks on your click and never sends your HF_TOKEN (Install still uses it). No backend request
+  sends a login saved in `~/.netrc`.
+- **Uncle Claude runs on a schedule only if you say so.** With an Anthropic key set, the
+  twice-daily advice and the servo-change reviews now also need Settings → Uncle Claude →
+  **Scheduled sends** (off). Uncle Claude's routes, like the staged-fix routes, refuse other
+  devices without the API key.
+- **Outreach posts wait for you.** Supervised mode is on unless you switch it off, and waiting
+  drafts, held code changes and publishes all sit on **Approvals**, each in its own tab; approving
+  a held code change applies it.
+- **Every outbound path is listed** in `scripts/inbound_guard/egress.json`. The inbound guard
+  holds new code that reaches a host no path declares and reports any outbound switch that turns
+  on; the security check lists the paths that are on.
 - **An inbound guard reads code before it lands.** `scripts/check_inbound.py` is the
   counterpart of the portability guard: it reads the lines a change adds and says whether
   they may land, should be held for a person to read, or must be refused. It looks at

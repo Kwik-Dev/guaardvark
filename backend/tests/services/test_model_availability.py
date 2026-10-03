@@ -333,14 +333,21 @@ class TestRepoAccessProbe(unittest.TestCase):
         R.status_code = status_code
 
         with patch.object(OfflineImageGenerator, "_hf_token", staticmethod(lambda: token)), \
-             patch("requests.head", return_value=R()):
-            return g._probe_repo_access("krea/Krea-2-Turbo")
+             patch("requests.head", return_value=R()) as head:
+            verdict = g._probe_repo_access("krea/Krea-2-Turbo")
+        self.last_call = head.call_args
+        return verdict
 
     def test_200_is_ok(self):
         self.assertEqual(self._probe(200, "hf_x"), "ok")
 
-    def test_403_with_token_means_licence_not_accepted(self):
-        self.assertEqual(self._probe(403, "hf_x"), "needs_licence")
+    def test_403_with_a_token_configured_reads_gated(self):
+        self.assertEqual(self._probe(403, "hf_x"), "gated")
+
+    def test_the_probe_never_sends_the_token(self):
+        self._probe(200, "hf_x")
+        headers = self.last_call.kwargs.get("headers") or {}
+        self.assertNotIn("Authorization", headers)
 
     def test_401_without_token_means_token_needed(self):
         self.assertEqual(self._probe(401, None), "needs_token")
@@ -371,16 +378,28 @@ class TestRepoAccessProbe(unittest.TestCase):
 
 class TestMenuFiltering(unittest.TestCase):
 
-    def test_gated_models_are_not_selectable(self):
+    def test_a_gated_model_without_a_token_is_not_selectable(self):
         g = _gen()
         with patch.object(g, "_is_model_downloaded", side_effect=lambda mid: "Z-Image" in mid), \
-             patch.object(g, "_probe_repo_access", return_value="needs_licence"):
-            models = g.get_available_models()
+             patch.object(g, "_probe_repo_access", return_value="needs_token"):
+            models = g.get_available_models(probe_remote=True)
 
         self.assertEqual(models["zimage-turbo"]["availability"], "ready")
         self.assertTrue(models["zimage-turbo"]["selectable"])
-        self.assertEqual(models["krea2-turbo"]["availability"], "needs_licence")
+        self.assertEqual(models["krea2-turbo"]["availability"], "needs_token")
         self.assertFalse(models["krea2-turbo"]["selectable"])
+
+    def test_a_gated_model_with_a_token_stays_selectable_and_says_so(self):
+        """The download uses the token; only then does Hugging Face say whether the
+        terms were accepted, so the probe must not hide the model."""
+        g = _gen()
+        with patch.object(g, "_is_model_downloaded", return_value=False), \
+             patch.object(g, "_probe_repo_access", return_value="gated"):
+            models = g.get_available_models(probe_remote=True)
+
+        self.assertEqual(models["krea2-turbo"]["availability"], "downloadable")
+        self.assertTrue(models["krea2-turbo"]["selectable"])
+        self.assertTrue(models["krea2-turbo"]["gated"])
 
     def test_undownloaded_but_fetchable_stays_selectable(self):
         """A model that simply needs downloading must remain pickable, or the user
@@ -388,10 +407,19 @@ class TestMenuFiltering(unittest.TestCase):
         g = _gen()
         with patch.object(g, "_is_model_downloaded", return_value=False), \
              patch.object(g, "_probe_repo_access", return_value="ok"):
-            models = g.get_available_models()
+            models = g.get_available_models(probe_remote=True)
 
         self.assertEqual(models["sd-xl"]["availability"], "downloadable")
         self.assertTrue(models["sd-xl"]["selectable"])
+
+    def test_listing_models_contacts_no_one_by_default(self):
+        """Opening the image page lists models; only Check access asks Hugging Face."""
+        g = _gen()
+        with patch.object(g, "_is_model_downloaded", return_value=False), \
+             patch.object(g, "_probe_repo_access") as probe:
+            models = g.get_available_models()
+        probe.assert_not_called()
+        self.assertEqual(models["krea2-turbo"]["availability"], "downloadable")
 
     def test_probe_remote_false_skips_the_network(self):
         g = _gen()
@@ -404,7 +432,7 @@ class TestMenuFiltering(unittest.TestCase):
         g = _gen()
         with patch.object(g, "_is_model_downloaded", return_value=True), \
              patch.object(g, "_probe_repo_access") as probe:
-            g.get_available_models()
+            g.get_available_models(probe_remote=True)
         probe.assert_not_called()
 
     def test_undownloaded_user_flux_is_downloadable_not_unreachable(self):
@@ -435,6 +463,16 @@ class TestLoadFailureMessages(unittest.TestCase):
             msg = g._load_failure_reason("krea2-turbo", "krea/Krea-2-Turbo")
 
         self.assertIn("gated", msg.lower())
+        self.assertIn("huggingface.co/krea/Krea-2-Turbo", msg)
+
+    def test_gated_with_a_token_points_at_the_terms(self):
+        g = _gen()
+        with patch.object(g, "_is_model_downloaded", return_value=False), \
+             patch.object(g, "_probe_repo_access", return_value="gated"):
+            msg = g._load_failure_reason("krea2-turbo", "krea/Krea-2-Turbo")
+
+        self.assertIn("gated", msg.lower())
+        self.assertIn("HF_TOKEN", msg)
         self.assertIn("huggingface.co/krea/Krea-2-Turbo", msg)
 
     def test_missing_token_names_the_env_var(self):

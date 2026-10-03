@@ -69,8 +69,13 @@ def transport(monkeypatch, tmp_path):
     return sent
 
 
-def test_the_netrc_fixture_would_leak_through_a_plain_request(transport):
-    """Guards the fixture: this is the login a plain requests call attaches."""
+def test_the_netrc_fixture_would_leak_through_a_plain_request(transport, monkeypatch):
+    """Guards the fixture: this is the login a plain requests call attaches.
+
+    Importing ``backend`` switches the .netrc lookup off for the whole process
+    (backend/no_netrc.py), so put requests' own lookup back to see the leak.
+    """
+    monkeypatch.setattr(requests.sessions, "get_netrc_auth", requests.utils.get_netrc_auth)
     prepared = requests.Session().prepare_request(requests.Request("GET", "https://wttr.in/Paris?format=j1"))
     assert prepared.headers.get("Authorization", "").startswith("Basic ")
 

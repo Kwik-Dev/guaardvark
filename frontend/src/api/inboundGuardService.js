@@ -20,8 +20,20 @@ export const inboundGuardService = {
     return post(ROOT, { mode });
   },
 
-  async listScans(status = "open", limit = 50) {
-    return handleResponse(await fetch(`${ROOT}/scans?status=${encodeURIComponent(status)}&limit=${limit}`));
+  // git: include verdicts the git hooks recorded. Leave it off when polling:
+  // the database list alone is cheap.
+  async listScans(status = "open", limit = 50, { git = true } = {}) {
+    return handleResponse(
+      await fetch(`${ROOT}/scans?status=${encodeURIComponent(status)}&limit=${limit}&git=${git ? 1 : 0}`),
+    );
+  },
+
+  async approveScan(id, { note = "", overrideBlock = false } = {}) {
+    return post(`${ROOT}/scans/${id}/approve`, { note, override_block: overrideBlock });
+  },
+
+  async rejectScan(id, { note = "" } = {}) {
+    return post(`${ROOT}/scans/${id}/reject`, { note });
   },
 
   async getScan(id) {

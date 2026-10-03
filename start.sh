@@ -1367,8 +1367,9 @@ ensure_pip_tmpdir() {
 # Observed 2026-08-13: one PyPI read timeout mid-wheel aborted the entire
 # bootstrap because nothing retried at this level.
 PIP_NET_FAULT_RE="Read timed out|ReadTimeoutError|Connection broken|ConnectionResetError|Connection aborted|NewConnectionError|ProtocolError|IncompleteRead|Temporary failure in name resolution|Network is unreachable"
+PIP_NO_COMPILER_RE="command '[^']*cc' failed|unable to execute '[^']*cc'|No such file or directory: '[^']*cc'|install the kernel header files"
 pip_install_requirements() {
-    local req="$1" attempt max_attempts=4 devheaders_fixed=0 log_mark attempt_out
+    local req="$1" attempt max_attempts=4 devheaders_fixed=0 compiler_fixed=0 log_mark attempt_out
     for attempt in $(seq 1 "$max_attempts"); do
         log_mark=$(wc -c < "$SETUP_LOG" 2>/dev/null || echo 0)
         if pip install -r "$req" >> "$SETUP_LOG" 2>&1; then
@@ -1385,6 +1386,18 @@ pip_install_requirements() {
                 vader_info "Auto-fix: installing python3.12-dev via apt, then retrying $(basename "$req")..."
                 sudo apt-get install -y python3.12-dev python3.12-venv >> "$SETUP_LOG" 2>&1 || true
                 devheaders_fixed=1
+                continue
+            fi
+        fi
+        # evdev (via pynput) ships only as an sdist, so a box with no C compiler
+        # or kernel headers (fresh Ubuntu desktops and WSL images) fails here.
+        if [ "$compiler_fixed" -eq 0 ] \
+           && grep -qE "$PIP_NO_COMPILER_RE" <<< "$attempt_out"; then
+            vader_warn "pip failed building a native wheel: no C compiler or kernel headers on this system."
+            if command_exists apt-get; then
+                vader_info "Auto-fix: installing build-essential via apt, then retrying $(basename "$req")..."
+                sudo apt-get install -y build-essential >> "$SETUP_LOG" 2>&1 || true
+                compiler_fixed=1
                 continue
             fi
         fi

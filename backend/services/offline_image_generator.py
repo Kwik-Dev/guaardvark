@@ -646,13 +646,19 @@ class OfflineImageGenerator:
         )
 
     def _probe_repo_access(self, repo_id: str) -> str:
-        """Can we actually fetch weights for this HF repo?
+        """Can this HF repo's weights be fetched, as far as an anonymous probe can tell?
 
-        Returns one of: ``ok`` | ``needs_token`` | ``needs_licence`` | ``unreachable``.
+        Returns one of: ``ok`` | ``gated`` | ``needs_token`` | ``unreachable``.
 
         Metadata access is not a sufficient test — a gated repo answers 200 on
         /api/models but 403 on the files themselves, which is exactly how Krea 2
         looked "fine" right up until the download failed. So probe a real file.
+
+        The probe never sends HF_TOKEN: asking whether a model exists is not a
+        reason to hand over the account's credential. A gated repo therefore
+        reads ``gated`` when a token is configured (the download will use it, and
+        only then does Hugging Face say whether its terms were accepted) and
+        ``needs_token`` when none is.
         """
         cache = getattr(self, "_repo_access_cache", None)
         if cache is None:
@@ -674,18 +680,11 @@ class OfflineImageGenerator:
             probe_url = f"https://huggingface.co/{repo_id}/resolve/main/model_index.json"
         try:
             import requests
-            token = self._hf_token()
-            headers = {"Authorization": f"Bearer {token}"} if token else {}
-            resp = requests.head(
-                probe_url,
-                headers=headers, timeout=6, allow_redirects=True,
-            )
+            resp = requests.head(probe_url, timeout=6, allow_redirects=True)
             if resp.status_code == 200:
                 verdict = "ok"
             elif resp.status_code in (401, 403):
-                # 401 without a token is "log in"; 403 with one means the account
-                # has not accepted this repo's terms.
-                verdict = "needs_licence" if token else "needs_token"
+                verdict = "gated" if self._hf_token() else "needs_token"
             elif resp.status_code == 404:
                 verdict = "unreachable"
         except Exception as e:
@@ -753,6 +752,14 @@ class OfflineImageGenerator:
             )
         if not self._is_model_downloaded(model_id):
             access = self._probe_repo_access(model_id)
+            if access == "gated":
+                return (
+                    f"'{model_key}' is not downloaded: {model_id} is a gated repository. "
+                    "Its download uses your HF_TOKEN; if it failed, the account that token "
+                    f"belongs to has probably not accepted the terms. Visit "
+                    f"https://huggingface.co/{model_id}, click 'Agree and access "
+                    "repository', then retry."
+                )
             if access == "needs_licence":
                 return (
                     f"'{model_key}' is not downloaded: {model_id} is a gated repository "
@@ -3527,7 +3534,7 @@ Negative Prompt: {negative_prompt}""",
 
         return result
 
-    def get_available_models(self, *, probe_remote: bool = True) -> Dict[str, Any]:
+    def get_available_models(self, *, probe_remote: bool = False) -> Dict[str, Any]:
         """Visible image models for menus/API, with a usability verdict per model.
 
         Carries UI metadata (label/description/recommended/order) so the frontend
@@ -3535,16 +3542,20 @@ Negative Prompt: {negative_prompt}""",
 
           ``ready``          weights on disk, selectable now
           ``downloadable``   not on disk but fetchable — selecting it starts a download
-          ``needs_licence``  gated repo, account has not accepted the terms
           ``needs_token``    gated repo and no HF_TOKEN configured
           ``unreachable``    not on disk and the repo could not be reached
+
+        A row's ``gated`` is true when a probe found the repo gated while a token is
+        configured: still downloadable, with the terms checked at download time.
 
         Anything other than ready/downloadable is unusable, and the caller is expected
         to keep it out of the picker rather than let a run fail later — a silent
         substitution is what made Krea 2 look like it was producing garbage.
 
-        ``probe_remote=False`` skips the network probe (disk truth only) for callers
-        that must not block.
+        Hugging Face is asked only when ``probe_remote`` is true, which a person
+        asks for (Check access in Manage models). By default this reads the disk
+        only, and a model that is not on disk reads ``downloadable``: opening a
+        page must not contact anyone.
         """
         models = {}
 
@@ -3569,6 +3580,7 @@ Negative Prompt: {negative_prompt}""",
                 continue
             meta = self.model_meta.get(model_key, {})
             downloaded = self._is_model_downloaded(model_id)
+            gated = False
             if downloaded:
                 availability = "ready"
             elif self.is_comfy_only_model(model_key):
@@ -3587,7 +3599,8 @@ Negative Prompt: {negative_prompt}""",
                 availability = "downloadable"
             else:
                 access = self._probe_repo_access(model_id)
-                availability = "downloadable" if access == "ok" else access
+                availability = "downloadable" if access in ("ok", "gated") else access
+                gated = access == "gated"
             models[model_key] = {
                 "id": model_id,
                 "name": model_key,
@@ -3598,6 +3611,7 @@ Negative Prompt: {negative_prompt}""",
                 "downloaded": downloaded,
                 "availability": availability,
                 "selectable": availability in ("ready", "downloadable"),
+                "gated": gated,
                 "current": model_id == self._current_model,
                 "size_estimate": (
                     "28-36GB" if "krea" in model_id.lower()

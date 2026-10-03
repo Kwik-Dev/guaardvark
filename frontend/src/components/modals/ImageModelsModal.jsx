@@ -45,20 +45,26 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
     total_gb: 0,
   });
   const [error, setError] = useState(null);
+  const [unavailable, setUnavailable] = useState([]);
+  const [checked, setChecked] = useState(false);
 
   const showMessageRef = useRef(showMessage);
   useEffect(() => {
     showMessageRef.current = showMessage;
   }, [showMessage]);
 
-  const fetchModels = useCallback(async () => {
+  // check: ask Hugging Face whether each model not on disk can be fetched. Only
+  // on the person's click; listing the models never contacts anyone.
+  const fetchModels = useCallback(async (check = false) => {
     try {
       setLoading(true);
-      const res = await axios.get("/api/batch-image/models");
+      const res = await axios.get("/api/batch-image/models", { params: check ? { check: 1 } : {} });
       if (res.data.success) {
         setModels(res.data.data.models);
         setAdapters(res.data.data.adapters || []);
         setEditing(res.data.data.editing || []);
+        setUnavailable(check ? res.data.data.unavailable_models || [] : []);
+        setChecked(check);
       } else {
         setError("Failed to load models");
       }
@@ -267,6 +273,14 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
                         {model.size_gb > 0 && (
                           <Chip label={`${model.size_gb} GB`} size="small" variant="outlined" />
                         )}
+                        {checked && !model.is_downloaded && (
+                          <Chip
+                            label={model.gated ? "Gated · uses your HF token" : "Available"}
+                            size="small"
+                            color={model.gated ? "warning" : "success"}
+                            variant="outlined"
+                          />
+                        )}
                       </Box>
                     }
                     secondary={
@@ -287,6 +301,23 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
                 </ListItem>
               );
             })}
+            {unavailable.length > 0 && (
+              <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 2 }}>
+                Not available
+              </Typography>
+            )}
+            {unavailable.map((model) => (
+              <ListItem key={`unavailable-${model.id}`} divider sx={{ py: 1.5 }}>
+                <ListItemIcon>
+                  <ImageIcon color="disabled" />
+                </ListItemIcon>
+                <ListItemText
+                  primary={model.name || model.id}
+                  secondary={model.reason}
+                  secondaryTypographyProps={{ variant: "body2" }}
+                />
+              </ListItem>
+            ))}
             {adapters.length > 0 && (
               <Typography variant="overline" color="text.secondary" sx={{ display: "block", mt: 2 }}>
                 Your LoRAs
@@ -389,6 +420,13 @@ const ImageModelsModal = ({ open, onClose, showMessage }) => {
       <DialogActions>
         <ActionButton onClick={() => setAddOpen(true)} disabled={isDownloading}>
           Add new model
+        </ActionButton>
+        <ActionButton
+          onClick={() => fetchModels(true)}
+          disabled={isDownloading || loading}
+          tooltip="Asks huggingface.co whether each model that is not installed can be downloaded. Sends no token; Install uses yours."
+        >
+          Check access
         </ActionButton>
         <Box sx={{ flex: 1 }} />
         <Button onClick={onClose} disabled={isDownloading}>

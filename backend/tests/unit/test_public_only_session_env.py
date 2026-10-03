@@ -32,8 +32,13 @@ def hostile_env(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def test_the_environment_would_leak_through_a_plain_session(hostile_env):
-    """Guards the fixture: without the fix these are the values that go out."""
+def test_the_environment_would_leak_through_a_plain_session(hostile_env, monkeypatch):
+    """Guards the fixture: without the fix these are the values that go out.
+
+    Importing ``backend`` switches the .netrc lookup off for the whole process
+    (backend/no_netrc.py), so put requests' own lookup back to see the leak.
+    """
+    monkeypatch.setattr(requests.sessions, "get_netrc_auth", requests.utils.get_netrc_auth)
     plain = requests.Session()
     prepared = plain.prepare_request(requests.Request("GET", URLS[1]))
     assert prepared.headers.get("Authorization", "").startswith("Basic ")

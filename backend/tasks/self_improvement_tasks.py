@@ -29,10 +29,12 @@ def create_self_improvement_tasks(celery_app: Celery):
             from backend.app import get_or_create_app
             app = get_or_create_app()
             with app.app_context():
-                from backend.services.claude_advisor_service import get_claude_advisor
+                from backend.services.claude_advisor_service import get_claude_advisor, scheduled_sends_allowed
                 advisor = get_claude_advisor()
                 if not advisor.is_available():
                     return {"skipped": True, "reason": "Claude not available"}
+                if not scheduled_sends_allowed():
+                    return {"skipped": True, "reason": "scheduled sends to Uncle Claude are off"}
 
                 import subprocess, os
                 system_state = {
@@ -157,10 +159,11 @@ def schedule_self_improvement_tasks(celery_app: Celery):
             "schedule": crontab(minute=15, hour="*/3"),  # Every 3 hours — are we clicking straight?
         },
     })
-    # Held back by beat while self-improvement is switched off in Settings.
+    # Held back by beat while self-improvement is switched off in Settings; the
+    # advice, which only talks to Anthropic, also waits for Scheduled sends.
     from backend.celery_beat_gates import gate_beat_entries
     gate_beat_entries(celery_app, {
         "self-improvement-check": "self_improvement",
-        "uncle-claude-advice": "self_improvement",
+        "uncle-claude-advice": "uncle_claude_scheduled",
         "servo-optimization": "self_improvement",
     })
