@@ -44,7 +44,7 @@ backends:
     model: ACE-Step/ACE-Step-v1-3.5B
     max_duration_s: 240              # 4-min soft cap for MVP
     timeout_s: 300
-    sample_rate: 44100
+    sample_rate: 44100               # not applied: ACE-Step v1 writes 48 kHz and results report the file's rate
     guidance_scale: 7.5              # measured against ACE-Step's default 15: see music_gen_acestep.py
     steps: 60
 

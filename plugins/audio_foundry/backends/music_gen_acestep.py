@@ -208,6 +208,8 @@ class ACEStepBackend(AudioBackend):
             raise RuntimeError(f"ACE-Step generate failed: {err}")
 
         actual_duration = float(result["duration_s"])
+        # The file's own rate (ACE-Step v1 writes 48 kHz), not the configured one.
+        actual_sample_rate = int(result.get("sample_rate") or self._sample_rate)
 
         final_path = self.post_process(wav_path, output_format=requested_format)
         actual_format = final_path.suffix.lstrip(".").lower()
@@ -220,7 +222,7 @@ class ACEStepBackend(AudioBackend):
         return GenerationResult(
             path=final_path.resolve(),
             duration_s=actual_duration,
-            sample_rate=self._sample_rate,
+            sample_rate=actual_sample_rate,
             meta={
                 "backend": self.name,
                 "model": self.MODEL_ID,

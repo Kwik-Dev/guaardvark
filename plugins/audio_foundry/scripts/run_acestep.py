@@ -31,7 +31,8 @@ Commands:
         "seed": null,
         "out_path": "/abs/path/to/output.wav"
      }}
-        -> {"ok": true, "samples": <int>, "channels": <int>, "duration_s": <float>}
+        -> {"ok": true, "samples": <int>, "channels": <int>, "duration_s": <float>,
+            "sample_rate": <int, as written: ACE-Step v1 writes 48000>}
         -> {"ok": false, "error": "..."}
 
     {"op": "unload"}
@@ -240,6 +241,7 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
             "samples": samples,
             "channels": channels,
             "duration_s": samples / actual_sr if actual_sr else 0.0,
+            "sample_rate": actual_sr,
         }
 
     # Fallback: pipeline didn't write a file, dig the audio out of the result.
@@ -282,6 +284,7 @@ def _do_generate(params: dict[str, Any]) -> dict[str, Any]:
         "samples": samples,
         "channels": channels,
         "duration_s": samples / sample_rate,
+        "sample_rate": sample_rate,
     }
 
 
