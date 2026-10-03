@@ -7,7 +7,10 @@ its strongest training prior — frequently country/folk — even when the user
 asks for piano and cello.
 
 This module asks the local Ollama chat model to translate user prose into a
-clean tag prompt + a paired negative_prompt. The rewriter runs on the main
+clean tag prompt. ACE-Step v1 has no negative conditioning, so no "avoid" list
+is produced; RewriteResult.negative_prompt stays "" for API compatibility.
+Instrumentals are handled by the "[instrumental]" lyrics marker the Audio
+Foundry sends, not by tags. The rewriter runs on the main
 backend (where Ollama lives), BEFORE we hit the audio_foundry plugin's
 `/generate/music` endpoint — that endpoint will request VRAM via the
 orchestrator and evict Ollama, so we have to get our LLM call in first
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional, TypedDict
 
 import requests
@@ -55,28 +59,28 @@ Tag vocabulary (use these as anchors):
 
 You MUST output a JSON object with exactly these keys:
 - "style_prompt": comma-separated tags, 6-12 tags total, anchored by a genre
-- "negative_prompt": comma-separated tags to AVOID, including any genres/instruments the user implicitly doesn't want
 - "tags_used": JSON array listing each tag in style_prompt
 
 Rules:
-- ALWAYS include "no vocals" in negative_prompt when the user asks for instrumental or doesn't mention vocals/lyrics.
-- If the user names instruments (e.g. "piano, cello"), include them as tags AND add their common confusables to negative_prompt (cello → fiddle, banjo; synth → acoustic guitar).
-- Translate vague mood words: "professional" → "polished mix"; "futuristic" → "synthwave" or "cinematic electronic"; "epic" → "epic, orchestral, lush strings".
+- Describe only what should be heard. Never write negative tags such as "no vocals" or "no drums": the model reads every tag as something to include.
+- If the user names instruments (e.g. "piano, cello"), include them as tags.
+- Translate vague mood words: "professional" → "polished mix"; "futuristic" → "synthwave" or "cinematic electronic"; "epic" → "epic, orchestral, lush strings"; "for working" or "for studying" → "calm, steady, minimal".
+- Add a vocal tag (e.g. "female vocals") only when the user wants singing.
 - Never invent lyrics. Never add a genre the user didn't imply.
 
 Examples:
 
 User: "futuristic professional piano cello"
-Output: {"style_prompt": "cinematic, ambient electronic, piano, cello, slow tempo, ethereal pads, polished mix, reverb-heavy", "negative_prompt": "country, folk, fiddle, banjo, no vocals, lo-fi texture, acoustic guitar", "tags_used": ["cinematic", "ambient electronic", "piano", "cello", "slow tempo", "ethereal pads", "polished mix", "reverb-heavy"]}
+Output: {"style_prompt": "cinematic, ambient electronic, piano, cello, slow tempo, ethereal pads, polished mix, reverb-heavy", "tags_used": ["cinematic", "ambient electronic", "piano", "cello", "slow tempo", "ethereal pads", "polished mix", "reverb-heavy"]}
 
 User: "dark synth driving for a chase scene"
-Output: {"style_prompt": "synthwave, dark, driving rhythm, analog synth, 808 bass, fast tempo, cinematic, tense", "negative_prompt": "country, folk, acoustic guitar, no vocals, calm, sparse", "tags_used": ["synthwave", "dark", "driving rhythm", "analog synth", "808 bass", "fast tempo", "cinematic", "tense"]}
+Output: {"style_prompt": "synthwave, dark, driving rhythm, analog synth, 808 bass, fast tempo, cinematic, tense", "tags_used": ["synthwave", "dark", "driving rhythm", "analog synth", "808 bass", "fast tempo", "cinematic", "tense"]}
 
 User: "chill lofi study beats with rain"
-Output: {"style_prompt": "lo-fi, hip-hop, mid-tempo, jazzy piano, vinyl crackle, sparse drums, dreamy, lo-fi texture", "negative_prompt": "rock, metal, fast tempo, no vocals, distorted guitar, orchestral", "tags_used": ["lo-fi", "hip-hop", "mid-tempo", "jazzy piano", "vinyl crackle", "sparse drums", "dreamy", "lo-fi texture"]}
+Output: {"style_prompt": "lo-fi, hip-hop, mid-tempo, jazzy piano, vinyl crackle, sparse drums, dreamy, lo-fi texture", "tags_used": ["lo-fi", "hip-hop", "mid-tempo", "jazzy piano", "vinyl crackle", "sparse drums", "dreamy", "lo-fi texture"]}
 
 User: "uplifting orchestral epic with choir"
-Output: {"style_prompt": "orchestral, cinematic, epic, lush strings, brass, choir, uplifting, mid-tempo, hopeful", "negative_prompt": "electronic, synth, lo-fi texture, dark, no vocals, country", "tags_used": ["orchestral", "cinematic", "epic", "lush strings", "brass", "choir", "uplifting", "mid-tempo", "hopeful"]}
+Output: {"style_prompt": "orchestral, cinematic, epic, lush strings, brass, choir, uplifting, mid-tempo, hopeful", "tags_used": ["orchestral", "cinematic", "epic", "lush strings", "brass", "choir", "uplifting", "mid-tempo", "hopeful"]}
 
 Output ONLY the JSON object, no commentary."""
 
@@ -97,9 +101,8 @@ def rewrite_music_prompt(
 
     Args:
         user_text: The user's free-form description (chips + free text joined).
-        instrumental: If True, biases the rewriter toward instrumental output
-            (the system prompt rules already enforce "no vocals" in negative
-            when this is True; when False, we drop that nudge).
+        instrumental: True for no singing (the default). False asks the model
+            for a vocal tag; the lyrics themselves come from the user.
         model: Override the Ollama model. None = use the saved active model.
 
     Returns:
@@ -114,10 +117,8 @@ def rewrite_music_prompt(
 
     user_msg = text
     if not instrumental:
-        # Tell the model the user expects vocals so it doesn't auto-add
-        # "no vocals" to the negative. Keeps the system prompt's instrumental
-        # default behavior, but lets the caller flip it.
-        user_msg = f"{text}\n\n[The user wants vocals — do NOT include 'no vocals' in negative_prompt.]"
+        # The system prompt only adds a vocal tag when singing is wanted.
+        user_msg = f"{text}\n\n[The user wants vocals: include a vocal tag.]"
 
     payload = {
         "model": chosen_model,
@@ -160,11 +161,18 @@ def rewrite_music_prompt(
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as e:
-        logger.warning("Music prompt rewrite — model didn't return valid JSON: %s; content=%r", e, content[:200])
-        return None
+        # Some models wrap the object in ```json fences even in Ollama's JSON mode;
+        # without this the whole rewrite fell back to the raw prompt.
+        block = re.search(r"\{.*\}", content or "", re.S)
+        try:
+            parsed = json.loads(block.group(0)) if block else None
+        except json.JSONDecodeError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            logger.warning("Music prompt rewrite — model didn't return valid JSON: %s; content=%r", e, content[:200])
+            return None
 
     style_prompt = (parsed.get("style_prompt") or "").strip()
-    negative_prompt = (parsed.get("negative_prompt") or "").strip()
     tags_used = parsed.get("tags_used") or []
 
     if not style_prompt:
@@ -176,12 +184,12 @@ def rewrite_music_prompt(
         tags_used = [t.strip() for t in str(tags_used).split(",") if t.strip()]
 
     logger.info(
-        "Music prompt rewrite — model=%s, style=%r, neg=%r",
-        chosen_model, style_prompt[:80], negative_prompt[:80],
+        "Music prompt rewrite — model=%s, style=%r",
+        chosen_model, style_prompt[:80],
     )
 
     return RewriteResult(
         style_prompt=style_prompt,
-        negative_prompt=negative_prompt,
+        negative_prompt="",
         tags_used=[str(t) for t in tags_used],
     )

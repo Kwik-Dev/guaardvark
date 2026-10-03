@@ -47,7 +47,7 @@ def test_acestep_generates_valid_wav(tmp_path):
         assert result.path.exists(), "output file missing"
         assert result.path.stat().st_size > 100_000, "output too small to be a song"
         data, sr = sf.read(str(result.path))
-        assert sr == 44100
+        assert sr == result.sample_rate == 48000   # ACE-Step v1 writes 48 kHz
         assert len(data) / sr == pytest.approx(result.duration_s, rel=0.05)
         assert result.meta["model"] == ACEStepBackend.MODEL_ID
         assert result.meta["seed"] == 7

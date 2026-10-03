@@ -341,7 +341,8 @@ def rewrite_music_prompt():
 
     Body: {"text": str, "instrumental": bool}
     Returns:
-        200 {"style_prompt": str, "negative_prompt": str, "tags_used": [str]}
+        200 {"style_prompt": str, "negative_prompt": "", "tags_used": [str]}
+            (negative_prompt stays empty: ACE-Step v1 has no negative conditioning)
         200 {"fallback": true, "reason": str, "style_prompt": text} if rewrite failed
         400 if text is empty
     """

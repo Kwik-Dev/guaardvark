@@ -63,10 +63,12 @@ class ACEStepBackend(AudioBackend):
         sample_rate: int = 44100,
         max_duration_s: float = 240.0,
         steps: int = 60,
-        # ACE-Step's model card recommends 15 for solid prompt adherence;
-        # 7.5 was a diffusers-style copy-paste that let the model wander into
-        # whatever its strongest training prior was (often country/folk).
-        guidance_scale: float = 15.0,
+        # 7.5, the value config.yaml ships. ACE-Step's own default is 15, but 15
+        # measured no better on 2026-10-03 (30 s clips, 60 steps, three seeds): style
+        # match to the prompt (CLAP) was the same, country/folk similarity slightly
+        # higher, and on plain-English prompts it sang more stray words. The country/folk
+        # drift is fixed by sending "[instrumental]" for instrumentals (run_acestep.py).
+        guidance_scale: float = 7.5,
     ) -> None:
         self._output_root = Path(output_root)
         self._sample_rate = int(sample_rate)
@@ -206,6 +208,8 @@ class ACEStepBackend(AudioBackend):
             raise RuntimeError(f"ACE-Step generate failed: {err}")
 
         actual_duration = float(result["duration_s"])
+        # The file's own rate (ACE-Step v1 writes 48 kHz), not the configured one.
+        actual_sample_rate = int(result.get("sample_rate") or self._sample_rate)
 
         final_path = self.post_process(wav_path, output_format=requested_format)
         actual_format = final_path.suffix.lstrip(".").lower()
@@ -218,12 +222,13 @@ class ACEStepBackend(AudioBackend):
         return GenerationResult(
             path=final_path.resolve(),
             duration_s=actual_duration,
-            sample_rate=self._sample_rate,
+            sample_rate=actual_sample_rate,
             meta={
                 "backend": self.name,
                 "model": self.MODEL_ID,
                 "style_prompt": style_prompt,
                 "negative_prompt": negative_prompt or "",
+                "negative_prompt_applied": False,
                 "lyrics": lyrics or "",
                 "instrumental_only": instrumental_only,
                 "requested_duration_s": duration_s,

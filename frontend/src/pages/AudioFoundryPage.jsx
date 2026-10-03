@@ -536,7 +536,8 @@ const AudioFoundryPage = () => {
   };
 
   // Ask the backend to translate the chip+text composition into a clean
-  // ACE-Step tag prompt + negative_prompt via the local LLM. On any failure
+  // ACE-Step tag prompt via the local LLM (negative_prompt comes back empty:
+  // ACE-Step v1 has no negative conditioning). On any failure
   // (Ollama down, model refused, JSON gibberish), the endpoint returns a
   // `fallback: true` payload with the user's raw text — we surface a one-line
   // warning and let them continue with the un-polished prompt.

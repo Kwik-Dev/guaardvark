@@ -158,9 +158,14 @@ class GenerateMusicTool(BaseTool):
         if not 5 <= seconds <= 240:
             return ToolResult(success=False, error="seconds must be from 5 to 240")
 
+        # No lyrics means an instrumental, as the lyrics parameter promises. Sent as
+        # instrumental_only so ACE-Step gets its "[instrumental]" marker; empty lyrics
+        # alone let it sing made-up words.
+        lyrics = (lyrics or "").strip()
+        instrumental = bool(instrumental) or not lyrics
         payload: dict[str, Any] = {"style_prompt": style, "duration_s": seconds,
-                                   "instrumental_only": bool(instrumental), "async": True}
-        if lyrics and not instrumental:
+                                   "instrumental_only": instrumental, "async": True}
+        if not instrumental:
             payload["lyrics"] = lyrics
         if seed is not None:
             payload["seed"] = int(seed)
