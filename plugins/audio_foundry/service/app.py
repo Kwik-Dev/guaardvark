@@ -75,9 +75,8 @@ class MusicRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     lyrics: Optional[str] = None
     style_prompt: str = Field(..., min_length=1)
-    # Optional steering-away tags. ACE-Step drifts toward its strongest training
-    # prior when style tags are vague ("professional", "futuristic"); negative
-    # tags push it off that prior. Caller can leave None to skip negative steering.
+    # Accepted for API compatibility but never applied: ACE-Step v1 has no negative
+    # conditioning. The result reports negative_prompt_applied: false.
     negative_prompt: Optional[str] = None
     duration_s: float = Field(60.0, gt=0, le=240.0)
     instrumental_only: bool = False
