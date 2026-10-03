@@ -90,6 +90,20 @@ _CLAIMED_SEARCH_NUDGE = (
 )
 # Added when the repeat claims it again, or when this turn had no tools to call.
 _CLAIMED_SEARCH_NOTE = "Note: no search ran for this reply."
+# A message asking to find or look something up. Answered with no tool call,
+# the model reported a match in a document that does not exist.
+_LOOKUP_REQUEST_RE = re.compile(
+    r"\b(?:find|search|look\s+(?:up|for)|locate|lookup)\b"
+    r"|\bsee if (?:you can|there)\b|\bis there (?:a|an|any)\b|\bdo (?:we|i) have\b",
+    re.IGNORECASE,
+)
+_LOOKUP_REQUEST_NUDGE = (
+    "The user asked you to find or look something up, and this reply calls no tool, so "
+    "nothing in it has been checked. Look it up now: find_records for Guaardvark's "
+    "projects, clients, documents and other records, find_files for file names on this "
+    "computer, search_knowledge_base for what documents say. If it was a how-to question, "
+    "answer it instead."
+)
 
 # A reply that opens with a tool signature the way the TOOLS prompt block prints
 # one: optional bracket or dash, a tool name, then "(param:type" ...
@@ -2570,24 +2584,28 @@ class UnifiedChatEngine:
                         continue
                     final_text = _TOOL_LIST_ECHO_FALLBACK_TEXT
                     emit_fn("chat:token", {"content": final_text, "session_id": session_id})
-                if (
-                    not steps  # no tool was even attempted this turn
-                    and not options.get("skip_nudges")
-                    and self._claims_unrun_search(final_text, session_id)
-                ):
+                # no tool was even attempted this turn (steps is per turn)
+                _claims = not steps and self._claims_unrun_search(final_text, session_id)
+                _unlooked = (not steps and not _skip_tools
+                             and bool(_LOOKUP_REQUEST_RE.search(selection_text)))
+                if not options.get("skip_nudges") and (_claims or _unlooked):
                     if not claimed_search_retried and not _skip_tools and not is_aborted(session_id):
                         claimed_search_retried = True
                         logger.info(
-                            f"[UNIFIED_ENGINE] iter={iteration} reply claims a search no tool ran; "
-                            "re-asking once"
+                            f"[UNIFIED_ENGINE] iter={iteration} no tool ran for a "
+                            f"{'claimed search' if _claims else 'lookup request'}; re-asking once"
                         )
-                        # The claim was streamed as it was written; take it off the screen.
+                        # The reply was streamed as it was written; take it off the screen.
                         emit_fn("chat:token", {"content": "", "reset": True, "session_id": session_id})
-                        ollama_messages.append({"role": "system", "content": _CLAIMED_SEARCH_NUDGE})
+                        ollama_messages.append({
+                            "role": "system",
+                            "content": _CLAIMED_SEARCH_NUDGE if _claims else _LOOKUP_REQUEST_NUDGE,
+                        })
                         continue
-                    logger.info(f"[UNIFIED_ENGINE] iter={iteration} reply still claims an unrun search; noting it")
-                    final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
-                    emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
+                    if _claims:
+                        logger.info(f"[UNIFIED_ENGINE] iter={iteration} reply still claims an unrun search; noting it")
+                        final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
+                        emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
