@@ -1373,7 +1373,7 @@ const CastMemberPage = () => {
           {/* One card per base the member holds a LoRA for (trained or imported). */}
           <Box sx={{ mt: 2 }}>
             <Typography variant="subtitle2" gutterBottom>LoRAs by base model</Typography>
-            {makeDefaultError && <Alert severity="error" sx={{ mb: 1 }}>{makeDefaultError}</Alert>}
+            {makeDefaultError && <CollapsibleAlert severity="error" sx={{ mb: 1 }}>{makeDefaultError}</CollapsibleAlert>}
             {loraBaseGroups.length === 0 ? (
               <Typography variant="body2" color="text.secondary">Nothing trained or imported yet.</Typography>
             ) : (
