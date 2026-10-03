@@ -141,6 +141,11 @@ class SystemCommandTool(BaseTool):
             parts = shlex.split(command_str)
             if not parts:
                 return ToolResult(success=False, error="Empty command")
+            # No shell expands "~", and find_files reports paths that way, so a
+            # path copied from its result named a folder literally called "~".
+            parts = [os.path.expanduser(p) if p.startswith("~") else p for p in parts]
+            if cwd and str(cwd).startswith("~"):
+                cwd = os.path.expanduser(str(cwd))
                 
             base_cmd = parts[0]
             if base_cmd not in self.ALLOWED_COMMANDS:
