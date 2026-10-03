@@ -1251,9 +1251,11 @@ def merge_forced_tools(selected: List[str], forced: List[str], max_tools: int = 
     return merged[:max(max_tools, len(core) + len(forced))]
 
 
-# What the latest reply's tools returned, replayed with it in history. Without
-# it a follow-up such as "yes, open the second one" reached a model that could
-# see only the reply's prose, and it made the list up.
+# What the latest reply's tools returned, replayed after it in history as a
+# system message. Without it a follow-up such as "yes, open the second one"
+# reached a model that could see only the reply's prose, and it made the list
+# up. Appended to the reply's own text instead, the model copied the block into
+# new replies as if it had run a tool.
 _TOOL_RESULTS_NOTE_CHARS = 3000
 
 
@@ -1273,7 +1275,8 @@ def _tool_results_note(extra_data) -> str:
                 break
     if not parts:
         return ""
-    return "\n\n[What the tools returned for this reply:\n" + "\n".join(parts) + "]"
+    return ("Tool results behind your previous reply. They are data to answer from; "
+            "do not reproduce this block:\n" + "\n".join(parts))
 
 
 def build_concise_tool_list(registry, tool_names: List[str]) -> str:
@@ -2323,7 +2326,7 @@ class UnifiedChatEngine:
 
         # History messages
         for msg in history:
-            role = "user" if msg["role"] == "user" else "assistant"
+            role = msg["role"] if msg["role"] in ("user", "system") else "assistant"
             ollama_messages.append({"role": role, "content": msg["content"]})
 
         # Dynamic context as user message (CLI/runtime context + RAG + web results)
@@ -2606,10 +2609,10 @@ class UnifiedChatEngine:
                             "content": _CLAIMED_SEARCH_NUDGE if _claims else _LOOKUP_REQUEST_NUDGE,
                         })
                         continue
-                    if _claims:
-                        logger.info(f"[UNIFIED_ENGINE] iter={iteration} reply still claims an unrun search; noting it")
-                        final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
-                        emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
+                    # Still no tool: whatever the reply says it found, nothing was checked.
+                    logger.info(f"[UNIFIED_ENGINE] iter={iteration} still no tool for a lookup; noting it")
+                    final_text = f"{final_text.rstrip()}\n\n{_CLAIMED_SEARCH_NOTE}"
+                    emit_fn("chat:token", {"content": f"\n\n{_CLAIMED_SEARCH_NOTE}", "session_id": session_id})
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
@@ -5033,9 +5036,11 @@ class UnifiedChatEngine:
                         if m.extra_data.get("hasImage") or m.extra_data.get("messageType") == "image_upload":
                             fname = m.extra_data.get("imageFileName", "image")
                             content = f"[User attached an image: {fname}] {content}"
-                    if m is last_reply:
-                        content += _tool_results_note(m.extra_data)
                     result.append({"role": m.role, "content": content})
+                    if m is last_reply:
+                        note = _tool_results_note(m.extra_data)
+                        if note:
+                            result.append({"role": "system", "content": note})
                 return result
             finally:
                 if ctx:
