@@ -334,6 +334,40 @@ def set_verbatim_prompts():
     return success_response({"enabled": enabled or forced, "stored": enabled, "forced_by_env": forced})
 
 
+@settings_bp.route("/image_keep_loaded", methods=["GET"])
+def get_image_keep_loaded():
+    """Minutes an image model stays loaded after a batch (0 = unload at once)."""
+    from backend.utils.settings_utils import (
+        IMAGE_KEEP_LOADED_MAX_MINUTES,
+        get_image_keep_loaded_minutes,
+    )
+
+    return success_response({
+        "minutes": get_image_keep_loaded_minutes(),
+        "max_minutes": IMAGE_KEEP_LOADED_MAX_MINUTES,
+    })
+
+
+@settings_bp.route("/image_keep_loaded", methods=["POST"])
+def set_image_keep_loaded():
+    """Set how long an image model stays loaded after a batch. Applies from the
+    next batch's end; turning it off unloads a model being kept now."""
+    if not request.is_json:
+        return error_response("Request must be JSON")
+    from backend.utils.settings_utils import set_image_keep_loaded_minutes
+
+    minutes = set_image_keep_loaded_minutes((request.get_json() or {}).get("minutes"))
+    if minutes == 0:
+        try:
+            from backend.services import offline_image_generator as oig
+            gen = oig._generator_instance
+            if gen is not None:
+                gen.release_kept_pipeline()
+        except Exception as e:
+            current_app.logger.warning(f"Could not unload the kept image model: {e}")
+    return success_response({"minutes": minutes})
+
+
 @settings_bp.route("/advanced_debug", methods=["GET"])
 def get_advanced_debug():
     enabled = False

@@ -436,6 +436,22 @@ class BatchImageGenerator:
         except Exception:
             pass
 
+    def _keep_or_cleanup_gpu_memory(self, batch_status: BatchGenerationStatus) -> None:
+        """End of a batch: keep the model loaded for the next one when Settings →
+        Generation asks for it and the batch did not fail; otherwise unload."""
+        minutes = 0
+        if batch_status.status in ("completed", "cancelled"):
+            try:
+                from backend.utils.settings_utils import get_image_keep_loaded_minutes
+                minutes = get_image_keep_loaded_minutes()
+            except Exception:  # noqa: BLE001
+                minutes = 0
+        gen = self.image_generator
+        if minutes > 0 and gen is not None and hasattr(gen, "keep_pipeline_for"):
+            if gen.keep_pipeline_for(minutes * 60):
+                return
+        self._cleanup_gpu_memory()
+
     def _batch_running(self, batch_id: Optional[str] = None) -> bool:
         with self.batch_lock:
             if batch_id is not None:
@@ -481,36 +497,79 @@ class BatchImageGenerator:
             return "zimage-turbo"
         return model_key
 
-    def _batch_resource_estimates(self, request: BatchImageRequest) -> Tuple[int, float]:
-        """Worst-case (vram_mb, ram_gb) across offline-generator prompts in this batch."""
+    @staticmethod
+    def _character_model_key(prompt: BatchPrompt) -> str:
+        """Catalog key a cast/LoRA prompt renders with, by the family of its first LoRA."""
+        model_key = "zimage-turbo"
+        try:
+            from backend.services.media_model_registry import resolve_inference_for_loras
+            paths = list(prompt.loras or [])
+            if not paths and getattr(prompt, "subject_ids", None):
+                from backend.models import Subject, db
+                for sid in prompt.subject_ids:
+                    s = db.session.get(Subject, int(sid))
+                    if s and s.lora_path:
+                        paths.append(s.lora_path)
+            if paths:
+                route = resolve_inference_for_loras(paths)
+                if route.get("family") == "zimage":
+                    model_key = "zimage-turbo"
+                elif route.get("family") == "flux":
+                    model_key = "flux-dev"
+                else:
+                    model_key = "sd-xl"
+        except Exception:
+            pass
+        return model_key
+
+    def _prompt_offline_model(self, prompt: BatchPrompt) -> Optional[str]:
+        """Catalog id of the offline pipeline this prompt renders on; None for ComfyUI."""
+        gen = self.image_generator
+        if gen is None:
+            return None
+        if prompt.loras or getattr(prompt, "subject_ids", None):
+            model_key = self._character_model_key(prompt)
+            # Only Z-Image cast renders use the offline pipeline (character_still_pipeline).
+            if model_key != "zimage-turbo" or self._zimage_via_comfyui_enabled():
+                return None
+        elif self._should_use_comfy_stills(prompt):
+            return None
+        elif self._zimage_via_comfyui_enabled() and self._is_zimage_model(prompt.model):
+            return None
+        else:
+            model_key = self._resolve_batch_model_key(prompt.model)
+        if self._is_comfy_flux_model(model_key):
+            return None
+        return gen.available_models.get(model_key, model_key)
+
+    def _kept_model_for_batch(self, request: BatchImageRequest) -> Optional[str]:
+        """The model kept loaded after the last batch, when this batch renders only with it."""
+        gen = self.image_generator
+        kept = gen.kept_model() if gen is not None and hasattr(gen, "kept_model") else None
+        if not kept or not request.prompts:
+            return None
+        if all(self._prompt_offline_model(p) == kept for p in request.prompts):
+            return kept
+        return None
+
+    def _batch_resource_estimates(
+        self, request: BatchImageRequest, reuse_model: Optional[str] = None
+    ) -> Tuple[int, float]:
+        """Worst-case (vram_mb, ram_gb) across offline-generator prompts in this batch.
+
+        ``reuse_model`` is the kept model this batch will render with
+        (_kept_model_for_batch); a kept model it will not use is unloaded before
+        admission, so it earns no discount.
+        """
         if not self.image_generator:
             return 4000, 6.0
         gen = self.image_generator
         vram_mb = 4000
         ram_gb = 6.0
+        kept = gen.kept_model() if hasattr(gen, "kept_model") else None
         for prompt in request.prompts:
             if prompt.loras or getattr(prompt, "subject_ids", None):
-                # Cast LoRAs: estimate by family from first LoRA when possible
-                model_key = "zimage-turbo"
-                try:
-                    from backend.services.media_model_registry import resolve_inference_for_loras
-                    paths = list(prompt.loras or [])
-                    if not paths and getattr(prompt, "subject_ids", None):
-                        from backend.models import Subject, db
-                        for sid in prompt.subject_ids:
-                            s = db.session.get(Subject, int(sid))
-                            if s and s.lora_path:
-                                paths.append(s.lora_path)
-                    if paths:
-                        route = resolve_inference_for_loras(paths)
-                        if route.get("family") == "zimage":
-                            model_key = "zimage-turbo"
-                        elif route.get("family") == "flux":
-                            model_key = "flux-dev"
-                        else:
-                            model_key = "sd-xl"
-                except Exception:
-                    pass
+                model_key = self._character_model_key(prompt)
             else:
                 model_key = self._resolve_batch_model_key(prompt.model)
             if self._is_comfy_flux_model(model_key):
@@ -533,11 +592,21 @@ class BatchImageGenerator:
             except Exception:
                 pw = ph = None
 
-            # If the model is already loaded (resident), its memory footprint is already
-            # reflected in the system's available RAM. Avoid double-gating it — but the
-            # per-generation activation surcharge above 1MP still applies.
-            if getattr(gen, "_pipeline", None) is not None and getattr(gen, "_current_model", None) == catalog_id:
-                model_vram = 1024 + max(0, gen._vram_estimate_mb(catalog_id, pw, ph) - gen._vram_estimate_mb(catalog_id))
+            # If the model is already loaded (resident) and stays for this batch, its
+            # weights are already counted in the system's used RAM, so only the
+            # surcharge above 1MP is new. VRAM is discounted only for a pipeline that
+            # sits wholly on the card: an offloaded one (Z-Image and Krea 2 on 16GB
+            # cards) keeps its weights in RAM and needs its full working peak again.
+            resident = (
+                getattr(gen, "_pipeline", None) is not None
+                and getattr(gen, "_current_model", None) == catalog_id
+                and (kept is None or kept == reuse_model)
+            )
+            if resident:
+                if getattr(gen, "_pipeline_offload_mode", None) == "full":
+                    model_vram = 1024 + max(0, gen._vram_estimate_mb(catalog_id, pw, ph) - gen._vram_estimate_mb(catalog_id))
+                else:
+                    model_vram = gen._vram_estimate_mb(catalog_id, pw, ph)
                 model_ram = 2.0 + max(0.0, gen._ram_estimate_gb(catalog_id, pw, ph) - gen._ram_estimate_gb(catalog_id))
             else:
                 model_vram = gen._vram_estimate_mb(catalog_id, pw, ph)
@@ -1567,7 +1636,7 @@ class BatchImageGenerator:
                     with self.batch_lock:
                         if batch_id in self.executors:
                             del self.executors[batch_id]
-                    self._cleanup_gpu_memory()
+                    self._keep_or_cleanup_gpu_memory(batch_status)
                     self._release_batch_booking(batch_id)
 
                 except Exception as e:
@@ -1584,6 +1653,16 @@ class BatchImageGenerator:
                             additional_data={"batch_id": batch_id, "error": str(e)}
                         )
 
+            # A model kept from the last batch that this one will not render with
+            # goes now, whichever engine this batch uses.
+            if self._kept_model_for_batch(request) is None:
+                try:
+                    gen = self.image_generator
+                    if gen is not None and hasattr(gen, "release_kept_pipeline"):
+                        gen.release_kept_pipeline()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Could not unload the kept image model: %s", e)
+
             if self._batch_uses_cuda_offline_gen():
                 from backend.services.gpu_resource_policy import (
                     compositor_vram_reserve_mb,
@@ -1593,7 +1672,8 @@ class BatchImageGenerator:
                 from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
                 from backend.services.job_types import JobKind
 
-                vram_mb, ram_gb = self._batch_resource_estimates(request)
+                reuse_model = self._kept_model_for_batch(request)
+                vram_mb, ram_gb = self._batch_resource_estimates(request, reuse_model)
                 slot_id = f"image_batch:{batch_id}"
                 reserve_mb = compositor_vram_reserve_mb()
                 cancel_event = self.cancel_events.get(batch_id)
@@ -1645,6 +1725,7 @@ class BatchImageGenerator:
                             # compositor's VRAM share (Wayland died when 2048² jobs were
                             # admitted against raw card totals).
                             vram_reserve_mb=reserve_mb,
+                            image_model=reuse_model,
                         ):
                             batch_status.gpu_wait_reason = None
                             _run_batch_body(session_held=True)

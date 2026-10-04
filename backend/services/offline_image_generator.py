@@ -417,6 +417,10 @@ class OfflineImageGenerator:
         self._gpu_fault: Optional[Dict[str, Any]] = None
         # Offload mode of the resident pipeline: None | "sequential" | "model" | "full"
         self._pipeline_offload_mode = None
+        # When set, the pipeline is idle and kept loaded after a batch until this
+        # time (Settings → Generation → Between batches); see keep_pipeline_for().
+        self._kept_until: Optional[float] = None
+        self._kept_lock = threading.Lock()
         # One-shot force sequential reload after a mid-inference OOM.
         self._force_sequential_offload = False
         # Active character LoRA adapter names loaded on the current pipeline.
@@ -1543,6 +1547,8 @@ class OfflineImageGenerator:
             )
             return False
 
+        # Whatever happens next, the pipeline is no longer waiting idle.
+        self._clear_kept()
         try:
             want_sequential = bool(force_sequential or self._force_sequential_offload)
             if (
@@ -2408,6 +2414,7 @@ Negative Prompt: {negative_prompt}""",
                     vram_estimate_mb=vram_est, ram_estimate_gb=ram_est,
                     require_fit=True, cross_process=True,
                     vram_reserve_mb=compositor_vram_reserve_mb(),
+                    image_model=model_id,
                 ))
 
                 family = self._model_family(model_id)
@@ -3246,8 +3253,85 @@ Negative Prompt: {negative_prompt}""",
         finally:
             self._generation_lock.release()
 
+    def keep_pipeline_for(self, seconds: int) -> bool:
+        """Leave the loaded pipeline in memory, idle, for up to ``seconds``.
+
+        Called at the end of a batch instead of unloading, so the next batch on
+        the same model starts without a reload. The orchestrator unloads it when
+        the time is up or when it needs the room, and any other GPU job unloads
+        it first (gpu_resource_policy.release_kept_image_pipeline). False when
+        nothing is loaded.
+        """
+        seconds = int(seconds or 0)
+        with self._generation_lock:
+            if self._pipeline is None or seconds <= 0:
+                return False
+            model_id = self._current_model
+            until = time.time() + seconds
+            with self._kept_lock:
+                self._kept_until = until
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator
+            orch = get_orchestrator()
+            orch.set_idle_timeout("sd:pipeline", seconds)
+            orch.release_model("sd:pipeline")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("orchestrator keep for sd:pipeline failed: %s", e)
+        try:
+            import json
+            from backend.services.gpu_resource_policy import kept_image_pipeline_marker
+            marker = kept_image_pipeline_marker()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            tmp = marker.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"pid": os.getpid(), "model": model_id, "until": until}))
+            tmp.replace(marker)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not write the kept-image marker: %s", e)
+        logger.info(
+            "Keeping %s loaded for %ss after the batch (offload=%s)",
+            model_id, seconds, self._pipeline_offload_mode,
+        )
+        return True
+
+    def kept_model(self) -> Optional[str]:
+        """The model held idle after a batch, or None."""
+        with self._kept_lock:
+            kept = self._kept_until is not None
+        return self._current_model if kept and self._pipeline is not None else None
+
+    def release_kept_pipeline(self, keep_model: Optional[str] = None) -> bool:
+        """Unload a pipeline held idle after a batch, unless it holds ``keep_model``.
+
+        True when it was unloaded. Refuses (False) while a generation holds the
+        pipeline, which only happens if it is in use and so no longer idle.
+        """
+        held = self.kept_model()
+        if held is None or (keep_model and keep_model == held):
+            return False
+        logger.info("Unloading %s kept after a batch: another GPU job needs the memory", held)
+        return bool(self._unload_pipeline(wait=False))
+
+    def _clear_kept(self) -> None:
+        with self._kept_lock:
+            if self._kept_until is None:
+                return
+            self._kept_until = None
+        try:
+            from backend.services.gpu_memory_orchestrator import get_orchestrator_if_created
+            orch = get_orchestrator_if_created()
+            if orch is not None:
+                orch.set_idle_timeout("sd:pipeline", None)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from backend.services.gpu_resource_policy import kept_image_pipeline_marker
+            kept_image_pipeline_marker().unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _unload_pipeline_unlocked(self) -> bool:
         """Teardown body; caller must hold ``_generation_lock``."""
+        self._clear_kept()
         if self._pipeline is None:
             return True
 

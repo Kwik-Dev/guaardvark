@@ -413,6 +413,30 @@ export const getVerbatimPrompts = async () => {
   }
 };
 
+export const getImageKeepLoaded = async () => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/image_keep_loaded`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("settingsService: Error getting image keep-loaded setting:", err.message);
+    return { error: err.message };
+  }
+};
+
+export const setImageKeepLoaded = async (minutes) => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/image_keep_loaded`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ minutes: Number(minutes) || 0 }),
+    });
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("settingsService: Error setting image keep-loaded:", err.message);
+    return { error: err.message };
+  }
+};
+
 export const setVerbatimPrompts = async (enabled) => {
   try {
     const response = await fetch(`${BASE_URL}/settings/verbatim_prompts`, {

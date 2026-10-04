@@ -153,6 +153,9 @@ const SettingsPage = () => {
   // VERBATIM_PROMPTS in the server environment overrides the toggle; when set
   // the chip shows on and cannot be changed here.
   const [verbatimForcedByEnv, setVerbatimForcedByEnv] = useState(false);
+  // Minutes the image model stays loaded after a batch; 0 unloads it at once.
+  const [imageKeepMinutes, setImageKeepMinutes] = useState(0);
+  const [imageKeepSaving, setImageKeepSaving] = useState(false);
   // Media stack (stills / cast LoRA train / max quality) — Ollama-picker style
   const [mediaModels, setMediaModelsState] = useState({
     stills_model: "zimage-turbo",
@@ -1124,6 +1127,38 @@ const SettingsPage = () => {
     };
     fetchAdvDebug();
   }, []);
+
+  useEffect(() => {
+    apiService
+      .getImageKeepLoaded()
+      .then((result) => {
+        const minutes = (result?.data ?? result)?.minutes;
+        if (typeof minutes === "number") setImageKeepMinutes(minutes);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleImageKeepChange = async (value) => {
+    const minutes = Number(value) || 0;
+    setImageKeepSaving(true);
+    try {
+      const result = await apiService.setImageKeepLoaded(minutes);
+      if (result?.error) throw new Error(result.error.message || result.error);
+      const saved = (result?.data ?? result)?.minutes;
+      if (typeof saved !== "number") throw new Error("Server did not confirm the setting");
+      setImageKeepMinutes(saved);
+      showMessage(
+        saved
+          ? `The image model now stays loaded for ${saved} minutes after each batch.`
+          : "The image model now unloads as each batch ends.",
+        "info",
+      );
+    } catch (err) {
+      showMessage(`Could not save: ${err.message}`, "error");
+    } finally {
+      setImageKeepSaving(false);
+    }
+  };
 
   useEffect(() => {
     const fetchVerbatim = async () => {
@@ -2945,6 +2980,34 @@ const SettingsPage = () => {
               <MenuItem value="zimage-turbo">Z-Image Turbo</MenuItem>
             </Select>
           </FormControl>
+        </Line>
+      </Cluster>
+      <Cluster
+        label="Between batches"
+        note="keeping the model loaded skips the reload when the next batch uses the same model"
+      >
+        <Line>
+          <ChoiceChips
+            ariaLabel="Image model between batches"
+            value={String(imageKeepMinutes)}
+            onChange={handleImageKeepChange}
+            disabled={imageKeepSaving}
+            options={[
+              {
+                value: "0",
+                label: "Unload",
+                tooltip: "Free the memory as soon as a batch ends",
+              },
+              ...[10, 30, 60].map((m) => ({
+                value: String(m),
+                label: m === 60 ? "Keep 1 h" : `Keep ${m} min`,
+                tooltip: `Keep the model loaded for ${m === 60 ? "an hour" : `${m} minutes`} after a batch. It holds system RAM while it waits (measured on a 16 GB card: about 21 GB for Z-Image Turbo, 31 GB for Krea 2 Turbo), and any other GPU job unloads it first.`,
+              })),
+              ...(![0, 10, 30, 60].includes(imageKeepMinutes)
+                ? [{ value: String(imageKeepMinutes), label: `Keep ${imageKeepMinutes} min` }]
+                : []),
+            ]}
+          />
         </Line>
       </Cluster>
       <Cluster
