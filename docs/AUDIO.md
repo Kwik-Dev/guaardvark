@@ -272,3 +272,9 @@ There are two different video features, and they differ:
 - **Generated files?** `ls data/uploads/Audio/`
 - **Character voices?** Each character's `voice_id` is set in casting/subject
   settings. If `None`, the default voice is used.
+
+## 6. Voice setup (TTS and STT)
+
+This guide covers the Audio Foundry plugin. For how the voice engines are wired, which of
+them is a server versus in-process, and the setup steps for each — including speech-to-text,
+which needs no plugin at all — see [docs/VOICE.md](VOICE.md).

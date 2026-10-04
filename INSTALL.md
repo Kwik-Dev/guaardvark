@@ -117,6 +117,34 @@ A fresh Apple Silicon runner installs and imports the backend in CI on every pus
 regression in the above shows up before a person hits it. Report anything else under the
 `mac` label — the install thread is issue #41.
 
+## Voice (TTS and STT)
+
+There is no cloud speech API. Both directions run on this machine, and neither needs a key.
+
+**Speech-to-text works with no setup.** `faster-whisper` is installed by `./start.sh` and the tiny English model is fetched on first use, so transcription is ready immediately:
+
+```bash
+curl -s -X POST http://localhost:5000/api/voice/speech-to-text -F audio=@clip.wav
+```
+
+(The file part must be named `audio`. On macOS the backend is on **5055**.) Accuracy is a choice, not a prerequisite — pick a larger model with `POST /api/voice/install-whisper-model` (`tiny`, `tiny.en`, `base`, `small`, `medium`), or skip Guaardvark's own build entirely by pointing it at a `whisper.cpp` server you already run:
+
+```env
+GUAARDVARK_USE_WHISPER_SERVER=1
+GUAARDVARK_WHISPER_SERVER_URL=http://127.0.0.1:5800   # optional; default 5800
+```
+
+**Text-to-speech needs one action.** Kokoro and Chatterbox live in the Audio Foundry plugin, so start it once; the ~80 MB Kokoro weights download on first use:
+
+```bash
+curl -s -X POST http://localhost:5000/api/plugins/audio_foundry/start
+curl -s -X POST http://localhost:5000/api/audio-foundry/generate/voice \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Hello from Guaardvark.", "backend": "auto", "voice_id": "af_heart"}'
+```
+
+Piper runs inside the backend and needs no plugin, but it does need a voice model installed (`POST /api/voice/install-voice-model`); the default `libritts` is not bundled, so a Piper request without one fails at playback. Voice cloning is Chatterbox-only and consent-gated — the reference clip must go through the upload route. Engines per task, cloning, the CLI commands, and the two ways `GET /api/voice/status` under-reports: [docs/VOICE.md](docs/VOICE.md).
+
 ## Alternative: Docker (Linux, core stack only)
 
 If you want to evaluate the UI/API without a native Python install:

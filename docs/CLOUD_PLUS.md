@@ -113,6 +113,15 @@ curl -s $B/api/settings/profile                 # workstation | creator
 `audio_foundry`, upscaling needs `upscaling`, LoRA training needs `lora_trainer`. A route whose
 plugin is off answers **503** — that is not a bug.
 
+**Voice (TTS and STT) is a local feature of this branch, not a cloud one.** There is no cloud
+speech vendor on either side of the cloud switch: the provider table holds Mistral and OpenAI for
+chat only, and it never routes audio. Speech-to-text works on a fresh install with no setup
+(`faster-whisper` plus a model fetched on first use); text-to-speech needs the `audio_foundry`
+plugin started once (Kokoro and Chatterbox). Piper runs in-process and can use an external
+`whisper.cpp` server instead of Guaardvark's own build, via `GUAARDVARK_USE_WHISPER_SERVER=1`.
+Setup commands, the engine table and two health-reporting caveats:
+[docs/VOICE.md](VOICE.md).
+
 ---
 
 ## 3. Turn the cloud layer on (the fork's own feature)
