@@ -309,7 +309,6 @@ def generate_music():
                 f"ACE-Step 1.5 is not installed (missing {missing[0]}). Open Audio Studio → "
                 "Manage models and Install it; generation never downloads on its own.")}), 400
     if model.startswith("minimax-music3"):
-        from flask import current_app, jsonify
         from backend.services import comfyui_music_generator as m3
         from backend.services.plugin_bridge import job_service_start_enabled
         from backend.services.video_model_registry import prepare_video_model, preflight_video_model
