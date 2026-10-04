@@ -397,7 +397,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/status`);
 
-      // Check if response is ok before parsing JSON
+      // A service that is not up yet is not a page error: the batch image service
+      // answers 503 while ComfyUI/the generator is stopped or still booting, and the
+      // dev proxy answers 502 {"error":"backend_offline"} when Flask itself is down.
+      // Both read as "the server crashed" here, but the Jobs page and the GPU banner
+      // already report them. A 403 is left to fall through, because that is an auth
+      // refusal (wrong machine or missing API key), not a missing service.
+      if (response.status === 502 || response.status === 503) {
+        return;
+      }
+
       if (!response.ok) {
         setError(`Service status check failed: HTTP ${response.status}`);
         return;
@@ -412,7 +421,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       const data = await response.json();
 
       if (!data.success) {
-        setError('Batch image generation service is not available');
+        if (data.data?.service_available === false || data.service_available === false) {
+          return;
+        }
+        setError(errorMessageFrom(data, 'Failed to check service status'));
       }
     } catch (err) {
       setError('Failed to check service status');
