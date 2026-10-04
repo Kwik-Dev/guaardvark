@@ -481,7 +481,11 @@ def launch_repl():
     def _handle_ctrl_c(event):
         now = time.time()
         if now - _last_ctrl_c["time"] < 2.0:
-            raise EOFError()
+            # Raised in a key handler, EOFError only gets prompt_toolkit's
+            # "Press ENTER to continue" screen; exiting the app makes
+            # session.prompt() raise it, which the main loop treats as quit.
+            event.app.exit(exception=EOFError)
+            return
         _last_ctrl_c["time"] = now
         # Rich's console.print() from inside a prompt_toolkit key handler
         # crashes the event loop because prompt_toolkit owns the terminal.

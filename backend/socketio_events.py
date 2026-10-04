@@ -531,14 +531,15 @@ def _handle_chat_send_local(payload):
             project_id = None
 
     # Abort any already-running generation for this session
-    try:
-        from backend.services.unified_chat_engine import set_abort_flag
-        set_abort_flag(session_id)
-    except Exception:
-        pass
+    from backend.services.unified_chat_engine import (
+        begin_new_turn, begin_turn, end_turn, turn_replaced,
+    )
+    turn_mark = begin_new_turn(session_id)
 
     def emit_fn(event, data_payload):
         data_payload["session_id"] = session_id
+        if turn_replaced(session_id, turn_mark):
+            return  # a newer message owns the room now
         try:
             logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] EMIT {event} -> room={session_id}")
             _sio.emit(event, data_payload, room=session_id)
@@ -585,6 +586,7 @@ def _handle_chat_send_local(payload):
             return
 
     def _run():
+        begin_turn(session_id, turn_mark)
         try:
             logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] BACKEND THREAD START session={session_id}")
 
@@ -627,6 +629,8 @@ def _handle_chat_send_local(payload):
         except Exception as _e:
             logger.error("[BRIDGE-LOCAL] engine error: %s", _e, exc_info=True)
             emit_fn("chat:error", {"error": str(_e)})
+        finally:
+            end_turn(session_id)
 
     threading.Thread(target=_run, daemon=True, name=f"bridge-chat-{session_id[:8]}").start()
 

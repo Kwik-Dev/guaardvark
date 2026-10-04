@@ -173,9 +173,18 @@ def _looks_like_tool_list_echo(text: str, tool_names) -> bool:
 
 TOOL_EMBEDDING_CACHE = os.path.join(CACHE_DIR, "tool_embeddings.json")
 
-# Abort flags for in-progress sessions
-_abort_flags: Dict[str, bool] = {}
+# Stop state for chat turns, kept per turn rather than per session. Every stop
+# request bumps the session's stop count, and a turn is stopped once the count
+# has moved past the mark it began with. Nothing lowers the count, so starting
+# or finishing one turn cannot revive another that was stopped during its slow
+# start (routing, retrieval) before its first check.
+_stop_counts: Dict[str, int] = {}
+# Mark of the newest turn begun on each session; a stopped turn whose mark is
+# lower has been replaced by a newer message.
+_newest_turn_marks: Dict[str, int] = {}
 _abort_lock = threading.Lock()
+# Per thread: (session_id, mark) of each turn the thread is running, innermost last.
+_turn_local = threading.local()
 
 # Approval events for human-in-the-loop
 _approval_events: Dict[str, threading.Event] = {}
@@ -316,21 +325,74 @@ def _record_approved_consent(tool, params: Dict[str, Any], session_id: str) -> N
 
 
 def set_abort_flag(session_id: str):
-    """Signal that a session should abort its current generation."""
+    """Stop every turn running on a session. Turns begun afterwards run normally."""
     with _abort_lock:
-        _abort_flags[session_id] = True
+        _stop_counts[session_id] = _stop_counts.get(session_id, 0) + 1
 
 
-def clear_abort_flag(session_id: str):
-    """Clear the abort flag for a session."""
+def begin_new_turn(session_id: str) -> int:
+    """Stop the turns already running on a session and open a new one.
+
+    For a new message from the user. Returns the new turn's mark, to pass to
+    begin_turn() on the thread that runs it and to turn_replaced().
+    """
     with _abort_lock:
-        _abort_flags.pop(session_id, None)
+        mark = _stop_counts.get(session_id, 0) + 1
+        _stop_counts[session_id] = mark
+        _newest_turn_marks[session_id] = mark
+        return mark
+
+
+def _turn_stack() -> list:
+    stack = getattr(_turn_local, "turns", None)
+    if stack is None:
+        stack = _turn_local.turns = []
+    return stack
+
+
+def begin_turn(session_id: str, mark: Optional[int] = None) -> None:
+    """Bind a chat turn to this thread, so is_aborted() answers for it.
+
+    With no mark, the thread joins the turn it is already running for the
+    session, or opens one that leaves other turns alone. Pair with end_turn().
+    """
+    stack = _turn_stack()
+    if mark is None:
+        mark = next((m for sid, m in reversed(stack) if sid == session_id), None)
+    if mark is None:
+        with _abort_lock:
+            mark = _stop_counts.get(session_id, 0)
+            _newest_turn_marks[session_id] = max(_newest_turn_marks.get(session_id, 0), mark)
+    stack.append((session_id, mark))
+
+
+def end_turn(session_id: str) -> None:
+    """Release this thread's innermost turn for the session."""
+    stack = _turn_stack()
+    for i in range(len(stack) - 1, -1, -1):
+        if stack[i][0] == session_id:
+            del stack[i]
+            return
 
 
 def is_aborted(session_id: str) -> bool:
-    """Check if a session has been aborted."""
+    """True when the turn this thread is running for the session was stopped.
+
+    A thread running no turn for the session gets the session-wide answer: a
+    stop has arrived since the newest turn began.
+    """
+    mark = next((m for sid, m in reversed(_turn_stack()) if sid == session_id), None)
     with _abort_lock:
-        return _abort_flags.get(session_id, False)
+        stops = _stop_counts.get(session_id, 0)
+        if mark is None:
+            mark = _newest_turn_marks.get(session_id, 0)
+        return stops > mark
+
+
+def turn_replaced(session_id: str, mark: int) -> bool:
+    """True once a newer message has opened a turn after this one was stopped."""
+    with _abort_lock:
+        return _newest_turn_marks.get(session_id, 0) > mark
 
 
 # Conversational messages that don't need tools or RAG
@@ -1922,13 +1984,13 @@ class UnifiedChatEngine:
         # layer or the brain) and reused here, so the ack, chat:complete and
         # the saved row all agree. Feedback resolves a reply by this id.
         request_id = str((options or {}).get("request_id") or "") or str(uuid.uuid4())
-        clear_abort_flag(session_id)
         clear_task_scoped_tool_grants(session_id)
         steps = []
         self._request_id = request_id
         self._emit_fn = emit_fn
         self._prov = {"request_id": request_id, "tier": int((options or {}).get("tier", 2) or 2)}
 
+        begin_turn(session_id)
         try:
             # Store app reference for thread-safe DB access in helper methods
             self.app = app
@@ -1958,7 +2020,7 @@ class UnifiedChatEngine:
             emit_fn("chat:error", {"error": str(e), "session_id": session_id})
             return {"success": False, "error": str(e), "request_id": request_id}
         finally:
-            clear_abort_flag(session_id)
+            end_turn(session_id)
 
     def _format_interface_context(self, options: Dict[str, Any]) -> str:
         """Return caller-supplied context for injection into the active turn.

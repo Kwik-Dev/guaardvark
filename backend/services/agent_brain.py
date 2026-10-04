@@ -24,7 +24,8 @@ from backend.services.brain_state import (
 )
 from backend.services.step_budget import StepBudget, TierTelemetry
 from backend.services.unified_chat_engine import (
-    clear_abort_flag,
+    begin_turn,
+    end_turn,
     is_aborted,
 )
 
@@ -339,10 +340,6 @@ class AgentBrain:
         except Exception:
             pass
 
-        # Clear any abort flag from a previous request on this session
-        # so we don't immediately abort ourselves.
-        clear_abort_flag(session_id)
-
         # === Direct slash / direct_tool bypass (e.g. /imagine) ===
         # Must short-circuit BEFORE any LLM or tier routing. This avoids the
         # chat model being involved at all (prevents the Ollama EOF / reload
@@ -392,6 +389,7 @@ class AgentBrain:
         # is consistent with direct /imagine. Skip gemma-direct even if screen active.
         force_standard_image = is_pure_image_request(message, options)
 
+        begin_turn(session_id)
         try:
             # -- Gemma4 direct path: no chains, no routing, no bloated prompts --
             # Gemma4 has native vision + pointing + tool use. Just send it the
@@ -578,6 +576,7 @@ class AgentBrain:
             }
 
         finally:
+            end_turn(session_id)
             # Record telemetry
             elapsed_ms = int((time.monotonic() - start_time) * 1000)
             telemetry = TierTelemetry(
