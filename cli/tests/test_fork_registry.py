@@ -146,6 +146,22 @@ def test_planned_entries_name_a_phase_and_a_command():
 
 def test_classify_covers_every_category():
     assert api_coverage.classify(next(iter(api_coverage.EXPOSED))) == "exposed"
-    assert api_coverage.classify(next(iter(api_coverage.PLANNED))) == "planned"
     assert api_coverage.classify(next(iter(api_coverage.NOT_EXPOSED))) == "not_exposed"
+    # PLANNED is legitimately empty now that every area is exposed or explained; the
+    # category still has to answer correctly when a future phase refills it.
+    if api_coverage.PLANNED:
+        assert api_coverage.classify(next(iter(api_coverage.PLANNED))) == "planned"
     assert api_coverage.classify("definitely-not-an-api") == "unknown"
+
+
+def test_every_area_is_exposed_or_explained():
+    """The end state of the coverage work: nothing left undecided.
+
+    Phase 4 closed the last planned group. If this ever fails, a backend area appeared
+    without anyone deciding what the CLI does about it — which is the whole point of the
+    spec-parity test.
+    """
+    assert not api_coverage.PLANNED, (
+        "these areas are still marked planned: "
+        + ", ".join(sorted(api_coverage.PLANNED))
+    )

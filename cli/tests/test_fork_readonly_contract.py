@@ -144,6 +144,15 @@ _READ_ONLY_INVOCATIONS = [
     ["training", "datasets"],
     ["training", "dataset", "1"],
     ["training", "backends"],
+    # Phase 4 groups (the writes in these are separately gated: llm cloud on,
+    # audio model-download and wordpress process-run all require --yes).
+    ["llm", "provider"],
+    ["llm", "models"],
+    ["audio", "models"],
+    ["wordpress", "sites"],
+    ["wordpress", "site", "1"],
+    ["wordpress", "pages"],
+    ["wordpress", "pull-status", "1"],
 ]
 
 

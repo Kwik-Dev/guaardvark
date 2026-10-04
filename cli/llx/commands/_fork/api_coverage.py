@@ -45,6 +45,7 @@ EXPOSED: dict[str, str] = {
     "interconnector": "family",
     "jobs": "jobs",
     "lessons": "lessons",
+    "llm_provider": "llm",
     "memory": "remember, memory (REPL)",
     "meta": "rules, status, dashboard, jobs, rag, quality",
     "model": "models, status",
@@ -68,14 +69,15 @@ EXPOSED: dict[str, str] = {
     "video_editor": "video-editor",
     "web_search": "web",
     "websites": "websites",
+    "wordpress": "wordpress",
 }
 
 # --- planned ---------------------------------------------------------------
-# area -> planned command group and the phase in docs/CLI_PLAN.md section 3
-PLANNED: dict[str, str] = {
-    "wordpress": "wordpress — CLI_PLAN 3.11 (Phase 4)",
-    "llm_provider": "llm — CLI_PLAN 3.1 (Phase 4)",
-}
+# Empty: every backend API area is either exposed by a command or declared below with a
+# reason. Phase 4 was the last planned group. Keep this map for future work — the phase
+# table in docs/CLI_PLAN.md is what fills it, and the spec-parity test is what notices when
+# a new backend area appears without a decision.
+PLANNED: dict[str, str] = {}
 
 # --- not exposed -----------------------------------------------------------
 # area -> the reason there is no CLI command

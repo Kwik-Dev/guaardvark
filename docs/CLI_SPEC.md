@@ -223,7 +223,7 @@ Beyond the shell commands above, the REPL adds:
 | **VideoEditorPage** | ❌ | **`video-editor` API unreferenced** |
 | **VideoTextOverlayPage** | ❌ | **`video-overlay` API unreferenced** |
 | **TrainingPage** | ❌ | **`training_datasets` API unreferenced** |
-| WordPressPages / WordPressSites | ❌ | `wordpress` API unreferenced |
+| WordPressPages / WordPressSites | ✅ `wordpress sites\|pages\|pull-*\|process-run` | `process-run` publishes, so it needs `--yes` |
 | ActivitiesPage / AutoresearchPage | ⚠️ | partial (jobs / `rag eval`) |
 | NotFoundPage | — | n/a |
 
@@ -235,7 +235,10 @@ classifies **every** `backend/api/*_api.py` module and is enforced by
 the module, not the URL prefix (`inbound_guard_api.py` serves `/api/settings/inbound_guard`, so
 prefix keying would collide with `settings`).
 
-At Phase 1: **43 exposed**, **7 planned**, **47 deliberately not exposed** (97 declared).
+At Phase 4 — the end state: **50 exposed**, **0 planned**, **47 deliberately not exposed** (97
+declared). Nothing is left undecided: every backend API area is either driven by a command
+or carries a written reason, and `cli/tests/test_spec_parity.py` fails when a new one
+appears without one.
 
 Reached by a command, including: `agent-chat`, `agent-control`, `agents`, `audio-foundry`,
 `automation`, `autoresearch`, `backups`, `batch-image`, `batch-video`, `bulk-generation`,
@@ -283,7 +286,7 @@ This is the authoritative "what the fork added that the terminal cannot do".
 | MPS support, auto-start, status check | ⚠️ | `plugins start\|stop\|status comfyui`, `gpu status\|release` — service only |
 | Engine detection from live `/object_info` | ❌ | backend health probe |
 | Z-Image generation via ComfyUI | ❌ | no engine flag; reachable only by passing a model id to `images generate --model` |
-| `/imagemodel comfyui` chat image backend | ❌ | the token `imagemodel` appears **nowhere** in `cli/llx` |
+| `/imagemodel comfyui` chat image backend | ✅ already covered | it persists the `chat_image_model` setting, which `settings get\|set chat_image_model` reaches; and `comfyui` is a registry id, so `images generate --model comfyui` works per-request. **No command was needed** — an earlier revision of this table said "appears nowhere in `cli/llx`", which was true of the token and false about the capability. |
 | Per-model VRAM reserve, `GUAARDVARK_COMFYUI_RESERVE_VRAM` | ❌ | `.env` |
 | Shared ComfyUI model home (`GUAARDVARK_COMFYUI_DIR`) | ❌ | `.env` |
 | ComfyUI catalog "installed" fix | ❌ | surfaced through `images models` / `videos models` output only |
@@ -361,7 +364,8 @@ Highest-value `cloud-plus` capabilities with **no CLI surface at all**:
 
 1. **Cast Library** — list/inspect subjects, LoRAs, samples (`cast-library`).
 2. **RunPod LoRA training** — launch/monitor a training run (`training_datasets`).
-3. **ComfyUI engine selection** — `/imagemodel comfyui`, Z-Image routing.
+3. **ComfyUI engine selection** — covered by `settings set chat_image_model comfyui` (persistent)
+   or `images generate --model comfyui` (per-request). Verify before adding a flag.
 4. **Video editor** — FFmpeg stills, framing, captions, bin reorder (`video-editor`).
 5. **Film Crew / music-video render control** — render, resume, I2V model choice.
 6. **Upscaling** (`upscaling`).
