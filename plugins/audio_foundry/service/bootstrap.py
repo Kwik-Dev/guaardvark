@@ -94,17 +94,25 @@ def _try_register_music(
     cfg: dict[str, Any],
     output_dir: Path,
 ) -> None:
-    """Register the music_gen backend (ACE-Step v1 3.5B)."""
+    """Register the music_gen facade: ACE-Step v1 3.5B (default) and ACE-Step 1.5.
+
+    The settings in config.yaml's music_gen block are v1's. ACE-Step 1.5 shares
+    only max_duration_s; its step count is fixed by the turbo model.
+    """
     try:
+        from backends.music_gen import MusicGenBackend
         from backends.music_gen_acestep import ACEStepBackend
-        backend = ACEStepBackend(
+        from backends.music_gen_acestep15 import ACEStep15Backend
+        max_duration_s = float(cfg.get("max_duration_s", 240.0))
+        v1 = ACEStepBackend(
             output_root=output_dir,
             sample_rate=int(cfg.get("sample_rate", 44100)),
-            max_duration_s=float(cfg.get("max_duration_s", 240.0)),
+            max_duration_s=max_duration_s,
             steps=int(cfg.get("steps", 60)),
             guidance_scale=float(cfg.get("guidance_scale", 7.5)),
         )
-        dispatcher.register(Intent.MUSIC, backend)
+        v15 = ACEStep15Backend(output_root=output_dir, max_duration_s=max_duration_s)
+        dispatcher.register(Intent.MUSIC, MusicGenBackend(v1, v15))
     except Exception as e:
         logger.error("Failed to register music_gen backend: %s", e, exc_info=True)
 

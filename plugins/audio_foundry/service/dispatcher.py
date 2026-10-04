@@ -150,6 +150,13 @@ class Dispatcher:
                         reason or f"Backend {backend.name} is unavailable on this machine"
                     )
 
+                # A backend holding several engines (music: ACE-Step v1 and 1.5)
+                # picks the one this request names; if it unloaded another for it,
+                # the slot no longer holds what the orchestrator recorded.
+                select = getattr(backend, "select_for_request", None)
+                if select is not None and select(params):
+                    self._orch.evict(f"{_SLOT_PREFIX}:{intent.value}")
+
                 if not backend.is_loaded:
                     self._load_with_orchestrator(intent, backend)
 
