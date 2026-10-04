@@ -128,6 +128,34 @@ Upload documents, build a knowledge base per project, and ask questions. Answers
 
 Desktop and vision tools are only offered to the model while the agent screen is active.
 
+### Voice: setting up TTS and STT
+
+Both are local; there is **no cloud speech API**. Speech-to-text needs no setup, text-to-speech needs one action.
+
+**Speech-to-text** — `faster-whisper` ships with the install and the tiny English model is fetched on first use:
+
+```bash
+curl -s -X POST http://localhost:5055/api/voice/speech-to-text -F audio=@clip.wav
+```
+
+Want better accuracy? Install a larger model (`tiny`, `tiny.en`, `base`, `small`, `medium`):
+
+```bash
+curl -s -X POST http://localhost:5055/api/voice/install-whisper-model \
+  -H 'Content-Type: application/json' -d '{"model_id": "base"}'
+```
+
+**Text-to-speech** — Kokoro and Chatterbox live in the Audio Foundry plugin, so start it once (Piper runs in-process and needs no plugin, but you must supply a voice model):
+
+```bash
+curl -s -X POST http://localhost:5055/api/plugins/audio_foundry/start
+curl -s -X POST http://localhost:5055/api/audio-foundry/generate/voice \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Hello from Guaardvark.", "backend": "auto", "voice_id": "af_heart"}'
+```
+
+Already running your own `whisper.cpp` server? Point Guaardvark at it with `GUAARDVARK_USE_WHISPER_SERVER=1` and `GUAARDVARK_WHISPER_SERVER_URL` in `.env`, and skip Guaardvark's own build. Full engine table, cloning, the CLI commands and the two health-reporting gotchas: **[docs/VOICE.md](docs/VOICE.md)**.
+
 ## Agents that use a real desktop and browser
 
 Guaardvark's agents control a **real Ubuntu desktop** (Xvfb and XFCE on display `:99`): the same Applications menu, desktop icons and taskbar you would see if you connected to the box over VNC. They see the screen through a vision model, move the mouse, click, type, browse, and check their own work. The desktop is isolated from yours: its own `XDG_DESKTOP_DIR` and `XDG_CONFIG_HOME`, so the agent's files and settings never collide with your session.
