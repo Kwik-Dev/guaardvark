@@ -126,8 +126,10 @@ def unified_chat():
     # the user means "stop what you're doing and listen to this instead."
     # Without this, the old thread keeps running (and its agent_task_execute
     # keeps the agent locked, so the new task gets "Agent already active").
-    from backend.services.unified_chat_engine import set_abort_flag
-    set_abort_flag(session_id)
+    # The new turn's mark is taken now, so a Stop that arrives while it is
+    # still starting up is not lost.
+    from backend.services.unified_chat_engine import begin_new_turn, turn_replaced
+    turn_mark = begin_new_turn(session_id)
 
     logger.info(
         f"[UNIFIED_CHAT] request_id={request_id[:8]} session={session_id} "
@@ -191,6 +193,10 @@ def unified_chat():
 
     def emit_fn(event, data_payload):
         data_payload["session_id"] = session_id
+        if turn_replaced(session_id, turn_mark):
+            # Stopped and replaced by a newer message: the room belongs to that
+            # turn now, and this one's late events would end or garble it.
+            return
         if socketio.server is None:
             logger.warning(f"SocketIO server not initialized, dropping event {event} for session {session_id}")
             return
@@ -255,6 +261,8 @@ def unified_chat():
             pass
 
     def run_engine():
+        from backend.services.unified_chat_engine import begin_turn, end_turn
+        begin_turn(session_id, turn_mark)
         try:
             logger.info(f"[SOCKET-CHAT] BACKEND THREAD START for session={session_id}; first chat:thinking may emit BEFORE client join_room completes (race window open)")
             # Wire the emit_fn into the thread-local so that agent_control tools
@@ -328,6 +336,7 @@ def unified_chat():
             logger.error(f"Chat engine thread error: {e}", exc_info=True)
             emit_fn("chat:error", {"error": str(e)})
         finally:
+            end_turn(session_id)
             # Always clear the thread-local emitter when this chat turn ends
             # (success, error, or abort) so the next turn on this thread gets a fresh one.
             try:
