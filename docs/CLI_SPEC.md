@@ -1,6 +1,7 @@
 # Guaardvark CLI — specification and Studio coverage
 
 **Status:** current as of `cloud-plus` tip `95393444` (post upstream sync to `ed37894f`).
+**Plan:** [docs/CLI_PLAN.md](CLI_PLAN.md) — the phased plan to close these gaps and renew the test framework.
 **Audience:** anyone asking "can I do X from the terminal?" — the answer, and the *why*.
 **Scope:** the `guaardvark` command (source `cli/`, package `guaardvark`, legacy alias `llx`)
 and how far it reaches into the Studio (web UI) and the backend API.
