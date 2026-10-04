@@ -140,12 +140,8 @@ const idsForTab = (tab, voiceBackend, musicModel, voiceId, referenceClip) => {
     if (engine === "chatterbox") return { ids: ["chatterbox"], any: false };
     return { ids: ["chatterbox", "kokoro"], any: true };
   }
-  if (tab === 1) {
-    return {
-      ids: [musicModel === "ace-step" ? "ace-step" : "minimax-music3-int8"],
-      any: false,
-    };
-  }
+  // Music model values are the catalog ids.
+  if (tab === 1) return { ids: [musicModel], any: false };
   return { ids: ["stable-audio-open"], any: false };
 };
 
@@ -195,9 +191,10 @@ const AudioFoundryPage = () => {
   const [musicInstruments, setMusicInstruments] = useState([]);
   const [musicExtra, setMusicExtra] = useState("");
   const [musicInstrumental, setMusicInstrumental] = useState(true);
-  // Music backend: the sidecar's ACE-Step (default) or MiniMax Music 3 through
-  // ComfyUI, which sings tagged lyrics; offered only when its weights are
-  // installed (the registry says), otherwise the option names the modal.
+  // Music backend: the sidecar's ACE-Step v1 (default), the sidecar's optional
+  // ACE-Step 1.5, or MiniMax Music 3 through ComfyUI, which sings tagged lyrics.
+  // The optional ones are offered only when installed (the registry says),
+  // otherwise the option names the modal.
   const [musicModel, setMusicModel] = useState("ace-step");
   const [musicLyrics, setMusicLyrics] = useState("");
   const [catalog, setCatalog] = useState([]);
@@ -231,6 +228,7 @@ const AudioFoundryPage = () => {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
   const music3Ready = catalog.find((m) => m.id === "minimax-music3-int8")?.installed ?? null;
+  const ace15Ready = catalog.find((m) => m.id === "ace-step-1.5")?.installed ?? null;
   const [musicPolish, setMusicPolish] = useState(true);
   const [musicPreview, setMusicPreview] = useState(null);
   const [musicPolishing, setMusicPolishing] = useState(false);
@@ -595,7 +593,7 @@ const AudioFoundryPage = () => {
       negativePrompt = musicPreview.negative_prompt || "";
     }
 
-    if (musicModel === "ace-step" && !pluginRunning) {
+    if (musicModel !== "minimax-music3-int8" && !pluginRunning) {
       setError("Audio Foundry is not running. Start it from Manage models.");
       openModels();
       return;
@@ -981,7 +979,10 @@ const AudioFoundryPage = () => {
                         sx={{ minWidth: 220 }}
                         SelectProps={{ native: true }}
                       >
-                        <option value="ace-step">ACE-Step (Audio Foundry)</option>
+                        <option value="ace-step">ACE-Step v1 (Audio Foundry)</option>
+                        <option value="ace-step-1.5" disabled={ace15Ready === false}>
+                          {ace15Ready === false ? "ACE-Step 1.5 (install in Manage models)" : "ACE-Step 1.5 (Audio Foundry)"}
+                        </option>
                         <option value="minimax-music3-int8" disabled={music3Ready === false}>
                           {music3Ready === false ? "MiniMax Music 3 (install in Manage models)" : "MiniMax Music 3 (sings lyrics)"}
                         </option>

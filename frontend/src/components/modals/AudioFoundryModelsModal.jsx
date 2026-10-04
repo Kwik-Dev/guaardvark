@@ -251,6 +251,7 @@ const AudioFoundryModelsModal = ({
               {m.gated && (
                 <Chip label="Gated" size="small" color="warning" variant="outlined" />
               )}
+              {m.license && <Chip label={m.license} size="small" variant="outlined" />}
             </Box>
           }
           secondary={
@@ -258,6 +259,11 @@ const AudioFoundryModelsModal = ({
               <Typography variant="caption" sx={{ display: "block", color: "text.secondary" }}>
                 {m.description}
               </Typography>
+              {m.vram_note && (
+                <Typography variant="caption" sx={{ display: "block", color: "text.secondary" }}>
+                  {m.vram_note}
+                </Typography>
+              )}
               {m.gated && m.terms_url && !m.installed && (
                 <Typography variant="caption" sx={{ display: "block", mt: 0.25 }}>
                   Accept terms at{" "}
@@ -284,7 +290,9 @@ const AudioFoundryModelsModal = ({
               <Typography variant="caption" noWrap>
                 {dl.status === "starting"
                   ? "Starting…"
-                  : `${dl.progress}% — ${dl.speed_mbps} MB/s`}
+                  : dl.status === "installing"
+                    ? "Building its environment…"
+                    : `${dl.progress}% — ${dl.speed_mbps} MB/s`}
               </Typography>
               <LinearProgress
                 variant={dl.progress > 0 ? "determinate" : "indeterminate"}
@@ -332,7 +340,8 @@ const AudioFoundryModelsModal = ({
           Audio Studio models
         </Box>
         <Typography variant="body2" sx={{ color: "text.secondary", mt: 0.5 }}>
-          Voice, music and FX weights install into the shared Hugging Face cache.
+          Voice, music and FX weights install into the shared Hugging Face cache
+          (ACE-Step 1.5 into data/models, with its own Python environment).
           Generation will not download them on its own.
         </Typography>
       </DialogTitle>

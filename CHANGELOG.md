@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **ACE-Step 1.5 is an optional music model.** Audio Studio → Manage models lists it with an
+  Install button that downloads its weights (9.4 GB, MIT license, pinned revision) into
+  `data/models/ace-step-1.5/` and builds its own Python environment from the pinned 1.5 release;
+  nothing is fetched until then. Once installed, the Music model picker, the REST route and the
+  `generate_music` tool (`model: "ace-step-1.5"`) can use it. ACE-Step v1 stays the default.
 - **Nothing leaves the machine just because a page opened.** The web UI's Lato and Raleway fonts
   ship with the app instead of loading from Google Fonts, and the image pages no longer ask
   Hugging Face about every model that is not installed: Manage models has **Check access**, which

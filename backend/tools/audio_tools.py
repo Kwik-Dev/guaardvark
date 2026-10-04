@@ -105,8 +105,11 @@ def _file_entry(result: dict) -> dict:
     return entry
 
 
+MUSIC_MODELS = ("ace-step", "ace-step-1.5")
+
+
 class GenerateMusicTool(BaseTool):
-    """Queue a song (ACE-Step) in Audio Foundry."""
+    """Queue a song (ACE-Step v1, or ACE-Step 1.5 when installed) in Audio Foundry."""
 
     name = "generate_music"
     read_only = False
@@ -118,7 +121,9 @@ class GenerateMusicTool(BaseTool):
         "minutes. Poll get_generation_status with that job_id; when it reports complete it gives the "
         "file name, its library document id and a download link. The song is also listed on the "
         "Studio's Audio page. Needs the Audio Foundry plugin running (it answers that it is not "
-        "running otherwise). For a spoken line use generate_speech; for a music video set to a "
+        "running otherwise). model 'ace-step-1.5' uses ACE-Step 1.5 instead of v1 when it has "
+        "been installed in Audio Studio → Manage models; it is refused otherwise, never "
+        "downloaded. For a spoken line use generate_speech; for a music video set to a "
         "song, generate_music_video."
     )
     parameters = {
@@ -144,10 +149,17 @@ class GenerateMusicTool(BaseTool):
             name="seed", type="int", required=False,
             description="Repeat a take exactly with the same seed and inputs. Omit for a new one.",
         ),
+        "model": ToolParameter(
+            name="model", type="string", required=False, default="ace-step",
+            enum=list(MUSIC_MODELS),
+            description="'ace-step' (default): ACE-Step v1. 'ace-step-1.5': ACE-Step 1.5, a newer "
+                        "MIT-licensed model, available once installed in Audio Studio → Manage models.",
+        ),
     }
 
     def execute(self, style: str = "", lyrics: str = None, seconds: float = None,
-                instrumental: bool = None, seed: int = None, **kwargs) -> ToolResult:
+                instrumental: bool = None, seed: int = None, model: str = None,
+                **kwargs) -> ToolResult:
         style = (style or "").strip()
         if not style:
             return ToolResult(success=False, error="style is required: describe the sound, e.g. 'lo-fi hip hop, soft piano, 80 bpm'")
@@ -157,6 +169,9 @@ class GenerateMusicTool(BaseTool):
             return ToolResult(success=False, error="seconds must be a number from 5 to 240")
         if not 5 <= seconds <= 240:
             return ToolResult(success=False, error="seconds must be from 5 to 240")
+        model = (model or MUSIC_MODELS[0]).strip().lower()
+        if model not in MUSIC_MODELS:
+            return ToolResult(success=False, error=f"model must be one of {', '.join(MUSIC_MODELS)}")
 
         # No lyrics means an instrumental, as the lyrics parameter promises. Sent as
         # instrumental_only so ACE-Step gets its "[instrumental]" marker; empty lyrics
@@ -169,6 +184,8 @@ class GenerateMusicTool(BaseTool):
             payload["lyrics"] = lyrics
         if seed is not None:
             payload["seed"] = int(seed)
+        if model != MUSIC_MODELS[0]:
+            payload["model"] = model
 
         body, err = _post("/api/audio-foundry/generate/music", payload, read_timeout=60)
         if err:
@@ -184,7 +201,7 @@ class GenerateMusicTool(BaseTool):
                     "studio_url": STUDIO_URL,
                     "next": "Poll get_generation_status with this job_id; the song is ready when it reports complete.",
                 },
-                metadata={"style": style, "seconds": seconds},
+                metadata={"style": style, "seconds": seconds, "model": model},
             )
         if body.get("path"):
             # Short requests can finish inline instead of queueing.
