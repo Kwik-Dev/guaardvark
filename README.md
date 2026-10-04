@@ -523,6 +523,10 @@ The package is the `guaardvark` command. It talks to a running backend on the co
 
 ## CLI
 
+**Full specification, and exactly how far the CLI reaches into the Studio:
+[docs/CLI_SPEC.md](docs/CLI_SPEC.md)** — the command reference, the web-UI/app coverage
+matrix, and the list of features the CLI does *not* have (and why).
+
 Typer + Rich + prompt_toolkit. The PyPI package and the command are `guaardvark` (`llx` is a deprecated alias). Tab completion works with or without a leading `/`; `/help imagine` shows one command; unknown commands suggest a close match.
 
 ```bash
